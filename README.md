@@ -169,6 +169,15 @@ Rules are checked in order for each new standard window; existing windows at lau
 their stage from `state.json` (or join the active stage), except that a matching `ignore`
 leaves them unmanaged and `float` pins them.
 
+## Persistence
+
+`state.json` next to the config is written about 500 ms after every change: stages in
+order, their windows (bundle ID, title, frame, front-to-back position, key window, pinned),
+the active stage and the strip slots. At launch, after the recovery scan, live windows are
+matched to it (exact bundle ID + title first, then bundle ID alone), the stages are rebuilt,
+the saved active stage is shown and the others are parked. Windows that match nothing join
+the active stage.
+
 ## Safety: no window stays parked
 
 1. A **registry** of every parked window (AX element + clamped restore frame), synced around

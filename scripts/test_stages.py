@@ -8,7 +8,7 @@ every fixture window onscreen; the app and the fixture are quit at the end, what
 
 Phases: m3 (stages, switching, frames, z-order, merge, pin, reveal, children), safety (quit,
 SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it), m4 (rules, placement,
-hot reload).
+hot reload), m6 (persistence across a relaunch of the app and of the fixture).
 """
 
 import json
@@ -463,6 +463,51 @@ def phase_m4():
     all_onscreen("m4 quit")
 
 
+def phase_m6():
+    say("\n== milestone 6: persistence ==")
+    stop_app()
+    stop_fixture()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(4)
+    s = start_app(4)
+    if not check(s is not None, "app up"):
+        return
+    t = by_title(s)
+    do("send", 2, t["Fixture 3"]["id"])
+    do("send", 2, t["Fixture 4"]["id"])
+    do("send", 3, t["Fixture 2"]["id"])
+    do("switch", 2)
+    want = stage_titles(state())
+    want_active = sorted(want[state()["active"]])
+    say(f"  stages before: {want}, active {want_active}")
+    time.sleep(1.0)
+    stop_app()
+    all_onscreen("quit")
+    check(os.path.exists(os.path.join(HOME, "state.json")), "state.json written")
+
+    s = start_app(4, fresh_log=False)
+    got = stage_titles(s)
+    check(sorted(map(sorted, got.values())) == sorted(map(sorted, want.values())), f"relaunch: stages came back ({got})")
+    check(sorted(got[s["active"]]) == want_active, "relaunch: the active stage came back")
+    consistent("relaunch")
+    stop_app()
+    all_onscreen("quit again")
+
+    say("-- the fixture relaunches too (new window IDs; matched by title)")
+    stop_fixture()
+    start_fixture(4)
+    s = start_app(4, fresh_log=False)
+    got = stage_titles(s)
+    check(sorted(map(sorted, got.values())) == sorted(map(sorted, want.values())), f"fixture relaunch: stages came back ({got})")
+    check(sorted(got[s["active"]]) == want_active, "fixture relaunch: the active stage came back")
+    consistent("fixture relaunch")
+    stop_app()
+    all_onscreen("final quit")
+
+
 def frontmost_bundle():
     r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
     out = r.stdout.strip()
@@ -470,7 +515,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6"]
     if not os.path.exists(BIN) or not os.path.exists(FIX_APP):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -480,7 +525,7 @@ def main():
     front = frontmost_bundle()
     try:
         for p in phases:
-            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4}[p]()
+            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE):
