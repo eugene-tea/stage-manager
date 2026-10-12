@@ -11,6 +11,8 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         #[cfg(target_os = "macos")]
         Some("ctl") => stage_manager::platform::ctl::run_client(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("strip-demo") => stage_manager::ui::strip_demo::run(),
         Some("--guardian") => {
             eprintln!("stage-manager: --guardian is reserved for a later milestone");
             ExitCode::from(2)
@@ -22,7 +24,7 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         None => app::run(),
         _ => {
-            eprintln!("usage: stage-manager [ctl <command...> | --version]");
+            eprintln!("usage: stage-manager [ctl <command...> | strip-demo | --version]");
             ExitCode::from(2)
         }
     }
@@ -264,6 +266,8 @@ mod app {
         };
         state.refresh_menu();
         APP.with(|a| *a.borrow_mut() = Some(state));
+        // INTEGRATOR: pass the loaded config's `[strip] thumbnail_interval_ms`.
+        stage_manager::ui::strip::install(mtm, stage_manager::config::StripConfig::default().thumbnail_interval_ms);
         status_menu::set_action_handler(|action| with_app(|app| app.on_menu(action)));
 
         if permissions.accessibility {
