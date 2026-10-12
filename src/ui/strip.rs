@@ -13,14 +13,24 @@
 //! - Cards glide to new slots on the spring; the strip **slides** out to the left when
 //!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
 //! - Thumbnails come from [`capture`], refreshed every `thumbnail_interval_ms`.
-//! - **Drag a card out** (press, move more than `[drag] threshold`): a ghost of its front
-//!   thumbnail follows the pointer in its own click-through panel and grows toward the
-//!   window's size past the strip's edge; released outside the strip it goes out as
-//!   [`StripEvent::CardDropped`], released over the strip nothing happens.
+//! - **Level** (`[strip] level`): Apple's strip sits below windows, so a window moved over
+//!   it covers it (and auto-hide slides it away). It is lifted above windows only while a
+//!   window is dragged over it, while a card is dragged, and while the edge reveals it over
+//!   a covering window; a click on a card never lifts it.
+//! - **Drag a card** (press, move more than `[drag] threshold`): within the strip column the
+//!   card itself follows the pointer and the others make room on the spring
+//!   (`[strip] reorder`; released there it goes out as [`StripEvent::CardMoved`]); past the
+//!   column a ghost of its front thumbnail follows the pointer in its own click-through
+//!   panel and grows toward the window's size; released outside the strip it goes out as
+//!   [`StripEvent::CardDropped`].
 //! - **Drop target**: while the controller reports a window drag
-//!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip area, the strip shows
-//!   itself and a highlighted placeholder card in the slot below the others. Auto-hide never
-//!   fights either drag.
+//!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip column, the strip is
+//!   lifted above windows, a card-sized snapshot of the window, turned like a card, follows
+//!   the pointer, and the cards open a gap at the slot under the pointer
+//!   ([`drop_slot`] tells the controller which). Auto-hide never fights either drag.
+//! - **Transitions** (`[animation]`, see `strip_motion`): snapshots of the windows that
+//!   leave and arrive move in the motion overlay above everything while the real windows
+//!   jump behind them.
 //! - Extensions, off by default (`[reveal]`): the **edge tab**, a slim translucent tab at the
 //!   left edge while a window covers the strip; the **launch reveal**, a covered strip shown
 //!   for a moment at launch.
@@ -37,8 +47,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSPanel,
-    NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel,
+    NSNormalWindowLevel, NSPanel, NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -50,16 +60,24 @@ use objc2_quartz_core::{
     kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
 };
 
-use crate::config::{MotionStyle, Rgba, StripStyle};
+use crate::config::{MotionStyle, Rgba, StripLevel, StripStyle};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Target};
+use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
-use crate::ui::strip_model::{self, CardSnapshot, StripEvent, StripSnapshot};
+use crate::ui::strip_model::{self, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
 use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
 
-/// The placeholder card's stage id in the column (never a real stage).
+#[path = "strip_motion.rs"]
+mod motion;
+
+/// The gap's stage id in the column while a window is dragged over it (never a real stage).
 const DROP_STAGE: u64 = u64::MAX;
+/// The strip's window level below windows (Apple's): just under normal windows.
+const BELOW_WINDOWS: isize = NSNormalWindowLevel - 1;
+/// A band of a card's height that will mean "onto this card" (a later merge); none yet.
+const MERGE_BAND: f64 = 0.0;
 /// The edge tab's window: width and height in points (the drawn pill is narrower).
 const TAB_SIZE: (f64, f64) = (10.0, 72.0);
 /// The drawn pill's width.
@@ -101,10 +119,17 @@ pub fn set_thumbnail_interval(ms: u64) {
     with_strip(|s| s.capturer.set_interval(Duration::from_millis(ms.max(1))));
 }
 
-/// True when a window released at `p` (global, top-left origin) drops onto the strip: the
-/// user has not hidden the strip and `p` is inside the strip area. Main thread.
-pub fn is_drop_target(p: Point) -> bool {
-    with_strip(|s| s.snapshot.user_visible && s.geometry.global.contains(p)).unwrap_or(false)
+/// Where a window released at `p` (global, top-left origin) goes: `None` when it is not over
+/// the strip (the user hid the strip, or `p` is outside the strip column), else the slot under
+/// `p`, the same one the strip's gap shows. Main thread.
+pub fn drop_slot(p: Point) -> Option<StripDrop> {
+    with_strip(|s| (s.snapshot.user_visible && s.geometry.global.contains(p)).then(|| s.drop_slot_at(p))).flatten()
+}
+
+/// Refreshes the full-size snapshots of the shown windows now: a switch may follow (the
+/// app switcher was opened). Main thread.
+pub fn prefetch() {
+    with_strip(|s| s.prefetch(None));
 }
 
 /// Draws the strip, slid in, into `path` with the offscreen renderer (see
@@ -146,6 +171,11 @@ pub fn set_screen_override(frame: NSRect, visible: NSRect) {
 /// Receives captured thumbnails on the main thread.
 fn thumbnail_arrived(id: u32, image: CFRetained<CGImage>) {
     with_strip(|s| s.set_thumbnail(id, image));
+}
+
+/// Receives full-size window snapshots (for transitions) on the main thread.
+fn snapshot_arrived(id: u32, image: CFRetained<CGImage>) {
+    with_strip(|s| s.set_snapshot(id, image));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -347,6 +377,8 @@ impl EdgeTab {
 
 #[derive(Clone, Debug, PartialEq)]
 struct Geometry {
+    /// The main display's frame, Cocoa coordinates.
+    screen: NSRect,
     /// Panel frame, Cocoa coordinates (bottom-left origin).
     panel: NSRect,
     /// The strip area in global top-left coordinates.
@@ -378,7 +410,7 @@ impl Geometry {
         let m = Metrics::new(style, size, k, display_middle - top);
         let panel = NSRect::new(visible.origin, NSSize::new(m.width, visible.size.height));
         let global = Rect::new(visible.origin.x, top, m.width, visible.size.height);
-        Self { panel, global, primary_height, m }
+        Self { screen: frame, panel, global, primary_height, m }
     }
 
     /// The edge tab's frame, global (top-left origin): flush left, vertically centered on
@@ -509,6 +541,16 @@ fn spring_position(motion: &MotionStyle, layer: &CALayer, to: CGPoint) {
     }
     let anim = spring(motion, "position", &NSValue::new(from), &NSValue::new(to));
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("position")));
+}
+
+/// Moves `layer` to `to` on the spring, or at once (cancelling any glide).
+fn move_to(motion: &MotionStyle, layer: &CALayer, to: CGPoint, immediate: bool) {
+    if immediate {
+        layer.removeAnimationForKey(&NSString::from_str("position"));
+        layer.setPosition(to);
+    } else {
+        spring_position(motion, layer, to);
+    }
 }
 
 /// Moves `layer`'s `sublayerTransform` to `to` along the spring, from what is drawn now.
@@ -656,9 +698,25 @@ impl Drop for Ghost {
     }
 }
 
+/// What a pressed card is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragMode {
+    /// Pressed, not moved past the threshold: a click on release.
+    Pressed,
+    /// Following the pointer within the strip column to another slot (`[strip] reorder`).
+    Reorder,
+    /// Dragged out: the ghost follows the pointer and grows.
+    Out,
+}
+
 /// A press on a card that may become a drag.
 struct CardDrag {
     stage: u64,
+    mode: DragMode,
+    /// The card's layout when pressed (it follows the pointer from there).
+    origin: CardLayout,
+    /// While reordering: the stage whose card it goes above (`None`: the bottom).
+    before: Option<u64>,
     /// Where the press was (global).
     press: Point,
     /// The front thumbnail where it was pressed (global).
@@ -701,13 +759,17 @@ struct Strip {
     poll_timer: Option<Retained<NSTimer>>,
     capturer: Capturer,
     card_drag: Option<CardDrag>,
-    /// A window drag is over the strip: the placeholder card shows.
+    /// A window drag is over the strip: the gap shows (at `drop_before`'s card).
     drop_over: bool,
-    drop_layer: Option<Retained<CALayer>>,
+    drop_before: Option<u64>,
     /// The edge tab shown while a window hides the strip (`[reveal] edge_tab`).
     tab: EdgeTab,
     /// The launch reveal happened (once per launch).
     announced: bool,
+    /// The panel is above windows now (`None` before the first decision).
+    lifted: Option<bool>,
+    /// Snapshots, transitions and the dragged window's card (`strip_motion`).
+    motion: motion::Motion,
 }
 
 impl Strip {
@@ -725,7 +787,7 @@ impl Strip {
         panel.setOpaque(false);
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
-        panel.setLevel(NSFloatingWindowLevel);
+        panel.setLevel(BELOW_WINDOWS);
         panel.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
                 | NSWindowCollectionBehavior::Stationary
@@ -733,7 +795,6 @@ impl Strip {
                 | NSWindowCollectionBehavior::FullScreenAuxiliary,
         );
         panel.setHidesOnDeactivate(false);
-        panel.setFloatingPanel(true);
         panel.setBecomesKeyOnlyIfNeeded(true);
         panel.setAcceptsMouseMovedEvents(true);
         // SAFETY: the panel is owned by `Strip` for the life of the app.
@@ -789,9 +850,11 @@ impl Strip {
             capturer,
             card_drag: None,
             drop_over: false,
-            drop_layer: None,
+            drop_before: None,
             tab,
             announced: false,
+            lifted: None,
+            motion: motion::Motion::new(mtm),
         };
         strip.apply_geometry();
         strip.slide(false, false);
@@ -851,11 +914,21 @@ impl Strip {
         self.scale = scale;
 
         let force = rescaled || snapshot.style != self.snapshot.style;
+        let transition = snapshot.transition.clone();
+        // Where incoming windows grow from: their cards before this snapshot replaces them.
+        let starts = transition.as_ref().map(|t| self.incoming_starts(t));
         self.snapshot = snapshot;
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
         }
         self.layout_cards(force);
+        if let (Some(t), Some(starts)) = (transition, starts) {
+            self.begin_transition(t, starts);
+        }
+        if let Some(id) = self.snapshot.parked {
+            self.outgoing_parked(id);
+        }
+        self.after_snapshot();
         if !self.has_snapshot {
             self.has_snapshot = true;
             self.panel.orderFrontRegardless();
@@ -871,21 +944,64 @@ impl Strip {
         self.update_targets();
     }
 
-    /// Lays out the column from the snapshot (plus the placeholder card while a window drag
-    /// is over the strip) and moves every card's layers to its slot.
-    fn layout_cards(&mut self, force: bool) {
+    /// The cards in the order shown now: the snapshot's, with a card being dragged moved to
+    /// the slot it would take, and a gap where a window dragged over the strip would go.
+    fn shown_cards(&self) -> Vec<CardSnapshot> {
         let mut cards = self.snapshot.cards.clone();
-        let drop_card = self.snapshot.window_drag.filter(|_| self.drop_over).map(|w| CardSnapshot {
-            stage: DROP_STAGE,
-            number: 0,
-            name: None,
-            windows: vec![w],
-            apps: Vec::new(),
-        });
-        if let Some(c) = &drop_card {
-            cards.push(c.clone());
+        if let Some(d) = self.card_drag.as_ref().filter(|d| d.mode == DragMode::Reorder)
+            && let Some(from) = cards.iter().position(|c| c.stage == d.stage)
+        {
+            let card = cards.remove(from);
+            let to = d.before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
+            cards.insert(to, card);
         }
-        let layouts = strip_layout::layout_column(&cards, self.geometry.height(), self.m());
+        if let Some(w) = self.snapshot.window_drag.filter(|_| self.drop_over) {
+            let gap = CardSnapshot { stage: DROP_STAGE, number: 0, name: None, windows: vec![w], apps: Vec::new() };
+            let to = self.drop_before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
+            cards.insert(to, gap);
+        }
+        cards
+    }
+
+    /// The snapshot's cards laid out as they are without any drag (what drops are measured
+    /// against, so the gap opening does not move the target).
+    fn resting_layouts(&self) -> Vec<CardLayout> {
+        strip_layout::layout_column(&self.snapshot.cards, self.geometry.height(), self.m())
+    }
+
+    /// The slot a release at `p` (global) goes to among `layouts`, leaving out `skip`'s card.
+    fn slot_at(&self, layouts: &[CardLayout], p: Point, skip: Option<u64>) -> Option<u64> {
+        let m = self.m();
+        let others: Vec<&CardLayout> = layouts.iter().filter(|l| Some(l.stage) != skip && l.stage != DROP_STAGE).collect();
+        let bands: Vec<(f64, f64)> = others
+            .iter()
+            .map(|l| {
+                let b = l.bounds(m);
+                (b.y, b.max_y())
+            })
+            .collect();
+        let y = p.y - self.geometry.global.y;
+        match motion_math::drop_spot(&bands, y, MERGE_BAND) {
+            DropSpot::Gap(i) | DropSpot::OnCard(i) => others.get(i).map(|l| l.stage),
+        }
+    }
+
+    /// The slot for a window released at `p` (global).
+    fn drop_slot_at(&self, p: Point) -> StripDrop {
+        StripDrop { before: self.slot_at(&self.resting_layouts(), p, None) }
+    }
+
+    /// Lays out the column ([`Strip::shown_cards`]) and moves every card's layers to its slot;
+    /// a card being reordered follows the pointer instead.
+    fn layout_cards(&mut self, force: bool) {
+        let cards = self.shown_cards();
+        let mut layouts = strip_layout::layout_column(&cards, self.geometry.height(), self.m());
+        let following = self.card_drag.as_ref().filter(|d| d.mode == DragMode::Reorder).map(|d| {
+            let p = self.pointer();
+            let mut l = d.origin.clone();
+            l.frame = l.frame.translate(p.x - d.press.x, p.y - d.press.y);
+            (d.stage, l)
+        });
         for l in &layouts {
             tracing::trace!(stage = l.stage, frame = %l.frame, "card layout");
         }
@@ -903,48 +1019,24 @@ impl Strip {
         if self.hovered.is_some_and(|h| !keep.contains(&h)) {
             self.hovered = None;
         }
-        for (layout, card) in layouts.iter().zip(&cards) {
+        for (i, card) in cards.iter().enumerate() {
             if card.stage == DROP_STAGE {
-                self.place_drop_target(layout);
-            } else {
-                self.place_card(layout, card, force);
+                continue; // the gap: the window's own card follows the pointer above
             }
-        }
-        if drop_card.is_none()
-            && let Some(layer) = self.drop_layer.take()
-        {
-            layer.removeFromSuperlayer();
+            match &following {
+                Some((stage, l)) if *stage == card.stage => {
+                    let l = l.clone();
+                    self.place_card(&l, card, force, true);
+                    layouts[i] = l;
+                }
+                _ => {
+                    let l = layouts[i].clone();
+                    self.place_card(&l, card, force, false);
+                }
+            }
         }
         CATransaction::commit();
         self.layouts = layouts;
-    }
-
-    /// Shows the highlighted placeholder card where a dropped window's card will go.
-    fn place_drop_target(&mut self, layout: &CardLayout) {
-        let Some(slot) = layout.thumbs.first() else { return };
-        let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
-        let image = self.thumbs.get(&slot.id).cloned();
-        let fade = self.style.cards.fade_ms as f64 / 1000.0;
-        let radius = self.style.cards.corner_radius * self.m().k;
-        let layer = self.drop_layer.get_or_insert_with(|| {
-            let layer = CALayer::new();
-            layer.setCornerRadius(radius.max(4.0));
-            layer.setMasksToBounds(true);
-            layer.setBorderWidth(2.5);
-            layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.9)));
-            layer.setBackgroundColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
-            // SAFETY: framework constant.
-            layer.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
-            layer.setOpacity(0.85);
-            self.overlay.addSublayer(&layer);
-            fade_in(&layer, fade);
-            layer
-        });
-        layer.setFrame(cg_rect(&r));
-        if let Some(img) = image {
-            // SAFETY: a CGImage is valid layer contents.
-            unsafe { layer.setContents(Some(as_object(&*img))) };
-        }
     }
 
     /// The hover transform of a card's container (anchored at the eye) and of its flat twin
@@ -966,8 +1058,9 @@ impl Strip {
         Point::new(size.width / 2.0 + layout.frame.x - built.x, size.height / 2.0 + layout.frame.y - built.y)
     }
 
-    /// Creates or updates one card's layers and moves them to the card's slot.
-    fn place_card(&mut self, layout: &CardLayout, card: &CardSnapshot, force_rebuild: bool) {
+    /// Creates or updates one card's layers and moves them to the card's slot: on the spring,
+    /// or at once (`immediate`, a card following the pointer).
+    fn place_card(&mut self, layout: &CardLayout, card: &CardSnapshot, force_rebuild: bool, immediate: bool) {
         let size = self.geometry.panel.size;
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height));
         let hovered = self.hovered == Some(card.stage);
@@ -992,7 +1085,11 @@ impl Strip {
                 self.cards_root.addSublayer(&card_layer);
                 self.overlay.addSublayer(&flat);
                 let fade = self.style.cards.fade_ms as f64 / 1000.0;
-                if self.has_snapshot {
+                if self.motion.holds(card.stage) {
+                    // A transition's snapshots are landing here; the card shows when they do.
+                    card_layer.setOpacity(0.0);
+                    flat.setOpacity(0.0);
+                } else if self.has_snapshot {
                     fade_in(&card_layer, fade);
                     fade_in(&flat, fade);
                 }
@@ -1020,9 +1117,9 @@ impl Strip {
             // Each plane glides to its new place; the icons follow with the flat twin.
             for (slot, (_, plane)) in layout.thumbs.iter().rev().zip(&layers.planes) {
                 let to = CGPoint::new(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y + slot.rect.h / 2.0);
-                spring_position(&motion, plane, to);
+                move_to(&motion, plane, to, immediate);
             }
-            spring_position(&motion, &layers.flat, CGPoint::new(flat_at.x, flat_at.y));
+            move_to(&motion, &layers.flat, CGPoint::new(flat_at.x, flat_at.y), immediate);
             layers.card.setTransform(hover_3d);
             layers.flat.setTransform(hover_flat);
             layers.snapshot = card.clone();
@@ -1142,6 +1239,7 @@ impl Strip {
         if !shown {
             return;
         }
+        self.motion.thumbnail_arrived(id, &image);
         for layers in self.cards.values() {
             for (wid, layer) in &layers.images {
                 if *wid == id {
@@ -1149,12 +1247,6 @@ impl Strip {
                     unsafe { layer.setContents(Some(as_object(&*image))) };
                 }
             }
-        }
-        if self.snapshot.window_drag.is_some_and(|w| w.id == id)
-            && let Some(layer) = &self.drop_layer
-        {
-            // SAFETY: a CGImage is valid layer contents.
-            unsafe { layer.setContents(Some(as_object(&*image))) };
         }
         if let Some(ghost) = self.card_drag.as_ref().filter(|d| d.front == id).and_then(|d| d.ghost.as_ref()) {
             ghost.set_image(&image);
@@ -1200,6 +1292,10 @@ impl Strip {
     fn mouse_down(&mut self, p: Point) {
         self.pressed = if self.shown { self.card_at(p) } else { None };
         self.card_drag = self.pressed.and_then(|stage| self.drag_for(stage));
+        if let Some(stage) = self.pressed {
+            // A click is likely: fresh snapshots of what leaves and what arrives.
+            self.prefetch(Some(stage));
+        }
         tracing::trace!(x = p.x, y = p.y, card = ?self.pressed, "strip mouse down");
     }
 
@@ -1214,7 +1310,26 @@ impl Strip {
         let thumb = Rect::new(g.x + b.x, g.y + b.y, b.w.max(1.0), b.h.max(1.0));
         let press = self.pointer();
         let grab = (((press.x - thumb.x) / thumb.w).clamp(0.0, 1.0), ((press.y - thumb.y) / thumb.h).clamp(0.0, 1.0));
-        Some(CardDrag { stage, press, thumb, grab, full: front.frame.size(), front: front.id, ghost: None })
+        Some(CardDrag {
+            stage,
+            mode: DragMode::Pressed,
+            origin: layout.clone(),
+            before: None,
+            press,
+            thumb,
+            grab,
+            full: front.frame.size(),
+            front: front.id,
+            ghost: None,
+        })
+    }
+
+    /// Sets a dragged card's opacity in the strip (lifted out, or back).
+    fn set_card_opacity(&self, stage: u64, opacity: f32) {
+        if let Some(layers) = self.cards.get(&stage) {
+            layers.card.setOpacity(opacity);
+            layers.flat.setOpacity(opacity);
+        }
     }
 
     fn mouse_dragged(&mut self) {
@@ -1223,38 +1338,76 @@ impl Strip {
         let primary_height = self.geometry.primary_height;
         let mtm = self.mtm;
         let style = self.style.drag.clone();
-        let Some(drag) = self.card_drag.as_mut() else { return };
-        if drag.ghost.is_none() {
-            if (p.x - drag.press.x).hypot(p.y - drag.press.y) <= style.threshold {
-                return;
-            }
-            let image = self.thumbs.get(&drag.front).cloned();
-            drag.ghost = Some(Ghost::new(mtm, image.as_deref(), style.ghost_opacity as f32));
-            tracing::debug!(stage = drag.stage, "card drag started");
-            if let Some(layers) = self.cards.get(&drag.stage) {
-                layers.card.setOpacity(style.lifted_opacity as f32);
-                layers.flat.setOpacity(style.lifted_opacity as f32);
+        let reorder = self.style.reorder;
+        let Some(drag) = self.card_drag.as_ref() else { return };
+        if drag.mode == DragMode::Pressed && (p.x - drag.press.x).hypot(p.y - drag.press.y) <= style.threshold {
+            return;
+        }
+        let stage = drag.stage;
+        let in_column = self.geometry.global.contains(p);
+        let mode = if reorder && in_column { DragMode::Reorder } else { DragMode::Out };
+        let before = if mode == DragMode::Reorder { self.slot_at(&self.resting_layouts(), p, Some(stage)) } else { None };
+        let image = self.thumbs.get(&drag.front).cloned();
+        let was = drag.mode;
+        if was == DragMode::Pressed {
+            tracing::debug!(stage, ?mode, "card drag started");
+        }
+        {
+            let Some(drag) = self.card_drag.as_mut() else { return };
+            drag.mode = mode;
+            drag.before = before;
+            if mode == DragMode::Reorder {
+                drag.ghost = None;
+            } else {
+                let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, p);
+                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_deref(), style.ghost_opacity as f32));
+                ghost.set_frame(frame, primary_height);
             }
         }
-        if let Some(ghost) = &drag.ghost {
-            let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, p);
-            ghost.set_frame(frame, primary_height);
+        match mode {
+            DragMode::Reorder => {
+                self.set_card_opacity(stage, 1.0);
+                if was != DragMode::Reorder {
+                    self.set_hover(Some(stage));
+                }
+                self.layout_cards(false);
+            }
+            DragMode::Out | DragMode::Pressed => {
+                if was != DragMode::Out {
+                    self.set_card_opacity(stage, style.lifted_opacity as f32);
+                    // The card goes back to its slot while its ghost is out.
+                    self.layout_cards(false);
+                }
+            }
         }
+        self.update_visibility();
     }
 
     fn mouse_up(&mut self, p: Point, shift: bool) -> Option<StripEvent> {
         if let Some(drag) = self.card_drag.take()
-            && drag.ghost.is_some()
+            && drag.mode != DragMode::Pressed
         {
             self.pressed = None;
-            if let Some(layers) = self.cards.get(&drag.stage) {
-                layers.card.setOpacity(1.0);
-                layers.flat.setOpacity(1.0);
-            }
+            self.set_card_opacity(drag.stage, 1.0);
             let at = self.pointer();
-            drop(drag.ghost);
+            if drag.mode == DragMode::Reorder {
+                // Put the card in its new slot now; the controller's snapshot agrees.
+                let moved = self.reorder_locally(drag.stage, drag.before);
+                self.layout_cards(false);
+                self.update_visibility();
+                return moved.then_some(StripEvent::CardMoved { stage: drag.stage, before: drag.before });
+            }
+            let out = !self.geometry.global.contains(at);
+            if out {
+                let right = self.geometry.global.max_x();
+                let rect = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, right, self.style.drag.grow_distance, at);
+                self.motion.keep_landing(drag.ghost, drag.front, rect);
+            } else {
+                drop(drag.ghost);
+            }
+            self.layout_cards(false);
             self.update_visibility();
-            if self.geometry.global.contains(at) {
+            if !out {
                 tracing::debug!(stage = drag.stage, "card drag cancelled over the strip");
                 return None;
             }
@@ -1271,6 +1424,18 @@ impl Strip {
         }
     }
 
+    /// Moves `stage`'s card above `before`'s (the bottom for `None`) in the snapshot; true when
+    /// the order changed.
+    fn reorder_locally(&mut self, stage: u64, before: Option<u64>) -> bool {
+        let cards = &mut self.snapshot.cards;
+        let Some(from) = cards.iter().position(|c| c.stage == stage) else { return false };
+        let old: Vec<u64> = cards.iter().map(|c| c.stage).collect();
+        let card = cards.remove(from);
+        let to = before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
+        cards.insert(to, card);
+        cards.iter().map(|c| c.stage).collect::<Vec<_>>() != old
+    }
+
     fn hover_at(&mut self, p: Option<Point>) {
         let card = if self.shown { p.and_then(|p| self.card_at(p)) } else { None };
         self.set_hover(card);
@@ -1279,6 +1444,10 @@ impl Strip {
     fn set_hover(&mut self, card: Option<u64>) {
         if card == self.hovered {
             return;
+        }
+        if card.is_some() {
+            // The pointer is on a card: a switch may follow.
+            self.prefetch(card);
         }
         let previous = std::mem::replace(&mut self.hovered, card);
         let seconds = self.style.cards.hover_ms as f64 / 1000.0;
@@ -1325,26 +1494,51 @@ impl Strip {
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
         let decision = self.visibility.step(mode, edge_pointer, &self.geometry.global, Instant::now());
-        // A window dragged over the strip area reveals it and shows the drop target.
-        let drop_over =
-            window_drag && self.snapshot.user_visible && pointer.is_some_and(|p| self.geometry.global.contains(p));
-        if drop_over != self.drop_over {
-            tracing::debug!(drop_over, "window drag over the strip");
+        // A window dragged over the strip column reveals it and opens the gap under the pointer.
+        let over = pointer.filter(|p| window_drag && self.snapshot.user_visible && self.geometry.global.contains(*p));
+        let drop_over = over.is_some();
+        let before = over.and_then(|p| self.drop_slot_at(p).before);
+        if drop_over != self.drop_over || (drop_over && before != self.drop_before) {
+            if drop_over != self.drop_over {
+                tracing::debug!(drop_over, "window drag over the strip");
+            }
             self.drop_over = drop_over;
+            self.drop_before = before;
             self.layout_cards(false);
             self.update_targets();
         }
-        // Never hide under a card being dragged out.
-        let card_dragging = self.card_drag.as_ref().is_some_and(|d| d.ghost.is_some());
+        // Never hide under a card being dragged.
+        let card_dragging = self.card_drag.as_ref().is_some_and(|d| d.mode != DragMode::Pressed);
         let shown = decision.shown || drop_over || (card_dragging && self.shown);
         if shown != self.shown {
             tracing::debug!(shown, ?mode, "strip visibility");
             self.slide(shown, true);
             self.update_targets();
         }
+        // Below windows (Apple's) unless something needs it on top: a window or a card being
+        // dragged, or the edge revealing it over a window that covers it.
+        let lift = self.style.level == StripLevel::AboveWindows
+            || drop_over
+            || card_dragging
+            || (self.shown && mode == Mode::EdgeOnly);
+        self.set_lifted(lift);
+        self.window_drag_card(over);
         self.set_polling(decision.poll || window_drag || card_dragging);
         let tab = self.style.reveal.edge_tab && self.covered() && !self.shown && !window_drag && !card_dragging;
         self.tab.show(tab, self.mtm);
+    }
+
+    /// Puts the panel above windows or back below them.
+    fn set_lifted(&mut self, lift: bool) {
+        if self.lifted == Some(lift) {
+            return;
+        }
+        self.lifted = Some(lift);
+        self.panel.setLevel(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+        if lift {
+            self.panel.orderFrontRegardless();
+        }
+        tracing::debug!(lift, "strip level");
     }
 
     /// Slides the strip in or out (cards in 3D, icons flat) and lets clicks through while it

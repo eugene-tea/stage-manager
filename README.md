@@ -105,16 +105,30 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   a new window of an app that is not on the current stage opens a stage of its own (the
   app's newest window, shown alone). Rules in `config.toml` (below) can send named apps
   elsewhere. Sheets, dialogs and panels follow their parent.
+- **Switching moves like Apple's** (`[animation]`): the windows you leave shrink into
+  their card's slot and the stage you pick grows from its card to its frames, on Apple's
+  spring (99 % by about 430 ms). Live windows cannot be scaled, so snapshots of them move in
+  a click-through layer above everything while the real windows jump behind them; a click
+  or key press during the motion brings the windows in at once. The same goes for the
+  desktop reveal, ⌘M and drops. `[animation] enabled = false` makes windows jump.
+- **The strip sits below windows**, as Apple's does: a window moved or dragged over it
+  covers it (and the strip slides away while one overlaps). It comes above windows only
+  while you drag a window or a card over it, or when the left edge reveals it over a
+  window. `[strip] level = "above_windows"` keeps it on top.
 - **Drag a card into the main area** to bring its windows into the current stage: press a
   card and move; a copy of its front window follows the pointer and grows to the window's
   size as it leaves the strip. Let go anywhere in the main area: the windows join the
   current stage and the front one lands where you dropped it (title bar under the pointer).
   Let go over the strip to cancel. A plain click still switches.
-- **Drag a window onto the strip** (by its title bar) to give it a stage of its own: when
-  the pointer reaches the strip area the strip slides in (if hidden) and shows a highlighted
-  empty card where it will go. Let go there: the window leaves the current stage, its card
-  appears in the strip, and it comes back where it was before the drag when you switch to
-  it.
+- **Drag a card up or down** within the strip to give it another slot (an extension, on
+  because it is invisible until used; `[strip] reorder`): the card follows the pointer, the
+  others make room, and the order stays (also across relaunches).
+- **Drag a window onto the strip** (by its title bar) to give it a stage of its own: once
+  the pointer is over the strip column, the strip comes above windows, a card-sized picture
+  of the window, turned like a card, follows the pointer, and the cards open a gap where
+  the pointer is. Let go: the window leaves the current stage, its picture shrinks into
+  that gap and becomes its card, and it comes back where it was before the drag when you
+  switch to it.
 - **Hold Shift to bring things here** instead of going there (`[sugar] shift_brings_here`,
   on by default):
   - open an app with Shift held (Dock click, Finder double-click, Spotlight Shift-Return,
@@ -185,6 +199,8 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | Key | Default | Values | What it does |
 |---|---|---|---|
 | `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
+| `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
+| `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
 | `strip.show_active` | `false` | true or false | Also show the active stage as a card (fixed order only; Apple never does). |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
@@ -245,7 +261,19 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `drag.threshold` | `4.0` | number, 0 to 100 | A press that moves farther than this (points) drags the card; less is a click. |
 | `drag.grow_distance` | `260.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance. |
 | `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
-| `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card. |
+| `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip. |
+| `animation.enabled` | `true` | true or false | Animate switches, the desktop reveal, Cmd-M and drops as Apple does. false: windows jump. |
+| `animation.spring_stiffness` | `240.0` | number, 1 to 10000 | Spring stiffness of the windows' motion (Apple's: 99 % by about 430 ms). |
+| `animation.spring_damping` | `31.0` | number, 0 to 1000 | Spring damping (31 with stiffness 240 and mass 1: critically damped, no overshoot). |
+| `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass. |
+| `animation.unpark_at` | `0.99` | number, 0.5 to 1 | An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 430 ms). |
+| `animation.cover_ms` | `20` | whole number, 0 to 500 | Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first. |
+| `animation.corner_radius` | `0.0` | number, 0 to 60 | Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius). |
+| `animation.shadow_radius` | `24.0` | number, 0 to 100 | Blur radius of a moving snapshot's shadow. |
+| `animation.shadow_opacity` | `0.35` | number, 0 to 1 | Opacity of that shadow. |
+| `animation.shadow_offset_y` | `10.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
+| `animation.snapshot_interval_ms` | `2000` | whole number, 0 to 60000 | How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip. |
+| `animation.snapshot_cache_mb` | `512` | whole number, 16 to 8192 | Most memory kept for full-size window snapshots; the oldest go first. |
 | `windows.fit` | `"off"` | "off", "move", "narrow" | Keep placed windows clear of the strip: "move" right just enough, "narrow" also too-wide ones. Apple: "off". |
 | `windows.fit_margin` | `16.0` | number, 0 to 500 | With fit: room kept between the strip column and the windows. |
 | `windows.minimize_to_strip` | `true` | true or false | Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock. |
@@ -382,14 +410,16 @@ the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips
 
 - Apple's own Stage Manager must be off while this app runs (both move windows).
 - Main display only; other displays are left alone.
-- A window dragged onto the strip keeps its full size until it is dropped (Apple shrinks it
-  into a card); a highlighted placeholder card shows where it will go. A dragged card's
-  ghost is a snapshot of its front window, not the live window.
+- Moving windows are snapshots (Apple moves the live windows): a full-size snapshot of
+  each shown window is refreshed every 2 s (`[animation] snapshot_interval_ms`) and when the
+  pointer reaches a card, so content that changed since may jump when the motion ends. A
+  window dragged over the strip keeps its full size under its card-sized picture (Apple
+  shrinks the window itself). A dragged card's ghost is a snapshot of its front window.
 - Shift sugar reads the modifier at the user's triggering click or key press: a newly
   opened app's first window counts within 10 s of a Shift-held click or key press (unless
   another click or key press came after it), an activation within 2 s; or Shift held at the
   moment. A slow app launched with Shift may miss the 10 s window.
-- Windows jump (no animation); parked windows leave a sliver in the bottom-right corner.
+- Parked windows leave a sliver in the bottom-right corner.
 - ⌘M: the window is parked, then un-minimized there, so macOS may show a short restore
   animation toward the bottom-right corner (Apple's window shrinks into the strip).
 - Thumbnails are stills refreshed every 1.5 s (Apple's cards are live).
@@ -425,6 +455,7 @@ open -n "target/Stage Manager.app" --stderr /tmp/strip-demo.log \
 | `STAGE_MANAGER_DEMO_NUMBERS=1` | number badges on cards |
 | `STAGE_MANAGER_DEMO_AUTOHIDE=0\|1` | override Apple's `AutoHide` (hide recent apps) |
 | `STAGE_MANAGER_THUMBNAIL_MS` | thumbnail refresh interval (default: the config's) |
+| `STAGE_MANAGER_DEMO_MOTION=1` | a card click plays the switch animation with snapshots of the windows involved (no window moves, so the snapshots land over the real ones) |
 
 Built with `cargo build --release --features debug-render`, the demo can also draw the strip
 offscreen with Core Animation's renderer, so the look can be checked while the screen is
@@ -466,6 +497,9 @@ limited to the fixture.
   thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,
   `native_settings`, `ctl`, `logging`, `paths`.
 - `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
-  clicks, card drag with its ghost, the drop target for window drags, slide), `strip_layout` (pure geometry and tilt), `strip_visibility` (pure
-  auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`.
+  clicks, level, card drag and reorder, the gap for window drags, slide), `strip_motion`
+  (full-size snapshots, transitions, the dragged window's card), `overlay` (the
+  click-through motion layer above everything), `motion_math` (pure: spring timing, planes,
+  drop spots, snapshot budget), `strip_layout` (pure geometry and tilt), `strip_visibility`
+  (pure auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`.
 - `scripts/` — signing identity, bundling, signing, run, fixture, `test-stages.sh`.

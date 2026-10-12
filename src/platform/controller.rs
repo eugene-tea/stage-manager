@@ -28,8 +28,14 @@
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
 //!   current stage, and an activation (Dock click) of an app in another stage brings its
 //!   windows here. The app switcher (Command held) never counts.
+//! - **Transitions** (`[animation]`): a batch that parks shown windows or brings parked ones
+//!   back is announced to the strip first ([`strip_model::Transition`]); once the strip has
+//!   drawn snapshots over them, outgoing windows park behind theirs, and incoming windows wait
+//!   (in the safety registry at their arrival frames) until the strip's growing snapshots
+//!   cover their frames ([`StripEvent::Unveil`]), or any other input arrives, or
+//!   [`PENDING_MAX`] passes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -52,7 +58,9 @@ use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_wid
 use crate::engine::persist::{LaunchHints, STATE_VERSION, StateFile, rematch};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
-use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripEvent, StripSnapshot};
+use crate::ui::strip_model::{
+    self, CardSnapshot, CardWindow, MovingWindow, StripDrop, StripEvent, StripSnapshot, Transition,
+};
 
 /// How long focus and activation events for windows and apps we just touched are ignored
 /// by default (`[windows] focus_echo_ms`).
@@ -66,6 +74,13 @@ const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
 
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
+
+/// Longest wait for the strip to draw a transition's snapshots before windows move anyway.
+const COVER_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// Incoming windows held behind their snapshots come back after this at the latest, even
+/// when the strip never says so.
+pub const PENDING_MAX: Duration = Duration::from_millis(1500);
 
 /// Updates for the main thread (menu and hotkeys).
 #[derive(Clone, Debug, PartialEq)]
@@ -183,6 +198,20 @@ struct WindowDrag {
     moving: bool,
 }
 
+/// Incoming windows of a transition, held parked until their snapshots cover their frames.
+#[derive(Debug)]
+struct Pending {
+    /// The transition.
+    id: u64,
+    /// Their `SetFrame`s, then the batch's raises and focus, in order.
+    actions: Vec<Action>,
+    since: Instant,
+    /// Registry entries bringing them to their arrival frames if anything goes wrong.
+    entries: BTreeMap<u32, ParkedEntry>,
+    /// Their arrival frames: a click there during the wait was meant for them.
+    frames: Vec<Rect>,
+}
+
 /// The engine plus everything around it on the WM thread.
 pub struct Controller {
     model: Option<Model>,
@@ -204,6 +233,15 @@ pub struct Controller {
     /// The first snapshot after the launch's stages are built asks the strip to show itself
     /// for a moment even when a window covers it (once per launch).
     announce: bool,
+    /// After the last batch: the windows the model had parked and every window's stage, so
+    /// a transition knows which windows arrive and from which card.
+    parked_before: HashSet<u32>,
+    homes_before: HashMap<u32, u64>,
+    /// Incoming windows waiting behind their growing snapshots.
+    pending: Option<Pending>,
+    next_transition: u64,
+    /// The transition whose outgoing windows just parked, for the next snapshot.
+    parked_note: Option<u64>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -268,6 +306,11 @@ impl Controller {
             press: None,
             drag: None,
             announce: false,
+            parked_before: HashSet::new(),
+            homes_before: HashMap::new(),
+            pending: None,
+            next_transition: 0,
+            parked_note: None,
         };
         this.notify_config();
         this
@@ -350,14 +393,21 @@ impl Controller {
     /// put them back (a fitted window's exact pre-fit frame).
     fn parked_entries(&self, ob: &Observer) -> BTreeMap<u32, ParkedEntry> {
         let Some(m) = &self.model else { return BTreeMap::new() };
-        m.safety_targets()
+        let mut entries: BTreeMap<u32, ParkedEntry> = m
+            .safety_targets()
             .into_iter()
             .filter_map(|(id, restore)| {
                 let w = ob.window(id.0)?;
                 let child = w.kind == WindowKind::Child;
                 Some((id.0, ParkedEntry { element: w.element.clone(), restore, child }))
             })
-            .collect()
+            .collect();
+        if let Some(p) = &self.pending {
+            for (id, e) in &p.entries {
+                entries.entry(*id).or_insert_with(|| e.clone());
+            }
+        }
+        entries
     }
 
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
@@ -426,12 +476,130 @@ impl Controller {
                 tracing::trace!(id, ?action, "done");
             }
         }
-        safety::registry_replace(parked);
+        safety::registry_replace(self.parked_entries(ob));
+        self.remember();
         if changed {
             self.mark_dirty();
             self.present();
         }
         failed
+    }
+
+    /// Notes which windows are parked and where every window lives, for the next transition.
+    fn remember(&mut self) {
+        let Some(m) = &self.model else { return };
+        self.parked_before = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
+        self.homes_before = m
+            .windows()
+            .filter_map(|w| match w.home {
+                Home::Stage(s) => Some((w.meta.id.0, s.0)),
+                Home::Pinned => None,
+            })
+            .collect();
+    }
+
+    /// The windows a batch moves on or off the screen, if any: parks of shown windows
+    /// (back to front, at their live frames, into their stage's card) and frames for parked
+    /// windows (back to front, at their arrival frames, from the card they were on).
+    fn transition_for(&mut self, ob: &Observer, actions: &[Action]) -> Option<Transition> {
+        let m = self.model.as_ref()?;
+        let mut outgoing = Vec::new();
+        let mut incoming: Vec<MovingWindow> = Vec::new();
+        for a in actions {
+            match *a {
+                Action::Park { id, .. } if !self.parked_before.contains(&id.0) => {
+                    let Some(w) = m.window(id) else { continue };
+                    let frame = ob.window(id.0).map_or(w.meta.frame, |t| t.frame);
+                    outgoing.push(MovingWindow {
+                        window: CardWindow { id: id.0, pid: w.meta.pid, frame },
+                        stage: m.stage_of(id).map(|s| s.0),
+                    });
+                }
+                Action::SetFrame { id, frame } if self.parked_before.contains(&id.0) => {
+                    let Some(w) = m.window(id) else { continue };
+                    incoming.retain(|x| x.window.id != id.0);
+                    incoming.push(MovingWindow {
+                        window: CardWindow { id: id.0, pid: w.meta.pid, frame },
+                        stage: self.homes_before.get(&id.0).copied(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        if outgoing.is_empty() && incoming.is_empty() {
+            return None;
+        }
+        // Parks go front to back; draw back to front.
+        outgoing.reverse();
+        self.next_transition += 1;
+        Some(Transition { id: self.next_transition, outgoing, incoming })
+    }
+
+    /// Executes a batch the user caused, animated (`[animation]`): the strip first draws
+    /// snapshots over the windows that leave and grows snapshots of those that arrive; the
+    /// leaving windows park behind theirs, the arriving ones wait until the strip unveils
+    /// them. Without the strip's cover the batch runs at once.
+    fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
+        self.flush_pending(ob);
+        let anim = self.store.config().style.animation.clone();
+        if !anim.enabled || !self.strip_visible {
+            return self.execute(ob, actions);
+        }
+        let Some(t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
+        let id = t.id;
+        let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
+        let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
+        let started = Instant::now();
+        self.present_with(Some(t));
+        let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
+        tracing::debug!(id, ?cover, waited_ms = started.elapsed().as_millis() as u64, "transition covered");
+        if cover.outgoing || cover.incoming {
+            std::thread::sleep(Duration::from_millis(anim.cover_ms));
+        }
+        if cover.outgoing {
+            self.parked_note = Some(id);
+        }
+        if !cover.incoming {
+            let failed = self.execute(ob, actions);
+            self.note_parked();
+            return failed;
+        }
+        let (later, now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
+            Action::SetFrame { id, .. } => arriving.contains(&id.0),
+            Action::Raise { .. } | Action::Focus { .. } => true,
+            Action::Park { .. } | Action::StateChanged => false,
+        });
+        let entries = later
+            .iter()
+            .filter_map(|a| match *a {
+                Action::SetFrame { id, frame } => {
+                    let w = ob.window(id.0)?;
+                    let child = w.kind == WindowKind::Child;
+                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child }))
+                }
+                _ => None,
+            })
+            .collect();
+        self.pending = Some(Pending { id, actions: later, since: Instant::now(), entries, frames });
+        let failed = self.execute(ob, now);
+        self.note_parked();
+        failed
+    }
+
+    /// Tells the strip a transition's outgoing windows have parked, if no snapshot did yet.
+    fn note_parked(&mut self) {
+        if self.parked_note.is_some() {
+            self.present();
+        }
+    }
+
+    /// Brings held incoming windows to their frames now (their snapshots cover them, or other
+    /// input arrived). Never interrupted: these windows are not parked in the model's eyes.
+    fn flush_pending(&mut self, ob: &Observer) {
+        if let Some(p) = self.pending.take() {
+            tracing::trace!(id = p.id, held_ms = p.since.elapsed().as_millis() as u64, "incoming windows unveiled");
+            self.execute_batch(ob, p.actions, false);
+        }
     }
 
     /// After a caught panic: make sure every window the model has parked is in the registry
@@ -449,6 +617,10 @@ impl Controller {
 
     /// Builds the strip snapshot and hands it to the strip.
     pub fn present(&mut self) {
+        self.present_with(None);
+    }
+
+    fn present_with(&mut self, transition: Option<Transition>) {
         self.strip_dirty = false;
         let Some(m) = &self.model else { return };
         let active = m.main_active_stage();
@@ -463,7 +635,6 @@ impl Controller {
                     .windows
                     .iter()
                     .filter_map(|id| m.window(*id))
-                    .take(3)
                     .map(|w| CardWindow { id: w.meta.id.0, pid: w.meta.pid, frame: w.restore })
                     .collect(),
                 apps: c.apps,
@@ -476,6 +647,17 @@ impl Controller {
             .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
             .map(|w| w.meta.frame)
             .collect();
+        let active_windows = active
+            .and_then(|a| m.stage(a))
+            .map(|s| {
+                s.windows
+                    .iter()
+                    .filter_map(|id| m.window(*id))
+                    .filter(|w| !w.parked)
+                    .map(|w| CardWindow { id: w.meta.id.0, pid: w.meta.pid, frame: w.meta.frame })
+                    .collect()
+            })
+            .unwrap_or_default();
         strip_model::present(StripSnapshot {
             cards,
             active_stage: active.map(|s| s.0),
@@ -485,6 +667,9 @@ impl Controller {
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
             announce: std::mem::take(&mut self.announce),
+            active_windows,
+            transition,
+            parked: self.parked_note.take(),
         });
     }
 
@@ -545,6 +730,9 @@ impl Controller {
 
     fn on_event(&mut self, ob: &mut Observer, event: WinEvent) {
         let now = Instant::now();
+        if !matches!(event, WinEvent::Moved(_) | WinEvent::Retitled(_)) {
+            self.flush_pending(ob);
+        }
         match event {
             WinEvent::Started => self.on_started(ob),
             WinEvent::Stopped => tracing::warn!("observation stopped; windows stay where they are"),
@@ -596,7 +784,7 @@ impl Controller {
                     if !actions.is_empty() {
                         tracing::info!(id, "focused window is in another stage; switching");
                     }
-                    self.execute(ob, actions);
+                    self.execute_animated(ob, actions);
                 }
             }
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
@@ -614,7 +802,7 @@ impl Controller {
                     if !actions.is_empty() {
                         tracing::info!(pid, "activated app lives in another stage; switching");
                     }
-                    self.execute(ob, actions);
+                    self.execute_animated(ob, actions);
                 }
             }
         }
@@ -639,7 +827,7 @@ impl Controller {
             return;
         }
         tracing::info!(id, "window minimized: it goes to the strip instead of the Dock");
-        self.execute(ob, actions);
+        self.execute_animated(ob, actions);
         if let Some(w) = ob.window(id) {
             let now = Instant::now();
             self.echoes.touch_window(id, now);
@@ -688,7 +876,7 @@ impl Controller {
         }
         self.triggers.consume();
         tracing::info!(pid, "Shift held: the app's windows come to the current stage");
-        self.execute(ob, actions);
+        self.execute_animated(ob, actions);
         true
     }
 
@@ -715,35 +903,43 @@ impl Controller {
         }
     }
 
-    /// Global input in another app (mouse down/up, key down). `over_strip` tells, for a
-    /// mouse-up, whether the pointer is over the visible strip.
-    pub fn input(&mut self, ob: &mut Observer, event: InputEvent, over_strip: bool) {
+    /// Global input in another app (mouse down/up, key down). `drop` tells, for a mouse-up
+    /// over the visible strip, which slot a dragged window goes to.
+    pub fn input(&mut self, ob: &mut Observer, event: InputEvent, drop: Option<StripDrop>) {
         let now = Instant::now();
         self.triggers.record(now, Modifiers { shift: event.shift, cmd: event.cmd });
         match event.kind {
             InputKind::MouseDown => {
+                // A click where an arriving window is about to be was meant for it: it
+                // arrives now, and the click is no wallpaper click.
+                let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
+                self.flush_pending(ob);
                 self.end_drag();
                 self.press = self.model.as_ref().map(|m| Press {
                     frames: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.restore)).collect(),
                 });
-                self.mouse_down(ob, event.at);
+                if for_arriving {
+                    tracing::debug!("click during a transition, on an arriving window");
+                } else {
+                    self.mouse_down(ob, event.at);
+                }
             }
             InputKind::MouseUp => {
                 self.press = None;
                 let Some(drag) = self.drag.take() else { return };
-                if drag.moving && over_strip {
-                    tracing::info!(id = drag.id, "window dropped on the strip: a stage of its own");
+                if let Some(slot) = drop.filter(|_| drag.moving) {
+                    tracing::info!(id = drag.id, before = ?slot.before, "window dropped on the strip: a stage of its own");
                     let obs = self.observe(ob);
                     if let Some(m) = self.model.as_mut() {
-                        let actions = m.drop_window_on_strip(WindowId(drag.id), drag.pre, &obs);
-                        self.execute(ob, actions);
+                        let actions = m.drop_window_on_strip(WindowId(drag.id), drag.pre, slot.before.map(StageId), &obs);
+                        self.execute_animated(ob, actions);
                     }
                 } else if drag.moving {
                     tracing::debug!(id = drag.id, "window drag ended in the main area");
                 }
                 self.present();
             }
-            InputKind::KeyDown => {}
+            InputKind::KeyDown => self.flush_pending(ob),
         }
     }
 
@@ -863,7 +1059,7 @@ impl Controller {
         let obs = self.observe(ob);
         if let Some(m) = self.model.as_mut() {
             let actions = m.add_window(meta, &decision, &obs);
-            self.execute(ob, actions);
+            self.execute_animated(ob, actions);
         }
     }
 
@@ -871,6 +1067,7 @@ impl Controller {
 
     /// The main display changed (or was first reported).
     pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>) {
+        self.flush_pending(ob);
         let Some(main) = displays.first().copied() else { return };
         safety::set_visible_frame(main.visible);
         self.displays = displays.clone();
@@ -904,29 +1101,38 @@ impl Controller {
         if self.model.as_ref().is_some_and(|m| !m.main_display().frame.contains(p)) {
             return;
         }
-        if !desktop::is_wallpaper_click(&windows::list_windows(), p) {
+        // Our own windows (the strip below windows, the motion overlay above them) never
+        // receive other apps' clicks, so they never hide the wallpaper.
+        let own = std::process::id() as i32;
+        let list: Vec<_> = windows::list_windows().into_iter().filter(|w| w.pid != own).collect();
+        if !desktop::is_wallpaper_click(&list, p) {
             return;
         }
         tracing::info!(x = p.x, y = p.y, "wallpaper click");
-        self.reveal(ob);
+        self.reveal(ob, true);
     }
 
-    fn reveal(&mut self, ob: &mut Observer) -> usize {
+    fn reveal(&mut self, ob: &mut Observer, animated: bool) -> usize {
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return 0 };
         let actions = m.reveal_desktop(&obs);
         let n = actions.len();
-        self.execute(ob, actions);
+        if animated {
+            self.execute_animated(ob, actions);
+        } else {
+            self.execute(ob, actions);
+        }
         n
     }
 
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
+        self.flush_pending(ob);
         let _ = match command {
-            HotkeyCommand::SwitchTo(n) => self.switch(ob, n),
-            HotkeyCommand::SendTo(n) => self.send(ob, None, Target::Number(n)),
-            HotkeyCommand::NewStage => self.send(ob, None, Target::New),
+            HotkeyCommand::SwitchTo(n) => self.switch(ob, n, true),
+            HotkeyCommand::SendTo(n) => self.send(ob, None, Target::Number(n), true),
+            HotkeyCommand::NewStage => self.send(ob, None, Target::New, true),
             HotkeyCommand::TogglePin => self.pin(ob, None),
             HotkeyCommand::ToggleStrip => {
                 self.toggle_strip();
@@ -946,6 +1152,20 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
+        if let StripEvent::Unveil { id } = event {
+            if self.pending.as_ref().is_some_and(|p| p.id == id) {
+                self.flush_pending(ob);
+            }
+            return;
+        }
+        self.flush_pending(ob);
+        if let StripEvent::CardMoved { stage, before } = event {
+            let Some(m) = self.model.as_mut() else { return };
+            tracing::info!(stage, ?before, "card moved to another slot");
+            let actions = m.move_card(StageId(stage), before.map(StageId));
+            self.execute(ob, actions);
+            return;
+        }
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
         let actions = match event {
@@ -959,11 +1179,17 @@ impl Controller {
                 tracing::info!(stage, pid, "card icon clicked: the stage, with every window of the app");
                 m.show_app_everywhere(StageId(stage), pid, &obs)
             }
+            StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } => Vec::new(),
         };
-        self.execute(ob, actions);
+        self.execute_animated(ob, actions);
     }
 
-    fn switch(&mut self, ob: &mut Observer, n: usize) -> Result<usize, String> {
+    /// Runs a batch animated (user input) or at once (scripted ctl commands).
+    fn run_batch(&mut self, ob: &Observer, actions: Vec<Action>, animated: bool) -> usize {
+        if animated { self.execute_animated(ob, actions) } else { self.execute(ob, actions) }
+    }
+
+    fn switch(&mut self, ob: &mut Observer, n: usize, animated: bool) -> Result<usize, String> {
         let obs = self.observe(ob);
         let m = self.model.as_mut().ok_or_else(not_managing)?;
         if n > m.stages().len() {
@@ -971,11 +1197,11 @@ impl Controller {
         }
         let actions = m.switch_to_number(n, &obs);
         let count = actions.len();
-        self.execute(ob, actions);
+        self.run_batch(ob, actions, animated);
         Ok(count)
     }
 
-    fn send(&mut self, ob: &mut Observer, id: Option<u32>, target: Target) -> Result<usize, String> {
+    fn send(&mut self, ob: &mut Observer, id: Option<u32>, target: Target, animated: bool) -> Result<usize, String> {
         let obs = self.observe(ob);
         let id = id.map(WindowId).or(obs.focused).ok_or("no focused window")?;
         let m = self.model.as_mut().ok_or_else(not_managing)?;
@@ -984,7 +1210,7 @@ impl Controller {
         }
         let actions = m.send_window(id, target, &obs);
         let count = actions.len();
-        self.execute(ob, actions);
+        self.run_batch(ob, actions, animated);
         Ok(count)
     }
 
@@ -1014,6 +1240,7 @@ impl Controller {
     /// Brings every parked window back onscreen (quit, safety). Returns how many AX calls
     /// failed; the registry is empty afterwards when none did.
     pub fn unpark_all(&mut self, ob: &Observer) -> usize {
+        self.flush_pending(ob);
         let Some(m) = self.model.as_mut() else { return 0 };
         let actions = m.unpark_all();
         let n = actions.len();
@@ -1024,6 +1251,7 @@ impl Controller {
 
     /// Re-reads config.toml and applies it; a bad file keeps the last good config.
     pub fn reload_config(&mut self, ob: &mut Observer) {
+        self.flush_pending(ob);
         self.config_mtime = mtime(self.store.path());
         match self.store.reload() {
             Ok(warnings) => {
@@ -1057,6 +1285,10 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
+        if self.pending.as_ref().is_some_and(|p| now.duration_since(p.since) >= PENDING_MAX) {
+            tracing::warn!("the strip never unveiled a transition's windows; they come back now");
+            self.flush_pending(ob);
+        }
         self.echoes.prune(now);
         if let Some((first, last)) = self.dirty
             && (now.duration_since(last) >= SAVE_DEBOUNCE || now.duration_since(first) >= SAVE_MAX_DELAY)
@@ -1084,15 +1316,16 @@ impl Controller {
             Ok(actions) => json!({ "ok": true, "actions": actions }),
             Err(e) => json!({ "ok": false, "error": e }),
         };
+        self.flush_pending(ob);
         match cmd {
             Command::State => self.state_json(ob),
             Command::Dump => ob.dump(),
-            Command::Switch(n) => done(self.switch(ob, n)),
-            Command::Send(n, id) => done(self.send(ob, id, Target::Number(n))),
-            Command::New(id) => done(self.send(ob, id, Target::New)),
+            Command::Switch(n) => done(self.switch(ob, n, false)),
+            Command::Send(n, id) => done(self.send(ob, id, Target::Number(n), false)),
+            Command::New(id) => done(self.send(ob, id, Target::New, false)),
             Command::Pin(id) => done(self.pin(ob, id)),
             Command::Merge(n) => done(self.merge(ob, n)),
-            Command::Reveal => done(if self.model.is_some() { Ok(self.reveal(ob)) } else { Err(not_managing()) }),
+            Command::Reveal => done(if self.model.is_some() { Ok(self.reveal(ob, false)) } else { Err(not_managing()) }),
             Command::UnparkAll => {
                 let failed = self.unpark_all(ob);
                 json!({ "ok": failed == 0, "failed": failed })
@@ -1183,6 +1416,8 @@ impl Controller {
             "fit": format!("{:?}", self.store.config().windows.fit).to_lowercase(),
             "strip_visible": self.strip_visible,
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
+            "animation": self.store.config().style.animation.enabled,
+            "strip_level": format!("{:?}", self.style.level),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },
             "config_path": self.store.path(),
             "config_error": self.config_error,

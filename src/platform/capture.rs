@@ -56,6 +56,8 @@ struct Shared {
     /// Window ids captured at least once since they were requested.
     captured: HashSet<u32>,
     interval: Duration,
+    /// Capture every target now, whatever the interval says.
+    force: bool,
     shutdown: bool,
 }
 
@@ -66,12 +68,22 @@ pub struct Capturer {
 
 impl Capturer {
     /// Starts the worker with a refresh interval; images go to `deliver` on the main thread.
+    /// Asks for Screen Recording when it is missing (and prompts are allowed).
     pub fn start(interval: Duration, deliver: Deliver) -> Self {
+        Self::spawn(interval, deliver, true)
+    }
+
+    /// Like [`Capturer::start`], without asking for Screen Recording (a second capturer).
+    pub fn start_quiet(interval: Duration, deliver: Deliver) -> Self {
+        Self::spawn(interval, deliver, false)
+    }
+
+    fn spawn(interval: Duration, deliver: Deliver, ask: bool) -> Self {
         let shared = Arc::new((
             Mutex::new(Shared { interval, ..Shared::default() }),
             Condvar::new(),
         ));
-        if !CGPreflightScreenCaptureAccess() {
+        if ask && !CGPreflightScreenCaptureAccess() {
             if permissions::prompts_allowed() {
                 tracing::info!("Screen Recording missing; asking through ScreenCaptureKit");
                 request_access();
@@ -100,6 +112,15 @@ impl Capturer {
             let ids: HashSet<u32> = targets.iter().map(|t| t.id).collect();
             s.captured.retain(|id| ids.contains(id));
             s.targets = targets;
+            cv.notify_all();
+        }
+    }
+
+    /// Captures every target as soon as the current round ends.
+    pub fn capture_now(&self) {
+        let (lock, cv) = &*self.shared;
+        if let Ok(mut s) = lock.lock() {
+            s.force = true;
             cv.notify_all();
         }
     }
@@ -155,7 +176,8 @@ fn run(shared: Arc<(Mutex<Shared>, Condvar)>, deliver: Deliver) {
                 let granted = CGPreflightScreenCaptureAccess();
                 let due_in = last_full.map_or(Duration::ZERO, |t| s.interval.saturating_sub(t.elapsed()));
                 if granted && !s.targets.is_empty() {
-                    if due_in.is_zero() {
+                    if due_in.is_zero() || s.force {
+                        s.force = false;
                         last_full = Some(Instant::now());
                         break s.targets.clone();
                     }

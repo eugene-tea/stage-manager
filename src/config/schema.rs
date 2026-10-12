@@ -125,7 +125,18 @@ pub const SECTIONS: &[SectionDef] = &[
     SectionDef { name: "icons", doc: &["The app icon over each card's bottom-left corner."] },
     SectionDef { name: "motion", doc: &["Cards and the strip move on one spring (Apple's, measured)."] },
     SectionDef { name: "reveal", doc: &["When the strip hides and comes back."] },
-    SectionDef { name: "drag", doc: &["Dragging a card out of the strip into the main area."] },
+    SectionDef {
+        name: "drag",
+        doc: &["Dragging a card out of the strip or within it, and dragging a window onto the strip."],
+    },
+    SectionDef {
+        name: "animation",
+        doc: &[
+            "Stage switches move as Apple's do: incoming windows grow from their card, outgoing ones",
+            "shrink into their slot. Live windows cannot be scaled, so snapshots move in a",
+            "click-through layer above everything while the real windows jump behind them.",
+        ],
+    },
     SectionDef { name: "windows", doc: &["How windows are treated."] },
     SectionDef {
         name: "sugar",
@@ -147,6 +158,10 @@ pub const KEYS: &[KeyDef] = &[
     // [strip]
     k("strip", "order", Kind::Choice(&["native", "fixed"]), "\"native\"",
         "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"fixed\" is creation order."),
+    k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
+        "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
+    k("strip", "reorder", Kind::Bool, "true",
+        "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
     k("strip", "show_active", Kind::Bool, "false", "Also show the active stage as a card (fixed order only; Apple never does)."),
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
     k("strip", "show_names", Kind::Bool, "false", "Draw stage names under cards. Apple shows none."),
@@ -218,7 +233,25 @@ pub const KEYS: &[KeyDef] = &[
     k("drag", "threshold", f(0.0, 100.0), "4.0", "A press that moves farther than this (points) drags the card; less is a click."),
     k("drag", "grow_distance", f(1.0, 3000.0), "260.0", "Past the strip, the dragged card grows to its window's size over this distance."),
     k("drag", "lifted_opacity", f(0.0, 1.0), "0.3", "Opacity of a card in the strip while it is dragged out."),
-    k("drag", "ghost_opacity", f(0.0, 1.0), "0.92", "Opacity of the dragged copy of the card."),
+    k("drag", "ghost_opacity", f(0.0, 1.0), "0.92", "Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip."),
+    // [animation]
+    k("animation", "enabled", Kind::Bool, "true",
+        "Animate switches, the desktop reveal, Cmd-M and drops as Apple does. false: windows jump."),
+    k("animation", "spring_stiffness", f(1.0, 10_000.0), "240.0", "Spring stiffness of the windows' motion (Apple's: 99 % by about 430 ms)."),
+    k("animation", "spring_damping", f(0.0, 1000.0), "31.0", "Spring damping (31 with stiffness 240 and mass 1: critically damped, no overshoot)."),
+    k("animation", "spring_mass", f(0.01, 100.0), "1.0", "Spring mass."),
+    k("animation", "unpark_at", f(0.5, 1.0), "0.99",
+        "An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 430 ms)."),
+    k("animation", "cover_ms", i(0, 500), "20",
+        "Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first."),
+    k("animation", "corner_radius", f(0.0, 60.0), "0.0",
+        "Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius)."),
+    k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow."),
+    k("animation", "shadow_opacity", f(0.0, 1.0), "0.35", "Opacity of that shadow."),
+    k("animation", "shadow_offset_y", f(-100.0, 100.0), "10.0", "Vertical offset of that shadow (down is positive)."),
+    k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
+        "How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip."),
+    k("animation", "snapshot_cache_mb", i(16, 8192), "512", "Most memory kept for full-size window snapshots; the oldest go first."),
     // [windows]
     k("windows", "fit", Kind::Choice(&["off", "move", "narrow"]), "\"off\"",
         "Keep placed windows clear of the strip: \"move\" right just enough, \"narrow\" also too-wide ones. Apple: \"off\"."),
@@ -363,6 +396,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-1.toml"),
     include_str!("legacy/default-2.toml"),
     include_str!("legacy/default-3.toml"),
+    include_str!("legacy/default-4.toml"),
 ];
 
 #[cfg(test)]

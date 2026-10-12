@@ -182,9 +182,40 @@ pub struct DragStyle {
     pub ghost_opacity: f64,
 }
 
+/// `[animation]`: switches drawn as moving snapshots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationStyle {
+    pub enabled: bool,
+    pub spring_stiffness: f64,
+    pub spring_damping: f64,
+    pub spring_mass: f64,
+    pub unpark_at: f64,
+    pub cover_ms: u64,
+    pub corner_radius: f64,
+    pub shadow_radius: f64,
+    pub shadow_opacity: f64,
+    pub shadow_offset_y: f64,
+    pub snapshot_interval_ms: u64,
+    pub snapshot_cache_mb: u64,
+}
+
+/// `[strip] level`: where the strip sits among windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripLevel {
+    /// Apple's: below normal windows, so a window moved over it covers it.
+    #[default]
+    BelowWindows,
+    /// Over every normal window.
+    AboveWindows,
+}
+
 /// Everything the strip panel draws with; changes apply live.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripStyle {
+    /// Below or above windows.
+    pub level: StripLevel,
+    /// Cards can be dragged to another slot.
+    pub reorder: bool,
     /// Column width.
     pub width: f64,
     /// Multiplies every strip length.
@@ -202,6 +233,7 @@ pub struct StripStyle {
     pub motion: MotionStyle,
     pub reveal: RevealStyle,
     pub drag: DragStyle,
+    pub animation: AnimationStyle,
 }
 
 impl Default for StripStyle {
@@ -522,6 +554,11 @@ impl Config {
                 thumbnail_interval_ms: v.uint("strip.thumbnail_interval_ms"),
             },
             style: StripStyle {
+                level: match v.text("strip.level") {
+                    "above_windows" => StripLevel::AboveWindows,
+                    _ => StripLevel::BelowWindows,
+                },
+                reorder: v.flag("strip.reorder"),
                 width: v.num("strip.width"),
                 scale: v.num("strip.scale"),
                 scale_to_display: v.flag("strip.scale_to_display"),
@@ -585,6 +622,20 @@ impl Config {
                     grow_distance: v.num("drag.grow_distance"),
                     lifted_opacity: v.num("drag.lifted_opacity"),
                     ghost_opacity: v.num("drag.ghost_opacity"),
+                },
+                animation: AnimationStyle {
+                    enabled: v.flag("animation.enabled"),
+                    spring_stiffness: v.num("animation.spring_stiffness"),
+                    spring_damping: v.num("animation.spring_damping"),
+                    spring_mass: v.num("animation.spring_mass"),
+                    unpark_at: v.num("animation.unpark_at"),
+                    cover_ms: v.uint("animation.cover_ms"),
+                    corner_radius: v.num("animation.corner_radius"),
+                    shadow_radius: v.num("animation.shadow_radius"),
+                    shadow_opacity: v.num("animation.shadow_opacity"),
+                    shadow_offset_y: v.num("animation.shadow_offset_y"),
+                    snapshot_interval_ms: v.uint("animation.snapshot_interval_ms"),
+                    snapshot_cache_mb: v.uint("animation.snapshot_cache_mb"),
                 },
             },
             windows: WindowsConfig {
@@ -833,6 +884,10 @@ mod tests {
         assert!(!c.style.scale_to_display && c.style.scale == 1.0);
         assert!(c.sugar.shift_brings_here, "invisible until Shift is held");
         assert!(c.windows.minimize_to_strip);
+        assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
+        assert!(c.style.reorder, "invisible until a card is dragged");
+        let a = &c.style.animation;
+        assert!(a.enabled && (a.spring_stiffness, a.spring_damping, a.spring_mass) == (240.0, 31.0, 1.0));
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }
@@ -857,6 +912,8 @@ mod tests {
             r##"
 [strip]
 order = "fixed"
+level = "above_windows"
+reorder = false
 show_active = true
 show_numbers = true
 thumbnail_interval_ms = 2000
@@ -895,9 +952,16 @@ names = ["Work", "Chat", "work", " "]
 
 [sugar]
 shift_brings_here = false
+
+[animation]
+enabled = false
+unpark_at = 0.9
 "##,
         );
         let c = p.config;
+        assert_eq!(c.style.level, StripLevel::AboveWindows);
+        assert!(!c.style.reorder);
+        assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert_eq!(c.strip.order, StripOrder::Fixed);
         assert!(c.strip.show_active && c.style.show_numbers);
         assert_eq!(c.strip.thumbnail_interval_ms, 2000);

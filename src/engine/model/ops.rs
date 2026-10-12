@@ -2,7 +2,7 @@
 //! then restore frames, then raises back to front, then focus, then `StateChanged`.
 
 use super::{
-    Action, Display, DisplayId, Home, Model, NativeTarget, Observation, Pid, Reveal, StageId,
+    Action, Display, DisplayId, Home, Model, NativeTarget, Observation, Pid, Reveal, StageId, StripOrder,
     Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::geometry::{Point, Rect};
@@ -651,8 +651,24 @@ impl Model {
     /// A window dragged by its title bar and dropped on the strip: it goes to a new stage of
     /// its own (parked, its card in the strip), and its restore frame is `pre_drag`, the
     /// frame it had before the drag, not where it was dropped. Its children move back by the
-    /// same offset. Same as [`Model::send_window`] with [`Target::New`] otherwise.
+    /// same offset. Its card takes the slot it was dropped into: right above `before`'s card,
+    /// or the bottom when `before` is `None` (see [`Model::move_card`]). Same as
+    /// [`Model::send_window`] with [`Target::New`] otherwise.
     pub fn drop_window_on_strip(
+        &mut self,
+        id: WindowId,
+        pre_drag: Rect,
+        before: Option<StageId>,
+        obs: &Observation,
+    ) -> Vec<Action> {
+        let actions = self.drop_window_on_strip_as_new(id, pre_drag, obs);
+        if let Some(stage) = self.stage_of(id).filter(|s| !self.is_active(*s)) {
+            self.move_card(stage, before);
+        }
+        actions
+    }
+
+    fn drop_window_on_strip_as_new(
         &mut self,
         id: WindowId,
         pre_drag: Rect,
@@ -677,6 +693,69 @@ impl Model {
         }
         obs.frames.insert(id, pre_drag);
         self.send_window(id, Target::New, &obs)
+    }
+
+    /// A card dragged to another slot of the strip (`[strip] reorder`): it goes right above
+    /// `before`'s card, or to the bottom when `before` is `None`. In Apple's order the slots
+    /// change and the slot-stable rule carries on from them (a full strip drops its least
+    /// recently used card, never the moved one); in fixed order the stage moves in creation
+    /// order, so hotkey numbers follow what the strip shows. Returns
+    /// [`Action::StateChanged`] when anything moved (the order is saved with the state).
+    pub fn move_card(&mut self, stage: StageId, before: Option<StageId>) -> Vec<Action> {
+        if before == Some(stage) || !self.place_card(stage, before) {
+            return Vec::new();
+        }
+        vec![Action::StateChanged]
+    }
+
+    fn place_card(&mut self, stage: StageId, before: Option<StageId>) -> bool {
+        let Some(display) = self.stage(stage).map(|s| s.display) else {
+            return false;
+        };
+        match self.options.strip.order {
+            StripOrder::Native => {
+                let capacity = self.options.strip.capacity;
+                if capacity == 0 || self.is_active(stage) {
+                    return false;
+                }
+                let recency: Vec<(StageId, u64)> =
+                    self.stages.iter().map(|s| (s.id, s.last_active)).collect();
+                let age = |id: StageId| recency.iter().find(|r| r.0 == id).map_or(0, |r| r.1);
+                let slots = self.slots.entry(display).or_default();
+                let old = slots.clone();
+                slots.retain(|&s| s != stage);
+                let at = before
+                    .and_then(|b| slots.iter().position(|&s| s == b))
+                    .unwrap_or(slots.len());
+                slots.insert(at, stage);
+                while slots.len() > capacity {
+                    let oldest = slots
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| **s != stage)
+                        .min_by_key(|(_, s)| age(**s))
+                        .map(|(i, _)| i);
+                    match oldest {
+                        Some(i) => {
+                            slots.remove(i);
+                        }
+                        None => break,
+                    }
+                }
+                *slots != old
+            }
+            StripOrder::Fixed => {
+                let Some(from) = self.stages.iter().position(|s| s.id == stage) else {
+                    return false;
+                };
+                let moved = self.stages.remove(from);
+                let at = before
+                    .and_then(|b| self.stages.iter().position(|s| s.id == b))
+                    .unwrap_or(self.stages.len());
+                self.stages.insert(at, moved);
+                at != from
+            }
+        }
     }
 
     /// An app became frontmost (Dock click, ⌘Tab).

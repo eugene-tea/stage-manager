@@ -171,8 +171,15 @@ pub fn test_pids() -> Vec<i32> {
 /// Checks that the topmost window at every point belongs to one of `pids`.
 pub fn path_is_safe(path: &[Point], pids: &[i32]) -> Result<(), String> {
     let list = windows::list_windows();
+    let own = std::process::id() as i32;
     for p in path {
-        let top = list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(*p));
+        // Our own strip sits below normal windows (layer -1): it counts where nothing covers
+        // it. Our click-through windows above the floating level (card ghosts, the motion
+        // overlay) never take a click, so they never count.
+        let top = list.iter().find(|w| {
+            let click_through = w.pid == own && w.layer > CLICKABLE_LEVEL;
+            w.onscreen && !click_through && (w.layer >= 0 || pids.contains(&w.pid)) && w.alpha > 0.0 && w.bounds.contains(*p)
+        });
         match top {
             Some(w) if pids.contains(&w.pid) => {}
             Some(w) => return Err(format!("the topmost window at {:.0},{:.0} is not ours or a fixture's (pid {})", p.x, p.y, w.pid)),
@@ -181,6 +188,9 @@ pub fn path_is_safe(path: &[Point], pids: &[i32]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The highest level of our own windows that take clicks (the strip lifted, the edge tab).
+const CLICKABLE_LEVEL: i64 = 3;
 
 /// Points from `a` to `b` at most `step` apart, both ends included.
 pub fn segment(a: Point, b: Point, step: f64) -> Vec<Point> {

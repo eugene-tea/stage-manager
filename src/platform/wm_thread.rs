@@ -33,7 +33,7 @@ use super::observe::{self, Observer};
 use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
-use crate::ui::strip_model::StripEvent;
+use crate::ui::strip_model::{StripDrop, StripEvent};
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
 pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
@@ -57,9 +57,9 @@ pub enum WmCommand {
     NativeSettings(RawSettings),
     /// The main display (first) and its visible frame, top-left coordinates.
     Displays(Vec<Display>),
-    /// Global input in another app (left mouse down/up, key down); for a mouse-up, whether
-    /// the pointer is over the visible strip.
-    Input(InputEvent, bool),
+    /// Global input in another app (left mouse down/up, key down); for a mouse-up over the
+    /// visible strip, the slot a window dropped there goes to.
+    Input(InputEvent, Option<StripDrop>),
     /// A hotkey was pressed.
     Hotkey(HotkeyCommand),
     /// Input from the strip.
@@ -249,7 +249,7 @@ impl WmState {
                 self.observer.set_settings(settings);
             }
             WmCommand::Displays(displays) => self.controller.set_displays(&mut self.observer, displays),
-            WmCommand::Input(event, over_strip) => self.controller.input(&mut self.observer, event, over_strip),
+            WmCommand::Input(event, drop) => self.controller.input(&mut self.observer, event, drop),
             WmCommand::Hotkey(command) => self.controller.hotkey(&mut self.observer, command),
             WmCommand::Strip(event) => self.controller.strip_event(&mut self.observer, event),
             WmCommand::ToggleStrip => self.controller.toggle_strip(),

@@ -1466,7 +1466,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         }
                         log.push(format!("drop window {} on the strip", id.0));
                         let obs = e.d.obs();
-                        let a = e.m.drop_window_on_strip(id, pre, &obs);
+                        let a = e.m.drop_window_on_strip(id, pre, None, &obs);
                         e.run(a);
                     }
                 }
@@ -1653,7 +1653,7 @@ fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame
     e.d.frames.insert(w(2), dropped);
     e.m.window_frame_changed(w(2), dropped);
     let obs = e.d.obs();
-    let a = e.m.drop_window_on_strip(w(2), pre, &obs);
+    let a = e.m.drop_window_on_strip(w(2), pre, None, &obs);
     e.run(a);
     assert_eq!(e.m.stages().len(), 2);
     assert_eq!(e.active_number(), 1, "the view does not switch");
@@ -1663,6 +1663,94 @@ fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame
     assert_eq!(e.slot_numbers(), [2]);
     e.switch(2);
     assert_eq!(e.d.frames[&w(2)], pre, "comes back where it was before the drag");
+}
+
+/// Four apps, four stages; stage 1 active, stages 2, 3, 4 in the strip.
+fn four_stages() -> Env {
+    let mut e = Env::new();
+    for (id, pid) in [(1, 10), (2, 11), (3, 12), (4, 13)] {
+        e.add(meta(id, pid, "com.example.x"), RuleAction::New);
+    }
+    e.switch(1);
+    e
+}
+
+fn stage_id(e: &Env, n: usize) -> StageId {
+    e.m.stages()[n - 1].id
+}
+
+#[test]
+fn a_window_dropped_between_two_cards_takes_that_slot() {
+    let mut e = four_stages();
+    let before: Vec<usize> = e.slot_numbers();
+    assert_eq!(before.len(), 3);
+    e.add(meta(5, 14, "com.example.y"), RuleAction::Current);
+    let pre = e.d.frames[&w(5)];
+    let below = stage_id(&e, before[1]);
+    let obs = e.d.obs();
+    let a = e.m.drop_window_on_strip(w(5), pre, Some(below), &obs);
+    e.run(a);
+    let new = e.number_of(5);
+    assert_eq!(e.slot_numbers(), [before[0], new, before[1], before[2]], "right above the card it was dropped on");
+    assert!(e.d.parked(w(5)));
+}
+
+#[test]
+fn a_dropped_window_in_a_full_strip_keeps_its_slot_and_the_oldest_card_leaves() {
+    let mut e = four_stages();
+    e.m.set_strip_capacity(3);
+    let before = e.slot_numbers();
+    assert_eq!(before.len(), 3);
+    e.add(meta(5, 14, "com.example.y"), RuleAction::Current);
+    let pre = e.d.frames[&w(5)];
+    let obs = e.d.obs();
+    let a = e.m.drop_window_on_strip(w(5), pre, Some(stage_id(&e, before[2])), &obs);
+    e.run(a);
+    let now = e.slot_numbers();
+    let new = e.number_of(5);
+    assert_eq!(now.len(), 3);
+    let at = now.iter().position(|&n| n == new).expect("in the strip");
+    assert_eq!(now.get(at + 1), Some(&before[2]), "right above the card it was dropped on ({now:?})");
+}
+
+#[test]
+fn a_card_dragged_to_another_slot_stays_there_and_the_swap_rule_carries_on() {
+    let mut e = four_stages();
+    let [a, b, c] = e.slot_numbers()[..] else { panic!("three cards") };
+    let moved = e.m.move_card(stage_id(&e, c), Some(stage_id(&e, a)));
+    assert_eq!(moved, [Action::StateChanged]);
+    assert_eq!(e.slot_numbers(), [c, a, b]);
+    assert!(e.m.move_card(stage_id(&e, c), Some(stage_id(&e, a))).is_empty(), "already there");
+    assert!(e.m.move_card(stage_id(&e, c), Some(stage_id(&e, c))).is_empty(), "onto itself");
+    let moved = e.m.move_card(stage_id(&e, c), None);
+    assert_eq!(moved, [Action::StateChanged]);
+    assert_eq!(e.slot_numbers(), [a, b, c], "to the bottom");
+    // Apple's swap: the stage left takes the clicked card's slot.
+    e.switch(b);
+    assert_eq!(e.slot_numbers(), [a, 1, c]);
+    // The order is part of the saved state.
+    let state = e.m.to_state();
+    let ids: Vec<StageId> = state.strip_slots.iter().filter_map(|i| e.m.stages().get(*i).map(|s| s.id)).collect();
+    assert_eq!(ids, e.m.strip_slots(MAIN));
+}
+
+#[test]
+fn in_fixed_order_a_dragged_card_moves_in_creation_order() {
+    let mut e = Env::with(ModelOptions {
+        strip: StripOptions { order: StripOrder::Fixed, show_active: false, capacity: 6 },
+        ..ModelOptions::default()
+    });
+    for (id, pid) in [(1, 10), (2, 11), (3, 12), (4, 13)] {
+        e.add(meta(id, pid, "com.example.x"), RuleAction::New);
+    }
+    e.switch(1);
+    assert_eq!(e.slot_numbers(), [2, 3, 4]);
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let two = e.m.stage_of(w(2)).expect("staged");
+    assert_eq!(e.m.move_card(four, Some(two)), [Action::StateChanged]);
+    assert_eq!(e.slot_numbers(), [2, 3, 4], "numbers follow the strip");
+    assert_eq!(e.number_of(4), 2, "the moved stage is now number 2");
+    assert_eq!(e.number_of(2), 3);
 }
 
 // ----- keeping windows clear of the strip ------------------------------------------------
