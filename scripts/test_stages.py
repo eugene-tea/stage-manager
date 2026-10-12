@@ -13,10 +13,15 @@ synthetic click and shift-click on a card of the real strip; the click is posted
 only when its own strip window is topmost at that point), native (Apple's defaults with three
 more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
-along the whole path, and the pointer is put back), visible (windows kept clear of the strip
-on first start, switch and creation; a too-wide one narrowed and given back its exact frame
-on quit; nudge-only with the launch announce and the edge tab; a menu-path quit right after a
-first start with many windows).
+along the whole path, and the pointer is put back), visible (by default, Apple's: no window
+is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of the strip on
+first start, switch and creation, a too-wide one narrowed and given back its exact frame on
+quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
+menu-path quit right after a first start with many windows), parity (the generated config has
+no live values and registers no hotkey; Cmd-M sends a window to the strip; a click on a
+card's app icon brings every window of that app).
+
+Tests that need an extension turn it on in their own config.toml.
 
 No phase runs while the owner's installed app is up, and only our own app's guardian is
 ever signalled.
@@ -303,6 +308,8 @@ def do(*words):
 
 def phase_m3():
     say("\n== milestone 3: stages, switching, frames, z-order, merge, pin, reveal, children ==")
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write("[hotkeys]\nenabled = true\n")
     start_fixture(4, "--panel")
     s = start_app(5)
     if not check(s is not None, "app manages the 4 fixture windows and the panel"):
@@ -311,7 +318,7 @@ def phase_m3():
     check(len(s["stages"]) == 1 and s["active"] == 1, "one active stage at launch")
     panel = t.get("Fixture Panel")
     check(panel is not None and panel["role"] == "child" and panel["parent"] is not None, "the panel is a child with a parent")
-    check("hotkeys registered active=21" in log_text(), "21 hotkeys registered")
+    check("hotkeys registered active=21" in log_text(), "21 hotkeys registered (turned on in this test's config)")
     w = {n: t[f"Fixture {n}"]["id"] for n in range(1, 5)}
 
     do("send", 2, w[3])
@@ -823,10 +830,48 @@ def write_config(text):
 
 
 def phase_visible():
-    say("\n== visible: windows clear of the strip, narrowed when too wide, the edge tab, quit ==")
+    say("\n== visible: Apple's exact frames by default; with fit, windows clear of the strip; the edge tab; quit ==")
     stop_app()
     stop_all_fixtures()
     write_config(None)
+    frames = {"a": "20,60,700,400;10,120,-40,500", "b": "30,90,600,380"}
+    start_extra_frames("a", 2, frames["a"])
+    start_extra_frames("b", 1, frames["b"])
+    subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
+    time.sleep(1.0)
+    wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["b"][0]])
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "defaults: app up with Alpha and Bravo"):
+        return
+    check(s["fit"] == "off" and s["stage_inset"] == 0, f"defaults: no fitting (fit={s['fit']}, inset {s['stage_inset']})")
+    t = by_title(s)
+    orig = {n: t[n]["restore"] for n in ("Alpha 1", "Alpha 2", "Bravo 1")}
+    check(all(t[n]["original"] is None for n in orig), "defaults: no window was moved or resized at first start")
+    consistent("defaults first start")
+    st = {st["number"]: st["windows"] for st in s["stages"]}
+    alpha = next(n for n, ws in st.items() if t["Alpha 1"]["id"] in ws)
+    bravo = next(n for n, ws in st.items() if t["Bravo 1"]["id"] in ws)
+    for n in (bravo, alpha, bravo, alpha):
+        do("switch", n)
+    s = state()
+    same = all(close(by_title(s)[n]["restore"], orig[n]) for n in orig)
+    check(same, "defaults: switching restores every window at exactly its own frame, even over the strip")
+    consistent("defaults switch")
+    time.sleep(1.0)
+    check(edge_tab() is None, "defaults: no edge tab while a window covers the strip")
+    check("showing it for a moment" not in log_text(), "defaults: no launch reveal")
+    check("hotkeys registered active=0" in log_text(), "defaults: no global hotkey registered")
+    screenshot("strip-defaults.png", s)
+    pid = app_pid()
+    ctl("quit")
+    wait_gone(pid)
+    a2 = live_frame_probe("a", "Alpha 2")
+    check(a2 is not None and close(a2, orig["Alpha 2"]), f"defaults quit: frames untouched ({fmt(a2) if a2 else None})")
+    all_onscreen("defaults quit")
+
+    say("-- [windows] fit = \"narrow\": windows clear of the strip, narrowed when too wide")
+    stop_all_fixtures()
+    write_config('[windows]\nfit = "narrow"\n')
     # Alpha: one window over the strip column that fits, one too wide for the stage area.
     # Bravo: one over the strip column (its stage is parked at first start).
     start_extra_frames("a", 2, "20,60,700,400;10,120,-40,500")
@@ -840,8 +885,8 @@ def phase_visible():
         return
     vis, inset = s["display"]["visible"], s["stage_inset"]
     left = vis["x"] + inset
-    check(s["fit_windows"] is True and 100 <= s["strip_width"] <= 200,
-          f"fitting on by default; strip {s['strip_width']:.0f} pt, stage area from x={left:.0f}")
+    check(s["fit_windows"] is True and s["strip_width"] == 200,
+          f"fitting on (config); strip {s['strip_width']:.0f} pt on every display, stage area from x={left:.0f}")
     t = by_title(s)
     for name in ("Alpha 1", "Alpha 2", "Bravo 1"):
         before[name] = t[name]["original"] or t[name]["restore"]
@@ -904,9 +949,9 @@ def phase_visible():
     check(took < 6, f"quit took {took:.1f} s")
     all_onscreen("visible quit")
 
-    say("-- nudge-only: a too-wide window stays put, the strip announces itself, then the edge tab")
+    say("-- fit = \"move\" with the launch reveal and the edge tab on: a too-wide window stays put")
     stop_all_fixtures()
-    write_config("[stages]\nfit_windows = false\n")
+    write_config('[windows]\nfit = "move"\n[reveal]\nedge_tab = true\nlaunch_reveal = true\n')
     start_extra_frames("a", 1, "10,120,-40,500")
     subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
     time.sleep(1.0)
@@ -964,6 +1009,87 @@ def phase_visible():
     stop_all_fixtures()
 
 
+# ----- parity: generated config, Cmd-M to the strip, a card's app icon -----------------
+
+
+def icon_center(s, number):
+    """Where the app icon of stage `number`'s card is, by the strip's layout rules (UX-SPEC):
+    cards of 161 pt per visible height (at least 97 pt tall), 29.5 pt apart, the column
+    centered on the visible frame; the icon centered 10.5 pt right of and above the front
+    window's bottom-left corner. Single-window cards only."""
+    vis = s["display"]["visible"]
+    by_id = {w["id"]: w for w in s["windows"]}
+    stages = {st["number"]: st for st in s["stages"]}
+    heights = []
+    for n in s["strip"]:
+        r = by_id[stages[n]["windows"][0]]["restore"]
+        heights.append(max(161.0 * r["h"] / vis["h"], 97.0))
+    total = sum(heights) + 29.5 * (len(heights) - 1)
+    top = vis["y"] + (vis["h"] - total) / 2
+    for n, h in zip(s["strip"], heights):
+        if n == number:
+            return vis["x"] + 15 + 10.5, top + h - 10.5
+        top += h + 29.5
+    return None
+
+
+def phase_parity():
+    say("\n== parity: generated config, Cmd-M to the strip, a card's app icon ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    start_extra_frames("a", 2, "400,80,600,400;460,140,620,420")
+    start_extra_frames("b", 1, "420,100,640,420")
+    subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
+    time.sleep(1.0)
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with Alpha (2 windows) and Bravo"):
+        return
+    with open(os.path.join(HOME, "config.toml")) as f:
+        text = f.read()
+    live = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#") and not l.startswith("[")]
+    check(not live, f"the generated config.toml holds no live values ({live[:3]})")
+    r = run([BIN, "config", "--print-defaults"], timeout=10)
+    check(r.stdout == text, "and it is exactly `config --print-defaults`")
+    check("hotkeys registered active=0" in log_text(), "no global hotkey registered")
+
+    say("-- Cmd-M sends the window to the strip as a card of its own")
+    s = state()
+    t = by_title(s)
+    alpha = s["active"] if t["Alpha 1"]["home"] == s["active"] else t["Alpha 1"]["home"]
+    do("switch", alpha)
+    time.sleep(0.9)
+    os.kill(extra_pid("a"), signal.SIGUSR2)
+    s = wait_state(lambda x: by_title(x)["Alpha 1"]["parked"], "Alpha 1 to go to the strip")
+    if check(s is not None, "a minimized window goes to the strip, not the Dock"):
+        a1 = by_title(s)["Alpha 1"]
+        check(stage_titles(s)[a1["home"]] == ["Alpha 1"] and a1["home"] in s["strip"], "as a card of its own")
+        check(s["active"] == alpha and "Alpha 2" in active_titles(s), "the view stays on the current stage")
+        check(close(a1["restore"], t["Alpha 1"]["restore"]), "its frame is kept for its return")
+    consistent("Cmd-M")
+    wins, d = fixture_windows([EXTRA["a"][0]])
+    check(len([w for w in wins if w["bounds"]["h"] > 60]) == 2, "the window is not left in the Dock (both Alpha windows listed)")
+
+    say("-- a click on a card's app icon brings every window of that app")
+    s = state()
+    t = by_title(s)
+    bravo = t["Bravo 1"]["home"]
+    do("switch", bravo)
+    time.sleep(1.5)
+    s = state()
+    t = by_title(s)
+    a1_stage = t["Alpha 1"]["home"]
+    pt = icon_center(s, a1_stage)
+    r = ctl("debug-click", pt[0], pt[1]) if pt else {"ok": False, "error": "no card"}
+    check(r.get("ok"), f"clicked Alpha 1's card icon at {pt} ({r.get('error', 'ok')})")
+    s = wait_state(lambda x: active_titles(x) == {"Alpha 1", "Alpha 2"}, "both Alpha windows shown")
+    check(s is not None, "the icon click shows the card's stage with every Alpha window")
+    consistent("icon click")
+    stop_app()
+    all_onscreen("parity quit")
+    stop_all_fixtures()
+
+
 def start_extra_frames(k, n, frames):
     bundle, path, pattern, title = EXTRA[k]
     stop_extra(k)
@@ -987,7 +1113,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -1002,7 +1128,7 @@ def main():
                 failed.append("the owner's app is running")
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
-             "native": phase_native}[p]()
+             "native": phase_native, "parity": phase_parity}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

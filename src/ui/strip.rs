@@ -1,17 +1,19 @@
 //! The strip panel: a borderless, non-activating `NSPanel` on the left of the main display
-//! that draws one tilted card per stage with Core Animation layers.
+//! that draws each stage as a card with Core Animation layers, the way Apple's does.
 //!
 //! - Snapshots arrive through [`strip_model::present`] on any thread and hop to the main
-//!   thread; everything here runs on the main thread.
-//! - Cards are layers under one perspective (`sublayerTransform.m34`) centered at the
-//!   display's vertical center, each turned about its left edge (see [`strip_layout`]).
-//!   App icons, badges and names live in a flat overlay above them.
-//! - Hover grows a card and shifts it left (eased, ~150 ms); a click acts on mouse-up in
-//!   the same card and goes out as [`StripEvent::CardClicked`].
-//! - Cards glide to new slots on the measured spring; the strip slides out to the left when
-//!   hidden (see [`strip_visibility`]).
+//!   thread; everything here runs on the main thread. Each snapshot carries the
+//!   [`StripStyle`] (config), so look and motion follow config edits live.
+//! - **Cards** ([`strip_layout`]): each window's thumbnail is its own plane, turned about
+//!   its left edge inside its card's perspective container, whose eye sits at the display's
+//!   vertical middle; app icons, badges and names live in a flat overlay above.
+//! - **Hover** grows the card about its center (eased); a click acts on mouse-up in the same
+//!   card and goes out as [`StripEvent::CardClicked`], or [`StripEvent::IconClicked`] on its
+//!   app icon.
+//! - Cards glide to new slots on the spring; the strip **slides** out to the left when
+//!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
 //! - Thumbnails come from [`capture`], refreshed every `thumbnail_interval_ms`.
-//! - **Drag a card out** (press, move more than [`DRAG_THRESHOLD`]): a ghost of its front
+//! - **Drag a card out** (press, move more than `[drag] threshold`): a ghost of its front
 //!   thumbnail follows the pointer in its own click-through panel and grows toward the
 //!   window's size past the strip's edge; released outside the strip it goes out as
 //!   [`StripEvent::CardDropped`], released over the strip nothing happens.
@@ -19,16 +21,14 @@
 //!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip area, the strip shows
 //!   itself and a highlighted placeholder card in the slot below the others. Auto-hide never
 //!   fights either drag.
-//! - **Size**: the column and its cards scale with the display
-//!   ([`crate::engine::stage_area::strip_scale`]): 200 pt at 5K, about 113 pt on a 1800 pt-wide laptop.
-//! - **Edge tab** (an extension): while a window covers the strip and hides it, a slim
-//!   translucent tab at the left edge shows that the strip is there; resting on it reveals
-//!   the strip like the edge does, a click reveals it at once.
-//! - **Announce**: at launch, a strip a window covers shows for [`ANNOUNCE`] anyway.
+//! - Extensions, off by default (`[reveal]`): the **edge tab**, a slim translucent tab at the
+//!   left edge while a window covers the strip; the **launch reveal**, a covered strip shown
+//!   for a moment at launch.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -50,34 +50,16 @@ use objc2_quartz_core::{
     kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
 };
 
-use crate::engine::geometry::{Point, Rect};
-use crate::engine::geometry::Size;
-use crate::engine::stage_area::{strip_scale, strip_width};
+use crate::config::{MotionStyle, Rgba, StripStyle};
+use crate::engine::geometry::{Point, Rect, Size};
+use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Target};
-use crate::ui::strip_layout::{
-    self, CardLayout, DRAG_THRESHOLD, HOVER_SCALE, HOVER_SHIFT, ICON_BELOW, ICON_LEFT_OVERHANG, ICON_STEP,
-};
+use crate::ui::strip_layout::{self, CardLayout, Metrics};
 use crate::ui::strip_model::{self, CardSnapshot, StripEvent, StripSnapshot};
-use crate::ui::strip_visibility::{self, ANNOUNCE, Mode, POLL_INTERVAL, Visibility};
+use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
 
-/// Spring for card motion and the slide (UX-SPEC "Transitions").
-const SPRING_MASS: f64 = 1.0;
-const SPRING_STIFFNESS: f64 = 240.0;
-const SPRING_DAMPING: f64 = 31.0;
-/// Hover ease duration.
-const HOVER_SECONDS: f64 = 0.15;
-/// New cards fade in over this long.
-const FADE_SECONDS: f64 = 0.2;
-/// Thumbnails are captured at this multiple of their point size.
-const CAPTURE_SCALE: f64 = 2.0;
-/// Corner radius of a thumbnail.
-const THUMB_RADIUS: f64 = 5.0;
 /// The placeholder card's stage id in the column (never a real stage).
 const DROP_STAGE: u64 = u64::MAX;
-/// A lifted card's opacity while its ghost is out.
-const LIFTED_OPACITY: f32 = 0.3;
-/// The ghost's opacity.
-const GHOST_OPACITY: f32 = 0.92;
 /// The edge tab's window: width and height in points (the drawn pill is narrower).
 const TAB_SIZE: (f64, f64) = (10.0, 72.0);
 /// The drawn pill's width.
@@ -123,6 +105,42 @@ pub fn set_thumbnail_interval(ms: u64) {
 /// user has not hidden the strip and `p` is inside the strip area. Main thread.
 pub fn is_drop_target(p: Point) -> bool {
     with_strip(|s| s.snapshot.user_visible && s.geometry.global.contains(p)).unwrap_or(false)
+}
+
+/// Draws the strip, slid in, into `path` with the offscreen renderer (see
+/// [`crate::ui::strip_render`]). Main thread.
+#[cfg(feature = "debug-render")]
+pub fn debug_render(path: &std::path::Path) -> Result<(), String> {
+    with_strip(|s| {
+        s.slide(true, false);
+        let root = CALayer::new();
+        root.setGeometryFlipped(true);
+        root.setFrame(s.root.bounds());
+        root.setBackgroundColor(Some(&color(0.93, 0.55, 0.22, 1.0)));
+        s.cards_root.removeFromSuperlayer();
+        s.overlay.removeFromSuperlayer();
+        root.addSublayer(&s.cards_root);
+        root.addSublayer(&s.overlay);
+        let result = crate::ui::strip_render::render_to_file(&root, 2.0, path);
+        s.cards_root.removeFromSuperlayer();
+        s.overlay.removeFromSuperlayer();
+        s.root.addSublayer(&s.cards_root);
+        s.root.addSublayer(&s.overlay);
+        result
+    })
+    .unwrap_or_else(|| Err("no strip".into()))
+}
+
+#[cfg(feature = "debug-render")]
+thread_local! {
+    static SCREEN_OVERRIDE: std::cell::Cell<Option<(NSRect, NSRect)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Lays the strip out for another screen (Cocoa frame and visible frame), so a render can be
+/// compared with a screenshot of another display. Main thread.
+#[cfg(feature = "debug-render")]
+pub fn set_screen_override(frame: NSRect, visible: NSRect) {
+    SCREEN_OVERRIDE.with(|o| o.set(Some((frame, visible))));
 }
 
 /// Receives captured thumbnails on the main thread.
@@ -327,7 +345,7 @@ impl EdgeTab {
 // ---------------------------------------------------------------------------------------
 // Geometry of the panel on the main display
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Geometry {
     /// Panel frame, Cocoa coordinates (bottom-left origin).
     panel: NSRect,
@@ -335,16 +353,12 @@ struct Geometry {
     global: Rect,
     /// Height of the primary display (for flipping Cocoa y).
     primary_height: f64,
-    /// The display's vertical center in panel coordinates.
-    center_y: f64,
-    /// The strip scale for this display ([`strip_scale`]).
-    k: f64,
-    /// The column's width.
-    width: f64,
+    /// The style resolved for this display.
+    m: Metrics,
 }
 
 impl Geometry {
-    fn current(mtm: MainThreadMarker) -> Self {
+    fn current(mtm: MainThreadMarker, style: &StripStyle) -> Self {
         let screens = NSScreen::screens(mtm);
         let main = screens.firstObject();
         let (frame, visible) = match &main {
@@ -354,14 +368,17 @@ impl Geometry {
                 (r, r)
             }
         };
+        #[cfg(feature = "debug-render")]
+        let (frame, visible) = SCREEN_OVERRIDE.with(|o| o.get()).unwrap_or((frame, visible));
         let primary_height = frame.size.height;
         let size = Size::new(visible.size.width, visible.size.height);
-        let (k, width) = (strip_scale(size), strip_width(size));
-        let panel = NSRect::new(visible.origin, NSSize::new(width, visible.size.height));
+        let k = length_scale(size, style);
         let top = primary_height - (visible.origin.y + visible.size.height);
-        let global = Rect::new(visible.origin.x, top, width, visible.size.height);
-        let display_center = primary_height - (frame.origin.y + frame.size.height / 2.0);
-        Self { panel, global, primary_height, center_y: display_center - top, k, width }
+        let display_middle = primary_height - (frame.origin.y + frame.size.height / 2.0);
+        let m = Metrics::new(style, size, k, display_middle - top);
+        let panel = NSRect::new(visible.origin, NSSize::new(m.width, visible.size.height));
+        let global = Rect::new(visible.origin.x, top, m.width, visible.size.height);
+        Self { panel, global, primary_height, m }
     }
 
     /// The edge tab's frame, global (top-left origin): flush left, vertically centered on
@@ -391,12 +408,18 @@ impl Geometry {
 
 /// One card's layers.
 struct CardLayers {
-    /// Tilted container of the thumbnails.
+    /// The card's perspective container: covers the panel, anchored at the eye; its
+    /// `sublayerTransform` is the slide and the perspective, its `transform` the hover.
     card: Retained<CALayer>,
-    /// Flat twin in the overlay (icons, badge, name); same anchor and position.
+    /// Flat twin in the overlay (icons, badge, name), covering the panel; hover scales it
+    /// about the same center.
     flat: Retained<CALayer>,
+    /// Thumbnail planes per window id (back to front), each turned about its left edge.
+    planes: Vec<(u32, Retained<CALayer>)>,
     /// Image layer per window id.
     images: Vec<(u32, Retained<CALayer>)>,
+    /// The card's top-left corner when the flat twin's content was drawn.
+    built: Point,
     /// What the layers were built from.
     snapshot: CardSnapshot,
     layout: CardLayout,
@@ -404,6 +427,10 @@ struct CardLayers {
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
     CGColor::new_srgb(r, g, b, a)
+}
+
+fn rgba(c: Rgba) -> CFRetained<CGColor> {
+    color(c.r, c.g, c.b, c.a)
 }
 
 fn cg_rect(r: &Rect) -> CGRect {
@@ -421,26 +448,35 @@ fn transform_value(t: CATransform3D) -> Retained<NSValue> {
     unsafe { NSValue::valueWithCATransform3D(t) }
 }
 
-/// The card's resting transform: the tilt, plus the hover growth when hovered (strip
-/// scale `k`).
-fn card_transform(theta: f64, k: f64, hovered: bool) -> CATransform3D {
-    let tilt = CATransform3D::new_rotation(theta, 0.0, 1.0, 0.0);
-    if hovered { tilt.concat(hover_transform(k)) } else { tilt }
+fn identity() -> CATransform3D {
+    CATransform3D::new_scale(1.0, 1.0, 1.0)
 }
 
-fn hover_transform(k: f64) -> CATransform3D {
-    CATransform3D::new_scale(HOVER_SCALE, HOVER_SCALE, 1.0).concat(CATransform3D::new_translation(-HOVER_SHIFT * k, 0.0, 0.0))
+/// A scale by `s` about `c`, for a layer anchored at `anchor` (both panel coordinates).
+fn scale_about(s: f64, c: Point, anchor: Point) -> CATransform3D {
+    let (dx, dy) = (c.x - anchor.x, c.y - anchor.y);
+    CATransform3D::new_translation(-dx, -dy, 0.0)
+        .concat(CATransform3D::new_scale(s, s, 1.0))
+        .concat(CATransform3D::new_translation(dx, dy, 0.0))
 }
 
-fn flat_transform(k: f64, hovered: bool) -> CATransform3D {
-    if hovered { hover_transform(k) } else { CATransform3D::new_scale(1.0, 1.0, 1.0) }
+/// A card container's `sublayerTransform`: slid `dx` in 3D, then the perspective.
+fn perspective(m: &Metrics, dx: f64) -> CATransform3D {
+    let mut p = identity();
+    p.m34 = -1.0 / m.perspective.max(1.0);
+    CATransform3D::new_translation(dx, 0.0, 0.0).concat(p)
 }
 
-fn spring(key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
+/// A thumbnail plane's turn about its left edge.
+fn turn(m: &Metrics) -> CATransform3D {
+    CATransform3D::new_rotation(m.tilt, 0.0, 1.0, 0.0)
+}
+
+fn spring(motion: &MotionStyle, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
     let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
-    anim.setMass(SPRING_MASS);
-    anim.setStiffness(SPRING_STIFFNESS);
-    anim.setDamping(SPRING_DAMPING);
+    anim.setMass(motion.spring_mass);
+    anim.setStiffness(motion.spring_stiffness);
+    anim.setDamping(motion.spring_damping);
     anim.setDuration(anim.settlingDuration());
     // SAFETY: from/to are NSValues of the animated property's type.
     unsafe {
@@ -464,28 +500,45 @@ fn ease(key: &str, from: &AnyObject, to: &AnyObject, seconds: f64) -> Retained<C
 }
 
 /// Moves `layer` to `to` along the spring, starting from where it is drawn now.
-fn spring_position(layer: &CALayer, to: CGPoint) {
+fn spring_position(motion: &MotionStyle, layer: &CALayer, to: CGPoint) {
     // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
     let from = unsafe { layer.presentationLayer() }.map(|p| p.position()).unwrap_or_else(|| layer.position());
     layer.setPosition(to);
     if (from.x - to.x).abs() < 0.25 && (from.y - to.y).abs() < 0.25 {
         return;
     }
-    let anim = spring("position", &NSValue::new(from), &NSValue::new(to));
+    let anim = spring(motion, "position", &NSValue::new(from), &NSValue::new(to));
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("position")));
 }
 
+/// Moves `layer`'s `sublayerTransform` to `to` along the spring, from what is drawn now.
+fn spring_sublayer_transform(motion: &MotionStyle, layer: &CALayer, to: CATransform3D) {
+    // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+    let from = unsafe { layer.presentationLayer() }
+        .map(|p| p.sublayerTransform())
+        .unwrap_or_else(|| layer.sublayerTransform());
+    layer.setSublayerTransform(to);
+    let anim = spring(motion, "sublayerTransform", &transform_value(from), &transform_value(to));
+    layer.addAnimation_forKey(&anim, Some(&NSString::from_str("sublayerTransform")));
+}
+
 /// Eases `layer`'s transform to `to` from what is drawn now.
-fn ease_transform(layer: &CALayer, to: CATransform3D) {
+fn ease_transform(layer: &CALayer, to: CATransform3D, seconds: f64) {
     // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
     let from = unsafe { layer.presentationLayer() }.map(|p| p.transform()).unwrap_or_else(|| layer.transform());
     layer.setTransform(to);
-    let anim = ease("transform", &transform_value(from), &transform_value(to), HOVER_SECONDS);
+    if seconds <= 0.0 {
+        return;
+    }
+    let anim = ease("transform", &transform_value(from), &transform_value(to), seconds);
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("transform")));
 }
 
-fn fade_in(layer: &CALayer) {
-    let anim = ease("opacity", &NSNumber::new_f32(0.0), &NSNumber::new_f32(1.0), FADE_SECONDS);
+fn fade_in(layer: &CALayer, seconds: f64) {
+    if seconds <= 0.0 {
+        return;
+    }
+    let anim = ease("opacity", &NSNumber::new_f32(0.0), &NSNumber::new_f32(1.0), seconds);
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("fade")));
 }
 
@@ -513,11 +566,12 @@ fn as_object_cf(s: &NSString) -> &objc2_core_foundation::CFType {
     unsafe { &*(s as *const NSString).cast::<objc2_core_foundation::CFType>() }
 }
 
-/// An app's icon as an image for a layer.
-fn app_icon(pid: i32) -> Option<CFRetained<CGImage>> {
+/// An app's icon as an image for a layer, rendered at `points` × 2 pixels.
+fn app_icon(pid: i32, points: f64) -> Option<CFRetained<CGImage>> {
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     let icon = app.icon()?;
-    let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(64.0, 64.0));
+    let side = (points * 2.0).clamp(32.0, 1024.0);
+    let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
     // SAFETY: a valid proposed rect pointer and no context or hints.
     let image = unsafe { icon.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
     // SAFETY: the Retained<CGImage> owns one reference; re-wrap it as CFRetained.
@@ -536,7 +590,7 @@ struct Ghost {
 }
 
 impl Ghost {
-    fn new(mtm: MainThreadMarker, image: Option<&CGImage>) -> Self {
+    fn new(mtm: MainThreadMarker, image: Option<&CGImage>, opacity: f32) -> Self {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0));
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -567,7 +621,7 @@ impl Ghost {
         layer.setBorderWidth(0.5);
         layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.35)));
         layer.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 0.95)));
-        layer.setOpacity(GHOST_OPACITY);
+        layer.setOpacity(opacity);
         // SAFETY: framework constant.
         layer.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
         if let Some(img) = image {
@@ -627,14 +681,12 @@ struct Strip {
     panel: Retained<NSPanel>,
     _view: Retained<StripView>,
     root: Retained<CALayer>,
-    /// Slides left to hide.
-    content: Retained<CALayer>,
-    /// Perspective container of the tilted cards.
-    stage: Retained<CALayer>,
-    /// Flat layer for icons, badges and names.
+    /// The cards' perspective containers.
+    cards_root: Retained<CALayer>,
+    /// Flat layer for icons, badges, names and the drop placeholder; slides in 2D.
     overlay: Retained<CALayer>,
+    style: Arc<StripStyle>,
     geometry: Geometry,
-    theta: f64,
     scale: f64,
     cards: HashMap<u64, CardLayers>,
     layouts: Vec<CardLayout>,
@@ -652,20 +704,21 @@ struct Strip {
     /// A window drag is over the strip: the placeholder card shows.
     drop_over: bool,
     drop_layer: Option<Retained<CALayer>>,
-    /// The edge tab shown while a window hides the strip.
+    /// The edge tab shown while a window hides the strip (`[reveal] edge_tab`).
     tab: EdgeTab,
-    /// The launch announce happened (once per launch).
+    /// The launch reveal happened (once per launch).
     announced: bool,
 }
 
 impl Strip {
     fn new(mtm: MainThreadMarker, interval: Duration) -> Self {
-        let geometry = Geometry::current(mtm);
-        let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+        let style = Arc::new(StripStyle::default());
+        let geometry = Geometry::current(mtm, &style);
+        let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
             geometry.panel,
-            style,
+            style_mask,
             NSBackingStoreType::Buffered,
             false,
         );
@@ -704,12 +757,10 @@ impl Strip {
         view.addTrackingArea(&area);
         panel.setContentView(Some(&view));
 
-        let content = CALayer::new();
-        let stage = CALayer::new();
+        let cards_root = CALayer::new();
         let overlay = CALayer::new();
-        content.addSublayer(&stage);
-        content.addSublayer(&overlay);
-        root.addSublayer(&content);
+        root.addSublayer(&cards_root);
+        root.addSublayer(&overlay);
 
         let scale = panel.backingScaleFactor();
         let capturer = Capturer::start(interval, thumbnail_arrived);
@@ -719,11 +770,10 @@ impl Strip {
             panel,
             _view: view,
             root,
-            content,
-            stage,
+            cards_root,
             overlay,
+            style,
             geometry,
-            theta: 0.0,
             scale,
             cards: HashMap::new(),
             layouts: Vec::new(),
@@ -748,45 +798,51 @@ impl Strip {
         strip
     }
 
-    /// Sizes the panel and the layer tree for the current geometry.
+    fn m(&self) -> &Metrics {
+        &self.geometry.m
+    }
+
+    /// How far left the cards sit when hidden.
+    fn hidden_dx(&self) -> f64 {
+        -(self.style.motion.slide_distance * self.m().k).max(self.geometry.panel.size.width + 30.0)
+    }
+
+    fn current_dx(&self) -> f64 {
+        if self.shown { 0.0 } else { self.hidden_dx() }
+    }
+
+    /// Sizes the panel and the layer tree for the current geometry; cards are rebuilt.
     fn apply_geometry(&mut self) {
-        let g = self.geometry;
+        let g = &self.geometry;
         self.panel.setFrame_display(g.panel, false);
-        let size = CGSize::new(g.panel.size.width, g.panel.size.height);
-        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), size);
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(g.panel.size.width, g.panel.size.height));
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.root.setFrame(bounds);
-        self.content.setBounds(bounds);
-        self.overlay.setFrame(bounds);
-        // The perspective is centered at (center_x, the display's vertical center): put the
-        // stage layer's anchor there while keeping its frame equal to the bounds.
-        let center_x = g.width / 2.0;
-        let cy = g.center_y.clamp(0.0, size.height.max(1.0));
-        self.stage.setBounds(bounds);
-        self.stage.setAnchorPoint(CGPoint::new(center_x / size.width.max(1.0), cy / size.height.max(1.0)));
-        self.stage.setPosition(CGPoint::new(center_x, cy));
-        let mut perspective = CATransform3D::new_scale(1.0, 1.0, 1.0);
-        perspective.m34 = -1.0 / strip_layout::PERSPECTIVE_DISTANCE;
-        self.stage.setSublayerTransform(perspective);
+        self.cards_root.setFrame(bounds);
+        self.overlay.setBounds(bounds);
         CATransaction::commit();
-        self.theta = strip_layout::tilt_angle(center_x, g.k);
-        // Cards built for another scale are rebuilt.
         for layers in self.cards.values() {
             layers.card.removeFromSuperlayer();
             layers.flat.removeFromSuperlayer();
         }
         self.cards.clear();
+        self.icons.clear();
+        self.visibility.set_timing(Timing::from_style(&self.style.reveal));
     }
 
     // -- snapshots ------------------------------------------------------------------------
 
     fn present(&mut self, snapshot: StripSnapshot) {
-        let geometry = Geometry::current(self.mtm);
+        if snapshot.style != self.style {
+            self.style = snapshot.style.clone();
+        }
+        let geometry = Geometry::current(self.mtm, &self.style);
         if geometry != self.geometry {
+            tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
             self.geometry = geometry;
             self.apply_geometry();
-            self.tab.place(geometry.cocoa(geometry.tab()));
+            self.tab.place(self.geometry.cocoa(self.geometry.tab()));
             let shown = self.shown;
             self.slide(shown, false);
         }
@@ -794,7 +850,7 @@ impl Strip {
         let rescaled = scale != self.scale;
         self.scale = scale;
 
-        let force = rescaled || snapshot.show_numbers != self.snapshot.show_numbers;
+        let force = rescaled || snapshot.style != self.snapshot.style;
         self.snapshot = snapshot;
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
@@ -808,7 +864,7 @@ impl Strip {
             self.announced = true;
             if self.covered() {
                 tracing::info!("launch: a window covers the strip; showing it for a moment");
-                self.visibility.announce(Instant::now(), ANNOUNCE);
+                self.visibility.announce(Instant::now(), Duration::from_millis(self.style.reveal.launch_reveal_ms));
             }
         }
         self.update_visibility();
@@ -829,7 +885,10 @@ impl Strip {
         if let Some(c) = &drop_card {
             cards.push(c.clone());
         }
-        let layouts = strip_layout::layout_column(&cards, self.geometry.height(), self.geometry.center_y, self.geometry.k);
+        let layouts = strip_layout::layout_column(&cards, self.geometry.height(), self.m());
+        for l in &layouts {
+            tracing::trace!(stage = l.stage, frame = %l.frame, "card layout");
+        }
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         let keep: Vec<u64> = layouts.iter().map(|l| l.stage).collect();
@@ -844,12 +903,11 @@ impl Strip {
         if self.hovered.is_some_and(|h| !keep.contains(&h)) {
             self.hovered = None;
         }
-        let show_numbers = self.snapshot.show_numbers;
         for (layout, card) in layouts.iter().zip(&cards) {
             if card.stage == DROP_STAGE {
                 self.place_drop_target(layout);
             } else {
-                self.place_card(layout, card, show_numbers, force);
+                self.place_card(layout, card, force);
             }
         }
         if drop_card.is_none()
@@ -864,11 +922,13 @@ impl Strip {
     /// Shows the highlighted placeholder card where a dropped window's card will go.
     fn place_drop_target(&mut self, layout: &CardLayout) {
         let Some(slot) = layout.thumbs.first() else { return };
-        let r = Rect::new(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
+        let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let image = self.thumbs.get(&slot.id).cloned();
+        let fade = self.style.cards.fade_ms as f64 / 1000.0;
+        let radius = self.style.cards.corner_radius * self.m().k;
         let layer = self.drop_layer.get_or_insert_with(|| {
             let layer = CALayer::new();
-            layer.setCornerRadius(8.0);
+            layer.setCornerRadius(radius.max(4.0));
             layer.setMasksToBounds(true);
             layer.setBorderWidth(2.5);
             layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.9)));
@@ -877,7 +937,7 @@ impl Strip {
             layer.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
             layer.setOpacity(0.85);
             self.overlay.addSublayer(&layer);
-            fade_in(&layer);
+            fade_in(&layer, fade);
             layer
         });
         layer.setFrame(cg_rect(&r));
@@ -887,40 +947,61 @@ impl Strip {
         }
     }
 
+    /// The hover transform of a card's container (anchored at the eye) and of its flat twin
+    /// (anchored at `flat_anchor`, its position), for `layout`.
+    fn hover_transforms(&self, layout: &CardLayout, hovered: bool, flat_anchor: Point) -> (CATransform3D, CATransform3D) {
+        if !hovered {
+            return (identity(), identity());
+        }
+        let m = self.m();
+        let c = layout.hover_center(m);
+        let s = m.hover_scale;
+        (scale_about(s, c, m.eye), scale_about(s, c, flat_anchor))
+    }
+
+    /// Where a card's flat twin sits: its content was drawn for the card at `built`, and the
+    /// card is now at `layout`.
+    fn flat_position(&self, layout: &CardLayout, built: Point) -> Point {
+        let size = self.geometry.panel.size;
+        Point::new(size.width / 2.0 + layout.frame.x - built.x, size.height / 2.0 + layout.frame.y - built.y)
+    }
+
     /// Creates or updates one card's layers and moves them to the card's slot.
-    fn place_card(&mut self, layout: &CardLayout, card: &CardSnapshot, show_numbers: bool, force_rebuild: bool) {
-        let f = layout.frame;
-        let position = CGPoint::new(f.x, f.y + f.h / 2.0);
-        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f.w, f.h));
+    fn place_card(&mut self, layout: &CardLayout, card: &CardSnapshot, force_rebuild: bool) {
+        let size = self.geometry.panel.size;
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height));
+        let hovered = self.hovered == Some(card.stage);
         let rebuild = match self.cards.get(&card.stage) {
             Some(layers) => {
                 force_rebuild
                     || layers.snapshot != *card
-                    || layers.layout.frame.size() != f.size()
-                    || layers.layout.thumbs != layout.thumbs
-                    || layers.layout.icons != layout.icons
+                    || layers.layout.thumbs.len() != layout.thumbs.len()
+                    || layers.layout.thumbs.iter().zip(&layout.thumbs).any(|(a, b)| a.id != b.id || a.rect.size() != b.rect.size())
+                    || layers.layout.icons.len() != layout.icons.len()
             }
             None => {
-                let hovered = self.hovered == Some(card.stage);
+                let m = self.m().clone();
                 let card_layer = CALayer::new();
-                card_layer.setAnchorPoint(CGPoint::new(0.0, 0.5));
-                card_layer.setPosition(position);
-                card_layer.setTransform(card_transform(self.theta, self.geometry.k, hovered));
-                card_layer.setAllowsEdgeAntialiasing(true);
+                card_layer.setBounds(bounds);
+                card_layer.setAnchorPoint(CGPoint::new(m.eye.x / size.width.max(1.0), m.eye.y / size.height.max(1.0)));
+                card_layer.setPosition(CGPoint::new(m.eye.x, m.eye.y));
+                card_layer.setSublayerTransform(perspective(&m, self.current_dx()));
                 let flat = CALayer::new();
-                flat.setAnchorPoint(CGPoint::new(0.0, 0.5));
-                flat.setPosition(position);
-                flat.setTransform(flat_transform(self.geometry.k, hovered));
-                self.stage.addSublayer(&card_layer);
+                flat.setBounds(bounds);
+                flat.setPosition(CGPoint::new(size.width / 2.0, size.height / 2.0));
+                self.cards_root.addSublayer(&card_layer);
                 self.overlay.addSublayer(&flat);
+                let fade = self.style.cards.fade_ms as f64 / 1000.0;
                 if self.has_snapshot {
-                    fade_in(&card_layer);
-                    fade_in(&flat);
+                    fade_in(&card_layer, fade);
+                    fade_in(&flat, fade);
                 }
                 let layers = CardLayers {
                     card: card_layer,
                     flat,
+                    planes: Vec::new(),
                     images: Vec::new(),
+                    built: Point::new(layout.frame.x, layout.frame.y),
                     snapshot: card.clone(),
                     layout: layout.clone(),
                 };
@@ -928,52 +1009,63 @@ impl Strip {
                 true
             }
         };
-        let images = if rebuild { Some(self.fill_card(card.stage, layout, card, show_numbers)) } else { None };
+        if rebuild {
+            self.fill_card(card.stage, layout, card);
+        }
+        let motion = self.style.motion.clone();
+        let Some(built) = self.cards.get(&card.stage).map(|l| l.built) else { return };
+        let flat_at = self.flat_position(layout, built);
+        let (hover_3d, hover_flat) = self.hover_transforms(layout, hovered, flat_at);
         if let Some(layers) = self.cards.get_mut(&card.stage) {
-            if let Some(images) = images {
-                layers.images = images;
+            // Each plane glides to its new place; the icons follow with the flat twin.
+            for (slot, (_, plane)) in layout.thumbs.iter().rev().zip(&layers.planes) {
+                let to = CGPoint::new(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y + slot.rect.h / 2.0);
+                spring_position(&motion, plane, to);
             }
-            layers.card.setBounds(bounds);
-            layers.flat.setBounds(bounds);
-            spring_position(&layers.card, position);
-            spring_position(&layers.flat, position);
+            spring_position(&motion, &layers.flat, CGPoint::new(flat_at.x, flat_at.y));
+            layers.card.setTransform(hover_3d);
+            layers.flat.setTransform(hover_flat);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
         }
     }
 
-    /// (Re)builds a card's thumbnails, icons, badge and name; returns the image layers.
-    fn fill_card(
-        &mut self,
-        stage: u64,
-        layout: &CardLayout,
-        card: &CardSnapshot,
-        show_numbers: bool,
-    ) -> Vec<(u32, Retained<CALayer>)> {
-        let mut images = Vec::new();
-        let Some(layers) = self.cards.get(&stage) else { return images };
+    /// (Re)builds a card's thumbnail planes, icons, badge and name.
+    fn fill_card(&mut self, stage: u64, layout: &CardLayout, card: &CardSnapshot) {
+        let Some(layers) = self.cards.get(&stage) else { return };
         let (card_layer, flat) = (layers.card.clone(), layers.flat.clone());
+        let m = self.m().clone();
+        let style = self.style.clone();
+        let c = &style.cards;
+        let k = m.k;
         // SAFETY: setting no sublayers removes the old children.
         unsafe {
             card_layer.setSublayers(None);
             flat.setSublayers(None);
         }
-        // Thumbnails back to front.
+        let size = self.geometry.panel.size;
+        flat.setPosition(CGPoint::new(size.width / 2.0, size.height / 2.0));
+        let mut planes = Vec::new();
+        let mut images = Vec::new();
+        // Thumbnails back to front, each a plane turned about its left edge.
         for slot in layout.thumbs.iter().rev() {
-            let holder = CALayer::new();
-            holder.setFrame(cg_rect(&slot.rect));
-            holder.setCornerRadius(THUMB_RADIUS);
-            holder.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 0.92)));
-            holder.setBorderWidth(0.5);
-            holder.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
-            holder.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
-            holder.setShadowOpacity(0.35);
-            holder.setShadowRadius(6.0);
-            holder.setShadowOffset(CGSize::new(0.0, 3.0));
-            holder.setAllowsEdgeAntialiasing(true);
+            let plane = CALayer::new();
+            plane.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(slot.rect.w, slot.rect.h)));
+            plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
+            plane.setPosition(CGPoint::new(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y + slot.rect.h / 2.0));
+            plane.setTransform(turn(&m));
+            plane.setCornerRadius(c.corner_radius * k);
+            plane.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 1.0)));
+            plane.setBorderWidth(c.border_width * k);
+            plane.setBorderColor(Some(&rgba(c.border_color)));
+            plane.setShadowColor(Some(&rgba(c.shadow_color)));
+            plane.setShadowOpacity(c.shadow_opacity as f32);
+            plane.setShadowRadius(c.shadow_radius * k);
+            plane.setShadowOffset(CGSize::new(c.shadow_offset_x * k, c.shadow_offset_y * k));
+            plane.setAllowsEdgeAntialiasing(true);
             let image = CALayer::new();
             image.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(slot.rect.w, slot.rect.h)));
-            image.setCornerRadius(THUMB_RADIUS);
+            image.setCornerRadius(c.corner_radius * k);
             image.setMasksToBounds(true);
             // SAFETY: framework constant.
             image.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
@@ -982,33 +1074,36 @@ impl Strip {
                 // SAFETY: a CGImage is valid layer contents.
                 unsafe { image.setContents(Some(as_object(&**img))) };
             }
-            holder.addSublayer(&image);
-            card_layer.addSublayer(&holder);
+            plane.addSublayer(&image);
+            card_layer.addSublayer(&plane);
+            planes.push((slot.id, plane));
             images.push((slot.id, image));
         }
-        // App icons, flat.
+        // App icons, flat, in panel coordinates.
+        let icon_style = &style.icons;
         for (pid, rect) in &layout.icons {
             let icon = CALayer::new();
-            icon.setFrame(cg_rect(rect));
+            icon.setFrame(cg_rect(&rect.translate(layout.frame.x, layout.frame.y)));
             // SAFETY: framework constant.
             icon.setContentsGravity(unsafe { kCAGravityResizeAspect });
             icon.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
-            icon.setShadowOpacity(0.3);
-            icon.setShadowRadius(3.0);
-            icon.setShadowOffset(CGSize::new(0.0, 1.5));
-            let image = self.icons.entry(*pid).or_insert_with(|| app_icon(*pid));
+            icon.setShadowOpacity(icon_style.shadow_opacity as f32);
+            icon.setShadowRadius(icon_style.shadow_radius * k);
+            icon.setShadowOffset(CGSize::new(0.0, icon_style.shadow_offset_y * k));
+            let side = rect.w;
+            let image = self.icons.entry(*pid).or_insert_with(|| app_icon(*pid, side));
             if let Some(img) = image {
                 // SAFETY: a CGImage is valid layer contents.
                 unsafe { icon.setContents(Some(as_object(&**img))) };
             }
             flat.addSublayer(&icon);
         }
-        let size = layout.frame.size();
-        if show_numbers {
+        let origin = Point::new(layout.frame.x, layout.frame.y);
+        if style.show_numbers {
             let text = card.number.to_string();
             let w = 18.0_f64.max(8.0 + 7.0 * text.len() as f64);
             let badge = CALayer::new();
-            badge.setFrame(CGRect::new(CGPoint::new(-6.0, -7.0), CGSize::new(w, 18.0)));
+            badge.setFrame(CGRect::new(CGPoint::new(origin.x - 6.0, origin.y - 7.0), CGSize::new(w, 18.0)));
             badge.setCornerRadius(9.0);
             badge.setBackgroundColor(Some(&color(0.08, 0.08, 0.1, 0.78)));
             badge.setBorderWidth(0.5);
@@ -1018,20 +1113,26 @@ impl Strip {
             badge.addSublayer(&label);
             flat.addSublayer(&badge);
         }
-        if let Some(name) = card.name.as_deref().filter(|n| !n.is_empty()) {
-            let k = self.geometry.k;
-            let icons_w = (layout.icons.len() as f64 * ICON_STEP - ICON_LEFT_OVERHANG) * k;
-            let x = icons_w.max(0.0) + 2.0;
+        if style.show_names
+            && let Some(name) = card.name.as_deref().filter(|n| !n.is_empty())
+        {
+            let icons_right = layout.icons.last().map_or(origin.x, |(_, r)| origin.x + r.max_x());
+            let x = icons_right + 4.0;
+            let base = layout.thumbs.first().map_or(layout.frame.h, |t| t.rect.max_y());
             let label = text_layer(name, 11.0, self.scale, false);
-            let width = (self.geometry.width - 20.0 * k - x).max(30.0);
-            label.setFrame(CGRect::new(CGPoint::new(x, size.h + ICON_BELOW * k - 16.0), CGSize::new(width, 15.0)));
+            let width = (self.geometry.panel.size.width - 8.0 - x).max(30.0);
+            label.setFrame(CGRect::new(CGPoint::new(x, origin.y + base - 2.0), CGSize::new(width, 15.0)));
             label.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
             label.setShadowOpacity(0.6);
             label.setShadowRadius(2.0);
             label.setShadowOffset(CGSize::new(0.0, 1.0));
             flat.addSublayer(&label);
         }
-        images
+        if let Some(layers) = self.cards.get_mut(&stage) {
+            layers.planes = planes;
+            layers.images = images;
+            layers.built = origin;
+        }
     }
 
     // -- thumbnails -------------------------------------------------------------------------
@@ -1065,14 +1166,15 @@ impl Strip {
     fn update_targets(&mut self) {
         let shown_ids: Vec<u32> = self.layouts.iter().flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
         self.thumbs.retain(|id, _| shown_ids.contains(id));
+        let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
         let targets = if self.shown {
             self.layouts
                 .iter()
                 .flat_map(|l| l.thumbs.iter())
                 .map(|t| Target {
                     id: t.id,
-                    width: (t.rect.w * HOVER_SCALE * CAPTURE_SCALE).round() as u32,
-                    height: (t.rect.h * HOVER_SCALE * CAPTURE_SCALE).round() as u32,
+                    width: (t.rect.w * resolution).round().max(1.0) as u32,
+                    height: (t.rect.h * resolution).round().max(1.0) as u32,
                 })
                 .collect()
         } else {
@@ -1083,16 +1185,16 @@ impl Strip {
 
     // -- pointer ----------------------------------------------------------------------------
 
-    /// The card under `p` (panel coordinates): its box shortened by the tilt, plus the icon
-    /// row below it.
+    /// The card under `p` (panel coordinates): its turned thumbnails and icons.
     fn card_at(&self, p: Point) -> Option<u64> {
-        let g = self.geometry;
-        let (overhang, below) = (ICON_LEFT_OVERHANG * g.k, ICON_BELOW * g.k);
-        self.layouts.iter().filter(|l| l.stage != DROP_STAGE).find_map(|l| {
-            let (w, _) = strip_layout::projected(l.frame.w, g.width / 2.0, g.k);
-            let hit = Rect::new(l.frame.x - overhang, l.frame.y, w + overhang, l.frame.h + below);
-            hit.contains(p).then_some(l.stage)
-        })
+        let m = self.m();
+        self.layouts.iter().filter(|l| l.stage != DROP_STAGE).find(|l| l.bounds(m).contains(p)).map(|l| l.stage)
+    }
+
+    /// The app whose icon is under `p` on `stage`'s card.
+    fn icon_at(&self, stage: u64, p: Point) -> Option<i32> {
+        let l = self.layouts.iter().find(|l| l.stage == stage)?;
+        l.icons.iter().find(|(_, r)| r.translate(l.frame.x, l.frame.y).contains(p)).map(|(pid, _)| *pid)
     }
 
     fn mouse_down(&mut self, p: Point) {
@@ -1108,12 +1210,8 @@ impl Strip {
         let slot = layout.thumbs.first()?;
         let front = card.windows.first()?;
         let g = self.geometry.global;
-        let thumb = Rect::new(
-            g.x + layout.frame.x + slot.rect.x,
-            g.y + layout.frame.y + slot.rect.y,
-            slot.rect.w.max(1.0),
-            slot.rect.h.max(1.0),
-        );
+        let b = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
+        let thumb = Rect::new(g.x + b.x, g.y + b.y, b.w.max(1.0), b.h.max(1.0));
         let press = self.pointer();
         let grab = (((press.x - thumb.x) / thumb.w).clamp(0.0, 1.0), ((press.y - thumb.y) / thumb.h).clamp(0.0, 1.0));
         Some(CardDrag { stage, press, thumb, grab, full: front.frame.size(), front: front.id, ghost: None })
@@ -1124,21 +1222,23 @@ impl Strip {
         let strip_right = self.geometry.global.max_x();
         let primary_height = self.geometry.primary_height;
         let mtm = self.mtm;
+        let style = self.style.drag.clone();
         let Some(drag) = self.card_drag.as_mut() else { return };
         if drag.ghost.is_none() {
-            if (p.x - drag.press.x).hypot(p.y - drag.press.y) <= DRAG_THRESHOLD {
+            if (p.x - drag.press.x).hypot(p.y - drag.press.y) <= style.threshold {
                 return;
             }
             let image = self.thumbs.get(&drag.front).cloned();
-            drag.ghost = Some(Ghost::new(mtm, image.as_deref()));
+            drag.ghost = Some(Ghost::new(mtm, image.as_deref(), style.ghost_opacity as f32));
             tracing::debug!(stage = drag.stage, "card drag started");
             if let Some(layers) = self.cards.get(&drag.stage) {
-                layers.card.setOpacity(LIFTED_OPACITY);
-                layers.flat.setOpacity(LIFTED_OPACITY);
+                layers.card.setOpacity(style.lifted_opacity as f32);
+                layers.flat.setOpacity(style.lifted_opacity as f32);
             }
         }
         if let Some(ghost) = &drag.ghost {
-            ghost.set_frame(strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, p), primary_height);
+            let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, p);
+            ghost.set_frame(frame, primary_height);
         }
     }
 
@@ -1162,7 +1262,13 @@ impl Strip {
             return Some(StripEvent::CardDropped { stage: drag.stage, x: origin.x, y: origin.y });
         }
         let pressed = self.pressed.take()?;
-        (self.shown && self.card_at(p) == Some(pressed)).then_some(StripEvent::CardClicked { stage: pressed, shift })
+        if !self.shown || self.card_at(p) != Some(pressed) {
+            return None;
+        }
+        match self.icon_at(pressed, p) {
+            Some(pid) if !shift => Some(StripEvent::IconClicked { stage: pressed, pid }),
+            _ => Some(StripEvent::CardClicked { stage: pressed, shift }),
+        }
     }
 
     fn hover_at(&mut self, p: Option<Point>) {
@@ -1175,13 +1281,17 @@ impl Strip {
             return;
         }
         let previous = std::mem::replace(&mut self.hovered, card);
+        let seconds = self.style.cards.hover_ms as f64 / 1000.0;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        let k = self.geometry.k;
         for (stage, on) in [(previous, false), (card, true)] {
-            if let Some(layers) = stage.and_then(|s| self.cards.get(&s)) {
-                ease_transform(&layers.card, card_transform(self.theta, k, on));
-                ease_transform(&layers.flat, flat_transform(k, on));
+            let Some(stage) = stage else { continue };
+            let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
+            let Some(built) = self.cards.get(&stage).map(|l| l.built) else { continue };
+            let (t3, tf) = self.hover_transforms(&layout, on, self.flat_position(&layout, built));
+            if let Some(layers) = self.cards.get(&stage) {
+                ease_transform(&layers.card, t3, seconds);
+                ease_transform(&layers.flat, tf, seconds);
             }
         }
         CATransaction::commit();
@@ -1233,11 +1343,12 @@ impl Strip {
             self.update_targets();
         }
         self.set_polling(decision.poll || window_drag || card_dragging);
-        let tab = self.covered() && !self.shown && !window_drag && !card_dragging;
+        let tab = self.style.reveal.edge_tab && self.covered() && !self.shown && !window_drag && !card_dragging;
         self.tab.show(tab, self.mtm);
     }
 
-    /// Slides the strip in or out and lets clicks through while it is out.
+    /// Slides the strip in or out (cards in 3D, icons flat) and lets clicks through while it
+    /// is out.
     fn slide(&mut self, shown: bool, animated: bool) {
         self.shown = shown;
         self.panel.setIgnoresMouseEvents(!shown);
@@ -1246,15 +1357,24 @@ impl Strip {
             self.pressed = None;
             self.card_drag = None;
         }
+        let dx = self.current_dx();
         let size = self.geometry.panel.size;
-        let x = if shown { size.width / 2.0 } else { size.width / 2.0 - (size.width + 30.0) };
-        let to = CGPoint::new(x, size.height / 2.0);
+        let to = CGPoint::new(size.width / 2.0 + dx, size.height / 2.0);
+        let motion = self.style.motion.clone();
+        let m = self.m().clone();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        for layers in self.cards.values() {
+            if animated {
+                spring_sublayer_transform(&motion, &layers.card, perspective(&m, dx));
+            } else {
+                layers.card.setSublayerTransform(perspective(&m, dx));
+            }
+        }
         if animated {
-            spring_position(&self.content, to);
+            spring_position(&motion, &self.overlay, to);
         } else {
-            self.content.setPosition(to);
+            self.overlay.setPosition(to);
         }
         CATransaction::commit();
     }
@@ -1265,10 +1385,9 @@ impl Strip {
                 let tick = RcBlock::new(|_t: NonNull<NSTimer>| {
                     with_strip(Strip::update_visibility);
                 });
+                let seconds = (self.style.reveal.poll_ms.max(10) as f64) / 1000.0;
                 // SAFETY: the block runs on the main run loop only.
-                let timer = unsafe {
-                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(POLL_INTERVAL.as_secs_f64(), true, &tick)
-                };
+                let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds, true, &tick) };
                 self.poll_timer = Some(timer);
             }
             (false, true) => {

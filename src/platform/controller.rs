@@ -31,19 +31,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
 use super::ax::AxElement;
 use super::ctl::Command;
-use super::input::{self, ACTIVATION_WINDOW, InputEvent, InputKind, LAUNCH_WINDOW, Modifiers, Triggers};
+use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
 use super::{desktop, paths, windows};
-use crate::config::{ConfigStore, HotkeyCommand, HotkeyConfig};
+use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Display, DisplayId, Home, Model, Observation, StageId, Target, WindowId, WindowMeta, WindowRole,
@@ -54,7 +54,8 @@ use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripEvent, StripSnapshot};
 
-/// How long focus and activation events for windows and apps we just touched are ignored.
+/// How long focus and activation events for windows and apps we just touched are ignored
+/// by default (`[windows] focus_echo_ms`).
 pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
 
 /// Quiet time before `state.json` is written after a change.
@@ -105,13 +106,25 @@ fn notify_ui(update: UiUpdate) {
 }
 
 /// Recently touched windows and apps, whose focus and activation events are our echoes.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Echoes {
     windows: HashMap<u32, Instant>,
     apps: HashMap<i32, Instant>,
+    window: Duration,
+}
+
+impl Default for Echoes {
+    fn default() -> Self {
+        Self { windows: HashMap::new(), apps: HashMap::new(), window: ECHO_WINDOW }
+    }
 }
 
 impl Echoes {
+    /// Sets how long an echo lasts.
+    pub fn set_window(&mut self, window: Duration) {
+        self.window = window;
+    }
+
     /// We just moved, raised or focused this window.
     pub fn touch_window(&mut self, id: u32, now: Instant) {
         self.windows.insert(id, now);
@@ -124,18 +137,18 @@ impl Echoes {
 
     /// True when a focus event for `id` is probably our own.
     pub fn is_window_echo(&self, id: u32, now: Instant) -> bool {
-        self.windows.get(&id).is_some_and(|t| now.duration_since(*t) < ECHO_WINDOW)
+        self.windows.get(&id).is_some_and(|t| now.duration_since(*t) < self.window)
     }
 
     /// True when an activation of `pid` is probably our own.
     pub fn is_app_echo(&self, pid: i32, now: Instant) -> bool {
-        self.apps.get(&pid).is_some_and(|t| now.duration_since(*t) < ECHO_WINDOW)
+        self.apps.get(&pid).is_some_and(|t| now.duration_since(*t) < self.window)
     }
 
     /// Forgets old entries.
     pub fn prune(&mut self, now: Instant) {
-        self.windows.retain(|_, t| now.duration_since(*t) < ECHO_WINDOW);
-        self.apps.retain(|_, t| now.duration_since(*t) < ECHO_WINDOW);
+        self.windows.retain(|_, t| now.duration_since(*t) < self.window);
+        self.apps.retain(|_, t| now.duration_since(*t) < self.window);
     }
 }
 
@@ -173,6 +186,8 @@ struct WindowDrag {
 /// The engine plus everything around it on the WM thread.
 pub struct Controller {
     model: Option<Model>,
+    /// The strip's look, shared with every snapshot.
+    style: Arc<StripStyle>,
     store: ConfigStore,
     config_error: Option<String>,
     config_mtime: Option<SystemTime>,
@@ -191,11 +206,20 @@ pub struct Controller {
     announce: bool,
 }
 
-/// How placed windows are kept clear of the strip on a display with `visible` frame: only
-/// while the strip shows (the user's toggle on, Apple's "Show recent apps" on).
-pub fn fit_options(visible: Rect, strip_visible: bool, settings: &NativeSettings, shrink: bool) -> FitOptions {
-    let on = strip_visible && !settings.hide_recent_apps;
-    FitOptions { inset: if on { stage_inset(visible.size()) } else { 0.0 }, shrink }
+/// How placed windows are kept clear of the strip on a display with `visible` frame: never
+/// by default (Apple leaves every window's frame alone); with `[windows] fit` only while the
+/// strip shows (the user's toggle on, Apple's "Show recent apps" on).
+pub fn fit_options(visible: Rect, strip_visible: bool, settings: &NativeSettings, config: &Config) -> FitOptions {
+    let on = config.windows.fit != FitMode::Off && strip_visible && !settings.hide_recent_apps;
+    FitOptions {
+        inset: if on { stage_inset(visible.size(), &config.style, config.windows.fit_margin) } else { 0.0 },
+        shrink: config.windows.fit == FitMode::Narrow,
+    }
+}
+
+/// The strip's card count on a display with `visible` frame.
+pub fn strip_capacity(visible: Rect, config: &Config) -> usize {
+    capacity_for(visible.size(), &config.strip.capacity, &config.style)
 }
 
 impl Controller {
@@ -204,9 +228,17 @@ impl Controller {
         let path = paths::config_file();
         let (store, result) = ConfigStore::open(path.clone());
         let config_error = match result {
-            Ok(warnings) => {
+            Ok((warnings, action)) => {
                 for w in warnings {
                     tracing::warn!("config: {w}");
+                }
+                match action {
+                    FileAction::Created => tracing::info!("config: wrote the commented default file {}", path.display()),
+                    FileAction::Upgraded => tracing::info!(
+                        "config: {} was an unedited default file of an earlier version; replaced it with today's commented one",
+                        path.display()
+                    ),
+                    FileAction::Read => {}
                 }
                 tracing::info!("config loaded from {}", path.display());
                 None
@@ -216,7 +248,11 @@ impl Controller {
                 Some(e.to_string())
             }
         };
+        let style = Arc::new(store.config().style.clone());
+        let mut echoes = Echoes::default();
+        echoes.set_window(Duration::from_millis(store.config().windows.focus_echo_ms));
         let this = Self {
+            style,
             model: None,
             config_mtime: mtime(&path),
             store,
@@ -225,7 +261,7 @@ impl Controller {
             settings: NativeSettings::default(),
             displays: Vec::new(),
             strip_visible: true,
-            echoes: Echoes::default(),
+            echoes,
             dirty: None,
             strip_dirty: false,
             triggers: Triggers::default(),
@@ -327,10 +363,10 @@ impl Controller {
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
     /// config.
     fn sync_fit(&mut self) {
-        let shrink = self.store.config().stages.fit_windows;
         let (strip_visible, settings) = (self.strip_visible, self.settings);
+        let config = self.store.config();
         if let Some(m) = self.model.as_mut() {
-            let fit = fit_options(m.main_display().visible, strip_visible, &settings, shrink);
+            let fit = fit_options(m.main_display().visible, strip_visible, &settings, config);
             m.set_fit(fit);
         }
     }
@@ -445,7 +481,7 @@ impl Controller {
             active_stage: active.map(|s| s.0),
             hide_recent_apps: m.strip_auto_hides(),
             user_visible: self.strip_visible,
-            show_numbers: self.store.config().strip.show_numbers,
+            style: self.style.clone(),
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
             announce: std::mem::take(&mut self.announce),
@@ -563,6 +599,7 @@ impl Controller {
                     self.execute(ob, actions);
                 }
             }
+            WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::AppActivated(pid) => {
                 if self.echoes.is_app_echo(pid, now) {
                     tracing::debug!(pid, "activation echo of our own action ignored");
@@ -579,6 +616,36 @@ impl Controller {
                     }
                     self.execute(ob, actions);
                 }
+            }
+        }
+    }
+
+    /// How long before an activation a Shift press still counts (`[sugar]`).
+    fn activation_window(&self) -> Duration {
+        Duration::from_millis(self.store.config().sugar.activation_window_ms)
+    }
+
+    /// ⌘M on a managed window: with `[windows] minimize_to_strip` (Apple's behavior) the
+    /// window goes to the strip as a card of its own instead of the Dock: it is parked, then
+    /// un-minimized there (macOS may flash its restore animation toward the corner).
+    fn on_minimized(&mut self, ob: &mut Observer, id: u32) {
+        if !self.store.config().windows.minimize_to_strip {
+            return;
+        }
+        let obs = self.observe(ob);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.minimize_to_strip(WindowId(id), &obs);
+        if actions.is_empty() {
+            return;
+        }
+        tracing::info!(id, "window minimized: it goes to the strip instead of the Dock");
+        self.execute(ob, actions);
+        if let Some(w) = ob.window(id) {
+            let now = Instant::now();
+            self.echoes.touch_window(id, now);
+            self.echoes.touch_app(w.pid, now);
+            if let Err(e) = w.element.set_minimized(false) {
+                tracing::warn!(id, "cannot restore the minimized window: {e}");
             }
         }
     }
@@ -610,7 +677,7 @@ impl Controller {
     fn bring_here_if_shift(&mut self, ob: &Observer, pid: i32, obs: &Observation, now: Instant) -> bool {
         if !self.store.config().sugar.shift_brings_here
             || self.app_present(pid)
-            || !self.triggers.shift_here(now, ACTIVATION_WINDOW, input::live_modifiers())
+            || !self.triggers.shift_here(now, self.activation_window(), input::live_modifiers())
         {
             return false;
         }
@@ -706,10 +773,10 @@ impl Controller {
             return;
         }
         let displays = if self.displays.is_empty() { fallback_displays() } else { self.displays.clone() };
-        let capacity = capacity_for(displays[0].visible.size());
         let config = self.store.config().clone();
+        let capacity = strip_capacity(displays[0].visible, &config);
         let mut options = config.model_options(self.settings, capacity);
-        options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, config.stages.fit_windows);
+        options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, &config);
         let mut model = Model::new(displays, options);
         let z = Self::z_map();
         let rules = &config.rules;
@@ -740,7 +807,7 @@ impl Controller {
             tracing::info!(stages = model.stages().len(), "first start: one stage per app, as Apple's Stage Manager does");
         }
         self.model = Some(model);
-        self.announce = true;
+        self.announce = config.style.reveal.launch_reveal;
         self.execute(ob, actions);
         for id in &assignment.unmatched {
             let Some(meta) = live.iter().find(|m| m.id == *id) else { continue };
@@ -778,7 +845,8 @@ impl Controller {
                 .model
                 .as_ref()
                 .is_some_and(|m| !m.windows().any(|w| w.meta.pid == meta.pid && w.meta.role == WindowRole::Standard));
-            let within = if new_app { LAUNCH_WINDOW } else { ACTIVATION_WINDOW };
+            let sugar = &self.store.config().sugar;
+            let within = Duration::from_millis(if new_app { sugar.launch_window_ms } else { sugar.activation_window_ms });
             if self.triggers.shift_here(Instant::now(), within, input::live_modifiers()) {
                 if new_app {
                     self.triggers.consume();
@@ -808,7 +876,7 @@ impl Controller {
         self.displays = displays.clone();
         if let Some(m) = self.model.as_mut() {
             let actions = m.set_displays(displays);
-            m.set_strip_capacity(capacity_for(main.visible.size()));
+            m.set_strip_capacity(strip_capacity(main.visible, self.store.config()));
             self.sync_fit();
             self.execute(ob, actions);
         }
@@ -887,6 +955,10 @@ impl Controller {
                 tracing::info!(stage, x, y, "card dropped in the main area: its windows join the current stage");
                 m.merge_into_active_at(StageId(stage), Point::new(x, y), &obs)
             }
+            StripEvent::IconClicked { stage, pid } => {
+                tracing::info!(stage, pid, "card icon clicked: the stage, with every window of the app");
+                m.show_app_everywhere(StageId(stage), pid, &obs)
+            }
         };
         self.execute(ob, actions);
     }
@@ -961,9 +1033,13 @@ impl Controller {
                 tracing::info!("config reloaded");
                 self.config_error = None;
                 let config = self.store.config().clone();
+                if *self.style != config.style {
+                    self.style = Arc::new(config.style.clone());
+                }
+                self.echoes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
                 self.sync_fit();
                 if let Some(m) = self.model.as_mut() {
-                    let capacity = m.options().strip.capacity;
+                    let capacity = strip_capacity(m.main_display().visible, &config);
                     m.set_strip_options(config.strip_options(capacity));
                     let actions = m.set_named_stages(config.stages.names.clone());
                     self.execute(ob, actions);
@@ -1102,8 +1178,9 @@ impl Controller {
             "strip": m.strip().iter().map(|c| c.number).collect::<Vec<_>>(),
             "strip_capacity": m.options().strip.capacity,
             "stage_inset": m.options().fit.inset,
-            "strip_width": strip_width(m.main_display().visible.size()),
+            "strip_width": strip_width(m.main_display().visible.size(), &self.style),
             "fit_windows": m.options().fit.shrink,
+            "fit": format!("{:?}", self.store.config().windows.fit).to_lowercase(),
             "strip_visible": self.strip_visible,
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },

@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn every_default_binding_maps() {
-        let b = HotkeyConfig::default().bindings();
+        let b = HotkeyConfig::default().all_bindings();
         assert_eq!(b.len(), 21);
         assert!(b.iter().all(|(h, _)| key_code(h.key).is_some()));
         let mut codes: Vec<(u32, u32)> = b.iter().map(|(h, _)| (key_code(h.key).unwrap_or(0), carbon_mods(h.mods))).collect();

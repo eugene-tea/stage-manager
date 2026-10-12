@@ -21,7 +21,7 @@ use super::park::{clamp_to_visible, is_parked, park_frame};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
-pub use strip::{CAPACITY_RANGE, CARD_PITCH, STRIP_MARGIN, StripCard, StripOptions, StripOrder, capacity_for_height};
+pub use strip::{StripCard, StripOptions, StripOrder};
 
 /// A process ID.
 pub type Pid = i32;

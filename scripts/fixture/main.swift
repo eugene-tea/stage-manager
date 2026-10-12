@@ -12,6 +12,7 @@
 //                                      down); a width <= 0 is the visible width plus it
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
+// SIGUSR2 minimizes the first visible standard window (as ⌘M would).
 import AppKit
 
 struct Options {
@@ -155,6 +156,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         makeWindow(opened, area: area).orderFront(nil)
     }
 
+    /// SIGUSR2: minimize the first visible standard window.
+    func minimizeOne() {
+        let wins = NSApp.windows.filter { $0.isVisible && !$0.isMiniaturized && !($0 is NSPanel) }
+        wins.sorted { $0.title < $1.title }.first?.miniaturize(nil)
+    }
+
     func show(_ window: NSWindow) {
         if options.background { window.orderBack(nil) } else { window.makeKeyAndOrderFront(nil) }
     }
@@ -177,4 +184,8 @@ signal(SIGUSR1, SIG_IGN)
 let another = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
 another.setEventHandler { delegate.openAnother() }
 another.resume()
+signal(SIGUSR2, SIG_IGN)
+let minimize = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+minimize.setEventHandler { delegate.minimizeOne() }
+minimize.resume()
 app.run()

@@ -11,18 +11,36 @@
 
 use std::time::{Duration, Instant};
 
+use crate::config::RevealStyle;
 use crate::engine::geometry::{Point, Rect};
 
-/// The pointer must rest this long at the left edge to reveal the strip.
-pub const EDGE_DWELL: Duration = Duration::from_millis(250);
-/// A revealed strip hides this long after the pointer leaves it.
-pub const LEAVE_DELAY: Duration = Duration::from_millis(500);
-/// The left edge zone, in points from the strip's left edge.
-pub const EDGE_ZONE: f64 = 2.0;
-/// The pointer poll period while polling is needed.
-pub const POLL_INTERVAL: Duration = Duration::from_millis(60);
-/// How long the launch announce shows a covered strip.
-pub const ANNOUNCE: Duration = Duration::from_secs(3);
+/// Timings and the edge zone (`[reveal]` in config).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Timing {
+    /// The pointer must rest this long at the left edge to reveal the strip.
+    pub edge_dwell: Duration,
+    /// A revealed strip hides this long after the pointer leaves it.
+    pub leave_delay: Duration,
+    /// The left edge zone, in points from the strip's left edge.
+    pub edge_zone: f64,
+}
+
+impl Timing {
+    /// From the `[reveal]` keys.
+    pub fn from_style(r: &RevealStyle) -> Self {
+        Self {
+            edge_dwell: Duration::from_millis(r.delay_ms),
+            leave_delay: Duration::from_millis(r.hide_delay_ms),
+            edge_zone: r.edge_width,
+        }
+    }
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self::from_style(&crate::config::StripStyle::default().reveal)
+    }
+}
 
 /// What drives visibility right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +91,8 @@ pub struct Visibility {
     hold_until: Option<Instant>,
     /// The edge tab's area (global), when it shows: resting on it counts as the edge.
     tab: Option<Rect>,
+    /// Delays and the edge zone.
+    timing: Timing,
 }
 
 impl Visibility {
@@ -81,8 +101,13 @@ impl Visibility {
         self.tab = tab;
     }
 
+    /// Sets the delays and the edge zone (config reload).
+    pub fn set_timing(&mut self, timing: Timing) {
+        self.timing = timing;
+    }
+
     /// Reveals the strip now (a click on the edge tab); it hides again once the pointer has
-    /// been away from it for [`LEAVE_DELAY`].
+    /// been away from it for the leave delay.
     pub fn reveal_now(&mut self) {
         self.revealed = true;
         self.dwell_since = None;
@@ -101,7 +126,7 @@ impl Visibility {
     pub fn step(&mut self, mode: Mode, pointer: Option<Point>, strip: &Rect, now: Instant) -> Decision {
         match mode {
             Mode::Off | Mode::Shown => {
-                *self = Self { tab: self.tab, ..Self::default() };
+                *self = Self { tab: self.tab, timing: self.timing, ..Self::default() };
                 Decision { shown: mode == Mode::Shown, poll: false }
             }
             Mode::EdgeOnly => {
@@ -112,20 +137,20 @@ impl Visibility {
                     self.hold_until = None;
                 }
                 if self.revealed {
-                    let inside = pointer.is_some_and(|p| strip.contains(p) || (p.x <= strip.x + EDGE_ZONE && in_rows(&p)));
+                    let inside = pointer.is_some_and(|p| strip.contains(p) || (p.x <= strip.x + self.timing.edge_zone && in_rows(&p)));
                     if inside || held {
                         self.left_since = None;
                     } else {
                         let since = *self.left_since.get_or_insert(now);
-                        if now.duration_since(since) >= LEAVE_DELAY {
-                            *self = Self::default();
+                        if now.duration_since(since) >= self.timing.leave_delay {
+                            *self = Self { tab: self.tab, timing: self.timing, ..Self::default() };
                         }
                     }
                 } else {
-                    let at_edge = pointer.is_some_and(|p| (p.x <= strip.x + EDGE_ZONE && in_rows(&p)) || on_tab(&p));
+                    let at_edge = pointer.is_some_and(|p| (p.x <= strip.x + self.timing.edge_zone && in_rows(&p)) || on_tab(&p));
                     if at_edge {
                         let since = *self.dwell_since.get_or_insert(now);
-                        if now.duration_since(since) >= EDGE_DWELL {
+                        if now.duration_since(since) >= self.timing.edge_dwell {
                             self.revealed = true;
                             self.dwell_since = None;
                             self.left_since = None;
@@ -232,7 +257,7 @@ mod tests {
         let mut v = Visibility::default();
         let t = Instant::now();
         let away = Some(Point::new(900.0, 500.0));
-        v.announce(t, ANNOUNCE);
+        v.announce(t, Duration::from_secs(3));
         assert!(v.step(Mode::EdgeOnly, away, &STRIP, t).shown);
         assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2900)).shown, "held while announced");
         assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 3100)).shown, "then the leave delay");

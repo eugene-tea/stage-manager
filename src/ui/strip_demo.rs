@@ -1,25 +1,35 @@
 //! `stage-manager strip-demo`: the strip fed by a made-up snapshot, as a test harness.
 //!
 //! Every second it reads the live window list (no Accessibility, never moves a window),
-//! groups windows by app into fake stages (chunks of 1, 2, 3 windows; the first two apps
-//! share one card), treats the stage holding the frontmost window as active (its frames
-//! drive auto-hide), and presents the rest as cards. Clicks are logged.
+//! groups windows into fake stages, treats the stage holding the frontmost window as active
+//! (its frames drive auto-hide), and presents the rest as cards. Clicks are logged.
 //!
-//! Environment: `STAGE_MANAGER_ONLY` (comma-separated bundle ids; their offscreen windows
-//! count too, so a window moved offscreen still shows), `STAGE_MANAGER_DEMO_NUMBERS=1`
-//! (number badges), `STAGE_MANAGER_DEMO_AUTOHIDE=0|1` (overrides Apple's `AutoHide`),
-//! `STAGE_MANAGER_THUMBNAIL_MS` (capture interval, default 1500).
+//! Grouping (`STAGE_MANAGER_DEMO_LAYOUT`): `native` (default) is Apple's "All at Once", one
+//! stage per app, so the strip can be compared like for like with Apple's; `chunks` splits
+//! each app's windows into stages of 1, 2, 3 windows and lets the first two apps share a
+//! card, to exercise stacks.
+//!
+//! The look comes from the built-in defaults, or from `$STAGE_MANAGER_HOME/config.toml` when
+//! `STAGE_MANAGER_HOME` is set (re-read when it changes; never written). Environment also:
+//! `STAGE_MANAGER_ONLY` (comma-separated bundle ids; their offscreen windows count too, so a
+//! window moved offscreen still shows), `STAGE_MANAGER_DEMO_NUMBERS=1` (number badges),
+//! `STAGE_MANAGER_DEMO_AUTOHIDE=0|1` (overrides Apple's `AutoHide`),
+//! `STAGE_MANAGER_THUMBNAIL_MS` (capture interval).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_foundation::{MainThreadMarker, NSTimer};
 
+use crate::config::{Config, StripStyle};
 use crate::engine::geometry::Rect;
 use crate::platform::permissions::PermissionState;
 use crate::platform::{logging, native_settings, windows};
@@ -27,7 +37,7 @@ use crate::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
 use crate::ui::strip;
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripSnapshot};
 
-/// Most cards the demo shows (Apple shows six at 1440 pt).
+/// Most cards the demo shows when the screen is unknown.
 const MAX_CARDS: usize = 6;
 /// Window list refresh period.
 const REFRESH_SECONDS: f64 = 1.0;
@@ -48,11 +58,14 @@ pub struct DemoWindow {
 pub struct DemoFlags {
     pub user_visible: bool,
     pub hide_recent_apps: bool,
-    pub show_numbers: bool,
+    /// Apple's grouping (one stage per app) instead of chunks.
+    pub native: bool,
+    /// Most cards.
+    pub capacity: usize,
 }
 
 /// Builds the fake stages from `windows` (front to back).
-pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot {
+pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags, style: Arc<StripStyle>) -> StripSnapshot {
     // Group by app, keeping front-to-back order of first appearance.
     let mut order: Vec<i32> = Vec::new();
     let mut by_pid: HashMap<i32, Vec<DemoWindow>> = HashMap::new();
@@ -62,9 +75,12 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
         }
         by_pid.entry(w.pid).or_default().push(*w);
     }
-    // Chunk each app's windows in sizes 1, 2, 3, 1, 2, 3, …
+    // Chunk each app's windows in sizes 1, 2, 3, 1, 2, 3, … (or one stage per app).
     let mut stages: Vec<Vec<DemoWindow>> = Vec::new();
-    for pid in &order {
+    for pid in order.iter().filter(|_| flags.native) {
+        stages.push(by_pid[pid].clone());
+    }
+    for pid in order.iter().filter(|_| !flags.native) {
         let list = &by_pid[pid];
         let mut i = 0;
         let mut size = 1;
@@ -77,7 +93,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
     }
     // The first two apps share a card: the second app's first stage joins the first
     // app's last stage when they fit in three windows together.
-    if order.len() >= 2 {
+    if order.len() >= 2 && !flags.native {
         let last_of_first = stages.iter().rposition(|s| s[0].pid == order[0]);
         let first_of_second = stages.iter().position(|s| s[0].pid == order[1]);
         if let (Some(a), Some(b)) = (last_of_first, first_of_second)
@@ -96,7 +112,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
         .iter()
         .enumerate()
         .filter(|(i, _)| Some(*i) != active)
-        .take(MAX_CARDS)
+        .take(flags.capacity.max(1))
         .map(|(i, s)| {
             let mut apps = Vec::new();
             for w in s {
@@ -107,7 +123,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
             CardSnapshot {
                 stage: i as u64 + 1,
                 number: i + 1,
-                name: (i % 3 == 2).then(|| format!("Stage {}", i + 1)),
+                name: (!flags.native && i % 3 == 2).then(|| format!("Stage {}", i + 1)),
                 windows: s.iter().map(|w| CardWindow { id: w.id, pid: w.pid, frame: w.frame }).collect(),
                 apps,
             }
@@ -118,7 +134,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
         active_stage: active.map(|i| i as u64 + 1),
         hide_recent_apps: flags.hide_recent_apps,
         user_visible: flags.user_visible,
-        show_numbers: flags.show_numbers,
+        style,
         active_frames,
         window_drag: None,
         announce: false,
@@ -131,6 +147,12 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
 struct Demo {
     menu: StatusMenu,
     flags: DemoFlags,
+    /// `$STAGE_MANAGER_HOME/config.toml`, read when it changes.
+    config_path: Option<PathBuf>,
+    config_mtime: Option<SystemTime>,
+    config: Config,
+    style: Arc<StripStyle>,
+    numbers: Option<bool>,
     only: Option<Vec<String>>,
     bundles: HashMap<i32, Option<String>>,
     last: Option<StripSnapshot>,
@@ -188,8 +210,71 @@ impl Demo {
         out
     }
 
+    /// Re-reads the config when its file changed (never writes it).
+    fn reload_config(&mut self) {
+        let Some(path) = &self.config_path else { return };
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if mtime == self.config_mtime {
+            return;
+        }
+        self.config_mtime = mtime;
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        match Config::parse(&text) {
+            Ok(p) => {
+                for w in p.warnings {
+                    tracing::warn!("config: {w}");
+                }
+                tracing::info!("demo: config read from {}", path.display());
+                self.config = p.config;
+            }
+            Err(e) => tracing::error!("demo: {e}; keeping the last good config"),
+        }
+        let mut style = self.config.style.clone();
+        if let Some(n) = self.numbers {
+            style.show_numbers = n;
+        }
+        if *self.style != style {
+            self.style = Arc::new(style);
+        }
+        strip::set_thumbnail_interval(self.config.strip.thumbnail_interval_ms);
+    }
+
+    /// With `debug-render`: `STAGE_MANAGER_DEMO_FAKE="<bundle id>:<w>x<h>;..."` stands in for
+    /// the live window list (one window per entry, front to back; the first is active).
+    #[cfg(feature = "debug-render")]
+    fn fake_windows(&mut self) -> Option<Vec<DemoWindow>> {
+        let spec = std::env::var("STAGE_MANAGER_DEMO_FAKE").ok()?;
+        let mut out = Vec::new();
+        for (i, item) in spec.split(';').filter(|s| !s.is_empty()).enumerate() {
+            let (bundle, size) = item.rsplit_once(':')?;
+            let (w, h) = size.split_once('x')?;
+            let pid = objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                &objc2_foundation::NSString::from_str(bundle),
+            )
+            .firstObject()
+            .map_or(-(i as i32) - 1, |a| a.processIdentifier());
+            let frame = Rect::new(300.0, 100.0, w.parse().ok()?, h.parse().ok()?);
+            out.push(DemoWindow { id: 900_000 + i as u32, pid, frame, onscreen: true });
+        }
+        Some(out)
+    }
+
+    fn windows_now(&mut self) -> Vec<DemoWindow> {
+        #[cfg(feature = "debug-render")]
+        if let Some(fake) = self.fake_windows() {
+            return fake;
+        }
+        self.live_windows()
+    }
+
     fn refresh(&mut self) {
-        let snapshot = demo_snapshot(&self.live_windows(), self.flags);
+        self.reload_config();
+        if let Some(mtm) = MainThreadMarker::new()
+            && let Some(d) = crate::platform::desktop::main_display(mtm)
+        {
+            self.flags.capacity = crate::engine::stage_area::capacity_for(d.visible.size(), &self.config.strip.capacity, &self.style);
+        }
+        let snapshot = demo_snapshot(&self.windows_now(), self.flags, self.style.clone());
         if self.last.as_ref() != Some(&snapshot) {
             tracing::debug!(
                 cards = snapshot.cards.len(),
@@ -243,7 +328,11 @@ pub fn run() -> ExitCode {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    let interval = std::env::var("STAGE_MANAGER_THUMBNAIL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+    let config_path = crate::platform::paths::custom_home().map(|h| h.join("config.toml"));
+    let interval = std::env::var("STAGE_MANAGER_THUMBNAIL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(Config::default().strip.thumbnail_interval_ms);
     strip::install(mtm, interval);
     strip_model::set_event_sink(|event| tracing::info!(?event, "demo: strip event"));
 
@@ -256,12 +345,31 @@ pub fn run() -> ExitCode {
     let flags = DemoFlags {
         user_visible: true,
         hide_recent_apps,
-        show_numbers: env_flag("STAGE_MANAGER_DEMO_NUMBERS").unwrap_or(false),
+        native: std::env::var("STAGE_MANAGER_DEMO_LAYOUT").map_or(true, |v| v != "chunks"),
+        capacity: MAX_CARDS,
     };
+    let numbers = env_flag("STAGE_MANAGER_DEMO_NUMBERS");
     tracing::info!(?only, ?flags, interval, "demo settings");
 
     let menu = StatusMenu::new(mtm);
-    let demo = Demo { menu, flags, only, bundles: HashMap::new(), last: None, _timer: None };
+    let config = Config::default();
+    let mut style = config.style.clone();
+    if let Some(n) = numbers {
+        style.show_numbers = n;
+    }
+    let demo = Demo {
+        menu,
+        flags,
+        config_path,
+        config_mtime: None,
+        config,
+        style: Arc::new(style),
+        numbers,
+        only,
+        bundles: HashMap::new(),
+        last: None,
+        _timer: None,
+    };
     demo.menu.update(&demo.menu_state());
     DEMO.with(|d| *d.borrow_mut() = Some(demo));
     status_menu::set_action_handler(|action| with_demo(|d| d.on_menu(action)));
@@ -273,6 +381,30 @@ pub fn run() -> ExitCode {
         d._timer = Some(timer);
         d.refresh();
     });
+    #[cfg(feature = "debug-render")]
+    if let Some((w, h, top)) = std::env::var("STAGE_MANAGER_DEMO_SCREEN").ok().and_then(|v| {
+        // "<width>x<height>+<menu bar height>", for example "1800x1169+39".
+        let (size, top) = v.split_once('+')?;
+        let (w, h) = size.split_once('x')?;
+        Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?, top.parse::<f64>().ok()?))
+    }) {
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        strip::set_screen_override(
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h - top)),
+        );
+        with_demo(Demo::refresh);
+    }
+    #[cfg(feature = "debug-render")]
+    if let Some(path) = std::env::var_os("STAGE_MANAGER_DEMO_RENDER") {
+        let render = RcBlock::new(move |_t: NonNull<NSTimer>| {
+            let r = strip::debug_render(std::path::Path::new(&path));
+            tracing::info!(?r, "demo: rendered the strip offscreen");
+            std::process::exit(if r.is_ok() { 0 } else { 1 });
+        });
+        // SAFETY: the block runs on the main run loop only.
+        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.5, false, &render) };
+    }
 
     app.run();
     ExitCode::SUCCESS
@@ -286,7 +418,11 @@ mod tests {
         DemoWindow { id, pid, frame: Rect::new(300.0 + id as f64, 100.0, 500.0, 400.0), onscreen }
     }
 
-    const FLAGS: DemoFlags = DemoFlags { user_visible: true, hide_recent_apps: false, show_numbers: true };
+    const FLAGS: DemoFlags = DemoFlags { user_visible: true, hide_recent_apps: false, native: false, capacity: 6 };
+
+    fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot {
+        super::demo_snapshot(windows, flags, Arc::new(StripStyle::default()))
+    }
 
     #[test]
     fn one_app_chunks_into_stages_and_the_front_one_is_active() {
@@ -297,7 +433,7 @@ mod tests {
         assert_eq!(s.active_frames.len(), 1);
         let ids: Vec<Vec<u32>> = s.cards.iter().map(|c| c.windows.iter().map(|w| w.id).collect()).collect();
         assert_eq!(ids, vec![vec![2, 3], vec![4, 5, 6]]);
-        assert!(s.show_numbers && s.user_visible);
+        assert!(s.user_visible);
     }
 
     #[test]
@@ -316,5 +452,14 @@ mod tests {
         assert_eq!(s.active_stage, Some(2));
         assert!(s.cards.iter().any(|c| c.windows.iter().any(|w| w.id == 1)));
         assert!(demo_snapshot(&[], FLAGS).cards.is_empty());
+    }
+
+    #[test]
+    fn the_native_layout_is_one_card_per_app() {
+        let list = vec![w(1, 7, true), w(2, 7, true), w(10, 8, true), w(11, 8, true), w(20, 9, true)];
+        let s = demo_snapshot(&list, DemoFlags { native: true, ..FLAGS });
+        let ids: Vec<Vec<u32>> = s.cards.iter().map(|c| c.windows.iter().map(|w| w.id).collect()).collect();
+        assert_eq!(ids, vec![vec![10, 11], vec![20]]);
+        assert!(s.cards.iter().all(|c| c.name.is_none()));
     }
 }

@@ -501,6 +501,41 @@ impl Model {
     /// and raised, and the first is focused. Stages left empty go away. A no-op (no actions)
     /// when the app has no window elsewhere.
     pub fn bring_app_here(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
+        let one = self.options.settings.app_windows == AppWindows::OneAtATime;
+        self.gather_app(pid, obs, one)
+    }
+
+    /// A click on a card's app icon: switch to the card's stage, then bring every window of
+    /// app `pid` from the other stages there too (Apple: the icon shows all of the app's
+    /// windows, including those in other sets). With nothing elsewhere it is a plain switch.
+    pub fn show_app_everywhere(&mut self, stage: StageId, pid: Pid, obs: &Observation) -> Vec<Action> {
+        let mut actions = self.switch_to(stage, obs);
+        actions.retain(|a| *a != Action::StateChanged);
+        // The stage just shown has no live frames to save yet.
+        let mut more = self.gather_app(pid, &Observation::default(), false);
+        actions.append(&mut more);
+        if actions.last() != Some(&Action::StateChanged) {
+            actions.push(Action::StateChanged);
+        }
+        actions
+    }
+
+    /// ⌘M on a shown window (`[windows] minimize_to_strip`): instead of the Dock, the window
+    /// goes to the strip as a stage of its own, as Apple's does; the view does not switch.
+    /// The platform un-minimizes it after parking it. A no-op for pinned, parked or unknown
+    /// windows.
+    pub fn minimize_to_strip(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
+        let Some(id) = self.resolve_standard(id) else { return Vec::new() };
+        let Some(w) = self.windows.get(&id) else { return Vec::new() };
+        if w.parked || w.home == Home::Pinned {
+            return Vec::new();
+        }
+        self.send_window(id, Target::New, obs)
+    }
+
+    /// Moves app `pid`'s windows from the display's inactive stages into the active one
+    /// (only the most recent one when `one`); see [`Model::bring_app_here`].
+    fn gather_app(&mut self, pid: Pid, obs: &Observation, one: bool) -> Vec<Action> {
         let mut actions = Vec::new();
         let display = self.current_display(obs);
         let active = self.ensure_active(display);
@@ -521,7 +556,7 @@ impl Model {
             .collect();
         sources.sort_by_key(|s| std::cmp::Reverse(s.0));
         let mut moving: Vec<WindowId> = sources.iter().flat_map(|s| s.2.clone()).collect();
-        if self.options.settings.app_windows == AppWindows::OneAtATime {
+        if one {
             moving.truncate(1);
         }
         if moving.is_empty() {

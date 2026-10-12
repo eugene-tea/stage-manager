@@ -124,6 +124,12 @@ impl Rect {
         (max_x > x && max_y > y).then(|| Rect::new(x, y, max_x - x, max_y - y))
     }
 
+    /// The smallest rectangle containing both.
+    pub fn union(&self, other: &Rect) -> Rect {
+        let (x, y) = (self.x.min(other.x), self.y.min(other.y));
+        Rect::new(x, y, self.max_x().max(other.max_x()) - x, self.max_y().max(other.max_y()) - y)
+    }
+
     /// The same rectangle moved by `(dx, dy)`.
     pub fn translate(&self, dx: f64, dy: f64) -> Rect {
         Rect::new(self.x + dx, self.y + dy, self.w, self.h)
