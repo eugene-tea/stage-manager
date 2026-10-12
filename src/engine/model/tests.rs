@@ -1730,7 +1730,7 @@ fn a_card_dragged_to_another_slot_stays_there_and_the_swap_rule_carries_on() {
     assert_eq!(e.slot_numbers(), [a, 1, c]);
     // The order is part of the saved state.
     let state = e.m.to_state();
-    let ids: Vec<StageId> = state.strip_slots.iter().filter_map(|i| e.m.stages().get(*i).map(|s| s.id)).collect();
+    let ids: Vec<StageId> = state.spaces[0].strip_slots.iter().filter_map(|i| e.m.stages().get(*i).map(|s| s.id)).collect();
     assert_eq!(ids, e.m.strip_slots(MAIN));
 }
 

@@ -8,7 +8,7 @@
 //! - a window is **stranded** when it sits in the main display's park zone
 //!   ([`is_parked`]) and does not show on another display either (so a window on a second
 //!   display to the bottom-right of the main one is left alone);
-//! - a stranded window goes back to its frame from `state.json` (exact bundle ID + title
+//! - a stranded window goes back to its frame from `state.json` (any Space; exact bundle ID + title
 //!   first, then bundle ID only, each saved window used once), else it is centered; the
 //!   result is always clamped onto the visible frame and never in a park zone; a saved
 //!   window we had fitted clear of the strip goes back to its pre-fit frame instead;
@@ -64,8 +64,7 @@ pub fn plan(
 ) -> Vec<(usize, Rect)> {
     let saved: Vec<(&str, &str, Rect, Option<Rect>)> = state
         .map(|s| {
-            s.stages
-                .iter()
+            s.all_stages()
                 .flat_map(|st| st.windows.iter())
                 .filter(|w| w.role == SavedRole::Standard)
                 .map(|w| (w.bundle_id.as_str(), w.title.as_str(), w.frame, w.original))
@@ -133,7 +132,7 @@ mod tests {
     use super::*;
     use crate::engine::geometry::Size;
     use crate::engine::park::park_frame;
-    use crate::engine::persist::{STATE_VERSION, SavedStage, SavedWindow};
+    use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
     const VISIBLE: Rect = Rect::new(0.0, 25.0, 1440.0, 875.0);
@@ -168,15 +167,16 @@ mod tests {
     }
 
     fn state(windows: Vec<SavedWindow>) -> StateFile {
-        StateFile {
-            version: STATE_VERSION,
+        StateFile::single(SavedSpace {
+            id: 1,
+            current: true,
             stages: vec![SavedStage {
                 name: None,
                 windows,
             }],
             active_index: Some(0),
             strip_slots: vec![],
-        }
+        })
     }
 
     fn parked(w: f64, h: f64) -> Rect {

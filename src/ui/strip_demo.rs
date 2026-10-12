@@ -147,8 +147,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags, style: Arc<StripS
         window_drag: None,
         announce: false,
         active_windows,
-        transition: None,
-        parked: None,
+        ..StripSnapshot::default()
     }
 }
 

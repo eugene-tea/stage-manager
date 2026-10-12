@@ -1,9 +1,15 @@
 //! Persistence: `state.json` and re-matching saved windows to live ones on launch.
 //!
-//! Window IDs do not survive an app relaunch, so saved windows are matched heuristically:
-//! exact bundle ID + title first, then bundle ID only in saved order. Each live window is
-//! used at most once; live windows that match nothing are grouped the way Apple's Stage
-//! Manager does when it is turned on: one stage per app (see [`Model::apply_launch`]).
+//! The file keeps stages **per Space** ([`SavedSpace`], keyed by the model's synthetic
+//! [`SpaceId`]). Window IDs do not survive an app relaunch, so saved windows are matched
+//! heuristically: exact bundle ID + title first, then bundle ID only in saved order. Each
+//! live window is used at most once; live windows that match nothing are grouped the way
+//! Apple's Stage Manager does when it is turned on: one stage per app (see
+//! [`Model::apply_launch`]). A Space is recognized by its windows: the saved Space whose
+//! windows match the ones on screen (exact bundle ID + title) is the one shown
+//! ([`Model::arrive`]); other saved Spaces wait, untouched, for their first visit.
+//!
+//! Version 1 files (one Space) are read as a single Space.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
 use super::model::{
-    Action, DisplayId, Home, Model, Observation, Pid, StageId, WindowId, WindowMeta, WindowRole,
+    Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowMeta, WindowRole,
     WindowState,
 };
 use super::park::is_parked;
@@ -19,8 +25,8 @@ use super::rules::Decision;
 use super::settings::AppWindows;
 use super::stage_area::same_frame;
 
-/// The state file format version this build reads and writes.
-pub const STATE_VERSION: u32 = 1;
+/// The state file format version this build writes (it also reads version 1).
+pub const STATE_VERSION: u32 = 2;
 
 /// A saved window's role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,37 +70,85 @@ pub struct SavedStage {
     pub windows: Vec<SavedWindow>,
 }
 
-/// The contents of `state.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StateFile {
-    /// Always [`STATE_VERSION`].
-    pub version: u32,
+/// One saved Space: its stages, active stage and strip, like a whole Stage Manager.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedSpace {
+    /// The model's synthetic Space id (never Apple's).
+    pub id: u64,
+    /// The Space shown when saved.
+    #[serde(default)]
+    pub current: bool,
     /// Stages in creation order (hotkey numbers).
     pub stages: Vec<SavedStage>,
-    /// Index into `stages` of the main display's active stage.
+    /// Index into `stages` of the Space's active stage.
     pub active_index: Option<usize>,
-    /// Indices into `stages` of the main display's strip slots, top to bottom.
+    /// Indices into `stages` of the strip slots, top to bottom.
     #[serde(default)]
     pub strip_slots: Vec<usize>,
 }
 
+/// The contents of `state.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateFile {
+    /// Always [`STATE_VERSION`] when written.
+    pub version: u32,
+    /// Every Space with stages, the shown one flagged `current`.
+    pub spaces: Vec<SavedSpace>,
+}
+
+/// Version 1: one Space, no ids.
+#[derive(Deserialize)]
+struct StateFileV1 {
+    stages: Vec<SavedStage>,
+    active_index: Option<usize>,
+    #[serde(default)]
+    strip_slots: Vec<usize>,
+}
+
 impl StateFile {
+    /// A file holding one Space.
+    pub fn single(space: SavedSpace) -> Self {
+        Self {
+            version: STATE_VERSION,
+            spaces: vec![space],
+        }
+    }
+
+    /// Every saved stage of every Space.
+    pub fn all_stages(&self) -> impl Iterator<Item = &SavedStage> {
+        self.spaces.iter().flat_map(|s| s.stages.iter())
+    }
+
     /// Pretty JSON for writing to disk.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Parses JSON, rejecting other versions.
+    /// Parses JSON: version 2, or version 1 read as one current Space; other versions are
+    /// rejected.
     pub fn from_json(text: &str) -> Result<Self, String> {
-        let state: StateFile =
+        let value: serde_json::Value =
             serde_json::from_str(text).map_err(|e| format!("state.json: {e}"))?;
-        if state.version != STATE_VERSION {
-            return Err(format!(
-                "state.json: version {} is not supported (expected {STATE_VERSION})",
-                state.version
-            ));
+        match value.get("version").and_then(serde_json::Value::as_u64) {
+            Some(1) => {
+                let v1: StateFileV1 =
+                    serde_json::from_value(value).map_err(|e| format!("state.json: {e}"))?;
+                Ok(Self::single(SavedSpace {
+                    id: 1,
+                    current: true,
+                    stages: v1.stages,
+                    active_index: v1.active_index,
+                    strip_slots: v1.strip_slots,
+                }))
+            }
+            Some(v) if v == u64::from(STATE_VERSION) => {
+                serde_json::from_value(value).map_err(|e| format!("state.json: {e}"))
+            }
+            Some(v) => Err(format!(
+                "state.json: version {v} is not supported (expected {STATE_VERSION})"
+            )),
+            None => Err("state.json: no version".to_string()),
         }
-        Ok(state)
     }
 }
 
@@ -145,10 +199,35 @@ pub struct LaunchHints {
     pub frontmost: Option<Pid>,
 }
 
-/// Places live standard windows into saved stages: exact bundle + title first, then bundle
-/// only, both in saved order (stage order, then front to back). Each live window is used at
-/// most once. Child windows on either side are left out; they follow their parents.
-pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
+/// How many live standard windows match a saved standard window of `space` exactly (bundle
+/// ID and title, each saved window used once): the evidence that `space` is on screen.
+pub fn exact_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
+    let mut used: HashSet<WindowId> = HashSet::new();
+    let mut n = 0;
+    for sw in space
+        .stages
+        .iter()
+        .flat_map(|s| s.windows.iter())
+        .filter(|w| w.role == SavedRole::Standard)
+    {
+        if let Some(l) = live.iter().find(|l| {
+            l.role == WindowRole::Standard
+                && !used.contains(&l.id)
+                && l.bundle_id == sw.bundle_id
+                && l.title == sw.title
+        }) {
+            used.insert(l.id);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Places live standard windows into one saved Space's stages: exact bundle + title first,
+/// then bundle only, both in saved order (stage order, then front to back). Each live window
+/// is used at most once. Child windows on either side are left out; they follow their
+/// parents.
+pub fn rematch(state: &SavedSpace, live: &[WindowMeta]) -> Assignment {
     let standard: Vec<&WindowMeta> = live
         .iter()
         .filter(|m| m.role == WindowRole::Standard)
@@ -221,11 +300,11 @@ pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
 }
 
 impl Model {
-    /// Snapshot for `state.json`. Pinned windows are saved with the main display's active
-    /// stage, flagged `pinned`; children are saved with their stage after its members.
+    /// Snapshot for `state.json`: every Space with windows, the shown one flagged `current`,
+    /// plus the saved Spaces not visited yet this run (untouched). Pinned windows are saved
+    /// with their Space's active stage, flagged `pinned`; children are saved with their stage
+    /// after its members.
     pub fn to_state(&self) -> StateFile {
-        let active = self.main_active_stage();
-        let active_index = self.stages.iter().position(|s| Some(s.id) == active);
         let save = |id: WindowId, z: usize, key: bool, pinned: bool| -> Option<SavedWindow> {
             let w = self.windows.get(&id)?;
             Some(SavedWindow {
@@ -242,50 +321,73 @@ impl Model {
                 original: w.original,
             })
         };
-        let mut stages: Vec<SavedStage> = self
-            .stages
-            .iter()
-            .map(|s| {
-                let mut windows: Vec<SavedWindow> = s
-                    .windows
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(z, &id)| save(id, z, s.key == Some(id), false))
-                    .collect();
-                let base = windows.len();
-                windows.extend(
-                    self.children_in(Home::Stage(s.id))
+        let mut spaces = Vec::new();
+        for space in &self.spaces {
+            if self.space_is_empty(space.id) {
+                continue;
+            }
+            let here: Vec<&crate::engine::model::Stage> = self.stages_in(space.id).collect();
+            let active = self.active_stage_in(space.id);
+            let active_index = here.iter().position(|s| Some(s.id) == active);
+            let mut stages: Vec<SavedStage> = here
+                .iter()
+                .map(|s| {
+                    let mut windows: Vec<SavedWindow> = s
+                        .windows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(z, &id)| save(id, z, s.key == Some(id), false))
+                        .collect();
+                    let base = windows.len();
+                    windows.extend(
+                        self.children_in(Home::Stage(s.id))
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(i, id)| save(id, base + i, false, false)),
+                    );
+                    SavedStage {
+                        name: s.name.clone(),
+                        windows,
+                    }
+                })
+                .collect();
+            if let Some(i) = active_index {
+                let mut pinned = self.pinned();
+                pinned.extend(self.children_in(Home::Pinned));
+                pinned.retain(|id| self.windows.get(id).is_some_and(|w| w.space == space.id));
+                let base = stages[i].windows.len();
+                stages[i].windows.extend(
+                    pinned
                         .into_iter()
                         .enumerate()
-                        .filter_map(|(i, id)| save(id, base + i, false, false)),
+                        .filter_map(|(k, id)| save(id, base + k, false, true)),
                 );
-                SavedStage {
-                    name: s.name.clone(),
-                    windows,
-                }
-            })
-            .collect();
-        if let Some(i) = active_index {
-            let mut pinned = self.pinned();
-            pinned.extend(self.children_in(Home::Pinned));
-            let base = stages[i].windows.len();
-            stages[i].windows.extend(
-                pinned
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(k, id)| save(id, base + k, false, true)),
-            );
+            }
+            let strip_slots = self
+                .slots
+                .get(&space.id)
+                .map(|slots| {
+                    slots
+                        .iter()
+                        .filter_map(|id| here.iter().position(|s| s.id == *id))
+                        .collect()
+                })
+                .unwrap_or_default();
+            spaces.push(SavedSpace {
+                id: space.id.0,
+                current: self.current.values().any(|&c| c == space.id),
+                stages,
+                active_index,
+                strip_slots,
+            });
         }
-        let strip_slots = self
-            .strip_slots(self.main_display().id)
-            .into_iter()
-            .filter_map(|id| self.stages.iter().position(|s| s.id == id))
-            .collect();
+        spaces.extend(self.leftovers.iter().cloned().map(|mut l| {
+            l.current = false;
+            l
+        }));
         StateFile {
             version: STATE_VERSION,
-            stages,
-            active_index,
-            strip_slots,
+            spaces,
         }
     }
 
@@ -300,9 +402,9 @@ impl Model {
         self.apply_launch(live, assignment, restore_frames, &LaunchHints::default())
     }
 
-    /// Rebuilds stages from an [`Assignment`] on launch. `live` lists every live window
-    /// (children too; they follow their parents). Saved stages with no matched window are
-    /// dropped unless active or declared.
+    /// Rebuilds stages from an [`Assignment`] on launch, on the Space the main display shows.
+    /// `live` lists every live window there (children too; they follow their parents). Saved
+    /// stages with no matched window are dropped unless active or declared.
     ///
     /// Standard windows no saved stage claims (every window on a first start, without a
     /// `state.json`) are placed the way Apple's Stage Manager does when it is turned on: an
@@ -314,9 +416,10 @@ impl Model {
     /// saved stage is active with windows, its stage becomes active. The others enter the
     /// strip most recently used first, by the window list's z-order.
     ///
-    /// Windows of inactive stages are parked; with `restore_frames` the active stage's and
-    /// pinned windows get their saved frames, else they keep their live frames (a live frame
-    /// in a park zone always falls back to the saved one). Windows already known are skipped.
+    /// Windows of the Space's inactive stages are parked; with `restore_frames` the active
+    /// stage's and pinned windows get their saved frames, else they keep their live frames (a
+    /// live frame in a park zone always falls back to the saved one). Windows already known
+    /// are skipped. Other Spaces are left alone.
     pub fn apply_launch(
         &mut self,
         live: &[WindowMeta],
@@ -326,7 +429,7 @@ impl Model {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let metas: HashMap<WindowId, &WindowMeta> = live.iter().map(|m| (m.id, m)).collect();
-        let main = self.main_display().id;
+        let space = self.current_space(self.main_display().id);
         let mut built: Vec<Option<StageId>> = vec![None; assignment.stages.len()];
         let mut placed: HashSet<WindowId> = HashSet::new();
 
@@ -348,13 +451,9 @@ impl Model {
                 }
                 continue;
             }
-            let display = standing
-                .first()
-                .map(|w| self.known_display(metas[&w.id].display))
-                .unwrap_or(main);
-            let sid = match st.name.as_deref().and_then(|n| self.find_named(n)) {
+            let sid = match st.name.as_deref().and_then(|n| self.find_named(space, n)) {
                 Some(s) if !built.contains(&Some(s)) => s,
-                _ => self.create_stage(display, st.name.clone()),
+                _ => self.create_stage(space, st.name.clone()),
             };
             built[i] = Some(sid);
             for w in &members {
@@ -380,8 +479,7 @@ impl Model {
         }
 
         if let Some(sid) = assignment.active_index.and_then(|i| built[i]) {
-            let display = self.stage(sid).map_or(main, |s| s.display);
-            let previous = self.active.insert(display, sid);
+            let previous = self.active.insert(space, sid);
             let t = self.tick();
             if let Some(stage) = self.stage_mut(sid) {
                 stage.last_active = t;
@@ -391,13 +489,13 @@ impl Model {
             }
         }
 
-        self.place_unmatched(&metas, assignment, &placed, hints);
+        self.place_unmatched(space, &metas, assignment, &placed, hints);
 
         // Every window of every stage clear of the strip, so restored frames already are.
         let ids: Vec<WindowId> = live.iter().map(|m| m.id).collect();
         let fitted: Vec<WindowId> = ids.into_iter().filter(|&id| self.fit_window(id)).collect();
 
-        let stage_ids: Vec<StageId> = self.stages.iter().map(|s| s.id).collect();
+        let stage_ids: Vec<StageId> = self.stages_in(space).map(|s| s.id).collect();
         for s in stage_ids {
             if self.is_active(s) {
                 if restore_frames {
@@ -411,7 +509,9 @@ impl Model {
         }
         if restore_frames {
             for id in self.pinned() {
-                self.restore_window(id, &mut actions);
+                if self.windows.get(&id).is_some_and(|w| w.space == space) {
+                    self.restore_window(id, &mut actions);
+                }
             }
         }
         for id in fitted {
@@ -444,7 +544,9 @@ impl Model {
             .iter()
             .filter_map(|&i| built.get(i).copied().flatten())
             .collect();
-        self.slots.insert(main, slots);
+        if !slots.is_empty() || !self.slots.contains_key(&space) {
+            self.slots.insert(space, slots);
+        }
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
@@ -453,6 +555,7 @@ impl Model {
     /// Places standard windows no saved stage claims (see [`Model::apply_launch`]).
     fn place_unmatched(
         &mut self,
+        space: SpaceId,
         metas: &HashMap<WindowId, &WindowMeta>,
         assignment: &Assignment,
         placed: &HashSet<WindowId>,
@@ -489,8 +592,7 @@ impl Model {
         let one_at_a_time = self.options.settings.app_windows == AppWindows::OneAtATime;
         let mut fresh: Vec<StageId> = Vec::new();
         for (pid, windows) in apps {
-            let display = self.known_display(windows[0].display);
-            let existing = self.app_stage(pid, display);
+            let existing = self.app_stage(pid, space);
             let units: Vec<Vec<&WindowMeta>> = if existing.is_none() && one_at_a_time {
                 windows.into_iter().map(|w| vec![w]).collect()
             } else {
@@ -500,21 +602,21 @@ impl Model {
                 let stage = match existing {
                     Some(s) => s,
                     None => {
-                        let active = self.ensure_active(display);
+                        let active = self.ensure_active(space);
                         let reusable = self.stage(active).is_some_and(|s| {
                             s.windows.is_empty() && s.name.is_none() && !fresh.contains(&active)
                         });
                         let s = if reusable {
                             active
                         } else {
-                            self.create_stage(display, None)
+                            self.create_stage(space, None)
                         };
                         fresh.push(s);
                         s
                     }
                 };
                 for meta in unit {
-                    self.insert_unmatched(meta, stage);
+                    self.insert_unmatched(meta, stage, space);
                 }
             }
         }
@@ -525,33 +627,32 @@ impl Model {
                 st.last_active = t;
             }
         }
-        let main = self.main_display().id;
-        let active = self.ensure_active(main);
+        let active = self.ensure_active(space);
         if self.stage_is_empty(active)
             && let Some(&first) = fresh.first()
             && first != active
         {
-            self.active.insert(main, first);
+            self.active.insert(space, first);
             let mut ignored = Vec::new();
             self.drop_if_dead(active, &mut ignored);
         }
-        let active = self.ensure_active(main);
+        let active = self.ensure_active(space);
         let t = self.tick();
         if let Some(st) = self.stage_mut(active) {
             st.last_active = t;
         }
     }
 
-    /// The stage holding app `pid`'s windows on `display`: the active one if it does, else
+    /// The stage holding app `pid`'s windows on `space`: the active one if it does, else
     /// the most recently active.
-    fn app_stage(&self, pid: Pid, display: DisplayId) -> Option<StageId> {
+    fn app_stage(&self, pid: Pid, space: SpaceId) -> Option<StageId> {
         let holds = |s: &&crate::engine::model::Stage| {
-            s.display == display
+            s.space == space
                 && s.windows
                     .iter()
                     .any(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid))
         };
-        let active = self.active_stage(display);
+        let active = self.active_stage_in(space);
         self.stages
             .iter()
             .filter(holds)
@@ -559,7 +660,7 @@ impl Model {
             .map(|s| s.id)
     }
 
-    fn insert_unmatched(&mut self, meta: &WindowMeta, stage: StageId) {
+    fn insert_unmatched(&mut self, meta: &WindowMeta, stage: StageId, space: SpaceId) {
         let display = self.known_display(meta.display);
         let mut meta = meta.clone();
         meta.display = display;
@@ -573,6 +674,8 @@ impl Model {
                 restore,
                 parked: false,
                 original: None,
+                space,
+                sticky: false,
             },
         );
         if let Some(s) = self.stage_mut(stage) {
@@ -617,6 +720,7 @@ impl Model {
         let restore = self.safe_restore(base, display);
         // The saved pre-fit frame still applies while the window is where we fitted it.
         let original = saved.original.filter(|_| same_frame(base, saved.frame));
+        let space = self.current_space(display);
         let mut meta = meta.clone();
         meta.display = display;
         self.windows.insert(
@@ -627,6 +731,8 @@ impl Model {
                 restore,
                 parked: false,
                 original,
+                space,
+                sticky: false,
             },
         );
     }

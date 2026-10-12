@@ -113,6 +113,7 @@ mod app {
         thumbnail_interval_ms: Option<u64>,
         display: Option<Display>,
         _workspace: WorkspaceObservers,
+        _spaces: WorkspaceObservers,
         _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
@@ -411,6 +412,10 @@ mod app {
         let workspace = apps::observe_workspace(move |event| {
             wm_events.send(WmCommand::App(event));
         });
+        let wm_spaces = wm.clone();
+        let spaces = apps::observe_space_changes(move || {
+            wm_spaces.send(WmCommand::SpaceChanged);
+        });
 
         let permissions = permissions::check_at_launch();
         tracing::info!(
@@ -456,6 +461,7 @@ mod app {
             thumbnail_interval_ms: None,
             display: None,
             _workspace: workspace,
+            _spaces: spaces,
             _input: input_monitor,
             _timer: timer,
         };

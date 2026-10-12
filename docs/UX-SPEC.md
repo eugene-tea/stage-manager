@@ -132,7 +132,7 @@ card-on-card merge can be added later; it is not built.
   As a `CASpringAnimation`: mass 1, stiffness 240, damping 31.
 - **Other cards** glide to their new slots on the same curve.
 - Switching Spaces (not Stage Manager) slides the whole screen 2609 pt in about 230–310 ms;
-  every Space has its own strip.
+  every Space has its own strip (see "Spaces").
 
 ## Interactions
 
@@ -166,6 +166,48 @@ card-on-card merge can be added later; it is not built.
   of an app with no managed window (newly opened, or all its windows closed) opens a new
   stage, and the stage you leave enters the strip. Rules (`current`, `new`, `stage:<name>`,
   `float`, `ignore`) still apply to the apps they name.
+
+## Spaces (Desktops)
+
+Native (Apple's Stage Manager guide; the 5K session; the owner's report of 10-12):
+
+- **Each Space has its own Stage Manager**: its own active stage and its own strip, listing
+  only that Space's windows. The same app can have stages on several Spaces, each holding
+  only that Space's windows (VS Code with a work window on Desktop 1 and a personal one on
+  Desktop 2).
+- **A card click never changes the Space.**
+- **Full-screen apps** are Spaces of their own, with no strip.
+- **Dock and ⌘Tab** may switch Spaces according to macOS's own setting ("When switching to
+  an application, switch to a Space with open windows for the application", Desktop & Dock
+  → Mission Control). Stage Manager follows; it never fights it.
+- Switching Spaces slides the whole screen (2609 pt in about 230–310 ms at 5K); the new
+  Space's strip slides in with it.
+
+Ours:
+
+- Stages, the active stage, strip slots, recency and hotkey numbers are kept per Space. Every
+  operation acts on the Space shown; nothing ever moves, raises or focuses a window on
+  another Space (that is what made macOS jump Desktops on a card click before 10-12).
+- macOS has no public id for a Space, so each gets a synthetic id and is recognized by its
+  windows: on a Space change (`NSWorkspace` `activeSpaceDidChangeNotification`) the window
+  server's on-screen list (`CGWindowListCopyWindowInfo`, on-screen only: the shown Space's
+  windows, parked slivers included, never another Space's) is compared with what we know.
+  A known Space scores its windows on screen minus its windows missing for no visible
+  reason (app not hidden, not minimized); the best positive score wins; else the saved
+  Space whose windows match by bundle ID and title; else a new Space.
+- `AXWindows` lists only the shown Space's windows for most apps (measured 10-12: Safari,
+  Mail, VS Code, Fork, Terminal, Chrome, Messages, Telegram), so a Space's windows are found
+  when it is first shown after launch; they are grouped the way turning Stage Manager on
+  does (one stage per app) or as `state.json` saved them.
+- A window moved to another Space (Mission Control, or dragged across with the pointer)
+  leaves its stage and joins the current stage of the Space it shows on. A window shown on
+  every Space ("Assign To: All Desktops") is treated as pinned.
+- Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
+  Accessibility before bringing its app forward (never all its windows), so macOS has no
+  reason to switch Spaces.
+- On a full-screen Space the strip is not shown and no stage changes.
+- The strip belongs to one Space at a time: on a Space change it is taken off, its cards
+  replaced without animation, and put on the Space shown (deviation 4).
 
 ## Grouping (`AppWindowGroupingBehavior`)
 
@@ -205,7 +247,11 @@ card-on-card merge can be added later; it is not built.
    window surfaces.
 3. **Parked windows leave a sliver** in the display's bottom-right corner (macOS keeps part
    of every window onscreen). Apple moves them off by private means.
-4. **One Space.** Stages live on the Space where the app runs; other Spaces are left alone.
+4. **Spaces are recognized, not named.** No public API names a Space, so Spaces are told
+   apart by their windows: an empty Desktop is forgotten when left, and a Desktop whose
+   windows are all hidden or minimized is taken for a new one until one of them shows. The
+   new Space's strip appears once the Space has slid in (Apple's slides in with it); the
+   old Space's strip slides away with its Space, as Apple's does.
 5. **Drag and drop stand-ins.** The Accessibility API cannot scale a live window, so a
    window dragged over the strip keeps its size under a card-sized snapshot of it (turned
    like a card, under the pointer, above everything) that stands in for Apple's shrinking

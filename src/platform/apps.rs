@@ -1,6 +1,6 @@
 //! Running applications from `NSWorkspace`: a snapshot of regular apps and the launch /
 //! terminate / activate notifications, observed on the main thread and handed on as plain
-//! Rust values.
+//! Rust values; and the active Space changing (`activeSpaceDidChangeNotification`).
 
 use std::ptr::NonNull;
 
@@ -8,9 +8,9 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_app_kit::{
-    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
-    NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidLaunchApplicationNotification,
-    NSWorkspaceDidTerminateApplicationNotification,
+    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+    NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification,
+    NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue};
 use serde::Serialize;
@@ -111,6 +111,25 @@ pub fn observe_workspace(sink: impl Fn(AppEvent) + 'static) -> WorkspaceObserver
         tokens.push(token);
     }
     WorkspaceObservers { center, tokens }
+}
+
+/// Observes `NSWorkspaceActiveSpaceDidChangeNotification` on the main queue: the user went
+/// to another Space (Desktop or full-screen app), on any display. Calls `sink` each time.
+pub fn observe_space_changes(sink: impl Fn() + 'static) -> WorkspaceObservers {
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let main_queue = NSOperationQueue::mainQueue();
+    let block = RcBlock::new(move |_note: NonNull<NSNotification>| sink());
+    // SAFETY: the notification name is a valid framework static; the block runs on the
+    // main queue only, where `sink` lives.
+    let token = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceActiveSpaceDidChangeNotification),
+            None,
+            Some(&main_queue),
+            &block,
+        )
+    };
+    WorkspaceObservers { center, tokens: vec![token] }
 }
 
 fn running_app_of(note: &NSNotification) -> Option<Retained<NSRunningApplication>> {

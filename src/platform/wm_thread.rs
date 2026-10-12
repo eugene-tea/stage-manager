@@ -64,6 +64,8 @@ pub enum WmCommand {
     Hotkey(HotkeyCommand),
     /// Input from the strip.
     Strip(StripEvent),
+    /// The user went to another Space (`activeSpaceDidChangeNotification`).
+    SpaceChanged,
     /// Show or hide the strip.
     ToggleStrip,
     /// Re-read config.toml.
@@ -252,6 +254,7 @@ impl WmState {
             WmCommand::Input(event, drop) => self.controller.input(&mut self.observer, event, drop),
             WmCommand::Hotkey(command) => self.controller.hotkey(&mut self.observer, command),
             WmCommand::Strip(event) => self.controller.strip_event(&mut self.observer, event),
+            WmCommand::SpaceChanged => self.controller.on_space_changed(&mut self.observer),
             WmCommand::ToggleStrip => self.controller.toggle_strip(),
             WmCommand::ReloadConfig => self.controller.reload_config(&mut self.observer),
             WmCommand::Ctl(cmd, reply) => {
@@ -260,7 +263,13 @@ impl WmState {
             }
             WmCommand::Shutdown(reply) => {
                 let failed = self.controller.unpark_all(&self.observer);
-                let ok = failed == 0 && safety::registry_len() == 0;
+                // A window still in a park zone on any Space (one AX could not reach there)
+                // leaves the exit unclean, so the guardian watches until it is back.
+                let stranded = safety::stranded_allowed();
+                if !stranded.is_empty() {
+                    tracing::warn!(windows = ?stranded.iter().map(|w| w.id).collect::<Vec<_>>(), "windows still parked after unparking (another Space?)");
+                }
+                let ok = failed == 0 && safety::registry_len() == 0 && stranded.is_empty();
                 self.controller.save_now();
                 self.observer.stop();
                 let _ = self.observer.take_events();

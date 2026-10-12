@@ -10,11 +10,16 @@
 //!    quits cleanly; SIGABRT gets a best-effort unpark in the handler itself.
 //! 5. **Guardian**: `stage-manager --guardian <pid>`, spawned at launch, waits for the app to
 //!    exit (kqueue `NOTE_EXIT`) and runs the recovery scan unless the app wrote its clean-exit
-//!    marker.
+//!    marker. Then, while a window is still stranded on a Space not shown (Accessibility lists
+//!    only the shown Space's windows of most apps), it keeps watching and scans again when
+//!    that window shows, until none is left or Stage Manager runs again.
 //! 6. **Recovery scan** (launch, guardian, panic fallback): every window of every allowed app
 //!    whose frame is stranded in the park zone goes back to its `state.json` frame or is
 //!    centered ([`crate::engine::recovery`]).
 //! 7. **Clamping**: every restore frame is clamped onto the visible display first.
+//!
+//! Quit counts as clean only when, after unparking, the window server lists no window of an
+//! allowed app in the park zone on any Space ([`stranded_allowed`]).
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -28,7 +33,7 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, names};
-use super::{desktop, observe, paths, windows};
+use super::{ctl, desktop, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::persist::StateFile;
 use crate::engine::recovery::{self, LiveWindow, ScanDisplays};
@@ -192,6 +197,53 @@ fn stranded_ids() -> Vec<u32> {
         .filter(|w| w.layer == 0 && recovery::is_stranded(w.bounds, &displays))
         .map(|w| w.id)
         .collect()
+}
+
+/// Windows of allowed apps (`STAGE_MANAGER_ONLY` honored, our own process and the system's
+/// excluded apps skipped) the window server lists in the main display's park zone, on any
+/// Space: windows on other Spaces are listed too, off screen, with their frames.
+pub fn stranded_allowed() -> Vec<windows::CgWindow> {
+    let only = observe::only_from_env();
+    let own = std::process::id() as i32;
+    let displays = scan_displays();
+    let mut bundles: std::collections::HashMap<i32, Option<String>> = std::collections::HashMap::new();
+    windows::list_windows()
+        .into_iter()
+        .filter(|w| w.layer == 0 && recovery::is_stranded(w.bounds, &displays))
+        .filter(|w| {
+            let bundle = bundles.entry(w.pid).or_insert_with(|| bundle_id_of(w.pid));
+            observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
+        })
+        .collect()
+}
+
+/// How often the guardian looks for stranded windows on other Spaces.
+const GUARDIAN_POLL: Duration = Duration::from_secs(2);
+
+/// After the guardian's scan: while windows stay stranded on Spaces not shown (out of
+/// Accessibility's reach), scans again each time one of them shows on screen (the user went
+/// to its Space). Stops when none is left, or when Stage Manager runs again (it takes over).
+fn watch_stranded() {
+    let mut last_shown: Vec<u32> = Vec::new();
+    loop {
+        let stranded = stranded_allowed();
+        if stranded.is_empty() {
+            tracing::info!("guardian: no window is left parked");
+            return;
+        }
+        if ctl::request("ping", Duration::from_millis(500)).is_ok() {
+            tracing::info!(left = stranded.len(), "guardian: Stage Manager runs again and takes over");
+            return;
+        }
+        let mut shown: Vec<u32> = stranded.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
+        shown.sort_unstable();
+        if !shown.is_empty() && shown != last_shown {
+            let r = recovery_scan("guardian: a Space with parked windows shows");
+            tracing::warn!(restored = r.restored, failed = r.failed, "guardian: scanned again");
+        }
+        last_shown = shown;
+        std::thread::sleep(GUARDIAN_POLL);
+    }
 }
 
 /// Runs `f`, catching a panic (logged). Inside, the panic hook does not unpark or exit: the
@@ -375,6 +427,7 @@ pub fn run_guardian(args: &[String]) -> ExitCode {
     tracing::warn!(parent, "guardian: the app exited without a clean exit; running the recovery scan");
     let r = recovery_scan("guardian");
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
+    watch_stranded();
     ExitCode::SUCCESS
 }
 

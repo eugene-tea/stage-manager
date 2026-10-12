@@ -27,6 +27,7 @@ pub mod names {
     pub const MAIN: &str = "AXMain";
     pub const MINIMIZED: &str = "AXMinimized";
     pub const FULLSCREEN: &str = "AXFullScreen";
+    pub const HIDDEN: &str = "AXHidden";
     pub const FRONTMOST: &str = "AXFrontmost";
     pub const RAISE: &str = "AXRaise";
     pub const FOCUSED_APPLICATION: &str = "AXFocusedApplication";
@@ -308,6 +309,14 @@ impl AxElement {
     /// `AXFullScreen` of a window; a window without the attribute is not fullscreen.
     pub fn is_fullscreen(&self) -> AxResult<bool> {
         match self.bool_attr(names::FULLSCREEN) {
+            Err(e) if e == AxError::ATTRIBUTE_UNSUPPORTED || e == AxError::NO_VALUE => Ok(false),
+            other => other,
+        }
+    }
+
+    /// `AXHidden` of an application element (⌘H); an app without the attribute is shown.
+    pub fn is_hidden(&self) -> AxResult<bool> {
+        match self.bool_attr(names::HIDDEN) {
             Err(e) if e == AxError::ATTRIBUTE_UNSUPPORTED || e == AxError::NO_VALUE => Ok(false),
             other => other,
         }

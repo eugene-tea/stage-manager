@@ -2,8 +2,8 @@
 //! then restore frames, then raises back to front, then focus, then `StateChanged`.
 
 use super::{
-    Action, Display, DisplayId, Home, Model, NativeTarget, Observation, Pid, Reveal, StageId, StripOrder,
-    Target, WindowId, WindowMeta, WindowRole, WindowState,
+    Action, Display, DisplayId, Home, Model, NativeTarget, Observation, Pid, Reveal, SpaceId, StripOrder,
+    StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::park::{clamp_to_visible, is_parked};
@@ -12,7 +12,8 @@ use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
 
 impl Model {
-    /// A window appeared. `decision` comes from the rules; it is ignored for children, which
+    /// A window appeared on the Space its display shows now (the platform offers a window
+    /// only once it is on screen). `decision` comes from the rules; it is ignored for children, which
     /// follow their parent (a child whose parent is known but unmanaged stays unmanaged; one
     /// with no known parent joins the active stage). Duplicate notifications for a known
     /// `WindowId` only refresh its title.
@@ -43,20 +44,21 @@ impl Model {
             return actions;
         }
         let display = self.known_display(meta.display);
+        let space = self.current_space(display);
         let mut meta = meta;
         meta.display = display;
         let id = meta.id;
 
         if let WindowRole::Child { parent } = meta.role {
-            let home = match parent {
+            let (home, space) = match parent {
                 Some(p) => match self.windows.get(&p) {
                     Some(pw) => {
                         meta.display = pw.meta.display;
-                        pw.home
+                        (pw.home, pw.space)
                     }
                     None => return actions,
                 },
-                None => Home::Stage(self.ensure_active(display)),
+                None => (Home::Stage(self.ensure_active(space)), space),
             };
             let restore = self.safe_restore(meta.frame, meta.display);
             let born_parked = restore != meta.frame;
@@ -68,6 +70,8 @@ impl Model {
                     restore,
                     parked: false,
                     original: None,
+                    space,
+                    sticky: false,
                 },
             );
             match home {
@@ -79,18 +83,18 @@ impl Model {
             return actions;
         }
 
-        let active = self.ensure_active(display);
+        let active = self.ensure_active(space);
         // (home, a stage was created for it, switch to its stage when that is inactive)
         let (home, created, follow) = match &decision.action {
             RuleAction::Float => (Home::Pinned, false, false),
             RuleAction::Current | RuleAction::Ignore => (Home::Stage(active), false, false),
-            RuleAction::New => (Home::Stage(self.create_stage(display, None)), true, true),
+            RuleAction::New => (Home::Stage(self.create_stage(space, None)), true, true),
             RuleAction::Stage(name) => {
                 let focused = obs.focused == Some(id);
-                match self.find_named(name) {
+                match self.find_named(space, name) {
                     Some(s) => (Home::Stage(s), false, focused),
                     None => (
-                        Home::Stage(self.create_stage(display, Some(name.clone()))),
+                        Home::Stage(self.create_stage(space, Some(name.clone()))),
                         true,
                         focused,
                     ),
@@ -101,7 +105,7 @@ impl Model {
                 NativeTarget::Fresh if self.stage_is_empty(active) => {
                     (Home::Stage(active), false, false)
                 }
-                NativeTarget::Fresh => (Home::Stage(self.create_stage(display, None)), true, true),
+                NativeTarget::Fresh => (Home::Stage(self.create_stage(space, None)), true, true),
             },
         };
         let front_stage = match home {
@@ -132,6 +136,8 @@ impl Model {
                 restore,
                 parked: false,
                 original: None,
+                space,
+                sticky: false,
             },
         );
         if let Home::Stage(s) = home
@@ -159,7 +165,7 @@ impl Model {
                 return actions;
             }
             self.park_window(id, &mut actions);
-            self.strip_enter(display, s);
+            self.strip_enter(space, s);
         }
         self.normalize_slots();
         actions.push(Action::StateChanged);
@@ -196,35 +202,39 @@ impl Model {
         actions
     }
 
-    /// Switches the target's display to `target`: saves the active stage's live frames, z-order
+    /// Switches the target's Space to `target`: saves the active stage's live frames, z-order
     /// and key window from `obs`, parks it, restores the target's frames, raises its windows
-    /// back to front and focuses its key window last. A no-op for the active stage or an
-    /// unknown one. Pinned windows are untouched. In the strip the stage left behind takes the
-    /// target's slot (or enters the strip if the target had none).
+    /// back to front and focuses its key window last. A no-op for the active stage, an
+    /// unknown one, or one on a Space its display does not show now (acting there would make
+    /// macOS switch Spaces). Pinned windows are untouched. In the strip the stage left behind
+    /// takes the target's slot (or enters the strip if the target had none).
     pub fn switch_to(&mut self, target: StageId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let Some(display) = self.stage(target).map(|s| s.display) else {
+        let Some(space) = self.stage(target).map(|s| s.space) else {
             return actions;
         };
-        let current = self.ensure_active(display);
+        if !self.is_shown_space(space) {
+            return actions;
+        }
+        let current = self.ensure_active(space);
         if current == target {
             return actions;
         }
-        self.revealed.remove(&display);
+        self.revealed.remove(&space);
         self.capture(current, obs);
         self.park_stage(current, &mut actions);
         let t = self.tick();
         if let Some(s) = self.stage_mut(current) {
             s.last_active = t;
         }
-        self.active.insert(display, target);
+        self.active.insert(space, target);
         let t = self.tick();
         if let Some(s) = self.stage_mut(target) {
             s.last_active = t;
         }
         if self.strip_eligible(current) {
-            self.strip_swap(display, current, target);
-        } else if let Some(slots) = self.slots.get_mut(&display) {
+            self.strip_swap(space, current, target);
+        } else if let Some(slots) = self.slots.get_mut(&space) {
             slots.retain(|&s| s != target);
         }
         self.drop_if_dead(current, &mut actions);
@@ -234,13 +244,11 @@ impl Model {
         actions
     }
 
-    /// Switches to stage `n` (1-based, creation order); a no-op when there is none.
+    /// Switches to stage `n` (1-based, creation order) of the current Space; a no-op when
+    /// there is none.
     pub fn switch_to_number(&mut self, n: usize, obs: &Observation) -> Vec<Action> {
-        match n
-            .checked_sub(1)
-            .and_then(|i| self.stages.get(i))
-            .map(|s| s.id)
-        {
+        let space = self.current_space_for(obs);
+        match self.stage_by_number(space, n) {
             Some(s) => self.switch_to(s, obs),
             None => Vec::new(),
         }
@@ -250,28 +258,31 @@ impl Model {
     /// stage, at the front, as its key window. The view does not switch: if the target is
     /// inactive the window is parked; if the source is the active stage and the window was
     /// focused, the source's next front window takes focus. A pinned window is unpinned.
-    /// `Target::Number(n)` creates a stage only when `n == count + 1`, else is a no-op for a
-    /// missing stage. Sending the last window out leaves the active stage empty.
+    /// Stages are those of the window's Space: `Target::Number(n)` creates a stage only when
+    /// `n == count + 1`, else is a no-op for a missing stage. Sending the last window out
+    /// leaves the active stage empty.
     pub fn send_window(&mut self, id: WindowId, target: Target, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(id) = self.resolve_standard(id) else {
             return actions;
         };
         let src = self.windows[&id].home;
-        let src_display = match src {
-            Home::Stage(s) => self.stage(s).map_or(self.displays[0].id, |s| s.display),
-            Home::Pinned => self.known_display(self.windows[&id].meta.display),
-        };
+        let space = self.windows[&id].space;
+        let count = self.stages_in(space).count();
         let dest = match target {
-            Target::Number(n) if n >= 1 && n <= self.stages.len() => self.stages[n - 1].id,
-            Target::Number(n) if n == self.stages.len() + 1 => self.create_stage(src_display, None),
-            Target::Number(_) => return actions,
-            Target::New => self.create_stage(src_display, None),
-            Target::Named(name) => match self.find_named(&name) {
+            Target::Number(n) if n >= 1 && n <= count => match self.stage_by_number(space, n) {
                 Some(s) => s,
-                None => self.create_stage(src_display, Some(name)),
+                None => return actions,
+            },
+            Target::Number(n) if n == count + 1 => self.create_stage(space, None),
+            Target::Number(_) => return actions,
+            Target::New => self.create_stage(space, None),
+            Target::Named(name) => match self.find_named(space, &name) {
+                Some(s) => s,
+                None => self.create_stage(space, Some(name)),
             },
         };
+        let src_display = self.space_display(space);
         if src == Home::Stage(dest) {
             return actions;
         }
@@ -327,31 +338,35 @@ impl Model {
             self.drop_if_dead(s, &mut actions);
         }
         if !dest_active {
-            self.strip_enter(dest_display, dest);
+            self.strip_enter(space, dest);
         }
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
     }
 
-    /// Moves every window of `stage` into the active stage of its display (a shift-click on a
+    /// Moves every window of `stage` into the active stage of its Space (a shift-click on a
     /// strip card). The moved windows go in front, keep their order, are restored and raised
     /// back to front, and the moved stage's key window is focused last. The emptied stage
-    /// goes away unless it is declared in config. A no-op for the active stage or an unknown
-    /// one. Pinned windows are untouched.
+    /// goes away unless it is declared in config. A no-op for the active stage, an unknown
+    /// one or one on a Space not shown now. Pinned windows are untouched.
     pub fn merge_into_active(&mut self, stage: StageId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(src) = self.stage(stage) else {
             return actions;
         };
         let display = src.display;
+        let space = src.space;
         let members = src.windows.clone();
         let src_key = src.key;
-        let active = self.ensure_active(display);
+        if !self.is_shown_space(space) {
+            return actions;
+        }
+        let active = self.ensure_active(space);
         if active == stage {
             return actions;
         }
-        self.revealed.remove(&display);
+        self.revealed.remove(&space);
         self.capture(active, obs);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
@@ -407,19 +422,24 @@ impl Model {
         actions
     }
 
-    /// Pins a window (a child stands for its parent) so it shows on every stage and is never
-    /// parked, or unpins it into the active stage of its display.
+    /// Pins a window (a child stands for its parent) so it shows on every stage of its Space
+    /// and is never parked, or unpins it into the active stage of its Space. A window seen on
+    /// every Space (sticky) stays pinned.
     pub fn toggle_pin(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(id) = self.resolve_standard(id) else {
             return actions;
         };
+        if self.windows[&id].sticky {
+            return actions;
+        }
         let display = self.known_display(self.windows[&id].meta.display);
+        let space = self.windows[&id].space;
         let mut group = vec![id];
         group.extend(self.children_of(id));
         match self.windows[&id].home {
             Home::Pinned => {
-                let stage = self.ensure_active(display);
+                let stage = self.ensure_active(space);
                 if let Some(s) = self.stage_mut(stage) {
                     s.windows.insert(0, id);
                     s.key = Some(id);
@@ -459,13 +479,16 @@ impl Model {
     }
 
     /// Where Apple puts a new standard window of app `pid` (the window itself not yet
-    /// managed): see [`Model::add_window`] for `native`.
+    /// managed) on the Space `display` shows: see [`Model::add_window`] for `native`. The
+    /// app's windows on other Spaces do not count (each Space has its own stages).
     pub fn native_target(&self, pid: Pid, display: DisplayId) -> NativeTarget {
-        let active = self.active_stage(display);
+        let space = self.current_space(display);
+        let active = self.active_stage_in(space);
         let app: Vec<&WindowState> = self
             .windows
             .values()
             .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard)
+            .filter(|w| w.space == space || w.sticky)
             .collect();
         if app
             .iter()
@@ -484,7 +507,7 @@ impl Model {
                 Home::Stage(s) => self.stage(s),
                 Home::Pinned => None,
             })
-            .filter(|s| s.display == display)
+            .filter(|s| s.space == space)
             .max_by_key(|s| s.last_active)
             .map_or(NativeTarget::Fresh, |s| NativeTarget::Join(s.id))
     }
@@ -495,7 +518,7 @@ impl Model {
 
     /// Brings app `pid`'s windows from other stages into the active stage instead of
     /// switching (Shift held on a Dock click or ⌘Tab). With [`AppWindows::AllAtOnce`] every
-    /// standard window of the app in an inactive stage of the display comes, most recently
+    /// standard window of the app in an inactive stage of the current Space comes, most recently
     /// active stage first and front to back within each; with [`AppWindows::OneAtATime`] only
     /// the app's most recent one. They go in front of the active stage's windows, are restored
     /// and raised, and the first is focused. Stages left empty go away. A no-op (no actions)
@@ -533,16 +556,17 @@ impl Model {
         self.send_window(id, Target::New, obs)
     }
 
-    /// Moves app `pid`'s windows from the display's inactive stages into the active one
+    /// Moves app `pid`'s windows from the current Space's inactive stages into the active one
     /// (only the most recent one when `one`); see [`Model::bring_app_here`].
     fn gather_app(&mut self, pid: Pid, obs: &Observation, one: bool) -> Vec<Action> {
         let mut actions = Vec::new();
         let display = self.current_display(obs);
-        let active = self.ensure_active(display);
+        let space = self.current_space(display);
+        let active = self.ensure_active(space);
         let mut sources: Vec<(u64, StageId, Vec<WindowId>)> = self
             .stages
             .iter()
-            .filter(|s| s.display == display && s.id != active)
+            .filter(|s| s.space == space && s.id != active)
             .map(|s| {
                 let mine: Vec<WindowId> = s
                     .windows
@@ -562,7 +586,7 @@ impl Model {
         if moving.is_empty() {
             return actions;
         }
-        self.revealed.remove(&display);
+        self.revealed.remove(&space);
         self.capture(active, obs);
         for &id in &moving {
             if let Some(Home::Stage(s)) = self.windows.get(&id).map(|w| w.home)
@@ -709,7 +733,7 @@ impl Model {
     }
 
     fn place_card(&mut self, stage: StageId, before: Option<StageId>) -> bool {
-        let Some(display) = self.stage(stage).map(|s| s.display) else {
+        let Some(space) = self.stage(stage).map(|s| s.space) else {
             return false;
         };
         match self.options.strip.order {
@@ -721,7 +745,7 @@ impl Model {
                 let recency: Vec<(StageId, u64)> =
                     self.stages.iter().map(|s| (s.id, s.last_active)).collect();
                 let age = |id: StageId| recency.iter().find(|r| r.0 == id).map_or(0, |r| r.1);
-                let slots = self.slots.entry(display).or_default();
+                let slots = self.slots.entry(space).or_default();
                 let old = slots.clone();
                 slots.retain(|&s| s != stage);
                 let at = before
@@ -760,6 +784,9 @@ impl Model {
 
     /// An app became frontmost (Dock click, ⌘Tab).
     ///
+    /// Only the current Space counts: an app with no window here is left to macOS (which
+    /// may switch Spaces, following "When switching to an application, switch to a Space
+    /// with open windows for the application"; the arrival there is [`Model::arrive`]).
     /// The candidate is the stage of the app's focused window in `obs` (when it is inactive),
     /// else the most recently active stage holding a window of the app. With
     /// [`AppWindows::AllAtOnce`] nothing happens while the active stage holds a window of the
@@ -767,17 +794,19 @@ impl Model {
     /// window's stage wins even then.
     pub fn app_activated(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
         let display = self.current_display(obs);
-        let active = self.ensure_active(display);
+        let space = self.current_space(display);
+        let active = self.ensure_active(space);
         let present = self.windows.values().any(|w| {
             w.meta.pid == pid
                 && w.meta.role == WindowRole::Standard
-                && (w.home == Home::Stage(active) || w.home == Home::Pinned)
+                && (w.home == Home::Stage(active)
+                    || (w.home == Home::Pinned && (w.space == space || w.sticky)))
         });
         let focused_stage = obs
             .focused
             .and_then(|f| self.resolve_standard(f))
             .and_then(|f| self.windows.get(&f))
-            .filter(|w| w.meta.pid == pid)
+            .filter(|w| w.meta.pid == pid && w.space == space)
             .and_then(|w| match w.home {
                 Home::Stage(s) if !self.is_active(s) => Some(s),
                 _ => None,
@@ -785,7 +814,7 @@ impl Model {
         let most_recent = || {
             self.stages
                 .iter()
-                .filter(|s| !self.is_active(s.id))
+                .filter(|s| s.space == space && !self.is_active(s.id))
                 .filter(|s| {
                     s.windows
                         .iter()
@@ -808,7 +837,8 @@ impl Model {
     }
 
     /// A window got focus (for example through ⌘` or a click on a sliver). If it sits in an
-    /// inactive stage, switch to that stage so the focused window is never left parked.
+    /// inactive stage of a Space shown now, switch to that stage so the focused window is
+    /// never left parked. Focus on another Space's window is left to the Space change.
     pub fn window_focused(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
         match self.resolve_standard(id).and_then(|w| self.stage_of(w)) {
             Some(s) if !self.is_active(s) => self.switch_to(s, obs),
@@ -822,13 +852,13 @@ impl Model {
     /// A no-op when the active stage is empty and nothing is pending.
     pub fn reveal_desktop(&mut self, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let display = self.current_display(obs);
-        let current = self.ensure_active(display);
+        let space = self.current_space_for(obs);
+        let current = self.ensure_active(space);
         let current_empty = self.stage(current).is_some_and(|s| s.windows.is_empty());
-        if let Some(r) = self.revealed.get(&display).copied()
+        if let Some(r) = self.revealed.get(&space).copied()
             && r.desktop == current
             && current_empty
-            && self.is_most_recent_inactive(display, r.from)
+            && self.is_most_recent_inactive(space, r.from)
         {
             return self.switch_to(r.from, obs);
         }
@@ -841,15 +871,15 @@ impl Model {
         if let Some(s) = self.stage_mut(current) {
             s.last_active = t;
         }
-        let desktop = self.create_stage(display, None);
-        self.active.insert(display, desktop);
+        let desktop = self.create_stage(space, None);
+        self.active.insert(space, desktop);
         let t = self.tick();
         if let Some(s) = self.stage_mut(desktop) {
             s.last_active = t;
         }
-        self.strip_enter(display, current);
+        self.strip_enter(space, current);
         self.revealed.insert(
-            display,
+            space,
             Reveal {
                 from: current,
                 desktop,
@@ -860,7 +890,7 @@ impl Model {
         actions
     }
 
-    fn is_most_recent_inactive(&self, display: DisplayId, stage: StageId) -> bool {
+    fn is_most_recent_inactive(&self, space: SpaceId, stage: StageId) -> bool {
         let Some(s) = self.stage(stage) else {
             return false;
         };
@@ -868,7 +898,7 @@ impl Model {
             && self
                 .stages
                 .iter()
-                .filter(|o| o.display == display && !self.is_active(o.id))
+                .filter(|o| o.space == space && !self.is_active(o.id))
                 .all(|o| o.last_active <= s.last_active)
     }
 
@@ -921,10 +951,11 @@ impl Model {
         actions
     }
 
-    /// Replaces the display list (first = main). Stages on a display that is gone move to the
-    /// main display; the one that was active there becomes inactive and is parked, and windows
-    /// already parked are parked again on the main display. New displays get an empty active
-    /// stage. An empty list is ignored.
+    /// Replaces the display list (first = main). Spaces of a display that is gone are
+    /// folded into the main display's current Space: their stages move there, the ones that
+    /// were active become inactive and are parked, and windows already parked are parked
+    /// again on the main display. New displays get a Space with an empty active stage. An
+    /// empty list is ignored.
     pub fn set_displays(&mut self, displays: Vec<Display>) -> Vec<Action> {
         let mut actions = Vec::new();
         if displays.is_empty() {
@@ -933,40 +964,54 @@ impl Model {
         self.displays = displays;
         let main = self.displays[0].id;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
-        let gone: Vec<DisplayId> = self
-            .stages
-            .iter()
-            .map(|s| s.display)
-            .filter(|d| !live.contains(d))
-            .collect();
-        let moved: Vec<StageId> = self
-            .stages
+        if !self.current.contains_key(&main) {
+            let s = self.new_space(main);
+            self.current.insert(main, s);
+        }
+        let main_space = self.current_space(main);
+        let gone: Vec<SpaceId> = self
+            .spaces
             .iter()
             .filter(|s| !live.contains(&s.display))
             .map(|s| s.id)
             .collect();
-        for d in &gone {
-            self.active.remove(d);
-            self.revealed.remove(d);
+        let moved: Vec<StageId> = self
+            .stages
+            .iter()
+            .filter(|s| gone.contains(&s.space) || !live.contains(&s.display))
+            .map(|s| s.id)
+            .collect();
+        for g in &gone {
+            self.active.remove(g);
+            self.revealed.remove(g);
+            self.slots.remove(g);
         }
+        self.current.retain(|d, _| live.contains(d));
+        self.spaces.retain(|s| live.contains(&s.display));
         for s in &moved {
             if let Some(st) = self.stage_mut(*s) {
                 st.display = main;
+                st.space = main_space;
             }
         }
         let ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for id in ids {
-            let home = self.windows[&id].home;
-            let on_gone = match home {
-                Home::Stage(s) => moved.contains(&s),
-                Home::Pinned => !live.contains(&self.windows[&id].meta.display),
+            let on_gone = {
+                let w = &self.windows[&id];
+                gone.contains(&w.space) || !live.contains(&w.meta.display)
             };
             if on_gone && let Some(w) = self.windows.get_mut(&id) {
                 w.meta.display = main;
+                w.space = main_space;
             }
         }
         for d in live {
-            self.ensure_active(d);
+            if !self.current.contains_key(&d) {
+                let s = self.new_space(d);
+                self.current.insert(d, s);
+            }
+            let space = self.current_space(d);
+            self.ensure_active(space);
         }
         for s in moved {
             if !self.is_active(s) {
@@ -984,7 +1029,10 @@ impl Model {
     pub fn set_named_stages(&mut self, names: Vec<String>) -> Vec<Action> {
         let mut actions = Vec::new();
         self.options.named_stages = names.clone();
-        self.declare_stages(&names);
+        let spaces: Vec<SpaceId> = self.spaces.iter().map(|s| s.id).collect();
+        for space in spaces {
+            self.declare_stages(space, &names);
+        }
         let ids: Vec<StageId> = self.stages.iter().map(|s| s.id).collect();
         for s in ids {
             self.drop_if_dead(s, &mut actions);

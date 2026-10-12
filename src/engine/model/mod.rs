@@ -6,8 +6,16 @@
 //! safe restore frame until it is shown again**, and whenever the model forgets a parked window
 //! it first emits a [`Action::SetFrame`] that brings it back. [`Model::unpark_all`] therefore
 //! always covers every parked window.
+//!
+//! **Spaces.** Every Space (Desktop) has its own Stage Manager, as Apple's does: its own
+//! stages, active stage, strip order and recency. A stage belongs to one Space ([`SpaceId`],
+//! a synthetic id the model gives each Space as the platform reports visits, see
+//! [`Model::arrive`]); operations act on the current Space of a display only, so nothing
+//! ever moves, raises or focuses a window on another Space (which would make macOS switch
+//! Spaces). Only the safety paths ([`Model::unpark_all`]) cover windows on every Space.
 
 mod ops;
+mod spaces;
 mod strip;
 #[cfg(test)]
 mod tests;
@@ -21,6 +29,7 @@ use super::park::{clamp_to_visible, is_parked, park_frame};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
+pub use spaces::{Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 
 /// A process ID.
@@ -92,6 +101,8 @@ pub struct Stage {
     pub name: Option<String>,
     /// The display the stage lives on.
     pub display: DisplayId,
+    /// The Space (Desktop) the stage lives on; its windows are all there.
+    pub space: SpaceId,
     /// Standard member windows, front to back.
     pub windows: Vec<WindowId>,
     /// The window focused last time the stage was left; focused again on return.
@@ -124,6 +135,11 @@ pub struct WindowState {
     /// the strip, or narrowed it). Quit, unpark-all and every safety path put the window
     /// back here; the user resizing the window forgets it, and moving it carries it along.
     pub original: Option<Rect>,
+    /// The Space the window was last seen on (for a stage member, its stage's Space).
+    pub space: SpaceId,
+    /// Seen on every Space ("Assign To: All Desktops"): treated as pinned, never moved
+    /// between Spaces and never counted when telling Spaces apart.
+    pub sticky: bool,
 }
 
 /// The platform's view at decision time.
@@ -223,16 +239,28 @@ const FALLBACK_DISPLAY: Display = Display {
 pub struct Model {
     /// Displays; the first is the main display.
     pub(crate) displays: Vec<Display>,
-    /// Stages in creation order (stage N = `stages[N - 1]`).
+    /// Stages in creation order (stage N of a Space = its Nth stage in this list).
     pub(crate) stages: Vec<Stage>,
     /// Every managed window, standard and child.
     pub(crate) windows: BTreeMap<WindowId, WindowState>,
-    /// The active stage per display.
-    pub(crate) active: HashMap<DisplayId, StageId>,
-    /// Strip slots per display, top to bottom (native order).
-    pub(crate) slots: HashMap<DisplayId, Vec<StageId>>,
-    /// Pending desktop reveal per display.
-    pub(crate) revealed: HashMap<DisplayId, Reveal>,
+    /// The active stage per Space.
+    pub(crate) active: HashMap<SpaceId, StageId>,
+    /// Strip slots per Space, top to bottom (native order).
+    pub(crate) slots: HashMap<SpaceId, Vec<StageId>>,
+    /// Pending desktop reveal per Space.
+    pub(crate) revealed: HashMap<SpaceId, Reveal>,
+    /// Spaces visited so far (and the ones of a new display), in creation order.
+    pub(crate) spaces: Vec<Space>,
+    /// The Space each display shows now.
+    pub(crate) current: HashMap<DisplayId, SpaceId>,
+    /// Next synthetic Space id.
+    pub(crate) next_space: u64,
+    /// Saved Spaces from `state.json` not visited yet this run: their stages are rebuilt on
+    /// the first visit ([`Model::arrive`]) and saved again untouched until then.
+    pub(crate) leftovers: Vec<super::persist::SavedSpace>,
+    /// Windows that moved to the current Space at a Space change, with the Space they came
+    /// from: seen there again later, they are on every Space (sticky).
+    pub(crate) moved_from: HashMap<WindowId, SpaceId>,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -242,9 +270,9 @@ pub struct Model {
 }
 
 impl Model {
-    /// A model for `displays` (the first is the main display). Declared named stages are
-    /// created on the main display; the first becomes active, else an empty stage does.
-    /// Every other display gets an empty active stage.
+    /// A model for `displays` (the first is the main display), each showing a Space of its
+    /// own. Declared named stages are created on the main display's Space; the first becomes
+    /// active, else an empty stage does. Every other display gets an empty active stage.
     pub fn new(displays: Vec<Display>, options: ModelOptions) -> Self {
         let displays = if displays.is_empty() {
             vec![FALLBACK_DISPLAY]
@@ -258,15 +286,26 @@ impl Model {
             active: HashMap::new(),
             slots: HashMap::new(),
             revealed: HashMap::new(),
+            spaces: Vec::new(),
+            current: HashMap::new(),
+            next_space: 1,
+            leftovers: Vec::new(),
+            moved_from: HashMap::new(),
             clock: 0,
             next_stage: 1,
             options,
         };
-        let names = model.options.named_stages.clone();
-        model.declare_stages(&names);
         let ids: Vec<DisplayId> = model.displays.iter().map(|d| d.id).collect();
+        for id in &ids {
+            let space = model.new_space(*id);
+            model.current.insert(*id, space);
+        }
+        let names = model.options.named_stages.clone();
+        let main = model.current_space(ids[0]);
+        model.declare_stages(main, &names);
         for id in ids {
-            model.ensure_active(id);
+            let space = model.current_space(id);
+            model.ensure_active(space);
         }
         model.normalize_slots();
         model
@@ -284,7 +323,7 @@ impl Model {
         &self.displays[0]
     }
 
-    /// Stages in creation order (stage N is `stages()[N - 1]`).
+    /// Stages of every Space in creation order (see [`Model::stages_in`] for one Space's).
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -294,14 +333,24 @@ impl Model {
         self.stages.iter().find(|s| s.id == id)
     }
 
-    /// The 1-based hotkey number of a stage.
+    /// The 1-based hotkey number of a stage: its place among its Space's stages.
     pub fn stage_number(&self, id: StageId) -> Option<usize> {
-        self.stages.iter().position(|s| s.id == id).map(|i| i + 1)
+        let space = self.stage(id)?.space;
+        self.stages
+            .iter()
+            .filter(|s| s.space == space)
+            .position(|s| s.id == id)
+            .map(|i| i + 1)
     }
 
-    /// The active stage of a display.
+    /// The active stage of a display (on the Space it shows now).
     pub fn active_stage(&self, display: DisplayId) -> Option<StageId> {
-        self.active.get(&display).copied()
+        self.active.get(&self.current_space(display)).copied()
+    }
+
+    /// The active stage of a Space.
+    pub fn active_stage_in(&self, space: SpaceId) -> Option<StageId> {
+        self.active.get(&space).copied()
     }
 
     /// The active stage of the main display.
@@ -409,13 +458,15 @@ impl Model {
             .any(|n| n.eq_ignore_ascii_case(name))
     }
 
-    pub(crate) fn find_named(&self, name: &str) -> Option<StageId> {
+    /// The stage of `space` named `name` (case-insensitive).
+    pub(crate) fn find_named(&self, space: SpaceId, name: &str) -> Option<StageId> {
         self.stages
             .iter()
             .find(|s| {
-                s.name
-                    .as_deref()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                s.space == space
+                    && s.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
             })
             .map(|s| s.id)
     }
@@ -428,19 +479,26 @@ impl Model {
             .unwrap_or(self.displays[0].id)
     }
 
+    /// The Space an operation acts on: the one the current display shows.
+    pub(crate) fn current_space_for(&self, obs: &Observation) -> SpaceId {
+        self.current_space(self.current_display(obs))
+    }
+
     pub(crate) fn tick(&mut self) -> u64 {
         self.clock += 1;
         self.clock
     }
 
-    pub(crate) fn create_stage(&mut self, display: DisplayId, name: Option<String>) -> StageId {
+    /// A new stage on `space` (and its display).
+    pub(crate) fn create_stage(&mut self, space: SpaceId, name: Option<String>) -> StageId {
         let id = StageId(self.next_stage);
         self.next_stage += 1;
-        let display = self.known_display(display);
+        let display = self.space_display(space);
         self.stages.push(Stage {
             id,
             name,
             display,
+            space,
             windows: Vec::new(),
             key: None,
             last_active: 0,
@@ -448,26 +506,25 @@ impl Model {
         id
     }
 
-    /// Creates any declared stage that does not exist yet, on the main display.
-    pub(crate) fn declare_stages(&mut self, names: &[String]) {
-        let main = self.displays[0].id;
+    /// Creates any declared stage that does not exist yet on `space`.
+    pub(crate) fn declare_stages(&mut self, space: SpaceId, names: &[String]) {
         for name in names {
-            if self.find_named(name).is_none() {
-                self.create_stage(main, Some(name.clone()));
+            if self.find_named(space, name).is_none() {
+                self.create_stage(space, Some(name.clone()));
             }
         }
     }
 
-    /// Gives `display` an active stage if it has none: its first stage if any, else a new one.
-    pub(crate) fn ensure_active(&mut self, display: DisplayId) -> StageId {
-        if let Some(&s) = self.active.get(&display) {
+    /// Gives `space` an active stage if it has none: its first stage if any, else a new one.
+    pub(crate) fn ensure_active(&mut self, space: SpaceId) -> StageId {
+        if let Some(&s) = self.active.get(&space) {
             return s;
         }
-        let stage = match self.stages.iter().find(|s| s.display == display) {
+        let stage = match self.stages.iter().find(|s| s.space == space) {
             Some(s) => s.id,
-            None => self.create_stage(display, None),
+            None => self.create_stage(space, None),
         };
-        self.active.insert(display, stage);
+        self.active.insert(space, stage);
         let t = self.tick();
         if let Some(s) = self.stage_mut(stage) {
             s.last_active = t;
@@ -714,23 +771,22 @@ impl Model {
     }
 
     /// Removes a stage that is no longer alive. Children left in it (orphans) move to the
-    /// display's active stage and are shown, so no parked window is ever forgotten.
+    /// Space's active stage and are shown, so no parked window is ever forgotten.
     pub(crate) fn drop_if_dead(&mut self, stage: StageId, actions: &mut Vec<Action>) {
-        if self.stage(stage).is_none() || self.stage_is_alive(stage) {
+        let Some(space) = self.stage(stage).map(|s| s.space) else {
+            return;
+        };
+        if self.stage_is_alive(stage) {
             return;
         }
-        let display = self
-            .stage(stage)
-            .map(|s| s.display)
-            .unwrap_or(self.displays[0].id);
         let leftovers = self.children_in(Home::Stage(stage));
         self.stages.retain(|s| s.id != stage);
         self.revealed
             .retain(|_, r| r.from != stage && r.desktop != stage);
-        if let Some(slots) = self.slots.get_mut(&display) {
+        if let Some(slots) = self.slots.get_mut(&space) {
             slots.retain(|&s| s != stage);
         }
-        let to = self.ensure_active(display);
+        let to = self.ensure_active(space);
         for c in leftovers {
             if let Some(w) = self.windows.get_mut(&c) {
                 w.home = Home::Stage(to);
