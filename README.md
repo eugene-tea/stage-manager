@@ -280,7 +280,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
 | `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there) |
 | `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
-| `debug-frame ID X Y W H` | set a shown managed window's frame (only with `STAGE_MANAGER_TEST=1`) |
+| `debug-frame ID X Y W H` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`) |
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"

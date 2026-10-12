@@ -58,7 +58,8 @@ pub enum Command {
         /// Hold shift.
         shift: bool,
     },
-    /// Sets a shown managed window's frame through AX (needs `STAGE_MANAGER_TEST=1`).
+    /// Sets a shown managed window's frame through AX and brings it to the front (needs
+    /// `STAGE_MANAGER_TEST=1`).
     DebugFrame {
         /// The window id.
         id: u32,

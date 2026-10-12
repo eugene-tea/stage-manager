@@ -978,10 +978,22 @@ impl Controller {
                 }
                 let shown = self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| !w.parked);
                 match ob.window(id) {
-                    Some(w) if shown => match w.element.set_frame(frame) {
-                        Ok(()) => json!({ "ok": true }),
-                        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-                    },
+                    Some(w) if shown => {
+                        // Placed and brought to the front, so a test's pointer path is over it.
+                        let now = Instant::now();
+                        self.echoes.touch_window(id, now);
+                        self.echoes.touch_app(w.pid, now);
+                        let result = w
+                            .element
+                            .set_frame(frame)
+                            .and_then(|_| w.element.raise())
+                            .and_then(|_| w.element.set_main(true))
+                            .and_then(|_| AxElement::application(w.pid).set_frontmost(true));
+                        match result {
+                            Ok(()) => json!({ "ok": true }),
+                            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                        }
+                    }
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }

@@ -305,7 +305,10 @@ def phase_m3():
     do("send", 2, w[3])
     do("send", 3, w[4])
     s = state()
-    check(stage_titles(s) == {1: ["Fixture 1", "Fixture 2"], 2: ["Fixture 3"], 3: ["Fixture 4"]}, "send builds stages 2 and 3")
+    # A stage lists its windows front to back: the first start took the window server's order.
+    front_first = z_titles(["Fixture 1", "Fixture 2"])
+    check(stage_titles(s) == {1: front_first, 2: ["Fixture 3"], 3: ["Fixture 4"]},
+          f"send builds stages 2 and 3 ({stage_titles(s)}, stage 1 front to back {front_first})")
     check(s["strip"] == [2, 3], "stages 2 and 3 are strip cards")
     consistent("after send")
 
@@ -632,6 +635,16 @@ def phase_native():
     start_extra("c", 1)
     subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
     time.sleep(1.0)
+    # Recency comes from the window server's z-order at launch (orderBack and `open -b` from
+    # a background shell do not order the apps predictably): each app's frontmost window.
+    wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["c"][0]])
+    pid_of = {w["pid"]: k for k in ("a", "c") for w in fixture_windows([EXTRA[k][0]])[0]}
+    best = {}
+    for w in wins:
+        if w["z"] is not None:
+            k = pid_of[w["pid"]]
+            best[k] = min(best.get(k, 1 << 30), w["z"])
+    expect_strip = [{"a": {"Alpha 1", "Alpha 2"}, "c": {"Charlie 1"}}[k] for k in sorted(best, key=best.get)]
     s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
     if not check(s is not None, "app up with three fixture apps"):
         return
@@ -640,7 +653,7 @@ def phase_native():
           f"first start: one stage per app ({stage_titles(s)})")
     check(active_titles(s) == {"Bravo 1"}, "first start: the frontmost app's stage is active")
     strip = [sets[n] for n in s["strip"]]
-    check(strip == [{"Alpha 1", "Alpha 2"}, {"Charlie 1"}], f"first start: the strip in recency order ({strip})")
+    check(strip == expect_strip, f"first start: the strip in recency order by z ({strip}, expected {expect_strip})")
     consistent("first start")
 
     say("-- a newly opened app gets a new stage")
