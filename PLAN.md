@@ -86,5 +86,6 @@ Each milestone ends with a commit and a manual test checklist; `cargo test` and
 
 ## Out of scope (prototype)
 
-Multi-monitor beyond the main display (the model keys stages by display), animations,
-fullscreen windows (ignored), drag and drop between stages.
+Multi-monitor beyond the main display (the model keys stages by display), fullscreen windows
+(ignored). (Switch animations, drawn with snapshots, and drag and drop came later; see
+`docs/UX-SPEC.md`.)

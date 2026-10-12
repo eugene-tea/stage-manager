@@ -14,7 +14,9 @@
 //! `STAGE_MANAGER_ONLY` (comma-separated bundle ids; their offscreen windows count too, so a
 //! window moved offscreen still shows), `STAGE_MANAGER_DEMO_NUMBERS=1` (number badges),
 //! `STAGE_MANAGER_DEMO_AUTOHIDE=0|1` (overrides Apple's `AutoHide`),
-//! `STAGE_MANAGER_THUMBNAIL_MS` (capture interval).
+//! `STAGE_MANAGER_THUMBNAIL_MS` (capture interval), `STAGE_MANAGER_DEMO_MOTION=1` (a card
+//! click plays the switch animation with snapshots of the windows involved; the real windows
+//! never move, so the snapshots land over them).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -35,7 +37,7 @@ use crate::platform::permissions::PermissionState;
 use crate::platform::{logging, native_settings, windows};
 use crate::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
 use crate::ui::strip;
-use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripSnapshot};
+use crate::ui::strip_model::{self, CardSnapshot, CardWindow, MovingWindow, StripEvent, StripSnapshot, Transition};
 
 /// Most cards the demo shows when the screen is unknown.
 const MAX_CARDS: usize = 6;
@@ -62,6 +64,8 @@ pub struct DemoFlags {
     pub native: bool,
     /// Most cards.
     pub capacity: usize,
+    /// Card clicks play the switch animation (`STAGE_MANAGER_DEMO_MOTION`).
+    pub motion: bool,
 }
 
 /// Builds the fake stages from `windows` (front to back).
@@ -107,6 +111,10 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags, style: Arc<StripS
     let active = front.and_then(|id| stages.iter().position(|s| s.iter().any(|w| w.id == id)));
     let active_frames =
         active.map(|i| stages[i].iter().filter(|w| w.onscreen).map(|w| w.frame).collect()).unwrap_or_default();
+    let active_windows = match active.filter(|_| flags.motion) {
+        Some(i) => stages[i].iter().filter(|w| w.onscreen).map(|w| CardWindow { id: w.id, pid: w.pid, frame: w.frame }).collect(),
+        None => Vec::new(),
+    };
 
     let cards = stages
         .iter()
@@ -138,6 +146,9 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags, style: Arc<StripS
         active_frames,
         window_drag: None,
         announce: false,
+        active_windows,
+        transition: None,
+        parked: None,
     }
 }
 
@@ -156,6 +167,7 @@ struct Demo {
     only: Option<Vec<String>>,
     bundles: HashMap<i32, Option<String>>,
     last: Option<StripSnapshot>,
+    transitions: u64,
     _timer: Option<Retained<NSTimer>>,
 }
 
@@ -287,6 +299,29 @@ impl Demo {
         }
     }
 
+    /// With `STAGE_MANAGER_DEMO_MOTION`: plays a switch to `stage`'s card. The active windows'
+    /// snapshots shrink into the card and the card's windows' snapshots grow to their frames;
+    /// no window moves.
+    fn play_switch(&mut self, stage: u64) {
+        let Some(mut s) = self.last.clone().filter(|_| self.flags.motion) else { return };
+        let Some(card) = s.cards.iter().find(|c| c.stage == stage).cloned() else { return };
+        self.transitions += 1;
+        let id = self.transitions;
+        let moving = |w: &CardWindow| MovingWindow { window: *w, stage: Some(stage) };
+        s.transition = Some(Transition {
+            id,
+            outgoing: s.active_windows.iter().rev().map(moving).collect(),
+            incoming: card.windows.iter().rev().map(moving).collect(),
+        });
+        tracing::info!(id, stage, "demo: playing a switch");
+        strip_model::present(s.clone());
+        s.transition = None;
+        s.parked = Some(id);
+        let parked = RcBlock::new(move |_t: NonNull<NSTimer>| strip_model::present(s.clone()));
+        // SAFETY: the block runs on the main run loop only; the run loop keeps the timer.
+        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.04, false, &parked) };
+    }
+
     fn on_menu(&mut self, action: MenuAction) {
         match action {
             MenuAction::ToggleStrip => {
@@ -334,7 +369,12 @@ pub fn run() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .unwrap_or(Config::default().strip.thumbnail_interval_ms);
     strip::install(mtm, interval);
-    strip_model::set_event_sink(|event| tracing::info!(?event, "demo: strip event"));
+    strip_model::set_event_sink(|event| {
+        tracing::info!(?event, "demo: strip event");
+        if let StripEvent::CardClicked { stage, shift: false } = event {
+            with_demo(|d| d.play_switch(stage));
+        }
+    });
 
     let only = std::env::var("STAGE_MANAGER_ONLY")
         .ok()
@@ -347,6 +387,7 @@ pub fn run() -> ExitCode {
         hide_recent_apps,
         native: std::env::var("STAGE_MANAGER_DEMO_LAYOUT").map_or(true, |v| v != "chunks"),
         capacity: MAX_CARDS,
+        motion: env_flag("STAGE_MANAGER_DEMO_MOTION").unwrap_or(false),
     };
     let numbers = env_flag("STAGE_MANAGER_DEMO_NUMBERS");
     tracing::info!(?only, ?flags, interval, "demo settings");
@@ -368,6 +409,7 @@ pub fn run() -> ExitCode {
         only,
         bundles: HashMap::new(),
         last: None,
+        transitions: 0,
         _timer: None,
     };
     demo.menu.update(&demo.menu_state());
@@ -418,7 +460,7 @@ mod tests {
         DemoWindow { id, pid, frame: Rect::new(300.0 + id as f64, 100.0, 500.0, 400.0), onscreen }
     }
 
-    const FLAGS: DemoFlags = DemoFlags { user_visible: true, hide_recent_apps: false, native: false, capacity: 6 };
+    const FLAGS: DemoFlags = DemoFlags { user_visible: true, hide_recent_apps: false, native: false, capacity: 6, motion: false };
 
     fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot {
         super::demo_snapshot(windows, flags, Arc::new(StripStyle::default()))
@@ -461,5 +503,8 @@ mod tests {
         let ids: Vec<Vec<u32>> = s.cards.iter().map(|c| c.windows.iter().map(|w| w.id).collect()).collect();
         assert_eq!(ids, vec![vec![10, 11], vec![20]]);
         assert!(s.cards.iter().all(|c| c.name.is_none()));
+        assert!(s.active_windows.is_empty(), "no snapshots of real windows unless asked");
+        let s = demo_snapshot(&list, DemoFlags { native: true, motion: true, ..FLAGS });
+        assert_eq!(s.active_windows.iter().map(|w| w.id).collect::<Vec<_>>(), [1, 2]);
     }
 }

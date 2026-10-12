@@ -1,5 +1,7 @@
-//! AppKit UI: status item and strip panel.
+//! AppKit UI: status item, strip panel and the motion overlay.
 
+pub mod motion_math;
+pub mod overlay;
 pub mod status_menu;
 pub mod strip;
 pub mod strip_demo;

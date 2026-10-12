@@ -37,6 +37,9 @@ whose default is Apple's value (`stage-manager config --explain <key>`).
 | Turning Stage Manager on | moves and resizes nothing (a window at x = −6, 1800 wide, stays) | same | — |
 | Switching stages | each window back at exactly its own frame, even over the strip | same | `[windows] fit = "move"` / `"narrow"` keeps windows clear of the strip |
 | A window over the strip | the strip hides while it overlaps | same | — |
+| The strip's level | below windows: a window moved over it covers it (owner, 10-12) | same; above windows only while a window or card is dragged over it or the edge reveals it over a window | `[strip] level = "above_windows"` |
+| Switching | windows grow from their card and shrink into their slot on the spring | same, drawn with snapshots (deviation 1) | `[animation]` |
+| Drag a card up or down in the strip | nothing (Apple's strip cannot be reordered) | moves the card to that slot (an extension, invisible until used) | `[strip] reorder` |
 | Edge tab, launch reveal | none | off | `[reveal] edge_tab`, `launch_reveal` |
 | Card numbers, stage names | none | off | `[strip] show_numbers`, `show_names` |
 | Global hotkeys | none | off | `[hotkeys] enabled` |
@@ -107,6 +110,16 @@ Apple's strip is **slot stable, not "most recent first"**. Every switch was a sw
 We implement exactly this (`strip.order = "native"`). `"fixed"` (creation order, matching
 the hotkey numbers) is an option.
 
+**Reorder (an extension, `[strip] reorder = true`).** Apple's strip cannot be reordered by
+dragging. Ours: press a card and drag it up or down within the strip column; the card
+follows the pointer, the others make room on the spring, and on release it takes the slot
+under the pointer (the gap between the cards whose middles are above and below it). The new
+order is saved; in Apple's order the swap rule above carries on from it, and in `"fixed"`
+order the stage moves in creation order (its hotkey number follows the strip). A card
+dragged past the column turns into the drag-out ghost (below); back over the column it
+follows the pointer again. The hit test already tells a gap from a card's middle so that a
+card-on-card merge can be added later; it is not built.
+
 ## Transitions
 
 - **Trigger:** a card click acts on **mouse-up**. Motion starts within one frame.
@@ -131,7 +144,7 @@ the hotkey numbers) is an option.
 | Click a card's app icon | All of the app's windows, also those in other stages (MacMost; Apple's docs are silent) | Switches to the card's stage and brings the app's windows from other stages there |
 | ⌘M | The window goes to the strip, not the Dock | Same: parked as a stage of its own, then un-minimized there (deviation 7) |
 | Drag card into main area | The window grows to full size as it leaves the strip, follows the pointer, and joins the **current** stage on drop | Same gesture: a press that moves more than 4 pt lifts the card; a ghost of its front window follows the pointer and grows from thumbnail to window size over the 260 pt past the strip's edge, the grab point sliding into the title bar. Released in the main area, the stage's windows join the current stage and the front window lands with its title bar under the pointer (clamped onto the screen); the others keep their saved frames. Released over the strip: cancelled. See deviation 5 |
-| Drag window onto strip | The window shrinks to card size while over the strip; on drop it becomes **its own stage** in a strip slot (settles in about 400 ms) | Same outcome: while a managed window is dragged by its title bar, the strip slides in once the pointer is over the strip area and shows a highlighted placeholder card in the next slot (the other cards make room). Released there, the window becomes its own stage, its card takes the slot, and its pre-drag frame is its saved frame. See deviation 5 |
+| Drag window onto strip | The window shrinks to card size under the pointer as soon as the pointer is over the strip and the cards make room where it is; on drop it becomes **its own stage** in that slot (settles in about 400 ms) | While a managed window is dragged by its title bar and the pointer is over the strip column, the strip comes above windows (and slides in if hidden), a card-sized snapshot of the window, turned like a card, follows the pointer (every drag event), and the cards open a gap at the slot under the pointer on the spring. Released there, the window becomes its own stage, its snapshot shrinks into the gap and becomes its card, and its pre-drag frame is its saved frame. Leaving the column takes the snapshot away and the strip back below windows. See deviation 5 |
 | Dock click or ⌘Tab to an app in the strip | Switches to that app's stage; the outgoing stage takes the vacated slot | Same |
 | Shift + Dock click on an app in another stage | (No native meaning) | Sugar: the app's windows come to the current stage instead (all of them; the most recent with One at a Time) |
 | Open an app with Shift held (Dock, Finder, Spotlight Shift-Return, Launchpad) | (No native meaning; the app opens in a new stage) | Sugar: its new window joins the current stage |
@@ -170,20 +183,40 @@ the hotkey numbers) is an option.
 
 ## Intentional deviations
 
-1. **No window animation.** Windows jump to their frames; the Accessibility API cannot
-   animate windows smoothly (out of scope for the prototype). The strip's own cards may
-   animate on the measured spring.
+1. **Window motion is drawn with snapshots.** The Accessibility API cannot scale a live
+   window, so switches are animated with snapshots in a click-through overlay above every
+   window (`[animation]`, on by default). At a switch the outgoing windows' snapshots
+   appear exactly over them, the windows park behind them, and the snapshots shrink into
+   the slot of their stage's card; the incoming windows' snapshots grow from their card to
+   their frames, and the windows come back behind them at 99 % of the motion
+   (`unpark_at`, ~430 ms); the snapshots go and the outgoing stage's card appears in the
+   same frame once they have landed. The incoming snapshots start within a frame or two of
+   the mouse-up; the outgoing ones hold still over their windows until those have parked
+   (`cover_ms` plus the parks, about two to four frames), so no real window ever peeks out
+   from behind a smaller snapshot. The desktop reveal, ⌘M, a window dropped on the strip
+   and a card dragged out land the same way. What remains: snapshots are stills (a full-size
+   snapshot of each shown window is kept fresh every `snapshot_interval_ms`, 2 s, and at
+   once when the pointer reaches or presses a card or ⌘ goes down for the app switcher, and
+   a window's last one before it parks is what grows back), so content that changed since
+   jumps when the motion ends; and during the ~430 ms an incoming window is not yet
+   clickable (a click or key press brings every incoming window in at once, and a click
+   where one is arriving is never taken as a wallpaper click).
 2. **Thumbnails are snapshots**, refreshed every 1–2 s through ScreenCaptureKit, not live
    window surfaces.
 3. **Parked windows leave a sliver** in the display's bottom-right corner (macOS keeps part
    of every window onscreen). Apple moves them off by private means.
 4. **One Space.** Stages live on the Space where the app runs; other Spaces are left alone.
 5. **Drag and drop stand-ins.** The Accessibility API cannot scale a live window, so a
-   window dragged over the strip keeps its size; a highlighted placeholder card in the slot
-   where its card will go stands in for Apple's shrinking window. A card dragged out of the
-   strip is shown by a ghost (a snapshot of its front window in a click-through panel) that
-   grows to the window's size, instead of the live window growing. Drop outcomes match
-   Apple's.
+   window dragged over the strip keeps its size under a card-sized snapshot of it (turned
+   like a card, under the pointer, above everything) that stands in for Apple's shrinking
+   window; the real window stays visible to the right of the column. A card dragged out of
+   the strip is shown by a ghost (a snapshot of its front window in a click-through panel)
+   that grows to the window's size, instead of the live window growing. Drop outcomes match
+   Apple's, in the slot under the pointer. (Before 10-12 the target felt "fairly far": the
+   placeholder always opened below the last card wherever the pointer was, a full strip then
+   put the new card in the least recently used card's slot, a third place, and the pointer
+   was polled every 60 ms; now the gap and the drop follow the pointer's slot on every drag
+   event.)
 6. **Desktop items** (`HideDesktop`) are read and logged but not acted on, since hiding
    Finder's desktop icons is outside a window manager's reach through public API.
 7. **⌘M** parks the window as a stage of its own and then un-minimizes it there, so macOS
@@ -203,5 +236,6 @@ the hotkey numbers) is an option.
 
 The edge-reveal and auto-hide delays (the laptop session's slide-ins followed window moves,
 not the edge), a hover's exact easing, Shift-click on a card holding several apps (ours
-merges the whole card), and Apple's thumbnail shadow and corner radius beyond what the
-screenshots show (ours: about 4 pt each).
+merges the whole card), Apple's thumbnail shadow and corner radius beyond what the
+screenshots show (ours: about 4 pt each), and the moving windows' shadow during a switch
+(ours: `[animation] shadow_*`, a guess).

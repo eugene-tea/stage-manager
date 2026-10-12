@@ -6,8 +6,16 @@
 //!
 //! [`present`] and [`emit`] are hook points: each side registers its handler at startup
 //! with [`set_presenter`] and [`set_event_sink`]. Until then they log and drop.
+//!
+//! **Transitions** (`[animation]`): before the controller moves windows for a switch, it
+//! presents a snapshot carrying a [`Transition`] (the windows about to leave and arrive) and
+//! waits ([`wait_cover`]) until the strip has drawn snapshots of them over the real windows
+//! ([`cover`]); then outgoing windows park behind their snapshots (and the next snapshot says
+//! so, [`StripSnapshot::parked`], so theirs start shrinking), and incoming ones are held
+//! until the strip says their growing snapshots cover their frames ([`StripEvent::Unveil`]).
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::config::StripStyle;
 
@@ -38,6 +46,55 @@ pub struct StripSnapshot {
     /// The launch's stages were just built and `[reveal] launch_reveal` is on: if a window
     /// covers the strip right now, show it for a moment anyway (once per launch).
     pub announce: bool,
+    /// The active stage's standard windows, front to back, at their live frames: the strip
+    /// keeps full-size snapshots of them ready for the next switch (`[animation]`).
+    pub active_windows: Vec<CardWindow>,
+    /// Windows are about to leave or arrive: animate them (this snapshot is the strip after
+    /// the change).
+    pub transition: Option<Transition>,
+    /// The outgoing windows of this transition have parked behind their snapshots: the
+    /// snapshots may start shrinking (before that a moving snapshot would uncover them).
+    pub parked: Option<u64>,
+}
+
+/// A switch (or reveal, merge, drop, Cmd-M) about to happen, announced before any window
+/// moves.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Transition {
+    /// Matches the strip's [`cover`] answer and [`StripEvent::Unveil`] to this transition.
+    pub id: u64,
+    /// Shown windows about to park, front to back, at their live frames; `stage` is the
+    /// stage whose card (in this snapshot) they shrink into.
+    pub outgoing: Vec<MovingWindow>,
+    /// Parked windows about to come back, front to back, at the frames they will get;
+    /// `stage` is the stage whose card (in the previous snapshot) they grow from.
+    pub incoming: Vec<MovingWindow>,
+}
+
+/// One window of a [`Transition`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MovingWindow {
+    /// The window, with its frame on screen (outgoing: now; incoming: when it arrives).
+    pub window: CardWindow,
+    /// The stage whose card it leaves into or arrives from.
+    pub stage: Option<u64>,
+}
+
+/// The strip's answer to a [`Transition`]: what it covered with snapshots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cover {
+    /// Snapshots are drawn over (some of) the outgoing windows: they may park now.
+    pub outgoing: bool,
+    /// Snapshots of (some of) the incoming windows are growing from their card: keep the
+    /// windows parked until [`StripEvent::Unveil`].
+    pub incoming: bool,
+}
+
+/// Where a window released over the strip goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StripDrop {
+    /// Right above this stage's card; `None` is below the last card.
+    pub before: Option<u64>,
 }
 
 /// One card: a stage that is not active.
@@ -79,6 +136,12 @@ pub enum StripEvent {
     /// A card's app icon was clicked: switch to the card's stage and bring every window of
     /// that app there (Apple: clicking the icon shows all of the app's windows).
     IconClicked { stage: u64, pid: i32 },
+    /// A card was dragged to another slot (`[strip] reorder`): right above `before`'s card,
+    /// or below the last card when `before` is `None`.
+    CardMoved { stage: u64, before: Option<u64> },
+    /// The incoming windows of transition `id` are covered by their growing snapshots: put
+    /// them in place now.
+    Unveil { id: u64 },
 }
 
 type Presenter = Box<dyn Fn(StripSnapshot) + Send + Sync>;
@@ -129,5 +192,88 @@ pub fn emit(event: StripEvent) {
             None => tracing::debug!(?event, "strip event dropped: no controller"),
         },
         Err(_) => tracing::warn!("strip event sink lock poisoned"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Where the cards are (for `ctl state` and scripted tests)
+
+fn card_frames() -> &'static Mutex<Vec<(u64, Rect)>> {
+    static F: OnceLock<Mutex<Vec<(u64, Rect)>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The strip publishes its cards' frames (stage id, global bounds, top to bottom; empty
+/// while it is hidden) after every layout (main thread).
+pub fn publish_cards(frames: Vec<(u64, Rect)>) {
+    if let Ok(mut f) = card_frames().lock() {
+        *f = frames;
+    }
+}
+
+/// The cards' frames last published (any thread).
+pub fn published_cards() -> Vec<(u64, Rect)> {
+    card_frames().lock().map(|f| f.clone()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------------------
+// Transition handshake
+
+/// The latest answer (transition id, what was covered) and its wake-up.
+type CoverSlot = (Mutex<Option<(u64, Cover)>>, Condvar);
+
+fn covers() -> &'static CoverSlot {
+    static C: OnceLock<CoverSlot> = OnceLock::new();
+    C.get_or_init(|| (Mutex::new(None), Condvar::new()))
+}
+
+/// The strip has drawn (or decided not to draw) snapshots for transition `id` (main thread).
+pub fn cover(id: u64, answer: Cover) {
+    let (lock, cv) = covers();
+    if let Ok(mut c) = lock.lock() {
+        *c = Some((id, answer));
+        cv.notify_all();
+    }
+}
+
+/// Waits up to `timeout` for the strip's answer to transition `id` (WM thread). No answer
+/// (no strip, or a busy main thread) counts as nothing covered, so windows move at once.
+pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
+    let (lock, cv) = covers();
+    let deadline = Instant::now() + timeout;
+    let Ok(mut c) = lock.lock() else { return Cover::default() };
+    loop {
+        if let Some((got, answer)) = *c
+            && got == id
+        {
+            return answer;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            tracing::debug!(id, "no answer from the strip for a transition; windows move at once");
+            return Cover::default();
+        }
+        c = match cv.wait_timeout(c, left) {
+            Ok((guard, _)) => guard,
+            Err(_) => return Cover::default(),
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cover_answer_is_matched_by_id_and_a_missing_one_times_out() {
+        cover(7, Cover { outgoing: true, incoming: false });
+        assert_eq!(wait_cover(7, Duration::from_millis(10)), Cover { outgoing: true, incoming: false });
+        let t0 = Instant::now();
+        assert_eq!(wait_cover(8, Duration::from_millis(30)), Cover::default(), "an old answer does not count");
+        assert!(t0.elapsed() >= Duration::from_millis(30));
+        let waiter = std::thread::spawn(|| wait_cover(9, Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(20));
+        cover(9, Cover { outgoing: false, incoming: true });
+        assert_eq!(waiter.join().ok(), Some(Cover { outgoing: false, incoming: true }));
     }
 }

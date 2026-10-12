@@ -425,8 +425,12 @@ mod app {
 
         let wm_input = wm.clone();
         let input_monitor = input::monitor(mtm, move |event| {
-            let over_strip = event.kind == InputKind::MouseUp && strip::is_drop_target(event.at);
-            wm_input.send(WmCommand::Input(event, over_strip));
+            if event.kind == InputKind::KeyDown && event.cmd {
+                // ⌘Tab may switch stages: fresh snapshots for the animation.
+                strip::prefetch();
+            }
+            let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
+            wm_input.send(WmCommand::Input(event, drop));
         });
         if input_monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");

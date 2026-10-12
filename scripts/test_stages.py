@@ -19,7 +19,11 @@ first start, switch and creation, a too-wide one narrowed and given back its exa
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
 menu-path quit right after a first start with many windows), parity (the generated config has
 no live values and registers no hotkey; Cmd-M sends a window to the strip; a click on a
-card's app icon brings every window of that app).
+card's app icon brings every window of that app), motion (the strip below windows and lifted
+while a window is dragged over it, with the dragged window's card in the motion overlay; a
+window dropped above the first card takes that slot; a card dragged to another slot keeps it
+across a relaunch; a card click animates and every frame is exact afterwards;
+`level = "above_windows"` keeps the strip on top).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -784,6 +788,142 @@ def phase_native():
     stop_all_fixtures()
 
 
+# ----- motion: strip level, drops into a slot, card reorder, switch animation -----------
+
+
+OVERLAY_LAYER = 25  # NSStatusWindowLevel: the click-through motion overlay
+
+
+def our_windows():
+    """Our own app's onscreen windows (layer, bounds), by our pid."""
+    pid = app_pid()
+    if not pid:
+        return []
+    r = run([BIN, "probe-windows", "dev.eugene.stagemanager"], timeout=10)
+    try:
+        wins = json.loads(r.stdout)["windows"]
+    except (json.JSONDecodeError, KeyError):
+        return []
+    return [w for w in wins if w["pid"] == pid and w["onscreen"]]
+
+
+def strip_panel(wins=None):
+    """The strip panel: our tall window at the left edge (not the slim tab, not the overlay)."""
+    tall = [w for w in (wins if wins is not None else our_windows())
+            if w["bounds"]["w"] > 12 and w["bounds"]["h"] > 300 and w["layer"] != OVERLAY_LAYER]
+    return tall[0] if tall else None
+
+
+def drag_in_background(points, hold_from, what):
+    """Starts a synthetic drag (ctl debug-drag) and returns (process, seconds until the
+    pointer rests at the last point)."""
+    path = 0.0
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        path += ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+    words = [str(round(c, 1)) for p in points for c in p]
+    proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+    say(f"  dragging {what}")
+    return proc, hold_from + 0.12 + (path / 4.0) * 0.012
+
+
+def phase_motion():
+    say("\n== motion: strip level, a window dropped into a slot, card reorder, switch animation ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    start_fixture(5)
+    s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with five fixture windows"):
+        return
+    check(s.get("strip_level") == "BelowWindows" and s.get("animation") is True,
+          f"defaults: the strip below windows, switches animated ({s.get('strip_level')}, {s.get('animation')})")
+    t = by_title(s)
+    vis = s["display"]["visible"]
+    left = vis["x"] + s["strip_width"] + 60
+    # Fixtures 3 and 5 stay, clear of the strip; 1, 2 and 4 get a stage each (three cards).
+    ctl("debug-frame", t["Fixture 3"]["id"], left, vis["y"] + 60, 640, 420)
+    ctl("debug-frame", t["Fixture 5"]["id"], left + 200, vis["y"] + 260, 640, 420)
+    for n in (1, 2, 4):
+        do("new", t[f"Fixture {n}"]["id"])
+    time.sleep(1.5)
+    s = state()
+    check(len(s["strip"]) == 3 and len(s.get("strip_cards", [])) == 3, f"three cards ({s['strip']}, {len(s.get('strip_cards', []))} drawn)")
+    panel = strip_panel()
+    check(panel is not None and panel["layer"] == -1, f"the strip sits below windows (layer {panel and panel['layer']})")
+
+    say("-- a window dragged over the strip lifts it and shows its card; dropped above the first card it takes that slot")
+    s = state()
+    first = s["strip_cards"][0]["frame"] if s.get("strip_cards") else None
+    pre = by_title(s)["Fixture 5"]["restore"]
+    grab = (pre["x"] + 300, pre["y"] + 12)
+    target = (vis["x"] + 60, (first["y"] - 6) if first else vis["y"] + 40)
+    proc, rest_at = drag_in_background([grab, (grab[0] - 60, grab[1]), target], 0.0, "Fixture 5 onto the strip")
+    time.sleep(rest_at + 0.2)
+    mid = our_windows()
+    lifted = strip_panel(mid)
+    check(lifted is not None and lifted["layer"] == 3, f"the strip is above windows while a window is over it (layer {lifted and lifted['layer']})")
+    check(any(w["layer"] == OVERLAY_LAYER for w in mid), "the dragged window's card shows in the motion overlay")
+    out, _ = proc.communicate(timeout=20)
+    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]})")
+    s = wait_state(lambda x: by_title(x)["Fixture 5"]["parked"], "Fixture 5 to become its own stage")
+    if check(s is not None, "a window dropped on the strip gets a stage of its own"):
+        f5 = by_title(s)["Fixture 5"]
+        check(s["strip"][:1] == [f5["home"]], f"its card took the slot above the first card ({s['strip']}, its stage {f5['home']})")
+        check(close(f5["restore"], pre), f"its saved frame is the pre-drag frame ({fmt(f5['restore'])})")
+    time.sleep(1.0)
+    panel = strip_panel()
+    check(panel is not None and panel["layer"] == -1, "the strip is back below windows")
+    consistent("window drop into a slot")
+
+    say("-- a card dragged to another slot keeps it, also after a relaunch")
+    time.sleep(1.0)
+    s = state()
+    cards = s.get("strip_cards", [])
+    if check(len(cards) == 4, f"four cards drawn ({len(cards)})"):
+        last, top = cards[-1], cards[0]["frame"]
+        b = last["frame"]
+        start = (vis["x"] + 70, b["y"] + b["h"] / 2)
+        proc, _ = drag_in_background([start, (start[0], start[1] - 30), (vis["x"] + 70, top["y"] + 4)], 0.0, "the last card to the top")
+        out, _ = proc.communicate(timeout=20)
+        check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]})")
+        s = wait_state(lambda x: x["strip"][:1] == [last["number"]], "the card to move to the top")
+        check(s is not None, f"the dragged card is first ({state()['strip']})")
+        order = state()["strip"]
+        stop_app()
+        s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)
+        check(s is not None and s["strip"] == order, f"the order survives a relaunch ({s and s['strip']} vs {order})")
+
+    say("-- a card click animates; every window ends at its exact frame")
+    time.sleep(1.5)
+    s = state()
+    cards = s.get("strip_cards", [])
+    if check(bool(cards), "cards drawn"):
+        c = cards[0]
+        b = c["frame"]
+        r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+        check(r.get("ok"), f"clicked a card ({r.get('error', 'ok')})")
+        check(any(w["layer"] == OVERLAY_LAYER for w in our_windows()), "snapshots move in the overlay")
+        s = wait_state(lambda x: x["active"] == c["number"], "the click to switch")
+        check(s is not None, "the click switched")
+        time.sleep(1.0)
+        check(not any(w["layer"] == OVERLAY_LAYER for w in our_windows()), "the overlay is gone once the motion ends")
+        consistent("animated switch")
+
+    say("-- level = \"above_windows\" keeps the strip on top")
+    stop_app()
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write("[strip]\nlevel = \"above_windows\"\n")
+    s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)
+    if check(s is not None, "app up with level = above_windows"):
+        time.sleep(1.5)
+        panel = strip_panel()
+        check(panel is not None and panel["layer"] == 3, f"the strip is above windows (layer {panel and panel['layer']})")
+    stop_app()
+    all_onscreen("motion quit")
+    write_config(None)
+    stop_all_fixtures()
+
+
 # ----- visible: the stage area beside the strip, the edge tab, quit right after a start --
 
 
@@ -791,7 +931,7 @@ SCRATCH = os.environ.get("SM_SCREENSHOTS") or HOME
 
 
 def our_layer3_windows():
-    """Our own app's windows at layer 3 (the strip panel and the edge tab), by our pid."""
+    """Our own app's windows at layer 3 (the edge tab; the strip when lifted), by our pid."""
     pid = app_pid()
     if not pid:
         return []
@@ -1115,7 +1255,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -1130,7 +1270,7 @@ def main():
                 failed.append("the owner's app is running")
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
-             "native": phase_native, "parity": phase_parity}[p]()
+             "native": phase_native, "parity": phase_parity, "motion": phase_motion}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
