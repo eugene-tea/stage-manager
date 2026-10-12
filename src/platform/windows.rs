@@ -5,13 +5,13 @@ use std::collections::{HashMap, HashSet};
 
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowBounds,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
     kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
     kCGWindowOwnerPID,
 };
 use serde::Serialize;
 
-use super::geometry::Rect;
+use crate::engine::geometry::Rect;
 
 /// Apps whose windows are never managed.
 pub const EXCLUDED_BUNDLE_IDS: [&str; 5] = [
@@ -43,6 +43,8 @@ pub struct CgWindow {
     pub bounds: Rect,
     /// Whether the window is onscreen.
     pub onscreen: bool,
+    /// Window alpha (0 = fully transparent).
+    pub alpha: f64,
 }
 
 /// Every window, front to back for the onscreen ones, desktop elements excluded.
@@ -62,7 +64,7 @@ fn parse_window(item: &CFType) -> Option<CgWindow> {
     // SAFETY: window-info dictionaries map CFString keys to CF values.
     let dict = unsafe { as_string_keyed(item.downcast_ref::<CFDictionary>()?) };
     // SAFETY: the kCGWindow* keys are valid framework statics.
-    let (k_id, k_pid, k_owner, k_name, k_layer, k_bounds, k_onscreen) = unsafe {
+    let (k_id, k_pid, k_owner, k_name, k_layer, k_bounds, k_onscreen, k_alpha) = unsafe {
         (
             kCGWindowNumber,
             kCGWindowOwnerPID,
@@ -71,6 +73,7 @@ fn parse_window(item: &CFType) -> Option<CgWindow> {
             kCGWindowLayer,
             kCGWindowBounds,
             kCGWindowIsOnscreen,
+            kCGWindowAlpha,
         )
     };
     let number = |k: &CFString| dict.get(k).and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()));
@@ -87,6 +90,7 @@ fn parse_window(item: &CFType) -> Option<CgWindow> {
         layer: number(k_layer).unwrap_or(0),
         bounds,
         onscreen: onscreen.unwrap_or(false),
+        alpha: dict.get(k_alpha).and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_f64())).unwrap_or(1.0),
     })
 }
 
@@ -141,7 +145,7 @@ mod tests {
     use super::*;
 
     fn w(id: u32, pid: i32, layer: i64, onscreen: bool) -> CgWindow {
-        CgWindow { id, pid, owner: String::new(), name: None, layer, bounds: Rect::default(), onscreen }
+        CgWindow { id, pid, owner: String::new(), name: None, layer, bounds: Rect::default(), onscreen, alpha: 1.0 }
     }
 
     #[test]

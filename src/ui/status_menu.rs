@@ -104,12 +104,25 @@ impl MenuTarget {
 }
 
 /// What the menu shows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MenuState {
     pub permissions: PermissionState,
     /// Apple's Stage Manager is on (`GloballyEnabled = 1`).
     pub apple_stage_manager_on: bool,
     pub strip_visible: bool,
+    /// config.toml failed to load (the last good config stays in force).
+    pub config_error: Option<String>,
+}
+
+/// The menu's config line: hidden (`None`) while the config is fine.
+pub fn config_line(error: Option<&str>) -> Option<String> {
+    const MAX: usize = 90;
+    let e = error?;
+    let mut text = format!("Config error: {e}");
+    if text.chars().count() > MAX {
+        text = text.chars().take(MAX - 1).collect::<String>() + "…";
+    }
+    Some(text)
 }
 
 /// The status item, its menu and the items that change.
@@ -117,6 +130,7 @@ pub struct StatusMenu {
     _item: Retained<NSStatusItem>,
     _target: Retained<MenuTarget>,
     state_line: Retained<NSMenuItem>,
+    config_line: Retained<NSMenuItem>,
     warning_line: Retained<NSMenuItem>,
     grant_accessibility: Retained<NSMenuItem>,
     grant_screen_recording: Retained<NSMenuItem>,
@@ -162,6 +176,9 @@ impl StatusMenu {
 
         let state_line = item(mtm, "", None, &target);
         state_line.setEnabled(false);
+        let config_line = item(mtm, "", None, &target);
+        config_line.setEnabled(false);
+        config_line.setHidden(true);
         let warning_line = item(mtm, "Apple's Stage Manager is on — turn it off", None, &target);
         warning_line.setEnabled(false);
         let grant_accessibility = item(mtm, "Grant Accessibility…", Some(sel!(grantAccessibility:)), &target);
@@ -171,7 +188,7 @@ impl StatusMenu {
         let open = item(mtm, "Open Config", Some(sel!(openConfig:)), &target);
         let quit = item(mtm, "Quit Stage Manager", Some(sel!(quit:)), &target);
 
-        for it in [&state_line, &warning_line, &grant_accessibility, &grant_screen_recording] {
+        for it in [&state_line, &config_line, &warning_line, &grant_accessibility, &grant_screen_recording] {
             menu.addItem(it);
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -186,6 +203,7 @@ impl StatusMenu {
             _item: status_item,
             _target: target,
             state_line,
+            config_line,
             warning_line,
             grant_accessibility,
             grant_screen_recording,
@@ -193,14 +211,37 @@ impl StatusMenu {
         }
     }
 
-    /// Shows `state`: the state line, the Apple Stage Manager warning, the grant items
-    /// (only while missing) and the strip toggle's title.
+    /// Shows `state`: the state line, the config error (only while there is one), the Apple
+    /// Stage Manager warning, the grant items (only while missing) and the strip toggle's
+    /// title.
     pub fn update(&self, state: &MenuState) {
         self.state_line.setTitle(&NSString::from_str(&state.permissions.summary()));
+        match config_line(state.config_error.as_deref()) {
+            Some(text) => {
+                self.config_line.setTitle(&NSString::from_str(&text));
+                self.config_line.setHidden(false);
+            }
+            None => self.config_line.setHidden(true),
+        }
         self.warning_line.setHidden(!state.apple_stage_manager_on);
         self.grant_accessibility.setHidden(state.permissions.accessibility);
         self.grant_screen_recording.setHidden(state.permissions.screen_recording);
         let strip = if state.strip_visible { "Hide Strip" } else { "Show Strip" };
         self.toggle_strip.setTitle(&NSString::from_str(strip));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_line_shows_only_errors_and_stays_short() {
+        assert_eq!(config_line(None), None);
+        assert_eq!(config_line(Some("bad")).as_deref(), Some("Config error: bad"));
+        let long = "x".repeat(300);
+        let line = config_line(Some(&long)).unwrap_or_default();
+        assert_eq!(line.chars().count(), 90);
+        assert!(line.ends_with('…'));
     }
 }

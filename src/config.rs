@@ -377,17 +377,24 @@ impl Config {
     }
 }
 
-/// `~/.config/stage-manager`, from `$HOME`.
+/// The environment variable that moves every file of the app (config, state, ctl socket,
+/// log) into one directory, so test runs never touch the real ones.
+pub const HOME_ENV: &str = "STAGE_MANAGER_HOME";
+
+/// `$STAGE_MANAGER_HOME` when set (and not empty), else `~/.config/stage-manager`.
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(HOME_ENV).filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("stage-manager"))
 }
 
-/// `~/.config/stage-manager/config.toml`.
+/// `config.toml` in [`config_dir`].
 pub fn default_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
 
-/// `~/.config/stage-manager/state.json`.
+/// `state.json` in [`config_dir`].
 pub fn state_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("state.json"))
 }
@@ -504,6 +511,15 @@ mod tests {
         let p = parse(&uncommented);
         assert_eq!(p.config.rules.rules.len(), 3);
         assert_eq!(p.config.stages.names, ["Work", "Chat"]);
+    }
+
+    #[test]
+    fn readme_shows_the_default_file_verbatim() {
+        let readme = include_str!("../README.md");
+        assert!(
+            readme.contains(&format!("```toml\n{DEFAULT_CONFIG}```")),
+            "README.md's config reference is out of date: paste DEFAULT_CONFIG into it"
+        );
     }
 
     #[test]

@@ -312,6 +312,79 @@ impl Model {
         actions
     }
 
+    /// Moves every window of `stage` into the active stage of its display (a shift-click on a
+    /// strip card). The moved windows go in front, keep their order, are restored and raised
+    /// back to front, and the moved stage's key window is focused last. The emptied stage
+    /// goes away unless it is declared in config. A no-op for the active stage or an unknown
+    /// one. Pinned windows are untouched.
+    pub fn merge_into_active(&mut self, stage: StageId, obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let Some(src) = self.stage(stage) else {
+            return actions;
+        };
+        let display = src.display;
+        let members = src.windows.clone();
+        let src_key = src.key;
+        let active = self.ensure_active(display);
+        if active == stage {
+            return actions;
+        }
+        self.revealed.remove(&display);
+        self.capture(active, obs);
+        let orphans: Vec<WindowId> = self
+            .children_in(Home::Stage(stage))
+            .into_iter()
+            .filter(|&c| self.resolve_standard(c).is_none())
+            .collect();
+        if let Some(s) = self.stage_mut(stage) {
+            s.windows.clear();
+            s.key = None;
+        }
+        for &id in &members {
+            self.set_home(id, Home::Stage(active), display);
+        }
+        for &c in &orphans {
+            if let Some(w) = self.windows.get_mut(&c) {
+                w.home = Home::Stage(active);
+                w.meta.display = display;
+            }
+        }
+        let key = src_key
+            .filter(|k| members.contains(k))
+            .or(members.first().copied());
+        let t = self.tick();
+        if let Some(a) = self.stage_mut(active) {
+            let mut windows = members.clone();
+            windows.append(&mut a.windows);
+            a.windows = windows;
+            if key.is_some() {
+                a.key = key;
+            }
+            a.last_active = t;
+        }
+        let mut order = Vec::new();
+        for &m in members.iter().rev() {
+            order.push(m);
+            order.extend(self.children_of(m));
+        }
+        order.extend(orphans);
+        for &id in &order {
+            if self.windows.get(&id).is_some_and(|w| w.parked) {
+                self.restore_window(id, &mut actions);
+            }
+        }
+        for &id in &order {
+            actions.push(Action::Raise { id });
+        }
+        if let Some(k) = key {
+            actions.push(Action::Focus { id: k });
+        }
+        self.drop_if_dead(stage, &mut actions);
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
+    }
+
     /// Pins a window (a child stands for its parent) so it shows on every stage and is never
     /// parked, or unpins it into the active stage of its display.
     pub fn toggle_pin(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
@@ -478,8 +551,13 @@ impl Model {
     }
 
     /// A window moved or resized. The frame becomes its restore frame unless it lies in a park
-    /// zone (our own parks report back here) or is degenerate.
+    /// zone (our own parks report back here) or is degenerate. Ignored while the model has
+    /// the window parked: macOS may clamp a parked window to a spot outside the park zone,
+    /// and that spot must never become its restore frame.
     pub fn window_frame_changed(&mut self, id: WindowId, frame: Rect) {
+        if self.windows.get(&id).is_some_and(|w| w.parked) {
+            return;
+        }
         self.record_frame(id, frame);
     }
 

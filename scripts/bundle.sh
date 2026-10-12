@@ -2,6 +2,8 @@
 # Assembles an app bundle under target/.
 #   scripts/bundle.sh app      -> target/Stage Manager.app (from target/release/stage-manager)
 #   scripts/bundle.sh fixture  -> target/SM Fixture.app    (compiles scripts/fixture/*.swift)
+# FIXTURE_ID and FIXTURE_APP give the fixture another bundle ID and path, so test runs can use
+# a fixture no other run manages (scripts/test-stages.sh does).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -55,11 +57,12 @@ case "${1:-}" in
     echo "Bundled $APP ($VERSION)"
     ;;
   fixture)
-    APP="target/SM Fixture.app"
+    APP="${FIXTURE_APP:-target/SM Fixture.app}"
+    FIXTURE_ID="${FIXTURE_ID:-dev.eugene.stagemanager.fixture}"
     rm -rf "$APP"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/sm-fixture" scripts/fixture/main.swift
-    write_plist "$APP/Contents/Info.plist" dev.eugene.stagemanager.fixture "SM Fixture" sm-fixture ""
+    write_plist "$APP/Contents/Info.plist" "$FIXTURE_ID" "SM Fixture" sm-fixture ""
     echo "Bundled $APP ($VERSION)"
     ;;
   *)
