@@ -11,7 +11,7 @@ CARGO   := nice -n 18 cargo
 APP     := target/Stage Manager.app
 FIXTURE := target/SM Fixture.app
 
-.PHONY: build bundle sign run install fixture check
+.PHONY: build bundle sign dev run install fixture check
 
 ## build: cargo build --release
 build:
@@ -25,7 +25,11 @@ bundle: build
 sign: bundle
 	scripts/sign.sh "$(APP)"
 
-## run: build, bundle, sign, launch through LaunchServices and stream the log (Ctrl-C quits)
+## dev: copy the signed app to the fixed dev location (one screen-access approval for every worktree)
+dev: sign
+	scripts/dev-app.sh
+
+## run: build, sign, copy to the dev location, launch through LaunchServices and stream the log (Ctrl-C quits)
 run: sign
 	scripts/run.sh
 

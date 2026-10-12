@@ -39,7 +39,9 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP = os.path.join(ROOT, "target", "Stage Manager.app")
+# The fixed dev copy (scripts/dev-app.sh): macOS asks for screen access once per app path.
+APP = os.environ.get("SM_DEV_APP") or os.path.expanduser(
+    "~/Library/Application Support/Stage Manager Dev/Stage Manager.app")
 BIN = os.path.join(APP, "Contents", "MacOS", "stage-manager")
 FIX_ID = os.environ.get("SM_FIXTURE_ID") or "dev.eugene.stagemanager.fixture.stages"
 FIX_NAME = "SM Fixture " + FIX_ID.rsplit(".", 1)[-1].capitalize()
