@@ -81,6 +81,9 @@ mod motion;
 const DROP_STAGE: u64 = u64::MAX;
 /// The strip's window level below windows (Apple's): just under normal windows.
 const BELOW_WINDOWS: isize = NSNormalWindowLevel - 1;
+
+/// After a re-home, when to check that the panel is on the Space shown (seconds).
+const REHOME_CHECKS: [f64; 2] = [0.4, 1.2];
 /// A band of a card's height that will mean "onto this card" (a later merge); none yet.
 const MERGE_BAND: f64 = 0.0;
 /// The edge tab's window: width and height in points (the drawn pill is narrower).
@@ -927,7 +930,8 @@ impl Strip {
         let rehome = !self.has_snapshot
             || snapshot.space != self.snapshot.space
             || snapshot.fullscreen != self.snapshot.fullscreen;
-        if rehome && self.has_snapshot {
+        let moved = rehome && self.has_snapshot;
+        if moved {
             tracing::debug!(space = snapshot.space, fullscreen = snapshot.fullscreen, "strip: another Space");
             self.panel.orderOut(None);
             self.tab.show(false, self.mtm);
@@ -951,7 +955,29 @@ impl Strip {
         if rehome {
             self.has_snapshot = true;
             if !self.snapshot.fullscreen {
-                self.panel.orderFrontRegardless();
+                // Ordered in on the next turn of the run loop: out and in within one
+                // transaction may leave the panel on the Space it was on.
+                if !moved {
+                    self.panel.orderFrontRegardless();
+                } else {
+                    DispatchQueue::main().exec_async(|| {
+                        with_strip(|s| {
+                            if !s.snapshot.fullscreen {
+                                s.panel.orderFrontRegardless();
+                            }
+                            s.publish_panel();
+                        });
+                    });
+                }
+                // Ordered in while the Space still slides, the panel could stay behind on the
+                // Space being left: look again once the slide is over.
+                for seconds in REHOME_CHECKS {
+                    let check = RcBlock::new(|_t: NonNull<NSTimer>| {
+                        with_strip(Strip::ensure_on_active_space);
+                    });
+                    // SAFETY: the block runs once on the main run loop.
+                    let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds, false, &check) };
+                }
             }
         }
         if self.snapshot.announce && !self.announced {
@@ -963,6 +989,7 @@ impl Strip {
         }
         self.update_visibility();
         self.update_targets();
+        self.publish_panel();
     }
 
     /// The cards in the order shown now: the snapshot's, with a card being dragged moved to
@@ -1523,6 +1550,41 @@ impl Strip {
         self.update_visibility();
     }
 
+    /// After a re-home: the panel must be on the Space shown (unless a full-screen Space
+    /// shows); if it stayed behind, it is ordered in again, which puts it there.
+    fn ensure_on_active_space(&mut self) {
+        if !self.has_snapshot || self.snapshot.fullscreen || !self.panel.isVisible() {
+            return;
+        }
+        if !self.panel.isOnActiveSpace() {
+            tracing::warn!(space = self.snapshot.space, "strip: the panel is not on the Space shown; ordering it in again");
+            self.panel.orderOut(None);
+            // In again on the next turn of the run loop, not in the same transaction.
+            DispatchQueue::main().exec_async(|| {
+                with_strip(|s| {
+                    if !s.snapshot.fullscreen {
+                        s.panel.orderFrontRegardless();
+                    }
+                    tracing::info!(on_active_space = s.panel.isOnActiveSpace(), "strip: the panel ordered in again");
+                    s.publish_panel();
+                });
+            });
+        }
+        self.publish_panel();
+    }
+
+    /// Publishes the panel's state for `ctl state` ([`strip_model::panel_status`]).
+    fn publish_panel(&self) {
+        strip_model::publish_panel_status(strip_model::PanelStatus {
+            shown: self.shown,
+            lifted: self.lifted.unwrap_or(false),
+            ordered_in: self.panel.isVisible(),
+            on_active_space: self.panel.isOnActiveSpace(),
+            frame: self.geometry.global,
+            space: self.snapshot.space,
+        });
+    }
+
     fn update_visibility(&mut self) {
         let overlapped = strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global);
         let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, overlapped);
@@ -1581,6 +1643,7 @@ impl Strip {
             self.panel.orderFrontRegardless();
         }
         tracing::debug!(lift, "strip level");
+        self.publish_panel();
     }
 
     /// Slides the strip in or out (cards in 3D, icons flat) and lets clicks through while it
@@ -1588,6 +1651,7 @@ impl Strip {
     fn slide(&mut self, shown: bool, animated: bool) {
         self.shown = shown;
         self.publish_cards();
+        self.publish_panel();
         self.panel.setIgnoresMouseEvents(!shown);
         if !shown {
             self.set_hover(None);

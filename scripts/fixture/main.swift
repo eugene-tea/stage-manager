@@ -13,6 +13,10 @@
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
+// SIGWINCH stands in for "its Desktop is not shown": every visible standard window parked
+// in the screen's bottom-right corner is ordered out (the window server still lists it, off
+// screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
+// behind the other windows at the same frames (their Desktop shows), without activating.
 import AppKit
 
 struct Options {
@@ -162,6 +166,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wins.sorted { $0.title < $1.title }.first?.miniaturize(nil)
     }
 
+    var away: [(NSWindow, NSRect)] = []
+
+    /// SIGWINCH: windows parked in the bottom-right corner go "to another Desktop".
+    func sendParkedAway() {
+        guard let screen = NSScreen.main?.frame else { return }
+        let parked = NSApp.windows.filter { w in
+            w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
+        }
+        for w in parked { w.orderOut(nil) }
+        away += parked.map { ($0, $0.frame) }
+    }
+
+    /// SIGINFO: the windows sent away show again ("their Desktop shows").
+    func bringAwayBack() {
+        // Ordering in constrains a window onto the screen; a Desktop switch never moves it.
+        for (w, frame) in away {
+            w.orderBack(nil)
+            w.setFrame(frame, display: false)
+        }
+        away = []
+    }
+
     func show(_ window: NSWindow) {
         if options.background { window.orderBack(nil) } else { window.makeKeyAndOrderFront(nil) }
     }
@@ -188,4 +214,12 @@ signal(SIGUSR2, SIG_IGN)
 let minimize = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
 minimize.setEventHandler { delegate.minimizeOne() }
 minimize.resume()
+signal(SIGWINCH, SIG_IGN)
+let sendAway = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
+sendAway.setEventHandler { delegate.sendParkedAway() }
+sendAway.resume()
+signal(SIGINFO, SIG_IGN)
+let comeBack = DispatchSource.makeSignalSource(signal: SIGINFO, queue: .main)
+comeBack.setEventHandler { delegate.bringAwayBack() }
+comeBack.resume()
 app.run()

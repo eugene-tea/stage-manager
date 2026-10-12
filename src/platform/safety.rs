@@ -8,11 +8,11 @@
 //!    registry (`try_lock`; a recovery scan when it is busy) and exits.
 //! 4. **Signals**: SIGTERM, SIGINT and SIGHUP go through a self-pipe to a watcher thread that
 //!    quits cleanly; SIGABRT gets a best-effort unpark in the handler itself.
-//! 5. **Guardian**: `stage-manager --guardian <pid>`, spawned at launch, waits for the app to
-//!    exit (kqueue `NOTE_EXIT`) and runs the recovery scan unless the app wrote its clean-exit
-//!    marker. Then, while a window is still stranded on a Space not shown (Accessibility lists
-//!    only the shown Space's windows of most apps), it keeps watching and scans again when
-//!    that window shows, until none is left or Stage Manager runs again.
+//! 5. **Guardian** ([`super::guardian`]): `stage-manager --guardian <pid>`, spawned at launch,
+//!    runs the recovery scan when the app dies without its clean-exit marker, then waits for
+//!    every window still parked on a Space not shown and brings each back once its Space
+//!    shows. It learns which windows to wait for from the parked file this module keeps
+//!    beside the registry ([`paths::parked_file`]).
 //! 6. **Recovery scan** (launch, guardian, panic fallback): every window of every allowed app
 //!    whose frame is stranded in the park zone goes back to its `state.json` frame or is
 //!    centered ([`crate::engine::recovery`]).
@@ -23,9 +23,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::os::unix::process::CommandExt;
 use std::panic::AssertUnwindSafe;
-use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
@@ -33,13 +31,10 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, names};
-use super::{ctl, desktop, observe, paths, windows};
+use super::{desktop, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::persist::StateFile;
-use crate::engine::recovery::{self, LiveWindow, ScanDisplays};
-
-/// The AX messaging timeout used by the guardian and emergency paths.
-const AX_TIMEOUT_SECONDS: f32 = 0.25;
+use crate::engine::recovery::{self, LiveWindow, Registered, ScanDisplays};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
 const MENU_BAR_GUESS: f64 = 38.0;
@@ -87,12 +82,75 @@ fn lock_registry() -> MutexGuard<'static, BTreeMap<u32, ParkedEntry>> {
 
 /// Adds entries (before a batch: windows about to be parked are covered at once).
 pub fn registry_add(entries: impl IntoIterator<Item = (u32, ParkedEntry)>) {
-    lock_registry().extend(entries);
+    let listed = {
+        let mut guard = lock_registry();
+        guard.extend(entries);
+        registered(&guard)
+    };
+    write_parked_file(&listed);
 }
 
 /// Replaces the registry with exactly `entries` (after a batch).
 pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
-    *lock_registry() = entries;
+    let listed = {
+        let mut guard = lock_registry();
+        *guard = entries;
+        registered(&guard)
+    };
+    write_parked_file(&listed);
+}
+
+/// The registry as the guardian needs it: ids, pids and restore frames.
+fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
+    map.iter()
+        .map(|(&id, e)| Registered { id, pid: e.element.pid().unwrap_or(-1), restore: e.restore, child: e.child })
+        .collect()
+}
+
+/// What the parked file holds now (only rewritten when it changes).
+static PARKED_WRITTEN: Mutex<Option<Vec<Registered>>> = Mutex::new(None);
+
+/// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, written
+/// atomically; removed when the registry is empty.
+fn write_parked_file(listed: &[Registered]) {
+    let Ok(mut written) = PARKED_WRITTEN.lock() else { return };
+    if written.as_deref() == Some(listed) {
+        return;
+    }
+    let path = paths::parked_file(std::process::id());
+    let result = if listed.is_empty() {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        let tmp = path.with_extension("json.tmp");
+        serde_json::to_vec(listed)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(&tmp, bytes))
+            .and_then(|()| std::fs::rename(&tmp, &path))
+    };
+    match result {
+        Ok(()) => *written = Some(listed.to_vec()),
+        Err(e) => tracing::warn!("cannot write {}: {e}", path.display()),
+    }
+}
+
+/// The windows the app process `pid` had registered (its parked file); empty when it has
+/// none or the file cannot be read.
+pub fn read_parked_file(pid: u32) -> Vec<Registered> {
+    let path = paths::parked_file(pid);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("cannot read {}: {e}", path.display());
+            Vec::new()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            tracing::warn!("cannot read {}: {e}", path.display());
+            Vec::new()
+        }
+    }
 }
 
 /// How many windows the registry holds.
@@ -217,35 +275,6 @@ pub fn stranded_allowed() -> Vec<windows::CgWindow> {
         .collect()
 }
 
-/// How often the guardian looks for stranded windows on other Spaces.
-const GUARDIAN_POLL: Duration = Duration::from_secs(2);
-
-/// After the guardian's scan: while windows stay stranded on Spaces not shown (out of
-/// Accessibility's reach), scans again each time one of them shows on screen (the user went
-/// to its Space). Stops when none is left, or when Stage Manager runs again (it takes over).
-fn watch_stranded() {
-    let mut last_shown: Vec<u32> = Vec::new();
-    loop {
-        let stranded = stranded_allowed();
-        if stranded.is_empty() {
-            tracing::info!("guardian: no window is left parked");
-            return;
-        }
-        if ctl::request("ping", Duration::from_millis(500)).is_ok() {
-            tracing::info!(left = stranded.len(), "guardian: Stage Manager runs again and takes over");
-            return;
-        }
-        let mut shown: Vec<u32> = stranded.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
-        shown.sort_unstable();
-        if !shown.is_empty() && shown != last_shown {
-            let r = recovery_scan("guardian: a Space with parked windows shows");
-            tracing::warn!(restored = r.restored, failed = r.failed, "guardian: scanned again");
-        }
-        last_shown = shown;
-        std::thread::sleep(GUARDIAN_POLL);
-    }
-}
-
 /// Runs `f`, catching a panic (logged). Inside, the panic hook does not unpark or exit: the
 /// caller recovers instead.
 pub fn guarded<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
@@ -355,139 +384,25 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
     Ok(())
 }
 
-/// Writes this process's clean-exit marker (every window is back onscreen).
+/// Writes this process's clean-exit marker (every window is back onscreen) and removes its
+/// parked file.
 pub fn mark_clean_exit() {
+    let _ = std::fs::remove_file(paths::parked_file(std::process::id()));
     let path = paths::clean_exit_marker(std::process::id());
     if let Err(e) = std::fs::write(&path, b"clean\n") {
         tracing::warn!("cannot write {}: {e}", path.display());
     }
 }
 
-/// Spawns the guardian for this process. It runs in its own session, so it outlives the app
-/// and its process group.
-pub fn spawn_guardian() -> Option<u32> {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("cannot find our own executable for the guardian: {e}");
-            return None;
-        }
-    };
-    let mut cmd = Command::new(exe);
-    cmd.arg("--guardian")
-        .arg(std::process::id().to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // SAFETY: setsid is async-signal-safe and touches nothing shared with the parent.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let pid = child.id();
-            tracing::info!(pid, "guardian started");
-            let _ = std::thread::Builder::new().name("guardian-reaper".into()).spawn(move || {
-                match child.wait() {
-                    Ok(status) => tracing::warn!(?status, "guardian exited while the app runs"),
-                    Err(e) => tracing::warn!("guardian wait failed: {e}"),
-                }
-            });
-            Some(pid)
-        }
-        Err(e) => {
-            tracing::error!("cannot start the guardian: {e}");
-            None
-        }
-    }
-}
-
-/// `stage-manager --guardian <pid>`: waits for `pid` to exit, then runs the recovery scan
-/// unless it wrote its clean-exit marker.
-pub fn run_guardian(args: &[String]) -> ExitCode {
-    super::logging::init();
-    let Some(parent) = args.first().and_then(|a| a.parse::<i32>().ok()).filter(|p| *p > 0) else {
-        eprintln!("usage: stage-manager --guardian <pid>");
-        return ExitCode::from(2);
-    };
-    if let Err(e) = AxElement::system_wide().set_messaging_timeout(AX_TIMEOUT_SECONDS) {
-        tracing::debug!("guardian: cannot set the AX timeout: {e}");
-    }
-    tracing::debug!(parent, "guardian watching");
-    wait_for_exit(parent);
-    let marker = paths::clean_exit_marker(parent as u32);
-    if marker.exists() {
-        let _ = std::fs::remove_file(&marker);
-        tracing::debug!(parent, "guardian: clean exit; nothing to do");
-        return ExitCode::SUCCESS;
-    }
-    tracing::warn!(parent, "guardian: the app exited without a clean exit; running the recovery scan");
-    let r = recovery_scan("guardian");
-    tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
-    watch_stranded();
-    ExitCode::SUCCESS
-}
-
-/// Blocks until `pid` exits (kqueue `EVFILT_PROC` / `NOTE_EXIT`); returns at once when it is
-/// already gone. Falls back to polling when kqueue fails.
-fn wait_for_exit(pid: i32) {
-    // SAFETY: kqueue() takes no arguments.
-    let kq = unsafe { libc::kqueue() };
-    if kq >= 0 {
-        // SAFETY: a zeroed kevent is valid; the fields are set below.
-        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
-        change.ident = pid as usize;
-        change.filter = libc::EVFILT_PROC;
-        change.flags = libc::EV_ADD | libc::EV_ONESHOT;
-        change.fflags = libc::NOTE_EXIT;
-        // SAFETY: as above.
-        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-        loop {
-            // SAFETY: one change in, room for one event out, no timeout.
-            let n = unsafe { libc::kevent(kq, &change, 1, &mut event, 1, std::ptr::null()) };
-            if n >= 0 {
-                // A registration error comes back as an EV_ERROR event: ESRCH means the
-                // process is already gone; anything else falls back to polling.
-                let (flags, data) = (event.flags, event.data);
-                if n == 1 && flags & libc::EV_ERROR != 0 && data != libc::ESRCH as isize {
-                    tracing::warn!(error = data, "guardian: kevent registration failed; polling");
-                    poll_for_exit(pid);
-                }
-                break;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                if err.raw_os_error() != Some(libc::ESRCH) {
-                    tracing::warn!("guardian: kevent failed ({err}); polling");
-                    poll_for_exit(pid);
-                }
-                break;
-            }
-        }
-        // SAFETY: closing our own descriptor.
-        unsafe { libc::close(kq) };
-    } else {
-        poll_for_exit(pid);
-    }
-}
-
-fn poll_for_exit(pid: i32) {
-    // SAFETY: signal 0 only checks that the process exists.
-    while unsafe { libc::kill(pid, 0) } == 0 {
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
-fn bundle_id_of(pid: i32) -> Option<String> {
+/// The bundle id of a running process, when LaunchServices knows it.
+pub(crate) fn bundle_id_of(pid: i32) -> Option<String> {
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
         .and_then(|a| a.bundleIdentifier())
         .map(|s| s.to_string())
 }
 
-fn scan_displays() -> ScanDisplays {
+/// The main display (visible frame as last reported, else guessed) and the others.
+pub(crate) fn scan_displays() -> ScanDisplays {
     let mut bounds = desktop::cg_display_bounds();
     let main = bounds.remove(0);
     let visible = VISIBLE

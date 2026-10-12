@@ -24,7 +24,7 @@ fn main() -> ExitCode {
             ExitCode::from(code as u8)
         }
         #[cfg(target_os = "macos")]
-        Some("--guardian") => stage_manager::platform::safety::run_guardian(&args[2..]),
+        Some("--guardian") => stage_manager::platform::guardian::run(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-windows") => app::probe_windows(&args[2..]),
         Some("--version") => {
@@ -72,7 +72,7 @@ mod app {
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
-    use stage_manager::platform::{hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{guardian, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
@@ -332,6 +332,15 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugHover { x, y, ms } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-hover needs STAGE_MANAGER_TEST=1");
+                }
+                match input::hover(stage_manager::engine::geometry::Point::new(x, y), Duration::from_millis(ms.min(5000))) {
+                    Ok(()) => json!({ "ok": true }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
             Command::DebugDrag { points, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
@@ -389,7 +398,7 @@ mod app {
             }
         };
         let _ = WM.set(wm.clone());
-        safety::spawn_guardian();
+        guardian::spawn();
         let wm_signals = wm.clone();
         if let Err(e) = safety::watch_signals(move |sig| {
             let _ = &wm_signals;

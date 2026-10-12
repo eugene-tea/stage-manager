@@ -62,7 +62,9 @@ Defence in depth, because a parked window that never returns is the worst bug:
 4. **SIGTERM/SIGINT/SIGHUP** go through a self-pipe to a watcher thread that unparks and exits.
 5. **Guardian process.** At launch the app spawns itself as `stage-manager --guardian <pid>`.
    When the parent dies without writing the clean-exit marker (SIGKILL, segfault, abort), the
-   guardian runs the recovery scan.
+   guardian runs the recovery scan, then waits for every window still parked (those the
+   registry's parked file names, and any managed app's in the park zone) and moves each back
+   once its Space shows.
 6. **Recovery scan** (launch and guardian): every window of every app whose frame lies in a
    park zone is moved back to its saved frame from `state.json`, or centered on the display.
 7. **Restore frames are clamped** onto the visible display before being applied.
@@ -70,8 +72,9 @@ Defence in depth, because a parked window that never returns is the worst bug:
 Across Spaces: the registry keeps every Space's parked windows (AX elements taken while
 their Space showed). Quit is clean only when the window server lists no managed window in
 the park zone on any Space; otherwise the guardian keeps watching after its scan and scans
-again whenever such a window shows (its Space was visited), since AX lists most apps'
-windows only on the shown Space.
+again whenever such a window shows (its Space was visited), retrying while it stays shown,
+since AX lists most apps' windows only on the shown Space. It never exits while one is left
+unless Stage Manager runs again.
 
 ## Testing hooks
 

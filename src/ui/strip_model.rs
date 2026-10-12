@@ -222,6 +222,41 @@ pub fn published_cards() -> Vec<(u64, Rect)> {
     card_frames().lock().map(|f| f.clone()).unwrap_or_default()
 }
 
+/// The strip panel's state as the window server and AppKit see it, for `ctl state` and the
+/// guided Spaces check (a card click that found no window there).
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct PanelStatus {
+    /// Slid in (not hidden by auto-hide or the user).
+    pub shown: bool,
+    /// Lifted above windows.
+    pub lifted: bool,
+    /// Ordered in (`isVisible`).
+    pub ordered_in: bool,
+    /// On the Space shown now (`isOnActiveSpace`).
+    pub on_active_space: bool,
+    /// The panel's frame, global top-left coordinates.
+    pub frame: Rect,
+    /// The Space id of the snapshot it shows.
+    pub space: u64,
+}
+
+fn panel_status_slot() -> &'static Mutex<PanelStatus> {
+    static S: OnceLock<Mutex<PanelStatus>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(PanelStatus::default()))
+}
+
+/// The strip publishes its panel's state after every change (main thread).
+pub fn publish_panel_status(status: PanelStatus) {
+    if let Ok(mut s) = panel_status_slot().lock() {
+        *s = status;
+    }
+}
+
+/// The panel's state last published (any thread).
+pub fn panel_status() -> PanelStatus {
+    panel_status_slot().lock().map(|s| *s).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------------------
 // Transition handshake
 

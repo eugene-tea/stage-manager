@@ -205,7 +205,14 @@ Ours:
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
   Accessibility before bringing its app forward (never all its windows), so macOS has no
   reason to switch Spaces.
-- On a full-screen Space the strip is not shown and no stage changes.
+- On a full-screen Space the strip is not shown and no stage changes. Entering or leaving
+  full screen, macOS shows a short-lived stand-in window covering the whole display (no
+  title, subrole `AXUnknown`) while the app's window animates, and the Space change comes in
+  the middle of it (measured 10-12: taken at face value, each toggle minted a new Desktop and
+  merged the Desktop's stages). A Space change while a window covers the display without any
+  window reporting `AXFullScreen` waits for the animation to settle (at most 2 s); a window
+  appearing then is not managed; a full-screen Space is known by a window on screen in full
+  screen. The Desktop keeps its id, stages and windows.
 - The strip belongs to one Space at a time: on a Space change it is taken off, its cards
   replaced without animation, and put on the Space shown (deviation 4).
 
