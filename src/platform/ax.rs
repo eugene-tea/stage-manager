@@ -13,7 +13,7 @@ use objc2_core_foundation::{
     kCFRunLoopDefaultMode,
 };
 
-use super::geometry::{Point, Rect, Size};
+use crate::engine::geometry::{Point, Rect, Size};
 
 /// Attribute, action and value names used by the app.
 pub mod names {
@@ -29,6 +29,7 @@ pub mod names {
     pub const FULLSCREEN: &str = "AXFullScreen";
     pub const FRONTMOST: &str = "AXFrontmost";
     pub const RAISE: &str = "AXRaise";
+    pub const FOCUSED_APPLICATION: &str = "AXFocusedApplication";
 
     pub const ROLE_WINDOW: &str = "AXWindow";
     pub const SUBROLE_STANDARD: &str = "AXStandardWindow";
@@ -43,12 +44,13 @@ pub mod notifications {
     pub const WINDOW_MOVED: &str = "AXWindowMoved";
     pub const WINDOW_RESIZED: &str = "AXWindowResized";
     pub const WINDOW_MINIATURIZED: &str = "AXWindowMiniaturized";
+    pub const TITLE_CHANGED: &str = "AXTitleChanged";
 
     /// Registered on each application element.
     pub const APP_LEVEL: [&str; 3] = [WINDOW_CREATED, FOCUSED_WINDOW_CHANGED, APPLICATION_ACTIVATED];
     /// Registered on each tracked window element.
-    pub const WINDOW_LEVEL: [&str; 4] =
-        [ELEMENT_DESTROYED, WINDOW_MOVED, WINDOW_RESIZED, WINDOW_MINIATURIZED];
+    pub const WINDOW_LEVEL: [&str; 5] =
+        [ELEMENT_DESTROYED, WINDOW_MOVED, WINDOW_RESIZED, WINDOW_MINIATURIZED, TITLE_CHANGED];
 }
 
 /// An Accessibility failure.
@@ -281,6 +283,11 @@ impl AxElement {
     /// `AXFocusedWindow` of an application element.
     pub fn focused_window(&self) -> AxResult<AxElement> {
         self.element_attr(names::FOCUSED_WINDOW)
+    }
+
+    /// `AXFocusedApplication` of the system-wide element: the frontmost app.
+    pub fn focused_application(&self) -> AxResult<AxElement> {
+        self.element_attr(names::FOCUSED_APPLICATION)
     }
 
     /// `AXMain` of a window.

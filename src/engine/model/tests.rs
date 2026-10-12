@@ -1034,6 +1034,110 @@ fn strip_auto_hide_follows_apple_setting() {
     assert!(m.strip_auto_hides());
 }
 
+#[test]
+fn moves_reported_for_a_parked_window_never_change_its_restore_frame() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    let saved = e.m.window(w(1)).map(|x| x.restore).expect("known");
+    // macOS clamped the parked window somewhere that does not look parked.
+    e.m.window_frame_changed(w(1), Rect::new(1200.0, 700.0, 600.0, 400.0));
+    assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(saved));
+    e.switch(1);
+    assert_eq!(e.d.frames[&w(1)], saved);
+}
+
+// ----- strip capacity --------------------------------------------------------------------
+
+#[test]
+fn strip_capacity_follows_the_visible_height() {
+    assert_eq!(capacity_for_height(1410.0), 6, "Apple's six at 1440 pt");
+    assert_eq!(capacity_for_height(875.0), 3, "small screens keep three");
+    assert_eq!(capacity_for_height(2500.0), 9);
+    assert_eq!(capacity_for_height(f64::NAN), 3);
+    assert_eq!(capacity_for_height(-5.0), 3);
+}
+
+// ----- merge (shift-click on a card) ---------------------------------------------------------
+
+#[test]
+fn merge_brings_a_stage_into_the_active_one_in_front() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::Current);
+    // Stage 2 holds [3, 2] and is active; go back to 1 and merge 2 into it.
+    e.switch(1);
+    assert!(e.d.parked(w(2)) && e.d.parked(w(3)));
+    let saved3 = e.m.window(w(3)).map(|x| x.restore).expect("known");
+    let stage2 = e.m.stages()[1].id;
+    let obs = e.d.obs();
+    let a = e.m.merge_into_active(stage2, &obs);
+    e.run(a.clone());
+    assert_eq!(e.m.stages().len(), 1, "the emptied stage is gone");
+    assert_eq!(e.members(1), [3, 2, 1]);
+    assert!(!e.d.parked(w(2)) && !e.d.parked(w(3)) && !e.d.parked(w(1)));
+    assert_eq!(e.d.frames[&w(3)], saved3, "restored exactly");
+    assert_eq!(e.d.focused, Some(w(3)), "the merged stage's key is focused");
+    assert_eq!(e.d.z[..3], [w(3), w(2), w(1)]);
+    assert_eq!(a.last(), Some(&Action::StateChanged));
+    assert!(e.m.strip().is_empty());
+}
+
+#[test]
+fn merge_of_the_active_or_an_unknown_stage_is_a_no_op() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    let active = e.m.main_active_stage().expect("active");
+    let obs = e.d.obs();
+    assert!(e.m.merge_into_active(active, &obs).is_empty());
+    assert!(e.m.merge_into_active(StageId(99), &obs).is_empty());
+}
+
+#[test]
+fn merge_keeps_a_declared_stage_and_moves_children_along() {
+    let mut e = Env::with(ModelOptions {
+        named_stages: vec!["Work".into(), "Chat".into()],
+        ..Default::default()
+    });
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(
+        meta(2, 11, "com.example.chat"),
+        RuleAction::Stage("Chat".into()),
+    );
+    // Window 2 was focused at birth, so Chat is active; add a child, then go back to Work.
+    let c = child(5, 11, Some(2));
+    e.d.frames.insert(c.id, c.frame);
+    let obs = e.d.obs();
+    let a = e.m.add_window(c, &Decision::default(), &obs);
+    e.run(a);
+    e.switch(1);
+    assert!(e.d.parked(w(5)));
+    let chat = e.m.stages()[1].id;
+    let obs = e.d.obs();
+    let a = e.m.merge_into_active(chat, &obs);
+    e.run(a);
+    assert_eq!(e.m.stages().len(), 2, "a declared stage survives empty");
+    assert!(e.members(2).is_empty());
+    assert_eq!(e.members(1), [2, 1]);
+    assert!(!e.d.parked(w(5)), "the child came along");
+    assert_eq!(e.m.stage_of(w(5)), e.m.main_active_stage());
+}
+
+#[test]
+fn merge_leaves_pinned_windows_alone() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Float);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    let stage1 = e.m.stages()[0].id;
+    let obs = e.d.obs();
+    let a = e.m.merge_into_active(stage1, &obs);
+    e.run(a);
+    assert_eq!(e.m.window(w(1)).map(|x| x.home), Some(Home::Pinned));
+    assert_eq!(e.members(1), [2, 3]);
+}
+
 // ----- property test ----------------------------------------------------------------------
 
 /// Tiny deterministic generator (SplitMix64).
@@ -1180,7 +1284,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
         for _ in 0..150 {
             let alive: Vec<WindowId> = e.d.frames.keys().copied().collect();
             let managed: Vec<WindowId> = e.m.windows().map(|w| w.meta.id).collect();
-            let op = rng.below(15);
+            let op = rng.below(16);
             let step = format!("seed {seed} op {op} after {log:?}");
             match op {
                 0..=2 => {
@@ -1323,6 +1427,14 @@ fn property_no_sequence_of_operations_loses_a_window() {
                             &obs,
                         );
                         assert!(a.is_empty(), "duplicate produced actions");
+                    }
+                }
+                14 => {
+                    if let Some(stage) = e.m.stages().get(rng.below(4)).map(|s| s.id) {
+                        log.push(format!("merge {}", stage.0));
+                        let obs = e.d.obs();
+                        let a = e.m.merge_into_active(stage, &obs);
+                        e.run(a);
                     }
                 }
                 _ => {

@@ -1,7 +1,19 @@
-//! Well-known file locations: ctl socket, log file, config file.
+//! Well-known file locations: ctl socket, log file, config and state files, clean-exit
+//! markers.
+//!
+//! `STAGE_MANAGER_HOME=<dir>` moves all of them into `<dir>` (test runs use a scratch
+//! directory, so they never touch the real config, state, socket or log). Without it:
+//! config and state in `~/.config/stage-manager`, the log in `~/Library/Logs/Stage Manager`,
+//! the socket in the per-user temporary directory.
 
 use std::ffi::CStr;
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+
+use crate::config::{self, HOME_ENV};
+
+/// `sun_path` holds 104 bytes on macOS; longer socket paths are hashed into the temp dir.
+const MAX_SOCKET_PATH: usize = 100;
 
 /// The per-user temporary directory (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, which is what
 /// `$TMPDIR` normally points at). Using `confstr` first keeps the app (launched through
@@ -20,58 +32,65 @@ pub fn user_temp_dir() -> PathBuf {
     std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// The ctl socket: `$TMPDIR/stage-manager.sock`.
+/// `$STAGE_MANAGER_HOME`, when set and not empty.
+pub fn custom_home() -> Option<PathBuf> {
+    std::env::var_os(HOME_ENV).filter(|d| !d.is_empty()).map(PathBuf::from)
+}
+
+/// The ctl socket: `$STAGE_MANAGER_HOME/stage-manager.sock`, else
+/// `$TMPDIR/stage-manager.sock`.
 pub fn socket_path() -> PathBuf {
-    user_temp_dir().join("stage-manager.sock")
+    match custom_home() {
+        Some(home) => socket_in(&home),
+        None => user_temp_dir().join("stage-manager.sock"),
+    }
+}
+
+/// The socket for a custom home; a path too long for `sun_path` becomes a short hashed name
+/// in the temp dir (the same for the app and the client).
+fn socket_in(home: &Path) -> PathBuf {
+    let path = home.join("stage-manager.sock");
+    if path.as_os_str().len() <= MAX_SOCKET_PATH {
+        return path;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    home.hash(&mut h);
+    user_temp_dir().join(format!("stage-manager-{:016x}.sock", h.finish()))
 }
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// `~/Library/Logs/Stage Manager`.
+/// `$STAGE_MANAGER_HOME`, else `~/Library/Logs/Stage Manager`.
 pub fn log_dir() -> PathBuf {
-    home().join("Library/Logs/Stage Manager")
+    custom_home().unwrap_or_else(|| home().join("Library/Logs/Stage Manager"))
 }
 
-/// `~/Library/Logs/Stage Manager/stage-manager.log`.
+/// `stage-manager.log` in [`log_dir`].
 pub fn log_file() -> PathBuf {
     log_dir().join("stage-manager.log")
 }
 
-// ---------------------------------------------------------------------------------------
-// INTEGRATOR: config values hard-coded here until `src/config.rs` (branch `engine`) owns
-// them. Replace `config_file` and `CONFIG_PLACEHOLDER` with the config module's path and
-// commented defaults.
-// ---------------------------------------------------------------------------------------
-
-/// `~/.config/stage-manager/config.toml`.
-pub fn config_file() -> PathBuf {
-    home().join(".config/stage-manager/config.toml")
+/// The config and state directory (see [`config::config_dir`]).
+pub fn config_dir() -> PathBuf {
+    config::config_dir().unwrap_or_else(|| home().join(".config/stage-manager"))
 }
 
-/// Written when Open Config finds no config file. INTEGRATOR: replace with the commented
-/// defaults from `config.rs`.
-pub const CONFIG_PLACEHOLDER: &str = "\
-# Stage Manager configuration.
-#
-# macOS settings (System Settings > Desktop & Dock > Stage Manager) stay the source of
-# truth for everything they cover; this file holds only what macOS lacks: new-window rules,
-# placement, hotkeys, named stages, pinning, persistence.
-#
-# The commented defaults arrive with the engine milestone.
-";
+/// `config.toml`.
+pub fn config_file() -> PathBuf {
+    config_dir().join("config.toml")
+}
 
-/// Creates the config file with [`CONFIG_PLACEHOLDER`] when it is missing; returns its path.
-pub fn ensure_config_file() -> std::io::Result<PathBuf> {
-    let path = config_file();
-    if !path.exists() {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, CONFIG_PLACEHOLDER)?;
-    }
-    Ok(path)
+/// `state.json`.
+pub fn state_file() -> PathBuf {
+    config_dir().join("state.json")
+}
+
+/// The clean-exit marker of the app process `pid`: written right before a clean exit, after
+/// every window is back onscreen; the guardian then exits without a recovery scan.
+pub fn clean_exit_marker(pid: u32) -> PathBuf {
+    config_dir().join(format!(".clean-exit-{pid}"))
 }
 
 #[cfg(test)]
@@ -79,15 +98,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn socket_lives_in_the_user_temp_dir() {
-        let p = socket_path();
-        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("stage-manager.sock"));
+    fn socket_lives_in_the_user_temp_dir_by_default() {
+        if custom_home().is_none() {
+            let p = socket_path();
+            assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("stage-manager.sock"));
+            assert!(p.starts_with(user_temp_dir()));
+        }
+    }
+
+    #[test]
+    fn long_custom_homes_get_a_short_hashed_socket() {
+        let short = socket_in(Path::new("/tmp/sm"));
+        assert_eq!(short, PathBuf::from("/tmp/sm/stage-manager.sock"));
+        let long = Path::new("/private/tmp").join("x".repeat(120));
+        let p = socket_in(&long);
+        assert!(p.as_os_str().len() <= MAX_SOCKET_PATH + 40);
         assert!(p.starts_with(user_temp_dir()));
+        assert_eq!(p, socket_in(&long), "stable");
+        assert_ne!(p, socket_in(&long.join("y")));
     }
 
     #[test]
     fn log_and_config_paths_are_named() {
-        assert!(log_file().ends_with("Library/Logs/Stage Manager/stage-manager.log"));
-        assert!(config_file().ends_with(".config/stage-manager/config.toml"));
+        assert!(log_file().ends_with("stage-manager.log"));
+        assert!(config_file().ends_with("config.toml"));
+        assert!(state_file().ends_with("state.json"));
+        assert!(clean_exit_marker(42).ends_with(".clean-exit-42"));
     }
 }

@@ -1,30 +1,48 @@
 //! The WM thread: a dedicated thread with its own `CFRunLoop` that owns every
-//! Accessibility call and observer.
+//! Accessibility call, the [`Observer`] and the [`Controller`] (the engine).
 //!
 //! Other threads talk to it through [`WmHandle`]: each command goes into an mpsc channel,
 //! then `CFRunLoopPerformBlock` + `CFRunLoopWakeUp` schedule a drain on the WM run loop.
 //! The send happens before the block is scheduled, so a wake-up is never lost; a drain that
 //! finds the channel already empty is harmless.
+//!
+//! Every entry point (command drain, AX callback, timer) runs inside
+//! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
+//! of killing the thread that owns the windows.
 
+use std::cell::RefCell;
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::Duration;
 
 use block2::RcBlock;
+use objc2_application_services::{AXObserver, AXUIElement};
 use objc2_core_foundation::{
-    CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer, kCFRunLoopDefaultMode,
+    CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer, CFString, kCFRunLoopDefaultMode,
 };
 
 use super::apps::{AppEvent, AppInfo};
 use super::ax::AxElement;
+use super::controller::Controller;
+use super::ctl::Command;
 use super::native_settings::RawSettings;
-use super::observe;
+use super::observe::{self, Observer};
+use super::safety;
+use crate::config::HotkeyCommand;
+use crate::engine::geometry::Point;
+use crate::engine::model::Display;
+use crate::ui::strip_model::StripEvent;
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
 pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 
-/// Housekeeping period of the WM run loop (retries of apps whose AX was not ready).
-const TICK_SECONDS: f64 = 1.0;
+/// Housekeeping period of the WM run loop (saves, config polling, strip refresh).
+const TICK_SECONDS: f64 = 0.25;
+
+/// App-observation retries run every this many ticks (about once a second).
+const RETRY_EVERY: u32 = 4;
 
 /// Work for the WM thread.
 pub enum WmCommand {
@@ -32,14 +50,28 @@ pub enum WmCommand {
     Apps(Vec<AppInfo>),
     /// A workspace event.
     App(AppEvent),
-    /// Accessibility trust changed: start or stop observation.
+    /// Accessibility trust changed: start or stop observation. The first grant runs the
+    /// recovery scan before observation starts.
     Accessibility(bool),
     /// Fresh `com.apple.WindowManager` values.
     NativeSettings(RawSettings),
-    /// Reply with the observed apps and windows as JSON.
-    Dump(SyncSender<serde_json::Value>),
-    /// Drop every observer, stop the run loop, then reply.
-    Shutdown(SyncSender<()>),
+    /// The main display (first) and its visible frame, top-left coordinates.
+    Displays(Vec<Display>),
+    /// A left mouse-down in another app, global top-left coordinates.
+    MouseDown(Point),
+    /// A hotkey was pressed.
+    Hotkey(HotkeyCommand),
+    /// Input from the strip.
+    Strip(StripEvent),
+    /// Show or hide the strip.
+    ToggleStrip,
+    /// Re-read config.toml.
+    ReloadConfig,
+    /// A ctl command for the engine; the reply is one JSON value.
+    Ctl(Command, SyncSender<serde_json::Value>),
+    /// Unpark every window, save state, drop every observer, stop the run loop, then reply
+    /// with whether every window came back.
+    Shutdown(SyncSender<bool>),
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -82,7 +114,7 @@ impl WmHandle {
         if self.tx.send(cmd).is_err() {
             return false;
         }
-        let block = RcBlock::new(observe::drain);
+        let block = RcBlock::new(drain);
         // SAFETY: the default-mode constant is a valid static; the block is 'static and is
         // copied by CoreFoundation.
         unsafe { self.run_loop.0.perform_block(kCFRunLoopDefaultMode.map(|m| m.as_ref()), Some(&block)) };
@@ -90,35 +122,187 @@ impl WmHandle {
         true
     }
 
-    /// Asks for a JSON dump; `None` when the WM thread does not answer within `timeout`.
-    pub fn dump(&self, timeout: Duration) -> Option<serde_json::Value> {
+    /// Runs a ctl command on the WM thread; `None` when it does not answer within `timeout`.
+    pub fn ctl(&self, cmd: Command, timeout: Duration) -> Option<serde_json::Value> {
         let (tx, rx) = mpsc::sync_channel(1);
-        if !self.send(WmCommand::Dump(tx)) {
+        if !self.send(WmCommand::Ctl(cmd, tx)) {
             return None;
         }
         rx.recv_timeout(timeout).ok()
     }
 
-    /// Stops observation and the WM thread; true when it confirmed within `timeout`.
-    pub fn shutdown(&self, timeout: Duration) -> bool {
+    /// Unparks every window and stops the WM thread. `Some(true)` when every window came
+    /// back, `None` when the thread did not answer within `timeout`.
+    pub fn shutdown(&self, timeout: Duration) -> Option<bool> {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.send(WmCommand::Shutdown(tx)) && rx.recv_timeout(timeout).is_ok()
+        if !self.send(WmCommand::Shutdown(tx)) {
+            return None;
+        }
+        rx.recv_timeout(timeout).ok()
     }
 }
 
-fn run(rx: mpsc::Receiver<WmCommand>, run_loop: &CFRunLoop) {
+/// Everything the WM thread owns.
+struct WmState {
+    observer: Observer,
+    controller: Controller,
+    scanned: bool,
+    ticks: u32,
+}
+
+thread_local! {
+    static STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
+    static INBOX: RefCell<Option<Receiver<WmCommand>>> = const { RefCell::new(None) };
+}
+
+fn with_state(f: impl FnOnce(&mut WmState)) {
+    STATE.with(|s| match s.try_borrow_mut() {
+        Ok(mut guard) => {
+            if let Some(state) = guard.as_mut() {
+                f(state);
+            }
+        }
+        Err(_) => tracing::warn!("WM state busy (re-entrant callback); event dropped"),
+    });
+}
+
+/// Runs `f` on the state inside a guarded section; after a caught panic the registry is
+/// resynced from the model.
+fn guarded_state(what: &str, f: impl FnOnce(&mut WmState)) {
+    if safety::guarded(what, || with_state(f)).is_none() {
+        let _ = safety::guarded("panic recovery", || with_state(WmState::after_panic));
+    }
+}
+
+/// Handles every queued command (scheduled by `WmHandle::send`).
+fn drain() {
+    loop {
+        let cmd = INBOX.with(|i| i.borrow().as_ref().and_then(|rx| rx.try_recv().ok()));
+        let Some(cmd) = cmd else { break };
+        guarded_state("a WM command", |s| s.handle(cmd));
+    }
+}
+
+/// Periodic housekeeping.
+fn tick() {
+    guarded_state("the WM tick", WmState::tick);
+}
+
+/// The AX observer callback. `refcon` carries the app's pid.
+unsafe extern "C-unwind" fn ax_callback(
+    _observer: NonNull<AXObserver>,
+    element: NonNull<AXUIElement>,
+    notification: NonNull<CFString>,
+    refcon: *mut c_void,
+) {
+    let pid = observe::pid_of_refcon(refcon);
+    // SAFETY: AX passes a live element and notification name for the callback's duration.
+    let element = unsafe { AxElement::from_borrowed(element) };
+    // SAFETY: as above.
+    let name = unsafe { notification.as_ref() }.to_string();
+    guarded_state("an AX callback", |s| {
+        s.observer.on_notification(pid, element, &name);
+        s.pump();
+    });
+}
+
+impl WmState {
+    /// Hands the observer's events to the controller.
+    fn pump(&mut self) {
+        loop {
+            let events = self.observer.take_events();
+            if events.is_empty() {
+                break;
+            }
+            self.controller.on_events(&mut self.observer, events);
+        }
+    }
+
+    fn handle(&mut self, cmd: WmCommand) {
+        match cmd {
+            WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
+            WmCommand::App(event) => self.observer.on_app_event(event, ax_callback),
+            WmCommand::Accessibility(trusted) => {
+                if trusted && !self.scanned {
+                    self.scanned = true;
+                    let r = safety::recovery_scan("launch");
+                    if r.restored > 0 {
+                        tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
+                    }
+                }
+                self.observer.set_accessibility(trusted, ax_callback);
+            }
+            WmCommand::NativeSettings(settings) => {
+                self.controller.set_settings(&settings);
+                self.observer.set_settings(settings);
+            }
+            WmCommand::Displays(displays) => self.controller.set_displays(&mut self.observer, displays),
+            WmCommand::MouseDown(p) => self.controller.mouse_down(&mut self.observer, p),
+            WmCommand::Hotkey(command) => self.controller.hotkey(&mut self.observer, command),
+            WmCommand::Strip(event) => self.controller.strip_event(&mut self.observer, event),
+            WmCommand::ToggleStrip => self.controller.toggle_strip(),
+            WmCommand::ReloadConfig => self.controller.reload_config(&mut self.observer),
+            WmCommand::Ctl(cmd, reply) => {
+                let value = self.controller.ctl(&mut self.observer, cmd);
+                let _ = reply.send(value);
+            }
+            WmCommand::Shutdown(reply) => {
+                let failed = self.controller.unpark_all(&self.observer);
+                let ok = failed == 0 && safety::registry_len() == 0;
+                self.controller.save_now();
+                self.observer.stop();
+                let _ = self.observer.take_events();
+                if let Some(rl) = CFRunLoop::current() {
+                    rl.stop();
+                }
+                let _ = reply.send(ok);
+            }
+        }
+        self.pump();
+    }
+
+    fn tick(&mut self) {
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks.is_multiple_of(RETRY_EVERY) {
+            self.observer.retry_pending(ax_callback);
+        }
+        self.pump();
+        self.controller.tick(&mut self.observer);
+    }
+
+    fn after_panic(&mut self) {
+        tracing::error!("recovering from a panic on the WM thread: resyncing the parked-window registry");
+        let _ = self.observer.take_events();
+        self.controller.resync_registry(&self.observer);
+    }
+}
+
+fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
     match AxElement::system_wide().set_messaging_timeout(AX_TIMEOUT_SECONDS) {
         Ok(()) => tracing::debug!("AX messaging timeout set to {AX_TIMEOUT_SECONDS} s"),
         Err(e) => tracing::warn!("could not set the AX messaging timeout: {e}"),
     }
-    observe::install(rx);
+    let only = observe::only_from_env();
+    if let Some(only) = &only {
+        let mut list: Vec<_> = only.iter().cloned().collect();
+        list.sort();
+        tracing::info!("management restricted to {}", list.join(", "));
+    }
+    let state = WmState {
+        observer: Observer::new(std::process::id() as i32, only),
+        controller: Controller::new(),
+        scanned: false,
+        ticks: 0,
+    };
+    STATE.with(|s| *s.borrow_mut() = Some(state));
+    INBOX.with(|i| *i.borrow_mut() = Some(rx));
 
     // The timer keeps the run loop alive (CFRunLoopRun returns at once with no sources)
-    // and drives retries.
-    let tick = RcBlock::new(|_timer: *mut CFRunLoopTimer| observe::tick());
+    // and drives housekeeping.
+    let tick_block = RcBlock::new(|_timer: *mut CFRunLoopTimer| tick());
     let first_fire = CFAbsoluteTimeGetCurrent() + TICK_SECONDS;
     // SAFETY: valid arguments; the block is copied by CoreFoundation.
-    let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, TICK_SECONDS, 0, 0, Some(&tick)) };
+    let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, TICK_SECONDS, 0, 0, Some(&tick_block)) };
     match &timer {
         // SAFETY: the default-mode constant is a valid static.
         Some(t) => run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode }),

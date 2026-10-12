@@ -20,7 +20,7 @@ use super::geometry::Rect;
 use super::park::{clamp_to_visible, is_parked, park_frame};
 use super::settings::NativeSettings;
 
-pub use strip::{StripCard, StripOptions, StripOrder};
+pub use strip::{CARD_PITCH, STRIP_MARGIN, StripCard, StripOptions, StripOrder, capacity_for_height};
 
 /// A process ID.
 pub type Pid = i32;

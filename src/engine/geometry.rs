@@ -145,6 +145,13 @@ impl Rect {
     }
 }
 
+impl std::fmt::Display for Rect {
+    /// `x,y wxh`, rounded to whole points (for logs).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.0},{:.0} {:.0}x{:.0}", self.x, self.y, self.w, self.h)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +191,11 @@ mod tests {
             r.centered_on(Point::new(50.0, 50.0)),
             Rect::new(45.0, 40.0, 10.0, 20.0)
         );
+    }
+
+    #[test]
+    fn formats_for_logs() {
+        assert_eq!(Rect::new(10.0, 20.5, 300.0, 200.0).to_string(), "10,20 300x200");
     }
 
     #[test]

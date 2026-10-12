@@ -4,13 +4,21 @@
 # fallback.
 #
 # Passed through to the app when set: RUST_LOG (default info,stage_manager=debug),
-# STAGE_MANAGER_NO_PROMPT, STAGE_MANAGER_ONLY.
+# STAGE_MANAGER_NO_PROMPT, STAGE_MANAGER_ONLY, STAGE_MANAGER_HOME (config, state, socket and
+# log in that directory), STAGE_MANAGER_TEST (test-only ctl commands).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 APP="target/Stage Manager.app"
 BIN="$APP/Contents/MacOS/stage-manager"
-LOG="$HOME/Library/Logs/Stage Manager/stage-manager.log"
+if [ -n "${STAGE_MANAGER_HOME:-}" ]; then
+  mkdir -p "$STAGE_MANAGER_HOME"
+  STAGE_MANAGER_HOME="$(cd "$STAGE_MANAGER_HOME" && pwd)"
+  export STAGE_MANAGER_HOME
+  LOG="$STAGE_MANAGER_HOME/stage-manager.log"
+else
+  LOG="$HOME/Library/Logs/Stage Manager/stage-manager.log"
+fi
 
 if "$BIN" ctl ping >/dev/null 2>&1; then
   echo "Stage Manager is already running; quit it first (\"$BIN\" ctl quit)." >&2
@@ -21,7 +29,7 @@ mkdir -p "$(dirname "$LOG")"
 : > "$LOG"
 
 ENV_ARGS=(--env "RUST_LOG=${RUST_LOG:-info,stage_manager=debug}")
-for var in STAGE_MANAGER_NO_PROMPT STAGE_MANAGER_ONLY; do
+for var in STAGE_MANAGER_NO_PROMPT STAGE_MANAGER_ONLY STAGE_MANAGER_HOME STAGE_MANAGER_TEST; do
   if [ -n "${!var+x}" ]; then ENV_ARGS+=(--env "$var=${!var}"); fi
 done
 

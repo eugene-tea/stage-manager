@@ -217,7 +217,12 @@ impl Demo {
     }
 
     fn menu_state(&self) -> MenuState {
-        MenuState { permissions: PermissionState::current(), apple_stage_manager_on: false, strip_visible: self.flags.user_visible }
+        MenuState {
+            permissions: PermissionState::current(),
+            apple_stage_manager_on: false,
+            strip_visible: self.flags.user_visible,
+            config_error: None,
+        }
     }
 }
 

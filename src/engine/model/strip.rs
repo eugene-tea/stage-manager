@@ -14,6 +14,31 @@
 
 use super::{DisplayId, Model, Pid, StageId, WindowId, WindowRole};
 
+/// Vertical room per card in points: UX-SPEC's measured card pitch (card tops 231, 406, 557,
+/// 728, 913, 1062 pt, so about 166 pt) plus a little air.
+pub const CARD_PITCH: f64 = 170.0;
+
+/// Room kept free above and below the column of cards, in points. Measured: six cards at
+/// 1410 pt of visible height left about 200 pt at each end.
+pub const STRIP_MARGIN: f64 = 190.0;
+
+/// The fewest and the most cards the strip shows, whatever the screen.
+pub const CAPACITY_RANGE: (usize, usize) = (3, 9);
+
+/// How many cards fit in a display's visible height (Apple: 6 at 1410 pt).
+pub fn capacity_for_height(visible_height: f64) -> usize {
+    let (lo, hi) = CAPACITY_RANGE;
+    if !visible_height.is_finite() {
+        return lo;
+    }
+    let n = ((visible_height - 2.0 * STRIP_MARGIN) / CARD_PITCH).floor();
+    if n.is_nan() || n < lo as f64 {
+        lo
+    } else {
+        (n as usize).min(hi)
+    }
+}
+
 /// How cards are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StripOrder {

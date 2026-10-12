@@ -1,30 +1,29 @@
-//! Observation state on the WM thread: which apps are observed, which windows are
-//! manageable, and the AX notification handlers that keep both current.
+//! Observation on the WM thread: which apps are observed, which windows are manageable, and
+//! the AX notification handlers that keep both current.
 //!
 //! A *manageable* window is an AX element with role `AXWindow`, a `CGWindowID`, not
 //! fullscreen, on layer 0. Subrole `AXStandardWindow` is [`WindowKind::Standard`]; any other
 //! subrole is [`WindowKind::Child`]. Windows are deduplicated by window id.
+//!
+//! The [`Observer`] only tracks; it reports what changed as [`WinEvent`]s, which the
+//! controller drains with [`Observer::take_events`] and turns into engine operations.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
-use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
-use std::sync::mpsc::Receiver;
 
 use objc2_application_services::{AXObserver, AXUIElement};
-use objc2_core_foundation::{CFRunLoop, CFString};
+use objc2_core_foundation::CFString;
 use serde::Serialize;
 use serde_json::json;
 
 use super::apps::{AppEvent, AppInfo};
 use super::ax::{AxElement, AxError, AxObserver, names, notifications as n};
-use super::geometry::Rect;
 use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
-use super::wm_thread::WmCommand;
+use crate::engine::geometry::Rect;
 
-/// How often an app whose AX is not ready yet (just launched) is retried, one per tick.
+/// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
 const MAX_ATTEMPTS: u32 = 10;
 
 /// Standard window or child (sheet, dialog, panel, popover…).
@@ -55,6 +54,27 @@ pub struct TrackedWindow {
     pub minimized: bool,
 }
 
+/// What changed, for the controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WinEvent {
+    /// Observation started; every window found so far is tracked (no `Found` for them).
+    Started,
+    /// Observation stopped (Accessibility revoked); every window was dropped.
+    Stopped,
+    /// A window appeared (created, or found when its app became observable).
+    Found(u32),
+    /// A window is gone (destroyed, or its app quit).
+    Destroyed(u32),
+    /// A window moved or resized; its tracked frame is current.
+    Moved(u32),
+    /// A window's title changed; its tracked title is current.
+    Retitled(u32),
+    /// A window got focus.
+    Focused(u32),
+    /// An observed app became frontmost (NSWorkspace).
+    AppActivated(i32),
+}
+
 struct ObservedApp {
     element: AxElement,
     observer: AxObserver,
@@ -67,8 +87,26 @@ pub fn parse_only(value: Option<&str>) -> Option<HashSet<String>> {
     if set.is_empty() { None } else { Some(set) }
 }
 
+/// The `STAGE_MANAGER_ONLY` filter from the environment.
+pub fn only_from_env() -> Option<HashSet<String>> {
+    parse_only(std::env::var("STAGE_MANAGER_ONLY").ok().as_deref())
+}
+
+/// Whether an app may be observed and managed: not us, not excluded, a real pid, and on the
+/// `only` list when there is one.
+pub fn app_allowed(only: Option<&HashSet<String>>, own_pid: i32, pid: i32, bundle_id: Option<&str>) -> bool {
+    if pid <= 0 || pid == own_pid {
+        return false;
+    }
+    match bundle_id {
+        Some(b) if windows::is_excluded_bundle(b) => false,
+        Some(b) => only.is_none_or(|only| only.contains(b)),
+        None => only.is_none(),
+    }
+}
+
 /// Everything the WM thread knows about apps and windows.
-pub struct Observation {
+pub struct Observer {
     own_pid: i32,
     only: Option<HashSet<String>>,
     accessibility: bool,
@@ -78,82 +116,28 @@ pub struct Observation {
     observed: HashMap<i32, ObservedApp>,
     windows: BTreeMap<u32, TrackedWindow>,
     pending: HashMap<i32, u32>,
+    /// Apps with a window the window server did not list yet (just created): rescanned on
+    /// the next retry passes, counting attempts.
+    recheck: HashMap<i32, u32>,
+    events: Vec<WinEvent>,
 }
 
-thread_local! {
-    static STATE: RefCell<Option<Observation>> = const { RefCell::new(None) };
-    static INBOX: RefCell<Option<Receiver<WmCommand>>> = const { RefCell::new(None) };
-}
-
-/// Installs the state and command receiver on the current (WM) thread.
-pub(crate) fn install(rx: Receiver<WmCommand>) {
-    let only = parse_only(std::env::var("STAGE_MANAGER_ONLY").ok().as_deref());
-    if let Some(only) = &only {
-        let mut list: Vec<_> = only.iter().cloned().collect();
-        list.sort();
-        tracing::info!("observation restricted to {}", list.join(", "));
-    }
-    STATE.with(|s| *s.borrow_mut() = Some(Observation::new(std::process::id() as i32, only)));
-    INBOX.with(|i| *i.borrow_mut() = Some(rx));
-}
-
-fn with_state(f: impl FnOnce(&mut Observation)) {
-    STATE.with(|s| match s.try_borrow_mut() {
-        Ok(mut guard) => {
-            if let Some(state) = guard.as_mut() {
-                f(state);
-            }
-        }
-        Err(_) => tracing::warn!("observation state busy (re-entrant callback); event dropped"),
-    });
-}
-
-/// Handles every queued command (scheduled by `WmHandle::send`).
-pub(crate) fn drain() {
-    loop {
-        let cmd = INBOX.with(|i| i.borrow().as_ref().and_then(|rx| rx.try_recv().ok()));
-        let Some(cmd) = cmd else { break };
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| with_state(|s| s.handle(cmd))));
-        if result.is_err() {
-            tracing::error!("panic while handling a WM command");
-        }
-    }
-}
-
-/// Periodic housekeeping (retries).
-pub(crate) fn tick() {
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| with_state(Observation::retry_pending)));
-    if result.is_err() {
-        tracing::error!("panic in WM tick");
-    }
-}
-
-/// The AX observer callback. `refcon` carries the app's pid.
-unsafe extern "C-unwind" fn ax_callback(
-    _observer: NonNull<AXObserver>,
-    element: NonNull<AXUIElement>,
-    notification: NonNull<CFString>,
-    refcon: *mut c_void,
-) {
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let pid = refcon as usize as i32;
-        // SAFETY: AX passes a live element and notification name for the callback's duration.
-        let element = unsafe { AxElement::from_borrowed(element) };
-        // SAFETY: as above.
-        let name = unsafe { notification.as_ref() }.to_string();
-        with_state(|s| s.on_notification(pid, element, &name));
-    }));
-    if result.is_err() {
-        tracing::error!("panic in AX callback");
-    }
-}
+/// The AX callback type, installed by the WM thread.
+pub type Callback =
+    unsafe extern "C-unwind" fn(NonNull<AXObserver>, NonNull<AXUIElement>, NonNull<CFString>, *mut c_void);
 
 fn refcon(pid: i32) -> usize {
     pid as usize
 }
 
-impl Observation {
-    fn new(own_pid: i32, only: Option<HashSet<String>>) -> Self {
+/// The pid carried in an AX callback's `refcon`.
+pub fn pid_of_refcon(refcon: *mut c_void) -> i32 {
+    refcon as usize as i32
+}
+
+impl Observer {
+    /// A fresh observer for this process, filtered by `only`.
+    pub fn new(own_pid: i32, only: Option<HashSet<String>>) -> Self {
         Self {
             own_pid,
             only,
@@ -164,58 +148,89 @@ impl Observation {
             observed: HashMap::new(),
             windows: BTreeMap::new(),
             pending: HashMap::new(),
+            recheck: HashMap::new(),
+            events: Vec::new(),
         }
     }
 
-    fn handle(&mut self, cmd: WmCommand) {
-        match cmd {
-            WmCommand::Apps(list) => {
-                self.apps = list.into_iter().map(|a| (a.pid, a)).collect();
-                tracing::debug!("{} regular apps running", self.apps.len());
-                if self.observing {
-                    self.observe_all();
-                }
-            }
-            WmCommand::App(event) => self.on_app_event(event),
-            WmCommand::Accessibility(trusted) => {
-                self.accessibility = trusted;
-                if trusted && !self.observing {
-                    self.start();
-                } else if !trusted && self.observing {
-                    tracing::warn!("Accessibility revoked; observation stopped");
-                    self.stop();
-                }
-            }
-            WmCommand::NativeSettings(settings) => self.settings = settings,
-            WmCommand::Dump(reply) => {
-                let _ = reply.send(self.dump());
-            }
-            WmCommand::Shutdown(reply) => {
-                self.stop();
-                if let Some(rl) = CFRunLoop::current() {
-                    rl.stop();
-                }
-                let _ = reply.send(());
-            }
+    /// The events since the last call.
+    pub fn take_events(&mut self) -> Vec<WinEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// True while windows are observed.
+    pub fn observing(&self) -> bool {
+        self.observing
+    }
+
+    /// True when Accessibility is granted.
+    pub fn accessibility(&self) -> bool {
+        self.accessibility
+    }
+
+    /// The tracked windows by id.
+    pub fn windows(&self) -> &BTreeMap<u32, TrackedWindow> {
+        &self.windows
+    }
+
+    /// One tracked window.
+    pub fn window(&self, id: u32) -> Option<&TrackedWindow> {
+        self.windows.get(&id)
+    }
+
+    /// The bundle id of a running app, if known.
+    pub fn bundle_id(&self, pid: i32) -> Option<&str> {
+        self.apps.get(&pid).and_then(|a| a.bundle_id.as_deref())
+    }
+
+    /// Re-reads a tracked window's frame through AX, keeping the result.
+    pub fn refresh_frame(&mut self, id: u32) -> Option<Rect> {
+        let w = self.windows.get_mut(&id)?;
+        if let Ok(f) = w.element.frame() {
+            w.frame = f;
+        }
+        Some(w.frame)
+    }
+
+    /// The `STAGE_MANAGER_ONLY` filter in force.
+    pub fn only(&self) -> Option<&HashSet<String>> {
+        self.only.as_ref()
+    }
+
+    /// Stores the latest `com.apple.WindowManager` values (for `ctl dump`).
+    pub fn set_settings(&mut self, settings: RawSettings) {
+        self.settings = settings;
+    }
+
+    /// The full list of running regular apps.
+    pub fn set_apps(&mut self, list: Vec<AppInfo>, callback: Callback) {
+        self.apps = list.into_iter().map(|a| (a.pid, a)).collect();
+        tracing::debug!("{} regular apps running", self.apps.len());
+        if self.observing {
+            self.observe_all(callback);
+        }
+    }
+
+    /// Accessibility trust changed: start or stop observation.
+    pub fn set_accessibility(&mut self, trusted: bool, callback: Callback) {
+        self.accessibility = trusted;
+        if trusted && !self.observing {
+            self.start(callback);
+        } else if !trusted && self.observing {
+            tracing::warn!("Accessibility revoked; observation stopped");
+            self.stop();
         }
     }
 
     fn allowed(&self, app: &AppInfo) -> bool {
-        if app.pid == self.own_pid {
-            return false;
-        }
-        match app.bundle_id.as_deref() {
-            Some(b) if windows::is_excluded_bundle(b) => false,
-            Some(b) => self.only.as_ref().is_none_or(|only| only.contains(b)),
-            None => self.only.is_none(),
-        }
+        app_allowed(self.only.as_ref(), self.own_pid, app.pid, app.bundle_id.as_deref())
     }
 
     fn bundle_of(&self, pid: i32) -> &str {
         self.apps.get(&pid).map_or("?", AppInfo::bundle_or_unknown)
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, callback: Callback) {
         self.observing = true;
         tracing::info!("Accessibility granted; observation starting");
         let list = windows::list_windows();
@@ -224,7 +239,7 @@ impl Observation {
         let mut found = Vec::new();
         let pids: Vec<i32> = self.apps.values().filter(|a| self.allowed(a)).map(|a| a.pid).collect();
         for pid in pids {
-            found.extend(self.observe_app_or_queue(pid, &cg));
+            found.extend(self.observe_app_or_queue(pid, &cg, callback));
         }
         found.sort_by_key(|id| z.get(id).copied().unwrap_or(usize::MAX));
         for id in &found {
@@ -237,16 +252,23 @@ impl Observation {
             }
         }
         tracing::info!("observing {} apps, {} manageable windows", self.observed.len(), self.windows.len());
+        self.events.push(WinEvent::Started);
     }
 
-    fn stop(&mut self) {
+    /// Drops every observer and window.
+    pub fn stop(&mut self) {
+        let was = self.observing;
         self.observing = false;
         self.observed.clear();
         self.windows.clear();
         self.pending.clear();
+        self.recheck.clear();
+        if was {
+            self.events.push(WinEvent::Stopped);
+        }
     }
 
-    fn observe_all(&mut self) {
+    fn observe_all(&mut self, callback: Callback) {
         let cg = cg_lookup();
         let pids: Vec<i32> = self
             .apps
@@ -255,15 +277,15 @@ impl Observation {
             .map(|a| a.pid)
             .collect();
         for pid in pids {
-            for id in self.observe_app_or_queue(pid, &cg) {
-                self.log_window("window found", id);
+            for id in self.observe_app_or_queue(pid, &cg, callback) {
+                self.found(id, "window found");
             }
         }
     }
 
     /// Observes `pid`; on failure queues a retry. Returns newly tracked window ids.
-    fn observe_app_or_queue(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>) -> Vec<u32> {
-        match self.observe_app(pid, cg) {
+    fn observe_app_or_queue(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>, callback: Callback) -> Vec<u32> {
+        match self.observe_app(pid, cg, callback) {
             Ok(ids) => {
                 self.pending.remove(&pid);
                 ids
@@ -281,12 +303,12 @@ impl Observation {
         }
     }
 
-    fn observe_app(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>) -> Result<Vec<u32>, AxError> {
+    fn observe_app(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>, callback: Callback) -> Result<Vec<u32>, AxError> {
         if self.observed.contains_key(&pid) {
             return Ok(Vec::new());
         }
         let element = AxElement::application(pid);
-        let observer = AxObserver::new(pid, ax_callback)?;
+        let observer = AxObserver::new(pid, callback)?;
         let mut registered = 0;
         let mut last_err = None;
         for name in n::APP_LEVEL {
@@ -308,27 +330,49 @@ impl Observation {
         };
         self.observed.insert(pid, ObservedApp { element, observer });
         tracing::debug!(pid, bundle = self.bundle_of(pid), "observing app");
-        Ok(ax_windows.into_iter().filter_map(|w| self.track_window(pid, w, cg)).collect())
+        let mut ids: Vec<u32> = ax_windows.into_iter().filter_map(|w| self.track_window(pid, w, cg)).collect();
+        // Creation order, so rules see windows in the order the app opened them.
+        ids.sort_unstable();
+        Ok(ids)
     }
 
     fn unobserve_app(&mut self, pid: i32) {
         self.pending.remove(&pid);
+        self.recheck.remove(&pid);
         if self.observed.remove(&pid).is_some() {
-            let before = self.windows.len();
-            self.windows.retain(|_, w| w.pid != pid);
-            tracing::debug!(pid, dropped = before - self.windows.len(), "stopped observing app");
+            let gone: Vec<u32> = self.windows.values().filter(|w| w.pid == pid).map(|w| w.id).collect();
+            for id in &gone {
+                self.windows.remove(id);
+                self.events.push(WinEvent::Destroyed(*id));
+            }
+            tracing::debug!(pid, dropped = gone.len(), "stopped observing app");
         }
     }
 
-    fn retry_pending(&mut self) {
-        if !self.observing || self.pending.is_empty() {
+    /// Retries apps whose AX was not ready, and rescans apps with windows the window server
+    /// did not list yet (called about once a second).
+    pub fn retry_pending(&mut self, callback: Callback) {
+        if !self.observing {
+            return;
+        }
+        let recheck: Vec<i32> = self.recheck.keys().copied().collect();
+        for pid in recheck {
+            let attempts = self.recheck.entry(pid).or_insert(0);
+            *attempts += 1;
+            if *attempts > MAX_ATTEMPTS {
+                self.recheck.remove(&pid);
+                continue;
+            }
+            self.rescan_app(pid);
+        }
+        if self.pending.is_empty() {
             return;
         }
         let cg = cg_lookup();
         let pids: Vec<i32> = self.pending.keys().copied().collect();
         for pid in pids {
-            for id in self.observe_app_or_queue(pid, &cg) {
-                self.log_window("window found", id);
+            for id in self.observe_app_or_queue(pid, &cg, callback) {
+                self.found(id, "window found");
             }
         }
     }
@@ -346,10 +390,15 @@ impl Observation {
             tracing::debug!(id, pid, "skipping fullscreen window");
             return None;
         }
-        let Some(cg_window) = cg.get(&id).filter(|w| w.layer == 0) else {
-            tracing::debug!(id, pid, "skipping window not on layer 0");
+        let Some(cg_window) = cg.get(&id) else {
+            tracing::debug!(id, pid, "window not listed by the window server yet; rechecking soon");
+            self.recheck.entry(pid).or_insert(0);
             return None;
         };
+        if cg_window.layer != 0 {
+            tracing::debug!(id, pid, "skipping window not on layer 0");
+            return None;
+        }
         let subrole = element.subrole().unwrap_or_default();
         let window = TrackedWindow {
             id,
@@ -376,6 +425,11 @@ impl Observation {
         self.windows.values().find(|w| w.pid == pid && &w.element == element).map(|w| w.id)
     }
 
+    fn found(&mut self, id: u32, what: &str) {
+        self.log_window(what, id);
+        self.events.push(WinEvent::Found(id));
+    }
+
     fn log_window(&self, what: &str, id: u32) {
         if let Some(w) = self.windows.get(&id) {
             tracing::info!(
@@ -391,14 +445,15 @@ impl Observation {
         let Some(app) = self.observed.get(&pid) else { return };
         let Ok(list) = app.element.windows() else { return };
         let cg = cg_lookup();
-        for w in list {
-            if let Some(id) = self.track_window(pid, w, &cg) {
-                self.log_window("window found", id);
-            }
+        let mut ids: Vec<u32> = list.into_iter().filter_map(|w| self.track_window(pid, w, &cg)).collect();
+        ids.sort_unstable();
+        for id in ids {
+            self.found(id, "window found");
         }
     }
 
-    fn on_notification(&mut self, pid: i32, element: AxElement, name: &str) {
+    /// Handles one AX notification for app `pid`.
+    pub fn on_notification(&mut self, pid: i32, element: AxElement, name: &str) {
         if !self.observing {
             return;
         }
@@ -406,7 +461,7 @@ impl Observation {
             n::WINDOW_CREATED => {
                 let cg = cg_lookup();
                 if let Some(id) = self.track_window(pid, element, &cg) {
-                    self.log_window("window created", id);
+                    self.found(id, "window created");
                 }
             }
             n::FOCUSED_WINDOW_CHANGED => {
@@ -414,12 +469,15 @@ impl Observation {
                     let cg = cg_lookup();
                     let id = self.track_window(pid, element.clone(), &cg);
                     if let Some(id) = id {
-                        self.log_window("window found", id);
+                        self.found(id, "window found");
                     }
                     id
                 });
                 match id {
-                    Some(id) => tracing::info!(id, pid, bundle = self.bundle_of(pid), "window focused"),
+                    Some(id) => {
+                        tracing::debug!(id, pid, bundle = self.bundle_of(pid), "window focused");
+                        self.events.push(WinEvent::Focused(id));
+                    }
                     None => tracing::debug!(pid, "focus moved to an unmanaged window"),
                 }
             }
@@ -435,6 +493,7 @@ impl Observation {
                         }
                     }
                     tracing::info!(id, pid, bundle = self.bundle_of(pid), "window destroyed");
+                    self.events.push(WinEvent::Destroyed(id));
                 }
             }
             n::WINDOW_MOVED | n::WINDOW_RESIZED => {
@@ -443,8 +502,19 @@ impl Observation {
                     if let (Some(w), Ok(frame)) = (self.windows.get_mut(&id), frame) {
                         w.frame = frame;
                         let what = if name == n::WINDOW_MOVED { "moved" } else { "resized" };
-                        tracing::debug!(id, pid, "window {what} to {frame}");
+                        tracing::trace!(id, pid, "window {what} to {frame}");
+                        self.events.push(WinEvent::Moved(id));
                     }
+                }
+            }
+            n::TITLE_CHANGED => {
+                if let Some(id) = self.find_window(pid, &element)
+                    && let Some(w) = self.windows.get_mut(&id)
+                    && let Ok(title) = w.element.title()
+                    && title != w.title
+                {
+                    w.title = title;
+                    self.events.push(WinEvent::Retitled(id));
                 }
             }
             n::WINDOW_MINIATURIZED => {
@@ -457,7 +527,8 @@ impl Observation {
         }
     }
 
-    fn on_app_event(&mut self, event: AppEvent) {
+    /// Handles an NSWorkspace event.
+    pub fn on_app_event(&mut self, event: AppEvent, callback: Callback) {
         match event {
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
@@ -466,8 +537,8 @@ impl Observation {
                 self.apps.insert(pid, app);
                 if self.observing && allowed {
                     let cg = cg_lookup();
-                    for id in self.observe_app_or_queue(pid, &cg) {
-                        self.log_window("window found", id);
+                    for id in self.observe_app_or_queue(pid, &cg, callback) {
+                        self.found(id, "window found");
                     }
                 }
             }
@@ -483,11 +554,14 @@ impl Observation {
                 let pid = app.pid;
                 let allowed = self.allowed(&app);
                 self.apps.entry(pid).or_insert(app);
-                if self.observing && allowed && !self.observed.contains_key(&pid) {
-                    let cg = cg_lookup();
-                    for id in self.observe_app_or_queue(pid, &cg) {
-                        self.log_window("window found", id);
+                if self.observing && allowed {
+                    if !self.observed.contains_key(&pid) {
+                        let cg = cg_lookup();
+                        for id in self.observe_app_or_queue(pid, &cg, callback) {
+                            self.found(id, "window found");
+                        }
                     }
+                    self.events.push(WinEvent::AppActivated(pid));
                 }
             }
         }
@@ -503,7 +577,7 @@ impl Observation {
     }
 
     /// The observed apps and windows as JSON (for `ctl dump`).
-    fn dump(&self) -> serde_json::Value {
+    pub fn dump(&self) -> serde_json::Value {
         let cg: Vec<CgWindow> = windows::list_windows();
         let z = windows::z_order(&cg);
         let mut wins: Vec<&TrackedWindow> = self.windows.values().collect();
@@ -590,20 +664,27 @@ mod tests {
 
     #[test]
     fn allowed_apps_respect_own_pid_exclusions_and_only() {
-        let all = Observation::new(1, None);
+        let all = Observer::new(1, None);
         assert!(!all.allowed(&app(1, Some("x.y"))));
         assert!(!all.allowed(&app(2, Some("com.apple.dock"))));
         assert!(all.allowed(&app(2, Some("x.y"))));
         assert!(all.allowed(&app(2, None)));
-        let only = Observation::new(1, parse_only(Some("dev.eugene.stagemanager.fixture")));
+        let only = Observer::new(1, parse_only(Some("dev.eugene.stagemanager.fixture")));
         assert!(only.allowed(&app(2, Some("dev.eugene.stagemanager.fixture"))));
         assert!(!only.allowed(&app(2, Some("x.y"))));
         assert!(!only.allowed(&app(2, None)));
     }
 
     #[test]
+    fn apps_without_a_real_pid_are_skipped() {
+        let all = Observer::new(1, None);
+        assert!(!all.allowed(&app(-1, Some("com.example.preview"))));
+        assert!(!all.allowed(&app(0, Some("com.example.preview"))));
+    }
+
+    #[test]
     fn dump_without_accessibility_says_so() {
-        let mut s = Observation::new(1, None);
+        let mut s = Observer::new(1, None);
         s.apps.insert(5, app(5, Some("x.y")));
         let d = s.dump();
         assert_eq!(d["accessibility"], false);
@@ -611,5 +692,15 @@ mod tests {
         assert!(d["note"].as_str().unwrap_or_default().contains("Accessibility not granted"));
         assert_eq!(d["apps"].as_array().map(Vec::len), Some(1));
         assert_eq!(d["windows"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn stop_reports_once() {
+        let mut s = Observer::new(1, None);
+        s.stop();
+        assert!(s.take_events().is_empty());
+        s.observing = true;
+        s.stop();
+        assert_eq!(s.take_events(), vec![WinEvent::Stopped]);
     }
 }
