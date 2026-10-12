@@ -37,7 +37,8 @@ The first signing with a new key makes macOS ask whether codesign may use it: ch
 | `make build`   | `cargo build --release` |
 | `make bundle`  | assembles `target/Stage Manager.app` (`LSUIElement`, bundle ID `dev.eugene.stagemanager`, version from `Cargo.toml`) |
 | `make sign`    | signs the bundle by SHA-1 with "Stage Manager Local Signing" (hardened runtime, no timestamp); fails pointing at `scripts/make-cert.sh` when the identity is missing; never ad-hoc |
-| `make run`     | `sign`, then launches through LaunchServices (`open -n`) and tails `~/Library/Logs/Stage Manager/stage-manager.log`; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
+| `make dev`     | `sign`, then copies the app to `~/Library/Application Support/Stage Manager Dev/` (`scripts/dev-app.sh`). macOS asks for screen access once per app location, so dev runs and tests always launch from there, whichever worktree built them |
+| `make run`     | `sign`, copies the app to the dev location, then launches it through LaunchServices (`open -n`) and tails `~/Library/Logs/Stage Manager/stage-manager.log`; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
 | `make install` | copies the signed app to `~/Applications` |
 | `make fixture` | builds and signs `target/SM Fixture.app` (test windows, below) |
 | `make check`   | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
@@ -442,7 +443,7 @@ from `$STAGE_MANAGER_HOME/config.toml` when that is set (re-read when saved, nev
 
 ```sh
 make fixture && open -n -g "target/SM Fixture.app" --args --windows 7 --background
-open -n "target/Stage Manager.app" --stderr /tmp/strip-demo.log \
+open -n "$HOME/Library/Application Support/Stage Manager Dev/Stage Manager.app" --stderr /tmp/strip-demo.log \
   --env STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture --env STAGE_MANAGER_DEMO_NUMBERS=1 \
   --args strip-demo
 ```

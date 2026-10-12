@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launches target/Stage Manager.app through LaunchServices (so TCC checks the bundle, not
+# Launches the dev copy of the app (scripts/dev-app.sh) through LaunchServices (so TCC checks the bundle, not
 # the terminal) and streams its log. Ctrl-C quits the app: `ctl quit` first, SIGTERM as a
 # fallback.
 #
@@ -9,7 +9,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-APP="target/Stage Manager.app"
+APP="$(scripts/dev-app.sh)" || exit 1
 BIN="$APP/Contents/MacOS/stage-manager"
 if [ -n "${STAGE_MANAGER_HOME:-}" ]; then
   mkdir -p "$STAGE_MANAGER_HOME"
