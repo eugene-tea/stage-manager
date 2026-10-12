@@ -4,10 +4,13 @@ A floating-window stage manager for macOS: Apple's Stage Manager strip and float
 plus rules, hotkeys, named stages, pinning, placement and persistence. See `PLAN.md`.
 
 Status: milestones 1–6 (skeleton, observation, stages with hotkeys and safety, rules and
-placement, the strip, persistence). The app keeps stages of floating windows on one Space:
+placement, the strip, persistence) plus Apple's default behavior (first start, new windows,
+drag and drop) and Shift sugar. The app keeps stages of floating windows on one Space:
 switching parks the stage you leave in the bottom-right corner and restores the target's
-frames and z-order exactly; the strip on the left shows the other stages as cards (click to
-switch, shift-click to bring a card's windows into the current stage).
+frames and z-order exactly; the strip on the left shows the other stages as cards.
+
+Everything works by mouse, the Dock and ⌘Tab, the way Apple's Stage Manager does. Hotkeys
+are optional extras; nothing needs one.
 
 ## Build
 
@@ -67,19 +70,57 @@ this app runs; the log and the menu warn when `GloballyEnabled` is 1.
 
 ## Using it
 
+Apple's Stage Manager is the baseline; everything below works without a keyboard shortcut.
+
+- **First start.** With no saved stages, every app with windows becomes its own stage, as
+  when Apple's Stage Manager is turned on: with "Show windows from an application: All at
+  Once" (System Settings → Desktop & Dock) one stage per app holding all its windows; with
+  "One at a Time" one stage per window. The frontmost app's stage is shown; the others go
+  to the strip, most recently used at the top. Later launches restore the saved stages
+  (below); apps that were not saved get their own stages the same way.
 - **Stages.** Every window belongs to one stage (or is pinned). Only the active stage is
   shown; the others are parked in the bottom-right corner (a sliver stays visible; macOS
-  keeps part of every window onscreen). Clicking a parked sliver, ⌘-Tab or a Dock click on
-  an app whose windows sit in another stage switches to that stage.
-- **New windows** follow the rules in `config.toml` (below); by default they join the
-  active stage where the app put them. Sheets, dialogs and panels follow their parent.
+  keeps part of every window onscreen). Clicking a card, clicking a parked sliver, ⌘Tab or
+  a Dock click on an app whose windows sit in another stage switches to that stage.
+- **New windows** follow Apple by default (`action = "native"`): a window of an app already
+  on the current stage joins it; a window of an app that sits in another stage joins that
+  stage and brings it forward; a newly opened app (or one whose windows were all closed)
+  gets a stage of its own, and the stage you leave goes to the strip. With "One at a Time",
+  a new window of an app that is not on the current stage opens a stage of its own (the
+  app's newest window, shown alone). Rules in `config.toml` (below) can send named apps
+  elsewhere. Sheets, dialogs and panels follow their parent.
+- **Drag a card into the main area** to bring its windows into the current stage: press a
+  card and move; a copy of its front window follows the pointer and grows to the window's
+  size as it leaves the strip. Let go anywhere in the main area: the windows join the
+  current stage and the front one lands where you dropped it (title bar under the pointer).
+  Let go over the strip to cancel. A plain click still switches.
+- **Drag a window onto the strip** (by its title bar) to give it a stage of its own: when
+  the pointer reaches the strip area the strip slides in (if hidden) and shows a highlighted
+  empty card where it will go. Let go there: the window leaves the current stage, its card
+  appears in the strip, and it comes back where it was before the drag when you switch to
+  it.
+- **Hold Shift to bring things here** instead of going there (`[sugar] shift_brings_here`,
+  on by default):
+  - open an app with Shift held (Dock click, Finder double-click, Spotlight Shift-Return,
+    Launchpad): its new window joins the current stage instead of opening a new one;
+  - Shift-click an app in the Dock whose windows sit in another stage: its windows come to
+    the current stage (all of them, or the most recent one with "One at a Time");
+  - Shift-click a card: its windows come to the current stage.
+
+  The app switcher is never affected: ⌘Tab and ⌘⇧Tab (which cycles backward) always switch
+  stages, as Apple's do.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
   click again to bring it back. This follows System Settings → Desktop & Dock → "Click
   wallpaper to reveal desktop": with **Only in Stage Manager** (the default) we reveal; with
   **Always**, macOS itself moves windows aside and we leave the click alone.
 - **Quit** from the menu bar item brings every parked window back first.
 
-### Hotkeys
+### Hotkeys (optional)
+
+Nothing needs a hotkey: every action above works by mouse, the Dock and ⌘Tab. The hotkeys
+are extras for people who like them. They stay on by default because none of them collides
+with a standard macOS shortcut (⌃⌥ is otherwise unused by macOS, except as VoiceOver's
+modifier while VoiceOver is running); set any of them to `""` to turn it off.
 
 | Default | Does | Config key |
 |---------|------|------------|
@@ -124,12 +165,15 @@ thumbnail_interval_ms = 1500
 
 [defaults]
 # What a new window does when no rule matches:
+#   "native"        Apple's Stage Manager: a window of an app already on the current stage
+#                   joins it; a window of an app that sits in another stage joins that stage
+#                   and brings it forward; a newly opened app gets a stage of its own
 #   "current"       join the active stage
 #   "new"           open a new stage and switch to it
 #   "stage:<name>"  join the named stage (created if missing)
 #   "float"         pin it: visible on every stage
 #   "ignore"        leave it unmanaged
-action = "current"
+action = "native"
 # Where it goes: "as-is", "center", or "cascade" (offset from the front window).
 placement = "as-is"
 
@@ -151,7 +195,15 @@ placement = "as-is"
 # app = "*"
 # placement = "cascade"
 
+[sugar]
+# Hold Shift to bring things here instead of going there: Shift while opening an app (Dock,
+# Finder, Spotlight Shift-Return, Launchpad) opens its window in the current stage; Shift on
+# a Dock click of an app in another stage brings its windows here; Shift-click on a card
+# brings the card's windows here. The app switcher (Cmd-Tab, Cmd-Shift-Tab) always switches.
+shift_brings_here = true
+
 [hotkeys]
+# Optional: everything works by mouse, Dock and Cmd-Tab; these are extras.
 # Modifiers: ctrl, alt (option), shift, cmd. "{n}" stands for the digits 1-9.
 # An empty string disables a hotkey.
 switch = "ctrl+alt+{n}"
@@ -226,7 +278,9 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `reload` | re-read `config.toml` |
 | `quit` | unpark everything and quit |
 | `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
-| `debug-click X Y [shift]` | click our own strip at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless the strip is the topmost window there) |
+| `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there) |
+| `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
+| `debug-frame ID X Y W H` | set a shown managed window's frame (only with `STAGE_MANAGER_TEST=1`) |
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
@@ -238,23 +292,40 @@ Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reacha
 
 ## Test script
 
-`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip]` builds the app and a private fixture
-(`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`, so it
-never collides with other fixture runs) and checks, against `ctl state` and the window
+`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native]` builds the app and private
+fixtures (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`,
+plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native phase;
+`SM_FIXTURE_ID` picks another base ID, so runs never collide) and checks, against `ctl state` and the window
 server (`probe-windows`): stages from `send`, exact restore frames (±1 pt) and z-order across
 switches, parked windows in the corner, merge, pin, reveal, child windows following their
 parent; the safety drills (`ctl quit`, SIGTERM, SIGINT, a panic, `kill -9` with the guardian,
 `kill -9` of app and guardian then a relaunch), each ending with every fixture window
 onscreen; rules (`new`, `float` + `center`, `cascade`), hot reload and a bad config; and
 persistence across a relaunch of the app and of the fixture; and a click and a shift-click
-on a real strip card (switch, merge). Every run uses
+on a real strip card (switch, merge); and Apple's defaults with three fixture apps (first
+start one stage per app, frontmost active, strip in recency order; a new app's window opens a
+new stage; a new window of a parked app's stage switches there; a new window of the active
+app joins; a Shift launch joins the current stage; a Shift activation brings an app's windows
+here; a card dragged into the main area merges and lands at the drop point; a window dragged
+onto the strip gets a stage of its own and keeps its pre-drag frame). Synthetic clicks and
+drags are posted only where our own or a fixture's windows are topmost along the whole path,
+and the pointer is put back. Apple's own Stage Manager must be off for the window-position
+checks: while it is on it scales inactive apps' windows into its own strip. Every run uses
 `STAGE_MANAGER_HOME` (default a new `/tmp/sm-test.*`, or `TEST_HOME`) and
-`STAGE_MANAGER_ONLY` set to the fixture. The fixture comes to the front during switches;
+`STAGE_MANAGER_ONLY` set to the fixtures. The fixture comes to the front during switches;
 the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips the build.
 
 ## Known limitations
 
+- Apple's own Stage Manager must be off while this app runs (both move windows).
 - Main display only; other displays are left alone.
+- A window dragged onto the strip keeps its full size until it is dropped (Apple shrinks it
+  into a card); a highlighted placeholder card shows where it will go. A dragged card's
+  ghost is a snapshot of its front window, not the live window.
+- Shift sugar reads the modifier at the user's triggering click or key press: a newly
+  opened app's first window counts within 10 s of a Shift-held click or key press (unless
+  another click or key press came after it), an activation within 2 s; or Shift held at the
+  moment. A slow app launched with Shift may miss the 10 s window.
 - Windows jump (no animation); parked windows leave a sliver in the bottom-right corner.
 - A dialog or panel's parent is a guess: the app's frontmost standard window at the time.
 - New windows are matched to rules by their title when they appear; an app that sets the
@@ -300,7 +371,8 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 ```
 
 Options also come from the environment: `FIXTURE_WINDOWS`, `FIXTURE_PANEL=1`,
-`FIXTURE_BACKGROUND=1`. Automated runs that manage windows must use `STAGE_MANAGER_ONLY`
+`FIXTURE_BACKGROUND=1`, `FIXTURE_TITLE` (title prefix, also `--title T`). `kill -USR1` opens
+one more window, ordered front without activating the app. Automated runs that manage windows must use `STAGE_MANAGER_ONLY`
 limited to the fixture.
 
 ## Layout
@@ -310,10 +382,11 @@ limited to the fixture.
   thread that owns every AX call), `observe` (observed apps and windows), `controller` (the
   engine on the WM thread: observations in, actions out, strip snapshots, `state.json`),
   `safety` (registry, panic hook, signals, guardian, recovery scan), `hotkeys` (Carbon),
-  `desktop` (displays, wallpaper clicks), `capture` (ScreenCaptureKit thumbnails on a worker
+  `desktop` (displays, wallpaper clicks), `input` (the global mouse and key monitor, live
+  modifiers, the Shift sugar's trigger record, test-only synthetic input), `capture` (ScreenCaptureKit thumbnails on a worker
   thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,
   `native_settings`, `ctl`, `logging`, `paths`.
 - `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
-  clicks, slide), `strip_layout` (pure geometry and tilt), `strip_visibility` (pure
+  clicks, card drag with its ghost, the drop target for window drags, slide), `strip_layout` (pure geometry and tilt), `strip_visibility` (pure
   auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`.
 - `scripts/` — signing identity, bundling, signing, run, fixture, `test-stages.sh`.

@@ -26,8 +26,13 @@ pub struct StripSnapshot {
     /// Draw stage numbers on cards (config `strip.show_numbers`).
     pub show_numbers: bool,
     /// Frames of the active stage's onscreen windows, for auto-hide when one overlaps the
-    /// strip area.
+    /// strip area (a window being dragged is left out).
     pub active_frames: Vec<Rect>,
+    /// A managed window is being dragged by its title bar: the strip reveals itself while the
+    /// pointer is over the strip area and shows a drop target (a placeholder card sized
+    /// like the window's pre-drag frame). Releasing there sends the window to a stage of its
+    /// own; the controller decides that from the mouse-up.
+    pub window_drag: Option<CardWindow>,
 }
 
 /// One card: a stage that is not active.
@@ -57,11 +62,15 @@ pub struct CardWindow {
 }
 
 /// User input on the strip.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StripEvent {
     /// A card was clicked (acts on mouse-up, as Apple's does). `shift` adds the card's
     /// windows to the active stage instead of switching.
     CardClicked { stage: u64, shift: bool },
+    /// A card was dragged out of the strip and released in the main area: its windows join
+    /// the active stage, and the stage's front window goes with its top-left corner at
+    /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer.
+    CardDropped { stage: u64, x: f64, y: f64 },
 }
 
 type Presenter = Box<dyn Fn(StripSnapshot) + Send + Sync>;

@@ -6,13 +6,16 @@
 //   --windows N  | FIXTURE_WINDOWS=N   number of standard windows (default 4)
 //   --panel      | FIXTURE_PANEL=1     also open "Fixture Panel" (an NSPanel, child-like)
 //   --background | FIXTURE_BACKGROUND=1  do not activate; order windows to the back
+//   --title T    | FIXTURE_TITLE=T     window titles "T 1…N" (default "Fixture")
 // A bare number argument is the same as --windows N.
+// SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 import AppKit
 
 struct Options {
     var windows = 4
     var panel = false
     var background = false
+    var title = "Fixture"
 
     static func parse() -> Options {
         var o = Options()
@@ -20,12 +23,14 @@ struct Options {
         if let n = env["FIXTURE_WINDOWS"].flatMap(Int.init) { o.windows = n }
         if env["FIXTURE_PANEL"] == "1" { o.panel = true }
         if env["FIXTURE_BACKGROUND"] == "1" { o.background = true }
+        if let t = env["FIXTURE_TITLE"], !t.isEmpty { o.title = t }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
             case "--windows": if let n = args.next().flatMap(Int.init) { o.windows = n }
             case "--panel": o.panel = true
             case "--background": o.background = true
+            case "--title": if let t = args.next() { o.title = t }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -82,23 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = NSSize(width: 520, height: 360)
         for i in 0..<options.windows {
-            // Distinct frames: a diagonal cascade with varied sizes, wrapping inside the screen.
-            let w = size.width + CGFloat(i % 3) * 40
-            let h = size.height + CGFloat(i % 2) * 30
-            let dx = CGFloat(i % 6) * 110, dy = CGFloat(i % 6) * 70 + CGFloat(i / 6) * 30
-            let origin = NSPoint(x: area.minX + 80 + dx, y: area.maxY - 80 - h - dy)
-            let title = "Fixture \(i + 1)"
-            let window = NSWindow(
-                contentRect: NSRect(origin: origin, size: NSSize(width: w, height: h)),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered, defer: false)
-            window.title = title
-            window.isReleasedWhenClosed = false
-            window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: title)
-            show(window)
-            windows.append(window)
+            show(makeWindow(i, area: area))
         }
         if options.panel {
             let panel = NSPanel(
@@ -119,6 +109,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    var opened = 0
+
+    /// Window number i + 1: distinct frames, a diagonal cascade with varied sizes.
+    func makeWindow(_ i: Int, area: NSRect) -> NSWindow {
+        let size = NSSize(width: 520, height: 360)
+        let w = size.width + CGFloat(i % 3) * 40
+        let h = size.height + CGFloat(i % 2) * 30
+        let dx = CGFloat(i % 6) * 110, dy = CGFloat(i % 6) * 70 + CGFloat(i / 6) * 30
+        let origin = NSPoint(x: area.minX + 80 + dx, y: area.maxY - 80 - h - dy)
+        let title = "\(options.title) \(i + 1)"
+        let window = NSWindow(
+            contentRect: NSRect(origin: origin, size: NSSize(width: w, height: h)),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = title
+        window.isReleasedWhenClosed = false
+        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: title)
+        windows.append(window)
+        opened = max(opened, i + 1)
+        return window
+    }
+
+    /// SIGUSR1: one more window, ordered front without activating the app.
+    func openAnother() {
+        let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        makeWindow(opened, area: area).orderFront(nil)
+    }
+
     func show(_ window: NSWindow) {
         if options.background { window.orderBack(nil) } else { window.makeKeyAndOrderFront(nil) }
     }
@@ -137,4 +155,8 @@ appItem.submenu = appMenu
 app.mainMenu = mainMenu
 let delegate = AppDelegate()
 app.delegate = delegate
+signal(SIGUSR1, SIG_IGN)
+let another = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+another.setEventHandler { delegate.openAnother() }
+another.resume()
 app.run()

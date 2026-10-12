@@ -82,21 +82,41 @@ the hotkey numbers) is an option.
 | Gesture | Native behavior (observed unless noted) | Ours |
 |---|---|---|
 | Click card | Switch to that stage; swap slots (above) | Same |
-| Shift-click card | Not captured in the session (owner's brief: adds the card's windows to the current stage) | Implemented per the brief; to be checked against native |
-| Drag card into main area | The window grows to full size as it leaves the strip, follows the pointer, and joins the **current** stage on drop | Out of scope (drag and drop); `⌃⌥⇧N` sends a window to a stage |
-| Drag window onto strip | The window shrinks to card size while over the strip; on drop it becomes **its own stage** in a strip slot (settles in about 400 ms) | Out of scope; `⌃⌥N` moves the focused window to a new stage |
+| Shift-click card | Not captured in the session (owner's brief: adds the card's windows to the current stage) | Implemented per the brief (sugar: "Shift brings things here"); to be checked against native |
+| Drag card into main area | The window grows to full size as it leaves the strip, follows the pointer, and joins the **current** stage on drop | Same gesture: a press that moves more than 4 pt lifts the card; a ghost of its front window follows the pointer and grows from thumbnail to window size over the 260 pt past the strip's edge, the grab point sliding into the title bar. Released in the main area, the stage's windows join the current stage and the front window lands with its title bar under the pointer (clamped onto the screen); the others keep their saved frames. Released over the strip: cancelled. See deviation 5 |
+| Drag window onto strip | The window shrinks to card size while over the strip; on drop it becomes **its own stage** in a strip slot (settles in about 400 ms) | Same outcome: while a managed window is dragged by its title bar, the strip slides in once the pointer is over the strip area and shows a highlighted placeholder card in the next slot (the other cards make room). Released there, the window becomes its own stage, its card takes the slot, and its pre-drag frame is its saved frame. See deviation 5 |
 | Dock click or ⌘Tab to an app in the strip | Switches to that app's stage; the outgoing stage takes the vacated slot | Same |
+| Shift + Dock click on an app in another stage | (No native meaning) | Sugar: the app's windows come to the current stage instead (all of them; the most recent with One at a Time) |
+| Open an app with Shift held (Dock, Finder, Spotlight Shift-Return, Launchpad) | (No native meaning; the app opens in a new stage) | Sugar: its new window joins the current stage |
+| ⌘Tab / ⌘⇧Tab | Switches stages (⌘⇧Tab cycles backward) | Same; Shift never changes the app switcher |
 | Click wallpaper | **Reveal desktop:** the active stage goes into the strip and the main area is empty. A second wallpaper click brings it back | Same, following `EnableStandardClickToShowDesktop` |
 | Window overlapping the strip area | Strip slides out of the way (not captured in the session; Apple's documented behavior) | Strip hides while any managed window intersects the strip area |
 | Pointer at the left edge | Strip slides back in (delay not captured) | Reveal after the pointer rests at x ≤ 2 pt for **250 ms** (provisional); hide again 500 ms after the pointer leaves the strip while a window still overlaps |
 
+## First start and new windows
+
+- **Turning Stage Manager on** (our first start, no `state.json`): every app with windows
+  becomes its own stage. The frontmost app's stage is shown; the others enter the strip most
+  recently used first (from the window list's z-order). Later launches restore saved stages
+  and treat apps that were not saved the same way.
+- **New windows** (`[defaults] action = "native"`): a window of an app already in the
+  current stage joins it; a window of an app whose windows sit in a parked stage joins that
+  stage and brings it forward (the most recently used one if there are several); a window
+  of an app with no managed window (newly opened, or all its windows closed) opens a new
+  stage, and the stage you leave enters the strip. Rules (`current`, `new`, `stage:<name>`,
+  `float`, `ignore`) still apply to the apps they name.
+
 ## Grouping (`AppWindowGroupingBehavior`)
 
 - **All at once (1, his setting):** activating an app shows all of its windows in that
-  stage. A new window of an app joins the active stage by default.
+  stage. A new window of an app joins its app's stage (above). First start: one stage per
+  app holding all its windows.
 - **One at a time (0):** only the app's most recent window is shown; its other windows stay
   in the strip as cards. Ours: activating such an app switches to the stage holding its most
-  recently focused window only.
+  recently focused window only. First start: one stage per window. A new window of an app
+  in the current stage joins it; a new window of an app that is only in parked stages opens
+  a stage of its own (the app's newest window, shown alone, as activating it would). Shift
+  on a Dock click brings only the app's most recent window here.
 
 ## Intentional deviations
 
@@ -108,11 +128,20 @@ the hotkey numbers) is an option.
 3. **Parked windows leave a sliver** in the display's bottom-right corner (macOS keeps part
    of every window onscreen). Apple moves them off by private means.
 4. **One Space.** Stages live on the Space where the app runs; other Spaces are left alone.
-5. **Drag and drop** between strip and main area is not implemented; hotkeys cover it.
+5. **Drag and drop stand-ins.** The Accessibility API cannot scale a live window, so a
+   window dragged over the strip keeps its size; a highlighted placeholder card in the slot
+   where its card will go stands in for Apple's shrinking window. A card dragged out of the
+   strip is shown by a ghost (a snapshot of its front window in a click-through panel) that
+   grows to the window's size, instead of the live window growing. Drop outcomes match
+   Apple's.
 6. **Desktop items** (`HideDesktop`) are read and logged but not acted on, since hiding
    Finder's desktop icons is outside a window manager's reach through public API.
-7. **Extensions** on top, all optional: rules for new windows, placement (center, cascade),
-   hotkeys, named stages, pinned windows, persistence, number badges on cards.
+7. **Extensions** on top, all optional and never replacing a native gesture: rules for new
+   windows, placement (center, cascade), hotkeys, named stages, pinned windows, persistence,
+   number badges on cards, and Shift sugar ("hold Shift to bring things here": Shift while
+   opening an app, on a Dock click, or on a card click). Shift is read at the user's
+   triggering click or key press (a global monitor) and at the moment the window or
+   activation arrives; a trigger with ⌘ held (the app switcher) never counts.
 
 ## Still to measure
 

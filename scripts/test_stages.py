@@ -10,7 +10,13 @@ Phases: m3 (stages, switching, frames, z-order, merge, pin, reveal, children), s
 SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
-only when its own strip window is topmost at that point).
+only when its own strip window is topmost at that point), native (Apple's defaults with three
+more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
+synthetic click and drag is posted only where our own or a fixture's windows are topmost
+along the whole path, and the pointer is put back).
+
+SM_FIXTURE_ID sets the main fixture's bundle ID (default dev.eugene.stagemanager.fixture.stages);
+the native phase's apps are <id>.a, <id>.b and <id>.c.
 """
 
 import json
@@ -24,14 +30,23 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "target", "Stage Manager.app")
 BIN = os.path.join(APP, "Contents", "MacOS", "stage-manager")
-FIX_ID = "dev.eugene.stagemanager.fixture.stages"
-FIX_APP = os.path.join(ROOT, "target", "SM Fixture Stages.app")
-FIX_EXE = "SM Fixture Stages.app/Contents/MacOS/sm-fixture"
+FIX_ID = os.environ.get("SM_FIXTURE_ID") or "dev.eugene.stagemanager.fixture.stages"
+FIX_NAME = "SM Fixture " + FIX_ID.rsplit(".", 1)[-1].capitalize()
+FIX_APP = os.path.join(ROOT, "target", FIX_NAME + ".app")
+FIX_EXE = FIX_NAME + ".app/Contents/MacOS/sm-fixture"
+# The native phase's three apps: (bundle ID, app path, process pattern, title prefix).
+EXTRA = {
+    k: (f"{FIX_ID}.{k}", os.path.join(ROOT, "target", f"{FIX_NAME} {k.upper()}.app"),
+        f"{FIX_NAME} {k.upper()}.app/Contents/MacOS/sm-fixture", title)
+    for k, title in (("a", "Alpha"), ("b", "Bravo"), ("c", "Charlie"))
+}
+ALL_IDS = [FIX_ID] + [e[0] for e in EXTRA.values()]
 PARK_MARGIN = 64.0
 
 HOME = os.environ.get("TEST_HOME") or tempfile.mkdtemp(prefix="sm-test.", dir="/tmp")
 os.makedirs(HOME, exist_ok=True)
-ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME, STAGE_MANAGER_ONLY=FIX_ID)
+ONLY = ",".join(ALL_IDS)
+ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME, STAGE_MANAGER_ONLY=ONLY)
 LOG = os.path.join(HOME, "stage-manager.log")
 
 passed, failed = [], []
@@ -59,8 +74,8 @@ def ctl(*words):
         return {"ok": False, "error": r.stdout + r.stderr}
 
 
-def probe():
-    r = run([BIN, "probe-windows", FIX_ID], timeout=10)
+def probe(bundle=FIX_ID):
+    r = run([BIN, "probe-windows", bundle], timeout=10)
     return json.loads(r.stdout)
 
 
@@ -113,17 +128,21 @@ def pids_of(pattern):
     return [int(p) for p in r.stdout.split()]
 
 
-def fixture_windows():
+def fixture_windows(bundles=None):
     """Fixture windows on layer 0 as the window server sees them, with the display."""
-    p = probe()
-    return [w for w in p["windows"] if w["layer"] == 0], p["display"]
+    out, display = [], None
+    for b in bundles or ALL_IDS:
+        p = probe(b)
+        display = p["display"]
+        out += [w for w in p["windows"] if w["layer"] == 0]
+    return out, display
 
 
 def start_fixture(n, *extra):
     stop_fixture()
     subprocess.run(["open", "-n", "-g", FIX_APP, "--args", "--windows", str(n), "--background", *extra], check=True)
     want = n + (1 if "--panel" in extra else 0)
-    return wait_until(lambda: len(fixture_windows()[0]) >= want, 15, f"{want} fixture windows")
+    return wait_until(lambda: len(fixture_windows([FIX_ID])[0]) >= want, 15, f"{want} fixture windows")
 
 
 def stop_fixture():
@@ -149,7 +168,7 @@ def start_app(expect_windows, extra_env=None, fresh_log=True):
     args = ["open", "-n", APP]
     env = {
         "STAGE_MANAGER_HOME": HOME,
-        "STAGE_MANAGER_ONLY": FIX_ID,
+        "STAGE_MANAGER_ONLY": ONLY,
         "STAGE_MANAGER_NO_PROMPT": "1",
         "RUST_LOG": "info,stage_manager=debug",
     }
@@ -547,6 +566,179 @@ def phase_strip():
     all_onscreen("strip quit")
 
 
+# ----- native: Apple's defaults, Shift sugar, drag and drop ------------------------------
+
+
+def start_extra(k, n):
+    bundle, path, pattern, title = EXTRA[k]
+    stop_extra(k)
+    subprocess.run(["open", "-n", "-g", path, "--args", "--windows", str(n), "--title", title, "--background"], check=True)
+    return wait_until(lambda: len(fixture_windows([bundle])[0]) >= n, 15, f"{n} {title} windows")
+
+
+def stop_extra(k):
+    pattern = EXTRA[k][2]
+    for pid in pids_of(pattern):
+        os.kill(pid, signal.SIGTERM)
+    wait_until(lambda: not pids_of(pattern), 10, f"{EXTRA[k][3]} to quit")
+
+
+def extra_pid(k):
+    p = pids_of(EXTRA[k][2])
+    return p[0] if p else None
+
+
+def stop_all_fixtures():
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+
+
+def stage_sets(s):
+    """Stage number -> set of window titles."""
+    return {n: set(t) for n, t in stage_titles(s).items()}
+
+
+def active_titles(s):
+    return set(stage_titles(s).get(s["active"], []))
+
+
+def wait_state(pred, what, timeout=6):
+    return wait_until(lambda: (lambda x: x if pred(x) else None)(state()), timeout, what)
+
+
+def topmost_point(prefix):
+    """The center of the frontmost shown window whose title starts with `prefix`."""
+    s = state()
+    ids = {w["id"] for w in s["windows"] if w["title"].startswith(prefix) and not w["parked"]}
+    wins, _ = fixture_windows()
+    mine = sorted((w for w in wins if w["id"] in ids and w["z"] is not None), key=lambda w: w["z"])
+    if not mine:
+        return None
+    b = mine[0]["bounds"]
+    return b["x"] + b["w"] / 2, b["y"] + b["h"] / 2
+
+
+def phase_native():
+    say("\n== native: first start, new windows, Shift sugar, card drag, window drag ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_extra("a", 2)
+    start_extra("b", 1)
+    start_extra("c", 1)
+    subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
+    time.sleep(1.0)
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with three fixture apps"):
+        return
+    sets = stage_sets(s)
+    check(sorted(map(sorted, sets.values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1"], ["Charlie 1"]],
+          f"first start: one stage per app ({stage_titles(s)})")
+    check(active_titles(s) == {"Bravo 1"}, "first start: the frontmost app's stage is active")
+    strip = [sets[n] for n in s["strip"]]
+    check(strip == [{"Alpha 1", "Alpha 2"}, {"Charlie 1"}], f"first start: the strip in recency order ({strip})")
+    consistent("first start")
+
+    say("-- a newly opened app gets a new stage")
+    stop_extra("c")
+    wait_state(lambda x: len(x["stages"]) == 2, "Charlie's stage to go")
+    start_extra("c", 1)
+    s = wait_state(lambda x: active_titles(x) == {"Charlie 1"}, "Charlie's new stage")
+    check(s is not None and len(s["stages"]) == 3, "a new app's window opens a new active stage")
+    consistent("new app")
+
+    say("-- a new window of a parked app's stage brings it forward")
+    os.kill(extra_pid("a"), signal.SIGUSR1)
+    s = wait_state(lambda x: active_titles(x) == {"Alpha 1", "Alpha 2", "Alpha 3"}, "Alpha 3 in Alpha's stage")
+    check(s is not None and len(s["stages"]) == 3, "the new window joins its app's stage, which becomes active")
+    consistent("new window of a parked app")
+
+    say("-- a new window of the active app joins it")
+    os.kill(extra_pid("a"), signal.SIGUSR1)
+    s = wait_state(lambda x: "Alpha 4" in active_titles(x), "Alpha 4 in the active stage")
+    check(s is not None and len(s["stages"]) == 3, "the new window joins the active stage")
+    consistent("new window of the active app")
+
+    say("-- Shift held while opening an app: its window joins the current stage")
+    stop_extra("c")
+    wait_state(lambda x: len(x["stages"]) == 2, "Charlie's stage to go")
+    time.sleep(0.8)
+    pt = topmost_point("Alpha")
+    r = ctl("debug-click", pt[0], pt[1], "shift") if pt else {"ok": False, "error": "no Alpha window"}
+    check(r.get("ok"), f"shift-clicked an Alpha window ({r.get('error', 'ok')})")
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x), "Charlie 1 managed")
+    check(s is not None and "Charlie 1" in active_titles(s) and len(s["stages"]) == 2,
+          f"a Shift launch joins the current stage ({stage_titles(s) if s else None})")
+    consistent("Shift launch")
+
+    say("-- Shift held on an activation: the app's windows come here")
+    time.sleep(0.8)
+    pt = topmost_point("Alpha")
+    r = ctl("debug-click", pt[0], pt[1], "shift") if pt else {"ok": False, "error": "no Alpha window"}
+    check(r.get("ok"), f"shift-clicked an Alpha window ({r.get('error', 'ok')})")
+    subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
+    s = wait_state(lambda x: "Bravo 1" in active_titles(x), "Bravo here")
+    check(s is not None and len(s["stages"]) == 1, "a Shift activation brings Bravo into the current stage")
+    consistent("Shift activation")
+
+    say("-- drag a card into the main area")
+    time.sleep(0.8)  # past the activation echo window
+    s = state()
+    t = by_title(s)
+    do("new", t["Bravo 1"]["id"])
+    for name in ("Alpha 2", "Alpha 3", "Alpha 4", "Charlie 1"):
+        do("send", 2, t[name]["id"])
+    s = state()
+    check(s["strip"] == [2] and active_titles(s) == {"Alpha 1"}, f"one card, Alpha 1 alone ({stage_titles(s)})")
+    vis = s["display"]["visible"]
+    cx, cy = vis["x"] + 70, vis["y"] + vis["h"] / 2
+    big = (vis["x"] + 200, cy - 260, 1000, 520)
+    r = ctl("debug-frame", t["Alpha 1"]["id"], *big)
+    check(r.get("ok"), f"Alpha 1 covers the drag path ({r.get('error', 'ok')})")
+    time.sleep(1.5)
+    front = state()["stages"][1]["windows"][0]
+    drop = (vis["x"] + 700, cy)
+    r = ctl("debug-drag", cx, cy, cx + 60, cy, *drop)
+    check(r.get("ok"), f"dragged the card to {drop[0]:.0f},{drop[1]:.0f} ({r.get('error', 'ok')})")
+    s = wait_state(lambda x: len(x["stages"]) == 1, "the card's windows to join")
+    check(s is not None and len(active_titles(s)) == 6, "the dropped card's windows join the current stage")
+    if s:
+        f = next(w for w in s["windows"] if w["id"] == front)["restore"]
+        inside = f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + 30
+        check(inside, f"its front window lands with its title bar under the drop point ({fmt(f)})")
+    consistent("card drop")
+
+    say("-- drag a window onto the strip")
+    s = state()
+    t = by_title(s)
+    do("new", t["Alpha 2"]["id"])
+    for name in ("Alpha 3", "Alpha 4", "Charlie 1", "Bravo 1"):
+        do("send", 2, t[name]["id"])
+    r = ctl("debug-frame", t["Alpha 1"]["id"], *big)
+    time.sleep(1.5)
+    s = state()
+    check(active_titles(s) == {"Alpha 1"}, f"Alpha 1 alone again ({stage_titles(s)})")
+    pre = by_title(s)["Alpha 1"]["restore"]
+    grab = (pre["x"] + 500, pre["y"] + 12)
+    r = ctl("debug-drag", *grab, grab[0] - 60, grab[1], vis["x"] + 60, grab[1])
+    check(r.get("ok"), f"dragged Alpha 1 by its title bar onto the strip ({r.get('error', 'ok')})")
+    s = wait_state(lambda x: by_title(x)["Alpha 1"]["parked"], "Alpha 1 to become its own stage")
+    if check(s is not None, "a window dropped on the strip gets a stage of its own"):
+        a1 = by_title(s)["Alpha 1"]
+        check(a1["home"] != s["active"] and stage_titles(s)[a1["home"]] == ["Alpha 1"], "alone in its new stage")
+        check(close(a1["restore"], pre), f"its saved frame is the pre-drag frame ({fmt(a1['restore'])})")
+        check(a1["home"] in s["strip"], "its card is in the strip")
+    consistent("window drop")
+    stop_app()
+    all_onscreen("native quit")
+    stop_all_fixtures()
+
+
 def frontmost_bundle():
     r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
     out = r.stdout.strip()
@@ -554,8 +746,8 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip"]
-    if not os.path.exists(BIN) or not os.path.exists(FIX_APP):
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native"]
+    if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
     if pids_of("Stage Manager.app/Contents/MacOS/stage-manager$") and not app_pid():
@@ -564,15 +756,16 @@ def main():
     front = frontmost_bundle()
     try:
         for p in phases:
-            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip}[p]()
+            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
+             "native": phase_native}[p]()
     finally:
         stop_app()
-        if pids_of(FIX_EXE):
+        if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
             all_onscreen("cleanup")
-        stop_fixture()
+        stop_all_fixtures()
         for g in guardian_pids():
             pass  # guardians exit with their app; nothing to kill
-        if front and front != FIX_ID:
+        if front and front not in ALL_IDS:
             subprocess.run(["open", "-b", front], capture_output=True)
     say(f"\n{len(passed)} passed, {len(failed)} failed")
     for f in failed:

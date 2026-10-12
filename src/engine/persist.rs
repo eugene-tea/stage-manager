@@ -2,7 +2,8 @@
 //!
 //! Window IDs do not survive an app relaunch, so saved windows are matched heuristically:
 //! exact bundle ID + title first, then bundle ID only in saved order. Each live window is
-//! used at most once; live windows that match nothing join the active stage.
+//! used at most once; live windows that match nothing are grouped the way Apple's Stage
+//! Manager does when it is turned on: one stage per app (see [`Model::apply_launch`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,10 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
 use super::model::{
-    Action, Home, Model, Observation, StageId, WindowId, WindowMeta, WindowRole, WindowState,
+    Action, DisplayId, Home, Model, Observation, Pid, StageId, WindowId, WindowMeta, WindowRole,
+    WindowState,
 };
 use super::park::is_parked;
 use super::rules::Decision;
+use super::settings::AppWindows;
 
 /// The state file format version this build reads and writes.
 pub const STATE_VERSION: u32 = 1;
@@ -124,6 +127,15 @@ pub struct Assignment {
     pub strip_slots: Vec<usize>,
     /// Live standard windows that matched nothing; they join the active stage.
     pub unmatched: Vec<WindowId>,
+}
+
+/// What the platform knows at launch about recency, for windows no saved stage claims.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LaunchHints {
+    /// Live windows front to back (the window list's z-order).
+    pub z_order: Vec<WindowId>,
+    /// The frontmost app, if known.
+    pub frontmost: Option<Pid>,
 }
 
 /// Places live standard windows into saved stages: exact bundle + title first, then bundle
@@ -268,17 +280,40 @@ impl Model {
         }
     }
 
-    /// Rebuilds stages from an [`Assignment`] on launch. `live` lists every live window
-    /// (children too; they follow their parents). Saved stages with no matched window are
-    /// dropped unless active or declared. Unmatched standard windows join the active stage.
-    /// Windows of inactive stages are parked; with `restore_frames` the active stage's and
-    /// pinned windows get their saved frames, else they keep their live frames (a live frame
-    /// in a park zone always falls back to the saved one). Windows already known are skipped.
+    /// Rebuilds stages from an [`Assignment`] on launch, with no recency hints (see
+    /// [`Model::apply_launch`]).
     pub fn apply_assignment(
         &mut self,
         live: &[WindowMeta],
         assignment: &Assignment,
         restore_frames: bool,
+    ) -> Vec<Action> {
+        self.apply_launch(live, assignment, restore_frames, &LaunchHints::default())
+    }
+
+    /// Rebuilds stages from an [`Assignment`] on launch. `live` lists every live window
+    /// (children too; they follow their parents). Saved stages with no matched window are
+    /// dropped unless active or declared.
+    ///
+    /// Standard windows no saved stage claims (every window on a first start, without a
+    /// `state.json`) are placed the way Apple's Stage Manager does when it is turned on: an
+    /// app that already has a saved stage takes its extra windows into that stage (the active
+    /// one if it holds the app); every other app gets a stage of its own holding all its
+    /// windows ([`AppWindows::AllAtOnce`]) or one stage per window
+    /// ([`AppWindows::OneAtATime`]). The frontmost app ([`LaunchHints::frontmost`], else the
+    /// app of the frontmost window) comes first and takes an empty active stage; when no
+    /// saved stage is active with windows, its stage becomes active. The others enter the
+    /// strip most recently used first, by the window list's z-order.
+    ///
+    /// Windows of inactive stages are parked; with `restore_frames` the active stage's and
+    /// pinned windows get their saved frames, else they keep their live frames (a live frame
+    /// in a park zone always falls back to the saved one). Windows already known are skipped.
+    pub fn apply_launch(
+        &mut self,
+        live: &[WindowMeta],
+        assignment: &Assignment,
+        restore_frames: bool,
+        hints: &LaunchHints,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let metas: HashMap<WindowId, &WindowMeta> = live.iter().map(|m| (m.id, m)).collect();
@@ -347,32 +382,7 @@ impl Model {
             }
         }
 
-        for &id in &assignment.unmatched {
-            let Some(meta) = metas.get(&id) else { continue };
-            if self.windows.contains_key(&id) || placed.contains(&id) {
-                continue;
-            }
-            let display = self.known_display(meta.display);
-            let stage = self.ensure_active(display);
-            let mut meta = (*meta).clone();
-            meta.display = display;
-            let restore = self.safe_restore(meta.frame, display);
-            self.windows.insert(
-                id,
-                WindowState {
-                    meta,
-                    home: Home::Stage(stage),
-                    restore,
-                    parked: false,
-                },
-            );
-            if let Some(s) = self.stage_mut(stage) {
-                s.windows.push(id);
-                if s.key.is_none() {
-                    s.key = Some(id);
-                }
-            }
-        }
+        self.place_unmatched(&metas, assignment, &placed, hints);
 
         let stage_ids: Vec<StageId> = self.stages.iter().map(|s| s.id).collect();
         for s in stage_ids {
@@ -414,6 +424,138 @@ impl Model {
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Places standard windows no saved stage claims (see [`Model::apply_launch`]).
+    fn place_unmatched(
+        &mut self,
+        metas: &HashMap<WindowId, &WindowMeta>,
+        assignment: &Assignment,
+        placed: &HashSet<WindowId>,
+        hints: &LaunchHints,
+    ) {
+        let z = |id: WindowId| {
+            hints
+                .z_order
+                .iter()
+                .position(|&x| x == id)
+                .unwrap_or(usize::MAX)
+        };
+        let mut pending: Vec<&WindowMeta> = assignment
+            .unmatched
+            .iter()
+            .filter_map(|id| metas.get(id).copied())
+            .filter(|m| !self.windows.contains_key(&m.id) && !placed.contains(&m.id))
+            .collect();
+        pending.sort_by_key(|m| z(m.id));
+        // Apps in recency order: the frontmost app first, then by their frontmost window.
+        let mut apps: Vec<(Pid, Vec<&WindowMeta>)> = Vec::new();
+        for m in pending {
+            match apps.iter_mut().find(|(p, _)| *p == m.pid) {
+                Some((_, ws)) => ws.push(m),
+                None => apps.push((m.pid, vec![m])),
+            }
+        }
+        if let Some(front) = hints.frontmost
+            && let Some(i) = apps.iter().position(|(p, _)| *p == front)
+        {
+            let app = apps.remove(i);
+            apps.insert(0, app);
+        }
+        let one_at_a_time = self.options.settings.app_windows == AppWindows::OneAtATime;
+        let mut fresh: Vec<StageId> = Vec::new();
+        for (pid, windows) in apps {
+            let display = self.known_display(windows[0].display);
+            let existing = self.app_stage(pid, display);
+            let units: Vec<Vec<&WindowMeta>> = if existing.is_none() && one_at_a_time {
+                windows.into_iter().map(|w| vec![w]).collect()
+            } else {
+                vec![windows]
+            };
+            for unit in units {
+                let stage = match existing {
+                    Some(s) => s,
+                    None => {
+                        let active = self.ensure_active(display);
+                        let reusable = self.stage(active).is_some_and(|s| {
+                            s.windows.is_empty() && s.name.is_none() && !fresh.contains(&active)
+                        });
+                        let s = if reusable {
+                            active
+                        } else {
+                            self.create_stage(display, None)
+                        };
+                        fresh.push(s);
+                        s
+                    }
+                };
+                for meta in unit {
+                    self.insert_unmatched(meta, stage);
+                }
+            }
+        }
+        // Recency: the first fresh stage is the most recent after the active one.
+        for &s in fresh.iter().rev() {
+            let t = self.tick();
+            if let Some(st) = self.stage_mut(s) {
+                st.last_active = t;
+            }
+        }
+        let main = self.main_display().id;
+        let active = self.ensure_active(main);
+        if self.stage_is_empty(active)
+            && let Some(&first) = fresh.first()
+            && first != active
+        {
+            self.active.insert(main, first);
+            let mut ignored = Vec::new();
+            self.drop_if_dead(active, &mut ignored);
+        }
+        let active = self.ensure_active(main);
+        let t = self.tick();
+        if let Some(st) = self.stage_mut(active) {
+            st.last_active = t;
+        }
+    }
+
+    /// The stage holding app `pid`'s windows on `display`: the active one if it does, else
+    /// the most recently active.
+    fn app_stage(&self, pid: Pid, display: DisplayId) -> Option<StageId> {
+        let holds = |s: &&crate::engine::model::Stage| {
+            s.display == display
+                && s.windows
+                    .iter()
+                    .any(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid))
+        };
+        let active = self.active_stage(display);
+        self.stages
+            .iter()
+            .filter(holds)
+            .max_by_key(|s| (Some(s.id) == active, s.last_active))
+            .map(|s| s.id)
+    }
+
+    fn insert_unmatched(&mut self, meta: &WindowMeta, stage: StageId) {
+        let display = self.known_display(meta.display);
+        let mut meta = meta.clone();
+        meta.display = display;
+        let id = meta.id;
+        let restore = self.safe_restore(meta.frame, display);
+        self.windows.insert(
+            id,
+            WindowState {
+                meta,
+                home: Home::Stage(stage),
+                restore,
+                parked: false,
+            },
+        );
+        if let Some(s) = self.stage_mut(stage) {
+            s.windows.push(id);
+            if s.key.is_none() {
+                s.key = Some(id);
+            }
+        }
     }
 
     /// Restores members of an active stage whose live frame is in a park zone (left there by a

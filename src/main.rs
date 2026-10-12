@@ -57,7 +57,8 @@ mod app {
     use stage_manager::platform::apps::{self, WorkspaceObservers};
     use stage_manager::platform::controller::{self, UiUpdate};
     use stage_manager::platform::ctl::{self, Command};
-    use stage_manager::platform::desktop::{self, ClickMonitor};
+    use stage_manager::platform::desktop;
+    use stage_manager::platform::input::{self, InputKind, InputMonitor};
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
     use stage_manager::platform::wm_thread::{WmCommand, WmHandle};
@@ -90,7 +91,7 @@ mod app {
         thumbnail_interval_ms: Option<u64>,
         display: Option<Display>,
         _workspace: WorkspaceObservers,
-        _clicks: Option<ClickMonitor>,
+        _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
 
@@ -287,7 +288,16 @@ mod app {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-click needs STAGE_MANAGER_TEST=1");
                 }
-                match desktop::click_own_window(stage_manager::engine::geometry::Point::new(x, y), shift) {
+                match input::click(stage_manager::engine::geometry::Point::new(x, y), shift) {
+                    Ok(()) => json!({ "ok": true }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
+            Command::DebugDrag { points, shift } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
+                }
+                match input::drag(&points, shift, Duration::from_millis(400)) {
                     Ok(()) => json!({ "ok": true }),
                     Err(e) => ctl::error_reply(&e),
                 }
@@ -373,12 +383,13 @@ mod app {
         warn_if_apple_stage_manager(&settings);
         wm.send(WmCommand::NativeSettings(settings.clone()));
 
-        let wm_clicks = wm.clone();
-        let clicks = desktop::monitor_clicks(mtm, move |p| {
-            wm_clicks.send(WmCommand::MouseDown(p));
+        let wm_input = wm.clone();
+        let input_monitor = input::monitor(mtm, move |event| {
+            let over_strip = event.kind == InputKind::MouseUp && strip::is_drop_target(event.at);
+            wm_input.send(WmCommand::Input(event, over_strip));
         });
-        if clicks.is_none() {
-            tracing::warn!("cannot monitor mouse clicks; wallpaper clicks will not reveal the desktop");
+        if input_monitor.is_none() {
+            tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
 
         if let Err(e) = ctl::serve(ctl_handler(wm.clone())) {
@@ -401,7 +412,7 @@ mod app {
             thumbnail_interval_ms: None,
             display: None,
             _workspace: workspace,
-            _clicks: clicks,
+            _input: input_monitor,
             _timer: timer,
         };
         state.send_display_if_changed();

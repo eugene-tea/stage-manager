@@ -11,6 +11,7 @@ pub mod controller;
 pub mod ctl;
 pub mod desktop;
 pub mod hotkeys;
+pub mod input;
 pub mod logging;
 pub mod native_settings;
 pub mod observe;

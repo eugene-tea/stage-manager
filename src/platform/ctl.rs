@@ -4,8 +4,10 @@
 //! Commands: `ping`, `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
 //! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`. Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
-//! environment, `debug-panic` panics on the main thread (a safety drill) and `debug-click X Y
-//! [shift]` clicks our own strip at a global point.
+//! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
+//! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift]` drags along
+//! the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
+//! topmost), and `debug-frame ID X Y W H` sets a shown managed window's frame.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -17,6 +19,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::paths;
+use crate::engine::geometry::{Point, Rect};
 
 /// A parsed ctl command.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,8 +50,24 @@ pub enum Command {
     Reload,
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
-    /// A synthetic click at a global point, posted only when our own window (the strip) is
-    /// the topmost window there (needs `STAGE_MANAGER_TEST=1`).
+    /// A synthetic left-button drag through global points, posted only when every point is
+    /// over our own windows or a `STAGE_MANAGER_ONLY` app's (needs `STAGE_MANAGER_TEST=1`).
+    DebugDrag {
+        /// Waypoints, global top-left coordinates.
+        points: Vec<Point>,
+        /// Hold shift.
+        shift: bool,
+    },
+    /// Sets a shown managed window's frame through AX (needs `STAGE_MANAGER_TEST=1`).
+    DebugFrame {
+        /// The window id.
+        id: u32,
+        /// The frame, global top-left coordinates.
+        frame: Rect,
+    },
+    /// A synthetic click at a global point, posted only when our own window or a
+    /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
+    /// `STAGE_MANAGER_TEST=1`).
     DebugClick {
         /// Global x (top-left origin).
         x: f64,
@@ -85,6 +104,26 @@ impl Command {
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
             ["debug-panic"] => Ok(Self::DebugPanic),
+            ["debug-drag", rest @ ..] => {
+                let (coords, shift) = match rest.split_last() {
+                    Some((&"shift", c)) => (c, true),
+                    _ => (rest, false),
+                };
+                if coords.len() < 4 || coords.len() % 2 != 0 {
+                    return Err("debug-drag needs X1 Y1 X2 Y2 [X Y ...] [shift]".into());
+                }
+                let nums = coords
+                    .iter()
+                    .map(|w| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let points = nums.chunks(2).map(|c| Point::new(c[0], c[1])).collect();
+                Ok(Self::DebugDrag { points, shift })
+            }
+            ["debug-frame", id, x, y, w, h] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
+                Ok(Self::DebugFrame { id, frame: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?) })
+            }
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
@@ -226,6 +265,15 @@ mod tests {
             Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })
         );
         assert!(Command::parse("debug-click 60").is_err());
+        assert_eq!(
+            Command::parse("debug-drag 1 2 3 4 shift"),
+            Ok(Command::DebugDrag { points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)], shift: true })
+        );
+        assert!(Command::parse("debug-drag 1 2 3").is_err());
+        assert_eq!(
+            Command::parse("debug-frame 7 200 300 800 600"),
+            Ok(Command::DebugFrame { id: 7, frame: Rect::new(200.0, 300.0, 800.0, 600.0) })
+        );
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert!(Command::parse("").is_err());
         assert!(Command::parse("switch 0").is_err());
