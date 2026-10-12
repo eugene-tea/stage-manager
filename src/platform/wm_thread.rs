@@ -1,4 +1,4 @@
-//! The WM thread: a dedicated thread with its own `CFRunLoop`; it will own every
+//! The WM thread: a dedicated thread with its own `CFRunLoop` that owns every
 //! Accessibility call and observer.
 //!
 //! Other threads talk to it through [`WmHandle`]: each command goes into an mpsc channel,
@@ -16,8 +16,12 @@ use objc2_core_foundation::{
 };
 
 use super::apps::{AppEvent, AppInfo};
+use super::ax::AxElement;
 use super::native_settings::RawSettings;
 use super::observe;
+
+/// Global AX messaging timeout, set on the system-wide element at thread start.
+pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 
 /// Housekeeping period of the WM run loop (retries of apps whose AX was not ready).
 const TICK_SECONDS: f64 = 1.0;
@@ -103,6 +107,10 @@ impl WmHandle {
 }
 
 fn run(rx: mpsc::Receiver<WmCommand>, run_loop: &CFRunLoop) {
+    match AxElement::system_wide().set_messaging_timeout(AX_TIMEOUT_SECONDS) {
+        Ok(()) => tracing::debug!("AX messaging timeout set to {AX_TIMEOUT_SECONDS} s"),
+        Err(e) => tracing::warn!("could not set the AX messaging timeout: {e}"),
+    }
     observe::install(rx);
 
     // The timer keeps the run loop alive (CFRunLoopRun returns at once with no sources)

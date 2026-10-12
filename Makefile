@@ -9,8 +9,9 @@ export PATH := $(HOME)/.cargo/bin:$(PATH)
 
 CARGO   := nice -n 18 cargo
 APP     := target/Stage Manager.app
+FIXTURE := target/SM Fixture.app
 
-.PHONY: build bundle sign run install check
+.PHONY: build bundle sign run install fixture check
 
 ## build: cargo build --release
 build:
@@ -34,6 +35,11 @@ install: sign
 	rm -rf "$(HOME)/Applications/Stage Manager.app"
 	ditto "$(APP)" "$(HOME)/Applications/Stage Manager.app"
 	@echo "Installed $(HOME)/Applications/Stage Manager.app"
+
+## fixture: build and sign target/SM Fixture.app (test windows)
+fixture:
+	scripts/bundle.sh fixture
+	scripts/sign.sh "$(FIXTURE)"
 
 ## check: cargo test + clippy -D warnings
 check:
