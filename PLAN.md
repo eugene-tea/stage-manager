@@ -34,6 +34,16 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   0.25 s messaging timeout. The main thread never calls AX. Commands go main → WM through a
   channel plus `CFRunLoopPerformBlock` + wake-up; strip snapshots go WM → main via GCD.
 
+## macOS settings drive behavior
+
+The app is a polyfill for Apple's Stage Manager, so Apple's own settings
+(`com.apple.WindowManager`, read with `CFPreferencesCopyAppValue` and re-read when they change)
+are the source of truth wherever they exist: show an app's windows all at once or one at a
+time (`AppWindowGroupingBehavior`), hide recent apps (`AutoHide`), hide desktop items
+(`HideDesktop`), click wallpaper to reveal desktop (`EnableStandardClickToShowDesktop`), hide
+widgets. `config.toml` holds only what macOS lacks: rules, placement, hotkeys, named stages,
+pinning, persistence, strip extensions. It never duplicates a macOS setting.
+
 ## Safety: no window stays parked
 
 Defence in depth, because a parked window that never returns is the worst bug:
