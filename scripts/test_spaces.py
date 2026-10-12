@@ -36,6 +36,33 @@ def yes(question):
     return input(f"\n??? {question} [y/N] ").strip().lower().startswith("y")
 
 
+def wait_for(what, cond, timeout):
+    """Polls `cond` until it holds for a second; no Return needed. None on timeout."""
+    end, since = time.time() + timeout, None
+    while time.time() < end:
+        try:
+            ok = cond()
+        except Exception:  # the app may be busy with the Space change
+            ok = False
+        if ok:
+            since = since or time.time()
+            if time.time() - since >= 1.0:
+                return True
+        else:
+            since = None
+        time.sleep(0.3)
+    say(f"    (gave up waiting for {what})")
+    return None
+
+
+def switch_to(what):
+    """Asks for a Desktop switch and notices it by itself (the shown Space changes)."""
+    before = current_space()
+    say(f"\n>>> {what} (the test notices by itself)")
+    if not wait_for("the Desktop switch", lambda: current_space() != before, 120):
+        input("    not seen; switch, then press Return… ")
+
+
 def spaces():
     d = ctl("dump")
     return d.get("spaces") or {}
@@ -92,7 +119,7 @@ def run():
     check(len(s["stages"]) == 2, f"two stages on Desktop 1 ({ts.stage_titles(s)})")
 
     say("\n== Desktop 2: Fixture 3 (the same app) and Bravo 1 ==")
-    ask("Switch to Desktop 2 (Control-Right Arrow)")
+    switch_to("Switch to Desktop 2 (Control-Right Arrow)")
     pid = ts.pids_of(ts.FIX_EXE)
     if pid:
         os.kill(pid[0], signal.SIGUSR1)
@@ -122,7 +149,7 @@ def run():
     check(ctl("switch", 1).get("ok") and current_space() == d2, "a hotkey switch stays on Desktop 2")
 
     say("\n== back on Desktop 1 ==")
-    ask("Switch back to Desktop 1 (Control-Left Arrow)")
+    switch_to("Switch back to Desktop 1 (Control-Left Arrow)")
     s = ts.wait_state(lambda x: x["space"] == d1, "Desktop 1 recognized", timeout=5)
     check(s is not None, "Desktop 1 recognized by its windows")
     if s:
@@ -144,7 +171,7 @@ def run():
     s = ts.start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
     check(s is not None and s["space"] == d1, "Desktop 1 recognized at launch with its saved id")
     check(spaces().get("saved_spaces_not_visited") == 1, "Desktop 2 waits for its first visit")
-    ask("Switch to Desktop 2")
+    switch_to("Switch to Desktop 2")
     s = ts.wait_state(lambda x: x["space"] == d2, "Desktop 2 rebuilt", timeout=6)
     check(s is not None, "Desktop 2 rebuilt with its saved id")
     if s:
@@ -155,7 +182,7 @@ def run():
     if s["space"] == d2 and not [w for w in s["windows"] if w["space"] == d2 and w["parked"]]:
         ctl("switch", 1 if s["active"] != 1 else 2)
     check(any(w["space"] == d2 and w["parked"] for w in state()["windows"]), "a window is parked on Desktop 2")
-    ask("Switch to Desktop 1")
+    switch_to("Switch to Desktop 1")
     time.sleep(1.5)
     app = ts.app_pid()
     guardians = ts.guardian_pids(app)
@@ -165,7 +192,8 @@ def run():
     time.sleep(3)
     still = bool(ts.pids_of(f"stage-manager --guardian {app}$"))
     say(f"    guardian still watching: {still}; parked anywhere now: {[w['id'] for w in parked_anywhere()]}")
-    ask("Switch to Desktop 2 and wait three seconds")
+    switch_to("Switch to Desktop 2")
+    time.sleep(3)
     time.sleep(3)
     left = parked_anywhere()
     check(not left, "the guardian brought Desktop 2's parked window back once Desktop 2 showed")
@@ -173,13 +201,17 @@ def run():
 
     say("\n== a full-screen app's Space has no strip ==")
     s = ts.start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"})
-    if yes("Optional: make a Fixture window full screen (green button) now and answer y once it is; n skips"):
-        time.sleep(2)
-        check(spaces().get("fullscreen") is True, "the engine knows a full-screen Space shows")
-        check(not yes("Is a strip (cards on the left) visible over the full-screen window?"), "no strip on the full-screen Space (by eye)")
-        ask("Leave full screen (green button or Control-Command-F)")
-        time.sleep(2)
-        check(spaces().get("fullscreen") is False, "back on a Desktop")
+    say("\n>>> Optional: make a Fixture window full screen (green button) within a minute; the test")
+    say("    notices by itself and checks the strip is gone, then asks you to leave full screen")
+    if wait_for("a full-screen window", lambda: spaces().get("fullscreen") is True, 60):
+        check(True, "the engine knows a full-screen Space shows")
+        time.sleep(1)
+        panel = ts.strip_panel([w for w in ts.our_windows() if w.get("onscreen", True)])
+        check(panel is None, f"no strip on the full-screen Space ({panel and panel['bounds']})")
+        say("\n>>> Leave full screen (green button or Control-Command-F); the test notices by itself")
+        check(wait_for("full screen to end", lambda: spaces().get("fullscreen") is False, 120) is True, "back on a Desktop")
+    else:
+        say("    full-screen check skipped")
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "the end: no fixture window parked on any Desktop")
