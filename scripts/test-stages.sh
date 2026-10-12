@@ -30,4 +30,6 @@ if [ -z "${SKIP_BUILD:-}" ]; then
     scripts/sign.sh "$app" >/dev/null || exit 1
   done
 fi
+# The app runs from the fixed dev copy (one screen-access approval for every worktree).
+scripts/dev-app.sh >/dev/null || exit 1
 exec python3 scripts/test_stages.py "$@"
