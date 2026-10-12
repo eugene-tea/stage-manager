@@ -3,6 +3,11 @@
 //!
 //! The strip feeds this with the pointer position (polled every ~60 ms only while
 //! [`Decision::poll`] says so) and the current time; it answers whether the strip shows.
+//!
+//! Extensions (Apple has neither): the **edge tab** ([`Visibility::set_tab`]), a slim tab
+//! at the left edge shown while a window hides the strip, reveals it on hover with the same
+//! dwell as the edge and at once on click ([`Visibility::reveal_now`]); and the launch
+//! **announce** ([`Visibility::announce`]) shows a covered strip for a few seconds.
 
 use std::time::{Duration, Instant};
 
@@ -16,6 +21,8 @@ pub const LEAVE_DELAY: Duration = Duration::from_millis(500);
 pub const EDGE_ZONE: f64 = 2.0;
 /// The pointer poll period while polling is needed.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(60);
+/// How long the launch announce shows a covered strip.
+pub const ANNOUNCE: Duration = Duration::from_secs(3);
 
 /// What drives visibility right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,22 +69,51 @@ pub struct Visibility {
     dwell_since: Option<Instant>,
     left_since: Option<Instant>,
     revealed: bool,
+    /// Shown regardless of the pointer until then (the launch announce).
+    hold_until: Option<Instant>,
+    /// The edge tab's area (global), when it shows: resting on it counts as the edge.
+    tab: Option<Rect>,
 }
 
 impl Visibility {
+    /// The edge tab's area while it shows (global), or `None`.
+    pub fn set_tab(&mut self, tab: Option<Rect>) {
+        self.tab = tab;
+    }
+
+    /// Reveals the strip now (a click on the edge tab); it hides again once the pointer has
+    /// been away from it for [`LEAVE_DELAY`].
+    pub fn reveal_now(&mut self) {
+        self.revealed = true;
+        self.dwell_since = None;
+        self.left_since = None;
+    }
+
+    /// Shows the strip until `now + for_how_long` whatever the pointer does, then hides it as
+    /// a revealed strip does.
+    pub fn announce(&mut self, now: Instant, for_how_long: Duration) {
+        self.reveal_now();
+        self.hold_until = Some(now + for_how_long);
+    }
+
     /// Advances the state with the pointer (global, top-left origin; `None` when unknown)
     /// and the strip area `strip` (global).
     pub fn step(&mut self, mode: Mode, pointer: Option<Point>, strip: &Rect, now: Instant) -> Decision {
         match mode {
             Mode::Off | Mode::Shown => {
-                *self = Self::default();
+                *self = Self { tab: self.tab, ..Self::default() };
                 Decision { shown: mode == Mode::Shown, poll: false }
             }
             Mode::EdgeOnly => {
                 let in_rows = |p: &Point| p.y >= strip.y && p.y <= strip.max_y();
+                let on_tab = |p: &Point| self.tab.is_some_and(|t| t.contains(*p));
+                let held = self.hold_until.is_some_and(|t| now < t);
+                if !held {
+                    self.hold_until = None;
+                }
                 if self.revealed {
                     let inside = pointer.is_some_and(|p| strip.contains(p) || (p.x <= strip.x + EDGE_ZONE && in_rows(&p)));
-                    if inside {
+                    if inside || held {
                         self.left_since = None;
                     } else {
                         let since = *self.left_since.get_or_insert(now);
@@ -86,7 +122,7 @@ impl Visibility {
                         }
                     }
                 } else {
-                    let at_edge = pointer.is_some_and(|p| p.x <= strip.x + EDGE_ZONE && in_rows(&p));
+                    let at_edge = pointer.is_some_and(|p| (p.x <= strip.x + EDGE_ZONE && in_rows(&p)) || on_tab(&p));
                     if at_edge {
                         let since = *self.dwell_since.get_or_insert(now);
                         if now.duration_since(since) >= EDGE_DWELL {
@@ -170,6 +206,37 @@ mod tests {
         let mut v = Visibility::default();
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 5.0)), &STRIP, t).shown);
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 5.0)), &STRIP, ms(t, 400)).shown);
+    }
+
+    #[test]
+    fn the_edge_tab_reveals_on_a_rest_and_at_once_on_a_click() {
+        let mut v = Visibility::default();
+        let t = Instant::now();
+        let tab = Rect::new(0.0, 700.0, 10.0, 72.0);
+        v.set_tab(Some(tab));
+        let on_tab = Some(Point::new(8.0, 730.0));
+        assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, t).shown);
+        assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 200)).shown);
+        assert!(v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 260)).shown, "same dwell as the edge");
+        let mut v = Visibility::default();
+        v.set_tab(Some(tab));
+        v.reveal_now();
+        assert!(v.step(Mode::EdgeOnly, on_tab, &STRIP, t).shown, "a click shows it at once");
+        let away = Some(Point::new(900.0, 500.0));
+        assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 100)).shown);
+        assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 700)).shown, "and it hides after the pointer leaves");
+    }
+
+    #[test]
+    fn the_announce_holds_the_strip_then_lets_auto_hide_resume() {
+        let mut v = Visibility::default();
+        let t = Instant::now();
+        let away = Some(Point::new(900.0, 500.0));
+        v.announce(t, ANNOUNCE);
+        assert!(v.step(Mode::EdgeOnly, away, &STRIP, t).shown);
+        assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2900)).shown, "held while announced");
+        assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 3100)).shown, "then the leave delay");
+        assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 3700)).shown, "auto-hide resumes");
     }
 
     #[test]

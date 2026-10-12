@@ -33,6 +33,9 @@ pub struct StripSnapshot {
     /// like the window's pre-drag frame). Releasing there sends the window to a stage of its
     /// own; the controller decides that from the mouse-up.
     pub window_drag: Option<CardWindow>,
+    /// The launch's stages were just built: if a window covers the strip right now, show it
+    /// for a few seconds anyway so the user sees the stages exist (once per launch).
+    pub announce: bool,
 }
 
 /// One card: a stage that is not active.

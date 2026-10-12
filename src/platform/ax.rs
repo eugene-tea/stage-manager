@@ -320,10 +320,19 @@ impl AxElement {
 
     /// Sets the frame: size, then position, then size again (a window that cannot grow past
     /// a display edge at its old position gets its full size once moved).
+    ///
+    /// A window that refuses a resize (a fixed-size dialog) still counts as done when its
+    /// size already is the one asked for: only the move mattered.
     pub fn set_frame(&self, r: Rect) -> AxResult<()> {
         let first = self.set_size(r.size());
         self.set_position(r.origin())?;
-        self.set_size(r.size()).or(first)
+        match self.set_size(r.size()).or(first) {
+            Ok(()) => Ok(()),
+            Err(e) => match self.frame() {
+                Ok(now) if (now.w - r.w).abs() <= 1.0 && (now.h - r.h).abs() <= 1.0 => Ok(()),
+                _ => Err(e),
+            },
+        }
     }
 
     /// `AXRaise` on a window.

@@ -47,9 +47,24 @@ pub struct CgWindow {
     pub alpha: f64,
 }
 
-/// Every window, front to back for the onscreen ones, desktop elements excluded.
+/// Every window, desktop elements excluded: the onscreen ones front to back, then the
+/// offscreen ones.
+///
+/// Two queries, because only the onscreen-only list is ordered front to back: the "all"
+/// list puts windows created later (our own strip panels, say) after older windows they
+/// cover, which once made a test's safety check see a covered window as topmost.
 pub fn list_windows() -> Vec<CgWindow> {
-    let options = CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements;
+    let mut out = query(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements);
+    let seen: HashSet<u32> = out.iter().map(|w| w.id).collect();
+    out.extend(
+        query(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
+            .into_iter()
+            .filter(|w| !seen.contains(&w.id)),
+    );
+    out
+}
+
+fn query(options: CGWindowListOption) -> Vec<CgWindow> {
     let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
         tracing::warn!("CGWindowListCopyWindowInfo returned nothing");
         return Vec::new();

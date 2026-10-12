@@ -13,7 +13,13 @@ synthetic click and shift-click on a card of the real strip; the click is posted
 only when its own strip window is topmost at that point), native (Apple's defaults with three
 more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
-along the whole path, and the pointer is put back).
+along the whole path, and the pointer is put back), visible (windows kept clear of the strip
+on first start, switch and creation; a too-wide one narrowed and given back its exact frame
+on quit; nudge-only with the launch announce and the edge tab; a menu-path quit right after a
+first start with many windows).
+
+No phase runs while the owner's installed app is up, and only our own app's guardian is
+ever signalled.
 
 SM_FIXTURE_ID sets the main fixture's bundle ID (default dev.eugene.stagemanager.fixture.stages);
 the native phase's apps are <id>.a, <id>.b and <id>.c.
@@ -156,8 +162,14 @@ def app_pid():
     return r.get("pid") if r.get("ok") else None
 
 
-def guardian_pids():
-    return pids_of("stage-manager --guardian")
+def guardian_pids(app):
+    """The guardian of our own app (pid `app`) only: never another Stage Manager's."""
+    return pids_of(f"stage-manager --guardian {app}$") if app else []
+
+
+def owner_app_running():
+    """The owner's installed Stage Manager: no live phase runs while it is up."""
+    return bool(pids_of("Applications/Stage Manager.app/Contents/MacOS/stage-manager"))
 
 
 def start_app(expect_windows, extra_env=None, fresh_log=True):
@@ -377,7 +389,7 @@ def drill(name, kill, evidence):
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
     ensure_something_parked()
     pid = app_pid()
-    guards = guardian_pids()
+    guards = guardian_pids(pid)
     kill(pid)
     wait_gone(pid)
     for g in guards:
@@ -405,7 +417,7 @@ def phase_safety():
     ensure_something_parked()
     time.sleep(1.0)  # let state.json catch up (debounced)
     pid = app_pid()
-    for g in guardian_pids():
+    for g in guardian_pids(pid):
         os.kill(g, signal.SIGKILL)
     os.kill(pid, signal.SIGKILL)
     wait_gone(pid)
@@ -457,7 +469,9 @@ def phase_m4():
     time.sleep(0.5)
     s = state()
     t = by_title(s)
-    check(stage_titles(s) == {1: ["Fixture 2", "Fixture 1"], 2: ["Fixture 3"]}, f"Fixture 3 opened a new stage ({stage_titles(s)})")
+    # Stage 1 lists its windows front to back, as the window server orders them.
+    want = {1: z_titles(["Fixture 1", "Fixture 2"]), 2: ["Fixture 3"]}
+    check(stage_titles(s) == want, f"Fixture 3 opened a new stage ({stage_titles(s)}, expected {want})")
     check(s["active"] == 2, "and the new stage is active")
     check(t["Fixture 4"]["home"] == "pinned", "Fixture 4 floats (pinned)")
     vis = s["display"]["visible"]
@@ -611,7 +625,15 @@ def wait_state(pred, what, timeout=6):
 
 
 def topmost_point(prefix):
-    """The center of the frontmost shown window whose title starts with `prefix`."""
+    """The center of the frontmost shown window whose title starts with `prefix`, brought to
+    the front first (in place) so no other app's window covers it: when a fixture app quits,
+    macOS activates another app, whose windows may cover the fixtures."""
+    s = state()
+    shown = [w for w in s["windows"] if w["title"].startswith(prefix) and not w["parked"]]
+    if shown:
+        r = shown[0]["restore"]
+        ctl("debug-frame", shown[0]["id"], r["x"], r["y"], r["w"], r["h"])
+        time.sleep(0.9)  # past the echo window of that raise
     s = state()
     ids = {w["id"] for w in s["windows"] if w["title"].startswith(prefix) and not w["parked"]}
     wins, _ = fixture_windows()
@@ -710,7 +732,8 @@ def phase_native():
     check(s["strip"] == [2] and active_titles(s) == {"Alpha 1"}, f"one card, Alpha 1 alone ({stage_titles(s)})")
     vis = s["display"]["visible"]
     cx, cy = vis["x"] + 70, vis["y"] + vis["h"] / 2
-    big = (vis["x"] + 200, cy - 260, 1000, 520)
+    # Right beside the strip column (it scales with the display), so the drag path is ours.
+    big = (vis["x"] + s["strip_width"], cy - 260, 1000, 520)
     r = ctl("debug-frame", t["Alpha 1"]["id"], *big)
     check(r.get("ok"), f"Alpha 1 covers the drag path ({r.get('error', 'ok')})")
     time.sleep(1.5)
@@ -752,6 +775,211 @@ def phase_native():
     stop_all_fixtures()
 
 
+# ----- visible: the stage area beside the strip, the edge tab, quit right after a start --
+
+
+SCRATCH = os.environ.get("SM_SCREENSHOTS") or HOME
+
+
+def our_layer3_windows():
+    """Our own app's windows at layer 3 (the strip panel and the edge tab), by our pid."""
+    pid = app_pid()
+    if not pid:
+        return []
+    r = run([BIN, "probe-windows", "dev.eugene.stagemanager"], timeout=10)
+    try:
+        wins = json.loads(r.stdout)["windows"]
+    except (json.JSONDecodeError, KeyError):
+        return []
+    return [w for w in wins if w["pid"] == pid and w["layer"] == 3 and w["onscreen"]]
+
+
+def edge_tab():
+    """The edge tab: our slim layer-3 window (the strip panel is far wider)."""
+    tabs = [w for w in our_layer3_windows() if w["bounds"]["w"] <= 12]
+    return tabs[0] if tabs else None
+
+
+def screenshot(name, s):
+    vis = s["display"]["visible"]
+    path = os.path.join(SCRATCH, name)
+    r = subprocess.run(["screencapture", "-x", "-R", f"{vis['x']:.0f},{vis['y']:.0f},260,{vis['h']:.0f}", path],
+                       capture_output=True, text=True)
+    say(f"  screenshot {path}" if r.returncode == 0 and os.path.exists(path) else f"  screenshot failed: {r.stderr.strip()}")
+
+
+def live_frame(title):
+    return frames_of([title])[title]
+
+
+def write_config(text):
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    if text:
+        with open(os.path.join(HOME, "config.toml"), "w") as f:
+            f.write(text)
+
+
+def phase_visible():
+    say("\n== visible: windows clear of the strip, narrowed when too wide, the edge tab, quit ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    # Alpha: one window over the strip column that fits, one too wide for the stage area.
+    # Bravo: one over the strip column (its stage is parked at first start).
+    start_extra_frames("a", 2, "20,60,700,400;10,120,-40,500")
+    start_extra_frames("b", 1, "30,90,600,380")
+    subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
+    time.sleep(1.0)
+    before = {}
+    wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["b"][0]])
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with Alpha and Bravo"):
+        return
+    vis, inset = s["display"]["visible"], s["stage_inset"]
+    left = vis["x"] + inset
+    check(s["fit_windows"] is True and 100 <= s["strip_width"] <= 200,
+          f"fitting on by default; strip {s['strip_width']:.0f} pt, stage area from x={left:.0f}")
+    t = by_title(s)
+    for name in ("Alpha 1", "Alpha 2", "Bravo 1"):
+        before[name] = t[name]["original"] or t[name]["restore"]
+    time.sleep(0.8)
+
+    def placed(title):
+        """Where the window is now (shown) or will be shown (parked: its restore frame)."""
+        w = by_title(state())[title]
+        return ("parked", w["restore"]) if w["parked"] else ("shown", live_frame(title))
+
+    def narrowed(f):
+        return (abs(f["x"] - left) <= 1 and abs(f["x"] + f["w"] - (vis["x"] + vis["w"])) <= 1
+                and abs(f["h"] - before["Alpha 2"]["h"]) <= 1 and f["w"] < before["Alpha 2"]["w"] - 1)
+
+    how, a1 = placed("Alpha 1")
+    check(abs(a1["x"] - left) <= 1 and abs(a1["w"] - before["Alpha 1"]["w"]) <= 1,
+          f"first start: a window over the strip moves right, same size ({how} {fmt(a1)})")
+    how, a2 = placed("Alpha 2")
+    check(narrowed(a2), f"first start: a too-wide window is narrowed to the stage area, height kept ({how} {fmt(a2)}, was {fmt(before['Alpha 2'])})")
+    how, b1 = placed("Bravo 1")
+    check(abs(b1["x"] - left) <= 1, f"first start: Bravo's window is clear too ({how} {fmt(b1)})")
+    check({placed(n)[0] for n in ("Alpha 1", "Bravo 1")} == {"parked", "shown"}, "one stage shown, the other parked")
+    consistent("visible first start")
+
+    say("-- a stage restore keeps it clear; the narrowed window stays narrowed")
+    s = state()
+    t = by_title(s)
+    number = {st["number"]: st["windows"] for st in s["stages"]}
+    alpha = next(n for n, ws in number.items() if t["Alpha 2"]["id"] in ws)
+    bravo = next(n for n, ws in number.items() if t["Bravo 1"]["id"] in ws)
+    for n in (bravo, alpha, bravo, alpha):
+        do("switch", n)
+    b = by_title(state())["Bravo 1"]["restore"]
+    a2 = live_frame("Alpha 2")
+    check(abs(b["x"] - left) <= 1, f"Bravo's stage restores clear of the strip ({fmt(b)})")
+    check(narrowed(a2), f"back on Alpha: shown narrowed ({fmt(a2)})")
+    consistent("visible switch")
+
+    say("-- a new window over the strip moves right")
+    start_extra_frames("c", 1, "25,150,640,360")
+    st = wait_state(lambda x: "Charlie 1" in active_titles(x), "Charlie's new stage")
+    time.sleep(0.6)
+    c1 = live_frame("Charlie 1")
+    check(st is not None and abs(c1["x"] - left) <= 1, f"a new window over the strip moves right ({fmt(c1)})")
+    time.sleep(1.5)
+    screenshot("strip-fit.png", state())
+
+    say("-- quit gives every window its exact earlier frame")
+    pid = app_pid()
+    t0 = time.time()
+    ctl("quit")
+    wait_gone(pid)
+    took = time.time() - t0
+    a2 = live_frame_probe("a", "Alpha 2")
+    want = before["Alpha 2"]
+    check(a2 is not None and close(a2, want), f"quit: the narrowed window is back at its exact frame ({fmt(a2) if a2 else None}, want {fmt(want)})")
+    a1 = live_frame_probe("a", "Alpha 1")
+    if not check(a1 is not None and close(a1, before["Alpha 1"]), f"quit: the moved window is back where it was ({fmt(a1) if a1 else None})"):
+        say(f"  Alpha's windows: {fixture_windows([EXTRA['a'][0]])[0]}")
+    check(took < 6, f"quit took {took:.1f} s")
+    all_onscreen("visible quit")
+
+    say("-- nudge-only: a too-wide window stays put, the strip announces itself, then the edge tab")
+    stop_all_fixtures()
+    write_config("[stages]\nfit_windows = false\n")
+    start_extra_frames("a", 1, "10,120,-40,500")
+    subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
+    time.sleep(1.0)
+    # The largest of the app's windows (an active app also lists its menu bar strip).
+    wide = max((w["bounds"] for w in fixture_windows([EXTRA["a"][0]])[0]), key=lambda b: b["w"] * b["h"])
+    s = start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up (nudge-only)"):
+        return
+    a1 = live_frame("Alpha 1")
+    check(close(a1, wide), f"nudge-only: the too-wide window stays where it is ({fmt(a1)}, was {fmt(wide)})")
+    check(edge_tab() is None, "the strip is shown for a moment at launch (no tab yet)")
+    tab = wait_until(edge_tab, 8, "the edge tab")
+    check("a window covers the strip; showing it for a moment" in log_text(), "the launch announce ran")
+    if check(tab is not None, f"the edge tab appears at layer 3 with our pid ({fmt(tab['bounds']) if tab else None})"):
+        b = tab["bounds"]
+        mid = s["display"]["visible"]["y"] + s["display"]["visible"]["h"] / 2
+        check(b["x"] <= vis["x"] + 1 and abs(b["y"] + b["h"] / 2 - mid) <= 2, "flush left, vertically centered")
+        screenshot("edge-tab.png", s)
+        r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+        check(r.get("ok"), f"clicked the tab ({r.get('error', 'ok')})")
+        gone = wait_until(lambda: edge_tab() is None, 3, "the tab to give way to the strip")
+        check(gone is not None, "a click on the tab reveals the strip (the tab hides)")
+        back = wait_until(edge_tab, 4, "the tab to come back once the pointer is away")
+        check(back is not None, "the strip auto-hides again and the tab returns")
+    stop_app()
+    all_onscreen("nudge-only quit")
+
+    say("-- quit right after a first start with many windows answers through the WM thread")
+    stop_all_fixtures()
+    write_config(None)
+    start_fixture(12)
+    start_extra("a", 3)
+    start_extra("b", 2)
+    start_extra("c", 2)
+    if os.path.exists(LOG):
+        os.remove(LOG)
+    args = ["open", "-n", APP]
+    for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": ONLY, "STAGE_MANAGER_NO_PROMPT": "1",
+                 "STAGE_MANAGER_TEST": "1", "RUST_LOG": "info,stage_manager=debug"}.items():
+        args += ["--env", f"{k}={v}"]
+    subprocess.run(args, check=True)
+    pid = wait_until(app_pid, 15, "the app")
+    wait_until(lambda: "first start: one stage per app" in log_text(), 15, "the first start")
+    t0 = time.time()
+    r = ctl("debug-menu-quit")
+    check(r.get("ok"), f"quit through the menu's path ({r.get('error', 'ok')})")
+    if pid:
+        wait_gone(pid, 35)
+    took = time.time() - t0
+    text = log_text()
+    check("did not answer" not in text and "unparked every window" in text,
+          f"the WM thread answered Quit ({took:.1f} s after the first start; no 'did not answer')")
+    check(took < 10, f"quit returned within the timeout ({took:.1f} s)")
+    all_onscreen("quit right after a first start")
+    stop_all_fixtures()
+
+
+def start_extra_frames(k, n, frames):
+    bundle, path, pattern, title = EXTRA[k]
+    stop_extra(k)
+    subprocess.run(["open", "-n", "-g", path, "--args", "--windows", str(n), "--title", title, "--background",
+                    "--frames", frames], check=True)
+    return wait_until(lambda: len(fixture_windows([bundle])[0]) >= n, 15, f"{n} {title} windows")
+
+
+def live_frame_probe(k, title):
+    """A fixture window's frame by title through AX-free means: the window server's list,
+    matched by the app's windows sorted by id (titles are 1..n in creation order)."""
+    wins = sorted((w for w in fixture_windows([EXTRA[k][0]])[0] if w["bounds"]["h"] > 60), key=lambda w: w["id"])
+    i = int(title.rsplit(" ", 1)[1]) - 1
+    return wins[i]["bounds"] if i < len(wins) else None
+
+
 def frontmost_bundle():
     r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
     out = r.stdout.strip()
@@ -759,7 +987,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -769,15 +997,17 @@ def main():
     front = frontmost_bundle()
     try:
         for p in phases:
-            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
+            if owner_app_running():
+                say("STOP: the owner's Stage Manager (~/Applications) is running; no live phase runs beside it")
+                failed.append("the owner's app is running")
+                break
+            {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
             all_onscreen("cleanup")
         stop_all_fixtures()
-        for g in guardian_pids():
-            pass  # guardians exit with their app; nothing to kill
         if front and front not in ALL_IDS:
             subprocess.run(["open", "-b", front], capture_output=True)
     say(f"\n{len(passed)} passed, {len(failed)} failed")

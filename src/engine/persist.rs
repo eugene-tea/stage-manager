@@ -17,6 +17,7 @@ use super::model::{
 use super::park::is_parked;
 use super::rules::Decision;
 use super::settings::AppWindows;
+use super::stage_area::same_frame;
 
 /// The state file format version this build reads and writes.
 pub const STATE_VERSION: u32 = 1;
@@ -48,6 +49,10 @@ pub struct SavedWindow {
     pub pinned: bool,
     /// Standard or child.
     pub role: SavedRole,
+    /// The frame before we fitted the window clear of the strip, when we did (quit and the
+    /// recovery scan put it back there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<Rect>,
 }
 
 /// One saved stage.
@@ -104,6 +109,8 @@ pub struct AssignedWindow {
     pub key: bool,
     /// It was pinned.
     pub pinned: bool,
+    /// Its saved pre-fit frame.
+    pub original: Option<Rect>,
 }
 
 /// A saved stage with the live windows matched into it, front to back.
@@ -191,6 +198,7 @@ pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
                 frame: sw.frame,
                 key: sw.key,
                 pinned: sw.pinned,
+                original: sw.original,
             });
         }
     }
@@ -231,6 +239,7 @@ impl Model {
                     WindowRole::Standard => SavedRole::Standard,
                     WindowRole::Child { .. } => SavedRole::Child,
                 },
+                original: w.original,
             })
         };
         let mut stages: Vec<SavedStage> = self
@@ -384,6 +393,10 @@ impl Model {
 
         self.place_unmatched(&metas, assignment, &placed, hints);
 
+        // Every window of every stage clear of the strip, so restored frames already are.
+        let ids: Vec<WindowId> = live.iter().map(|m| m.id).collect();
+        let fitted: Vec<WindowId> = ids.into_iter().filter(|&id| self.fit_window(id)).collect();
+
         let stage_ids: Vec<StageId> = self.stages.iter().map(|s| s.id).collect();
         for s in stage_ids {
             if self.is_active(s) {
@@ -399,6 +412,17 @@ impl Model {
         if restore_frames {
             for id in self.pinned() {
                 self.restore_window(id, &mut actions);
+            }
+        }
+        for id in fitted {
+            let shown = self.windows.get(&id).filter(|w| !w.parked).map(|w| w.restore);
+            let done = actions
+                .iter()
+                .any(|a| matches!(a, Action::SetFrame { id: x, .. } if *x == id));
+            if let Some(frame) = shown
+                && !done
+            {
+                actions.push(Action::SetFrame { id, frame });
             }
         }
 
@@ -548,6 +572,7 @@ impl Model {
                 home: Home::Stage(stage),
                 restore,
                 parked: false,
+                original: None,
             },
         );
         if let Some(s) = self.stage_mut(stage) {
@@ -590,6 +615,8 @@ impl Model {
             meta.frame
         };
         let restore = self.safe_restore(base, display);
+        // The saved pre-fit frame still applies while the window is where we fitted it.
+        let original = saved.original.filter(|_| same_frame(base, saved.frame));
         let mut meta = meta.clone();
         meta.display = display;
         self.windows.insert(
@@ -599,6 +626,7 @@ impl Model {
                 home,
                 restore,
                 parked: false,
+                original,
             },
         );
     }

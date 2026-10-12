@@ -50,6 +50,8 @@ pub enum Command {
     Reload,
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
+    /// Test only: quit the way the menu's Quit item does (from inside a menu action).
+    DebugMenuQuit,
     /// A synthetic left-button drag through global points, posted only when every point is
     /// over our own windows or a `STAGE_MANAGER_ONLY` app's (needs `STAGE_MANAGER_TEST=1`).
     DebugDrag {
@@ -105,6 +107,7 @@ impl Command {
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
             ["debug-panic"] => Ok(Self::DebugPanic),
+            ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-drag", rest @ ..] => {
                 let (coords, shift) = match rest.split_last() {
                     Some((&"shift", c)) => (c, true),
@@ -261,6 +264,7 @@ mod tests {
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
+        assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),
             Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })

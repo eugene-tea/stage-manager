@@ -67,6 +67,7 @@ impl Model {
                     home,
                     restore,
                     parked: false,
+                    original: None,
                 },
             );
             match home {
@@ -130,6 +131,7 @@ impl Model {
                 home,
                 restore,
                 parked: false,
+                original: None,
             },
         );
         if let Home::Stage(s) = home
@@ -138,13 +140,16 @@ impl Model {
             stage.windows.insert(0, id);
             stage.key = Some(id);
         }
+        self.fit_window(id);
+        let restore = self.windows[&id].restore;
 
         let target_active = match home {
             Home::Stage(s) => self.is_active(s),
             Home::Pinned => true,
         };
         if target_active {
-            // `restore` differs from `placed` only when the window was born in a park zone.
+            // `restore` differs from the live frame when the window was born in a park zone,
+            // was placed by a rule, or was fitted clear of the strip.
             if restore != self.windows[&id].meta.frame {
                 actions.push(Action::SetFrame { id, frame: restore });
             }
@@ -764,6 +769,15 @@ impl Model {
         self.record_frame(id, frame);
     }
 
+    /// Like [`Model::window_frame_changed`] for the result of our own action (a frame we just
+    /// set, maybe clamped by the app): it never counts as the user's resize.
+    pub fn window_frame_settled(&mut self, id: WindowId, frame: Rect) {
+        if self.windows.get(&id).is_some_and(|w| w.parked) {
+            return;
+        }
+        self.record_own_frame(id, frame);
+    }
+
     /// A window's title changed. Returns true when the window is managed.
     pub fn window_title_changed(&mut self, id: WindowId, title: &str) -> bool {
         match self.windows.get_mut(&id) {
@@ -776,17 +790,19 @@ impl Model {
     }
 
     /// Brings every parked window back to its restore frame, clamped onto its display's
-    /// visible frame. Used on quit and by safety code; the stages stay as they are.
+    /// visible frame, and every window we fitted into the stage area back to the exact frame
+    /// it had before ([`Model::safety_targets`]). Used on quit and by safety code; the stages
+    /// stay as they are, and the pre-fit frames become the restore frames.
     pub fn unpark_all(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
-        let parked: Vec<WindowId> = self
-            .windows
-            .values()
-            .filter(|w| w.parked)
-            .map(|w| w.meta.id)
-            .collect();
-        for id in parked {
-            self.restore_window(id, &mut actions);
+        for (id, frame) in self.safety_targets() {
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.parked = false;
+                if w.original.take().is_some() {
+                    w.restore = frame;
+                }
+            }
+            actions.push(Action::SetFrame { id, frame });
         }
         actions
     }

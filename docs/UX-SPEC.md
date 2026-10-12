@@ -35,6 +35,17 @@ Our `config.toml` never repeats these. It only adds what macOS lacks.
   toward the viewer. The far (right) edge is about **92 %** of the near edge's height, and
   the top edge falls about 10° left to right. We reproduce this with a `CATransform3D`
   y-rotation and perspective, tuned to that ratio.
+- **Size by screen (ours, by formula):** every strip length (column width, card box, gaps,
+  icon size and offsets, hover shift, perspective distances) is multiplied by
+  `k = (visible width / 2560) × (visible height / 1410)`, kept within 0.5…1 (the 5K
+  numbers above at `k = 1`; larger screens keep them; the floor keeps cards legible).
+  Capacity is `floor((visible height − 2 × 190 k) / (170 k))`, within 3…9. Apple draws
+  smaller cards on laptops; its exact sizes there are not measured yet.
+
+  | Screen (visible frame) | k | Column | Card box | Capacity | Stage area starts at |
+  |---|---|---|---|---|---|
+  | 5K, 2560 × 1410 pt | 1.00 | 200 pt | 170 × 177 pt | 6 | x = 216 pt |
+  | Laptop, 1800 × 1130 pt | 0.56 | 113 pt | 96 × 100 pt | 9 | x = 129 pt |
 - **Count:** at most **6 cards** at 1440 pt height. When a seventh stage enters the strip,
   the oldest card drops out of view (its windows stay parked).
 - **Vertical layout:** cards are stacked top to bottom with about **12–25 pt** between card
@@ -90,7 +101,8 @@ the hotkey numbers) is an option.
 | Open an app with Shift held (Dock, Finder, Spotlight Shift-Return, Launchpad) | (No native meaning; the app opens in a new stage) | Sugar: its new window joins the current stage |
 | ⌘Tab / ⌘⇧Tab | Switches stages (⌘⇧Tab cycles backward) | Same; Shift never changes the app switcher |
 | Click wallpaper | **Reveal desktop:** the active stage goes into the strip and the main area is empty. A second wallpaper click brings it back | Same, following `EnableStandardClickToShowDesktop` |
-| Window overlapping the strip area | Strip slides out of the way (not captured in the session; Apple's documented behavior) | Strip hides while any managed window intersects the strip area |
+| Window overlapping the strip area | Strip slides out of the way (not captured in the session; Apple's documented behavior). Apple keeps the stage's windows clear of the strip when it places them | When we place a window (first start, a stage shown, a new window, a card dropped in) that overlaps the strip column plus a 16 pt margin, it moves right just enough; one too wide is also narrowed (height kept; `[stages] fit_windows = false` only moves). Pre-fit frames come back on quit. The strip hides while any window of the active stage intersects the strip area (a window the user drags there stays) |
+| Pointer on the edge tab (ours) | (Apple has no tab) | While a window hides the strip, a slim translucent tab (10 × 72 pt window, 5 pt pill, light/dark aware) sits at the left edge, vertically centered: resting on it reveals the strip after 250 ms like the edge, a click reveals it at once. Hidden when the strip shows or the user turned the strip off |
 | Pointer at the left edge | Strip slides back in (delay not captured) | Reveal after the pointer rests at x ≤ 2 pt for **250 ms** (provisional); hide again 500 ms after the pointer leaves the strip while a window still overlaps |
 
 ## First start and new windows
@@ -136,7 +148,14 @@ the hotkey numbers) is an option.
    Apple's.
 6. **Desktop items** (`HideDesktop`) are read and logged but not acted on, since hiding
    Finder's desktop icons is outside a window manager's reach through public API.
-7. **Extensions** on top, all optional and never replacing a native gesture: rules for new
+7. **Windows narrowed to fit.** Apple keeps windows clear of the strip; we do the same by
+   moving them, and by narrowing a window too wide for the room beside the strip (Apple's
+   exact behavior for such windows is not measured). Every narrowed window gets its exact
+   earlier frame back on quit or after a crash (`state.json` keeps the pre-fit frame).
+8. **Edge tab and launch announce.** A slim tab at the left edge while a window hides the
+   strip, and a 3 s showing of a covered strip right after launch, so the strip is never
+   invisible without a hint. Apple has neither.
+9. **Extensions** on top, all optional and never replacing a native gesture: rules for new
    windows, placement (center, cascade), hotkeys, named stages, pinned windows, persistence,
    number badges on cards, and Shift sugar ("hold Shift to bring things here": Shift while
    opening an app, on a Dock click, or on a card click). Shift is read at the user's

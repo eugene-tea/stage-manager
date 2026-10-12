@@ -14,6 +14,7 @@ fn saved(bundle: &str, title: &str, z: usize) -> SavedWindow {
         key: z == 0,
         pinned: false,
         role: SavedRole::Standard,
+        original: None,
     }
 }
 
@@ -574,4 +575,43 @@ fn an_empty_saved_active_stage_gives_way_to_the_frontmost_new_app() {
     );
     assert_eq!(m.main_active_stage(), m.stage_of(WindowId(2)));
     assert_eq!(m.stages().len(), 2);
+}
+
+// ----- keeping windows clear of the strip at launch ----------------------------------------
+
+#[test]
+fn first_start_fits_every_window_of_every_stage_and_saves_the_pre_fit_frame() {
+    use crate::engine::stage_area::FitOptions;
+    let mut m = model_with(ModelOptions { fit: FitOptions { inset: 216.0, shrink: true }, ..ModelOptions::default() });
+    let wide = Rect::new(10.0, 60.0, 1400.0, 700.0);
+    let over = Rect::new(50.0, 80.0, 600.0, 400.0);
+    let live = [
+        WindowMeta { frame: wide, ..app_window(1, 10, "com.example.a") },
+        WindowMeta { frame: over, ..app_window(2, 20, "com.example.b") },
+    ];
+    let actions = first_start(&mut m, &live, &[1, 2], Some(10));
+    let fitted_wide = Rect::new(216.0, 60.0, 1440.0 - 216.0, 700.0);
+    assert!(actions.contains(&Action::SetFrame { id: WindowId(1), frame: fitted_wide }), "{actions:?}");
+    let parked = m.window(WindowId(2)).expect("managed");
+    assert!(parked.parked);
+    assert_eq!(parked.restore, Rect::new(216.0, 80.0, 600.0, 400.0), "the parked stage's frame is already clear");
+    assert_eq!(parked.original, Some(over));
+
+    // Saved with the pre-fit frames, and matched back on the next launch.
+    let state = m.to_state();
+    let json = state.to_json();
+    assert!(json.contains("\"original\""));
+    let saved = StateFile::from_json(&json).expect("parses");
+    let mut again = model_with(ModelOptions { fit: FitOptions { inset: 216.0, shrink: true }, ..ModelOptions::default() });
+    let live = [
+        WindowMeta { frame: fitted_wide, ..app_window(1, 10, "com.example.a") },
+        WindowMeta { frame: Rect::new(216.0, 80.0, 600.0, 400.0), ..app_window(2, 20, "com.example.b") },
+    ];
+    let a = rematch(&saved, &live);
+    again.apply_launch(&live, &a, false, &LaunchHints::default());
+    assert_eq!(again.window(WindowId(1)).and_then(|w| w.original), Some(wide));
+    assert_eq!(again.window(WindowId(2)).and_then(|w| w.original), Some(over));
+    // A state.json without pre-fit frames still loads.
+    let old = json.replace("\"original\"", "\"ignored_unknown\"");
+    assert!(StateFile::from_json(&old).is_ok());
 }

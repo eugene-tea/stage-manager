@@ -41,8 +41,8 @@ mod app {
     use std::cell::RefCell;
     use std::process::ExitCode;
     use std::ptr::NonNull;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
     use block2::RcBlock;
@@ -61,7 +61,7 @@ mod app {
     use stage_manager::platform::input::{self, InputKind, InputMonitor};
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
-    use stage_manager::platform::wm_thread::{WmCommand, WmHandle};
+    use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::platform::{hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -69,11 +69,23 @@ mod app {
     /// Permission, settings and display poll period.
     const POLL_SECONDS: f64 = 2.0;
 
-    /// How long Quit waits for the WM thread to unpark every window.
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+    /// How long Quit waits for the WM thread to put `windows` windows back: the action in
+    /// flight when Quit came (a batch stops between actions), then a frame per window, each
+    /// up to three AX calls (size, position, size) that a slow or hung app may let run to
+    /// the 0.25 s messaging timeout. At least 4 s, at most 30 s.
+    pub(crate) fn shutdown_timeout(windows: usize) -> Duration {
+        let per_window = 3.0 * f64::from(wm_thread::AX_TIMEOUT_SECONDS) + 0.05;
+        let secs = 2.0 + per_window * windows as f64;
+        Duration::from_secs_f64(secs.clamp(4.0, 30.0))
+    }
 
-    /// After a signal, how long the main thread gets to quit before the watcher does it.
-    const SIGNAL_GRACE: Duration = Duration::from_secs(5);
+    /// After a signal, the main thread gets the shutdown timeout plus this before the
+    /// watcher thread unparks on its own.
+    const SIGNAL_GRACE_EXTRA: Duration = Duration::from_secs(2);
+
+    /// The WM thread's handle, for Quit: reachable even while the app state is borrowed
+    /// (a menu action runs inside that borrow).
+    static WM: OnceLock<WmHandle> = OnceLock::new();
 
     /// `STAGE_MANAGER_TEST=1` enables test-only ctl commands (`debug-panic`).
     const TEST_ENV: &str = "STAGE_MANAGER_TEST";
@@ -233,20 +245,28 @@ mod app {
     /// Quits cleanly (main thread): every parked window back onscreen through the WM thread
     /// (the registry and a recovery scan as fallbacks), the clean-exit marker for the
     /// guardian, the socket removed, then exit.
+    ///
+    /// The WM thread is told first ([`safety::request_quit`]) so a long batch of window moves
+    /// stops between two actions and Quit is answered next.
     fn quit() {
         if QUITTING.swap(true, Ordering::SeqCst) {
             return;
         }
-        tracing::info!("quitting: unparking every window");
-        let wm = APP.with(|a| a.try_borrow().ok().and_then(|g| g.as_ref().map(|app| app.wm.clone())));
-        let ok = match wm.and_then(|wm| wm.shutdown(SHUTDOWN_TIMEOUT)) {
-            Some(true) => true,
-            Some(false) => {
+        safety::request_quit();
+        let timeout = shutdown_timeout(safety::registry_len());
+        tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
+        let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
+            Some(Some(true)) => true,
+            Some(Some(false)) => {
                 tracing::warn!("some windows did not come back through the WM thread; retrying from the registry");
                 safety::emergency_unpark("quit")
             }
-            None => {
+            Some(None) => {
                 tracing::warn!("WM thread did not answer; unparking from the registry");
+                safety::emergency_unpark("quit")
+            }
+            None => {
+                tracing::warn!("no WM thread; unparking from the registry");
                 safety::emergency_unpark("quit")
             }
         };
@@ -274,6 +294,14 @@ mod app {
             }),
             Command::Quit => {
                 DispatchQueue::main().exec_async(quit);
+                json!({ "ok": true, "quitting": true })
+            }
+            Command::DebugMenuQuit => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-menu-quit needs STAGE_MANAGER_TEST=1");
+                }
+                // The menu's path: the action runs while the app state is borrowed.
+                DispatchQueue::main().exec_async(|| with_app(|app| app.on_menu(MenuAction::Quit)));
                 json!({ "ok": true, "quitting": true })
             }
             Command::DebugPanic => {
@@ -309,8 +337,9 @@ mod app {
     }
 
     fn on_signal(_sig: i32) {
+        let grace = shutdown_timeout(safety::registry_len()) + SIGNAL_GRACE_EXTRA;
         DispatchQueue::main().exec_async(quit);
-        std::thread::sleep(SIGNAL_GRACE);
+        std::thread::sleep(grace);
         tracing::error!("main thread did not quit after a signal; unparking from the signal watcher");
         QUITTING.store(true, Ordering::SeqCst);
         let ok = safety::emergency_unpark("signal");
@@ -348,6 +377,7 @@ mod app {
                 return ExitCode::FAILURE;
             }
         };
+        let _ = WM.set(wm.clone());
         safety::spawn_guardian();
         let wm_signals = wm.clone();
         if let Err(e) = safety::watch_signals(move |sig| {

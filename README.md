@@ -77,7 +77,21 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   Once" (System Settings → Desktop & Dock) one stage per app holding all its windows; with
   "One at a Time" one stage per window. The frontmost app's stage is shown; the others go
   to the strip, most recently used at the top. Later launches restore the saved stages
-  (below); apps that were not saved get their own stages the same way.
+  (below); apps that were not saved get their own stages the same way. If a window covers
+  the strip at that moment, the strip shows itself for about 3 seconds anyway, so you see
+  the stages are there.
+- **Windows stay clear of the strip**, as with Apple's: whenever we place a window (first
+  start, switching to a stage, a new window, a card dropped in) and it overlaps the strip's
+  column, it moves right just enough. A window too wide for the room beside the strip is
+  also made narrower (height unchanged); `[stages] fit_windows = false` turns the narrowing
+  off (then it stays put). Quit gives every window back its exact earlier frame. A window
+  you drag over the strip yourself stays where you put it until the next switch; the strip
+  then hides behind it.
+- **The strip's size follows the screen**: 200 pt wide on a 5K display, about 113 pt on a
+  1800 pt-wide laptop, with smaller cards.
+- **When a window hides the strip**, a slim translucent tab shows at the middle of the
+  screen's left edge. Rest the pointer on it (or on the very edge) to slide the strip in,
+  or click it. It is not shown when you hid the strip from the menu.
 - **Stages.** Every window belongs to one stage (or is pinned). Only the active stage is
   shown; the others are parked in the bottom-right corner (a sliver stays visible; macOS
   keeps part of every window onscreen). Clicking a card, clicking a parked sliver, ⌘Tab or
@@ -113,7 +127,8 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   click again to bring it back. This follows System Settings → Desktop & Dock → "Click
   wallpaper to reveal desktop": with **Only in Stage Manager** (the default) we reveal; with
   **Always**, macOS itself moves windows aside and we leave the click alone.
-- **Quit** from the menu bar item brings every parked window back first.
+- **Quit** from the menu bar item brings every parked window back first, and every window
+  we narrowed or moved clear of the strip back to its earlier frame.
 
 ### Hotkeys (optional)
 
@@ -217,6 +232,12 @@ toggle_strip = "ctrl+alt+s"
 # and stay even when empty. For example:
 # names = ["Work", "Chat"]
 names = []
+# Windows are kept clear of the strip, as Apple's Stage Manager does: when a stage is
+# shown or a window opens over the strip, the window moves right just enough. A window
+# too wide for the room beside the strip is also made narrower (its height stays); quit
+# gives every window back its exact earlier size. false only moves windows, never
+# resizes them (a too-wide window then stays where it is and the strip hides behind it).
+fit_windows = true
 ```
 
 Rules are checked in order for each new standard window; existing windows at launch keep

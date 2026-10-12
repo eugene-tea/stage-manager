@@ -7,6 +7,9 @@
 //   --panel      | FIXTURE_PANEL=1     also open "Fixture Panel" (an NSPanel, child-like)
 //   --background | FIXTURE_BACKGROUND=1  do not activate; order windows to the back
 //   --title T    | FIXTURE_TITLE=T     window titles "T 1…N" (default "Fixture")
+//   --frames F   | FIXTURE_FRAMES=F    frames of the first windows, "x,y,w,h;x,y,w,h;..." in
+//                                      points from the visible frame's top-left corner (y
+//                                      down); a width <= 0 is the visible width plus it
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 import AppKit
@@ -16,6 +19,14 @@ struct Options {
     var panel = false
     var background = false
     var title = "Fixture"
+    var frames: [[Double]] = []
+
+    static func parseFrames(_ text: String) -> [[Double]] {
+        text.split(separator: ";").compactMap { part in
+            let v = part.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            return v.count == 4 ? v : nil
+        }
+    }
 
     static func parse() -> Options {
         var o = Options()
@@ -24,6 +35,7 @@ struct Options {
         if env["FIXTURE_PANEL"] == "1" { o.panel = true }
         if env["FIXTURE_BACKGROUND"] == "1" { o.background = true }
         if let t = env["FIXTURE_TITLE"], !t.isEmpty { o.title = t }
+        if let f = env["FIXTURE_FRAMES"] { o.frames = parseFrames(f) }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -31,6 +43,7 @@ struct Options {
             case "--panel": o.panel = true
             case "--background": o.background = true
             case "--title": if let t = args.next() { o.title = t }
+            case "--frames": if let f = args.next() { o.frames = parseFrames(f) }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -117,10 +130,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let w = size.width + CGFloat(i % 3) * 40
         let h = size.height + CGFloat(i % 2) * 30
         let dx = CGFloat(i % 6) * 110, dy = CGFloat(i % 6) * 70 + CGFloat(i / 6) * 30
-        let origin = NSPoint(x: area.minX + 80 + dx, y: area.maxY - 80 - h - dy)
+        var rect = NSRect(x: area.minX + 80 + dx, y: area.maxY - 80 - h - dy, width: w, height: h)
+        if i < options.frames.count {
+            let f = options.frames[i]
+            let fw = f[2] <= 0 ? area.width + f[2] : f[2]
+            rect = NSRect(x: area.minX + f[0], y: area.maxY - f[1] - f[3], width: fw, height: f[3])
+        }
         let title = "\(options.title) \(i + 1)"
         let window = NSWindow(
-            contentRect: NSRect(origin: origin, size: NSSize(width: w, height: h)),
+            contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = title
