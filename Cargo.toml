@@ -34,6 +34,16 @@ objc2-quartz-core = "0.3"
 block2 = "0.6"
 dispatch2 = "0.3"
 libc = "0.2"
+# Only with the `debug-render` feature: renders the strip offscreen (no screen access needed).
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
+    "std", "MTLDevice", "MTLTexture", "MTLResource", "MTLPixelFormat", "MTLTypes", "MTLAllocation",
+] }
+
+[features]
+# `strip-demo` with STAGE_MANAGER_DEMO_RENDER=<file> draws the strip into <file> (raw BGRA)
+# with Core Animation's offscreen renderer and quits: a visual check that works while the
+# screen is locked or without Screen Recording.
+debug-render = ["dep:objc2-metal", "objc2-quartz-core/CARenderer", "objc2-quartz-core/objc2-metal"]
 
 [dev-dependencies]
 tempfile = "3"

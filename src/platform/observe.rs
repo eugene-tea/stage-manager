@@ -73,6 +73,8 @@ pub enum WinEvent {
     Focused(u32),
     /// An observed app became frontmost (NSWorkspace).
     AppActivated(i32),
+    /// A window was minimized (⌘M, the yellow button).
+    Minimized(u32),
 }
 
 struct ObservedApp {
@@ -521,6 +523,8 @@ impl Observer {
                 if let Some(w) = self.find_window(pid, &element).and_then(|id| self.windows.get_mut(&id)) {
                     w.minimized = true;
                     tracing::debug!(id = w.id, pid, "window minimized");
+                    let id = w.id;
+                    self.events.push(WinEvent::Minimized(id));
                 }
             }
             other => tracing::debug!(pid, "unhandled AX notification {other}"),

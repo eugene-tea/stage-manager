@@ -228,9 +228,13 @@ pub enum HotkeyCommand {
     ToggleStrip,
 }
 
-/// The `[hotkeys]` section; `None` disables a binding.
+/// The `[hotkeys]` section; `None` disables a binding. Nothing is registered unless
+/// `enabled` (Apple's Stage Manager has no hotkeys, and these take combinations other apps
+/// may use).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeyConfig {
+    /// Register the bindings at all (default off).
+    pub enabled: bool,
     /// Switch to stage N (default `ctrl+alt+{n}`).
     pub switch: Option<NumberedHotkey>,
     /// Send the focused window to stage N (default `ctrl+alt+shift+{n}`).
@@ -253,6 +257,7 @@ const CTRL_ALT: Mods = Mods {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             switch: Some(NumberedHotkey { mods: CTRL_ALT }),
             send: Some(NumberedHotkey {
                 mods: Mods {
@@ -277,8 +282,14 @@ impl Default for HotkeyConfig {
 }
 
 impl HotkeyConfig {
-    /// Every binding the platform should register, numbered ones expanded to 1–9.
+    /// Every binding the platform should register (none unless enabled), numbered ones
+    /// expanded to 1–9.
     pub fn bindings(&self) -> Vec<(Hotkey, HotkeyCommand)> {
+        if self.enabled { self.all_bindings() } else { Vec::new() }
+    }
+
+    /// Every configured binding, enabled or not, numbered ones expanded to 1–9.
+    pub fn all_bindings(&self) -> Vec<(Hotkey, HotkeyCommand)> {
         let mut out = Vec::new();
         for n in 1..=9u8 {
             if let Some(s) = self.switch {
@@ -302,7 +313,7 @@ impl HotkeyConfig {
 
     /// Hotkeys bound to more than one command, as readable warnings.
     pub fn conflicts(&self) -> Vec<String> {
-        let b = self.bindings();
+        let b = self.all_bindings();
         let mut out = Vec::new();
         for (i, (k, c)) in b.iter().enumerate() {
             if let Some((_, other)) = b[..i].iter().find(|(k2, _)| k2 == k) {
@@ -467,7 +478,8 @@ mod tests {
 
     #[test]
     fn default_bindings_expand_digits() {
-        let b = HotkeyConfig::default().bindings();
+        let b = HotkeyConfig::default().all_bindings();
+        assert!(HotkeyConfig::default().bindings().is_empty(), "off by default");
         assert_eq!(b.len(), 9 * 2 + 3);
         assert!(b.contains(&(
             Hotkey {

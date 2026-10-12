@@ -1048,17 +1048,6 @@ fn moves_reported_for_a_parked_window_never_change_its_restore_frame() {
     assert_eq!(e.d.frames[&w(1)], saved);
 }
 
-// ----- strip capacity --------------------------------------------------------------------
-
-#[test]
-fn strip_capacity_follows_the_visible_height() {
-    assert_eq!(capacity_for_height(1410.0), 6, "Apple's six at 1440 pt");
-    assert_eq!(capacity_for_height(875.0), 3, "small screens keep three");
-    assert_eq!(capacity_for_height(2500.0), 9);
-    assert_eq!(capacity_for_height(f64::NAN), 3);
-    assert_eq!(capacity_for_height(-5.0), 3);
-}
-
 // ----- merge (shift-click on a card) ---------------------------------------------------------
 
 #[test]
@@ -1789,4 +1778,74 @@ mod fitting {
         e.add(at(1, Rect::new(10.0, 60.0, 1400.0, 700.0)), RuleAction::Native);
         assert_eq!(live(&e, 1).x, 10.0);
     }
+}
+
+// ----- parity: the card's app icon, Cmd-M, One at a Time ----------------------------------
+
+#[test]
+fn an_icon_click_switches_and_brings_every_window_of_the_app() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Native);
+    e.send(3, Target::New);
+    e.switch(1);
+    let stage = e.m.stage_of(w(2)).expect("staged");
+    let obs = e.d.obs();
+    let a = e.m.show_app_everywhere(stage, 11, &obs);
+    e.run(a.clone());
+    assert_eq!(e.m.main_active_stage(), Some(stage));
+    let mut members = titles(&e, e.active_number());
+    members.sort_unstable();
+    assert_eq!(members, [2, 3], "the app's window from the other stage came too");
+    assert!(!e.d.parked(w(2)) && !e.d.parked(w(3)) && e.d.parked(w(1)));
+    assert_eq!(a.iter().filter(|x| **x == Action::StateChanged).count(), 1);
+    assert_eq!(a.last(), Some(&Action::StateChanged));
+}
+
+#[test]
+fn minimize_sends_the_window_to_the_strip_and_keeps_the_view() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 10, "com.example.a"), RuleAction::Native);
+    let before = e.m.window(w(1)).map(|x| x.restore);
+    let active = e.m.main_active_stage();
+    let obs = e.d.obs();
+    let a = e.m.minimize_to_strip(w(1), &obs);
+    e.run(a);
+    assert!(e.d.parked(w(1)) && !e.d.parked(w(2)));
+    assert_eq!(e.m.main_active_stage(), active, "the view does not switch");
+    let own = e.m.stage_of(w(1)).expect("staged");
+    assert_ne!(Some(own), active);
+    assert!(e.m.strip().iter().any(|c| c.stage == own), "a card of its own");
+    assert_eq!(e.m.window(w(1)).map(|x| x.restore), before, "its frame waits for its return");
+    let obs = e.d.obs();
+    assert!(e.m.minimize_to_strip(w(1), &obs).is_empty(), "a parked window is left alone");
+}
+
+#[test]
+fn one_at_a_time_shows_an_app_once_and_its_card_cycles_through_its_windows() {
+    let mut options = ModelOptions::default();
+    options.settings.app_windows = AppWindows::OneAtATime;
+    let mut e = Env::with(options);
+    e.add(meta(1, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(4, 10, "com.example.a"), RuleAction::New);
+    let strip = e.m.strip();
+    assert_eq!(strip.len(), 1, "one card for the app's three waiting windows: {strip:?}");
+    assert_eq!(strip[0].windows.len(), 3);
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let card = e.m.strip().into_iter().find(|c| c.windows.iter().any(|x| [1, 2, 3].contains(&x.0))).expect("card");
+        let obs = e.d.obs();
+        let a = e.m.switch_to(card.stage, &obs);
+        e.run(a);
+        let shown = titles(&e, e.active_number());
+        assert_eq!(shown.len(), 1);
+        seen.push(shown[0]);
+        assert_eq!(e.m.strip().len(), 2, "the app's card and the stage left behind");
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, [1, 2, 3], "clicks cycle through every window");
 }

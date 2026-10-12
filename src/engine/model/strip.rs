@@ -8,36 +8,13 @@
 //!   an out-of-view stage, a new inactive stage) takes a free slot at the bottom; with none
 //!   free it takes the slot of the **least recently used** card, which drops out of view (its
 //!   windows stay parked).
-//! - At most `capacity` cards show; the platform computes it from the screen height.
+//! - At most `capacity` cards show; the platform computes it from the screen height
+//!   (`[strip] capacity*`, Apple: 5 at 1130 pt, 6 at 1410 pt).
 //!
 //! `StripOrder::Fixed` instead lists stages in creation order, matching hotkey numbers.
 
 use super::{DisplayId, Model, Pid, StageId, WindowId, WindowRole};
-
-/// Vertical room per card in points: UX-SPEC's measured card pitch (card tops 231, 406, 557,
-/// 728, 913, 1062 pt, so about 166 pt) plus a little air.
-pub const CARD_PITCH: f64 = 170.0;
-
-/// Room kept free above and below the column of cards, in points. Measured: six cards at
-/// 1410 pt of visible height left about 200 pt at each end.
-pub const STRIP_MARGIN: f64 = 190.0;
-
-/// The fewest and the most cards the strip shows, whatever the screen.
-pub const CAPACITY_RANGE: (usize, usize) = (3, 9);
-
-/// How many cards fit in a display's visible height (Apple: 6 at 1410 pt).
-pub fn capacity_for_height(visible_height: f64) -> usize {
-    let (lo, hi) = CAPACITY_RANGE;
-    if !visible_height.is_finite() {
-        return lo;
-    }
-    let n = ((visible_height - 2.0 * STRIP_MARGIN) / CARD_PITCH).floor();
-    if n.is_nan() || n < lo as f64 {
-        lo
-    } else {
-        (n as usize).min(hi)
-    }
-}
+use crate::engine::settings::AppWindows;
 
 /// How cards are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -120,9 +97,59 @@ impl Model {
                 .take(opts.capacity)
                 .collect(),
         };
-        ids.into_iter()
-            .filter_map(|id| self.card(id, Some(id) == active))
-            .collect()
+        let cards: Vec<StripCard> = ids.into_iter().filter_map(|id| self.card(id, Some(id) == active)).collect();
+        if self.options.settings.app_windows == AppWindows::OneAtATime {
+            self.group_one_at_a_time(display, cards)
+        } else {
+            cards
+        }
+    }
+
+    /// With "One at a Time", an app's windows sit in stages of one window each; Apple shows
+    /// the app once on the left, and clicking it again opens the next window. So the cards
+    /// of single-app stages of one app become one card (in the first one's slot) whose stage
+    /// is the app's least recently shown window (clicks cycle through them all), with the
+    /// app's other waiting windows stacked behind it.
+    fn group_one_at_a_time(&self, display: DisplayId, cards: Vec<StripCard>) -> Vec<StripCard> {
+        let single_app = |c: &StripCard| (c.apps.len() == 1).then(|| c.apps[0]);
+        let mut out: Vec<StripCard> = Vec::new();
+        let mut done: Vec<Pid> = Vec::new();
+        for card in cards {
+            let Some(pid) = single_app(&card).filter(|_| !card.active) else {
+                out.push(card);
+                continue;
+            };
+            if done.contains(&pid) {
+                continue;
+            }
+            done.push(pid);
+            // Every inactive single-window-app stage of this app on the display, also the
+            // ones out of view, least recently shown first.
+            let mut group: Vec<(u64, StageId)> = self
+                .stages
+                .iter()
+                .filter(|s| s.display == display && !self.is_active(s.id) && !s.windows.is_empty())
+                .filter(|s| s.windows.iter().all(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid)))
+                .map(|s| (s.last_active, s.id))
+                .collect();
+            group.sort();
+            let Some(next) = group.first().map(|g| g.1).and_then(|id| self.card(id, false)) else {
+                out.push(card);
+                continue;
+            };
+            let mut windows = next.windows.clone();
+            for (_, id) in group.iter().skip(1) {
+                if let Some(s) = self.stage(*id) {
+                    for w in &s.windows {
+                        if !windows.contains(w) {
+                            windows.push(*w);
+                        }
+                    }
+                }
+            }
+            out.push(StripCard { windows, ..next });
+        }
+        out
     }
 
     /// Updates the strip options; capacity changes evict least recently used cards or refill.

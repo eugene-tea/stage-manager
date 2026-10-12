@@ -1,61 +1,53 @@
 //! The strip's size on a display and the stage area beside it, pure.
 //!
-//! - **Strip scale.** UX-SPEC's strip numbers were measured on a 5K display (visible frame
-//!   2560 × 1410 pt). Apple draws smaller cards on smaller screens, so every strip length
-//!   (column width, card box, gaps, icons) is multiplied by [`strip_scale`]: the visible
-//!   frame's area relative to the 5K one, `(w / 2560) × (h / 1410)`, kept within
-//!   [`MIN_STRIP_SCALE`]..1. On a 1800 × 1130 pt laptop that is 0.56: a column of about
-//!   113 pt instead of 200 pt. Capacity follows from the scaled card pitch
-//!   ([`capacity_for`]).
-//! - **Stage area.** Apple keeps the stage's windows clear of the strip. The stage area is
-//!   the visible frame minus the strip column and a [`STRIP_CLEARANCE`] margin
-//!   ([`stage_inset`]). When we place a window that overlaps the column, [`fit_frame`] moves
-//!   it right just enough; a window too wide for the area is also narrowed to fit when
-//!   shrinking is on (`[stages] fit_windows`), else it stays put.
+//! - **Strip lengths.** Apple draws the strip with the same lengths on every display (the
+//!   card x, gaps and icons measured on a 1800 pt laptop and a 5K display match; a card's
+//!   size follows its window, see `ui::strip_layout`). Every strip length is multiplied by
+//!   [`length_scale`]: `[strip] scale` (1 by default), times [`strip_scale`] when
+//!   `[strip] scale_to_display` asks to shrink strips on small screens.
+//! - **Capacity** comes from the visible height ([`capacity_for`], `[strip] capacity*`).
+//! - **Stage area.** Apple leaves windows where they are, even over the strip (the strip
+//!   then hides). With `[windows] fit` on, the stage area is the visible frame minus the
+//!   strip column and a margin ([`stage_inset`]); when we place a window that overlaps the
+//!   column, [`fit_frame`] moves it right just enough, and with `"narrow"` also narrows a
+//!   window too wide for the area.
 
 use super::geometry::{Rect, Size};
-use super::model::{CAPACITY_RANGE, CARD_PITCH, STRIP_MARGIN};
+use crate::config::{CapacityRule, StripStyle};
 
-/// The visible frame UX-SPEC's strip numbers were measured on (5K, menu bar 30 pt).
+/// The visible frame the area-based scale is relative to (5K, menu bar 30 pt).
 pub const REFERENCE_VISIBLE: Size = Size::new(2560.0, 1410.0);
 
-/// The strip column's width at the reference size (Apple's strip occupies about 0–200 pt).
-pub const REFERENCE_STRIP_WIDTH: f64 = 200.0;
-
-/// The smallest strip scale: cards stay legible (a card box of about 85 × 89 pt).
+/// The smallest area-based scale: cards stay legible.
 pub const MIN_STRIP_SCALE: f64 = 0.5;
 
-/// Room kept between the strip column and the stage area, in points.
-pub const STRIP_CLEARANCE: f64 = 16.0;
-
-/// The factor applied to every strip length on a display whose visible frame is `visible`:
-/// the area ratio to [`REFERENCE_VISIBLE`], within [`MIN_STRIP_SCALE`]..1.
+/// The area-based factor `(w / 2560) × (h / 1410)` within [`MIN_STRIP_SCALE`]..1, used only
+/// with `[strip] scale_to_display`.
 pub fn strip_scale(visible: Size) -> f64 {
     let k = (visible.w / REFERENCE_VISIBLE.w) * (visible.h / REFERENCE_VISIBLE.h);
     if k.is_finite() { k.clamp(MIN_STRIP_SCALE, 1.0) } else { 1.0 }
 }
 
+/// The factor applied to every strip length on a display whose visible frame is `visible`.
+pub fn length_scale(visible: Size, style: &StripStyle) -> f64 {
+    let display = if style.scale_to_display { strip_scale(visible) } else { 1.0 };
+    style.scale * display
+}
+
 /// The strip column's width on a display whose visible frame is `visible`.
-pub fn strip_width(visible: Size) -> f64 {
-    (REFERENCE_STRIP_WIDTH * strip_scale(visible)).round()
+pub fn strip_width(visible: Size, style: &StripStyle) -> f64 {
+    (style.width * length_scale(visible, style)).round()
 }
 
 /// How far the stage area starts right of the visible frame's left edge: the strip column
-/// plus [`STRIP_CLEARANCE`].
-pub fn stage_inset(visible: Size) -> f64 {
-    strip_width(visible) + STRIP_CLEARANCE
+/// plus `margin`.
+pub fn stage_inset(visible: Size, style: &StripStyle, margin: f64) -> f64 {
+    strip_width(visible, style) + margin
 }
 
-/// How many cards fit on a display whose visible frame is `visible` (Apple: 6 at 5K): the
-/// visible height less the scaled top and bottom margins, over the scaled card pitch.
-pub fn capacity_for(visible: Size) -> usize {
-    let (lo, hi) = CAPACITY_RANGE;
-    let k = strip_scale(visible);
-    if !visible.h.is_finite() {
-        return lo;
-    }
-    let n = ((visible.h - 2.0 * STRIP_MARGIN * k) / (CARD_PITCH * k)).floor();
-    if n.is_nan() || n < lo as f64 { lo } else { (n as usize).min(hi) }
+/// How many cards fit on a display whose visible frame is `visible`.
+pub fn capacity_for(visible: Size, rule: &CapacityRule, style: &StripStyle) -> usize {
+    rule.for_height(visible.h, length_scale(visible, style))
 }
 
 /// How the model keeps placed windows clear of the strip.
@@ -118,21 +110,25 @@ mod tests {
     const FIVE_K: Size = Size::new(2560.0, 1410.0);
 
     #[test]
-    fn the_strip_keeps_the_5k_size_and_narrows_on_a_laptop() {
-        assert_eq!(strip_scale(FIVE_K), 1.0);
-        assert_eq!(strip_width(FIVE_K), 200.0);
-        assert_eq!(capacity_for(FIVE_K), 6, "Apple's six at 5K");
-        let w = strip_width(LAPTOP);
-        assert!((105.0..=125.0).contains(&w), "about 120 pt on a laptop, got {w}");
-        assert!(w < strip_width(FIVE_K));
-        assert!(capacity_for(LAPTOP) >= 3);
-        // Larger screens never grow the strip past the measured size.
+    fn the_strip_has_apples_size_everywhere_unless_asked() {
+        let style = StripStyle::default();
+        let rule = crate::config::Config::default().strip.capacity;
+        assert_eq!(length_scale(LAPTOP, &style), 1.0);
+        assert_eq!(strip_width(LAPTOP, &style), strip_width(FIVE_K, &style));
+        assert_eq!(strip_width(FIVE_K, &style), 200.0);
+        assert_eq!(capacity_for(LAPTOP, &rule, &style), 5, "Apple's five at 1130 pt");
+        assert_eq!(capacity_for(FIVE_K, &rule, &style), 6, "Apple's six at 1410 pt");
+        assert_eq!(stage_inset(FIVE_K, &style, 16.0), 216.0);
+        // Round 4A's display scaling, now an option.
+        let scaled = StripStyle { scale_to_display: true, ..StripStyle::default() };
+        let w = strip_width(LAPTOP, &scaled);
+        assert!((105.0..=125.0).contains(&w), "about 113 pt on a laptop, got {w}");
+        assert_eq!(strip_width(FIVE_K, &scaled), 200.0);
         assert_eq!(strip_scale(Size::new(3840.0, 2135.0)), 1.0);
-        // A tiny screen keeps legible cards.
         assert_eq!(strip_scale(Size::new(1024.0, 700.0)), MIN_STRIP_SCALE);
         assert_eq!(strip_scale(Size::new(f64::NAN, 1.0)), 1.0);
-        assert_eq!(capacity_for(Size::new(1800.0, f64::NAN)), 3);
-        assert_eq!(stage_inset(FIVE_K), 216.0);
+        let big = StripStyle { scale: 1.5, ..StripStyle::default() };
+        assert_eq!(strip_width(FIVE_K, &big), 300.0);
     }
 
     #[test]

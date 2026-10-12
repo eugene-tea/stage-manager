@@ -7,7 +7,9 @@
 //! [`present`] and [`emit`] are hook points: each side registers its handler at startup
 //! with [`set_presenter`] and [`set_event_sink`]. Until then they log and drop.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::config::StripStyle;
 
 use crate::engine::geometry::Rect;
 
@@ -23,8 +25,8 @@ pub struct StripSnapshot {
     pub hide_recent_apps: bool,
     /// The user's Show/Hide Strip toggle (menu or hotkey). `false` hides it outright.
     pub user_visible: bool,
-    /// Draw stage numbers on cards (config `strip.show_numbers`).
-    pub show_numbers: bool,
+    /// How the strip looks and moves (config; changes apply live).
+    pub style: Arc<StripStyle>,
     /// Frames of the active stage's onscreen windows, for auto-hide when one overlaps the
     /// strip area (a window being dragged is left out).
     pub active_frames: Vec<Rect>,
@@ -33,8 +35,8 @@ pub struct StripSnapshot {
     /// like the window's pre-drag frame). Releasing there sends the window to a stage of its
     /// own; the controller decides that from the mouse-up.
     pub window_drag: Option<CardWindow>,
-    /// The launch's stages were just built: if a window covers the strip right now, show it
-    /// for a few seconds anyway so the user sees the stages exist (once per launch).
+    /// The launch's stages were just built and `[reveal] launch_reveal` is on: if a window
+    /// covers the strip right now, show it for a moment anyway (once per launch).
     pub announce: bool,
 }
 
@@ -74,6 +76,9 @@ pub enum StripEvent {
     /// the active stage, and the stage's front window goes with its top-left corner at
     /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer.
     CardDropped { stage: u64, x: f64, y: f64 },
+    /// A card's app icon was clicked: switch to the card's stage and bring every window of
+    /// that app there (Apple: clicking the icon shows all of the app's windows).
+    IconClicked { stage: u64, pid: i32 },
 }
 
 type Presenter = Box<dyn Fn(StripSnapshot) + Send + Sync>;

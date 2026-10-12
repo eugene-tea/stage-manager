@@ -300,6 +300,11 @@ impl AxElement {
         self.bool_attr(names::MINIMIZED)
     }
 
+    /// Minimizes or restores the window (`AXMinimized`).
+    pub fn set_minimized(&self, minimized: bool) -> AxResult<()> {
+        self.set_bool_attr(names::MINIMIZED, minimized)
+    }
+
     /// `AXFullScreen` of a window; a window without the attribute is not fullscreen.
     pub fn is_fullscreen(&self) -> AxResult<bool> {
         match self.bool_attr(names::FULLSCREEN) {

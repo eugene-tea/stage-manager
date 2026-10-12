@@ -1,131 +1,234 @@
 //! Configuration: TOML at `~/.config/stage-manager/config.toml`.
 //!
-//! The file holds only what macOS lacks (rules, placement, hotkeys, named stages, strip
-//! extensions). Apple's own Stage Manager settings are read from `com.apple.WindowManager`
-//! (see [`crate::engine::settings`]) and never repeated here. The first run writes
-//! [`DEFAULT_CONFIG`], which documents every option and parses to [`Config::default`].
-//! Unknown keys produce warnings, not errors; a bad file keeps the previous config and
-//! returns an error message for the log and the menu.
+//! Out of the box the app looks and behaves like Apple's Stage Manager; every extension is
+//! off until the file turns it on. Every key, with its type, range, default and a one-line
+//! explanation, lives in [`schema::KEYS`]; the built-in defaults live in code, and the file
+//! written on first run ([`schema::default_file`]) holds no live values (every key is
+//! commented out), so new defaults reach existing users. Apple's own Stage Manager settings
+//! are read from `com.apple.WindowManager` (see [`crate::engine::settings`]) and never
+//! repeated here.
+//!
+//! Unknown keys and out-of-range numbers produce warnings (numbers are clamped); a value of
+//! the wrong type is an error, and a bad file keeps the previous config.
 
 pub mod hotkey;
+pub mod schema;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
 
 use crate::engine::model::{ModelOptions, StripOptions, StripOrder};
 use crate::engine::rules::{Decision, Placement, Rule, RuleAction, RuleSet};
 use crate::engine::settings::NativeSettings;
 
 pub use hotkey::{Hotkey, HotkeyCommand, HotkeyConfig, Key, Mods, NumberedHotkey};
+use schema::{KEYS, Kind, RETIRED, RULE_KEYS, SECTIONS};
 
-/// The file written on first run. Every uncommented value equals the built-in default.
-pub const DEFAULT_CONFIG: &str = r#"# Stage Manager configuration.
-#
-# macOS settings come first: "Show recent apps", "Show windows from an application",
-# "Click wallpaper to reveal desktop" and the rest are read live from
-# System Settings → Desktop & Dock. This file only adds what macOS lacks.
-# Changes are picked up automatically.
+/// The file written on first run: every key commented out with its default.
+pub fn default_file() -> String {
+    schema::default_file()
+}
 
-[strip]
-# "native": Apple's slot-stable order (the stage you leave takes the clicked card's slot).
-# "fixed": creation order, matching the hotkey numbers.
-order = "native"
-# Also show the active stage as a card (fixed order only; Apple never shows it).
-show_active = false
-# Show each card's hotkey number.
-show_numbers = true
-# How often thumbnails refresh, in milliseconds (minimum 250).
-thumbnail_interval_ms = 1500
+/// A number, or "auto" (computed from the display).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Auto {
+    /// Computed from the display.
+    Auto,
+    /// This value.
+    Value(f64),
+}
 
-[defaults]
-# What a new window does when no rule matches:
-#   "native"        Apple's Stage Manager: a window of an app already on the current stage
-#                   joins it; a window of an app that sits in another stage joins that stage
-#                   and brings it forward; a newly opened app gets a stage of its own
-#   "current"       join the active stage
-#   "new"           open a new stage and switch to it
-#   "stage:<name>"  join the named stage (created if missing)
-#   "float"         pin it: visible on every stage
-#   "ignore"        leave it unmanaged
-action = "native"
-# Where it goes: "as-is", "center", or "cascade" (offset from the front window).
-placement = "as-is"
+impl Auto {
+    /// The value, or `auto` when automatic.
+    pub fn or(self, auto: f64) -> f64 {
+        match self {
+            Auto::Auto => auto,
+            Auto::Value(v) => v,
+        }
+    }
+}
 
-# Rules for new windows, checked in order; the first match wins. `app` is a bundle ID
-# (exact) or "*"; `title` is an optional regular expression. Leave out `action` or
-# `placement` to use the defaults above.
-#
-# [[rule]]
-# app = "com.example.chat"
-# action = "stage:Chat"
-#
-# [[rule]]
-# app = "com.example.terminal"
-# title = "^Scratch"
-# action = "float"
-# placement = "center"
-#
-# [[rule]]
-# app = "*"
-# placement = "cascade"
+/// An sRGB color with alpha, each channel 0..=1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
+}
 
-[sugar]
-# Hold Shift to bring things here instead of going there: Shift while opening an app (Dock,
-# Finder, Spotlight Shift-Return, Launchpad) opens its window in the current stage; Shift on
-# a Dock click of an app in another stage brings its windows here; Shift-click on a card
-# brings the card's windows here. The app switcher (Cmd-Tab, Cmd-Shift-Tab) always switches.
-shift_brings_here = true
+impl Rgba {
+    /// Parses `#rrggbb` or `#rrggbbaa`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let hex = text.strip_prefix('#').ok_or_else(|| format!("{text:?} is not a #rrggbb color"))?;
+        if !(hex.len() == 6 || hex.len() == 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("{text:?} is not a #rrggbb or #rrggbbaa color"));
+        }
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map(|b| f64::from(b) / 255.0).unwrap_or(0.0);
+        Ok(Self { r: byte(0), g: byte(2), b: byte(4), a: if hex.len() == 8 { byte(6) } else { 1.0 } })
+    }
+}
 
-[hotkeys]
-# Optional: everything works by mouse, Dock and Cmd-Tab; these are extras.
-# Modifiers: ctrl, alt (option), shift, cmd. "{n}" stands for the digits 1-9.
-# An empty string disables a hotkey.
-switch = "ctrl+alt+{n}"
-send = "ctrl+alt+shift+{n}"
-new_stage = "ctrl+alt+n"
-toggle_pin = "ctrl+alt+p"
-toggle_strip = "ctrl+alt+s"
+/// How the strip's card count is chosen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CapacityRule {
+    /// A fixed count; 0 counts from the visible height.
+    pub fixed: usize,
+    /// Room per card.
+    pub pitch: f64,
+    /// Room kept free above and below.
+    pub margin: f64,
+    /// Bounds of the counted value.
+    pub min: usize,
+    pub max: usize,
+}
 
-[stages]
-# Named stages created at launch, in this order (they take hotkey numbers 1, 2, ...)
-# and stay even when empty. For example:
-# names = ["Work", "Chat"]
-names = []
-# Windows are kept clear of the strip, as Apple's Stage Manager does: when a stage is
-# shown or a window opens over the strip, the window moves right just enough. A window
-# too wide for the room beside the strip is also made narrower (its height stays); quit
-# gives every window back its exact earlier size. false only moves windows, never
-# resizes them (a too-wide window then stays where it is and the strip hides behind it).
-fit_windows = true
-"#;
+impl CapacityRule {
+    /// The card count for a visible height, with strip lengths multiplied by `k`.
+    pub fn for_height(&self, visible_height: f64, k: f64) -> usize {
+        if self.fixed > 0 {
+            return self.fixed;
+        }
+        let (lo, hi) = (self.min.min(self.max), self.max.max(self.min));
+        let n = ((visible_height - 2.0 * self.margin * k) / (self.pitch * k)).floor();
+        if !n.is_finite() || n < lo as f64 { lo } else { (n as usize).min(hi) }
+    }
+}
 
-/// Smallest accepted thumbnail interval.
-pub const MIN_THUMBNAIL_INTERVAL_MS: u64 = 250;
-
-/// The `[strip]` section: our extensions to Apple's strip.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The `[strip]` keys the engine uses.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StripConfig {
     /// Card order.
     pub order: StripOrder,
     /// Show the active stage as a card (fixed order only).
     pub show_active: bool,
-    /// Show hotkey numbers on cards.
-    pub show_numbers: bool,
+    /// How many cards show.
+    pub capacity: CapacityRule,
     /// Thumbnail refresh interval.
     pub thumbnail_interval_ms: u64,
 }
 
-impl Default for StripConfig {
+/// `[cards]`: the look of each card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardStyle {
+    pub x: f64,
+    pub full_height: f64,
+    pub min_height: f64,
+    pub max_width: f64,
+    pub gap: f64,
+    pub tilt: Auto,
+    pub perspective: Auto,
+    pub perspective_x: f64,
+    pub perspective_y: f64,
+    pub corner_radius: f64,
+    pub border_width: f64,
+    pub border_color: Rgba,
+    pub shadow_radius: f64,
+    pub shadow_opacity: f64,
+    pub shadow_offset_x: f64,
+    pub shadow_offset_y: f64,
+    pub shadow_color: Rgba,
+    pub max_windows: usize,
+    pub stack_dx: f64,
+    pub behind_scale: f64,
+    pub second_app_dx: f64,
+    pub second_app_dy: f64,
+    pub hover_scale: f64,
+    pub hover_ms: u64,
+    pub fade_ms: u64,
+}
+
+/// `[icons]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IconStyle {
+    pub size: f64,
+    pub center_dx: f64,
+    pub center_dy: f64,
+    pub step: f64,
+    pub max: usize,
+    pub shadow_radius: f64,
+    pub shadow_opacity: f64,
+    pub shadow_offset_y: f64,
+}
+
+/// `[motion]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MotionStyle {
+    pub spring_stiffness: f64,
+    pub spring_damping: f64,
+    pub spring_mass: f64,
+    pub slide_distance: f64,
+}
+
+/// `[reveal]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevealStyle {
+    pub edge_width: f64,
+    pub delay_ms: u64,
+    pub hide_delay_ms: u64,
+    pub poll_ms: u64,
+    pub edge_tab: bool,
+    pub launch_reveal: bool,
+    pub launch_reveal_ms: u64,
+}
+
+/// `[drag]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DragStyle {
+    pub threshold: f64,
+    pub grow_distance: f64,
+    pub lifted_opacity: f64,
+    pub ghost_opacity: f64,
+}
+
+/// Everything the strip panel draws with; changes apply live.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripStyle {
+    /// Column width.
+    pub width: f64,
+    /// Multiplies every strip length.
+    pub scale: f64,
+    /// Also shrink by display area.
+    pub scale_to_display: bool,
+    /// Number badges.
+    pub show_numbers: bool,
+    /// Stage names.
+    pub show_names: bool,
+    /// Thumbnail capture resolution (multiple of the drawn size).
+    pub thumbnail_resolution: f64,
+    pub cards: CardStyle,
+    pub icons: IconStyle,
+    pub motion: MotionStyle,
+    pub reveal: RevealStyle,
+    pub drag: DragStyle,
+}
+
+impl Default for StripStyle {
     fn default() -> Self {
-        Self {
-            order: StripOrder::Native,
-            show_active: false,
-            show_numbers: true,
-            thumbnail_interval_ms: 1500,
-        }
+        Config::default().style
     }
+}
+
+/// `[windows] fit`: keeping placed windows clear of the strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FitMode {
+    /// Apple's: windows keep their exact frames.
+    #[default]
+    Off,
+    /// Move right just enough.
+    Move,
+    /// Move, and narrow a window too wide for the room.
+    Narrow,
+}
+
+/// `[windows]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowsConfig {
+    pub fit: FitMode,
+    pub fit_margin: f64,
+    pub minimize_to_strip: bool,
+    pub focus_echo_ms: u64,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -134,44 +237,46 @@ pub struct SugarConfig {
     /// Shift held while opening an app, on a Dock click or on a card click brings windows
     /// into the current stage instead of switching.
     pub shift_brings_here: bool,
-}
-
-impl Default for SugarConfig {
-    fn default() -> Self {
-        Self {
-            shift_brings_here: true,
-        }
-    }
+    /// A newly opened app's first window counts a Shift held this long before.
+    pub launch_window_ms: u64,
+    /// An activation counts a Shift held this long before.
+    pub activation_window_ms: u64,
 }
 
 /// The `[stages]` section.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StagesConfig {
     /// Named stages created at launch, in order.
     pub names: Vec<String>,
-    /// Narrow a window too wide for the stage area beside the strip (else only move it).
-    pub fit_windows: bool,
-}
-
-impl Default for StagesConfig {
-    fn default() -> Self {
-        Self { names: Vec::new(), fit_windows: true }
-    }
 }
 
 /// The whole configuration, validated.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    /// Strip extensions.
+    /// Strip order and capacity.
     pub strip: StripConfig,
+    /// How the strip looks and moves.
+    pub style: StripStyle,
+    /// Window treatment.
+    pub windows: WindowsConfig,
     /// New-window rules with the `[defaults]` decision.
     pub rules: RuleSet,
-    /// Hotkeys (optional extras).
+    /// Hotkeys (an extension; off unless `[hotkeys] enabled = true`).
     pub hotkeys: HotkeyConfig,
     /// Named stages.
     pub stages: StagesConfig,
     /// Modifier sugar.
     pub sugar: SugarConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        match Config::parse("") {
+            Ok(p) => p.config,
+            // The built-in defaults are static and tested; this cannot happen.
+            Err(e) => panic!("built-in config defaults are invalid: {e}"),
+        }
+    }
 }
 
 /// A config problem that stops a file from loading.
@@ -195,200 +300,204 @@ pub struct Parsed {
     pub warnings: Vec<String>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Raw {
-    strip: RawStrip,
-    defaults: RawDefaults,
-    rule: Vec<RawRule>,
-    hotkeys: RawHotkeys,
-    stages: RawStages,
-    sugar: RawSugar,
-}
+/// Validated values by `section.key`, defaults filled in.
+struct Values(BTreeMap<String, toml::Value>);
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawSugar {
-    shift_brings_here: Option<bool>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawStrip {
-    order: Option<String>,
-    show_active: Option<bool>,
-    show_numbers: Option<bool>,
-    thumbnail_interval_ms: Option<u64>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawDefaults {
-    action: Option<String>,
-    placement: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawRule {
-    app: String,
-    title: Option<String>,
-    action: Option<String>,
-    placement: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawHotkeys {
-    switch: Option<String>,
-    send: Option<String>,
-    new_stage: Option<String>,
-    toggle_pin: Option<String>,
-    toggle_strip: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawStages {
-    names: Option<Vec<String>>,
-    fit_windows: Option<bool>,
-}
-
-const KNOWN: &[(&str, &[&str])] = &[
-    (
-        "strip",
-        &[
-            "order",
-            "show_active",
-            "show_numbers",
-            "thumbnail_interval_ms",
-        ],
-    ),
-    ("defaults", &["action", "placement"]),
-    ("rule", &["app", "title", "action", "placement"]),
-    (
-        "hotkeys",
-        &["switch", "send", "new_stage", "toggle_pin", "toggle_strip"],
-    ),
-    ("stages", &["names", "fit_windows"]),
-    ("sugar", &["shift_brings_here"]),
-];
-
-fn unknown_keys(table: &toml::Table) -> Vec<String> {
-    let mut out = Vec::new();
-    for (section, value) in table {
-        let Some((_, keys)) = KNOWN.iter().find(|(s, _)| s == section) else {
-            out.push(format!("unknown section [{section}] ignored"));
-            continue;
-        };
-        let tables: Vec<&toml::Table> = match value {
-            toml::Value::Table(t) => vec![t],
-            toml::Value::Array(items) => items.iter().filter_map(toml::Value::as_table).collect(),
-            _ => Vec::new(),
-        };
-        for t in tables {
-            for key in t.keys() {
-                if !keys.contains(&key.as_str()) {
-                    out.push(format!("unknown key {key:?} in [{section}] ignored"));
-                }
-            }
+impl Values {
+    fn get(&self, path: &str) -> &toml::Value {
+        match self.0.get(path) {
+            Some(v) => v,
+            None => panic!("config key {path} is not in the schema"),
         }
     }
-    out
+    fn num(&self, path: &str) -> f64 {
+        let v = self.get(path);
+        v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).unwrap_or(0.0)
+    }
+    fn int(&self, path: &str) -> i64 {
+        self.get(path).as_integer().unwrap_or(0)
+    }
+    fn uint(&self, path: &str) -> u64 {
+        self.int(path).max(0) as u64
+    }
+    fn count(&self, path: &str) -> usize {
+        self.int(path).max(0) as usize
+    }
+    fn flag(&self, path: &str) -> bool {
+        self.get(path).as_bool().unwrap_or(false)
+    }
+    fn text(&self, path: &str) -> &str {
+        self.get(path).as_str().unwrap_or("")
+    }
+    fn auto(&self, path: &str) -> Auto {
+        match self.get(path).as_str() {
+            Some(_) => Auto::Auto,
+            None => Auto::Value(self.num(path)),
+        }
+    }
+    fn color(&self, path: &str) -> Rgba {
+        Rgba::parse(self.text(path)).unwrap_or(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+    }
+}
+
+/// Checks one value against its kind; numbers out of range are clamped with a warning.
+fn validate(d: &schema::KeyDef, v: &toml::Value, warnings: &mut Vec<String>) -> Result<toml::Value, String> {
+    let path = d.path();
+    let ty = || format!("[{}] {}: expected {}", d.section, d.key, d.kind.describe());
+    let clamp_f = |x: f64, min: f64, max: f64, warnings: &mut Vec<String>| {
+        if x < min || x > max || !x.is_finite() {
+            let c = if x.is_finite() { x.clamp(min, max) } else { min };
+            warnings.push(format!("{path} = {x} is outside {min}..{max}; using {c}"));
+            c
+        } else {
+            x
+        }
+    };
+    let number = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
+    Ok(match d.kind {
+        Kind::Bool => toml::Value::Boolean(v.as_bool().ok_or_else(ty)?),
+        Kind::Float { min, max } => toml::Value::Float(clamp_f(number(v).ok_or_else(ty)?, min, max, warnings)),
+        Kind::Int { min, max } => {
+            let x = v.as_integer().ok_or_else(ty)?;
+            if x < min || x > max {
+                let c = x.clamp(min, max);
+                warnings.push(format!("{path} = {x} is outside {min}..{max}; using {c}"));
+                toml::Value::Integer(c)
+            } else {
+                toml::Value::Integer(x)
+            }
+        }
+        Kind::FloatOrAuto { min, max } => match (v.as_str(), number(v)) {
+            (Some("auto"), _) => toml::Value::String("auto".into()),
+            (None, Some(x)) => toml::Value::Float(clamp_f(x, min, max, warnings)),
+            _ => return Err(ty()),
+        },
+        Kind::Choice(choices) => {
+            let s = v.as_str().ok_or_else(ty)?;
+            if !choices.contains(&s) {
+                return Err(format!("[{}] {} {s:?}: expected {}", d.section, d.key, d.kind.describe()));
+            }
+            v.clone()
+        }
+        Kind::Color => {
+            Rgba::parse(v.as_str().ok_or_else(ty)?).map_err(|e| format!("[{}] {}: {e}", d.section, d.key))?;
+            v.clone()
+        }
+        Kind::Hotkey => {
+            hotkey::parse_hotkey(v.as_str().ok_or_else(ty)?)?;
+            v.clone()
+        }
+        Kind::NumberedHotkey => {
+            hotkey::parse_numbered(v.as_str().ok_or_else(ty)?)?;
+            v.clone()
+        }
+        Kind::Names => {
+            let items = v.as_array().ok_or_else(ty)?;
+            if items.iter().any(|i| !i.is_str()) {
+                return Err(ty());
+            }
+            v.clone()
+        }
+        Kind::Action => {
+            RuleAction::parse(v.as_str().ok_or_else(ty)?)?;
+            v.clone()
+        }
+        Kind::Placement => {
+            Placement::parse(v.as_str().ok_or_else(ty)?)?;
+            v.clone()
+        }
+    })
+}
+
+fn default_values() -> BTreeMap<String, toml::Value> {
+    KEYS.iter()
+        .map(|d| {
+            let doc = format!("v = {}", d.default);
+            let value = toml::from_str::<toml::Table>(&doc).ok().and_then(|mut t| t.remove("v"));
+            match value {
+                Some(v) => (d.path(), v),
+                None => panic!("schema default for {} is not TOML: {}", d.path(), d.default),
+            }
+        })
+        .collect()
 }
 
 impl Config {
     /// Parses and validates config text.
     pub fn parse(text: &str) -> Result<Parsed, ConfigError> {
-        let table: toml::Table =
-            toml::from_str(text).map_err(|e| ConfigError(format!("config.toml: {e}")))?;
-        let mut warnings = unknown_keys(&table);
-        let raw: Raw =
-            toml::from_str(text).map_err(|e| ConfigError(format!("config.toml: {e}")))?;
         let err = |e: String| ConfigError(format!("config.toml: {e}"));
-
-        let defaults_strip = StripConfig::default();
-        let order = match raw.strip.order.as_deref() {
-            None | Some("native") => StripOrder::Native,
-            Some("fixed") => StripOrder::Fixed,
-            Some(other) => {
-                return Err(err(format!(
-                    "[strip] order {other:?}: expected native or fixed"
-                )));
+        let table: toml::Table = toml::from_str(text).map_err(|e| ConfigError(format!("config.toml: {e}")))?;
+        let mut warnings = Vec::new();
+        let mut values = default_values();
+        let mut raw_rules: Vec<toml::Table> = Vec::new();
+        for (section, value) in &table {
+            if section == "rule" {
+                let items = value.as_array().ok_or_else(|| err("[[rule]] must be an array of tables".into()))?;
+                for item in items {
+                    let t = item.as_table().ok_or_else(|| err("[[rule]] must be an array of tables".into()))?;
+                    for key in t.keys() {
+                        if !RULE_KEYS.contains(&key.as_str()) {
+                            warnings.push(format!("unknown key {key:?} in [[rule]] ignored"));
+                        }
+                    }
+                    raw_rules.push(t.clone());
+                }
+                continue;
             }
-        };
-        let mut interval = raw
-            .strip
-            .thumbnail_interval_ms
-            .unwrap_or(defaults_strip.thumbnail_interval_ms);
-        if interval < MIN_THUMBNAIL_INTERVAL_MS {
-            warnings.push(format!(
-                "[strip] thumbnail_interval_ms {interval} is below {MIN_THUMBNAIL_INTERVAL_MS}; using {MIN_THUMBNAIL_INTERVAL_MS}"
-            ));
-            interval = MIN_THUMBNAIL_INTERVAL_MS;
+            if !SECTIONS.iter().any(|s| s.name == section) {
+                warnings.push(format!("unknown section [{section}] ignored"));
+                continue;
+            }
+            let t = value.as_table().ok_or_else(|| err(format!("[{section}] must be a table")))?;
+            for (key, v) in t {
+                if let Some((_, _, why)) = RETIRED.iter().find(|(s, k, _)| s == section && k == key) {
+                    warnings.push(format!("[{section}] {key}: {why}"));
+                    continue;
+                }
+                let Some(d) = KEYS.iter().find(|d| d.section == section && d.key == key) else {
+                    warnings.push(format!("unknown key {key:?} in [{section}] ignored"));
+                    continue;
+                };
+                let checked = validate(d, v, &mut warnings).map_err(err)?;
+                values.insert(d.path(), checked);
+            }
         }
-        let strip = StripConfig {
-            order,
-            show_active: raw.strip.show_active.unwrap_or(defaults_strip.show_active),
-            show_numbers: raw
-                .strip
-                .show_numbers
-                .unwrap_or(defaults_strip.show_numbers),
-            thumbnail_interval_ms: interval,
-        };
+        let v = Values(values);
 
-        let defaults = Decision {
-            action: raw
-                .defaults
-                .action
-                .as_deref()
-                .map(RuleAction::parse)
-                .transpose()
-                .map_err(err)?
-                .unwrap_or_default(),
-            placement: raw
-                .defaults
-                .placement
-                .as_deref()
-                .map(Placement::parse)
-                .transpose()
-                .map_err(err)?
-                .unwrap_or_default(),
-        };
-        let rules = raw
-            .rule
+        let rules = raw_rules
             .iter()
             .enumerate()
-            .map(|(i, r)| {
-                Rule::parse(
-                    &r.app,
-                    r.title.as_deref(),
-                    r.action.as_deref(),
-                    r.placement.as_deref(),
-                )
-                .map_err(|e| err(format!("[[rule]] #{}: {e}", i + 1)))
+            .map(|(i, t)| {
+                let s = |k: &str| t.get(k).map(|v| v.as_str().ok_or(format!("[[rule]] #{}: {k} must be a string", i + 1)));
+                let app = s("app").ok_or(format!("[[rule]] #{}: missing app", i + 1))??;
+                let title = s("title").transpose()?;
+                let action = s("action").transpose()?;
+                let placement = s("placement").transpose()?;
+                Rule::parse(app, title, action, placement).map_err(|e| format!("[[rule]] #{}: {e}", i + 1))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        let defaults = Decision {
+            action: RuleAction::parse(v.text("defaults.action")).map_err(err)?,
+            placement: Placement::parse(v.text("defaults.placement")).map_err(err)?,
+        };
 
-        let base = HotkeyConfig::default();
-        let numbered = |text: Option<&String>, fallback| match text {
-            Some(t) => hotkey::parse_numbered(t).map_err(err),
-            None => Ok(fallback),
-        };
-        let fixed = |text: Option<&String>, fallback| match text {
-            Some(t) => hotkey::parse_hotkey(t).map_err(err),
-            None => Ok(fallback),
-        };
+        let numbered = |p: &str| hotkey::parse_numbered(v.text(p)).map_err(err);
+        let fixed = |p: &str| hotkey::parse_hotkey(v.text(p)).map_err(err);
         let hotkeys = HotkeyConfig {
-            switch: numbered(raw.hotkeys.switch.as_ref(), base.switch)?,
-            send: numbered(raw.hotkeys.send.as_ref(), base.send)?,
-            new_stage: fixed(raw.hotkeys.new_stage.as_ref(), base.new_stage)?,
-            toggle_pin: fixed(raw.hotkeys.toggle_pin.as_ref(), base.toggle_pin)?,
-            toggle_strip: fixed(raw.hotkeys.toggle_strip.as_ref(), base.toggle_strip)?,
+            enabled: v.flag("hotkeys.enabled"),
+            switch: numbered("hotkeys.switch")?,
+            send: numbered("hotkeys.send")?,
+            new_stage: fixed("hotkeys.new_stage")?,
+            toggle_pin: fixed("hotkeys.toggle_pin")?,
+            toggle_strip: fixed("hotkeys.toggle_strip")?,
         };
-        warnings.extend(hotkeys.conflicts());
+        if hotkeys.enabled {
+            warnings.extend(hotkeys.conflicts());
+        }
 
         let mut names: Vec<String> = Vec::new();
-        for n in raw.stages.names.unwrap_or_default() {
+        for n in v.get("stages.names").as_array().into_iter().flatten().filter_map(toml::Value::as_str) {
             let n = n.trim().to_string();
             if n.is_empty() {
                 warnings.push("[stages] an empty name was ignored".to_string());
@@ -399,33 +508,110 @@ impl Config {
             }
         }
 
-        Ok(Parsed {
-            config: Config {
-                strip,
-                rules: RuleSet::new(rules, defaults),
-                hotkeys,
-                stages: StagesConfig {
-                    names,
-                    fit_windows: raw.stages.fit_windows.unwrap_or(StagesConfig::default().fit_windows),
+        let config = Config {
+            strip: StripConfig {
+                order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
+                show_active: v.flag("strip.show_active"),
+                capacity: CapacityRule {
+                    fixed: v.count("strip.capacity"),
+                    pitch: v.num("strip.capacity_pitch"),
+                    margin: v.num("strip.capacity_margin"),
+                    min: v.count("strip.capacity_min"),
+                    max: v.count("strip.capacity_max"),
                 },
-                sugar: SugarConfig {
-                    shift_brings_here: raw
-                        .sugar
-                        .shift_brings_here
-                        .unwrap_or(SugarConfig::default().shift_brings_here),
+                thumbnail_interval_ms: v.uint("strip.thumbnail_interval_ms"),
+            },
+            style: StripStyle {
+                width: v.num("strip.width"),
+                scale: v.num("strip.scale"),
+                scale_to_display: v.flag("strip.scale_to_display"),
+                show_numbers: v.flag("strip.show_numbers"),
+                show_names: v.flag("strip.show_names"),
+                thumbnail_resolution: v.num("strip.thumbnail_resolution"),
+                cards: CardStyle {
+                    x: v.num("cards.x"),
+                    full_height: v.num("cards.full_height"),
+                    min_height: v.num("cards.min_height"),
+                    max_width: v.num("cards.max_width"),
+                    gap: v.num("cards.gap"),
+                    tilt: v.auto("cards.tilt"),
+                    perspective: v.auto("cards.perspective"),
+                    perspective_x: v.num("cards.perspective_x"),
+                    perspective_y: v.num("cards.perspective_y"),
+                    corner_radius: v.num("cards.corner_radius"),
+                    border_width: v.num("cards.border_width"),
+                    border_color: v.color("cards.border_color"),
+                    shadow_radius: v.num("cards.shadow_radius"),
+                    shadow_opacity: v.num("cards.shadow_opacity"),
+                    shadow_offset_x: v.num("cards.shadow_offset_x"),
+                    shadow_offset_y: v.num("cards.shadow_offset_y"),
+                    shadow_color: v.color("cards.shadow_color"),
+                    max_windows: v.count("cards.max_windows"),
+                    stack_dx: v.num("cards.stack_dx"),
+                    behind_scale: v.num("cards.behind_scale"),
+                    second_app_dx: v.num("cards.second_app_dx"),
+                    second_app_dy: v.num("cards.second_app_dy"),
+                    hover_scale: v.num("cards.hover_scale"),
+                    hover_ms: v.uint("cards.hover_ms"),
+                    fade_ms: v.uint("cards.fade_ms"),
+                },
+                icons: IconStyle {
+                    size: v.num("icons.size"),
+                    center_dx: v.num("icons.center_dx"),
+                    center_dy: v.num("icons.center_dy"),
+                    step: v.num("icons.step"),
+                    max: v.count("icons.max"),
+                    shadow_radius: v.num("icons.shadow_radius"),
+                    shadow_opacity: v.num("icons.shadow_opacity"),
+                    shadow_offset_y: v.num("icons.shadow_offset_y"),
+                },
+                motion: MotionStyle {
+                    spring_stiffness: v.num("motion.spring_stiffness"),
+                    spring_damping: v.num("motion.spring_damping"),
+                    spring_mass: v.num("motion.spring_mass"),
+                    slide_distance: v.num("motion.slide_distance"),
+                },
+                reveal: RevealStyle {
+                    edge_width: v.num("reveal.edge_width"),
+                    delay_ms: v.uint("reveal.delay_ms"),
+                    hide_delay_ms: v.uint("reveal.hide_delay_ms"),
+                    poll_ms: v.uint("reveal.poll_ms"),
+                    edge_tab: v.flag("reveal.edge_tab"),
+                    launch_reveal: v.flag("reveal.launch_reveal"),
+                    launch_reveal_ms: v.uint("reveal.launch_reveal_ms"),
+                },
+                drag: DragStyle {
+                    threshold: v.num("drag.threshold"),
+                    grow_distance: v.num("drag.grow_distance"),
+                    lifted_opacity: v.num("drag.lifted_opacity"),
+                    ghost_opacity: v.num("drag.ghost_opacity"),
                 },
             },
-            warnings,
-        })
+            windows: WindowsConfig {
+                fit: match v.text("windows.fit") {
+                    "move" => FitMode::Move,
+                    "narrow" => FitMode::Narrow,
+                    _ => FitMode::Off,
+                },
+                fit_margin: v.num("windows.fit_margin"),
+                minimize_to_strip: v.flag("windows.minimize_to_strip"),
+                focus_echo_ms: v.uint("windows.focus_echo_ms"),
+            },
+            rules: RuleSet::new(rules, defaults),
+            hotkeys,
+            stages: StagesConfig { names },
+            sugar: SugarConfig {
+                shift_brings_here: v.flag("sugar.shift_brings_here"),
+                launch_window_ms: v.uint("sugar.launch_window_ms"),
+                activation_window_ms: v.uint("sugar.activation_window_ms"),
+            },
+        };
+        Ok(Parsed { config, warnings })
     }
 
     /// Strip options for the model; `capacity` is computed by the platform from the screen.
     pub fn strip_options(&self, capacity: usize) -> StripOptions {
-        StripOptions {
-            order: self.strip.order,
-            show_active: self.strip.show_active,
-            capacity,
-        }
+        StripOptions { order: self.strip.order, show_active: self.strip.show_active, capacity }
     }
 
     /// Model options from this config plus Apple's settings and the strip capacity.
@@ -461,6 +647,17 @@ pub fn state_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("state.json"))
 }
 
+/// What [`load_or_create`] did to the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAction {
+    /// Read it as it was.
+    Read,
+    /// It was missing: wrote the commented default file.
+    Created,
+    /// It was an unedited default file of an earlier version: replaced it with today's.
+    Upgraded,
+}
+
 /// Result of [`load_or_create`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
@@ -468,30 +665,37 @@ pub struct Loaded {
     pub config: Config,
     /// Warnings from parsing.
     pub warnings: Vec<String>,
-    /// True when the default file was written by this call.
-    pub created: bool,
+    /// What happened to the file.
+    pub action: FileAction,
 }
 
-/// Loads `path`, writing [`DEFAULT_CONFIG`] there first (and its directory) if it is missing.
+/// True when `text` is a default file some earlier version wrote, never edited.
+pub fn is_legacy_default(text: &str) -> bool {
+    schema::LEGACY_DEFAULTS.contains(&text)
+}
+
+/// Loads `path`. A missing file is written with [`default_file`] first (and its directory);
+/// a file byte-identical to an earlier version's default is replaced with it. Any other
+/// file is left alone.
 pub fn load_or_create(path: &Path) -> Result<Loaded, ConfigError> {
-    let mut created = false;
+    let mut action = FileAction::Read;
+    let write = |path: &Path| {
+        std::fs::write(path, default_file()).map_err(|e| ConfigError(format!("cannot write {}: {e}", path.display())))
+    };
     if !path.exists() {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| ConfigError(format!("cannot create {}: {e}", dir.display())))?;
         }
-        std::fs::write(path, DEFAULT_CONFIG)
-            .map_err(|e| ConfigError(format!("cannot write {}: {e}", path.display())))?;
-        created = true;
+        write(path)?;
+        action = FileAction::Created;
+    } else if std::fs::read_to_string(path).is_ok_and(|t| is_legacy_default(&t)) {
+        write(path)?;
+        action = FileAction::Upgraded;
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| ConfigError(format!("cannot read {}: {e}", path.display())))?;
+    let text = std::fs::read_to_string(path).map_err(|e| ConfigError(format!("cannot read {}: {e}", path.display())))?;
     let Parsed { config, warnings } = Config::parse(&text)?;
-    Ok(Loaded {
-        config,
-        warnings,
-        created,
-    })
+    Ok(Loaded { config, warnings, action })
 }
 
 /// The config in force plus where it came from. A failed reload keeps the previous config.
@@ -502,24 +706,13 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// Opens `path`, creating the default file if missing. A bad file yields the built-in
-    /// defaults plus the error. Warnings come back for logging.
-    pub fn open(path: PathBuf) -> (Self, Result<Vec<String>, ConfigError>) {
+    /// Opens `path`, creating (or upgrading an unedited) default file. A bad file yields the
+    /// built-in defaults plus the error. Warnings and what happened to the file come back
+    /// for logging.
+    pub fn open(path: PathBuf) -> (Self, Result<(Vec<String>, FileAction), ConfigError>) {
         match load_or_create(&path) {
-            Ok(l) => (
-                Self {
-                    path,
-                    config: l.config,
-                },
-                Ok(l.warnings),
-            ),
-            Err(e) => (
-                Self {
-                    path,
-                    config: Config::default(),
-                },
-                Err(e),
-            ),
+            Ok(l) => (Self { path, config: l.config }, Ok((l.warnings, l.action))),
+            Err(e) => (Self { path, config: Config::default() }, Err(e)),
         }
     }
 
@@ -543,6 +736,48 @@ impl ConfigStore {
     }
 }
 
+/// `stage-manager config ...`: `--print-defaults`, `--explain <section.key>`,
+/// `--reference` (README's table), `--check [file]`. Returns the exit code and output.
+pub fn command(args: &[String]) -> (i32, String) {
+    match args.first().map(String::as_str) {
+        Some("--print-defaults") => (0, default_file()),
+        Some("--reference") => (0, schema::markdown_reference()),
+        Some("--explain") => match args.get(1) {
+            Some(key) => match schema::explain(key) {
+                Some(text) => (0, text),
+                None => {
+                    let close: Vec<String> = KEYS
+                        .iter()
+                        .map(|d| d.path())
+                        .filter(|p| p.contains(key.as_str()) || key.contains(p.split('.').next_back().unwrap_or("")))
+                        .collect();
+                    let hint = if close.is_empty() { String::new() } else { format!(" (did you mean {}?)", close.join(", ")) };
+                    (1, format!("unknown key {key:?}{hint}; keys are section.key, for example windows.fit\n"))
+                }
+            },
+            None => (2, "usage: stage-manager config --explain <section.key>\n".into()),
+        },
+        Some("--check") => {
+            let path = args.get(1).map(PathBuf::from).or_else(default_path);
+            let Some(path) = path else { return (2, "no config path\n".into()) };
+            match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Config::parse(&t).map_err(|e| e.0)) {
+                Ok(p) => {
+                    let mut out = format!("{}: ok\n", path.display());
+                    for w in p.warnings {
+                        out.push_str(&format!("warning: {w}\n"));
+                    }
+                    (0, out)
+                }
+                Err(e) => (1, format!("{e}\n")),
+            }
+        }
+        _ => (
+            2,
+            "usage: stage-manager config --print-defaults | --explain <section.key> | --reference | --check [file]\n".into(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,34 +788,61 @@ mod tests {
     }
 
     #[test]
-    fn default_file_parses_to_the_defaults_without_warnings() {
-        let p = parse(DEFAULT_CONFIG);
+    fn the_default_file_parses_to_the_defaults_without_warnings() {
+        let p = parse(&default_file());
         assert_eq!(p.config, Config::default());
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
     }
 
     #[test]
-    fn default_file_examples_parse_when_uncommented() {
-        let uncommented: String = DEFAULT_CONFIG
+    fn every_key_uncommented_with_its_default_parses_to_the_defaults() {
+        let uncommented: String = default_file()
             .lines()
-            .filter(|l| *l != "names = []")
+            .map(|l| match l.strip_prefix("# ") {
+                Some(rest) if KEYS.iter().any(|d| rest == format!("{} = {}", d.key, d.default)) => rest,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let p = parse(&uncommented);
+        assert_eq!(p.config, Config::default());
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn the_rule_examples_parse_when_uncommented() {
+        let uncommented: String = default_file()
+            .lines()
+            .skip_while(|l| !l.starts_with("# Rules for new windows"))
             .map(|l| match l.strip_prefix("# ") {
                 Some(rest) if rest.starts_with("[[rule]]") || rest.contains(" = ") => rest,
                 _ => l,
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let p = parse(&uncommented);
-        assert_eq!(p.config.rules.rules.len(), 3);
-        assert_eq!(p.config.stages.names, ["Work", "Chat"]);
+        assert_eq!(parse(&uncommented).config.rules.rules.len(), 2);
     }
 
     #[test]
-    fn readme_shows_the_default_file_verbatim() {
+    fn the_defaults_are_apples() {
+        let c = Config::default();
+        assert_eq!(c.windows.fit, FitMode::Off, "windows keep their exact frames");
+        assert!(!c.style.reveal.edge_tab && !c.style.reveal.launch_reveal);
+        assert!(!c.style.show_numbers && !c.style.show_names);
+        assert!(!c.hotkeys.enabled && c.hotkeys.bindings().is_empty(), "no global hotkeys");
+        assert!(!c.style.scale_to_display && c.style.scale == 1.0);
+        assert!(c.sugar.shift_brings_here, "invisible until Shift is held");
+        assert!(c.windows.minimize_to_strip);
+        assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
+        assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
+    }
+
+    #[test]
+    fn readme_has_the_generated_reference() {
         let readme = include_str!("../README.md");
         assert!(
-            readme.contains(&format!("```toml\n{DEFAULT_CONFIG}```")),
-            "README.md's config reference is out of date: paste DEFAULT_CONFIG into it"
+            readme.contains(&schema::markdown_reference()),
+            "README.md's configuration reference is out of date: paste `stage-manager config --reference`"
         );
     }
 
@@ -592,12 +854,22 @@ mod tests {
     #[test]
     fn full_config() {
         let p = parse(
-            r#"
+            r##"
 [strip]
 order = "fixed"
 show_active = true
-show_numbers = false
+show_numbers = true
 thumbnail_interval_ms = 2000
+capacity = 4
+
+[cards]
+tilt = 30
+perspective = 900.5
+shadow_color = "#11223380"
+
+[windows]
+fit = "narrow"
+minimize_to_strip = false
 
 [defaults]
 action = "new"
@@ -614,6 +886,7 @@ action = "float"
 placement = "center"
 
 [hotkeys]
+enabled = true
 switch = "cmd+alt+{n}"
 toggle_strip = ""
 
@@ -622,65 +895,42 @@ names = ["Work", "Chat", "work", " "]
 
 [sugar]
 shift_brings_here = false
-"#,
+"##,
         );
         let c = p.config;
-        assert_eq!(
-            c.strip,
-            StripConfig {
-                order: StripOrder::Fixed,
-                show_active: true,
-                show_numbers: false,
-                thumbnail_interval_ms: 2000
-            }
-        );
-        assert_eq!(
-            c.rules.defaults,
-            Decision {
-                action: RuleAction::New,
-                placement: Placement::Cascade
-            }
-        );
+        assert_eq!(c.strip.order, StripOrder::Fixed);
+        assert!(c.strip.show_active && c.style.show_numbers);
+        assert_eq!(c.strip.thumbnail_interval_ms, 2000);
+        assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 4);
+        assert_eq!(c.style.cards.tilt, Auto::Value(30.0));
+        assert_eq!(c.style.cards.perspective, Auto::Value(900.5));
+        assert!((c.style.cards.shadow_color.a - 128.0 / 255.0).abs() < 1e-9);
+        assert_eq!(c.windows.fit, FitMode::Narrow);
+        assert!(!c.windows.minimize_to_strip);
+        assert_eq!(c.rules.defaults, Decision { action: RuleAction::New, placement: Placement::Cascade });
         assert_eq!(c.rules.rules.len(), 2);
         assert_eq!(c.rules.rules[1].app, AppMatch::Any);
-        assert_eq!(
-            c.rules.decide("com.example.chat", "x").action,
-            RuleAction::Stage("Chat".into())
-        );
-        assert_eq!(
-            c.rules.decide("com.example.chat", "x").placement,
-            Placement::Cascade
-        );
-        assert_eq!(
-            c.rules
-                .decide("com.example.video", "Picture in Picture")
-                .action,
-            RuleAction::Float
-        );
-        assert!(
-            c.hotkeys
-                .switch
-                .is_some_and(|s| s.mods.cmd && s.mods.alt && !s.mods.ctrl)
-        );
+        assert_eq!(c.rules.decide("com.example.chat", "x").action, RuleAction::Stage("Chat".into()));
+        assert_eq!(c.rules.decide("com.example.video", "Picture in Picture").action, RuleAction::Float);
+        assert!(c.hotkeys.enabled);
+        assert!(c.hotkeys.switch.is_some_and(|s| s.mods.cmd && s.mods.alt && !s.mods.ctrl));
         assert_eq!(c.hotkeys.toggle_strip, None);
-        assert_eq!(
-            c.hotkeys.new_stage,
-            HotkeyConfig::default().new_stage,
-            "unset keeps default"
-        );
+        assert_eq!(c.hotkeys.new_stage, HotkeyConfig::default().new_stage, "unset keeps default");
         assert_eq!(c.stages.names, ["Work", "Chat"]);
         assert!(!c.sugar.shift_brings_here);
-        assert!(Config::default().sugar.shift_brings_here);
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
     }
 
     #[test]
-    fn unknown_keys_warn_and_do_not_fail() {
+    fn unknown_and_retired_keys_warn_and_do_not_fail() {
         let p = parse(
             r#"
 [strip]
 order = "native"
 position = "left"
+
+[stages]
+fit_windows = true
 
 [[rule]]
 app = "com.example.a"
@@ -690,10 +940,12 @@ when = "always"
 swipe = true
 "#,
         );
-        assert_eq!(p.config.strip, StripConfig::default());
-        assert_eq!(p.warnings.len(), 3, "{:?}", p.warnings);
+        assert_eq!(p.config.strip, Config::default().strip);
+        assert_eq!(p.config.windows, Config::default().windows);
+        assert_eq!(p.warnings.len(), 4, "{:?}", p.warnings);
         assert!(p.warnings.iter().any(|w| w.contains("position")));
         assert!(p.warnings.iter().any(|w| w.contains("[gestures]")));
+        assert!(p.warnings.iter().any(|w| w.contains("fit_windows") && w.contains("[windows] fit")));
     }
 
     #[test]
@@ -701,6 +953,10 @@ swipe = true
         for text in [
             "[strip]\norder = \"recent\"",
             "[strip]\nshow_numbers = \"yes\"",
+            "[strip]\ncapacity = 2.5",
+            "[cards]\ntilt = \"steep\"",
+            "[cards]\nborder_color = \"white\"",
+            "[windows]\nfit = \"tile\"",
             "[defaults]\naction = \"tile\"",
             "[defaults]\nplacement = \"grid\"",
             "[[rule]]\ntitle = \"x\"",
@@ -709,6 +965,7 @@ swipe = true
             "[hotkeys]\nnew_stage = \"ctrl+alt+{n}\"",
             "[hotkeys]\ntoggle_pin = \"p\"",
             "[sugar]\nshift_brings_here = \"yes\"",
+            "[stages]\nnames = [1]",
             "strip = 5",
             "not toml at all [",
         ] {
@@ -717,49 +974,61 @@ swipe = true
     }
 
     #[test]
-    fn low_thumbnail_interval_is_clamped_with_a_warning() {
-        let p = parse("[strip]\nthumbnail_interval_ms = 10");
-        assert_eq!(
-            p.config.strip.thumbnail_interval_ms,
-            MIN_THUMBNAIL_INTERVAL_MS
-        );
-        assert_eq!(p.warnings.len(), 1);
+    fn out_of_range_numbers_are_clamped_with_a_warning() {
+        let p = parse("[strip]\nthumbnail_interval_ms = 10\n[cards]\nhover_scale = 9.0");
+        assert_eq!(p.config.strip.thumbnail_interval_ms, 250);
+        assert_eq!(p.config.style.cards.hover_scale, 2.0);
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
     }
 
     #[test]
-    fn hotkey_conflicts_warn() {
-        let p = parse("[hotkeys]\ntoggle_pin = \"ctrl+alt+n\"");
+    fn hotkey_conflicts_warn_only_when_enabled() {
+        assert_eq!(parse("[hotkeys]\ntoggle_pin = \"ctrl+alt+n\"").warnings.len(), 0);
+        let p = parse("[hotkeys]\nenabled = true\ntoggle_pin = \"ctrl+alt+n\"");
         assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn capacity_counts_from_the_height() {
+        let c = Config::default().strip.capacity;
+        assert_eq!(c.for_height(875.0, 1.0), 3, "small screens keep three");
+        assert_eq!(c.for_height(2500.0, 1.0), 9);
+        assert_eq!(c.for_height(f64::NAN, 1.0), 3);
+        assert_eq!(c.for_height(1130.0, 0.5), 9, "smaller cards fit more");
     }
 
     #[test]
     fn model_options_carry_config_and_settings() {
         let p = parse("[strip]\norder = \"fixed\"\n[stages]\nnames = [\"Work\"]");
         let o = p.config.model_options(NativeSettings::default(), 5);
-        assert_eq!(
-            o.strip,
-            StripOptions {
-                order: StripOrder::Fixed,
-                show_active: false,
-                capacity: 5
-            }
-        );
+        assert_eq!(o.strip, StripOptions { order: StripOrder::Fixed, show_active: false, capacity: 5 });
         assert_eq!(o.named_stages, ["Work"]);
     }
 
     #[test]
-    fn first_run_writes_the_default_file() {
+    fn first_run_writes_the_commented_file_and_old_defaults_are_upgraded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("config.toml");
         let l = load_or_create(&path).expect("loads");
-        assert!(l.created);
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("written"),
-            DEFAULT_CONFIG
-        );
+        assert_eq!(l.action, FileAction::Created);
+        assert_eq!(std::fs::read_to_string(&path).expect("written"), default_file());
         assert_eq!(l.config, Config::default());
-        let again = load_or_create(&path).expect("loads");
-        assert!(!again.created);
+        assert_eq!(load_or_create(&path).expect("loads").action, FileAction::Read);
+
+        for old in schema::LEGACY_DEFAULTS {
+            std::fs::write(&path, old).expect("write");
+            let l = load_or_create(&path).expect("loads");
+            assert_eq!(l.action, FileAction::Upgraded);
+            assert_eq!(std::fs::read_to_string(&path).expect("read"), default_file());
+            assert_eq!(l.config, Config::default());
+        }
+        // An edited file is left alone, even one that differs by a byte.
+        let edited = format!("{} ", schema::LEGACY_DEFAULTS[2]);
+        std::fs::write(&path, &edited).expect("write");
+        let l = load_or_create(&path).expect("loads");
+        assert_eq!(l.action, FileAction::Read);
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), edited);
+        assert!(l.config.style.show_numbers, "its old values stay");
     }
 
     #[test]
@@ -768,7 +1037,7 @@ swipe = true
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[strip]\norder = \"fixed\"").expect("write");
         let (mut store, first) = ConfigStore::open(path.clone());
-        assert_eq!(first, Ok(vec![]));
+        assert_eq!(first, Ok((vec![], FileAction::Read)));
         assert_eq!(store.config().strip.order, StripOrder::Fixed);
         std::fs::write(&path, "[strip]\norder = \"sideways\"").expect("write");
         let e = store.reload().expect_err("bad file");
@@ -788,5 +1057,24 @@ swipe = true
         let (store, result) = ConfigStore::open(path);
         assert!(result.is_err());
         assert_eq!(store.config(), &Config::default());
+    }
+
+    #[test]
+    fn the_config_command_prints_explains_and_checks() {
+        let (code, out) = command(&["--print-defaults".into()]);
+        assert_eq!((code, out), (0, default_file()));
+        let (code, out) = command(&["--explain".into(), "cards.tilt".into()]);
+        assert_eq!(code, 0);
+        assert!(out.contains("auto"));
+        let (code, out) = command(&["--explain".into(), "tilt".into()]);
+        assert_eq!(code, 1);
+        assert!(out.contains("cards.tilt"), "{out}");
+        assert_eq!(command(&[]).0, 2);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("c.toml");
+        std::fs::write(&path, "[windows]\nfit = \"move\"\nx = 1").expect("write");
+        let (code, out) = command(&["--check".into(), path.display().to_string()]);
+        assert_eq!(code, 0);
+        assert!(out.contains("warning"));
     }
 }

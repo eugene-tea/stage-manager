@@ -3,6 +3,9 @@
 //! - `stage-manager` runs the menu bar app.
 //! - `stage-manager ctl <words...>` sends one command to the running app's ctl socket.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
+//! - `stage-manager config --print-defaults | --explain <section.key> | --reference |
+//!   --check [file]` prints the commented default config, explains a key, prints README's
+//!   configuration table, or validates a file.
 //! - `stage-manager probe-windows <bundle-id>` prints that app's windows as the window
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts.
 
@@ -15,6 +18,11 @@ fn main() -> ExitCode {
         Some("ctl") => stage_manager::platform::ctl::run_client(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("strip-demo") => stage_manager::ui::strip_demo::run(),
+        Some("config") => {
+            let (code, out) = stage_manager::config::command(&args[2..]);
+            if code == 0 { print!("{out}") } else { eprint!("{out}") }
+            ExitCode::from(code as u8)
+        }
         #[cfg(target_os = "macos")]
         Some("--guardian") => stage_manager::platform::safety::run_guardian(&args[2..]),
         #[cfg(target_os = "macos")]
@@ -26,7 +34,9 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         None => app::run(),
         _ => {
-            eprintln!("usage: stage-manager [ctl <command...> | strip-demo | probe-windows <bundle-id> | --version]");
+            eprintln!(
+                "usage: stage-manager [ctl <command...> | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id> | --version]"
+            );
             ExitCode::from(2)
         }
     }
@@ -52,7 +62,7 @@ mod app {
     use objc2_foundation::{MainThreadMarker, NSString, NSTimer, NSURL};
     use serde_json::json;
 
-    use stage_manager::config::{DEFAULT_CONFIG, HotkeyConfig, StripConfig};
+    use stage_manager::config::{Config, HotkeyConfig, default_file};
     use stage_manager::engine::model::Display;
     use stage_manager::platform::apps::{self, WorkspaceObservers};
     use stage_manager::platform::controller::{self, UiUpdate};
@@ -214,7 +224,7 @@ mod app {
     fn open_config() {
         let path = paths::config_file();
         if !path.exists() {
-            let written = std::fs::create_dir_all(paths::config_dir()).and_then(|_| std::fs::write(&path, DEFAULT_CONFIG));
+            let written = std::fs::create_dir_all(paths::config_dir()).and_then(|_| std::fs::write(&path, default_file()));
             if let Err(e) = written {
                 tracing::warn!("cannot create {}: {e}", path.display());
                 return;
@@ -449,7 +459,7 @@ mod app {
         state.refresh_menu();
         APP.with(|a| *a.borrow_mut() = Some(state));
         // The loaded config's interval follows in the first UiUpdate::Config.
-        strip::install(mtm, StripConfig::default().thumbnail_interval_ms);
+        strip::install(mtm, Config::default().strip.thumbnail_interval_ms);
         status_menu::set_action_handler(|action| with_app(|app| app.on_menu(action)));
 
         if permissions.accessibility {
