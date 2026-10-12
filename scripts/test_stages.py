@@ -8,7 +8,9 @@ every fixture window onscreen; the app and the fixture are quit at the end, what
 
 Phases: m3 (stages, switching, frames, z-order, merge, pin, reveal, children), safety (quit,
 SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it), m4 (rules, placement,
-hot reload), m6 (persistence across a relaunch of the app and of the fixture).
+hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
+synthetic click and shift-click on a card of the real strip; the click is posted by the app
+only when its own strip window is topmost at that point).
 """
 
 import json
@@ -508,6 +510,43 @@ def phase_m6():
     all_onscreen("final quit")
 
 
+def phase_strip():
+    say("\n== the strip end to end: a card click switches, a shift-click merges ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(4)
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up"):
+        return
+    t = by_title(s)
+    # Stage 1 keeps only Fixture 3 (clear of the strip area, so the strip stays shown);
+    # the others go to stage 2, which is the single card.
+    for n in (1, 2, 4):
+        do("send", 2, t[f"Fixture {n}"]["id"])
+    s = state()
+    check(s["active"] == 1 and s["strip"] == [2], "one card (stage 2) in the strip")
+    vis = s["display"]["visible"]
+    x, y = vis["x"] + 70, vis["y"] + vis["h"] / 2
+    time.sleep(1.5)
+    r = ctl("debug-click", x, y)
+    check(r.get("ok"), f"clicked the card at {x:.0f},{y:.0f} ({r.get('error', 'ok')})")
+    s = wait_until(lambda: (lambda x: x if x["active"] == 2 else None)(state()), 3, "the card click to switch")
+    check(s is not None, "a card click switches to its stage")
+    consistent("after the card click")
+    do("switch", 1)
+    time.sleep(1.5)
+    r = ctl("debug-click", x, y, "shift")
+    check(r.get("ok"), f"shift-clicked the card ({r.get('error', 'ok')})")
+    s = wait_until(lambda: (lambda x: x if len(x["stages"]) == 1 else None)(state()), 3, "the shift-click to merge")
+    check(s is not None and len(stage_titles(s)[1]) == 4, "a shift-click brings the card's windows into the active stage")
+    consistent("after the shift-click")
+    stop_app()
+    all_onscreen("strip quit")
+
+
 def frontmost_bundle():
     r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
     out = r.stdout.strip()
@@ -515,7 +554,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip"]
     if not os.path.exists(BIN) or not os.path.exists(FIX_APP):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -525,7 +564,7 @@ def main():
     front = frontmost_bundle()
     try:
         for p in phases:
-            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6}[p]()
+            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE):

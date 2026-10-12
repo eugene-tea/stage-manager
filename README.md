@@ -3,10 +3,11 @@
 A floating-window stage manager for macOS: Apple's Stage Manager strip and floating windows,
 plus rules, hotkeys, named stages, pinning, placement and persistence. See `PLAN.md`.
 
-Status: milestones 1–4 and 6 (skeleton, observation, stages with hotkeys and safety, rules
-and placement, persistence); the strip (milestone 5) is built on its own branch. The app
-keeps stages of floating windows on one Space: switching parks the stage you leave in the
-bottom-right corner and restores the target's frames and z-order exactly.
+Status: milestones 1–6 (skeleton, observation, stages with hotkeys and safety, rules and
+placement, the strip, persistence). The app keeps stages of floating windows on one Space:
+switching parks the stage you leave in the bottom-right corner and restores the target's
+frames and z-order exactly; the strip on the left shows the other stages as cards (click to
+switch, shift-click to bring a card's windows into the current stage).
 
 ## Build
 
@@ -45,7 +46,8 @@ against the terminal. Launched with `open`, macOS checks the bundle's own signat
 
 - **Accessibility** — observing and moving windows. Without it the app runs, says so in the
   menu, and starts observing within 2 s of the grant (no relaunch).
-- **Screen Recording** — strip thumbnails (later milestone).
+- **Screen Recording** — strip thumbnails (ScreenCaptureKit). The strip also asks through
+  `SCShareableContent`, which is what lists the app in System Settings on recent macOS.
 
 At launch the app asks macOS for whatever is missing (system dialogs), unless
 `STAGE_MANAGER_NO_PROMPT` is set. The menu shows "Grant Accessibility…" / "Grant Screen
@@ -224,6 +226,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `reload` | re-read `config.toml` |
 | `quit` | unpark everything and quit |
 | `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
+| `debug-click X Y [shift]` | click our own strip at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless the strip is the topmost window there) |
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
@@ -235,7 +238,7 @@ Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reacha
 
 ## Test script
 
-`scripts/test-stages.sh [m3] [safety] [m4] [m6]` builds the app and a private fixture
+`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip]` builds the app and a private fixture
 (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`, so it
 never collides with other fixture runs) and checks, against `ctl state` and the window
 server (`probe-windows`): stages from `send`, exact restore frames (±1 pt) and z-order across
@@ -243,7 +246,8 @@ switches, parked windows in the corner, merge, pin, reveal, child windows follow
 parent; the safety drills (`ctl quit`, SIGTERM, SIGINT, a panic, `kill -9` with the guardian,
 `kill -9` of app and guardian then a relaunch), each ending with every fixture window
 onscreen; rules (`new`, `float` + `center`, `cascade`), hot reload and a bad config; and
-persistence across a relaunch of the app and of the fixture. Every run uses
+persistence across a relaunch of the app and of the fixture; and a click and a shift-click
+on a real strip card (switch, merge). Every run uses
 `STAGE_MANAGER_HOME` (default a new `/tmp/sm-test.*`, or `TEST_HOME`) and
 `STAGE_MANAGER_ONLY` set to the fixture. The fixture comes to the front during switches;
 the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips the build.
@@ -260,6 +264,28 @@ the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips
   a click on a Finder desktop icon also counts as a wallpaper click.
 - Persistence matches windows by bundle ID and title; two windows with the same title in one
   app may swap stages after a relaunch.
+
+## Strip demo
+
+`stage-manager strip-demo` runs the strip panel alone, fed by a made-up snapshot built from
+the live window list every second (no Accessibility; it never moves a window): windows are
+grouped by app into fake stages of 1, 2 and 3 windows, the first two apps share one card,
+and the stage holding the frontmost window is "active" (its frames drive auto-hide). Clicks
+are logged; the menu's Show/Hide Strip toggles it.
+
+```sh
+make fixture && open -n -g "target/SM Fixture.app" --args --windows 7 --background
+open -n "target/Stage Manager.app" --stderr /tmp/strip-demo.log \
+  --env STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture --env STAGE_MANAGER_DEMO_NUMBERS=1 \
+  --args strip-demo
+```
+
+| Variable | Effect |
+|----------|--------|
+| `STAGE_MANAGER_ONLY` | show only these apps (their offscreen windows too) |
+| `STAGE_MANAGER_DEMO_NUMBERS=1` | number badges on cards |
+| `STAGE_MANAGER_DEMO_AUTOHIDE=0\|1` | override Apple's `AutoHide` (hide recent apps) |
+| `STAGE_MANAGER_THUMBNAIL_MS` | thumbnail refresh interval (default 1500) |
 
 ## Fixture app
 
@@ -284,7 +310,10 @@ limited to the fixture.
   thread that owns every AX call), `observe` (observed apps and windows), `controller` (the
   engine on the WM thread: observations in, actions out, strip snapshots, `state.json`),
   `safety` (registry, panic hook, signals, guardian, recovery scan), `hotkeys` (Carbon),
-  `desktop` (displays, wallpaper clicks), `windows` (CGWindowList), `apps` (NSWorkspace),
-  `permissions`, `native_settings`, `ctl`, `logging`, `paths`.
-- `src/ui` — status item and menu; `strip_model` (the strip's contract).
+  `desktop` (displays, wallpaper clicks), `capture` (ScreenCaptureKit thumbnails on a worker
+  thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,
+  `native_settings`, `ctl`, `logging`, `paths`.
+- `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
+  clicks, slide), `strip_layout` (pure geometry and tilt), `strip_visibility` (pure
+  auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`.
 - `scripts/` — signing identity, bundling, signing, run, fixture, `test-stages.sh`.

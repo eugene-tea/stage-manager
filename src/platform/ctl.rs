@@ -4,7 +4,8 @@
 //! Commands: `ping`, `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
 //! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`. Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
-//! environment, `debug-panic` panics on the main thread (a safety drill).
+//! environment, `debug-panic` panics on the main thread (a safety drill) and `debug-click X Y
+//! [shift]` clicks our own strip at a global point.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -18,7 +19,7 @@ use serde_json::json;
 use super::paths;
 
 /// A parsed ctl command.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// Liveness check; answers with the pid and version.
     Ping,
@@ -46,6 +47,16 @@ pub enum Command {
     Reload,
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
+    /// A synthetic click at a global point, posted only when our own window (the strip) is
+    /// the topmost window there (needs `STAGE_MANAGER_TEST=1`).
+    DebugClick {
+        /// Global x (top-left origin).
+        x: f64,
+        /// Global y.
+        y: f64,
+        /// Hold shift.
+        shift: bool,
+    },
 }
 
 fn number(word: &str) -> Result<usize, String> {
@@ -74,6 +85,10 @@ impl Command {
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
             ["debug-panic"] => Ok(Self::DebugPanic),
+            ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
+                let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
+                Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
+            }
             [] => Err("empty command".into()),
             _ => Err(format!("unknown command: {}", words.join(" "))),
         }
@@ -206,6 +221,12 @@ mod tests {
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
+        assert_eq!(
+            Command::parse("debug-click 60 700.5 shift"),
+            Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })
+        );
+        assert!(Command::parse("debug-click 60").is_err());
+        assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert!(Command::parse("").is_err());
         assert!(Command::parse("switch 0").is_err());
         assert!(Command::parse("switch x").is_err());

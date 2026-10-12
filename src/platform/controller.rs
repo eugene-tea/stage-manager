@@ -59,6 +59,8 @@ pub enum UiUpdate {
         error: Option<String>,
         /// Hotkeys to register.
         hotkeys: HotkeyConfig,
+        /// The strip's thumbnail refresh interval.
+        thumbnail_interval_ms: u64,
     },
     /// The strip's Show/Hide state.
     StripVisible(bool),
@@ -185,7 +187,12 @@ impl Controller {
     }
 
     fn notify_config(&self) {
-        notify_ui(UiUpdate::Config { error: self.config_error.clone(), hotkeys: self.store.config().hotkeys.clone() });
+        let config = self.store.config();
+        notify_ui(UiUpdate::Config {
+            error: self.config_error.clone(),
+            hotkeys: config.hotkeys.clone(),
+            thumbnail_interval_ms: config.strip.thumbnail_interval_ms,
+        });
     }
 
     /// True once the model exists (observation started).
@@ -781,7 +788,7 @@ impl Controller {
                 self.reload_config(ob);
                 json!({ "ok": self.config_error.is_none(), "error": self.config_error })
             }
-            Command::Ping | Command::Quit | Command::DebugPanic => json!({ "ok": false, "error": "not a WM command" }),
+            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugClick { .. } => json!({ "ok": false, "error": "not a WM command" }),
         }
     }
 

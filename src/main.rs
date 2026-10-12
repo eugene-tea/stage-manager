@@ -14,6 +14,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("ctl") => stage_manager::platform::ctl::run_client(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("strip-demo") => stage_manager::ui::strip_demo::run(),
+        #[cfg(target_os = "macos")]
         Some("--guardian") => stage_manager::platform::safety::run_guardian(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-windows") => app::probe_windows(&args[2..]),
@@ -24,7 +26,7 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         None => app::run(),
         _ => {
-            eprintln!("usage: stage-manager [ctl <command...> | probe-windows <bundle-id> | --version]");
+            eprintln!("usage: stage-manager [ctl <command...> | strip-demo | probe-windows <bundle-id> | --version]");
             ExitCode::from(2)
         }
     }
@@ -50,7 +52,7 @@ mod app {
     use objc2_foundation::{MainThreadMarker, NSString, NSTimer, NSURL};
     use serde_json::json;
 
-    use stage_manager::config::{DEFAULT_CONFIG, HotkeyConfig};
+    use stage_manager::config::{DEFAULT_CONFIG, HotkeyConfig, StripConfig};
     use stage_manager::engine::model::Display;
     use stage_manager::platform::apps::{self, WorkspaceObservers};
     use stage_manager::platform::controller::{self, UiUpdate};
@@ -61,7 +63,7 @@ mod app {
     use stage_manager::platform::wm_thread::{WmCommand, WmHandle};
     use stage_manager::platform::{hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
-    use stage_manager::ui::strip_model;
+    use stage_manager::ui::{strip, strip_model};
 
     /// Permission, settings and display poll period.
     const POLL_SECONDS: f64 = 2.0;
@@ -85,6 +87,7 @@ mod app {
         strip_visible: bool,
         config_error: Option<String>,
         hotkeys: Option<HotkeyConfig>,
+        thumbnail_interval_ms: Option<u64>,
         display: Option<Display>,
         _workspace: WorkspaceObservers,
         _clicks: Option<ClickMonitor>,
@@ -155,8 +158,12 @@ mod app {
 
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
-                UiUpdate::Config { error, hotkeys } => {
+                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms } => {
                     self.config_error = error;
+                    if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
+                        strip::set_thumbnail_interval(thumbnail_interval_ms);
+                        self.thumbnail_interval_ms = Some(thumbnail_interval_ms);
+                    }
                     if self.hotkeys.as_ref() != Some(&hotkeys) {
                         let r = hotkeys::register(&hotkeys.bindings());
                         tracing::info!(active = r.active, failed = ?r.failed, "hotkeys registered");
@@ -276,6 +283,15 @@ mod app {
                 DispatchQueue::main().exec_async(|| panic!("debug-panic requested over ctl"));
                 json!({ "ok": true, "panicking": true })
             }
+            Command::DebugClick { x, y, shift } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-click needs STAGE_MANAGER_TEST=1");
+                }
+                match desktop::click_own_window(stage_manager::engine::geometry::Point::new(x, y), shift) {
+                    Ok(()) => json!({ "ok": true }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
             other => wm
                 .ctl(other, Duration::from_secs(4))
                 .unwrap_or_else(|| ctl::error_reply("WM thread did not answer")),
@@ -382,6 +398,7 @@ mod app {
             strip_visible: true,
             config_error: None,
             hotkeys: None,
+            thumbnail_interval_ms: None,
             display: None,
             _workspace: workspace,
             _clicks: clicks,
@@ -390,6 +407,8 @@ mod app {
         state.send_display_if_changed();
         state.refresh_menu();
         APP.with(|a| *a.borrow_mut() = Some(state));
+        // The loaded config's interval follows in the first UiUpdate::Config.
+        strip::install(mtm, StripConfig::default().thumbnail_interval_ms);
         status_menu::set_action_handler(|action| with_app(|app| app.on_menu(action)));
 
         if permissions.accessibility {

@@ -6,6 +6,7 @@
 
 pub mod apps;
 pub mod ax;
+pub mod capture;
 pub mod controller;
 pub mod ctl;
 pub mod desktop;

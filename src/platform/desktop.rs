@@ -12,7 +12,11 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask, NSScreen};
-use objc2_core_graphics::{CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID};
+use objc2_core_foundation::CGPoint;
+use objc2_core_graphics::{
+    CGDisplayBounds, CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGGetActiveDisplayList, CGMainDisplayID,
+    CGMouseButton, CGWarpMouseCursorPosition,
+};
 use objc2_foundation::{MainThreadMarker, NSRect};
 
 use super::windows::CgWindow;
@@ -81,6 +85,34 @@ fn bounds_of(id: u32) -> Rect {
 /// transparent windows do not count.
 pub fn is_wallpaper_click(list: &[CgWindow], p: Point) -> bool {
     !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p))
+}
+
+/// Test support: clicks at `p` (global top-left coordinates), with shift when asked, only
+/// when the topmost window there belongs to this process (our strip), so a stray click can
+/// never land in another app. The pointer goes back where it was.
+pub fn click_own_window(p: Point, shift: bool) -> Result<(), String> {
+    let own = std::process::id() as i32;
+    let list = super::windows::list_windows();
+    let top = list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p));
+    match top {
+        Some(w) if w.pid == own => {}
+        Some(w) => return Err(format!("the topmost window at {},{} is not ours (pid {})", p.x, p.y, w.pid)),
+        None => return Err(format!("no window at {},{}", p.x, p.y)),
+    }
+    let back = CGEvent::new(None).map(|e| CGEvent::location(Some(&e)));
+    let at = CGPoint { x: p.x, y: p.y };
+    for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
+        let event = CGEvent::new_mouse_event(None, kind, at, CGMouseButton::Left).ok_or("cannot create a mouse event")?;
+        if shift {
+            CGEvent::set_flags(Some(&event), CGEventFlags::MaskShift);
+        }
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    if let Some(back) = back {
+        let _ = CGWarpMouseCursorPosition(back);
+    }
+    Ok(())
 }
 
 /// Keeps the global mouse-down monitor alive; dropping it removes the monitor.
