@@ -43,7 +43,8 @@ against the terminal. Launched with `open`, macOS checks the bundle's own signat
 
 - **Accessibility** — observing and moving windows. Without it the app runs, says so in the
   menu, and starts observing within 2 s of the grant (no relaunch).
-- **Screen Recording** — strip thumbnails (later milestone).
+- **Screen Recording** — strip thumbnails (ScreenCaptureKit). The strip also asks through
+  `SCShareableContent`, which is what lists the app in System Settings on recent macOS.
 
 At launch the app asks macOS for whatever is missing (system dialogs), unless
 `STAGE_MANAGER_NO_PROMPT` is set. The menu shows "Grant Accessibility…" / "Grant Screen
@@ -83,6 +84,28 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"
 
 Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reachable.
 
+## Strip demo
+
+`stage-manager strip-demo` runs the strip panel alone, fed by a made-up snapshot built from
+the live window list every second (no Accessibility; it never moves a window): windows are
+grouped by app into fake stages of 1, 2 and 3 windows, the first two apps share one card,
+and the stage holding the frontmost window is "active" (its frames drive auto-hide). Clicks
+are logged; the menu's Show/Hide Strip toggles it.
+
+```sh
+make fixture && open -n -g "target/SM Fixture.app" --args --windows 7 --background
+open -n "target/Stage Manager.app" --stderr /tmp/strip-demo.log \
+  --env STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture --env STAGE_MANAGER_DEMO_NUMBERS=1 \
+  --args strip-demo
+```
+
+| Variable | Effect |
+|----------|--------|
+| `STAGE_MANAGER_ONLY` | show only these apps (their offscreen windows too) |
+| `STAGE_MANAGER_DEMO_NUMBERS=1` | number badges on cards |
+| `STAGE_MANAGER_DEMO_AUTOHIDE=0\|1` | override Apple's `AutoHide` (hide recent apps) |
+| `STAGE_MANAGER_THUMBNAIL_MS` | thumbnail refresh interval (default 1500) |
+
 ## Fixture app
 
 `make fixture` builds `target/SM Fixture.app` (bundle ID `dev.eugene.stagemanager.fixture`):
@@ -106,5 +129,8 @@ limited to the fixture.
   thread that owns every AX call), `observe` (observed apps and windows), `windows`
   (CGWindowList), `apps` (NSWorkspace), `permissions`, `native_settings`, `ctl`, `logging`,
   `paths`.
-- `src/ui` — status item and menu (strip later).
+- `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
+  clicks, slide), `strip_layout` (pure geometry and tilt), `strip_visibility` (pure
+  auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`.
+- `src/platform/capture` — ScreenCaptureKit thumbnails on a worker thread.
 - `scripts/` — signing identity, bundling, signing, run, fixture.
