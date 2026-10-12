@@ -12,8 +12,11 @@
 //!   (`[strip] capacity*`, Apple: 5 at 1130 pt, 6 at 1410 pt).
 //!
 //! `StripOrder::Fixed` instead lists stages in creation order, matching hotkey numbers.
+//!
+//! Every Space has its own strip: slots, order and recency are kept per Space, and a
+//! display's strip shows the Space it shows now.
 
-use super::{DisplayId, Model, Pid, StageId, WindowId, WindowRole};
+use super::{DisplayId, Model, Pid, SpaceId, StageId, WindowId, WindowRole};
 use crate::engine::settings::AppWindows;
 
 /// How cards are ordered.
@@ -66,7 +69,7 @@ pub struct StripCard {
 }
 
 impl Model {
-    /// The cards for the main display.
+    /// The cards for the main display (the Space it shows now).
     pub fn strip(&self) -> Vec<StripCard> {
         self.strip_for(self.displays[0].id)
     }
@@ -76,17 +79,22 @@ impl Model {
         self.options.settings.hide_recent_apps
     }
 
-    /// The cards for one display.
+    /// The cards for one display: those of the Space it shows now.
     pub fn strip_for(&self, display: DisplayId) -> Vec<StripCard> {
+        self.strip_in(self.current_space(display))
+    }
+
+    /// The cards of one Space.
+    pub fn strip_in(&self, space: SpaceId) -> Vec<StripCard> {
         let opts = self.options.strip;
-        let active = self.active_stage(display);
+        let active = self.active_stage_in(space);
         let ids: Vec<StageId> = match opts.order {
-            StripOrder::Native => self.slots.get(&display).cloned().unwrap_or_default(),
+            StripOrder::Native => self.slots.get(&space).cloned().unwrap_or_default(),
             StripOrder::Fixed => self
                 .stages
                 .iter()
                 .filter(|s| {
-                    s.display == display
+                    s.space == space
                         && if Some(s.id) == active {
                             opts.show_active && !s.windows.is_empty()
                         } else {
@@ -99,7 +107,7 @@ impl Model {
         };
         let cards: Vec<StripCard> = ids.into_iter().filter_map(|id| self.card(id, Some(id) == active)).collect();
         if self.options.settings.app_windows == AppWindows::OneAtATime {
-            self.group_one_at_a_time(display, cards)
+            self.group_one_at_a_time(space, cards)
         } else {
             cards
         }
@@ -110,7 +118,7 @@ impl Model {
     /// of single-app stages of one app become one card (in the first one's slot) whose stage
     /// is the app's least recently shown window (clicks cycle through them all), with the
     /// app's other waiting windows stacked behind it.
-    fn group_one_at_a_time(&self, display: DisplayId, cards: Vec<StripCard>) -> Vec<StripCard> {
+    fn group_one_at_a_time(&self, space: SpaceId, cards: Vec<StripCard>) -> Vec<StripCard> {
         let single_app = |c: &StripCard| (c.apps.len() == 1).then(|| c.apps[0]);
         let mut out: Vec<StripCard> = Vec::new();
         let mut done: Vec<Pid> = Vec::new();
@@ -123,12 +131,12 @@ impl Model {
                 continue;
             }
             done.push(pid);
-            // Every inactive single-window-app stage of this app on the display, also the
+            // Every inactive single-window-app stage of this app on the Space, also the
             // ones out of view, least recently shown first.
             let mut group: Vec<(u64, StageId)> = self
                 .stages
                 .iter()
-                .filter(|s| s.display == display && !self.is_active(s.id) && !s.windows.is_empty())
+                .filter(|s| s.space == space && !self.is_active(s.id) && !s.windows.is_empty())
                 .filter(|s| s.windows.iter().all(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid)))
                 .map(|s| (s.last_active, s.id))
                 .collect();
@@ -205,25 +213,25 @@ impl Model {
 
     /// The stage `leaving` gives up the active spot to `target`: swap slots, or let `leaving`
     /// enter the strip when `target` had no card.
-    pub(crate) fn strip_swap(&mut self, display: DisplayId, leaving: StageId, target: StageId) {
-        let slots = self.slots.entry(display).or_default();
+    pub(crate) fn strip_swap(&mut self, space: SpaceId, leaving: StageId, target: StageId) {
+        let slots = self.slots.entry(space).or_default();
         if let Some(i) = slots.iter().position(|&s| s == target) {
             slots[i] = leaving;
         } else {
-            self.strip_enter(display, leaving);
+            self.strip_enter(space, leaving);
         }
     }
 
     /// A stage enters the strip: a free slot at the bottom, else the least recently used
     /// card's slot.
-    pub(crate) fn strip_enter(&mut self, display: DisplayId, stage: StageId) {
+    pub(crate) fn strip_enter(&mut self, space: SpaceId, stage: StageId) {
         let capacity = self.options.strip.capacity;
         if capacity == 0 {
             return;
         }
         let recency: Vec<(StageId, u64)> =
             self.stages.iter().map(|s| (s.id, s.last_active)).collect();
-        let slots = self.slots.entry(display).or_default();
+        let slots = self.slots.entry(space).or_default();
         if slots.contains(&stage) {
             return;
         }
@@ -242,14 +250,14 @@ impl Model {
     /// that are out of view.
     pub(crate) fn normalize_slots(&mut self) {
         let capacity = self.options.strip.capacity;
-        let displays: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
-        self.slots.retain(|d, _| displays.contains(d));
-        for display in displays {
-            let mut slots = self.slots.remove(&display).unwrap_or_default();
+        let spaces: Vec<SpaceId> = self.spaces.iter().map(|s| s.id).collect();
+        self.slots.retain(|d, _| spaces.contains(d));
+        for space in spaces {
+            let mut slots = self.slots.remove(&space).unwrap_or_default();
             let mut seen = Vec::new();
             slots.retain(|&s| {
                 let keep = !seen.contains(&s)
-                    && self.stage(s).is_some_and(|st| st.display == display)
+                    && self.stage(s).is_some_and(|st| st.space == space)
                     && self.strip_eligible(s);
                 seen.push(s);
                 keep
@@ -271,7 +279,7 @@ impl Model {
                 .stages
                 .iter()
                 .filter(|s| {
-                    s.display == display && !slots.contains(&s.id) && self.strip_eligible(s.id)
+                    s.space == space && !slots.contains(&s.id) && self.strip_eligible(s.id)
                 })
                 .map(|s| (s.last_active, s.id))
                 .collect();
@@ -282,12 +290,13 @@ impl Model {
                 }
                 slots.push(id);
             }
-            self.slots.insert(display, slots);
+            self.slots.insert(space, slots);
         }
     }
 
-    /// Stage IDs in the strip's slots for a display (native order), top to bottom.
+    /// Stage IDs in the strip's slots for a display's current Space (native order), top to
+    /// bottom.
     pub fn strip_slots(&self, display: DisplayId) -> Vec<StageId> {
-        self.slots.get(&display).cloned().unwrap_or_default()
+        self.slots.get(&self.current_space(display)).cloned().unwrap_or_default()
     }
 }

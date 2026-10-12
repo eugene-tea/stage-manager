@@ -8,9 +8,10 @@ placement, the strip, persistence) plus Apple's default behavior (first start, n
 drag and drop, ⌘M, the card's app icon, One at a Time), Shift sugar, and a strip measured
 against Apple's on a laptop and a 5K display. **Out of the box it looks and behaves like
 Apple's Stage Manager**; every extension is off until `config.toml` turns it on, and every
-look and behavior is a config key (below). The app keeps stages of floating windows on one Space:
-switching parks the stage you leave in the bottom-right corner and restores the target's
-frames and z-order exactly; the strip on the left shows the other stages as cards.
+look and behavior is a config key (below). The app keeps stages of floating windows on every
+Space (Desktop), each with its own stages and strip, as Apple's does: switching parks the
+stage you leave in the bottom-right corner and restores the target's frames and z-order
+exactly; the strip on the left shows the Space's other stages as cards.
 
 Everything works by mouse, the Dock and ⌘Tab, the way Apple's Stage Manager does. Hotkeys
 are an optional extra (off by default); nothing needs one.
@@ -129,7 +130,19 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   Apple's does, instead of the Dock (`[windows] minimize_to_strip`; macOS may show its
   restore animation toward the corner for a moment).
 - **Click a card's app icon** to switch to that card with every window of the app, also the
-  ones sitting in other stages.
+  ones sitting in other stages of the Space.
+- **Spaces (Desktops).** Every Space has its own Stage Manager, as Apple's does: its own
+  stages, active stage and strip, listing only that Space's windows. The same app can have
+  stages on several Spaces (VS Code at work on Desktop 1 and at home on Desktop 2), each
+  holding only that Space's windows. Clicking a card never changes the Space. Going to a
+  Space shows its strip (the first visit after launch groups its windows one stage per app,
+  or as saved); a Dock click or ⌘Tab to an app may switch Spaces the way macOS's own
+  setting says ("When switching to an application, switch to a Space with open windows for
+  the application", Desktop & Dock → Mission Control); we never fight it. A window moved to
+  another Space (Mission Control, or dragged across) leaves its stage and joins the current
+  stage there. A window on every Space ("Assign To: All Desktops") is treated as pinned.
+  Full-screen apps are Spaces of their own: no strip there. Stage numbers (hotkeys, `ctl
+  switch N`) count the current Space's stages.
 - **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
   card; clicking it again opens the app's next window.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
@@ -282,12 +295,16 @@ leaves them unmanaged and `float` pins them.
 
 ## Persistence
 
-`state.json` next to the config is written about 500 ms after every change: stages in
-order, their windows (bundle ID, title, frame, front-to-back position, key window, pinned),
-the active stage and the strip slots. At launch, after the recovery scan, live windows are
-matched to it (exact bundle ID + title first, then bundle ID alone), the stages are rebuilt,
-the saved active stage is shown and the others are parked. Windows that match nothing join
-the active stage.
+`state.json` next to the config is written about 500 ms after every change, per Space (each
+with a synthetic id; macOS has no public one): stages in order, their windows (bundle ID,
+title, frame, front-to-back position, key window, pinned), the active stage and the strip
+slots. At launch, after the recovery scan, the Space shown is recognized by its windows
+(exact bundle ID + title; with no match, the Space shown when saved), its windows are matched
+to it (exact bundle ID + title first, then bundle ID alone), the stages are rebuilt, the
+saved active stage is shown and the others are parked. Windows that match nothing get stages
+the way a first start does. Every other saved Space is rebuilt the same way the first time
+you go there (macOS lists most apps' windows of a Space only while it shows), and is saved
+again untouched until then. Version 1 files (one Space) are read as one Space.
 
 ## Safety: no window stays parked
 
@@ -300,9 +317,16 @@ the active stage.
    (forcing the unpark itself if the main thread hangs); SIGABRT gets a best-effort unpark.
 5. A **guardian** process (`stage-manager --guardian <pid>`) waits for the app with kqueue
    and runs the recovery scan unless the app wrote its clean-exit marker (`kill -9`, crash).
+   While a window stays stranded on another Space (Accessibility reaches most apps' windows
+   only on the Space shown), it keeps watching the window list and scans again when that
+   window shows (you went to its Space), until none is left or Stage Manager runs again.
 6. The **recovery scan** at launch and in the guardian: every window of every managed app
    stranded in the park zone goes back to its `state.json` frame, or is centered.
 7. Every restore frame is **clamped** onto the visible screen.
+
+Every Space counts: the registry holds parked windows of every Space (their AX elements
+were taken while their Space showed), and Quit is clean only when the window server lists
+no managed app's window in the park zone on any Space; otherwise the guardian takes over.
 
 ## Environment
 
@@ -323,10 +347,10 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | Command | Does |
 |---------|------|
 | `ping` | `{"ok":true,"pong":true,"pid":…,"version":…}` |
-| `dump` | observed apps and windows (says so when Accessibility is missing) |
-| `state` | stages, windows, restore and live frames, parked flags, strip, config error |
-| `switch N` | switch to stage N |
-| `send N [ID]` | send a window (default: the focused one) to stage N |
+| `dump` | observed apps and windows (says so when Accessibility is missing), and `spaces`: each Space's synthetic id, display, whether it shows, its active stage and stage ids (no titles), plus windows waiting to show and saved Spaces not visited yet |
+| `state` | stages (with their Space), windows, restore and live frames, parked flags, strip, the Space shown, config error |
+| `switch N` | switch to stage N (of the Space shown) |
+| `send N [ID]` | send a window (default: the focused one) to stage N of its Space |
 | `new [ID]` | send a window to a new stage |
 | `pin [ID]` | pin or unpin a window |
 | `merge N` | move stage N's windows into the active stage (a shift-click on its card) |
@@ -382,6 +406,11 @@ the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips
 
 - Apple's own Stage Manager must be off while this app runs (both move windows).
 - Main display only; other displays are left alone.
+- Spaces are told apart by their windows (no public API names them): an empty Desktop is
+  forgotten when you leave it, and a Desktop whose windows are all hidden or minimized is
+  taken for a new one until one of them shows (then it is recognized). Each Space's strip
+  appears once the Space has slid in (Apple's slides in with it). The first visit to a
+  Space after launch parks its windows into stages, one per app (or as saved).
 - A window dragged onto the strip keeps its full size until it is dropped (Apple shrinks it
   into a card); a highlighted placeholder card shows where it will go. A dragged card's
   ghost is a snapshot of its front window, not the live window.

@@ -38,6 +38,12 @@ pub struct StripSnapshot {
     /// The launch's stages were just built and `[reveal] launch_reveal` is on: if a window
     /// covers the strip right now, show it for a moment anyway (once per launch).
     pub announce: bool,
+    /// The Space (Desktop) these cards belong to (the engine's synthetic id). Every Space
+    /// has its own strip: when it changes, the strip drops the old cards at once and shows
+    /// itself on the Space now shown.
+    pub space: u64,
+    /// The shown Space is a full-screen app's: no strip there.
+    pub fullscreen: bool,
 }
 
 /// One card: a stage that is not active.

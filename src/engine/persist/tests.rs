@@ -26,9 +26,10 @@ fn live(id: u32, bundle: &str, title: &str) -> WindowMeta {
     }
 }
 
-fn state(stages: Vec<(Option<&str>, Vec<SavedWindow>)>, active: Option<usize>) -> StateFile {
-    StateFile {
-        version: STATE_VERSION,
+fn state(stages: Vec<(Option<&str>, Vec<SavedWindow>)>, active: Option<usize>) -> SavedSpace {
+    SavedSpace {
+        id: 1,
+        current: true,
         stages: stages
             .into_iter()
             .map(|(name, windows)| SavedStage {
@@ -54,28 +55,41 @@ fn json_round_trip() {
         ],
         Some(0),
     );
-    let back = StateFile::from_json(&s.to_json()).expect("parses");
-    assert_eq!(back, s);
-    assert!(s.to_json().contains("\"role\": \"standard\""));
+    let file = StateFile::single(s);
+    let back = StateFile::from_json(&file.to_json()).expect("parses");
+    assert_eq!(back, file);
+    assert!(file.to_json().contains("\"role\": \"standard\""));
 }
 
 #[test]
 fn json_rejects_other_versions_and_garbage() {
-    let mut s = state(vec![], None);
-    s.version = 2;
+    let mut s = StateFile::single(state(vec![], None));
+    s.version = 3;
     assert!(StateFile::from_json(&s.to_json()).is_err());
     assert!(StateFile::from_json("not json").is_err());
+    assert!(StateFile::from_json("{}").is_err());
 }
 
 #[test]
 fn json_without_strip_slots_still_parses() {
-    let text = r#"{"version":1,"stages":[],"active_index":null}"#;
-    assert!(
-        StateFile::from_json(text)
-            .expect("parses")
-            .strip_slots
-            .is_empty()
-    );
+    let text = r#"{"version":2,"spaces":[{"id":4,"stages":[],"active_index":null}]}"#;
+    let s = StateFile::from_json(text).expect("parses");
+    assert!(s.spaces[0].strip_slots.is_empty());
+    assert!(!s.spaces[0].current);
+}
+
+#[test]
+fn version_1_files_are_read_as_one_current_space() {
+    let text = r#"{"version":1,"stages":[{"name":"Work","windows":[]},{"name":null,"windows":[]}],"active_index":1,"strip_slots":[0]}"#;
+    let s = StateFile::from_json(text).expect("parses");
+    assert_eq!(s.version, STATE_VERSION);
+    assert_eq!(s.spaces.len(), 1);
+    let space = &s.spaces[0];
+    assert_eq!((space.id, space.current), (1, true));
+    assert_eq!(space.stages.len(), 2);
+    assert_eq!(space.stages[0].name.as_deref(), Some("Work"));
+    assert_eq!(space.active_index, Some(1));
+    assert_eq!(space.strip_slots, [0]);
 }
 
 #[test]
@@ -218,7 +232,10 @@ fn to_state_saves_stages_frames_key_children_and_pins() {
     m.add_window(child(5, 10, Some(1)), &d(RuleAction::Current), &obs);
     m.add_window(live(3, "com.example.c", "C"), &d(RuleAction::Float), &obs);
     m.send_window(WindowId(2), Target::Named("Mail".into()), &obs);
-    let s = m.to_state();
+    let file = m.to_state();
+    assert_eq!(file.spaces.len(), 1);
+    let s = &file.spaces[0];
+    assert!(s.current);
     assert_eq!(s.stages.len(), 2);
     assert_eq!(s.active_index, Some(0));
     let first = &s.stages[0].windows;
@@ -290,7 +307,7 @@ fn save_rematch_and_apply_rebuilds_the_same_stages() {
         },
     ];
     let state = StateFile::from_json(&json).expect("parses");
-    let a = rematch(&state, &relive);
+    let a = rematch(&state.spaces[0], &relive);
     let mut fresh = model();
     let actions = fresh.apply_assignment(&relive, &a, false);
 
@@ -607,7 +624,7 @@ fn first_start_fits_every_window_of_every_stage_and_saves_the_pre_fit_frame() {
         WindowMeta { frame: fitted_wide, ..app_window(1, 10, "com.example.a") },
         WindowMeta { frame: Rect::new(216.0, 80.0, 600.0, 400.0), ..app_window(2, 20, "com.example.b") },
     ];
-    let a = rematch(&saved, &live);
+    let a = rematch(&saved.spaces[0], &live);
     again.apply_launch(&live, &a, false, &LaunchHints::default());
     assert_eq!(again.window(WindowId(1)).and_then(|w| w.original), Some(wide));
     assert_eq!(again.window(WindowId(2)).and_then(|w| w.original), Some(over));

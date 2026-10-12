@@ -21,6 +21,11 @@
 //!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip area, the strip shows
 //!   itself and a highlighted placeholder card in the slot below the others. Auto-hide never
 //!   fights either drag.
+//! - **Spaces**: the panel belongs to one Space at a time, like any window, and slides away
+//!   with it, as each Space's own strip does. When a snapshot for another Space arrives the
+//!   panel is ordered out, its old cards are dropped without animation, the new ones laid
+//!   out, and it is ordered in again, which puts it on the Space shown now. On a full-screen
+//!   app's Space it stays out.
 //! - Extensions, off by default (`[reveal]`): the **edge tab**, a slim translucent tab at the
 //!   left edge while a window covers the strip; the **launch reveal**, a covered strip shown
 //!   for a moment at launch.
@@ -281,12 +286,8 @@ impl EdgeTab {
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
         panel.setLevel(NSFloatingWindowLevel);
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::IgnoresCycle
-                | NSWindowCollectionBehavior::FullScreenAuxiliary,
-        );
+        // One Space at a time (re-homed on a Space change), never over a full-screen app.
+        panel.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
         panel.setHidesOnDeactivate(false);
         panel.setBecomesKeyOnlyIfNeeded(true);
         // SAFETY: the panel is owned by the tab for the life of the app.
@@ -726,12 +727,8 @@ impl Strip {
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
         panel.setLevel(NSFloatingWindowLevel);
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::IgnoresCycle
-                | NSWindowCollectionBehavior::FullScreenAuxiliary,
-        );
+        // One Space at a time (re-homed on a Space change), never over a full-screen app.
+        panel.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
         panel.setHidesOnDeactivate(false);
         panel.setFloatingPanel(true);
         panel.setBecomesKeyOnlyIfNeeded(true);
@@ -822,13 +819,21 @@ impl Strip {
         self.cards_root.setFrame(bounds);
         self.overlay.setBounds(bounds);
         CATransaction::commit();
+        self.clear_cards();
+        self.icons.clear();
+        self.visibility.set_timing(Timing::from_style(&self.style.reveal));
+    }
+
+    /// Drops every card's layers at once (no animation).
+    fn clear_cards(&mut self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
         for layers in self.cards.values() {
             layers.card.removeFromSuperlayer();
             layers.flat.removeFromSuperlayer();
         }
+        CATransaction::commit();
         self.cards.clear();
-        self.icons.clear();
-        self.visibility.set_timing(Timing::from_style(&self.style.reveal));
     }
 
     // -- snapshots ------------------------------------------------------------------------
@@ -851,14 +856,30 @@ impl Strip {
         self.scale = scale;
 
         let force = rescaled || snapshot.style != self.snapshot.style;
+        // Another Space (or a full-screen one): out at once, the old cards dropped, so none
+        // of them shows on the new Space; ordered in below, on the Space shown now.
+        let rehome = !self.has_snapshot
+            || snapshot.space != self.snapshot.space
+            || snapshot.fullscreen != self.snapshot.fullscreen;
+        if rehome && self.has_snapshot {
+            tracing::debug!(space = snapshot.space, fullscreen = snapshot.fullscreen, "strip: another Space");
+            self.panel.orderOut(None);
+            self.tab.show(false, self.mtm);
+            self.set_hover(None);
+            self.pressed = None;
+            self.card_drag = None;
+            self.clear_cards();
+        }
         self.snapshot = snapshot;
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
         }
         self.layout_cards(force);
-        if !self.has_snapshot {
+        if rehome {
             self.has_snapshot = true;
-            self.panel.orderFrontRegardless();
+            if !self.snapshot.fullscreen {
+                self.panel.orderFrontRegardless();
+            }
         }
         if self.snapshot.announce && !self.announced {
             self.announced = true;
@@ -1343,7 +1364,12 @@ impl Strip {
             self.update_targets();
         }
         self.set_polling(decision.poll || window_drag || card_dragging);
-        let tab = self.style.reveal.edge_tab && self.covered() && !self.shown && !window_drag && !card_dragging;
+        let tab = self.style.reveal.edge_tab
+            && !self.snapshot.fullscreen
+            && self.covered()
+            && !self.shown
+            && !window_drag
+            && !card_dragging;
         self.tab.show(tab, self.mtm);
     }
 

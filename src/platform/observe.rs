@@ -7,6 +7,13 @@
 //!
 //! The [`Observer`] only tracks; it reports what changed as [`WinEvent`]s, which the
 //! controller drains with [`Observer::take_events`] and turns into engine operations.
+//!
+//! **Spaces.** `AXWindows` lists only the current Space's windows for most apps (measured
+//! 10-12 on macOS 27: Safari, Mail, VS Code, Fork, Terminal, Chrome, Messages, Telegram);
+//! some apps list every Space's. So the windows of another Space are found when the user
+//! goes there ([`Observer::rescan_all`] on a Space change), and a tracked window that goes
+//! to another Space stays tracked (no destroy notification comes). Whether a window is on
+//! the current Space is the window server's on-screen flag, read by the controller.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -444,14 +451,51 @@ impl Observer {
     /// Re-reads an app's window list and tracks windows that appeared without a
     /// notification (or before the window server knew them).
     fn rescan_app(&mut self, pid: i32) {
-        let Some(app) = self.observed.get(&pid) else { return };
-        let Ok(list) = app.element.windows() else { return };
         let cg = cg_lookup();
-        let mut ids: Vec<u32> = list.into_iter().filter_map(|w| self.track_window(pid, w, &cg)).collect();
-        ids.sort_unstable();
-        for id in ids {
+        for id in self.rescan_app_quietly(pid, &cg) {
             self.found(id, "window found");
         }
+    }
+
+    /// Tracks the windows `pid` lists now that are not tracked yet, in creation order,
+    /// without reporting them.
+    fn rescan_app_quietly(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>) -> Vec<u32> {
+        let Some(app) = self.observed.get(&pid) else { return Vec::new() };
+        let Ok(list) = app.element.windows() else { return Vec::new() };
+        let mut ids: Vec<u32> = list.into_iter().filter_map(|w| self.track_window(pid, w, cg)).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// After a Space change: re-reads every observed app's window list (most apps list only
+    /// the current Space's windows) and returns the windows tracked for the first time,
+    /// without reporting them as [`WinEvent::Found`]: the controller places them as the
+    /// Space's own.
+    pub fn rescan_all(&mut self) -> Vec<u32> {
+        if !self.observing {
+            return Vec::new();
+        }
+        let cg = cg_lookup();
+        let pids: Vec<i32> = self.observed.keys().copied().collect();
+        let mut out = Vec::new();
+        for pid in pids {
+            for id in self.rescan_app_quietly(pid, &cg) {
+                self.log_window("window found on arrival", id);
+                out.push(id);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// True when the window is minimized now (asked through AX; false when AX cannot tell).
+    pub fn is_minimized_now(&self, id: u32) -> bool {
+        self.windows.get(&id).is_some_and(|w| w.element.is_minimized().unwrap_or(false))
+    }
+
+    /// True when app `pid` is hidden now (⌘H; asked through AX).
+    pub fn app_hidden_now(&self, pid: i32) -> bool {
+        self.observed.get(&pid).is_some_and(|a| a.element.is_hidden().unwrap_or(false))
     }
 
     /// Handles one AX notification for app `pid`.

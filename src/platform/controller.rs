@@ -24,12 +24,21 @@
 //!   which shows a drop target; released over the strip, it gets a stage of its own and keeps
 //!   its pre-drag frame. A card dragged out of the strip arrives as
 //!   [`StripEvent::CardDropped`].
+//! - **Spaces**: every Space (Desktop) has its own stages and strip, as Apple's does. A
+//!   window is given to the engine only once the window server lists it on screen (so its
+//!   Space is the shown one); until then it waits in `unplaced` (another Space, minimized,
+//!   app hidden). On a Space change ([`Controller::on_space_changed`]) every app's window
+//!   list is read again and the engine recognizes the Space by the windows on screen
+//!   ([`Model::arrive`]). About once a second the window server's list is checked: windows
+//!   waiting that now show are new windows; windows of other Spaces on screen were moved
+//!   here; windows of this Space gone from the screen (app not hidden, not minimized) left
+//!   it. On a full-screen app's Space there is no strip and no stage changes.
 //! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
 //!   current stage, and an activation (Dock click) of an app in another stage brings its
 //!   windows here. The app switcher (Command held) never counts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -49,7 +58,7 @@ use crate::engine::model::{
     Action, Display, DisplayId, Home, Model, Observation, StageId, Target, WindowId, WindowMeta, WindowRole,
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
-use crate::engine::persist::{LaunchHints, STATE_VERSION, StateFile, rematch};
+use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripEvent, StripSnapshot};
@@ -66,6 +75,15 @@ const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
 
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
+
+/// How often the window server's list is checked for windows changing Spaces.
+const SPACE_POLL: Duration = Duration::from_secs(1);
+
+/// No such check this soon after a Space change (the list may still be the old Space's).
+const SPACE_SETTLE: Duration = Duration::from_secs(1);
+
+/// A window counts as moved to or gone from the shown Space after this many checks in a row.
+const SPACE_CHECKS: u32 = 2;
 
 /// Updates for the main thread (menu and hotkeys).
 #[derive(Clone, Debug, PartialEq)]
@@ -204,6 +222,19 @@ pub struct Controller {
     /// The first snapshot after the launch's stages are built asks the strip to show itself
     /// for a moment even when a window covers it (once per launch).
     announce: bool,
+    /// Tracked windows not given to the engine yet: not on screen when found (another
+    /// Space, minimized, app hidden). Offered once they show.
+    unplaced: BTreeSet<u32>,
+    /// The shown Space is a full-screen app's: no strip, no stage changes.
+    fullscreen: bool,
+    /// When the last Space change was handled.
+    space_changed_at: Option<Instant>,
+    /// When the window server's list was last checked for Space changes.
+    space_checked: Instant,
+    /// Managed windows of other Spaces on screen at the last check.
+    foreign: Vec<u32>,
+    /// Managed windows of the shown Space missing from the screen: checks in a row.
+    absent: HashMap<u32, u32>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -268,6 +299,12 @@ impl Controller {
             press: None,
             drag: None,
             announce: false,
+            unplaced: BTreeSet::new(),
+            fullscreen: false,
+            space_changed_at: None,
+            space_checked: Instant::now(),
+            foreign: Vec::new(),
+            absent: HashMap::new(),
         };
         this.notify_config();
         this
@@ -324,9 +361,11 @@ impl Controller {
         })
     }
 
-    /// Live frames of every shown managed window, the z-order and the focused window.
+    /// Live frames of every shown managed window of the shown Space, the z-order and the
+    /// focused window.
     fn observe(&self, ob: &mut Observer) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
+        let space = m.current_space(m.main_display().id);
         let list = windows::list_windows();
         let z_order: Vec<WindowId> = list
             .iter()
@@ -334,7 +373,8 @@ impl Controller {
             .map(|w| WindowId(w.id))
             .filter(|id| m.window(*id).is_some())
             .collect();
-        let shown: Vec<u32> = m.windows().filter(|w| !w.parked).map(|w| w.meta.id.0).collect();
+        let shown: Vec<u32> =
+            m.windows().filter(|w| !w.parked && (w.space == space || w.sticky)).map(|w| w.meta.id.0).collect();
         let mut frames = HashMap::new();
         for id in shown {
             if let Some(f) = ob.refresh_frame(id) {
@@ -411,6 +451,9 @@ impl Controller {
                 Action::Park { frame, .. } => w.element.set_position(frame.origin()),
                 Action::Raise { .. } => w.element.raise(),
                 Action::Focus { .. } => {
+                    // Raise and make it main first, then bring only the app forward (never
+                    // all its windows): with its main window on the shown Space, macOS has
+                    // no reason to switch Spaces. The engine never focuses another Space's.
                     self.echoes.touch_app(w.pid, now);
                     let _ = w.element.raise();
                     let main = w.element.set_main(true);
@@ -470,9 +513,14 @@ impl Controller {
             })
             .collect();
         let dragged = self.drag.filter(|d| d.moving);
+        let space = m.current_space(m.main_display().id);
         let active_frames = m
             .windows()
-            .filter(|w| !w.parked && (w.home == Home::Pinned || active.is_some_and(|a| w.home == Home::Stage(a))))
+            .filter(|w| {
+                !w.parked
+                    && ((w.home == Home::Pinned && (w.space == space || w.sticky))
+                        || active.is_some_and(|a| w.home == Home::Stage(a)))
+            })
             .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
             .map(|w| w.meta.frame)
             .collect();
@@ -485,6 +533,8 @@ impl Controller {
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
             announce: std::mem::take(&mut self.announce),
+            space: m.current_space(m.main_display().id).0,
+            fullscreen: self.fullscreen,
         });
     }
 
@@ -550,6 +600,8 @@ impl Controller {
             WinEvent::Stopped => tracing::warn!("observation stopped; windows stay where they are"),
             WinEvent::Found(id) => self.on_found(ob, id),
             WinEvent::Destroyed(id) => {
+                self.unplaced.remove(&id);
+                self.absent.remove(&id);
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.remove_window(WindowId(id));
                     self.execute(ob, actions);
@@ -580,8 +632,14 @@ impl Controller {
                 }
             }
             WinEvent::Focused(id) => {
+                if self.unplaced.contains(&id) {
+                    self.on_found(ob, id);
+                }
                 if self.echoes.is_window_echo(id, now) {
                     tracing::debug!(id, "focus echo of our own action ignored");
+                    return;
+                }
+                if self.fullscreen {
                     return;
                 }
                 let obs = self.observe(ob);
@@ -601,8 +659,16 @@ impl Controller {
             }
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::AppActivated(pid) => {
+                let waiting: Vec<u32> =
+                    self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
+                for id in waiting {
+                    self.on_found(ob, id);
+                }
                 if self.echoes.is_app_echo(pid, now) {
                     tracing::debug!(pid, "activation echo of our own action ignored");
+                    return;
+                }
+                if self.fullscreen {
                     return;
                 }
                 let obs = self.observe(ob);
@@ -629,7 +695,7 @@ impl Controller {
     /// window goes to the strip as a card of its own instead of the Dock: it is parked, then
     /// un-minimized there (macOS may flash its restore animation toward the corner).
     fn on_minimized(&mut self, ob: &mut Observer, id: u32) {
-        if !self.store.config().windows.minimize_to_strip {
+        if !self.store.config().windows.minimize_to_strip || self.fullscreen {
             return;
         }
         let obs = self.observe(ob);
@@ -657,16 +723,18 @@ impl Controller {
         })
     }
 
-    /// True when app `pid` has a standard window on the current stage (or pinned): its
-    /// activation switches nothing, so Shift has nothing to change (a Shift-click inside one
-    /// of its windows, to extend a selection, must not pull in its other windows).
+    /// True when app `pid` has a standard window on the current stage (or pinned on this
+    /// Space): its activation switches nothing, so Shift has nothing to change (a Shift-click
+    /// inside one of its windows, to extend a selection, must not pull in its other windows).
     fn app_present(&self, pid: i32) -> bool {
         self.model.as_ref().is_some_and(|m| {
             let active = m.main_active_stage();
+            let space = m.current_space(m.main_display().id);
             m.windows().any(|w| {
                 w.meta.pid == pid
                     && w.meta.role == WindowRole::Standard
-                    && (w.home == Home::Pinned || active.is_some_and(|a| w.home == Home::Stage(a)))
+                    && ((w.home == Home::Pinned && (w.space == space || w.sticky))
+                        || active.is_some_and(|a| w.home == Home::Stage(a)))
             })
         })
     }
@@ -753,12 +821,9 @@ impl Controller {
         }
     }
 
-    fn z_map() -> HashMap<u32, usize> {
-        windows::z_order(&windows::list_windows())
-    }
-
-    /// Observation started: build the model from the live windows and `state.json` (launch,
-    /// after the recovery scan), or add newly seen windows when it restarts.
+    /// Observation started: build the model from the windows on screen and `state.json`
+    /// (launch, after the recovery scan), or add newly seen windows when it restarts.
+    /// Windows not on screen (other Spaces, minimized, hidden apps) wait in `unplaced`.
     fn on_started(&mut self, ob: &mut Observer) {
         if self.model.is_some() {
             let new: Vec<u32> = ob
@@ -777,58 +842,298 @@ impl Controller {
         let capacity = strip_capacity(displays[0].visible, &config);
         let mut options = config.model_options(self.settings, capacity);
         options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, &config);
+        let main = displays[0];
         let mut model = Model::new(displays, options);
-        let z = Self::z_map();
-        let rules = &config.rules;
-        let live: Vec<WindowMeta> = ob
+        let list = windows::list_windows();
+        let shown = on_screen(&list);
+        let z = windows::z_order(&list);
+        let candidates: Vec<WindowMeta> = ob
             .windows()
             .keys()
             .filter_map(|id| self.meta(ob, *id, &z))
-            .filter(|m| m.role != WindowRole::Standard || rules.decide(&m.bundle_id, &m.title).action != RuleAction::Ignore)
+            .filter(|m| self.allowed_by_rules(m))
             .collect();
+        let (live, waiting): (Vec<WindowMeta>, Vec<WindowMeta>) =
+            candidates.into_iter().partition(|m| shown.contains(&m.id.0));
+        self.unplaced = waiting.iter().map(|m| m.id.0).collect();
         let state = Self::load_state();
-        let empty = StateFile { version: STATE_VERSION, stages: vec![], active_index: None, strip_slots: vec![] };
-        let assignment = rematch(state.as_ref().unwrap_or(&empty), &live);
+        let first_start = state.is_none();
         tracing::info!(
             live = live.len(),
-            saved_stages = state.as_ref().map_or(0, |s| s.stages.len()),
-            unmatched = assignment.unmatched.len(),
+            off_screen = self.unplaced.len(),
+            saved_spaces = state.as_ref().map_or(0, |s| s.spaces.len()),
             "building stages"
         );
-        let z_order: Vec<WindowId> = windows::list_windows()
-            .iter()
-            .filter(|w| w.onscreen && w.layer == 0)
-            .map(|w| WindowId(w.id))
-            .collect();
-        let frontmost = AxElement::system_wide().focused_application().ok().and_then(|a| a.pid().ok());
-        let first_start = state.is_none();
-        let actions = model.apply_launch(&live, &assignment, false, &LaunchHints { z_order, frontmost });
+        if let Some(state) = state {
+            model.restore_spaces(state.spaces);
+        }
+        if main.frame.w > 0.0 && self.fullscreen_shown(&list, main.frame) {
+            self.fullscreen = true;
+            tracing::info!("launched on a full-screen app's Space: no strip until a Desktop shows");
+        }
+        let hints = launch_hints(&list);
+        let actions = if self.fullscreen { Vec::new() } else { model.arrive(main.id, &live, &[], &hints) };
         if first_start {
             tracing::info!(stages = model.stages().len(), "first start: one stage per app, as Apple's Stage Manager does");
+        }
+        if self.fullscreen {
+            self.unplaced.extend(live.iter().map(|m| m.id.0));
         }
         self.model = Some(model);
         self.announce = config.style.reveal.launch_reveal;
         self.execute(ob, actions);
-        for id in &assignment.unmatched {
-            let Some(meta) = live.iter().find(|m| m.id == *id) else { continue };
-            if rules.decide(&meta.bundle_id, &meta.title).action == RuleAction::Float {
-                let obs = self.observe(ob);
-                if let Some(m) = self.model.as_mut() {
-                    let actions = m.toggle_pin(*id, &obs);
-                    self.execute(ob, actions);
-                }
-            }
+        if !self.fullscreen {
+            self.pin_floats(ob, &live);
         }
         self.present();
         self.mark_dirty();
     }
 
-    /// A window appeared after launch: the rules decide where it goes.
+    /// True unless a rule says to ignore the window (children always count).
+    fn allowed_by_rules(&self, m: &WindowMeta) -> bool {
+        m.role != WindowRole::Standard || self.store.config().rules.decide(&m.bundle_id, &m.title).action != RuleAction::Ignore
+    }
+
+    /// Windows just placed by an arrival whose rule says `float`: pinned.
+    fn pin_floats(&mut self, ob: &mut Observer, placed: &[WindowMeta]) {
+        for meta in placed.iter().filter(|m| m.role == WindowRole::Standard) {
+            let float = self.store.config().rules.decide(&meta.bundle_id, &meta.title).action == RuleAction::Float;
+            let pinned = self.model.as_ref().and_then(|m| m.window(meta.id)).is_none_or(|w| w.home == Home::Pinned);
+            if float && !pinned {
+                let obs = self.observe(ob);
+                if let Some(m) = self.model.as_mut() {
+                    let actions = m.toggle_pin(meta.id, &obs);
+                    self.execute(ob, actions);
+                }
+            }
+        }
+    }
+
+    /// True when the shown Space is a full-screen app's: a window on screen covers the whole
+    /// display (menu bar included) and its app has a window in full screen.
+    fn fullscreen_shown(&self, list: &[windows::CgWindow], display: Rect) -> bool {
+        list.iter()
+            .filter(|w| w.onscreen && w.layer == 0)
+            .filter(|w| (w.bounds.x - display.x).abs() < 1.0 && (w.bounds.y - display.y).abs() < 1.0)
+            .filter(|w| (w.bounds.w - display.w).abs() < 1.0 && (w.bounds.h - display.h).abs() < 1.0)
+            .any(|w| {
+                AxElement::application(w.pid)
+                    .windows()
+                    .is_ok_and(|ws| ws.iter().any(|e| e.is_fullscreen().unwrap_or(false)))
+            })
+    }
+
+    /// True when the window list disagrees with the Space the engine thinks is shown (a
+    /// Space change under way, its notification not handled yet): a known window of another
+    /// Space is on screen, or none of this Space's windows is while one of them is missing
+    /// for no visible reason.
+    fn space_in_doubt(&self, ob: &Observer, shown: &HashSet<u32>) -> bool {
+        let Some(m) = &self.model else { return false };
+        let space = m.current_space(m.main_display().id);
+        let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
+        if m.windows().filter(standard).any(|w| w.space != space && shown.contains(&w.meta.id.0)) {
+            return true;
+        }
+        let here: Vec<WindowId> = m.windows().filter(standard).filter(|w| w.space == space).map(|w| w.meta.id).collect();
+        if here.is_empty() || here.iter().any(|id| shown.contains(&id.0)) {
+            return false;
+        }
+        let absent = self.absent_windows(ob, shown);
+        here.iter().any(|id| absent.contains(id))
+    }
+
+    /// Managed standard windows missing from the screen for no reason we can see: their app
+    /// is not hidden and they are not minimized (asked through AX). Evidence that the Space
+    /// they live on is not the one shown.
+    fn absent_windows(&self, ob: &Observer, shown: &HashSet<u32>) -> Vec<WindowId> {
+        let Some(m) = &self.model else { return Vec::new() };
+        let mut hidden: HashMap<i32, bool> = HashMap::new();
+        m.windows()
+            .filter(|w| w.meta.role == WindowRole::Standard && !w.sticky && !shown.contains(&w.meta.id.0))
+            .filter(|w| ob.window(w.meta.id.0).is_some())
+            .filter(|w| !*hidden.entry(w.meta.pid).or_insert_with(|| ob.app_hidden_now(w.meta.pid)))
+            .filter(|w| !ob.is_minimized_now(w.meta.id.0))
+            .map(|w| w.meta.id)
+            .collect()
+    }
+
+    /// The user went to another Space (`activeSpaceDidChangeNotification`): read every app's
+    /// window list again, recognize the Space by the windows on screen and show its stages
+    /// and strip. On a full-screen app's Space: no strip, nothing changes.
+    pub fn on_space_changed(&mut self, ob: &mut Observer) {
+        let Some(m) = self.model.as_ref() else { return };
+        let now = Instant::now();
+        self.space_changed_at = Some(now);
+        self.space_checked = now;
+        self.foreign.clear();
+        self.absent.clear();
+        let main = *m.main_display();
+        let before = m.current_space(main.id);
+        let found = ob.rescan_all();
+        let list = windows::list_windows();
+        if self.fullscreen_shown(&list, main.frame) {
+            if !self.fullscreen {
+                tracing::info!("Space changed: a full-screen app's Space (no strip)");
+            }
+            self.fullscreen = true;
+            self.unplaced.extend(found);
+            self.present();
+            return;
+        }
+        self.fullscreen = false;
+        let shown = on_screen(&list);
+        let z = windows::z_order(&list);
+        for id in &found {
+            self.unplaced.insert(*id);
+        }
+        let live: Vec<WindowMeta> = ob
+            .windows()
+            .keys()
+            .copied()
+            .filter(|id| shown.contains(id))
+            .filter(|id| self.unplaced.contains(id) || m.window(WindowId(*id)).is_some())
+            .filter_map(|id| self.meta(ob, id, &z))
+            .filter(|meta| self.allowed_by_rules(meta))
+            .collect();
+        let arrivals: Vec<WindowMeta> = live.iter().filter(|meta| m.window(meta.id).is_none()).cloned().collect();
+        for meta in &live {
+            self.unplaced.remove(&meta.id.0);
+        }
+        let hints = launch_hints(&list);
+        let absent = self.absent_windows(ob, &shown);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.arrive(main.id, &live, &absent, &hints);
+        let after = m.current_space(main.id);
+        tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
+        self.execute(ob, actions);
+        self.pin_floats(ob, &arrivals);
+        // Arriving through an app (Dock, Cmd-Tab) whose window waits in a stage here: show it.
+        let obs = self.observe(ob);
+        if let (Some(f), Some(m)) = (obs.focused, self.model.as_mut()) {
+            let actions = m.window_focused(f, &obs);
+            if !actions.is_empty() {
+                tracing::info!(id = f.0, "the focused window waits in a stage of this Space; switching");
+            }
+            self.execute(ob, actions);
+        }
+        self.present();
+        self.mark_dirty();
+    }
+
+    /// About once a second: windows waiting that now show on screen are new windows; known
+    /// windows of other Spaces on screen were moved here; windows of the shown Space gone from
+    /// the screen (their app not hidden, not minimized) left it. A change between a Desktop
+    /// and a full-screen Space the notification missed is handled as a Space change.
+    fn check_spaces(&mut self, ob: &mut Observer) {
+        let now = Instant::now();
+        if now.duration_since(self.space_checked) < SPACE_POLL
+            || self.space_changed_at.is_some_and(|t| now.duration_since(t) < SPACE_SETTLE)
+        {
+            return;
+        }
+        self.space_checked = now;
+        let Some(m) = self.model.as_ref() else { return };
+        let main = *m.main_display();
+        let list = windows::list_windows();
+        if self.fullscreen_shown(&list, main.frame) != self.fullscreen {
+            self.on_space_changed(ob);
+            return;
+        }
+        if self.fullscreen {
+            return;
+        }
+        let shown = on_screen(&list);
+        self.unplaced.retain(|id| ob.window(*id).is_some());
+        let showing: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown.contains(id)).collect();
+        for id in showing {
+            self.on_found(ob, id);
+        }
+
+        let Some(m) = self.model.as_ref() else { return };
+        let space = m.current_space(main.id);
+        let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
+        // Windows of other Spaces on screen, twice in a row: a Space change went unseen, the
+        // arrival guessed wrong, or a window was moved here. Arrive again.
+        let foreign: Vec<u32> = m
+            .windows()
+            .filter(standard)
+            .filter(|w| w.space != space && shown.contains(&w.meta.id.0))
+            .map(|w| w.meta.id.0)
+            .collect();
+        if !foreign.is_empty() && foreign == self.foreign {
+            tracing::info!(windows = ?foreign, "windows of another Space are on screen; recognizing the Space again");
+            self.on_space_changed(ob);
+            return;
+        }
+        self.foreign = foreign;
+
+        let here = m.windows().filter(standard).filter(|w| w.space == space).count();
+        let missing: Vec<(u32, i32)> = m
+            .windows()
+            .filter(standard)
+            .filter(|w| w.space == space && !shown.contains(&w.meta.id.0))
+            .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
+            .map(|w| (w.meta.id.0, w.meta.pid))
+            .collect();
+        let missing: Vec<u32> = missing
+            .into_iter()
+            .filter(|&(id, pid)| ob.window(id).is_some() && !ob.app_hidden_now(pid) && !ob.is_minimized_now(id))
+            .map(|(id, _)| id)
+            .collect();
+        self.absent.retain(|id, _| missing.contains(id));
+        let mut gone = Vec::new();
+        for &id in &missing {
+            let n = self.absent.entry(id).or_insert(0);
+            *n += 1;
+            if *n >= SPACE_CHECKS {
+                gone.push(id);
+            }
+        }
+        if gone.is_empty() {
+            return;
+        }
+        // Most of this Space's windows gone at once: another Space shows (the notification
+        // was missed); recognize it rather than forgetting them.
+        if gone.len() >= 2 && gone.len() * 2 >= here {
+            tracing::info!(missing = gone.len(), of = here, "most windows of this Space are gone from the screen; recognizing the Space again");
+            self.on_space_changed(ob);
+            return;
+        }
+        for id in gone {
+            self.absent.remove(&id);
+            let Some(m) = self.model.as_mut() else { return };
+            tracing::info!(id, "window left this Space (not on screen, not minimized, app not hidden)");
+            let (actions, forgotten) = m.window_left_space(WindowId(id));
+            self.execute(ob, actions);
+            self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+        }
+    }
+
+    /// A window appeared after launch: the rules decide where it goes. One that is not on
+    /// screen (another Space, minimized, app hidden; or any window while a full-screen app's
+    /// Space shows) waits in `unplaced` until it shows.
     fn on_found(&mut self, ob: &mut Observer, id: u32) {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
-        let z = Self::z_map();
+        let list = windows::list_windows();
+        let shown = on_screen(&list);
+        if self.fullscreen || !shown.contains(&id) {
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "window not on screen; it is placed once it shows");
+            }
+            return;
+        }
+        if self.space_in_doubt(ob, &shown) {
+            // Its notification came before the Space change's: placing it now would put it
+            // (and maybe a stage switch, a focus) on the Space being left.
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "the window list disagrees with the Space shown; the window is placed on arrival");
+            }
+            return;
+        }
+        self.unplaced.remove(&id);
+        let z = windows::z_order(&list);
         let Some(mut meta) = self.meta(ob, id, &z) else { return };
         if let Some(title) = ob.window(id).and_then(|w| w.element.title().ok()) {
             meta.title = title;
@@ -898,7 +1203,7 @@ impl Controller {
 
     /// A left mouse-down in another app at `p`: on the wallpaper it reveals the desktop.
     pub fn mouse_down(&mut self, ob: &mut Observer, p: Point) {
-        if self.model.is_none() || !wallpaper_reveal_enabled(&self.settings) {
+        if self.model.is_none() || self.fullscreen || !wallpaper_reveal_enabled(&self.settings) {
             return;
         }
         if self.model.as_ref().is_some_and(|m| !m.main_display().frame.contains(p)) {
@@ -923,6 +1228,10 @@ impl Controller {
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
+        if self.fullscreen && command != HotkeyCommand::ToggleStrip {
+            tracing::debug!("a full-screen app's Space shows; the hotkey does nothing");
+            return;
+        }
         let _ = match command {
             HotkeyCommand::SwitchTo(n) => self.switch(ob, n),
             HotkeyCommand::SendTo(n) => self.send(ob, None, Target::Number(n)),
@@ -946,6 +1255,9 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
+        if self.fullscreen {
+            return;
+        }
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
         let actions = match event {
@@ -966,7 +1278,8 @@ impl Controller {
     fn switch(&mut self, ob: &mut Observer, n: usize) -> Result<usize, String> {
         let obs = self.observe(ob);
         let m = self.model.as_mut().ok_or_else(not_managing)?;
-        if n > m.stages().len() {
+        let space = m.current_space(m.main_display().id);
+        if m.stage_by_number(space, n).is_none() {
             return Err(format!("there is no stage {n}"));
         }
         let actions = m.switch_to_number(n, &obs);
@@ -1004,7 +1317,8 @@ impl Controller {
     fn merge(&mut self, ob: &mut Observer, n: usize) -> Result<usize, String> {
         let obs = self.observe(ob);
         let m = self.model.as_mut().ok_or_else(not_managing)?;
-        let stage = m.stages().get(n.wrapping_sub(1)).map(|s| s.id).ok_or(format!("there is no stage {n}"))?;
+        let space = m.current_space(m.main_display().id);
+        let stage = m.stage_by_number(space, n).ok_or(format!("there is no stage {n}"))?;
         let actions = m.merge_into_active(stage, &obs);
         let count = actions.len();
         self.execute(ob, actions);
@@ -1071,6 +1385,9 @@ impl Controller {
                 self.reload_config(ob);
             }
         }
+        if self.model.is_some() && !safety::quit_requested() {
+            self.check_spaces(ob);
+        }
         if self.strip_dirty {
             self.present();
         }
@@ -1086,7 +1403,11 @@ impl Controller {
         };
         match cmd {
             Command::State => self.state_json(ob),
-            Command::Dump => ob.dump(),
+            Command::Dump => {
+                let mut dump = ob.dump();
+                dump["spaces"] = self.spaces_json();
+                dump
+            }
             Command::Switch(n) => done(self.switch(ob, n)),
             Command::Send(n, id) => done(self.send(ob, id, Target::Number(n))),
             Command::New(id) => done(self.send(ob, id, Target::New)),
@@ -1145,9 +1466,10 @@ impl Controller {
             .map(|s| {
                 json!({
                     "id": s.id.0,
+                    "space": s.space.0,
                     "number": number(s.id),
                     "name": s.name,
-                    "active": Some(s.id) == active,
+                    "active": m.active_stage_in(s.space) == Some(s.id),
                     "key": s.key.map(|k| k.0),
                     "windows": s.windows.iter().map(|w| w.0).collect::<Vec<_>>(),
                 })
@@ -1169,11 +1491,16 @@ impl Controller {
                     "original": w.original,
                     "live": live,
                     "parked": w.parked,
+                    "space": w.space.0,
+                    "sticky": w.sticky,
                 })
             })
             .collect();
         json!({
             "ok": true,
+            "space": m.current_space(m.main_display().id).0,
+            "fullscreen": self.fullscreen,
+            "unplaced": self.unplaced.iter().collect::<Vec<_>>(),
             "active": active.and_then(number),
             "strip": m.strip().iter().map(|c| c.number).collect::<Vec<_>>(),
             "strip_capacity": m.options().strip.capacity,
@@ -1193,6 +1520,34 @@ impl Controller {
     }
 }
 
+impl Controller {
+    /// The Spaces the engine knows, for `ctl dump`: synthetic id, display, whether shown,
+    /// the active stage and every stage id (no titles).
+    pub fn spaces_json(&self) -> Value {
+        let Some(m) = &self.model else { return json!(null) };
+        let list: Vec<Value> = m
+            .spaces()
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id.0,
+                    "display": s.display.0,
+                    "current": m.current_space(s.display) == s.id,
+                    "active_stage": m.active_stage_in(s.id).map(|a| a.0),
+                    "stages": m.stages_in(s.id).map(|st| st.id.0).collect::<Vec<_>>(),
+                    "windows": m.windows().filter(|w| w.space == s.id).count(),
+                })
+            })
+            .collect();
+        json!({
+            "fullscreen": self.fullscreen,
+            "unplaced_windows": self.unplaced.len(),
+            "saved_spaces_not_visited": m.unvisited_saved_spaces(),
+            "list": list,
+        })
+    }
+}
+
 impl Default for Controller {
     fn default() -> Self {
         Self::new()
@@ -1205,6 +1560,21 @@ fn not_managing() -> String {
 
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Ids of the layer-0 windows the window server lists on screen: the shown Space's (parked
+/// ones included), never another Space's.
+fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
+    list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
+}
+
+/// Recency hints for windows placed on arrival: the window list's z-order and the frontmost
+/// app.
+fn launch_hints(list: &[windows::CgWindow]) -> LaunchHints {
+    LaunchHints {
+        z_order: list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect(),
+        frontmost: AxElement::system_wide().focused_application().ok().and_then(|a| a.pid().ok()),
+    }
 }
 
 /// The focused window: the frontmost app's `AXFocusedWindow`, as a `CGWindowID`.
