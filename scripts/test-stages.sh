@@ -4,13 +4,15 @@
 # Stages A/B/C.app" with IDs <id>.a/.b/.c for the native phase; SM_FIXTURE_ID picks another
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
-#   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 strip native
+#   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 strip native visible
 #   scripts/test-stages.sh m3 safety       # some phases
 #   SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 #
 # Every app run uses STAGE_MANAGER_HOME=$TEST_HOME (default: a new /tmp/sm-test.* dir) and
 # STAGE_MANAGER_ONLY=<the fixtures>; only fixture windows ever move. The fixture app comes to
 # the front during switches; the app that was frontmost is activated again at the end.
+# No phase runs while the owner's installed app (~/Applications/Stage Manager.app) is up;
+# SM_SCREENSHOTS=<dir> is where the visible phase saves its strip screenshots.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"

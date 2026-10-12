@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use super::geometry::Rect;
 use super::park::{clamp_to_visible, is_parked, park_frame};
 use super::settings::NativeSettings;
+use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
-pub use strip::{CARD_PITCH, STRIP_MARGIN, StripCard, StripOptions, StripOrder, capacity_for_height};
+pub use strip::{CAPACITY_RANGE, CARD_PITCH, STRIP_MARGIN, StripCard, StripOptions, StripOrder, capacity_for_height};
 
 /// A process ID.
 pub type Pid = i32;
@@ -119,6 +120,10 @@ pub struct WindowState {
     pub restore: Rect,
     /// True while the model has the window parked.
     pub parked: bool,
+    /// The frame the window had before we fitted it into the stage area (moved it clear of
+    /// the strip, or narrowed it). Quit, unpark-all and every safety path put the window
+    /// back here; the user resizing the window forgets it, and moving it carries it along.
+    pub original: Option<Rect>,
 }
 
 /// The platform's view at decision time.
@@ -193,6 +198,8 @@ pub struct ModelOptions {
     /// Stages declared in config (`[stages] names`): created up front in this order, they keep
     /// their numbers and survive being empty.
     pub named_stages: Vec<String>,
+    /// Keeping placed windows clear of the strip (off by default; the platform sets it).
+    pub fit: FitOptions,
 }
 
 /// State of a desktop reveal, so a second reveal brings the stage back.
@@ -329,7 +336,33 @@ impl Model {
             .collect()
     }
 
-    /// Every parked window with its restore frame (for the platform's safety registry).
+    /// Every window a safety path must move back, with where to: parked windows and windows
+    /// we fitted into the stage area. The target is the window's pre-fit frame when it has one
+    /// (exactly, so its size comes back), else its restore frame clamped onto the visible
+    /// frame.
+    pub fn safety_targets(&self) -> Vec<(WindowId, Rect)> {
+        self.windows
+            .values()
+            .filter(|w| w.parked || w.original.is_some())
+            .map(|w| (w.meta.id, self.safety_target(w)))
+            .collect()
+    }
+
+    pub(crate) fn safety_target(&self, w: &WindowState) -> Rect {
+        let d = self.display(w.meta.display);
+        match w.original {
+            Some(o) if !o.is_degenerate() && !is_parked(o, d.frame) && !is_parked(o, d.visible) => o,
+            Some(o) => clamp_to_visible(o, d.visible),
+            None => clamp_to_visible(w.restore, d.visible),
+        }
+    }
+
+    /// Sets how placed windows are kept clear of the strip.
+    pub fn set_fit(&mut self, fit: FitOptions) {
+        self.options.fit = fit;
+    }
+
+    /// Every parked window with its restore frame.
     pub fn parked_windows(&self) -> Vec<(WindowId, Rect)> {
         self.windows
             .values()
@@ -496,7 +529,20 @@ impl Model {
 
     /// Records `frame` as a window's restore frame unless it is unusable (in a park zone or
     /// degenerate). Returns whether it was taken.
+    ///
+    /// A frame that differs from the restore frame is the user's: resizing forgets the
+    /// window's pre-fit frame, moving carries it along by the same offset.
     pub(crate) fn record_frame(&mut self, id: WindowId, frame: Rect) -> bool {
+        self.record(id, frame, true)
+    }
+
+    /// Like [`Model::record_frame`] for a frame that results from our own action (macOS may
+    /// have clamped what we asked for): the pre-fit frame is kept as it is.
+    pub(crate) fn record_own_frame(&mut self, id: WindowId, frame: Rect) -> bool {
+        self.record(id, frame, false)
+    }
+
+    fn record(&mut self, id: WindowId, frame: Rect, by_user: bool) -> bool {
         let Some(w) = self.windows.get(&id) else {
             return false;
         };
@@ -507,10 +553,47 @@ impl Model {
         if let Some(w) = self.windows.get_mut(&id) {
             w.meta.frame = frame;
             if usable {
+                if by_user
+                    && let Some(o) = w.original
+                    && !same_frame(frame, w.restore)
+                {
+                    w.original = if !same_size(frame, w.restore) || same_size(frame, o) {
+                        None
+                    } else {
+                        Some(o.translate(frame.x - w.restore.x, frame.y - w.restore.y))
+                    };
+                }
                 w.restore = frame;
             }
         }
         usable
+    }
+
+    /// Fits a standard, non-pinned window's restore frame into the stage area
+    /// ([`fit_frame`]) when fitting is on; remembers the frame it had before (once). Returns
+    /// true when the restore frame changed.
+    pub(crate) fn fit_window(&mut self, id: WindowId) -> bool {
+        let fit = self.options.fit;
+        if !fit.active() {
+            return false;
+        }
+        let Some(w) = self.windows.get(&id) else {
+            return false;
+        };
+        if w.meta.role != WindowRole::Standard || w.home == Home::Pinned {
+            return false;
+        }
+        let visible = self.display(w.meta.display).visible;
+        let from = clamp_to_visible(w.restore, visible);
+        let to = fit_frame(from, stage_area(visible, fit.inset), fit.shrink);
+        if same_frame(to, from) {
+            return false;
+        }
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.original.get_or_insert(w.restore);
+            w.restore = to;
+        }
+        true
     }
 
     /// A restore frame that is safe to record for a new window: `frame`, or a centered one if
@@ -539,8 +622,9 @@ impl Model {
         actions.push(Action::Park { id, frame });
     }
 
-    /// Brings one window to its clamped restore frame.
+    /// Brings one window to its clamped restore frame, fitted into the stage area first.
     pub(crate) fn restore_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
+        self.fit_window(id);
         let Some(w) = self.windows.get(&id) else {
             return;
         };

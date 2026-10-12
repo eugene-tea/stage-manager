@@ -9,7 +9,12 @@
 //! - **Echoes**: focus and activation events for windows and apps we just touched are our
 //!   own actions coming back late; they are dropped for [`ECHO_WINDOW`] so a stale focus
 //!   never bounces us back to the stage we left.
-//! - **Safety**: the parked-window registry is synced around every batch.
+//! - **Safety**: the parked-window registry is synced around every batch. A batch stops
+//!   between actions once Quit is requested ([`safety::quit_requested`]), so Quit is
+//!   answered within one action's time.
+//! - **Stage area**: while the strip shows, placed windows are kept clear of it (moved
+//!   right, narrowed when too wide unless `[stages] fit_windows = false`); their pre-fit
+//!   frames come back on quit ([`FitOptions`]).
 //! - After every state change: the strip snapshot ([`strip_model::present`]) and a debounced
 //!   `state.json` save.
 //! - **Apple's defaults**: the first start groups windows one stage per app; new windows
@@ -42,9 +47,8 @@ use crate::config::{ConfigStore, HotkeyCommand, HotkeyConfig};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Display, DisplayId, Home, Model, Observation, StageId, Target, WindowId, WindowMeta, WindowRole,
-    capacity_for_height,
 };
-use crate::engine::park::clamp_to_visible;
+use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, STATE_VERSION, StateFile, rematch};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
@@ -182,6 +186,16 @@ pub struct Controller {
     triggers: Triggers,
     press: Option<Press>,
     drag: Option<WindowDrag>,
+    /// The first snapshot after the launch's stages are built asks the strip to show itself
+    /// for a moment even when a window covers it (once per launch).
+    announce: bool,
+}
+
+/// How placed windows are kept clear of the strip on a display with `visible` frame: only
+/// while the strip shows (the user's toggle on, Apple's "Show recent apps" on).
+pub fn fit_options(visible: Rect, strip_visible: bool, settings: &NativeSettings, shrink: bool) -> FitOptions {
+    let on = strip_visible && !settings.hide_recent_apps;
+    FitOptions { inset: if on { stage_inset(visible.size()) } else { 0.0 }, shrink }
 }
 
 impl Controller {
@@ -217,6 +231,7 @@ impl Controller {
             triggers: Triggers::default(),
             press: None,
             drag: None,
+            announce: false,
         };
         this.notify_config();
         this
@@ -295,20 +310,39 @@ impl Controller {
 
     // ----- executing actions -------------------------------------------------------------
 
+    /// Registry entries: parked windows and windows we fitted, with where safety paths
+    /// put them back (a fitted window's exact pre-fit frame).
     fn parked_entries(&self, ob: &Observer) -> BTreeMap<u32, ParkedEntry> {
         let Some(m) = &self.model else { return BTreeMap::new() };
-        let visible = m.main_display().visible;
-        m.parked_windows()
+        m.safety_targets()
             .into_iter()
             .filter_map(|(id, restore)| {
-                let element = ob.window(id.0)?.element.clone();
-                Some((id.0, ParkedEntry { element, restore: clamp_to_visible(restore, visible) }))
+                let w = ob.window(id.0)?;
+                let child = w.kind == WindowKind::Child;
+                Some((id.0, ParkedEntry { element: w.element.clone(), restore, child }))
             })
             .collect()
     }
 
-    /// Executes actions in order; returns how many AX calls failed.
+    /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
+    /// config.
+    fn sync_fit(&mut self) {
+        let shrink = self.store.config().stages.fit_windows;
+        let (strip_visible, settings) = (self.strip_visible, self.settings);
+        if let Some(m) = self.model.as_mut() {
+            let fit = fit_options(m.main_display().visible, strip_visible, &settings, shrink);
+            m.set_fit(fit);
+        }
+    }
+
+    /// Executes actions in order; returns how many AX calls failed. Stops between actions
+    /// once Quit is requested (the model's state stays safe: unpark-all covers every window
+    /// it counts as parked, whether or not its park was carried out).
     fn execute(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
+        self.execute_batch(ob, actions, true)
+    }
+
+    fn execute_batch(&mut self, ob: &Observer, actions: Vec<Action>, interruptible: bool) -> usize {
         if actions.is_empty() {
             return 0;
         }
@@ -317,7 +351,13 @@ impl Controller {
         let now = Instant::now();
         let mut failed = 0;
         let mut changed = false;
-        for action in actions {
+        let total = actions.len();
+        for (done, action) in actions.into_iter().enumerate() {
+            if interruptible && action != Action::StateChanged && safety::quit_requested() {
+                tracing::info!(done, total, "quit requested: the rest of this batch is skipped");
+                changed = true;
+                break;
+            }
             let id = match action {
                 Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id.0,
                 Action::StateChanged => {
@@ -408,6 +448,7 @@ impl Controller {
             show_numbers: self.store.config().strip.show_numbers,
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
+            announce: std::mem::take(&mut self.announce),
         });
     }
 
@@ -481,10 +522,15 @@ impl Controller {
             WinEvent::Moved(id) => {
                 self.maybe_start_drag(ob, id, now);
                 let frame = ob.window(id).map(|w| w.frame);
+                let ours = self.echoes.is_window_echo(id, now);
                 if let (Some(m), Some(frame)) = (self.model.as_mut(), frame)
                     && m.window(WindowId(id)).is_some()
                 {
-                    m.window_frame_changed(WindowId(id), frame);
+                    if ours {
+                        m.window_frame_settled(WindowId(id), frame);
+                    } else {
+                        m.window_frame_changed(WindowId(id), frame);
+                    }
                     self.mark_dirty();
                     self.strip_dirty = true;
                 }
@@ -660,9 +706,11 @@ impl Controller {
             return;
         }
         let displays = if self.displays.is_empty() { fallback_displays() } else { self.displays.clone() };
-        let capacity = capacity_for_height(displays[0].visible.h);
+        let capacity = capacity_for(displays[0].visible.size());
         let config = self.store.config().clone();
-        let mut model = Model::new(displays, config.model_options(self.settings, capacity));
+        let mut options = config.model_options(self.settings, capacity);
+        options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, config.stages.fit_windows);
+        let mut model = Model::new(displays, options);
         let z = Self::z_map();
         let rules = &config.rules;
         let live: Vec<WindowMeta> = ob
@@ -692,6 +740,7 @@ impl Controller {
             tracing::info!(stages = model.stages().len(), "first start: one stage per app, as Apple's Stage Manager does");
         }
         self.model = Some(model);
+        self.announce = true;
         self.execute(ob, actions);
         for id in &assignment.unmatched {
             let Some(meta) = live.iter().find(|m| m.id == *id) else { continue };
@@ -759,7 +808,8 @@ impl Controller {
         self.displays = displays.clone();
         if let Some(m) = self.model.as_mut() {
             let actions = m.set_displays(displays);
-            m.set_strip_capacity(capacity_for_height(main.visible.h));
+            m.set_strip_capacity(capacity_for(main.visible.size()));
+            self.sync_fit();
             self.execute(ob, actions);
         }
     }
@@ -773,6 +823,7 @@ impl Controller {
         self.settings = s;
         if let Some(m) = self.model.as_mut() {
             m.set_settings(s);
+            self.sync_fit();
             self.present();
         }
     }
@@ -819,6 +870,7 @@ impl Controller {
     /// Shows or hides the strip (menu and hotkey).
     pub fn toggle_strip(&mut self) {
         self.strip_visible = !self.strip_visible;
+        self.sync_fit();
         tracing::info!(visible = self.strip_visible, "strip toggled");
         notify_ui(UiUpdate::StripVisible(self.strip_visible));
         self.present();
@@ -893,7 +945,7 @@ impl Controller {
         let Some(m) = self.model.as_mut() else { return 0 };
         let actions = m.unpark_all();
         let n = actions.len();
-        let failed = self.execute(ob, actions);
+        let failed = self.execute_batch(ob, actions, false);
         tracing::info!(windows = n, failed, "unparked every window");
         failed
     }
@@ -909,6 +961,7 @@ impl Controller {
                 tracing::info!("config reloaded");
                 self.config_error = None;
                 let config = self.store.config().clone();
+                self.sync_fit();
                 if let Some(m) = self.model.as_mut() {
                     let capacity = m.options().strip.capacity;
                     m.set_strip_options(config.strip_options(capacity));
@@ -997,7 +1050,7 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugClick { .. } | Command::DebugDrag { .. } => {
+            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. } | Command::DebugDrag { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }
         }
@@ -1037,6 +1090,7 @@ impl Controller {
                     "parent": match w.meta.role { WindowRole::Child { parent } => parent.map(|p| p.0), WindowRole::Standard => None },
                     "home": match w.home { Home::Pinned => json!("pinned"), Home::Stage(s) => json!(number(s)) },
                     "restore": w.restore,
+                    "original": w.original,
                     "live": live,
                     "parked": w.parked,
                 })
@@ -1047,6 +1101,9 @@ impl Controller {
             "active": active.and_then(number),
             "strip": m.strip().iter().map(|c| c.number).collect::<Vec<_>>(),
             "strip_capacity": m.options().strip.capacity,
+            "stage_inset": m.options().fit.inset,
+            "strip_width": strip_width(m.main_display().visible.size()),
+            "fit_windows": m.options().fit.shrink,
             "strip_visible": self.strip_visible,
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },

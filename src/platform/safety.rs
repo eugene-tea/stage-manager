@@ -39,13 +39,31 @@ const AX_TIMEOUT_SECONDS: f32 = 0.25;
 /// Assumed menu bar height when the visible frame is unknown (guardian).
 const MENU_BAR_GUESS: f64 = 38.0;
 
-/// A parked window: its element and the frame that brings it back.
+/// A window a safety path must move back (parked, or fitted clear of the strip): its
+/// element and the frame that brings it back.
 #[derive(Clone, Debug)]
 pub struct ParkedEntry {
     /// The window's AX element.
     pub element: AxElement,
-    /// The restore frame, already clamped onto the visible display.
+    /// Where it goes: the restore frame clamped onto the visible display, or a fitted
+    /// window's exact pre-fit frame.
     pub restore: Rect,
+    /// A child window (dialog, sheet, panel): some refuse a resize or a move; the recovery
+    /// scan covers them.
+    pub child: bool,
+}
+
+/// Set once Quit is requested: the WM thread stops long batches and answers Quit first.
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Marks that the app is quitting (any thread).
+pub fn request_quit() {
+    QUIT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// True once Quit is requested.
+pub fn quit_requested() -> bool {
+    QUIT_REQUESTED.load(Ordering::SeqCst)
 }
 
 static REGISTRY: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new());
@@ -95,6 +113,9 @@ pub struct Report {
     pub failed: usize,
 }
 
+/// The registry entries [`unpark_registry`] could not restore: id, frame target, error.
+static LAST_FAILURES: Mutex<Vec<(u32, bool, String)>> = Mutex::new(Vec::new());
+
 /// Moves every registry window back to its restore frame. Waits up to `wait` for the lock;
 /// `None` when it stayed busy. Entries that were restored leave the registry.
 pub fn unpark_registry(wait: Duration) -> Option<Report> {
@@ -108,34 +129,69 @@ pub fn unpark_registry(wait: Duration) -> Option<Report> {
         }
     };
     let mut report = Report::default();
+    let mut failures = Vec::new();
     let entries = std::mem::take(&mut *guard);
     for (id, entry) in entries {
         report.checked += 1;
         match entry.element.set_frame(entry.restore) {
             Ok(()) => report.restored += 1,
             Err(e) => {
-                tracing::warn!(id, "safety: cannot restore window: {e}");
+                // Logged by the caller once it knows whether the recovery scan covered it.
+                tracing::debug!(id, child = entry.child, "safety: cannot restore window: {e}");
+                failures.push((id, entry.child, e.to_string()));
                 report.failed += 1;
                 guard.insert(id, entry);
             }
         }
+    }
+    if let Ok(mut f) = LAST_FAILURES.lock() {
+        *f = failures;
     }
     Some(report)
 }
 
 /// The last line of defence in this process: the registry, else a recovery scan. True when
 /// nothing failed.
+///
+/// A registry entry that could not be moved (a fixed-size dialog, say) is not a failure when
+/// the recovery scan leaves no window stranded: it is logged at debug only.
 pub fn emergency_unpark(reason: &str) -> bool {
     match unpark_registry(Duration::from_millis(200)) {
         Some(r) if r.failed == 0 => {
             tracing::warn!(reason, restored = r.restored, "safety: registry unparked");
             true
         }
-        other => {
-            tracing::warn!(reason, ?other, "safety: registry unavailable or incomplete; running the recovery scan");
+        Some(r) => {
+            tracing::info!(reason, restored = r.restored, failed = r.failed, "safety: registry unparked; running the recovery scan for the rest");
+            let scan = recovery_scan(reason);
+            let failures = LAST_FAILURES.lock().map(|f| f.clone()).unwrap_or_default();
+            let stranded = stranded_ids();
+            let mut ok = scan.failed == 0;
+            for (id, child, error) in failures {
+                if stranded.contains(&id) {
+                    ok = false;
+                    tracing::warn!(reason, id, child, "safety: window still parked after the scan: {error}");
+                } else {
+                    tracing::debug!(reason, id, child, "safety: the registry could not move it ({error}), but it is not parked");
+                }
+            }
+            ok
+        }
+        None => {
+            tracing::warn!(reason, "safety: registry busy; running the recovery scan");
             recovery_scan(reason).failed == 0
         }
     }
+}
+
+/// Window ids (of every app) that sit stranded in the main display's park zone now.
+fn stranded_ids() -> Vec<u32> {
+    let displays = scan_displays();
+    windows::list_windows()
+        .iter()
+        .filter(|w| w.layer == 0 && recovery::is_stranded(w.bounds, &displays))
+        .map(|w| w.id)
+        .collect()
 }
 
 /// Runs `f`, catching a panic (logged). Inside, the panic hook does not unpark or exit: the

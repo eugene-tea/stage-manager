@@ -175,17 +175,26 @@ fn guarded_state(what: &str, f: impl FnOnce(&mut WmState)) {
     }
 }
 
-/// Handles every queued command (scheduled by `WmHandle::send`).
+/// Handles every queued command (scheduled by `WmHandle::send`). Once Quit is requested,
+/// every command but `Shutdown` is dropped, so Quit never waits behind queued work (a
+/// dropped ctl request gets no reply; its caller times out).
 fn drain() {
     loop {
         let cmd = INBOX.with(|i| i.borrow().as_ref().and_then(|rx| rx.try_recv().ok()));
         let Some(cmd) = cmd else { break };
+        if safety::quit_requested() && !matches!(cmd, WmCommand::Shutdown(_)) {
+            tracing::debug!("quitting: a queued WM command is dropped");
+            continue;
+        }
         guarded_state("a WM command", |s| s.handle(cmd));
     }
 }
 
-/// Periodic housekeeping.
+/// Periodic housekeeping (none once Quit is requested).
 fn tick() {
+    if safety::quit_requested() {
+        return;
+    }
     guarded_state("the WM tick", WmState::tick);
 }
 
@@ -203,7 +212,9 @@ unsafe extern "C-unwind" fn ax_callback(
     let name = unsafe { notification.as_ref() }.to_string();
     guarded_state("an AX callback", |s| {
         s.observer.on_notification(pid, element, &name);
-        s.pump();
+        if !safety::quit_requested() {
+            s.pump();
+        }
     });
 }
 
@@ -259,7 +270,9 @@ impl WmState {
                 let _ = reply.send(ok);
             }
         }
-        self.pump();
+        if !safety::quit_requested() {
+            self.pump();
+        }
     }
 
     fn tick(&mut self) {

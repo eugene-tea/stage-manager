@@ -11,6 +11,7 @@ pub mod placement;
 pub mod recovery;
 pub mod rules;
 pub mod settings;
+pub mod stage_area;
 #[cfg(test)]
 pub(crate) mod testkit;
 

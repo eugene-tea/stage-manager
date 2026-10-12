@@ -121,6 +121,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
         show_numbers: flags.show_numbers,
         active_frames,
         window_drag: None,
+        announce: false,
     }
 }
 

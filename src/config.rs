@@ -93,6 +93,12 @@ toggle_strip = "ctrl+alt+s"
 # and stay even when empty. For example:
 # names = ["Work", "Chat"]
 names = []
+# Windows are kept clear of the strip, as Apple's Stage Manager does: when a stage is
+# shown or a window opens over the strip, the window moves right just enough. A window
+# too wide for the room beside the strip is also made narrower (its height stays); quit
+# gives every window back its exact earlier size. false only moves windows, never
+# resizes them (a too-wide window then stays where it is and the strip hides behind it).
+fit_windows = true
 "#;
 
 /// Smallest accepted thumbnail interval.
@@ -139,10 +145,18 @@ impl Default for SugarConfig {
 }
 
 /// The `[stages]` section.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagesConfig {
     /// Named stages created at launch, in order.
     pub names: Vec<String>,
+    /// Narrow a window too wide for the stage area beside the strip (else only move it).
+    pub fit_windows: bool,
+}
+
+impl Default for StagesConfig {
+    fn default() -> Self {
+        Self { names: Vec::new(), fit_windows: true }
+    }
 }
 
 /// The whole configuration, validated.
@@ -236,6 +250,7 @@ struct RawHotkeys {
 #[serde(default)]
 struct RawStages {
     names: Option<Vec<String>>,
+    fit_windows: Option<bool>,
 }
 
 const KNOWN: &[(&str, &[&str])] = &[
@@ -254,7 +269,7 @@ const KNOWN: &[(&str, &[&str])] = &[
         "hotkeys",
         &["switch", "send", "new_stage", "toggle_pin", "toggle_strip"],
     ),
-    ("stages", &["names"]),
+    ("stages", &["names", "fit_windows"]),
     ("sugar", &["shift_brings_here"]),
 ];
 
@@ -389,7 +404,10 @@ impl Config {
                 strip,
                 rules: RuleSet::new(rules, defaults),
                 hotkeys,
-                stages: StagesConfig { names },
+                stages: StagesConfig {
+                    names,
+                    fit_windows: raw.stages.fit_windows.unwrap_or(StagesConfig::default().fit_windows),
+                },
                 sugar: SugarConfig {
                     shift_brings_here: raw
                         .sugar
@@ -416,6 +434,7 @@ impl Config {
             settings,
             strip: self.strip_options(capacity),
             named_stages: self.stages.names.clone(),
+            fit: crate::engine::stage_area::FitOptions::default(),
         }
     }
 }

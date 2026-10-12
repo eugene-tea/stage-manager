@@ -1675,3 +1675,118 @@ fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame
     e.switch(2);
     assert_eq!(e.d.frames[&w(2)], pre, "comes back where it was before the drag");
 }
+
+// ----- keeping windows clear of the strip ------------------------------------------------
+
+mod fitting {
+    use super::*;
+    use crate::engine::stage_area::FitOptions;
+
+    /// A 216 pt inset (the 5K strip column plus its margin) on the 1440 pt test display.
+    const INSET: f64 = 216.0;
+
+    fn env(shrink: bool) -> Env {
+        Env::with(ModelOptions { fit: FitOptions { inset: INSET, shrink }, ..ModelOptions::default() })
+    }
+
+    fn at(id: u32, frame: Rect) -> WindowMeta {
+        WindowMeta { frame, ..meta(id, 10 + id as i32, &format!("com.example.app{id}")) }
+    }
+
+    fn live(e: &Env, id: u32) -> Rect {
+        e.d.frames[&w(id)]
+    }
+
+    #[test]
+    fn a_new_window_over_the_strip_moves_right_without_resizing() {
+        let mut e = env(true);
+        e.add(at(1, Rect::new(40.0, 100.0, 600.0, 400.0)), RuleAction::Native);
+        assert_eq!(live(&e, 1), Rect::new(INSET, 100.0, 600.0, 400.0));
+        assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(Rect::new(INSET, 100.0, 600.0, 400.0)));
+        assert_eq!(e.m.window(w(1)).and_then(|x| x.original), Some(Rect::new(40.0, 100.0, 600.0, 400.0)));
+        // A window clear of the strip is left alone.
+        let a = e.add(at(2, Rect::new(300.0, 100.0, 600.0, 400.0)), RuleAction::Current);
+        assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { .. })));
+        assert_eq!(e.m.window(w(2)).and_then(|x| x.original), None);
+    }
+
+    #[test]
+    fn a_too_wide_window_is_narrowed_and_quit_gives_its_exact_size_back() {
+        let mut e = env(true);
+        let wide = Rect::new(10.0, 60.0, 1400.0, 700.0);
+        e.add(at(1, wide), RuleAction::Native);
+        assert_eq!(live(&e, 1), Rect::new(INSET, 60.0, 1440.0 - INSET, 700.0), "narrowed, height kept");
+        assert_eq!(e.m.safety_targets(), vec![(w(1), wide)], "safety paths know the pre-fit frame");
+        let a = e.m.unpark_all();
+        e.run(a);
+        assert_eq!(live(&e, 1), wide, "quit restores the exact original frame");
+        assert!(e.m.safety_targets().is_empty());
+    }
+
+    #[test]
+    fn nudge_only_leaves_a_too_wide_window_where_it_is() {
+        let mut e = env(false);
+        let wide = Rect::new(10.0, 60.0, 1400.0, 700.0);
+        let a = e.add(at(1, wide), RuleAction::Native);
+        assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { .. })));
+        assert_eq!(live(&e, 1), wide);
+        e.add(at(2, Rect::new(100.0, 60.0, 900.0, 700.0)), RuleAction::Current);
+        assert_eq!(live(&e, 2).x, INSET, "one that fits still moves");
+        assert_eq!(live(&e, 2).w, 900.0);
+    }
+
+    #[test]
+    fn restoring_a_stage_fits_again_after_the_user_moved_a_window_over_the_strip() {
+        let mut e = env(true);
+        let wide = Rect::new(10.0, 60.0, 1400.0, 700.0);
+        e.add(at(1, wide), RuleAction::Native);
+        e.add(at(2, Rect::new(400.0, 100.0, 600.0, 400.0)), RuleAction::New);
+        e.switch(1);
+        let fitted = live(&e, 1);
+        // The user drags it 100 pt left over the strip: their frame stands.
+        let user = fitted.translate(-100.0, 0.0);
+        e.d.frames.insert(w(1), user);
+        e.m.window_frame_changed(w(1), user);
+        assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(user));
+        assert_eq!(e.m.window(w(1)).and_then(|x| x.original), Some(wide.translate(-100.0, 0.0)), "the move carries the pre-fit frame along");
+        // Leaving and coming back places it again: clear of the strip.
+        e.switch(2);
+        e.switch(1);
+        assert_eq!(live(&e, 1), fitted);
+        // A resize by the user forgets the pre-fit size.
+        let resized = Rect::new(300.0, 60.0, 800.0, 700.0);
+        e.d.frames.insert(w(1), resized);
+        e.m.window_frame_changed(w(1), resized);
+        assert_eq!(e.m.window(w(1)).and_then(|x| x.original), None);
+    }
+
+    #[test]
+    fn our_own_clamped_frames_keep_the_pre_fit_frame() {
+        let mut e = env(true);
+        let wide = Rect::new(10.0, 60.0, 1400.0, 700.0);
+        e.add(at(1, wide), RuleAction::Native);
+        // The app refused to get narrower than 1300 pt.
+        let clamped = Rect::new(INSET, 60.0, 1300.0, 700.0);
+        e.m.window_frame_settled(w(1), clamped);
+        assert_eq!(e.m.window(w(1)).and_then(|x| x.original), Some(wide));
+        assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(clamped));
+    }
+
+    #[test]
+    fn children_and_pinned_windows_are_never_fitted() {
+        let mut e = env(true);
+        e.add(at(1, Rect::new(300.0, 60.0, 600.0, 400.0)), RuleAction::Native);
+        let c = WindowMeta { frame: Rect::new(20.0, 100.0, 200.0, 100.0), ..child(5, 11, Some(1)) };
+        e.add(c, RuleAction::Native);
+        assert_eq!(live(&e, 5).x, 20.0);
+        e.add(at(3, Rect::new(20.0, 60.0, 300.0, 300.0)), RuleAction::Float);
+        assert_eq!(live(&e, 3).x, 20.0);
+    }
+
+    #[test]
+    fn fitting_is_off_by_default() {
+        let mut e = Env::new();
+        e.add(at(1, Rect::new(10.0, 60.0, 1400.0, 700.0)), RuleAction::Native);
+        assert_eq!(live(&e, 1).x, 10.0);
+    }
+}

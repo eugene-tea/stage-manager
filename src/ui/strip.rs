@@ -19,6 +19,12 @@
 //!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip area, the strip shows
 //!   itself and a highlighted placeholder card in the slot below the others. Auto-hide never
 //!   fights either drag.
+//! - **Size**: the column and its cards scale with the display
+//!   ([`crate::engine::stage_area::strip_scale`]): 200 pt at 5K, about 113 pt on a 1800 pt-wide laptop.
+//! - **Edge tab** (an extension): while a window covers the strip and hides it, a slim
+//!   translucent tab at the left edge shows that the strip is there; resting on it reveals
+//!   the strip like the edge does, a click reveals it at once.
+//! - **Announce**: at launch, a strip a window covers shows for [`ANNOUNCE`] anyway.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -31,7 +37,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSPanel,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSPanel,
     NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
@@ -45,14 +51,14 @@ use objc2_quartz_core::{
 };
 
 use crate::engine::geometry::{Point, Rect};
-use crate::platform::capture::{Capturer, Target};
 use crate::engine::geometry::Size;
+use crate::engine::stage_area::{strip_scale, strip_width};
+use crate::platform::capture::{Capturer, Target};
 use crate::ui::strip_layout::{
     self, CardLayout, DRAG_THRESHOLD, HOVER_SCALE, HOVER_SHIFT, ICON_BELOW, ICON_LEFT_OVERHANG, ICON_STEP,
-    STRIP_WIDTH,
 };
 use crate::ui::strip_model::{self, CardSnapshot, StripEvent, StripSnapshot};
-use crate::ui::strip_visibility::{self, Mode, POLL_INTERVAL, Visibility};
+use crate::ui::strip_visibility::{self, ANNOUNCE, Mode, POLL_INTERVAL, Visibility};
 
 /// Spring for card motion and the slide (UX-SPEC "Transitions").
 const SPRING_MASS: f64 = 1.0;
@@ -72,6 +78,10 @@ const DROP_STAGE: u64 = u64::MAX;
 const LIFTED_OPACITY: f32 = 0.3;
 /// The ghost's opacity.
 const GHOST_OPACITY: f32 = 0.92;
+/// The edge tab's window: width and height in points (the drawn pill is narrower).
+const TAB_SIZE: (f64, f64) = (10.0, 72.0);
+/// The drawn pill's width.
+const TAB_PILL_WIDTH: f64 = 5.0;
 
 // ---------------------------------------------------------------------------------------
 // Main-thread state
@@ -200,6 +210,120 @@ impl StripView {
     }
 }
 
+define_class!(
+    // SAFETY: NSView has no subclassing requirements; EdgeTabView does not implement Drop.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SMEdgeTabView"]
+    pub struct EdgeTabView;
+
+    // SAFETY: NSObjectProtocol has no safety requirements.
+    unsafe impl NSObjectProtocol for EdgeTabView {}
+
+    impl EdgeTabView {
+        // SAFETY (all methods): signatures match NSView / NSResponder.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            with_strip(Strip::tab_clicked);
+        }
+    }
+);
+
+impl EdgeTabView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: NSView's designated initializer on a fresh instance.
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+/// The edge tab: a slim pill at the left edge in a small non-activating panel of its own.
+struct EdgeTab {
+    panel: Retained<NSPanel>,
+    _view: Retained<EdgeTabView>,
+    pill: Retained<CALayer>,
+    shown: bool,
+}
+
+impl EdgeTab {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Self {
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            frame,
+            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setHasShadow(false);
+        panel.setLevel(NSFloatingWindowLevel);
+        panel.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        panel.setHidesOnDeactivate(false);
+        panel.setBecomesKeyOnlyIfNeeded(true);
+        // SAFETY: the panel is owned by the tab for the life of the app.
+        unsafe { panel.setReleasedWhenClosed(false) };
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
+        let view = EdgeTabView::new(mtm, bounds);
+        let root = CALayer::new();
+        view.setLayer(Some(&root));
+        view.setWantsLayer(true);
+        let pill = CALayer::new();
+        pill.setCornerRadius(TAB_PILL_WIDTH / 2.0);
+        pill.setBorderWidth(0.5);
+        root.addSublayer(&pill);
+        panel.setContentView(Some(&view));
+        let tab = Self { panel, _view: view, pill, shown: false };
+        tab.place(frame);
+        tab
+    }
+
+    /// Sizes the panel and its pill (flush left, full height).
+    fn place(&self, frame: NSRect) {
+        self.panel.setFrame_display(frame, false);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.pill.setFrame(CGRect::new(CGPoint::new(1.0, 0.0), CGSize::new(TAB_PILL_WIDTH, frame.size.height)));
+        CATransaction::commit();
+    }
+
+    /// Translucent colors for the current light or dark appearance.
+    fn paint(&self, mtm: MainThreadMarker) {
+        let name = NSApplication::sharedApplication(mtm).effectiveAppearance().name().to_string();
+        let dark = name.contains("Dark");
+        let (fill, edge) = if dark { (color(1.0, 1.0, 1.0, 0.42), color(0.0, 0.0, 0.0, 0.25)) } else { (color(0.0, 0.0, 0.0, 0.28), color(1.0, 1.0, 1.0, 0.45)) };
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.pill.setBackgroundColor(Some(&fill));
+        self.pill.setBorderColor(Some(&edge));
+        CATransaction::commit();
+    }
+
+    fn show(&mut self, on: bool, mtm: MainThreadMarker) {
+        if on == self.shown {
+            return;
+        }
+        self.shown = on;
+        if on {
+            self.paint(mtm);
+            self.panel.orderFrontRegardless();
+        } else {
+            self.panel.orderOut(None);
+        }
+        tracing::debug!(shown = on, "edge tab");
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Geometry of the panel on the main display
 
@@ -213,6 +337,10 @@ struct Geometry {
     primary_height: f64,
     /// The display's vertical center in panel coordinates.
     center_y: f64,
+    /// The strip scale for this display ([`strip_scale`]).
+    k: f64,
+    /// The column's width.
+    width: f64,
 }
 
 impl Geometry {
@@ -227,11 +355,25 @@ impl Geometry {
             }
         };
         let primary_height = frame.size.height;
-        let panel = NSRect::new(visible.origin, NSSize::new(STRIP_WIDTH, visible.size.height));
+        let size = Size::new(visible.size.width, visible.size.height);
+        let (k, width) = (strip_scale(size), strip_width(size));
+        let panel = NSRect::new(visible.origin, NSSize::new(width, visible.size.height));
         let top = primary_height - (visible.origin.y + visible.size.height);
-        let global = Rect::new(visible.origin.x, top, STRIP_WIDTH, visible.size.height);
+        let global = Rect::new(visible.origin.x, top, width, visible.size.height);
         let display_center = primary_height - (frame.origin.y + frame.size.height / 2.0);
-        Self { panel, global, primary_height, center_y: display_center - top }
+        Self { panel, global, primary_height, center_y: display_center - top, k, width }
+    }
+
+    /// The edge tab's frame, global (top-left origin): flush left, vertically centered on
+    /// the strip.
+    fn tab(&self) -> Rect {
+        let (w, h) = TAB_SIZE;
+        Rect::new(self.global.x, self.global.y + (self.global.h - h) / 2.0, w, h)
+    }
+
+    /// A global rect as a Cocoa screen rect.
+    fn cocoa(&self, r: Rect) -> NSRect {
+        NSRect::new(NSPoint::new(r.x, self.primary_height - (r.y + r.h)), NSSize::new(r.w, r.h))
     }
 
     fn height(&self) -> f64 {
@@ -279,18 +421,19 @@ fn transform_value(t: CATransform3D) -> Retained<NSValue> {
     unsafe { NSValue::valueWithCATransform3D(t) }
 }
 
-/// The card's resting transform: the tilt, plus the hover growth when hovered.
-fn card_transform(theta: f64, hovered: bool) -> CATransform3D {
+/// The card's resting transform: the tilt, plus the hover growth when hovered (strip
+/// scale `k`).
+fn card_transform(theta: f64, k: f64, hovered: bool) -> CATransform3D {
     let tilt = CATransform3D::new_rotation(theta, 0.0, 1.0, 0.0);
-    if hovered { tilt.concat(hover_transform()) } else { tilt }
+    if hovered { tilt.concat(hover_transform(k)) } else { tilt }
 }
 
-fn hover_transform() -> CATransform3D {
-    CATransform3D::new_scale(HOVER_SCALE, HOVER_SCALE, 1.0).concat(CATransform3D::new_translation(-HOVER_SHIFT, 0.0, 0.0))
+fn hover_transform(k: f64) -> CATransform3D {
+    CATransform3D::new_scale(HOVER_SCALE, HOVER_SCALE, 1.0).concat(CATransform3D::new_translation(-HOVER_SHIFT * k, 0.0, 0.0))
 }
 
-fn flat_transform(hovered: bool) -> CATransform3D {
-    if hovered { hover_transform() } else { CATransform3D::new_scale(1.0, 1.0, 1.0) }
+fn flat_transform(k: f64, hovered: bool) -> CATransform3D {
+    if hovered { hover_transform(k) } else { CATransform3D::new_scale(1.0, 1.0, 1.0) }
 }
 
 fn spring(key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
@@ -509,6 +652,10 @@ struct Strip {
     /// A window drag is over the strip: the placeholder card shows.
     drop_over: bool,
     drop_layer: Option<Retained<CALayer>>,
+    /// The edge tab shown while a window hides the strip.
+    tab: EdgeTab,
+    /// The launch announce happened (once per launch).
+    announced: bool,
 }
 
 impl Strip {
@@ -566,6 +713,7 @@ impl Strip {
 
         let scale = panel.backingScaleFactor();
         let capturer = Capturer::start(interval, thumbnail_arrived);
+        let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()));
         let mut strip = Self {
             mtm,
             panel,
@@ -592,6 +740,8 @@ impl Strip {
             card_drag: None,
             drop_over: false,
             drop_layer: None,
+            tab,
+            announced: false,
         };
         strip.apply_geometry();
         strip.slide(false, false);
@@ -611,7 +761,7 @@ impl Strip {
         self.overlay.setFrame(bounds);
         // The perspective is centered at (center_x, the display's vertical center): put the
         // stage layer's anchor there while keeping its frame equal to the bounds.
-        let center_x = STRIP_WIDTH / 2.0;
+        let center_x = g.width / 2.0;
         let cy = g.center_y.clamp(0.0, size.height.max(1.0));
         self.stage.setBounds(bounds);
         self.stage.setAnchorPoint(CGPoint::new(center_x / size.width.max(1.0), cy / size.height.max(1.0)));
@@ -620,7 +770,13 @@ impl Strip {
         perspective.m34 = -1.0 / strip_layout::PERSPECTIVE_DISTANCE;
         self.stage.setSublayerTransform(perspective);
         CATransaction::commit();
-        self.theta = strip_layout::tilt_angle(center_x);
+        self.theta = strip_layout::tilt_angle(center_x, g.k);
+        // Cards built for another scale are rebuilt.
+        for layers in self.cards.values() {
+            layers.card.removeFromSuperlayer();
+            layers.flat.removeFromSuperlayer();
+        }
+        self.cards.clear();
     }
 
     // -- snapshots ------------------------------------------------------------------------
@@ -630,6 +786,7 @@ impl Strip {
         if geometry != self.geometry {
             self.geometry = geometry;
             self.apply_geometry();
+            self.tab.place(geometry.cocoa(geometry.tab()));
             let shown = self.shown;
             self.slide(shown, false);
         }
@@ -646,6 +803,13 @@ impl Strip {
         if !self.has_snapshot {
             self.has_snapshot = true;
             self.panel.orderFrontRegardless();
+        }
+        if self.snapshot.announce && !self.announced {
+            self.announced = true;
+            if self.covered() {
+                tracing::info!("launch: a window covers the strip; showing it for a moment");
+                self.visibility.announce(Instant::now(), ANNOUNCE);
+            }
         }
         self.update_visibility();
         self.update_targets();
@@ -665,7 +829,7 @@ impl Strip {
         if let Some(c) = &drop_card {
             cards.push(c.clone());
         }
-        let layouts = strip_layout::layout_column(&cards, self.geometry.height(), self.geometry.center_y);
+        let layouts = strip_layout::layout_column(&cards, self.geometry.height(), self.geometry.center_y, self.geometry.k);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         let keep: Vec<u64> = layouts.iter().map(|l| l.stage).collect();
@@ -741,12 +905,12 @@ impl Strip {
                 let card_layer = CALayer::new();
                 card_layer.setAnchorPoint(CGPoint::new(0.0, 0.5));
                 card_layer.setPosition(position);
-                card_layer.setTransform(card_transform(self.theta, hovered));
+                card_layer.setTransform(card_transform(self.theta, self.geometry.k, hovered));
                 card_layer.setAllowsEdgeAntialiasing(true);
                 let flat = CALayer::new();
                 flat.setAnchorPoint(CGPoint::new(0.0, 0.5));
                 flat.setPosition(position);
-                flat.setTransform(flat_transform(hovered));
+                flat.setTransform(flat_transform(self.geometry.k, hovered));
                 self.stage.addSublayer(&card_layer);
                 self.overlay.addSublayer(&flat);
                 if self.has_snapshot {
@@ -855,10 +1019,12 @@ impl Strip {
             flat.addSublayer(&badge);
         }
         if let Some(name) = card.name.as_deref().filter(|n| !n.is_empty()) {
-            let icons_w = layout.icons.len() as f64 * ICON_STEP - ICON_LEFT_OVERHANG;
+            let k = self.geometry.k;
+            let icons_w = (layout.icons.len() as f64 * ICON_STEP - ICON_LEFT_OVERHANG) * k;
             let x = icons_w.max(0.0) + 2.0;
             let label = text_layer(name, 11.0, self.scale, false);
-            label.setFrame(CGRect::new(CGPoint::new(x, size.h + ICON_BELOW - 16.0), CGSize::new((STRIP_WIDTH - 20.0 - x).max(30.0), 15.0)));
+            let width = (self.geometry.width - 20.0 * k - x).max(30.0);
+            label.setFrame(CGRect::new(CGPoint::new(x, size.h + ICON_BELOW * k - 16.0), CGSize::new(width, 15.0)));
             label.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
             label.setShadowOpacity(0.6);
             label.setShadowRadius(2.0);
@@ -920,9 +1086,11 @@ impl Strip {
     /// The card under `p` (panel coordinates): its box shortened by the tilt, plus the icon
     /// row below it.
     fn card_at(&self, p: Point) -> Option<u64> {
+        let g = self.geometry;
+        let (overhang, below) = (ICON_LEFT_OVERHANG * g.k, ICON_BELOW * g.k);
         self.layouts.iter().filter(|l| l.stage != DROP_STAGE).find_map(|l| {
-            let (w, _) = strip_layout::projected(l.frame.w, STRIP_WIDTH / 2.0);
-            let hit = Rect::new(l.frame.x - ICON_LEFT_OVERHANG, l.frame.y, w + ICON_LEFT_OVERHANG, l.frame.h + ICON_BELOW);
+            let (w, _) = strip_layout::projected(l.frame.w, g.width / 2.0, g.k);
+            let hit = Rect::new(l.frame.x - overhang, l.frame.y, w + overhang, l.frame.h + below);
             hit.contains(p).then_some(l.stage)
         })
     }
@@ -1009,10 +1177,11 @@ impl Strip {
         let previous = std::mem::replace(&mut self.hovered, card);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        let k = self.geometry.k;
         for (stage, on) in [(previous, false), (card, true)] {
             if let Some(layers) = stage.and_then(|s| self.cards.get(&s)) {
-                ease_transform(&layers.card, card_transform(self.theta, on));
-                ease_transform(&layers.flat, flat_transform(on));
+                ease_transform(&layers.card, card_transform(self.theta, k, on));
+                ease_transform(&layers.flat, flat_transform(k, on));
             }
         }
         CATransaction::commit();
@@ -1024,9 +1193,24 @@ impl Strip {
         self.geometry.global_point(NSEvent::mouseLocation())
     }
 
+    /// True when the strip is on but a window of the active stage covers it.
+    fn covered(&self) -> bool {
+        self.snapshot.user_visible
+            && !self.snapshot.hide_recent_apps
+            && strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global)
+    }
+
+    /// A click on the edge tab reveals the strip at once.
+    fn tab_clicked(&mut self) {
+        tracing::debug!("edge tab clicked");
+        self.visibility.reveal_now();
+        self.update_visibility();
+    }
+
     fn update_visibility(&mut self) {
         let overlapped = strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global);
         let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, overlapped);
+        self.visibility.set_tab(self.tab.shown.then(|| self.geometry.tab()));
         let window_drag = self.snapshot.window_drag.is_some();
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
@@ -1049,6 +1233,8 @@ impl Strip {
             self.update_targets();
         }
         self.set_polling(decision.poll || window_drag || card_dragging);
+        let tab = self.covered() && !self.shown && !window_drag && !card_dragging;
+        self.tab.show(tab, self.mtm);
     }
 
     /// Slides the strip in or out and lets clicks through while it is out.

@@ -1,12 +1,15 @@
 //! Strip geometry, pure: where each card, thumbnail and app icon goes, and the perspective
 //! tilt. All values are points in the strip panel's own coordinates (top-left origin,
-//! `y` grows down). Numbers come from `docs/UX-SPEC.md` ("Strip geometry").
+//! `y` grows down). Numbers come from `docs/UX-SPEC.md` ("Strip geometry"), measured at 5K;
+//! every length is multiplied by the display's strip scale `k`
+//! ([`crate::engine::stage_area::strip_scale`]), so smaller screens get a narrower column
+//! and smaller cards of the same shape.
 
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::ui::strip_model::CardSnapshot;
 
-/// Width of the strip panel (the strip area Apple keeps clear is about 0–200 pt).
-pub const STRIP_WIDTH: f64 = 200.0;
+/// Width of the strip panel at 5K (the strip area Apple keeps clear is about 0–200 pt).
+pub const STRIP_WIDTH: f64 = crate::engine::stage_area::REFERENCE_STRIP_WIDTH;
 /// Left edge of every card.
 pub const CARD_X: f64 = 15.0;
 /// A card's arrangement of thumbnails fits this box (before the tilt shortens it).
@@ -141,8 +144,8 @@ pub fn arrange_card(card: &CardSnapshot, scale: f64) -> (Size, Vec<ThumbSlot>) {
     (size, thumbs)
 }
 
-/// The app icons of a card of `size`, relative to its top-left corner.
-fn icons_for(card: &CardSnapshot, size: Size) -> Vec<(i32, Rect)> {
+/// The app icons of a card of `size`, relative to its top-left corner, at strip scale `k`.
+fn icons_for(card: &CardSnapshot, size: Size, k: f64) -> Vec<(i32, Rect)> {
     let mut pids: Vec<i32> = card.apps.clone();
     for w in &card.windows {
         if !pids.contains(&w.pid) {
@@ -153,36 +156,39 @@ fn icons_for(card: &CardSnapshot, size: Size) -> Vec<(i32, Rect)> {
         .take(MAX_ICONS)
         .enumerate()
         .map(|(i, &pid)| {
-            let x = -ICON_LEFT_OVERHANG + i as f64 * ICON_STEP;
-            let y = size.h + ICON_BELOW - ICON_SIZE;
-            (pid, Rect::new(x, y, ICON_SIZE, ICON_SIZE))
+            let x = (-ICON_LEFT_OVERHANG + i as f64 * ICON_STEP) * k;
+            let y = size.h + (ICON_BELOW - ICON_SIZE) * k;
+            (pid, Rect::new(x, y, ICON_SIZE * k, ICON_SIZE * k))
         })
         .collect()
 }
 
-/// Lays out the column: cards top to bottom, [`CARD_GAP`] apart, centered on `center_y`
-/// and kept inside `0..height` (scaled down uniformly when they would not fit).
-pub fn layout_column(cards: &[CardSnapshot], height: f64, center_y: f64) -> Vec<CardLayout> {
+/// Lays out the column at strip scale `k`: cards top to bottom, [`CARD_GAP`] apart,
+/// centered on `center_y` and kept inside `0..height` (scaled down uniformly when they
+/// would not fit).
+pub fn layout_column(cards: &[CardSnapshot], height: f64, center_y: f64, k: f64) -> Vec<CardLayout> {
     if cards.is_empty() {
         return Vec::new();
     }
-    let natural: Vec<f64> = cards.iter().map(|c| arrange_card(c, 1.0).0.h).collect();
-    let gaps = CARD_GAP * (cards.len() - 1) as f64;
-    let room = (height - 2.0 * COLUMN_MARGIN - ICON_BELOW - gaps).max(1.0);
+    let natural: Vec<f64> = cards.iter().map(|c| arrange_card(c, k).0.h).collect();
+    let gap = CARD_GAP * k;
+    let (margin, below) = (COLUMN_MARGIN * k, ICON_BELOW * k);
+    let gaps = gap * (cards.len() - 1) as f64;
+    let room = (height - 2.0 * margin - below - gaps).max(1.0);
     let sum: f64 = natural.iter().sum();
     let scale = if sum > room { (room / sum).max(0.2) } else { 1.0 };
 
-    let arranged: Vec<(Size, Vec<ThumbSlot>)> = cards.iter().map(|c| arrange_card(c, scale)).collect();
+    let arranged: Vec<(Size, Vec<ThumbSlot>)> = cards.iter().map(|c| arrange_card(c, scale * k)).collect();
     let total = arranged.iter().map(|(s, _)| s.h).sum::<f64>() + gaps;
-    let top_min = COLUMN_MARGIN;
-    let top_max = (height - COLUMN_MARGIN - ICON_BELOW - total).max(top_min);
+    let top_min = margin;
+    let top_max = (height - margin - below - total).max(top_min);
     let mut y = (center_y - total / 2.0).clamp(top_min, top_max);
 
     let mut out = Vec::with_capacity(cards.len());
     for (card, (size, thumbs)) in cards.iter().zip(arranged) {
-        let frame = Rect::new(CARD_X, y, size.w, size.h);
-        out.push(CardLayout { stage: card.stage, frame, thumbs, icons: icons_for(card, size) });
-        y += size.h + CARD_GAP;
+        let frame = Rect::new(CARD_X * k, y, size.w, size.h);
+        out.push(CardLayout { stage: card.stage, frame, thumbs, icons: icons_for(card, size, k) });
+        y += size.h + gap;
     }
     out
 }
@@ -216,20 +222,21 @@ pub fn drop_origin(full: Size, grab_x: f64, p: Point) -> Point {
 }
 
 /// The y-rotation (radians) that puts the vanishing point [`VANISHING_DISTANCE`] right of
-/// the card's left edge, given the projection center's x (`center_x`, panel coordinates).
-pub fn tilt_angle(center_x: f64) -> f64 {
-    (PERSPECTIVE_DISTANCE / (VANISHING_DISTANCE + CARD_X - center_x)).atan()
+/// the card's left edge, given the projection center's x (`center_x`, panel coordinates),
+/// at strip scale `k` (every distance scales, so the tilt looks the same).
+pub fn tilt_angle(center_x: f64, k: f64) -> f64 {
+    (PERSPECTIVE_DISTANCE * k / ((VANISHING_DISTANCE + CARD_X) * k - center_x)).atan()
 }
 
 /// Projects a card's right edge: returns (projected width, far edge height ratio) for a
-/// card of width `w` whose left edge is at [`CARD_X`], seen through the perspective
-/// centered at `center_x`.
-pub fn projected(w: f64, center_x: f64) -> (f64, f64) {
-    let theta = tilt_angle(center_x);
-    let depth = 1.0 + w * theta.sin() / PERSPECTIVE_DISTANCE;
-    let x = CARD_X + w * theta.cos();
+/// card of width `w` whose left edge is at [`CARD_X`] (scaled by `k`), seen through the
+/// perspective (distance scaled by `k`) centered at `center_x`.
+pub fn projected(w: f64, center_x: f64, k: f64) -> (f64, f64) {
+    let theta = tilt_angle(center_x, k);
+    let depth = 1.0 + w * theta.sin() / (PERSPECTIVE_DISTANCE * k);
+    let x = CARD_X * k + w * theta.cos();
     let projected_x = center_x + (x - center_x) / depth;
-    (projected_x - CARD_X, 1.0 / depth)
+    (projected_x - CARD_X * k, 1.0 / depth)
 }
 
 #[cfg(test)]
@@ -280,7 +287,7 @@ mod tests {
         let mid = |r: &Rect| r.y + r.h / 2.0;
         assert!((mid(&t[0].rect) - mid(&t[1].rect) - SECOND_APP_UP).abs() < 1e-9);
         assert!(size.w <= CARD_BOX.w + 1e-9 && size.h <= CARD_BOX.h + 1e-9);
-        let icons = icons_for(&c, size);
+        let icons = icons_for(&c, size, 1.0);
         assert_eq!(icons.len(), 2);
         assert_eq!(icons[1].1.x - icons[0].1.x, ICON_STEP);
         assert_eq!(icons[0].1.x, -ICON_LEFT_OVERHANG);
@@ -290,7 +297,7 @@ mod tests {
     #[test]
     fn the_column_is_centered_with_gaps_and_scales_down_when_full() {
         let cards: Vec<_> = (1..=3).map(|i| card(i, &[(i as u32, 1, 800.0, 600.0)])).collect();
-        let l = layout_column(&cards, 1400.0, 700.0);
+        let l = layout_column(&cards, 1400.0, 700.0, 1.0);
         assert_eq!(l.len(), 3);
         assert!((l[1].frame.y - l[0].frame.max_y() - CARD_GAP).abs() < 1e-9);
         let mid = (l[0].frame.y + l[2].frame.max_y()) / 2.0;
@@ -298,18 +305,41 @@ mod tests {
         assert!(l.iter().all(|c| c.frame.x == CARD_X));
 
         let many: Vec<_> = (1..=12).map(|i| card(i, &[(i as u32, 1, 600.0, 900.0)])).collect();
-        let l = layout_column(&many, 900.0, 450.0);
+        let l = layout_column(&many, 900.0, 450.0, 1.0);
         assert!(l[0].frame.y >= COLUMN_MARGIN - 1e-9);
         assert!(l.last().map(|c| c.frame.max_y() + ICON_BELOW).unwrap_or(0.0) <= 900.0 - COLUMN_MARGIN + 1e-6);
     }
 
     #[test]
     fn the_tilt_makes_the_far_edge_about_92_percent() {
-        let (w, ratio) = projected(150.0, STRIP_WIDTH / 2.0);
+        let (w, ratio) = projected(150.0, STRIP_WIDTH / 2.0, 1.0);
         assert!(w < 150.0 && w > 120.0, "projected width {w}");
         assert!((0.90..0.95).contains(&ratio), "far edge ratio {ratio}");
         // The edges meet at the vanishing point: height shrinks linearly with projected x.
         assert!(((1.0 - ratio) * VANISHING_DISTANCE - w).abs() < 1.0);
+        // A laptop's smaller card keeps the same shape.
+        let k = 0.56;
+        let (wk, rk) = projected(150.0 * k, STRIP_WIDTH * k / 2.0, k);
+        assert!((wk - w * k).abs() < 0.5, "{wk} vs {}", w * k);
+        assert!((rk - ratio).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_laptop_strip_is_narrower_with_smaller_cards_of_the_same_shape() {
+        use crate::engine::stage_area::{strip_scale, strip_width};
+        let laptop = Size::new(1800.0, 1130.0);
+        let five_k = Size::new(2560.0, 1410.0);
+        let k = strip_scale(laptop);
+        assert!(strip_width(laptop) < strip_width(five_k));
+        let cards: Vec<_> = (1..=3).map(|i| card(i, &[(i as u32, 1, 800.0, 600.0)])).collect();
+        let big = layout_column(&cards, 1410.0, 705.0, 1.0);
+        let small = layout_column(&cards, 1130.0, 565.0, k);
+        for (b, s) in big.iter().zip(&small) {
+            assert!((s.frame.w - b.frame.w * k).abs() < 1e-6, "card widths scale");
+            assert!((s.frame.x - CARD_X * k).abs() < 1e-9);
+            assert!(s.frame.max_x() <= strip_width(laptop), "the card fits the narrower column");
+        }
+        assert!((small[1].frame.y - small[0].frame.max_y() - CARD_GAP * k).abs() < 1e-9);
     }
 
     #[test]
