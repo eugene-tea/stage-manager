@@ -34,7 +34,9 @@ impl RuleAction {
             "ignore" => Ok(Self::Ignore),
             _ => match t.strip_prefix("stage:") {
                 Some(name) if !name.trim().is_empty() => Ok(Self::Stage(name.trim().to_string())),
-                Some(_) => Err(format!("action {text:?}: a stage name is missing after \"stage:\"")),
+                Some(_) => Err(format!(
+                    "action {text:?}: a stage name is missing after \"stage:\""
+                )),
                 None => Err(format!(
                     "action {text:?}: expected current, new, stage:<name>, float or ignore"
                 )),
@@ -74,7 +76,9 @@ impl Placement {
             "as-is" => Ok(Self::AsIs),
             "center" => Ok(Self::Center),
             "cascade" => Ok(Self::Cascade),
-            _ => Err(format!("placement {text:?}: expected as-is, center or cascade")),
+            _ => Err(format!(
+                "placement {text:?}: expected as-is, center or cascade"
+            )),
         }
     }
 }
@@ -182,7 +186,10 @@ impl RuleSet {
     pub fn decide(&self, bundle_id: &str, title: &str) -> Decision {
         match self.rules.iter().find(|r| r.matches(bundle_id, title)) {
             Some(rule) => Decision {
-                action: rule.action.clone().unwrap_or_else(|| self.defaults.action.clone()),
+                action: rule
+                    .action
+                    .clone()
+                    .unwrap_or_else(|| self.defaults.action.clone()),
                 placement: rule.placement.unwrap_or(self.defaults.placement),
             },
             None => self.defaults.clone(),
@@ -239,14 +246,23 @@ mod tests {
 
     #[test]
     fn no_match_takes_defaults() {
-        let defaults = Decision { action: RuleAction::New, placement: Placement::Center };
-        let set = RuleSet::new(vec![rule("com.example.a", None, Some("float"), None)], defaults.clone());
+        let defaults = Decision {
+            action: RuleAction::New,
+            placement: Placement::Center,
+        };
+        let set = RuleSet::new(
+            vec![rule("com.example.a", None, Some("float"), None)],
+            defaults.clone(),
+        );
         assert_eq!(set.decide("com.example.b", "x"), defaults);
     }
 
     #[test]
     fn missing_parts_fall_back_to_defaults() {
-        let defaults = Decision { action: RuleAction::Current, placement: Placement::Cascade };
+        let defaults = Decision {
+            action: RuleAction::Current,
+            placement: Placement::Cascade,
+        };
         let set = RuleSet::new(
             vec![
                 rule("com.example.a", None, None, Some("center")),
@@ -256,11 +272,17 @@ mod tests {
         );
         assert_eq!(
             set.decide("com.example.a", ""),
-            Decision { action: RuleAction::Current, placement: Placement::Center }
+            Decision {
+                action: RuleAction::Current,
+                placement: Placement::Center
+            }
         );
         assert_eq!(
             set.decide("com.example.b", ""),
-            Decision { action: RuleAction::New, placement: Placement::Cascade }
+            Decision {
+                action: RuleAction::New,
+                placement: Placement::Cascade
+            }
         );
     }
 
@@ -274,13 +296,22 @@ mod tests {
             ],
             Decision::default(),
         );
-        assert_eq!(set.decide("com.example.term", "Scratch pad").action, RuleAction::Float);
+        assert_eq!(
+            set.decide("com.example.term", "Scratch pad").action,
+            RuleAction::Float
+        );
         assert_eq!(
             set.decide("com.example.term", "My Scratch").action,
             RuleAction::Stage("Shell".into())
         );
-        assert_eq!(set.decide("com.example.video", "Picture in Picture").action, RuleAction::Float);
-        assert_eq!(set.decide("com.example.video", "Movie").action, RuleAction::Current);
+        assert_eq!(
+            set.decide("com.example.video", "Picture in Picture").action,
+            RuleAction::Float
+        );
+        assert_eq!(
+            set.decide("com.example.video", "Movie").action,
+            RuleAction::Current
+        );
     }
 
     #[test]
@@ -290,8 +321,14 @@ mod tests {
             Decision::default(),
         );
         assert_eq!(set.decide("com.example.app", "").action, RuleAction::Ignore);
-        assert_eq!(set.decide("com.example.app.helper", "").action, RuleAction::Current);
-        assert_eq!(set.decide("COM.EXAMPLE.APP", "").action, RuleAction::Current);
+        assert_eq!(
+            set.decide("com.example.app.helper", "").action,
+            RuleAction::Current
+        );
+        assert_eq!(
+            set.decide("COM.EXAMPLE.APP", "").action,
+            RuleAction::Current
+        );
     }
 
     #[test]

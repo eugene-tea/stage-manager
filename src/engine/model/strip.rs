@@ -38,7 +38,11 @@ pub struct StripOptions {
 
 impl Default for StripOptions {
     fn default() -> Self {
-        Self { order: StripOrder::Native, show_active: false, capacity: 6 }
+        Self {
+            order: StripOrder::Native,
+            show_active: false,
+            capacity: 6,
+        }
     }
 }
 
@@ -91,7 +95,9 @@ impl Model {
                 .take(opts.capacity)
                 .collect(),
         };
-        ids.into_iter().filter_map(|id| self.card(id, Some(id) == active)).collect()
+        ids.into_iter()
+            .filter_map(|id| self.card(id, Some(id) == active))
+            .collect()
     }
 
     /// Updates the strip options; capacity changes evict least recently used cards or refill.
@@ -112,7 +118,11 @@ impl Model {
             .windows
             .iter()
             .copied()
-            .filter(|w| self.windows.get(w).is_some_and(|w| w.meta.role == WindowRole::Standard))
+            .filter(|w| {
+                self.windows
+                    .get(w)
+                    .is_some_and(|w| w.meta.role == WindowRole::Standard)
+            })
             .collect();
         let mut apps = Vec::new();
         for w in &windows {
@@ -134,7 +144,9 @@ impl Model {
 
     /// An inactive stage that may hold a card: it has windows or is declared in config.
     pub(crate) fn strip_eligible(&self, id: StageId) -> bool {
-        let Some(s) = self.stage(id) else { return false };
+        let Some(s) = self.stage(id) else {
+            return false;
+        };
         !self.is_active(id)
             && (!s.windows.is_empty() || s.name.as_deref().is_some_and(|n| self.is_declared(n)))
     }
@@ -206,7 +218,9 @@ impl Model {
             let mut out_of_view: Vec<(u64, StageId)> = self
                 .stages
                 .iter()
-                .filter(|s| s.display == display && !slots.contains(&s.id) && self.strip_eligible(s.id))
+                .filter(|s| {
+                    s.display == display && !slots.contains(&s.id) && self.strip_eligible(s.id)
+                })
                 .map(|s| (s.last_active, s.id))
                 .collect();
             out_of_view.sort_by(|a, b| b.cmp(a));

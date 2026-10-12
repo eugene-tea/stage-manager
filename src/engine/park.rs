@@ -63,7 +63,10 @@ pub fn is_parked(frame: Rect, display: Rect) -> bool {
 ///   [`TITLE_BAR_HEIGHT`] points) inside `visible`; its body may extend below the bottom.
 pub fn clamp_to_visible(frame: Rect, visible: Rect) -> Rect {
     if frame.is_degenerate() {
-        let size = Size::new(FALLBACK_SIZE.w.min(visible.w), FALLBACK_SIZE.h.min(visible.h));
+        let size = Size::new(
+            FALLBACK_SIZE.w.min(visible.w),
+            FALLBACK_SIZE.h.min(visible.h),
+        );
         return center_size(size, visible);
     }
     let size = Size::new(frame.w.min(visible.w), frame.h.min(visible.h));
@@ -126,7 +129,10 @@ mod tests {
         // A large window reaching into the corner but mostly visible.
         assert!(!is_parked(Rect::new(800.0, 400.0, 800.0, 600.0), DISPLAY));
         // Offscreen to the top-left is not the park zone.
-        assert!(!is_parked(Rect::new(-2000.0, -2000.0, 100.0, 100.0), DISPLAY));
+        assert!(!is_parked(
+            Rect::new(-2000.0, -2000.0, 100.0, 100.0),
+            DISPLAY
+        ));
         // Offscreen bottom-left is not the park zone either.
         assert!(!is_parked(Rect::new(10.0, 880.0, 100.0, 100.0), DISPLAY));
     }
@@ -178,7 +184,9 @@ mod tests {
     fn clamp_never_returns_a_parked_frame() {
         let mut seed = 7u64;
         for _ in 0..2000 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let a = ((seed >> 33) % 4000) as f64 - 1000.0;
             let b = ((seed >> 13) % 3000) as f64 - 1000.0;
             let w = ((seed >> 40) % 2500) as f64;
@@ -186,7 +194,12 @@ mod tests {
             let out = clamp_to_visible(Rect::new(a, b, w, h), VISIBLE);
             assert!(!is_parked(out, VISIBLE), "{out:?}");
             assert!(!is_parked(out, DISPLAY), "{out:?}");
-            assert!(VISIBLE.contains_rect(&Rect::new(out.x, out.y, out.w, TITLE_BAR_HEIGHT.min(out.h))));
+            assert!(VISIBLE.contains_rect(&Rect::new(
+                out.x,
+                out.y,
+                out.w,
+                TITLE_BAR_HEIGHT.min(out.h)
+            )));
         }
     }
 }

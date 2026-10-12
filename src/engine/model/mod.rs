@@ -230,7 +230,11 @@ impl Model {
     /// created on the main display; the first becomes active, else an empty stage does.
     /// Every other display gets an empty active stage.
     pub fn new(displays: Vec<Display>, options: ModelOptions) -> Self {
-        let displays = if displays.is_empty() { vec![FALLBACK_DISPLAY] } else { displays };
+        let displays = if displays.is_empty() {
+            vec![FALLBACK_DISPLAY]
+        } else {
+            displays
+        };
         let mut model = Self {
             displays,
             stages: Vec::new(),
@@ -338,7 +342,10 @@ impl Model {
     // ----- internal helpers --------------------------------------------------------------
 
     pub(crate) fn display(&self, id: DisplayId) -> &Display {
-        self.displays.iter().find(|d| d.id == id).unwrap_or(&self.displays[0])
+        self.displays
+            .iter()
+            .find(|d| d.id == id)
+            .unwrap_or(&self.displays[0])
     }
 
     pub(crate) fn known_display(&self, id: DisplayId) -> DisplayId {
@@ -354,13 +361,20 @@ impl Model {
     }
 
     pub(crate) fn is_declared(&self, name: &str) -> bool {
-        self.options.named_stages.iter().any(|n| n.eq_ignore_ascii_case(name))
+        self.options
+            .named_stages
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(name))
     }
 
     pub(crate) fn find_named(&self, name: &str) -> Option<StageId> {
         self.stages
             .iter()
-            .find(|s| s.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+            .find(|s| {
+                s.name
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
             .map(|s| s.id)
     }
 
@@ -381,7 +395,14 @@ impl Model {
         let id = StageId(self.next_stage);
         self.next_stage += 1;
         let display = self.known_display(display);
-        self.stages.push(Stage { id, name, display, windows: Vec::new(), key: None, last_active: 0 });
+        self.stages.push(Stage {
+            id,
+            name,
+            display,
+            windows: Vec::new(),
+            key: None,
+            last_active: 0,
+        });
         id
     }
 
@@ -432,7 +453,9 @@ impl Model {
         let mut frontier = vec![id];
         while let Some(p) = frontier.pop() {
             for w in self.windows.values() {
-                if w.meta.role == (WindowRole::Child { parent: Some(p) }) && !out.contains(&w.meta.id) {
+                if w.meta.role == (WindowRole::Child { parent: Some(p) })
+                    && !out.contains(&w.meta.id)
+                {
                     out.push(w.meta.id);
                     frontier.push(w.meta.id);
                 }
@@ -465,7 +488,9 @@ impl Model {
     /// Records `frame` as a window's restore frame unless it is unusable (in a park zone or
     /// degenerate). Returns whether it was taken.
     pub(crate) fn record_frame(&mut self, id: WindowId, frame: Rect) -> bool {
-        let Some(w) = self.windows.get(&id) else { return false };
+        let Some(w) = self.windows.get(&id) else {
+            return false;
+        };
         let display = *self.display(w.meta.display);
         let usable = !frame.is_degenerate()
             && !is_parked(frame, display.frame)
@@ -492,7 +517,9 @@ impl Model {
 
     /// Parks one window (no-op for pinned windows).
     pub(crate) fn park_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
-        let Some(w) = self.windows.get(&id) else { return };
+        let Some(w) = self.windows.get(&id) else {
+            return;
+        };
         if w.home == Home::Pinned {
             return;
         }
@@ -505,7 +532,9 @@ impl Model {
 
     /// Brings one window to its clamped restore frame.
     pub(crate) fn restore_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
-        let Some(w) = self.windows.get(&id) else { return };
+        let Some(w) = self.windows.get(&id) else {
+            return;
+        };
         let frame = clamp_to_visible(w.restore, self.display(w.meta.display).visible);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = false;
@@ -524,8 +553,15 @@ impl Model {
             }
         }
         let focused_member = obs.focused.and_then(|f| self.resolve_standard(f));
-        let Some(s) = self.stage_mut(stage) else { return };
-        let z = |id: &WindowId| obs.z_order.iter().position(|x| x == id).unwrap_or(usize::MAX);
+        let Some(s) = self.stage_mut(stage) else {
+            return;
+        };
+        let z = |id: &WindowId| {
+            obs.z_order
+                .iter()
+                .position(|x| x == id)
+                .unwrap_or(usize::MAX)
+        };
         s.windows.sort_by_key(z);
         s.key = match focused_member {
             Some(f) if s.windows.contains(&f) => Some(f),
@@ -548,7 +584,10 @@ impl Model {
     pub(crate) fn show_stage(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let members = s.windows.clone();
-        let key = s.key.filter(|k| members.contains(k)).or(members.first().copied());
+        let key = s
+            .key
+            .filter(|k| members.contains(k))
+            .or(members.first().copied());
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
@@ -573,7 +612,9 @@ impl Model {
 
     /// True when a stage must be kept: active, has a standard member, or is declared.
     pub(crate) fn stage_is_alive(&self, stage: StageId) -> bool {
-        let Some(s) = self.stage(stage) else { return false };
+        let Some(s) = self.stage(stage) else {
+            return false;
+        };
         self.is_active(stage)
             || !s.windows.is_empty()
             || s.name.as_deref().is_some_and(|n| self.is_declared(n))
@@ -585,10 +626,14 @@ impl Model {
         if self.stage(stage).is_none() || self.stage_is_alive(stage) {
             return;
         }
-        let display = self.stage(stage).map(|s| s.display).unwrap_or(self.displays[0].id);
+        let display = self
+            .stage(stage)
+            .map(|s| s.display)
+            .unwrap_or(self.displays[0].id);
         let leftovers = self.children_in(Home::Stage(stage));
         self.stages.retain(|s| s.id != stage);
-        self.revealed.retain(|_, r| r.from != stage && r.desktop != stage);
+        self.revealed
+            .retain(|_, r| r.from != stage && r.desktop != stage);
         if let Some(slots) = self.slots.get_mut(&display) {
             slots.retain(|&s| s != stage);
         }

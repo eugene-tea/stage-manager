@@ -78,7 +78,8 @@ impl StateFile {
 
     /// Parses JSON, rejecting other versions.
     pub fn from_json(text: &str) -> Result<Self, String> {
-        let state: StateFile = serde_json::from_str(text).map_err(|e| format!("state.json: {e}"))?;
+        let state: StateFile =
+            serde_json::from_str(text).map_err(|e| format!("state.json: {e}"))?;
         if state.version != STATE_VERSION {
             return Err(format!(
                 "state.json: version {} is not supported (expected {STATE_VERSION})",
@@ -129,11 +130,17 @@ pub struct Assignment {
 /// only, both in saved order (stage order, then front to back). Each live window is used at
 /// most once. Child windows on either side are left out; they follow their parents.
 pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
-    let standard: Vec<&WindowMeta> = live.iter().filter(|m| m.role == WindowRole::Standard).collect();
+    let standard: Vec<&WindowMeta> = live
+        .iter()
+        .filter(|m| m.role == WindowRole::Standard)
+        .collect();
     let mut saved: Vec<(usize, &SavedWindow)> = Vec::new();
     for (i, st) in state.stages.iter().enumerate() {
-        let mut ws: Vec<&SavedWindow> =
-            st.windows.iter().filter(|w| w.role == SavedRole::Standard).collect();
+        let mut ws: Vec<&SavedWindow> = st
+            .windows
+            .iter()
+            .filter(|w| w.role == SavedRole::Standard)
+            .collect();
         ws.sort_by_key(|w| w.z);
         saved.extend(ws.into_iter().map(|w| (i, w)));
     }
@@ -148,7 +155,10 @@ pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
             if slot.is_some() {
                 continue;
             }
-            if let Some(l) = standard.iter().find(|l| !used.contains(&l.id) && pass(sw, l)) {
+            if let Some(l) = standard
+                .iter()
+                .find(|l| !used.contains(&l.id) && pass(sw, l))
+            {
                 used.insert(l.id);
                 *slot = Some(l.id);
             }
@@ -157,7 +167,10 @@ pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
     let mut stages: Vec<AssignedStage> = state
         .stages
         .iter()
-        .map(|s| AssignedStage { name: s.name.clone(), windows: Vec::new() })
+        .map(|s| AssignedStage {
+            name: s.name.clone(),
+            windows: Vec::new(),
+        })
         .collect();
     for ((stage, sw), id) in saved.iter().zip(&matched) {
         if let Some(id) = id {
@@ -171,10 +184,19 @@ pub fn rematch(state: &StateFile, live: &[WindowMeta]) -> Assignment {
     }
     let active_index = state.active_index.filter(|&i| i < stages.len());
     Assignment {
-        strip_slots: state.strip_slots.iter().copied().filter(|&i| i < stages.len()).collect(),
+        strip_slots: state
+            .strip_slots
+            .iter()
+            .copied()
+            .filter(|&i| i < stages.len())
+            .collect(),
         stages,
         active_index,
-        unmatched: standard.iter().filter(|l| !used.contains(&l.id)).map(|l| l.id).collect(),
+        unmatched: standard
+            .iter()
+            .filter(|l| !used.contains(&l.id))
+            .map(|l| l.id)
+            .collect(),
     }
 }
 
@@ -216,23 +238,34 @@ impl Model {
                         .enumerate()
                         .filter_map(|(i, id)| save(id, base + i, false, false)),
                 );
-                SavedStage { name: s.name.clone(), windows }
+                SavedStage {
+                    name: s.name.clone(),
+                    windows,
+                }
             })
             .collect();
         if let Some(i) = active_index {
             let mut pinned = self.pinned();
             pinned.extend(self.children_in(Home::Pinned));
             let base = stages[i].windows.len();
-            stages[i]
-                .windows
-                .extend(pinned.into_iter().enumerate().filter_map(|(k, id)| save(id, base + k, false, true)));
+            stages[i].windows.extend(
+                pinned
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(k, id)| save(id, base + k, false, true)),
+            );
         }
         let strip_slots = self
             .strip_slots(self.main_display().id)
             .into_iter()
             .filter_map(|id| self.stages.iter().position(|s| s.id == id))
             .collect();
-        StateFile { version: STATE_VERSION, stages, active_index, strip_slots }
+        StateFile {
+            version: STATE_VERSION,
+            stages,
+            active_index,
+            strip_slots,
+        }
     }
 
     /// Rebuilds stages from an [`Assignment`] on launch. `live` lists every live window
@@ -257,7 +290,11 @@ impl Model {
             let members: Vec<&AssignedWindow> = st
                 .windows
                 .iter()
-                .filter(|w| metas.contains_key(&w.id) && !self.windows.contains_key(&w.id) && placed.insert(w.id))
+                .filter(|w| {
+                    metas.contains_key(&w.id)
+                        && !self.windows.contains_key(&w.id)
+                        && placed.insert(w.id)
+                })
                 .collect();
             let declared = st.name.as_deref().is_some_and(|n| self.is_declared(n));
             let standing: Vec<&&AssignedWindow> = members.iter().filter(|w| !w.pinned).collect();
@@ -277,11 +314,19 @@ impl Model {
             };
             built[i] = Some(sid);
             for w in &members {
-                let home = if w.pinned { Home::Pinned } else { Home::Stage(sid) };
+                let home = if w.pinned {
+                    Home::Pinned
+                } else {
+                    Home::Stage(sid)
+                };
                 self.insert_restored(metas[&w.id], w, home, restore_frames);
             }
             let ids: Vec<WindowId> = standing.iter().map(|w| w.id).collect();
-            let key = standing.iter().find(|w| w.key).map(|w| w.id).or(ids.first().copied());
+            let key = standing
+                .iter()
+                .find(|w| w.key)
+                .map(|w| w.id)
+                .or(ids.first().copied());
             let t = self.tick();
             if let Some(stage) = self.stage_mut(sid) {
                 stage.windows.extend(ids);
@@ -312,7 +357,15 @@ impl Model {
             let mut meta = (*meta).clone();
             meta.display = display;
             let restore = self.safe_restore(meta.frame, display);
-            self.windows.insert(id, WindowState { meta, home: Home::Stage(stage), restore, parked: false });
+            self.windows.insert(
+                id,
+                WindowState {
+                    meta,
+                    home: Home::Stage(stage),
+                    restore,
+                    parked: false,
+                },
+            );
             if let Some(s) = self.stage_mut(stage) {
                 s.windows.push(id);
                 if s.key.is_none() {
@@ -326,6 +379,8 @@ impl Model {
             if self.is_active(s) {
                 if restore_frames {
                     self.show_stage(s, &mut actions);
+                } else {
+                    self.unstick(s, &mut actions);
                 }
             } else {
                 self.park_stage(s, &mut actions);
@@ -337,20 +392,54 @@ impl Model {
             }
         }
 
-        for meta in live.iter().filter(|m| matches!(m.role, WindowRole::Child { .. })) {
-            let child_actions = self.add_window(meta.clone(), &Decision::default(), &Observation::default());
-            actions.extend(child_actions.into_iter().filter(|a| *a != Action::StateChanged));
+        for meta in live
+            .iter()
+            .filter(|m| matches!(m.role, WindowRole::Child { .. }))
+        {
+            let child_actions =
+                self.add_window(meta.clone(), &Decision::default(), &Observation::default());
+            actions.extend(
+                child_actions
+                    .into_iter()
+                    .filter(|a| *a != Action::StateChanged),
+            );
         }
 
-        let slots: Vec<StageId> =
-            assignment.strip_slots.iter().filter_map(|&i| built.get(i).copied().flatten()).collect();
+        let slots: Vec<StageId> = assignment
+            .strip_slots
+            .iter()
+            .filter_map(|&i| built.get(i).copied().flatten())
+            .collect();
         self.slots.insert(main, slots);
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
     }
 
-    fn insert_restored(&mut self, meta: &WindowMeta, saved: &AssignedWindow, home: Home, restore_frames: bool) {
+    /// Restores members of an active stage whose live frame is in a park zone (left there by a
+    /// crash), since they would otherwise stay hidden while counted as visible.
+    fn unstick(&mut self, stage: StageId, actions: &mut Vec<Action>) {
+        let Some(s) = self.stage(stage) else { return };
+        let mut ids = s.windows.clone();
+        ids.extend(self.children_in(Home::Stage(stage)));
+        for id in ids {
+            let stuck = self
+                .windows
+                .get(&id)
+                .is_some_and(|w| is_parked(w.meta.frame, self.display(w.meta.display).frame));
+            if stuck {
+                self.restore_window(id, actions);
+            }
+        }
+    }
+
+    fn insert_restored(
+        &mut self,
+        meta: &WindowMeta,
+        saved: &AssignedWindow,
+        home: Home,
+        restore_frames: bool,
+    ) {
         let display = self.known_display(meta.display);
         let live_parked = is_parked(meta.frame, self.display(display).frame);
         let base = if restore_frames || live_parked || meta.frame.is_degenerate() {
@@ -361,7 +450,15 @@ impl Model {
         let restore = self.safe_restore(base, display);
         let mut meta = meta.clone();
         meta.display = display;
-        self.windows.insert(meta.id, WindowState { meta, home, restore, parked: false });
+        self.windows.insert(
+            meta.id,
+            WindowState {
+                meta,
+                home,
+                restore,
+                parked: false,
+            },
+        );
     }
 }
 

@@ -15,11 +15,17 @@ struct Env {
 
 impl Env {
     fn new() -> Self {
-        Self { m: model(), d: Desk::default() }
+        Self {
+            m: model(),
+            d: Desk::default(),
+        }
     }
 
     fn with(options: ModelOptions) -> Self {
-        Self { m: model_with(options), d: Desk::default() }
+        Self {
+            m: model_with(options),
+            d: Desk::default(),
+        }
     }
 
     fn run(&mut self, actions: Vec<Action>) -> Vec<Action> {
@@ -31,10 +37,17 @@ impl Env {
         self.add_placed(meta, action, Placement::AsIs)
     }
 
-    fn add_placed(&mut self, meta: WindowMeta, action: RuleAction, placement: Placement) -> Vec<Action> {
+    fn add_placed(
+        &mut self,
+        meta: WindowMeta,
+        action: RuleAction,
+        placement: Placement,
+    ) -> Vec<Action> {
         self.d.open(&meta);
         let obs = self.d.obs();
-        let a = self.m.add_window(meta, &Decision { action, placement }, &obs);
+        let a = self
+            .m
+            .add_window(meta, &Decision { action, placement }, &obs);
         self.run(a)
     }
 
@@ -68,7 +81,9 @@ impl Env {
     }
 
     fn active_number(&self) -> usize {
-        self.m.stage_number(self.m.main_active_stage().expect("active")).expect("numbered")
+        self.m
+            .stage_number(self.m.main_active_stage().expect("active"))
+            .expect("numbered")
     }
 
     fn members(&self, n: usize) -> Vec<u32> {
@@ -97,11 +112,22 @@ fn new_model_has_one_empty_active_stage() {
 
 #[test]
 fn declared_stages_exist_up_front_and_first_is_active() {
-    let m = model_with(ModelOptions { named_stages: vec!["Work".into(), "Chat".into()], ..Default::default() });
-    let names: Vec<_> = m.stages().iter().map(|s| s.name.clone().unwrap_or_default()).collect();
+    let m = model_with(ModelOptions {
+        named_stages: vec!["Work".into(), "Chat".into()],
+        ..Default::default()
+    });
+    let names: Vec<_> = m
+        .stages()
+        .iter()
+        .map(|s| s.name.clone().unwrap_or_default())
+        .collect();
     assert_eq!(names, ["Work", "Chat"]);
     assert_eq!(m.main_active_stage(), Some(m.stages()[0].id));
-    assert_eq!(m.strip().len(), 1, "an empty declared stage still has a card");
+    assert_eq!(
+        m.strip().len(),
+        1,
+        "an empty declared stage still has a card"
+    );
     assert_eq!(m.strip()[0].name.as_deref(), Some("Chat"));
 }
 
@@ -133,7 +159,10 @@ fn duplicate_notifications_are_deduped() {
     assert!(a.is_empty());
     assert_eq!(e.m.stages().len(), 1);
     assert_eq!(e.members(1), [1]);
-    assert_eq!(e.m.window(w(1)).map(|x| x.meta.title.as_str()), Some("Renamed"));
+    assert_eq!(
+        e.m.window(w(1)).map(|x| x.meta.title.as_str()),
+        Some("Renamed")
+    );
 }
 
 #[test]
@@ -164,13 +193,23 @@ fn named_stage_parks_unfocused_windows_and_follows_focused_ones() {
     let m2 = meta(2, 11, "com.example.chat");
     e.d.frames.insert(m2.id, m2.frame);
     let obs = e.d.obs();
-    let a = e.m.add_window(m2, &Decision { action: RuleAction::Stage("Chat".into()), placement: Placement::AsIs }, &obs);
+    let a = e.m.add_window(
+        m2,
+        &Decision {
+            action: RuleAction::Stage("Chat".into()),
+            placement: Placement::AsIs,
+        },
+        &obs,
+    );
     e.run(a);
     assert_eq!(e.active_number(), 1);
     assert!(e.d.parked(w(2)));
     assert_eq!(e.m.stages()[1].name.as_deref(), Some("Chat"));
     // Window 3 of the same rule opens focused: we follow it.
-    e.add(meta(3, 11, "com.example.chat"), RuleAction::Stage("chat".into()));
+    e.add(
+        meta(3, 11, "com.example.chat"),
+        RuleAction::Stage("chat".into()),
+    );
     assert_eq!(e.m.stages().len(), 2, "names match case-insensitively");
     assert_eq!(e.active_number(), 2);
     assert!(!e.d.parked(w(2)) && !e.d.parked(w(3)) && e.d.parked(w(1)));
@@ -179,9 +218,19 @@ fn named_stage_parks_unfocused_windows_and_follows_focused_ones() {
 #[test]
 fn center_placement_moves_the_new_window() {
     let mut e = Env::new();
-    let a = e.add_placed(meta(1, 10, "com.example.a"), RuleAction::Current, Placement::Center);
+    let a = e.add_placed(
+        meta(1, 10, "com.example.a"),
+        RuleAction::Current,
+        Placement::Center,
+    );
     let expected = Rect::new(420.0, 263.0, 600.0, 400.0);
-    assert_eq!(a.first(), Some(&Action::SetFrame { id: w(1), frame: expected }));
+    assert_eq!(
+        a.first(),
+        Some(&Action::SetFrame {
+            id: w(1),
+            frame: expected
+        })
+    );
     assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(expected));
 }
 
@@ -190,9 +239,19 @@ fn cascade_placement_offsets_from_the_front_window() {
     let mut e = Env::new();
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     let front = e.d.frames[&w(1)];
-    let a = e.add_placed(meta(2, 10, "com.example.a"), RuleAction::Current, Placement::Cascade);
+    let a = e.add_placed(
+        meta(2, 10, "com.example.a"),
+        RuleAction::Current,
+        Placement::Cascade,
+    );
     let expected = Rect::new(front.x + 32.0, front.y + 32.0, 600.0, 400.0);
-    assert_eq!(a.first(), Some(&Action::SetFrame { id: w(2), frame: expected }));
+    assert_eq!(
+        a.first(),
+        Some(&Action::SetFrame {
+            id: w(2),
+            frame: expected
+        })
+    );
 }
 
 #[test]
@@ -289,7 +348,10 @@ fn removing_a_parent_forgets_its_children_and_restores_parked_ones() {
     e.d.close(w(1));
     e.run(a.clone());
     assert!(e.m.window(w(2)).is_none());
-    assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if *id == w(2))));
+    assert!(
+        a.iter()
+            .any(|x| matches!(x, Action::SetFrame { id, .. } if *id == w(2)))
+    );
     assert!(!e.d.parked(w(2)), "a forgotten window is never left parked");
 }
 
@@ -313,10 +375,16 @@ fn switch_parks_restores_raises_and_focuses_in_order() {
     e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
     e.add(meta(3, 12, "com.example.c"), RuleAction::New);
     let a = e.switch(1);
-    let last_park = a.iter().rposition(|x| matches!(x, Action::Park { .. })).expect("parks");
+    let last_park = a
+        .iter()
+        .rposition(|x| matches!(x, Action::Park { .. }))
+        .expect("parks");
     let first_set = first_index(&a, |x| matches!(x, Action::SetFrame { .. })).expect("sets");
     let first_raise = first_index(&a, |x| matches!(x, Action::Raise { .. })).expect("raises");
-    let last_set = a.iter().rposition(|x| matches!(x, Action::SetFrame { .. })).expect("sets");
+    let last_set = a
+        .iter()
+        .rposition(|x| matches!(x, Action::SetFrame { .. }))
+        .expect("sets");
     let focus = first_index(&a, |x| matches!(x, Action::Focus { .. })).expect("focus");
     assert!(last_park < first_set && last_set < first_raise && focus > first_raise);
     assert_eq!(a.last(), Some(&Action::StateChanged));
@@ -356,7 +424,10 @@ fn switch_remembers_the_focused_window_as_key() {
     e.send(3, Target::New);
     let two = e.m.stages()[1].id;
     // Window 1 is focused although 2 is in front (a focused window behind a floating one).
-    let obs = Observation { focused: Some(w(1)), ..e.d.obs() };
+    let obs = Observation {
+        focused: Some(w(1)),
+        ..e.d.obs()
+    };
     let a = e.m.switch_to(two, &obs);
     e.run(a);
     assert_eq!(e.m.stages()[0].key, Some(w(1)));
@@ -384,9 +455,13 @@ fn switch_never_records_a_parked_frame_as_restore() {
     let good = e.d.frames[&w(1)];
     e.add(meta(2, 11, "com.example.b"), RuleAction::New);
     // A stale observation claims window 2 sits in the park zone while active.
-    e.d.frames.insert(w(2), Rect::new(1430.0, 890.0, 600.0, 400.0));
+    e.d.frames
+        .insert(w(2), Rect::new(1430.0, 890.0, 600.0, 400.0));
     e.switch(1);
-    assert!(!is_parked(e.m.window(w(2)).map(|x| x.restore).expect("w2"), FRAME));
+    assert!(!is_parked(
+        e.m.window(w(2)).map(|x| x.restore).expect("w2"),
+        FRAME
+    ));
     assert_eq!(e.d.frames[&w(1)], good);
 }
 
@@ -408,7 +483,9 @@ fn pinned_windows_are_untouched_by_switches() {
     e.add(meta(1, 10, "com.example.a"), RuleAction::Float);
     e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
     let a = e.add(meta(3, 12, "com.example.c"), RuleAction::New);
-    assert!(!a.iter().any(|x| matches!(x, Action::Park { id, .. } | Action::SetFrame { id, .. } if *id == w(1))));
+    assert!(!a.iter().any(
+        |x| matches!(x, Action::Park { id, .. } | Action::SetFrame { id, .. } if *id == w(1))
+    ));
     assert!(!e.d.parked(w(1)));
     assert!(e.m.pinned().contains(&w(1)));
     assert!(e.m.strip().iter().all(|c| !c.windows.contains(&w(1))));
@@ -449,8 +526,14 @@ fn closing_the_key_window_picks_the_next_front() {
 
 #[test]
 fn declared_stages_survive_being_empty() {
-    let mut e = Env::with(ModelOptions { named_stages: vec!["Work".into(), "Chat".into()], ..Default::default() });
-    e.add(meta(1, 10, "com.example.a"), RuleAction::Stage("Chat".into()));
+    let mut e = Env::with(ModelOptions {
+        named_stages: vec!["Work".into(), "Chat".into()],
+        ..Default::default()
+    });
+    e.add(
+        meta(1, 10, "com.example.a"),
+        RuleAction::Stage("Chat".into()),
+    );
     e.switch(1);
     e.close(1);
     assert_eq!(e.m.stages().len(), 2);
@@ -586,7 +669,10 @@ fn activating_an_app_switches_to_its_most_recent_stage() {
     e.add(meta(2, 10, "com.example.a"), RuleAction::New);
     e.add(meta(3, 11, "com.example.b"), RuleAction::New);
     // Stage 2 was active more recently than stage 1.
-    let obs = Observation { focused: None, ..e.d.obs() };
+    let obs = Observation {
+        focused: None,
+        ..e.d.obs()
+    };
     let a = e.m.app_activated(10, &obs);
     e.run(a);
     assert_eq!(e.active_number(), 2);
@@ -598,7 +684,10 @@ fn activation_follows_the_focused_window_first() {
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     e.add(meta(2, 10, "com.example.a"), RuleAction::New);
     e.add(meta(3, 11, "com.example.b"), RuleAction::New);
-    let obs = Observation { focused: Some(w(1)), ..e.d.obs() };
+    let obs = Observation {
+        focused: Some(w(1)),
+        ..e.d.obs()
+    };
     let a = e.m.app_activated(10, &obs);
     e.run(a);
     assert_eq!(e.active_number(), 1);
@@ -611,13 +700,19 @@ fn one_at_a_time_follows_the_focused_window_even_when_present() {
     let mut e = Env::with(options);
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     e.add(meta(2, 10, "com.example.a"), RuleAction::New);
-    let obs = Observation { focused: Some(w(1)), ..e.d.obs() };
+    let obs = Observation {
+        focused: Some(w(1)),
+        ..e.d.obs()
+    };
     let a = e.m.app_activated(10, &obs);
     e.run(a);
     assert_eq!(e.active_number(), 1);
     // All at once ignores the focused window while the app is present.
     e.m.set_settings(NativeSettings::default());
-    let obs = Observation { focused: Some(w(2)), ..e.d.obs() };
+    let obs = Observation {
+        focused: Some(w(2)),
+        ..e.d.obs()
+    };
     let a = e.m.app_activated(10, &obs);
     assert!(a.iter().all(|x| *x == Action::StateChanged) || a.is_empty());
 }
@@ -628,7 +723,10 @@ fn an_app_with_a_pinned_window_does_not_pull_a_switch() {
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     e.add(meta(2, 10, "com.example.a"), RuleAction::Float);
     e.add(meta(3, 11, "com.example.b"), RuleAction::New);
-    let obs = Observation { focused: Some(w(2)), ..e.d.obs() };
+    let obs = Observation {
+        focused: Some(w(2)),
+        ..e.d.obs()
+    };
     assert!(e.m.app_activated(10, &obs).is_empty());
 }
 
@@ -730,7 +828,10 @@ fn unpark_all_restores_every_parked_window_clamped() {
     for id in [1, 2, 3, 4] {
         assert!(!e.d.parked(w(id)), "window {id}");
     }
-    assert_eq!(e.d.frames[&w(3)], clamp_to_visible(Rect::new(-500.0, -100.0, 600.0, 400.0), VISIBLE));
+    assert_eq!(
+        e.d.frames[&w(3)],
+        clamp_to_visible(Rect::new(-500.0, -100.0, 600.0, 400.0), VISIBLE)
+    );
     assert!(e.m.parked_windows().is_empty());
 }
 
@@ -751,16 +852,25 @@ fn removed_display_moves_its_stages_to_main() {
     assert_eq!(e.m.stages().len(), 2);
     let a = e.m.set_displays(vec![display()]);
     e.run(a);
-    assert!(e.d.parked(w(5)), "the second display's active stage is parked on main");
+    assert!(
+        e.d.parked(w(5)),
+        "the second display's active stage is parked on main"
+    );
     assert!(e.m.stages().iter().all(|s| s.display == MAIN));
     let a = e.m.unpark_all();
     e.run(a);
-    assert!(VISIBLE.contains_rect(&Rect { h: 28.0, ..e.d.frames[&w(5)] }));
+    assert!(VISIBLE.contains_rect(&Rect {
+        h: 28.0,
+        ..e.d.frames[&w(5)]
+    }));
 }
 
 #[test]
 fn renamed_declarations_release_empty_stages() {
-    let mut m = model_with(ModelOptions { named_stages: vec!["Work".into(), "Chat".into()], ..Default::default() });
+    let mut m = model_with(ModelOptions {
+        named_stages: vec!["Work".into(), "Chat".into()],
+        ..Default::default()
+    });
     m.set_named_stages(vec!["Work".into(), "Music".into()]);
     let names: Vec<_> = m.stages().iter().filter_map(|s| s.name.clone()).collect();
     assert_eq!(names, ["Work", "Music"]);
@@ -792,7 +902,11 @@ fn clicking_a_card_swaps_slots() {
     let mut e = stages(4, 6);
     assert_eq!(e.slot_numbers(), [1, 2, 3]);
     e.switch(1);
-    assert_eq!(e.slot_numbers(), [4, 2, 3], "the stage left takes the vacated slot");
+    assert_eq!(
+        e.slot_numbers(),
+        [4, 2, 3],
+        "the stage left takes the vacated slot"
+    );
     e.switch(3);
     assert_eq!(e.slot_numbers(), [4, 2, 1]);
 }
@@ -810,7 +924,11 @@ fn a_stage_entering_a_full_strip_evicts_the_least_recently_used() {
     // The evicted card is the one used least recently.
     let evicted: Vec<_> = before.iter().filter(|n| !after.contains(n)).collect();
     assert_eq!(evicted.len(), 1);
-    let kept = before.iter().find(|n| after.contains(n)).copied().expect("one kept");
+    let kept = before
+        .iter()
+        .find(|n| after.contains(n))
+        .copied()
+        .expect("one kept");
     let age = |n: usize| e.m.stages()[n - 1].last_active;
     assert!(age(*evicted[0]) < age(kept));
     // It takes the evicted card's slot, not the bottom.
@@ -821,7 +939,9 @@ fn a_stage_entering_a_full_strip_evicts_the_least_recently_used() {
 #[test]
 fn switching_by_hotkey_to_an_out_of_view_stage_enters_the_leaving_one() {
     let mut e = stages(4, 2);
-    let out = (1..=3).find(|n| !e.slot_numbers().contains(n)).expect("one out of view");
+    let out = (1..=3)
+        .find(|n| !e.slot_numbers().contains(n))
+        .expect("one out of view");
     e.switch(out);
     assert!(e.slot_numbers().contains(&4));
     assert!(!e.slot_numbers().contains(&out));
@@ -830,13 +950,18 @@ fn switching_by_hotkey_to_an_out_of_view_stage_enters_the_leaving_one() {
 #[test]
 fn a_closed_card_frees_its_slot_and_an_out_of_view_stage_returns() {
     let mut e = stages(4, 2);
-    let out = (1..=3).find(|n| !e.slot_numbers().contains(n)).expect("one out of view");
+    let out = (1..=3)
+        .find(|n| !e.slot_numbers().contains(n))
+        .expect("one out of view");
     let shown = e.slot_numbers()[0];
     // Close the only window of a shown stage.
     let id = e.members(shown)[0];
     e.close(id);
     assert_eq!(e.slot_numbers().len(), 2);
-    let out_id = e.m.stages().iter().position(|s| s.windows.contains(&w(out as u32)));
+    let out_id =
+        e.m.stages()
+            .iter()
+            .position(|s| s.windows.contains(&w(out as u32)));
     assert!(out_id.is_some());
 }
 
@@ -856,14 +981,32 @@ fn capacity_shrinks_by_evicting_the_oldest_and_grows_back() {
 fn fixed_order_lists_creation_order_and_can_show_the_active_stage() {
     let mut e = stages(4, 6);
     e.switch(2);
-    e.m.set_strip_options(StripOptions { order: StripOrder::Fixed, show_active: false, capacity: 6 });
+    e.m.set_strip_options(StripOptions {
+        order: StripOrder::Fixed,
+        show_active: false,
+        capacity: 6,
+    });
     assert_eq!(e.slot_numbers(), [1, 3, 4]);
-    e.m.set_strip_options(StripOptions { order: StripOrder::Fixed, show_active: true, capacity: 6 });
+    e.m.set_strip_options(StripOptions {
+        order: StripOrder::Fixed,
+        show_active: true,
+        capacity: 6,
+    });
     let cards = e.m.strip();
-    assert_eq!(cards.iter().map(|c| c.number).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert_eq!(
+        cards.iter().map(|c| c.number).collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
     assert!(cards[1].active);
-    e.m.set_strip_options(StripOptions { order: StripOrder::Native, show_active: true, capacity: 6 });
-    assert!(e.m.strip().iter().all(|c| !c.active), "native never shows the active stage");
+    e.m.set_strip_options(StripOptions {
+        order: StripOrder::Native,
+        show_active: true,
+        capacity: 6,
+    });
+    assert!(
+        e.m.strip().iter().all(|c| !c.active),
+        "native never shows the active stage"
+    );
 }
 
 #[test]
@@ -884,7 +1027,10 @@ fn cards_list_windows_front_to_back_and_apps_once() {
 fn strip_auto_hide_follows_apple_setting() {
     let mut m = model();
     assert!(!m.strip_auto_hides());
-    m.set_settings(NativeSettings { hide_recent_apps: true, ..NativeSettings::default() });
+    m.set_settings(NativeSettings {
+        hide_recent_apps: true,
+        ..NativeSettings::default()
+    });
     assert!(m.strip_auto_hides());
 }
 
@@ -903,7 +1049,11 @@ impl Rng {
     }
 
     fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
 
     fn pick<T: Copy>(&mut self, items: &[T]) -> Option<T> {
@@ -916,12 +1066,19 @@ fn check_invariants(e: &Env, step: &str) {
     // Every live window the desk shows parked is known to the model as parked.
     for (&id, &f) in &e.d.frames {
         if is_parked(f, FRAME) {
-            assert!(m.window(id).is_some_and(|w| w.parked), "{step}: {id:?} parked on the desk but not in the model");
+            assert!(
+                m.window(id).is_some_and(|w| w.parked),
+                "{step}: {id:?} parked on the desk but not in the model"
+            );
         }
     }
     // Restore frames are never in the park zone.
     for w in m.windows() {
-        assert!(!is_parked(w.restore, FRAME), "{step}: restore frame of {:?} is parked", w.meta.id);
+        assert!(
+            !is_parked(w.restore, FRAME),
+            "{step}: restore frame of {:?} is parked",
+            w.meta.id
+        );
     }
     // Standard windows: exactly one home; members exist and are standard.
     let mut seen = std::collections::HashSet::new();
@@ -936,8 +1093,17 @@ fn check_invariants(e: &Env, step: &str) {
             assert!(s.windows.contains(&k), "{step}: key {k:?} not a member");
         }
         let active = m.active_stage(s.display) == Some(s.id);
-        let declared = s.name.as_deref().is_some_and(|n| m.options().named_stages.iter().any(|d| d.eq_ignore_ascii_case(n)));
-        assert!(active || declared || !s.windows.is_empty(), "{step}: dead stage {:?} kept", s.id);
+        let declared = s.name.as_deref().is_some_and(|n| {
+            m.options()
+                .named_stages
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(n))
+        });
+        assert!(
+            active || declared || !s.windows.is_empty(),
+            "{step}: dead stage {:?} kept",
+            s.id
+        );
     }
     for w in m.windows() {
         match (w.meta.role, w.home) {
@@ -948,15 +1114,25 @@ fn check_invariants(e: &Env, step: &str) {
     }
     // Visible stages are visible, inactive ones parked (on the desk).
     for w in m.windows() {
-        let Some(&f) = e.d.frames.get(&w.meta.id) else { continue };
+        let Some(&f) = e.d.frames.get(&w.meta.id) else {
+            continue;
+        };
         let shown = match w.home {
             Home::Pinned => true,
             Home::Stage(s) => m.active_stage(MAIN) == Some(s),
         };
         if shown {
-            assert!(!is_parked(f, FRAME), "{step}: {:?} should be visible", w.meta.id);
+            assert!(
+                !is_parked(f, FRAME),
+                "{step}: {:?} should be visible",
+                w.meta.id
+            );
         } else {
-            assert!(is_parked(f, FRAME) && w.parked, "{step}: {:?} should be parked", w.meta.id);
+            assert!(
+                is_parked(f, FRAME) && w.parked,
+                "{step}: {:?} should be parked",
+                w.meta.id
+            );
         }
     }
     // Strip slots: unique, eligible, within capacity, and full when there is room.
@@ -967,9 +1143,22 @@ fn check_invariants(e: &Env, step: &str) {
     uniq.sort();
     uniq.dedup();
     assert_eq!(uniq.len(), slots.len(), "{step}: duplicate slot");
-    let eligible = m.stages().iter().filter(|s| m.active_stage(MAIN) != Some(s.id) && (!s.windows.is_empty() || s.name.as_deref().is_some_and(|n| m.options().named_stages.iter().any(|d| d == n)))).count();
+    let eligible = m
+        .stages()
+        .iter()
+        .filter(|s| {
+            m.active_stage(MAIN) != Some(s.id)
+                && (!s.windows.is_empty()
+                    || s.name
+                        .as_deref()
+                        .is_some_and(|n| m.options().named_stages.iter().any(|d| d == n)))
+        })
+        .count();
     assert_eq!(slots.len(), eligible.min(cap), "{step}: slots not filled");
-    assert!(m.active_stage(MAIN).is_some_and(|a| !slots.contains(&a)), "{step}: active in strip");
+    assert!(
+        m.active_stage(MAIN).is_some_and(|a| !slots.contains(&a)),
+        "{step}: active in strip"
+    );
 }
 
 #[test]
@@ -1002,7 +1191,8 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         3 => RuleAction::Ignore,
                         _ => RuleAction::Current,
                     };
-                    let placement = [Placement::AsIs, Placement::Center, Placement::Cascade][rng.below(3)];
+                    let placement =
+                        [Placement::AsIs, Placement::Center, Placement::Cascade][rng.below(3)];
                     let mut m = meta(next_id, 10 + rng.below(4) as i32, "com.example.p");
                     if rng.below(8) == 0 && action != RuleAction::Ignore {
                         m.frame = Rect::new(1420.0, 880.0, 500.0, 300.0); // born in the corner
@@ -1038,7 +1228,10 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         e.close(id.0);
                         // Sometimes the app closes the children too.
                         if rng.below(2) == 0 {
-                            for c in alive.iter().filter(|c| e.m.window(**c).is_none() && **c != id) {
+                            for c in alive
+                                .iter()
+                                .filter(|c| e.m.window(**c).is_none() && **c != id)
+                            {
                                 e.d.close(*c);
                             }
                         }
@@ -1083,9 +1276,18 @@ fn property_no_sequence_of_operations_loses_a_window() {
                 }
                 11 => {
                     // The user moves a visible window.
-                    let visible: Vec<WindowId> = alive.iter().copied().filter(|id| !e.d.parked(*id)).collect();
+                    let visible: Vec<WindowId> = alive
+                        .iter()
+                        .copied()
+                        .filter(|id| !e.d.parked(*id))
+                        .collect();
                     if let Some(id) = rng.pick(&visible) {
-                        let f = Rect::new(rng.below(1200) as f64, 25.0 + rng.below(700) as f64, 300.0 + rng.below(900) as f64, 200.0 + rng.below(700) as f64);
+                        let f = Rect::new(
+                            rng.below(1200) as f64,
+                            25.0 + rng.below(700) as f64,
+                            300.0 + rng.below(900) as f64,
+                            200.0 + rng.below(700) as f64,
+                        );
                         e.d.frames.insert(id, f);
                         e.d.raise(id);
                         e.d.focused = Some(id);
@@ -1096,7 +1298,10 @@ fn property_no_sequence_of_operations_loses_a_window() {
                 12 => {
                     if let Some(id) = rng.pick(&alive) {
                         log.push(format!("focus {}", id.0));
-                        let obs = Observation { focused: Some(id), ..e.d.obs() };
+                        let obs = Observation {
+                            focused: Some(id),
+                            ..e.d.obs()
+                        };
                         let a = e.m.window_focused(id, &obs);
                         e.run(a);
                     }
@@ -1104,9 +1309,19 @@ fn property_no_sequence_of_operations_loses_a_window() {
                 13 => {
                     if let Some(id) = rng.pick(&managed) {
                         // Duplicate notification.
-                        let m = WindowMeta { id, ..meta(id.0, 10, "com.example.p") };
+                        let m = WindowMeta {
+                            id,
+                            ..meta(id.0, 10, "com.example.p")
+                        };
                         let obs = e.d.obs();
-                        let a = e.m.add_window(m, &Decision { action: RuleAction::New, placement: Placement::Center }, &obs);
+                        let a = e.m.add_window(
+                            m,
+                            &Decision {
+                                action: RuleAction::New,
+                                placement: Placement::Center,
+                            },
+                            &obs,
+                        );
                         assert!(a.is_empty(), "duplicate produced actions");
                     }
                 }
@@ -1125,7 +1340,10 @@ fn property_no_sequence_of_operations_loses_a_window() {
         let a = e.m.unpark_all();
         e.run(a);
         for (&id, &f) in &e.d.frames {
-            assert!(!is_parked(f, FRAME), "seed {seed}: {id:?} still parked after unpark_all");
+            assert!(
+                !is_parked(f, FRAME),
+                "seed {seed}: {id:?} still parked after unpark_all"
+            );
         }
     }
 }

@@ -88,7 +88,11 @@ impl Rect {
 
     /// The area; zero for degenerate rectangles.
     pub fn area(&self) -> f64 {
-        if self.is_degenerate() { 0.0 } else { self.w * self.h }
+        if self.is_degenerate() {
+            0.0
+        } else {
+            self.w * self.h
+        }
     }
 
     /// True when any value is not finite or the width or height is not positive.
@@ -132,7 +136,12 @@ impl Rect {
 
     /// The same size centered on `center`.
     pub fn centered_on(&self, center: Point) -> Rect {
-        Rect::new(center.x - self.w / 2.0, center.y - self.h / 2.0, self.w, self.h)
+        Rect::new(
+            center.x - self.w / 2.0,
+            center.y - self.h / 2.0,
+            self.w,
+            self.h,
+        )
     }
 }
 

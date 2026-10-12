@@ -75,27 +75,47 @@ mod tests {
     #[test]
     fn cascade_offsets_from_front() {
         let front = Rect::new(100.0, 100.0, 600.0, 400.0);
-        let f = cascade(Rect::new(0.0, 0.0, 500.0, 300.0), Some(front), VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(0.0, 0.0, 500.0, 300.0),
+            Some(front),
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f, Rect::new(132.0, 132.0, 500.0, 300.0));
     }
 
     #[test]
     fn cascade_without_front_keeps_origin() {
-        let f = cascade(Rect::new(70.0, 80.0, 500.0, 300.0), None, VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(70.0, 80.0, 500.0, 300.0),
+            None,
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f, Rect::new(70.0, 80.0, 500.0, 300.0));
     }
 
     #[test]
     fn cascade_wraps_on_right_overflow() {
         let front = Rect::new(1000.0, 100.0, 400.0, 300.0);
-        let f = cascade(Rect::new(0.0, 0.0, 420.0, 300.0), Some(front), VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(0.0, 0.0, 420.0, 300.0),
+            Some(front),
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f, Rect::new(16.0, 41.0, 420.0, 300.0));
     }
 
     #[test]
     fn cascade_wraps_on_bottom_overflow() {
         let front = Rect::new(100.0, 600.0, 400.0, 300.0);
-        let f = cascade(Rect::new(0.0, 0.0, 400.0, 300.0), Some(front), VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            Some(front),
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f, Rect::new(16.0, 41.0, 400.0, 300.0));
     }
 
@@ -103,7 +123,12 @@ mod tests {
     fn cascade_exact_fit_does_not_wrap() {
         // Right edge lands exactly on the visible edge.
         let front = Rect::new(908.0, 100.0, 400.0, 300.0);
-        let f = cascade(Rect::new(0.0, 0.0, 500.0, 300.0), Some(front), VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(0.0, 0.0, 500.0, 300.0),
+            Some(front),
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f.x, 940.0);
         assert_eq!(f.max_x(), VISIBLE.max_x());
     }
@@ -111,14 +136,24 @@ mod tests {
     #[test]
     fn cascade_huge_window_is_shrunk_and_pinned_inside() {
         let front = Rect::new(100.0, 100.0, 400.0, 300.0);
-        let f = cascade(Rect::new(0.0, 0.0, 5000.0, 5000.0), Some(front), VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(0.0, 0.0, 5000.0, 5000.0),
+            Some(front),
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f, VISIBLE);
     }
 
     #[test]
     fn cascade_nearly_full_size_wraps_then_clamps() {
         let front = Rect::new(0.0, 25.0, 400.0, 300.0);
-        let f = cascade(Rect::new(0.0, 0.0, 1430.0, 870.0), Some(front), VISIBLE, CASCADE_OFFSET);
+        let f = cascade(
+            Rect::new(0.0, 0.0, 1430.0, 870.0),
+            Some(front),
+            VISIBLE,
+            CASCADE_OFFSET,
+        );
         assert_eq!(f, Rect::new(10.0, 30.0, 1430.0, 870.0));
         assert!(VISIBLE.contains_rect(&f));
     }
@@ -128,7 +163,12 @@ mod tests {
         let mut front = Rect::new(16.0, 41.0, 600.0, 500.0);
         let mut wrapped = false;
         for _ in 0..20 {
-            let next = cascade(Rect::new(0.0, 0.0, 600.0, 500.0), Some(front), VISIBLE, CASCADE_OFFSET);
+            let next = cascade(
+                Rect::new(0.0, 0.0, 600.0, 500.0),
+                Some(front),
+                VISIBLE,
+                CASCADE_OFFSET,
+            );
             assert!(VISIBLE.contains_rect(&next));
             if next.x < front.x {
                 wrapped = true;

@@ -22,7 +22,12 @@ impl Model {
     /// it when the window is focused in `obs`, else parks it there; `float` pins it; `ignore`
     /// leaves it unmanaged. Placement (`center`, `cascade` from the stage's front window)
     /// applies before any switch.
-    pub fn add_window(&mut self, meta: WindowMeta, decision: &Decision, obs: &Observation) -> Vec<Action> {
+    pub fn add_window(
+        &mut self,
+        meta: WindowMeta,
+        decision: &Decision,
+        obs: &Observation,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         if let Some(w) = self.windows.get_mut(&meta.id) {
             w.meta.title = meta.title;
@@ -49,7 +54,15 @@ impl Model {
             };
             let restore = self.safe_restore(meta.frame, meta.display);
             let born_parked = restore != meta.frame;
-            self.windows.insert(id, WindowState { meta, home, restore, parked: false });
+            self.windows.insert(
+                id,
+                WindowState {
+                    meta,
+                    home,
+                    restore,
+                    parked: false,
+                },
+            );
             match home {
                 Home::Stage(s) if !self.is_active(s) => self.park_window(id, &mut actions),
                 _ if born_parked => actions.push(Action::SetFrame { id, frame: restore }),
@@ -66,7 +79,10 @@ impl Model {
             RuleAction::New => (Home::Stage(self.create_stage(display, None)), true),
             RuleAction::Stage(name) => match self.find_named(name) {
                 Some(s) => (Home::Stage(s), false),
-                None => (Home::Stage(self.create_stage(display, Some(name.clone()))), true),
+                None => (
+                    Home::Stage(self.create_stage(display, Some(name.clone()))),
+                    true,
+                ),
             },
         };
         let front_stage = match home {
@@ -76,7 +92,12 @@ impl Model {
         let front = self
             .stage(front_stage)
             .and_then(|s| s.windows.first().copied())
-            .and_then(|f| obs.frames.get(&f).copied().or(self.windows.get(&f).map(|w| w.restore)));
+            .and_then(|f| {
+                obs.frames
+                    .get(&f)
+                    .copied()
+                    .or(self.windows.get(&f).map(|w| w.restore))
+            });
         let visible = self.display(display).visible;
         let placed = match decision.placement {
             Placement::AsIs => meta.frame,
@@ -84,7 +105,15 @@ impl Model {
             Placement::Cascade => cascade(meta.frame, front, visible, CASCADE_OFFSET),
         };
         let restore = self.safe_restore(placed, display);
-        self.windows.insert(id, WindowState { meta, home, restore, parked: false });
+        self.windows.insert(
+            id,
+            WindowState {
+                meta,
+                home,
+                restore,
+                parked: false,
+            },
+        );
         if let Home::Stage(s) = home
             && let Some(stage) = self.stage_mut(s)
         {
@@ -120,7 +149,9 @@ impl Model {
     /// standard window disappears; the active stage may become empty.
     pub fn remove_window(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
-        let Some(w) = self.windows.get(&id) else { return actions };
+        let Some(w) = self.windows.get(&id) else {
+            return actions;
+        };
         let home = w.home;
         for c in self.children_of(id) {
             if self.windows.get(&c).is_some_and(|w| w.parked) {
@@ -150,7 +181,9 @@ impl Model {
     /// target's slot (or enters the strip if the target had none).
     pub fn switch_to(&mut self, target: StageId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let Some(display) = self.stage(target).map(|s| s.display) else { return actions };
+        let Some(display) = self.stage(target).map(|s| s.display) else {
+            return actions;
+        };
         let current = self.ensure_active(display);
         if current == target {
             return actions;
@@ -181,7 +214,11 @@ impl Model {
 
     /// Switches to stage `n` (1-based, creation order); a no-op when there is none.
     pub fn switch_to_number(&mut self, n: usize, obs: &Observation) -> Vec<Action> {
-        match n.checked_sub(1).and_then(|i| self.stages.get(i)).map(|s| s.id) {
+        match n
+            .checked_sub(1)
+            .and_then(|i| self.stages.get(i))
+            .map(|s| s.id)
+        {
             Some(s) => self.switch_to(s, obs),
             None => Vec::new(),
         }
@@ -195,7 +232,9 @@ impl Model {
     /// missing stage. Sending the last window out leaves the active stage empty.
     pub fn send_window(&mut self, id: WindowId, target: Target, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let Some(id) = self.resolve_standard(id) else { return actions };
+        let Some(id) = self.resolve_standard(id) else {
+            return actions;
+        };
         let src = self.windows[&id].home;
         let src_display = match src {
             Home::Stage(s) => self.stage(s).map_or(self.displays[0].id, |s| s.display),
@@ -239,8 +278,11 @@ impl Model {
 
         let dest_active = self.is_active(dest);
         if dest_active {
-            let parked: Vec<WindowId> =
-                group.iter().copied().filter(|w| self.windows.get(w).is_some_and(|w| w.parked)).collect();
+            let parked: Vec<WindowId> = group
+                .iter()
+                .copied()
+                .filter(|w| self.windows.get(w).is_some_and(|w| w.parked))
+                .collect();
             for &w in &parked {
                 self.restore_window(w, &mut actions);
             }
@@ -274,7 +316,9 @@ impl Model {
     /// parked, or unpins it into the active stage of its display.
     pub fn toggle_pin(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let Some(id) = self.resolve_standard(id) else { return actions };
+        let Some(id) = self.resolve_standard(id) else {
+            return actions;
+        };
         let display = self.known_display(self.windows[&id].meta.display);
         let mut group = vec![id];
         group.extend(self.children_of(id));
@@ -300,8 +344,11 @@ impl Model {
                     }
                 }
                 self.set_home(id, Home::Pinned, display);
-                let parked: Vec<WindowId> =
-                    group.iter().copied().filter(|w| self.windows.get(w).is_some_and(|w| w.parked)).collect();
+                let parked: Vec<WindowId> = group
+                    .iter()
+                    .copied()
+                    .filter(|w| self.windows.get(w).is_some_and(|w| w.parked))
+                    .collect();
                 for &w in &parked {
                     self.restore_window(w, &mut actions);
                 }
@@ -344,14 +391,20 @@ impl Model {
             self.stages
                 .iter()
                 .filter(|s| !self.is_active(s.id))
-                .filter(|s| s.windows.iter().any(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid)))
+                .filter(|s| {
+                    s.windows
+                        .iter()
+                        .any(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid))
+                })
                 .max_by_key(|s| s.last_active)
                 .map(|s| s.id)
         };
         let target = match self.options.settings.app_windows {
             AppWindows::AllAtOnce if present => None,
             AppWindows::AllAtOnce => focused_stage.or_else(most_recent),
-            AppWindows::OneAtATime => focused_stage.or_else(|| if present { None } else { most_recent() }),
+            AppWindows::OneAtATime => {
+                focused_stage.or_else(|| if present { None } else { most_recent() })
+            }
         };
         match target {
             Some(s) => self.switch_to(s, obs),
@@ -400,14 +453,22 @@ impl Model {
             s.last_active = t;
         }
         self.strip_enter(display, current);
-        self.revealed.insert(display, Reveal { from: current, desktop });
+        self.revealed.insert(
+            display,
+            Reveal {
+                from: current,
+                desktop,
+            },
+        );
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
     }
 
     fn is_most_recent_inactive(&self, display: DisplayId, stage: StageId) -> bool {
-        let Some(s) = self.stage(stage) else { return false };
+        let Some(s) = self.stage(stage) else {
+            return false;
+        };
         !self.is_active(stage)
             && self
                 .stages
@@ -437,7 +498,12 @@ impl Model {
     /// visible frame. Used on quit and by safety code; the stages stay as they are.
     pub fn unpark_all(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
-        let parked: Vec<WindowId> = self.windows.values().filter(|w| w.parked).map(|w| w.meta.id).collect();
+        let parked: Vec<WindowId> = self
+            .windows
+            .values()
+            .filter(|w| w.parked)
+            .map(|w| w.meta.id)
+            .collect();
         for id in parked {
             self.restore_window(id, &mut actions);
         }
@@ -456,10 +522,18 @@ impl Model {
         self.displays = displays;
         let main = self.displays[0].id;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
-        let gone: Vec<DisplayId> =
-            self.stages.iter().map(|s| s.display).filter(|d| !live.contains(d)).collect();
-        let moved: Vec<StageId> =
-            self.stages.iter().filter(|s| !live.contains(&s.display)).map(|s| s.id).collect();
+        let gone: Vec<DisplayId> = self
+            .stages
+            .iter()
+            .map(|s| s.display)
+            .filter(|d| !live.contains(d))
+            .collect();
+        let moved: Vec<StageId> = self
+            .stages
+            .iter()
+            .filter(|s| !live.contains(&s.display))
+            .map(|s| s.id)
+            .collect();
         for d in &gone {
             self.active.remove(d);
             self.revealed.remove(d);

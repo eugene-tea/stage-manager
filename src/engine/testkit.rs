@@ -13,7 +13,11 @@ pub const FRAME: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
 pub const VISIBLE: Rect = Rect::new(0.0, 25.0, 1440.0, 875.0);
 
 pub fn display() -> Display {
-    Display { id: MAIN, frame: FRAME, visible: VISIBLE }
+    Display {
+        id: MAIN,
+        frame: FRAME,
+        visible: VISIBLE,
+    }
 }
 
 pub fn model() -> Model {
@@ -44,7 +48,9 @@ pub fn meta(id: u32, pid: Pid, bundle: &str) -> WindowMeta {
 
 pub fn child(id: u32, pid: Pid, parent: Option<u32>) -> WindowMeta {
     WindowMeta {
-        role: WindowRole::Child { parent: parent.map(WindowId) },
+        role: WindowRole::Child {
+            parent: parent.map(WindowId),
+        },
         frame: Rect::new(300.0, 200.0, 300.0, 150.0),
         title: "Save".to_string(),
         ..meta(id, pid, "com.example.app")
@@ -112,6 +118,8 @@ impl Desk {
     }
 
     pub fn parked(&self, id: WindowId) -> bool {
-        self.frames.get(&id).is_some_and(|f| super::park::is_parked(*f, FRAME))
+        self.frames
+            .get(&id)
+            .is_some_and(|f| super::park::is_parked(*f, FRAME))
     }
 }
