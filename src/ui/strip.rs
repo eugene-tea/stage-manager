@@ -1037,6 +1037,22 @@ impl Strip {
         }
         CATransaction::commit();
         self.layouts = layouts;
+        self.publish_cards();
+    }
+
+    /// Publishes where the cards are (global), for `ctl state`.
+    fn publish_cards(&self) {
+        let g = self.geometry.global;
+        let frames = if self.shown {
+            self.layouts
+                .iter()
+                .filter(|l| l.stage != DROP_STAGE)
+                .map(|l| (l.stage, l.bounds(self.m()).translate(g.x, g.y)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        strip_model::publish_cards(frames);
     }
 
     /// The hover transform of a card's container (anchored at the eye) and of its flat twin
@@ -1545,6 +1561,7 @@ impl Strip {
     /// is out.
     fn slide(&mut self, shown: bool, animated: bool) {
         self.shown = shown;
+        self.publish_cards();
         self.panel.setIgnoresMouseEvents(!shown);
         if !shown {
             self.set_hover(None);

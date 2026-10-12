@@ -196,6 +196,27 @@ pub fn emit(event: StripEvent) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Where the cards are (for `ctl state` and scripted tests)
+
+fn card_frames() -> &'static Mutex<Vec<(u64, Rect)>> {
+    static F: OnceLock<Mutex<Vec<(u64, Rect)>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The strip publishes its cards' frames (stage id, global bounds, top to bottom; empty
+/// while it is hidden) after every layout (main thread).
+pub fn publish_cards(frames: Vec<(u64, Rect)>) {
+    if let Ok(mut f) = card_frames().lock() {
+        *f = frames;
+    }
+}
+
+/// The cards' frames last published (any thread).
+pub fn published_cards() -> Vec<(u64, Rect)> {
+    card_frames().lock().map(|f| f.clone()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------------------
 // Transition handshake
 
 /// The latest answer (transition id, what was covered) and its wake-up.

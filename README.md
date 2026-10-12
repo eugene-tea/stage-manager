@@ -378,7 +378,7 @@ Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reacha
 
 ## Test script
 
-`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity]` builds the app and private
+`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion]` builds the app and private
 fixtures (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`,
 plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native phase;
 `SM_FIXTURE_ID` picks another base ID, so runs never collide) and checks, against `ctl state` and the window
@@ -398,7 +398,12 @@ default (nothing moved or resized at first start, on switches or at quit, no edg
 launch reveal, no hotkey) and, with `[windows] fit` turned on in the test's own config,
 windows kept clear of the strip and given back their exact frames at quit; the generated
 config with no live values, ⌘M sending a window to the strip (the fixture minimizes a
-window on SIGUSR2) and a click on a card's app icon bringing every window of the app.
+window on SIGUSR2) and a click on a card's app icon bringing every window of the app; and
+motion: the strip below windows (layer -1), lifted (layer 3) with the dragged window's card in
+the motion overlay while a window is dragged over it, the window dropped above the first card
+taking that slot, a card dragged to the top keeping its slot across a relaunch, an animated
+card click ending with every frame exact, and `level = "above_windows"`. `ctl state` lists the
+drawn cards' frames (`strip_cards`) for these drags.
 Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
 drags are posted only where our own or a fixture's windows are topmost along the whole path,
 and the pointer is put back. Apple's own Stage Manager must be off for the window-position

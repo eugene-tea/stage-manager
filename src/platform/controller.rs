@@ -1024,6 +1024,7 @@ impl Controller {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
+        self.flush_pending(ob);
         let z = Self::z_map();
         let Some(mut meta) = self.meta(ob, id, &z) else { return };
         if let Some(title) = ob.window(id).and_then(|w| w.element.title().ok()) {
@@ -1417,6 +1418,10 @@ impl Controller {
             "strip_visible": self.strip_visible,
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "animation": self.store.config().style.animation.enabled,
+            "strip_cards": strip_model::published_cards()
+                .into_iter()
+                .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))
+                .collect::<Vec<_>>(),
             "strip_level": format!("{:?}", self.style.level),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },
             "config_path": self.store.path(),
