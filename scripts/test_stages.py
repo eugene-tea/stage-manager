@@ -179,8 +179,10 @@ def guardian_pids(app):
 
 
 def owner_app_running():
-    """The owner's installed Stage Manager: no live phase runs while it is up."""
-    return bool(pids_of("Applications/Stage Manager.app/Contents/MacOS/stage-manager"))
+    """Any Stage Manager that is not this run's own app (the owner's, from ~/Applications,
+    a repo's target/ or anywhere else): no live phase runs while it is up."""
+    ours = app_pid()
+    return any(p != ours for p in pids_of("Stage Manager.app/Contents/MacOS/stage-manager$"))
 
 
 def start_app(expect_windows, extra_env=None, fresh_log=True):
@@ -1266,7 +1268,7 @@ def main():
     try:
         for p in phases:
             if owner_app_running():
-                say("STOP: the owner's Stage Manager (~/Applications) is running; no live phase runs beside it")
+                say("STOP: another Stage Manager (the owner's) is running; no live phase runs beside it")
                 failed.append("the owner's app is running")
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
