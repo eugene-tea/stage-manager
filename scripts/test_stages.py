@@ -7,7 +7,8 @@ bundle ID, which no other run uses), so no other window is ever touched. Each ph
 every fixture window onscreen; the app and the fixture are quit at the end, whatever happens.
 
 Phases: m3 (stages, switching, frames, z-order, merge, pin, reveal, children), safety (quit,
-SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it).
+SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it), m4 (rules, placement,
+hot reload).
 """
 
 import json
@@ -394,6 +395,74 @@ def phase_safety():
     all_onscreen("quit after the relaunch")
 
 
+CONFIG_M4 = f"""
+[[rule]]
+app = "{FIX_ID}"
+title = "^Fixture 2$"
+placement = "cascade"
+
+[[rule]]
+app = "{FIX_ID}"
+title = "^Fixture 3$"
+action = "new"
+
+[[rule]]
+app = "{FIX_ID}"
+title = "^Fixture 4$"
+action = "float"
+placement = "center"
+"""
+
+
+def phase_m4():
+    say("\n== milestone 4: rules, placement, hot reload ==")
+    stop_app()
+    stop_fixture()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write(CONFIG_M4)
+    s = start_app(0)
+    check(s is not None and s["config_error"] is None, "the app starts with the rules config")
+    start_fixture(4)
+    s = wait_until(lambda: (lambda x: x if len(x["windows"]) >= 4 else None)(state()), 15, "4 managed windows")
+    if not check(s is not None, "the new fixture windows are managed"):
+        return
+    time.sleep(0.5)
+    s = state()
+    t = by_title(s)
+    check(stage_titles(s) == {1: ["Fixture 2", "Fixture 1"], 2: ["Fixture 3"]}, f"Fixture 3 opened a new stage ({stage_titles(s)})")
+    check(s["active"] == 2, "and the new stage is active")
+    check(t["Fixture 4"]["home"] == "pinned", "Fixture 4 floats (pinned)")
+    vis = s["display"]["visible"]
+    f4 = frames_of(["Fixture 4"])["Fixture 4"]
+    cx = vis["x"] + (vis["w"] - f4["w"]) / 2
+    cy = vis["y"] + (vis["h"] - f4["h"]) / 2
+    check(abs(f4["x"] - cx) <= 1 and abs(f4["y"] - cy) <= 1, f"Fixture 4 centered ({fmt(f4)})")
+    r1, r2 = t["Fixture 1"]["restore"], t["Fixture 2"]["restore"]
+    check(abs(r2["x"] - r1["x"] - 32) <= 1 and abs(r2["y"] - r1["y"] - 32) <= 1, "Fixture 2 cascaded 32 pt from Fixture 1")
+    consistent("after the rules")
+
+    with open(os.path.join(HOME, "config.toml"), "a") as f:
+        f.write('\n[stages]\nnames = ["Mail"]\n')
+    s = wait_until(lambda: (lambda x: x if any(st["name"] == "Mail" for st in x["stages"]) else None)(state()), 5, "hot reload")
+    check(s is not None, "hot reload: the named stage Mail appears")
+    with open(os.path.join(HOME, "config.toml"), "a") as f:
+        f.write("\n[strip]\norder = \"sideways\"\n")
+    s = wait_until(lambda: (lambda x: x if x["config_error"] else None)(state()), 5, "the config error")
+    check(s is not None and "sideways" in (s["config_error"] or ""), "a bad config shows its error")
+    check(s is not None and any(st["name"] == "Mail" for st in s["stages"]), "and the last good config stays")
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write(CONFIG_M4)
+    r = ctl("reload")
+    check(r.get("ok"), "reload over ctl clears the error")
+    do("pin", t["Fixture 4"]["id"])
+    stop_app()
+    all_onscreen("m4 quit")
+
+
 def frontmost_bundle():
     r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
     out = r.stdout.strip()
@@ -401,7 +470,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4"]
     if not os.path.exists(BIN) or not os.path.exists(FIX_APP):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -411,7 +480,7 @@ def main():
     front = frontmost_bundle()
     try:
         for p in phases:
-            {"m3": phase_m3, "safety": phase_safety}[p]()
+            {"m3": phase_m3, "safety": phase_safety, "m4": phase_m4}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE):
