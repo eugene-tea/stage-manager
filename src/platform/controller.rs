@@ -32,7 +32,8 @@
 //!   ([`Model::arrive`]). About once a second the window server's list is checked: windows
 //!   waiting that now show are new windows; windows of other Spaces on screen were moved
 //!   here; windows of this Space gone from the screen (app not hidden, not minimized) left
-//!   it. On a full-screen app's Space there is no strip and no stage changes.
+//!   it. On a full-screen app's Space there is no strip and no stage changes; a Space change
+//!   during the full-screen animation waits for it to settle ([`crate::engine::fullscreen`]).
 //! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
 //!   current stage, and an activation (Dock click) of an app in another stage brings its
@@ -59,6 +60,7 @@ use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
 use super::{desktop, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
+use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Display, DisplayId, Home, Model, Observation, StageId, Target, WindowId, WindowMeta, WindowRole,
@@ -264,6 +266,11 @@ pub struct Controller {
     unplaced: BTreeSet<u32>,
     /// The shown Space is a full-screen app's: no strip, no stage changes.
     fullscreen: bool,
+    /// A Space change waits for a full-screen animation to settle ([`Settle`]): nothing is
+    /// counted and no stage changes until it has.
+    space_pending: bool,
+    /// Waits out full-screen animations.
+    settle: Settle,
     /// When the last Space change was handled.
     space_changed_at: Option<Instant>,
     /// When the window server's list was last checked for Space changes.
@@ -343,6 +350,8 @@ impl Controller {
             parked_note: None,
             unplaced: BTreeSet::new(),
             fullscreen: false,
+            space_pending: false,
+            settle: Settle::default(),
             space_changed_at: None,
             space_checked: Instant::now(),
             foreign: Vec::new(),
@@ -826,7 +835,7 @@ impl Controller {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
-                if self.fullscreen {
+                if self.frozen() {
                     return;
                 }
                 let obs = self.observe(ob);
@@ -855,7 +864,7 @@ impl Controller {
                     tracing::debug!(pid, "activation echo of our own action ignored");
                     return;
                 }
-                if self.fullscreen {
+                if self.frozen() {
                     return;
                 }
                 let obs = self.observe(ob);
@@ -882,7 +891,7 @@ impl Controller {
     /// window goes to the strip as a card of its own instead of the Dock: it is parked, then
     /// un-minimized there (macOS may flash its restore animation toward the corner).
     fn on_minimized(&mut self, ob: &mut Observer, id: u32) {
-        if !self.store.config().windows.minimize_to_strip || self.fullscreen {
+        if !self.store.config().windows.minimize_to_strip || self.frozen() {
             return;
         }
         let obs = self.observe(ob);
@@ -1062,7 +1071,7 @@ impl Controller {
         if let Some(state) = state {
             model.restore_spaces(state.spaces);
         }
-        if main.frame.w > 0.0 && self.fullscreen_shown(&list, main.frame) {
+        if main.frame.w > 0.0 && self.screen_seen(ob, &list, main.frame) == Seen::FullScreen {
             self.fullscreen = true;
             tracing::info!("launched on a full-screen app's Space: no strip until a Desktop shows");
         }
@@ -1104,18 +1113,32 @@ impl Controller {
         }
     }
 
-    /// True when the shown Space is a full-screen app's: a window on screen covers the whole
-    /// display (menu bar included) and its app has a window in full screen.
-    fn fullscreen_shown(&self, list: &[windows::CgWindow], display: Rect) -> bool {
-        list.iter()
-            .filter(|w| w.onscreen && w.layer == 0)
-            .filter(|w| (w.bounds.x - display.x).abs() < 1.0 && (w.bounds.y - display.y).abs() < 1.0)
-            .filter(|w| (w.bounds.w - display.w).abs() < 1.0 && (w.bounds.h - display.h).abs() < 1.0)
-            .any(|w| {
-                AxElement::application(w.pid)
-                    .windows()
-                    .is_ok_and(|ws| ws.iter().any(|e| e.is_fullscreen().unwrap_or(false)))
-            })
+    /// No stage changes now: a full-screen app's Space shows, or a Space change waits for a
+    /// full-screen animation to settle.
+    fn frozen(&self) -> bool {
+        self.fullscreen || self.space_pending
+    }
+
+    /// What the window list shows on `display` ([`Seen`]): a full-screen app's Space when a
+    /// big window on screen says it is in full screen (asked through Accessibility: the
+    /// observer's element when we track it, else its app's window list); an animation when a
+    /// window covers the whole display without that; else a Desktop.
+    fn screen_seen(&self, ob: &Observer, list: &[windows::CgWindow], display: Rect) -> Seen {
+        let big: Vec<&windows::CgWindow> = list
+            .iter()
+            .filter(|w| w.onscreen && w.layer == 0 && fullscreen::could_be_fullscreen(w.bounds, display))
+            .collect();
+        let covering = big.iter().filter(|w| fullscreen::covers_display(w.bounds, display)).count();
+        let mut apps: HashMap<i32, Vec<AxElement>> = HashMap::new();
+        let full = big.iter().any(|w| match ob.window(w.id) {
+            Some(t) => t.element.is_fullscreen().unwrap_or(false),
+            None => apps
+                .entry(w.pid)
+                .or_insert_with(|| AxElement::application(w.pid).windows().unwrap_or_default())
+                .iter()
+                .any(|e| e.window_id().ok() == Some(w.id) && e.is_fullscreen().unwrap_or(false)),
+        });
+        Seen::of(covering, full)
     }
 
     /// True when the window list disagrees with the Space the engine thinks is shown (a
@@ -1153,37 +1176,65 @@ impl Controller {
     }
 
     /// The user went to another Space (`activeSpaceDidChangeNotification`): read every app's
-    /// window list again, recognize the Space by the windows on screen and show its stages
-    /// and strip. On a full-screen app's Space: no strip, nothing changes.
+    /// window list again, then (once any full-screen animation has settled,
+    /// [`Self::settle_space`]) recognize the Space by the windows on screen and show its
+    /// stages and strip. On a full-screen app's Space: no strip, nothing changes.
     pub fn on_space_changed(&mut self, ob: &mut Observer) {
         // Windows still held behind a switch's snapshots belong to the Space being left:
         // bring them in before anything is counted for the new one.
         self.flush_pending(ob);
-        let Some(m) = self.model.as_ref() else { return };
+        if self.model.is_none() {
+            return;
+        }
         let now = Instant::now();
         self.space_changed_at = Some(now);
         self.space_checked = now;
         self.foreign.clear();
         self.absent.clear();
-        let main = *m.main_display();
-        let before = m.current_space(main.id);
         let found = ob.rescan_all();
+        self.unplaced.extend(found);
+        self.space_pending = true;
+        self.settle_space(ob);
+    }
+
+    /// A Space change waiting to be handled: a full-screen app's Space, a Desktop (arrive),
+    /// or still a full-screen animation (looked at again on the next tick).
+    fn settle_space(&mut self, ob: &mut Observer) {
+        let Some(m) = self.model.as_ref() else { return };
+        let main = *m.main_display();
         let list = windows::list_windows();
-        if self.fullscreen_shown(&list, main.frame) {
-            if !self.fullscreen {
-                tracing::info!("Space changed: a full-screen app's Space (no strip)");
+        let now = Instant::now();
+        let was_waiting = self.settle.waiting(now);
+        match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
+            Verdict::Wait => {
+                if !was_waiting {
+                    tracing::info!("Space changed during a full-screen animation; waiting for it to settle");
+                }
             }
-            self.fullscreen = true;
-            self.unplaced.extend(found);
-            self.present();
-            return;
+            Verdict::FullScreen => {
+                self.space_pending = false;
+                if !self.fullscreen {
+                    tracing::info!("Space changed: a full-screen app's Space (no strip)");
+                }
+                self.fullscreen = true;
+                self.present();
+            }
+            Verdict::Desktop => {
+                self.space_pending = false;
+                self.fullscreen = false;
+                self.space_changed_at = Some(now);
+                self.arrive_here(ob, &list, main);
+            }
         }
-        self.fullscreen = false;
-        let shown = on_screen(&list);
-        let z = windows::z_order(&list);
-        for id in &found {
-            self.unplaced.insert(*id);
-        }
+    }
+
+    /// A Desktop shows: the engine recognizes it by the windows on screen ([`Model::arrive`]),
+    /// its stages and strip come back.
+    fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display) {
+        let Some(m) = self.model.as_ref() else { return };
+        let before = m.current_space(main.id);
+        let shown = on_screen(list);
+        let z = windows::z_order(list);
         let live: Vec<WindowMeta> = ob
             .windows()
             .keys()
@@ -1197,7 +1248,7 @@ impl Controller {
         for meta in &live {
             self.unplaced.remove(&meta.id.0);
         }
-        let hints = launch_hints(&list);
+        let hints = launch_hints(list);
         let absent = self.absent_windows(ob, &shown);
         let Some(m) = self.model.as_mut() else { return };
         let actions = m.arrive(main.id, &live, &absent, &hints);
@@ -1233,9 +1284,19 @@ impl Controller {
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
         let list = windows::list_windows();
-        if self.fullscreen_shown(&list, main.frame) != self.fullscreen {
-            self.on_space_changed(ob);
-            return;
+        // A change between a Desktop and a full-screen Space the notification missed is
+        // handled as a Space change; during a full-screen animation nothing is counted.
+        match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
+            Verdict::Wait => return,
+            Verdict::FullScreen if !self.fullscreen => {
+                self.on_space_changed(ob);
+                return;
+            }
+            Verdict::Desktop if self.fullscreen => {
+                self.on_space_changed(ob);
+                return;
+            }
+            _ => {}
         }
         if self.fullscreen {
             return;
@@ -1317,9 +1378,20 @@ impl Controller {
         self.flush_pending(ob);
         let list = windows::list_windows();
         let shown = on_screen(&list);
-        if self.fullscreen || !shown.contains(&id) {
+        if self.frozen() || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
+            }
+            return;
+        }
+        let display = self.model.as_ref().map(|m| m.main_display().frame);
+        if let Some(display) = display
+            && self.settle.step(self.screen_seen(ob, &list, display), Instant::now()) != Verdict::Desktop
+        {
+            // Most likely the full-screen animation's stand-in window (it goes away once the
+            // animation is over), or a window on a full-screen Space not handled yet.
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "a full-screen animation or Space shows; the window is placed once a Desktop shows");
             }
             return;
         }
@@ -1621,7 +1693,11 @@ impl Controller {
             }
         }
         if self.model.is_some() && !safety::quit_requested() {
-            self.check_spaces(ob);
+            if self.space_pending {
+                self.settle_space(ob);
+            } else {
+                self.check_spaces(ob);
+            }
         }
         if self.strip_dirty {
             self.present();
@@ -1683,7 +1759,9 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. } | Command::DebugDrag { .. } => {
+            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
+            | Command::DebugHover { .. }
+            | Command::DebugDrag { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }
         }
@@ -1752,6 +1830,7 @@ impl Controller {
                 .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))
                 .collect::<Vec<_>>(),
             "strip_level": format!("{:?}", self.style.level),
+            "strip_panel": strip_model::panel_status(),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },
             "config_path": self.store.path(),
             "config_error": self.config_error,
@@ -1783,6 +1862,7 @@ impl Controller {
             .collect();
         json!({
             "fullscreen": self.fullscreen,
+            "settling": self.space_pending,
             "unplaced_windows": self.unplaced.len(),
             "saved_spaces_not_visited": m.unvisited_saved_spaces(),
             "list": list,

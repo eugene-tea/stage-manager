@@ -15,6 +15,14 @@
 //! - a window that is not stranded but still sits exactly where we fitted it (exact bundle ID
 //!   and title, live frame equal to the saved one) goes back to its saved pre-fit frame, so
 //!   a crash never leaves a window narrowed.
+//!
+//! The guardian also needs to know which windows still wait after its scan
+//! ([`stranded_windows`]): windows the crashed app had registered as parked (the parked
+//! file, [`Registered`]) and any allowed app's window, still in the park zone, on any Space.
+//! A window on a Space not shown is out of Accessibility's reach for most apps; it can only
+//! be moved once its Space shows (the window server lists it on screen again).
+
+use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
 use super::park::{PARK_MARGIN, clamp_to_visible, is_parked};
@@ -103,12 +111,7 @@ pub fn plan(
         .iter()
         .zip(target)
         .map(|(&i, saved)| {
-            let base = saved.unwrap_or(windows[i].frame);
-            let mut frame = clamp_to_visible(base, displays.visible);
-            if is_parked(frame, displays.main) {
-                frame = clamp_to_visible(Rect::new(f64::NAN, 0.0, 0.0, 0.0), displays.visible);
-            }
-            (i, frame)
+            (i, safe_restore(saved.unwrap_or(windows[i].frame), displays))
         })
         .collect();
     for (i, w) in windows.iter().enumerate() {
@@ -125,6 +128,77 @@ pub fn plan(
         }
     }
     out
+}
+
+/// A window the app had in its safety registry (parked, or fitted clear of the strip), as
+/// written to the parked file for the guardian.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Registered {
+    /// `CGWindowID`.
+    pub id: u32,
+    /// The owning process.
+    pub pid: i32,
+    /// Where it goes back (already clamped onto the visible display when registered).
+    pub restore: Rect,
+    /// A child window (dialog, sheet, panel).
+    pub child: bool,
+}
+
+/// A window the window server lists (on any Space), as the guardian sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Listed {
+    /// `CGWindowID`.
+    pub id: u32,
+    /// The owning process.
+    pub pid: i32,
+    /// Its frame (the window server keeps another Space's windows' frames).
+    pub bounds: Rect,
+    /// On screen now: its Space shows.
+    pub onscreen: bool,
+    /// Its app may be managed (`STAGE_MANAGER_ONLY`, exclusions).
+    pub allowed: bool,
+}
+
+/// A window still stranded in the park zone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stranded {
+    /// `CGWindowID`.
+    pub id: u32,
+    /// The owning process.
+    pub pid: i32,
+    /// On screen now (its Space shows): Accessibility can reach it.
+    pub shown: bool,
+    /// Where it goes back: the registered frame, made safe ([`safe_restore`]); `None` for a
+    /// window the app had not registered (the recovery scan decides).
+    pub restore: Option<Rect>,
+}
+
+/// Every layer-0 window in `listed` that is stranded: registered ones (whatever their app)
+/// and those of allowed apps. A registered window no longer listed was closed: it waits for
+/// nothing.
+pub fn stranded_windows(listed: &[Listed], registered: &[Registered], displays: &ScanDisplays) -> Vec<Stranded> {
+    listed
+        .iter()
+        .filter(|w| is_stranded(w.bounds, displays))
+        .filter_map(|w| {
+            let reg = registered.iter().find(|r| r.id == w.id);
+            (reg.is_some() || w.allowed).then(|| Stranded {
+                id: w.id,
+                pid: w.pid,
+                shown: w.onscreen,
+                restore: reg.map(|r| safe_restore(r.restore, displays)),
+            })
+        })
+        .collect()
+}
+
+/// A restore frame clamped onto the visible display and never in a park zone.
+pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
+    let mut f = clamp_to_visible(frame, displays.visible);
+    if is_parked(f, displays.main) {
+        f = clamp_to_visible(Rect::new(f64::NAN, 0.0, 0.0, 0.0), displays.visible);
+    }
+    f
 }
 
 #[cfg(test)]
@@ -265,5 +339,44 @@ mod tests {
         let ws = [live("com.example.a", "X", parked(400.0, 300.0))];
         let p = plan(&ws, Some(&bad), &displays());
         assert!(!is_parked(p[0].1, MAIN) && VISIBLE.contains_rect(&p[0].1));
+    }
+
+    fn listed(id: u32, bounds: Rect, onscreen: bool, allowed: bool) -> Listed {
+        Listed { id, pid: 7, bounds, onscreen, allowed }
+    }
+
+    #[test]
+    fn registered_windows_wait_until_they_leave_the_park_zone() {
+        let restore = Rect::new(300.0, 200.0, 600.0, 400.0);
+        let reg = [Registered { id: 1, pid: 7, restore, child: false }];
+        // Parked on a Space not shown: waits, not shown, with its registered frame.
+        let away = [listed(1, parked(600.0, 400.0), false, false)];
+        assert_eq!(
+            stranded_windows(&away, &reg, &displays()),
+            vec![Stranded { id: 1, pid: 7, shown: false, restore: Some(restore) }],
+            "a registered window counts even when its app is not on the allowed list"
+        );
+        // Its Space shows: still waiting, now reachable.
+        let here = [listed(1, parked(600.0, 400.0), true, false)];
+        assert!(stranded_windows(&here, &reg, &displays())[0].shown);
+        // Back on screen, or closed: nothing waits.
+        assert!(stranded_windows(&[listed(1, restore, true, true)], &reg, &displays()).is_empty());
+        assert!(stranded_windows(&[], &reg, &displays()).is_empty());
+    }
+
+    #[test]
+    fn unregistered_windows_wait_only_for_allowed_apps() {
+        let ws = [listed(2, parked(400.0, 300.0), false, true), listed(3, parked(400.0, 300.0), false, false)];
+        let s = stranded_windows(&ws, &[], &displays());
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].id, s[0].restore), (2, None));
+    }
+
+    #[test]
+    fn registered_restore_frames_are_made_safe() {
+        let reg = [Registered { id: 1, pid: 7, restore: parked(400.0, 300.0), child: false }];
+        let s = stranded_windows(&[listed(1, parked(400.0, 300.0), true, true)], &reg, &displays());
+        let f = s[0].restore.unwrap_or_default();
+        assert!(!is_parked(f, MAIN) && VISIBLE.contains_rect(&f), "{f:?}");
     }
 }

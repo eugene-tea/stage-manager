@@ -10,6 +10,7 @@ pub mod capture;
 pub mod controller;
 pub mod ctl;
 pub mod desktop;
+pub mod guardian;
 pub mod hotkeys;
 pub mod input;
 pub mod logging;

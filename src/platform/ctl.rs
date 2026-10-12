@@ -52,6 +52,18 @@ pub enum Command {
     DebugPanic,
     /// Test only: quit the way the menu's Quit item does (from inside a menu action).
     DebugMenuQuit,
+    /// A synthetic pointer move to a global point, resting there for `ms` (the strip's
+    /// left-edge reveal), only where our own or a `STAGE_MANAGER_ONLY` app's window is topmost
+    /// (needs `STAGE_MANAGER_TEST=1`). The next synthetic click or drag puts the pointer back
+    /// where it was before the hover.
+    DebugHover {
+        /// Global x (top-left origin).
+        x: f64,
+        /// Global y.
+        y: f64,
+        /// How long to rest there, in milliseconds.
+        ms: u64,
+    },
     /// A synthetic left-button drag through global points, posted only when every point is
     /// over our own windows or a `STAGE_MANAGER_ONLY` app's (needs `STAGE_MANAGER_TEST=1`).
     DebugDrag {
@@ -127,6 +139,11 @@ impl Command {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
                 Ok(Self::DebugFrame { id, frame: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?) })
+            }
+            ["debug-hover", x, y, ms] => {
+                let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
+                let ms = ms.parse::<u64>().map_err(|_| format!("expected milliseconds, got {ms:?}"))?;
+                Ok(Self::DebugHover { x: coord(x)?, y: coord(y)?, ms })
             }
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
@@ -270,6 +287,8 @@ mod tests {
             Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })
         );
         assert!(Command::parse("debug-click 60").is_err());
+        assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));
+        assert!(Command::parse("debug-hover 1 720").is_err());
         assert_eq!(
             Command::parse("debug-drag 1 2 3 4 shift"),
             Ok(Command::DebugDrag { points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)], shift: true })

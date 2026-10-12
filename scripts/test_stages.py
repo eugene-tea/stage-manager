@@ -185,11 +185,23 @@ def owner_app_running():
     return any(p != ours for p in pids_of("Stage Manager.app/Contents/MacOS/stage-manager$"))
 
 
+def archive_log():
+    """Keeps the last app run's log as stage-manager.run-NN.log (renamed, not removed: its
+    guardian keeps writing into the same file), so a run leaves the whole story."""
+    if not os.path.exists(LOG):
+        return None
+    n = 1 + max([int(f[len("stage-manager.run-"):-4]) for f in os.listdir(HOME)
+                 if f.startswith("stage-manager.run-") and f.endswith(".log") and f[18:-4].isdigit()] or [0])
+    path = os.path.join(HOME, f"stage-manager.run-{n:02d}.log")
+    os.rename(LOG, path)
+    return path
+
+
 def start_app(expect_windows, extra_env=None, fresh_log=True):
     if app_pid():
         stop_app()
-    if fresh_log and os.path.exists(LOG):
-        os.remove(LOG)
+    if fresh_log:
+        archive_log()
     args = ["open", "-n", APP]
     env = {
         "STAGE_MANAGER_HOME": HOME,
@@ -427,6 +439,8 @@ def phase_safety():
     drill("debug-panic", lambda pid: ctl("debug-panic"), ["debug-panic requested over ctl", "safety: registry unparked"])
     drill("kill -9 (the guardian restores)", lambda pid: os.kill(pid, signal.SIGKILL), ["guardian: recovery scan done", "recovery: window brought back reason=\"guardian\""])
 
+    drill_away()
+
     say("-- drill: kill -9 of the app and the guardian (the next launch restores)")
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
     ensure_something_parked()
@@ -444,6 +458,54 @@ def phase_safety():
     consistent("after the relaunch")
     stop_app()
     all_onscreen("quit after the relaunch")
+
+
+def drill_away():
+    """kill -9 while a parked window's Desktop is not shown, emulated by the fixture: on
+    SIGWINCH it orders its parked windows out (the window server lists them off screen,
+    Accessibility no longer does), on SIGINFO back in (their Desktop shows)."""
+    say("-- drill: kill -9 with a window parked on a Desktop not shown (emulated): the guardian waits")
+    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    ensure_something_parked()
+    time.sleep(1.0)
+    fixture = pids_of(FIX_EXE)
+    parked_ids = [w["id"] for w in state()["windows"] if w["parked"] and w["role"] == "standard"]
+    if not check(bool(fixture) and bool(parked_ids), "drill setup: a parked fixture window"):
+        return
+    pid = app_pid()
+    guards = guardian_pids(pid)
+
+    def listed(ids):
+        wins, d = fixture_windows([FIX_ID])
+        return [w for w in wins if w["id"] in ids]
+
+    # Frozen first, so the app never hears of the window leaving the screen (Accessibility
+    # reports an ordered-out window as destroyed; a real Desktop switch does not).
+    os.kill(pid, signal.SIGSTOP)
+    os.kill(fixture[0], signal.SIGWINCH)
+    away = wait_until(lambda: (lambda ws: ws if ws and not any(w["onscreen"] for w in ws) else None)(listed(parked_ids)), 3,
+                      "the parked windows to leave the screen")
+    os.kill(pid, signal.SIGKILL)
+    wait_gone(pid)
+    if not check(away is not None, "the parked windows are off screen (their Desktop not shown)"):
+        os.kill(fixture[0], signal.SIGINFO)
+        return
+    time.sleep(3.0)
+    _, d = fixture_windows([FIX_ID])
+    check(bool(guards) and bool(pids_of(f"stage-manager --guardian {pid}$")),
+          "the guardian keeps waiting while a registered window is parked out of reach")
+    check(all(is_parked(w["bounds"], d) for w in listed(parked_ids)), "the window is still parked (nothing could reach it)")
+    check("guardian: waiting for" in log_text() and "registered)\"] shown_now=[]" in log_text(),
+          "the guardian's log says what it waits for (the registered window, its Desktop not shown)")
+    os.kill(fixture[0], signal.SIGINFO)
+    back = wait_until(lambda: (lambda ws: ws if ws and not any(is_parked(w["bounds"], d) for w in ws) else None)(listed(parked_ids)), 5,
+                      "the window to come back")
+    check(back is not None, "the window comes back as soon as its Desktop shows")
+    check("guardian: its Desktop shows; window brought back" in log_text(), "the log says the guardian brought it back")
+    for g in guards:
+        wait_gone(g, 5)
+    check(not pids_of(f"stage-manager --guardian {pid}$"), "the guardian ends once nothing is left parked")
+    all_onscreen("kill -9 with a window away")
 
 
 CONFIG_M4 = f"""
@@ -828,17 +890,56 @@ def drag_in_background(points, hold_from, what):
     return proc, hold_from + 0.12 + (path / 4.0) * 0.012
 
 
+CONFIG_BACKDROP = f"""
+[[rule]]
+app = "{FIX_ID}.c"
+action = "ignore"
+"""
+
+
+def start_backdrop(s):
+    """An unmanaged fixture window (Charlie, an `ignore` rule) in front of every other app's
+    window, covering the strip column and the main area's left part: whatever else is on the
+    screen (an editor over the strip column, say), the synthetic drags pass over our windows
+    and the fixtures only. The fixtures are raised in front of it afterwards."""
+    vis = s["display"]["visible"]
+    start_extra_frames("c", 1, f"0,0,{s['strip_width'] + 900:.0f},{vis['h']:.0f}")
+    subprocess.run(["open", "-b", EXTRA["c"][0]], check=True)
+    time.sleep(0.8)
+
+
+def reveal_strip(what):
+    """Reaches the strip the way a person does when a window covers its column (his editor
+    on the 5K display): an active window over the strip column hides it (Apple's auto-hide);
+    the pointer resting at the left edge brings it back above every window."""
+    s = state()
+    vis = s["display"]["visible"]
+    edge = vis["x"] + s["strip_width"]
+    active = [w for w in s["windows"] if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]]
+    if active and not any(w["restore"]["x"] < edge for w in active):
+        r = active[0]["restore"]
+        ctl("debug-frame", active[0]["id"], edge - 100, r["y"], r["w"], r["h"])
+        time.sleep(0.9)  # past the echo window; the strip hides
+    r = ctl("debug-hover", vis["x"] + 1, vis["y"] + vis["h"] / 2, 900)
+    panel = wait_until(lambda: (lambda p: p if p and p["layer"] == 3 else None)(strip_panel()), 3, "the strip to be revealed")
+    cards = state().get("strip_cards", [])
+    return check(r.get("ok") and panel is not None and bool(cards),
+                 f"{what}: the pointer resting at the left edge reveals the covered strip above windows "
+                 f"({r.get('error', 'ok')}, layer {panel and panel['layer']}, {len(cards)} cards)")
+
+
 def phase_motion():
     say("\n== motion: strip level, a window dropped into a slot, card reorder, switch animation ==")
     stop_app()
     stop_all_fixtures()
-    write_config(None)
+    write_config(CONFIG_BACKDROP)
     start_fixture(5)
     s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"})
     if not check(s is not None, "app up with five fixture windows"):
         return
     check(s.get("strip_level") == "BelowWindows" and s.get("animation") is True,
           f"defaults: the strip below windows, switches animated ({s.get('strip_level')}, {s.get('animation')})")
+    start_backdrop(s)
     t = by_title(s)
     vis = s["display"]["visible"]
     left = vis["x"] + s["strip_width"] + 60
@@ -879,9 +980,11 @@ def phase_motion():
 
     say("-- a card dragged to another slot keeps it, also after a relaunch")
     time.sleep(1.0)
+    check(len(state().get("strip_cards", [])) == 4, f"four cards drawn ({len(state().get('strip_cards', []))})")
+    reveal_strip("reorder")
     s = state()
     cards = s.get("strip_cards", [])
-    if check(len(cards) == 4, f"four cards drawn ({len(cards)})"):
+    if len(cards) == 4:
         last, top = cards[-1], cards[0]["frame"]
         b = last["frame"]
         start = (vis["x"] + 70, b["y"] + b["h"] / 2)
@@ -897,6 +1000,7 @@ def phase_motion():
 
     say("-- a card click animates; every window ends at its exact frame")
     time.sleep(1.5)
+    reveal_strip("card click")
     s = state()
     cards = s.get("strip_cards", [])
     if check(bool(cards), "cards drawn"):
@@ -914,7 +1018,7 @@ def phase_motion():
     say("-- level = \"above_windows\" keeps the strip on top")
     stop_app()
     with open(os.path.join(HOME, "config.toml"), "w") as f:
-        f.write("[strip]\nlevel = \"above_windows\"\n")
+        f.write("[strip]\nlevel = \"above_windows\"\n" + CONFIG_BACKDROP)
     s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)
     if check(s is not None, "app up with level = above_windows"):
         time.sleep(1.5)
@@ -1280,7 +1384,7 @@ def main():
         stop_all_fixtures()
         if front and front not in ALL_IDS:
             subprocess.run(["open", "-b", front], capture_output=True)
-    say(f"\n{len(passed)} passed, {len(failed)} failed")
+    say(f"\n{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager*.log)")
     for f in failed:
         say(f"  FAIL {f}")
     return 1 if failed else 0

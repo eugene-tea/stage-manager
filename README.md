@@ -156,8 +156,9 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   the application", Desktop & Dock → Mission Control); we never fight it. A window moved to
   another Space (Mission Control, or dragged across) leaves its stage and joins the current
   stage there. A window on every Space ("Assign To: All Desktops") is treated as pinned.
-  Full-screen apps are Spaces of their own: no strip there. Stage numbers (hotkeys, `ctl
-  switch N`) count the current Space's stages.
+  Full-screen apps are Spaces of their own: no strip there; entering or leaving full screen
+  keeps the Desktop's stages (a Space change during macOS's full-screen animation waits for
+  it to settle). Stage numbers (hotkeys, `ctl switch N`) count the current Space's stages.
 - **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
   card; clicking it again opens the app's next window.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
@@ -346,9 +347,12 @@ again untouched until then. Version 1 files (one Space) are read as one Space.
    (forcing the unpark itself if the main thread hangs); SIGABRT gets a best-effort unpark.
 5. A **guardian** process (`stage-manager --guardian <pid>`) waits for the app with kqueue
    and runs the recovery scan unless the app wrote its clean-exit marker (`kill -9`, crash).
-   While a window stays stranded on another Space (Accessibility reaches most apps' windows
-   only on the Space shown), it keeps watching the window list and scans again when that
-   window shows (you went to its Space), until none is left or Stage Manager runs again.
+   It knows the parked windows from the registry's copy on disk (`.parked-<pid>.json` in the
+   config directory). While a window stays stranded on another Space (Accessibility reaches
+   most apps' windows only on the Space shown), it watches the window list every 0.5 s and
+   moves the window back as soon as it shows (you went to its Space), retrying while it
+   stays shown; it never exits while one is left, unless Stage Manager runs again. Its log
+   says what it waits for.
 6. The **recovery scan** at launch and in the guardian: every window of every managed app
    stranded in the park zone goes back to its `state.json` frame, or is centered.
 7. Every restore frame is **clamped** onto the visible screen.
@@ -388,7 +392,8 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `reload` | re-read `config.toml` |
 | `quit` | unpark everything and quit |
 | `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
-| `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there) |
+| `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there; the refusal lists our own windows) |
+| `debug-hover X Y MS` | move the pointer to a global point and rest there (the strip's edge reveal; only with `STAGE_MANAGER_TEST=1`, same guard); the next synthetic click or drag puts the pointer back |
 | `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
 | `debug-frame ID X Y W H` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`) |
 
@@ -409,8 +414,10 @@ plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native 
 server (`probe-windows`): stages from `send`, exact restore frames (±1 pt) and z-order across
 switches, parked windows in the corner, merge, pin, reveal, child windows following their
 parent; the safety drills (`ctl quit`, SIGTERM, SIGINT, a panic, `kill -9` with the guardian,
-`kill -9` of app and guardian then a relaunch), each ending with every fixture window
-onscreen; rules (`new`, `float` + `center`, `cascade`), hot reload and a bad config; and
+`kill -9` while a parked window's Desktop is not shown, emulated by the fixture ordering its
+parked windows out on SIGWINCH and in on SIGINFO: the guardian waits, says so and brings it
+back once it shows, `kill -9` of app and guardian then a relaunch), each ending with every
+fixture window onscreen; rules (`new`, `float` + `center`, `cascade`), hot reload and a bad config; and
 persistence across a relaunch of the app and of the fixture; and a click and a shift-click
 on a real strip card (switch, merge); and Apple's defaults with three fixture apps (first
 start one stage per app, frontmost active, strip in recency order; a new app's window opens a
@@ -426,8 +433,14 @@ window on SIGUSR2) and a click on a card's app icon bringing every window of the
 motion: the strip below windows (layer -1), lifted (layer 3) with the dragged window's card in
 the motion overlay while a window is dragged over it, the window dropped above the first card
 taking that slot, a card dragged to the top keeping its slot across a relaunch, an animated
-card click ending with every frame exact, and `level = "above_windows"`. `ctl state` lists the
-drawn cards' frames (`strip_cards`) for these drags.
+card click ending with every frame exact, and `level = "above_windows"`, all over an
+unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip column, the
+drags pass over our windows and the fixtures only, with the strip reached for the reorder and
+the click the way a person does when a window covers it (the pointer resting at the left
+edge). `ctl state` lists the drawn cards' frames (`strip_cards`) and the strip panel's state
+(`strip_panel`) for these drags. Every app run's log is kept as `stage-manager.run-NN.log` in
+the test home (the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
+is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
 Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
 drags are posted only where our own or a fixture's windows are topmost along the whole path,
 and the pointer is put back. Apple's own Stage Manager must be off for the window-position
@@ -526,7 +539,8 @@ limited to the fixture.
 - `src/platform` — macOS glue: `ax` (AXUIElement / AXObserver wrappers), `wm_thread` (the
   thread that owns every AX call), `observe` (observed apps and windows), `controller` (the
   engine on the WM thread: observations in, actions out, strip snapshots, `state.json`),
-  `safety` (registry, panic hook, signals, guardian, recovery scan), `hotkeys` (Carbon),
+  `safety` (registry and its parked file, panic hook, signals, recovery scan), `guardian`
+  (the guardian process), `hotkeys` (Carbon),
   `desktop` (displays, wallpaper clicks), `input` (the global mouse and key monitor, live
   modifiers, the Shift sugar's trigger record, test-only synthetic input), `capture` (ScreenCaptureKit thumbnails on a worker
   thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,

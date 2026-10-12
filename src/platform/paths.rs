@@ -1,5 +1,5 @@
 //! Well-known file locations: ctl socket, log file, config and state files, clean-exit
-//! markers.
+//! markers, the parked file for the guardian.
 //!
 //! `STAGE_MANAGER_HOME=<dir>` moves all of them into `<dir>` (test runs use a scratch
 //! directory, so they never touch the real config, state, socket or log). Without it:
@@ -93,6 +93,13 @@ pub fn clean_exit_marker(pid: u32) -> PathBuf {
     config_dir().join(format!(".clean-exit-{pid}"))
 }
 
+/// The parked file of the app process `pid`: the safety registry's windows (id, pid,
+/// restore frame), rewritten whenever it changes, so the guardian knows exactly which windows
+/// to wait for after a crash. Removed on a clean exit.
+pub fn parked_file(pid: u32) -> PathBuf {
+    config_dir().join(format!(".parked-{pid}.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +131,6 @@ mod tests {
         assert!(config_file().ends_with("config.toml"));
         assert!(state_file().ends_with("state.json"));
         assert!(clean_exit_marker(42).ends_with(".clean-exit-42"));
+        assert!(parked_file(42).ends_with(".parked-42.json"));
     }
 }

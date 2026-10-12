@@ -183,7 +183,16 @@ pub fn path_is_safe(path: &[Point], pids: &[i32]) -> Result<(), String> {
         match top {
             Some(w) if pids.contains(&w.pid) => {}
             Some(w) => return Err(format!("the topmost window at {:.0},{:.0} is not ours or a fixture's (pid {})", p.x, p.y, w.pid)),
-            None => return Err(format!("no window at {:.0},{:.0}", p.x, p.y)),
+            None => {
+                // Say where our own windows are: the strip panel missing from the screen there
+                // (ordered out, on another Space, elsewhere) is the usual story.
+                let ours: Vec<String> = list
+                    .iter()
+                    .filter(|w| w.pid == own)
+                    .map(|w| format!("layer {} {} {}", w.layer, w.bounds, if w.onscreen { "on screen" } else { "off screen" }))
+                    .collect();
+                return Err(format!("no window at {:.0},{:.0} (our windows: {})", p.x, p.y, ours.join("; ")));
+            }
         }
     }
     Ok(())
@@ -229,11 +238,36 @@ fn pointer_now() -> Option<CGPoint> {
     CGEvent::new(None).map(|e| CGEvent::location(Some(&e)))
 }
 
+/// Where the pointer was before a synthetic hover moved it: the next click or drag puts it
+/// back there.
+static HOVER_HOME: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// Where a synthetic click or drag puts the pointer back: before a hover, else where it is.
+fn pointer_home() -> Option<CGPoint> {
+    let hovered = HOVER_HOME.lock().ok().and_then(|mut h| h.take());
+    hovered.map(|(x, y)| CGPoint { x, y }).or_else(pointer_now)
+}
+
+/// A synthetic pointer move to `p` (only where the topmost window is ours or a fixture's),
+/// resting there for `rest` (the strip's left-edge reveal). The pointer stays; the next
+/// synthetic click or drag puts it back where it was before.
+pub fn hover(p: Point, rest: Duration) -> Result<(), String> {
+    path_is_safe(&[p], &test_pids())?;
+    if let Ok(mut home) = HOVER_HOME.lock()
+        && home.is_none()
+    {
+        *home = pointer_now().map(|c| (c.x, c.y));
+    }
+    post_mouse(CGEventType::MouseMoved, p, false)?;
+    std::thread::sleep(rest);
+    Ok(())
+}
+
 /// A synthetic click at `p`, only where the topmost window is ours or a fixture's. The
 /// pointer goes back where it was.
 pub fn click(p: Point, shift: bool) -> Result<(), String> {
     path_is_safe(&[p], &test_pids())?;
-    let back = pointer_now();
+    let back = pointer_home();
     for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
         post_mouse(kind, p, shift)?;
         std::thread::sleep(Duration::from_millis(60));
@@ -259,7 +293,7 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
         path.extend(segment(pair[0], pair[1], 4.0).into_iter().skip(1));
     }
     path_is_safe(&path, &test_pids())?;
-    let back = pointer_now();
+    let back = pointer_home();
     post_mouse(CGEventType::LeftMouseDown, first, shift)?;
     std::thread::sleep(Duration::from_millis(120));
     for p in path.iter().skip(1) {
