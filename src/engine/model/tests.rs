@@ -2,6 +2,7 @@
 //! property test that no sequence of operations loses a window.
 
 use super::*;
+use crate::engine::geometry::Point;
 use crate::engine::park::{clamp_to_visible, is_parked};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
@@ -1284,11 +1285,12 @@ fn property_no_sequence_of_operations_loses_a_window() {
         for _ in 0..150 {
             let alive: Vec<WindowId> = e.d.frames.keys().copied().collect();
             let managed: Vec<WindowId> = e.m.windows().map(|w| w.meta.id).collect();
-            let op = rng.below(16);
+            let op = rng.below(19);
             let step = format!("seed {seed} op {op} after {log:?}");
             match op {
                 0..=2 => {
-                    let action = match rng.below(6) {
+                    let action = match rng.below(8) {
+                        6 | 7 => RuleAction::Native,
                         0 => RuleAction::New,
                         1 => RuleAction::Stage(names[rng.below(3)].to_string()),
                         2 => RuleAction::Float,
@@ -1437,10 +1439,47 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         e.run(a);
                     }
                 }
-                _ => {
+                15 => {
                     let cap = rng.below(5);
                     log.push(format!("capacity {cap}"));
                     e.m.set_strip_capacity(cap);
+                }
+                16 => {
+                    let pid = 10 + rng.below(4) as i32;
+                    log.push(format!("bring {pid} here"));
+                    let obs = e.d.obs();
+                    let a = e.m.bring_app_here(pid, &obs);
+                    e.run(a);
+                }
+                17 => {
+                    if let Some(stage) = e.m.stages().get(rng.below(4)).map(|s| s.id) {
+                        let at = Point::new(rng.below(1600) as f64 - 100.0, rng.below(1000) as f64);
+                        log.push(format!("drop card {} at {at:?}", stage.0));
+                        let obs = e.d.obs();
+                        let a = e.m.merge_into_active_at(stage, at, &obs);
+                        e.run(a);
+                    }
+                }
+                _ => {
+                    // The user drags a visible standard window onto the strip.
+                    let draggable: Vec<WindowId> = managed
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            !e.d.parked(*id)
+                                && e.m.window(*id).is_some_and(|w| w.meta.role == WindowRole::Standard)
+                        })
+                        .collect();
+                    if let Some(id) = rng.pick(&draggable) {
+                        let pre = e.m.window(id).map(|w| w.restore).unwrap_or(FRAME);
+                        if let Some(f) = e.d.frames.get_mut(&id) {
+                            *f = Rect::new(40.0, 300.0, f.w, f.h);
+                        }
+                        log.push(format!("drop window {} on the strip", id.0));
+                        let obs = e.d.obs();
+                        let a = e.m.drop_window_on_strip(id, pre, &obs);
+                        e.run(a);
+                    }
                 }
             }
             if log.len() > 12 {
@@ -1458,4 +1497,181 @@ fn property_no_sequence_of_operations_loses_a_window() {
             );
         }
     }
+}
+
+// ----- Apple's defaults: native new windows, bring here, drag and drop ---------------------
+
+fn titles(e: &Env, n: usize) -> Vec<u32> {
+    e.members(n)
+}
+
+#[test]
+fn native_a_window_of_an_app_in_the_active_stage_joins_it() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 10, "com.example.a"), RuleAction::Native);
+    assert_eq!(e.m.stages().len(), 1, "the empty first stage was used");
+    assert_eq!(titles(&e, 1), [2, 1]);
+    assert_eq!(e.active_number(), 1);
+}
+
+#[test]
+fn native_a_new_app_opens_a_new_stage_and_switches() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    let a = e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    assert_eq!(e.m.stages().len(), 2);
+    assert_eq!(e.number_of(2), 2);
+    assert_eq!(e.active_number(), 2);
+    assert!(e.d.parked(w(1)), "the stage left behind is parked");
+    assert!(a.contains(&Action::Focus { id: w(2) }));
+    assert_eq!(e.slot_numbers(), [1], "the stage left enters the strip");
+}
+
+#[test]
+fn native_a_new_window_of_a_parked_app_brings_its_stage_forward() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    assert_eq!(e.active_number(), 2);
+    let a = e.add(meta(3, 10, "com.example.a"), RuleAction::Native);
+    assert_eq!(e.active_number(), 1, "switched to the app's stage");
+    assert_eq!(titles(&e, 1), [3, 1]);
+    assert!(!e.d.parked(w(1)) && !e.d.parked(w(3)));
+    assert!(e.d.parked(w(2)));
+    assert_eq!(a.iter().rev().nth(1), Some(&Action::Focus { id: w(3) }));
+}
+
+#[test]
+fn native_picks_the_apps_most_recent_stage() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 10, "com.example.a"), RuleAction::Native);
+    e.send(2, Target::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Native);
+    // Stage 2 (window 2) was used more recently than stage 1? Visit it, then leave.
+    e.switch(2);
+    e.switch(3);
+    e.add(meta(4, 10, "com.example.a"), RuleAction::Native);
+    assert_eq!(e.number_of(4), 2);
+    assert_eq!(e.active_number(), 2);
+}
+
+#[test]
+fn native_a_pinned_app_counts_as_present() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Float);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 10, "com.example.a"), RuleAction::Native);
+    assert_eq!(e.m.stages().len(), 1);
+    assert_eq!(e.number_of(3), 1);
+}
+
+#[test]
+fn native_with_one_at_a_time_gives_a_parked_apps_new_window_its_own_stage() {
+    let mut options = ModelOptions::default();
+    options.settings.app_windows = AppWindows::OneAtATime;
+    let mut e = Env::with(options);
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 10, "com.example.a"), RuleAction::Native);
+    assert_eq!(e.m.stages().len(), 3);
+    assert_eq!(e.number_of(3), 3);
+    assert_eq!(e.active_number(), 3);
+    // An app present in the active stage still joins it.
+    e.add(meta(4, 10, "com.example.a"), RuleAction::Native);
+    assert_eq!(e.number_of(4), 3);
+}
+
+#[test]
+fn bring_app_here_moves_every_window_of_the_app() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Native);
+    e.send(3, Target::New);
+    e.switch(1);
+    assert_eq!(e.m.stages().len(), 3);
+    let obs = e.d.obs();
+    let a = e.m.bring_app_here(11, &obs);
+    e.run(a.clone());
+    assert_eq!(e.m.stages().len(), 1, "emptied stages go away");
+    assert_eq!(e.active_number(), 1);
+    let mut members = titles(&e, 1);
+    members.sort_unstable();
+    assert_eq!(members, [1, 2, 3]);
+    for id in [1, 2, 3] {
+        assert!(!e.d.parked(w(id)), "{id} shown");
+    }
+    assert!(a.iter().any(|x| matches!(x, Action::Focus { .. })));
+    // Nothing elsewhere: no actions.
+    let obs = e.d.obs();
+    assert!(e.m.bring_app_here(11, &obs).is_empty());
+}
+
+#[test]
+fn bring_app_here_one_at_a_time_takes_only_the_most_recent_window() {
+    let mut options = ModelOptions::default();
+    options.settings.app_windows = AppWindows::OneAtATime;
+    let mut e = Env::with(options);
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Native);
+    e.switch(1);
+    let obs = e.d.obs();
+    let a = e.m.bring_app_here(11, &obs);
+    e.run(a);
+    assert_eq!(titles(&e, 1), [3, 1]);
+    assert!(e.d.parked(w(2)));
+}
+
+#[test]
+fn a_dropped_card_lands_its_front_window_at_the_drop_point() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Native);
+    e.switch(1);
+    let other = e.m.window(w(2)).map(|x| x.restore);
+    let stage = e.m.stages()[1].id;
+    let obs = e.d.obs();
+    let a = e.m.merge_into_active_at(stage, Point::new(500.0, 300.0), &obs);
+    e.run(a);
+    assert_eq!(e.m.stages().len(), 1);
+    let front = e.d.frames[&w(3)];
+    assert_eq!((front.x, front.y), (500.0, 300.0));
+    assert_eq!(e.m.window(w(3)).map(|x| x.restore), Some(front));
+    assert_eq!(e.d.frames.get(&w(2)).copied(), other, "others keep their frames");
+    assert_eq!(e.m.main_active_stage().and_then(|s| e.m.stage(s)).and_then(|s| s.key), Some(w(3)));
+    // A drop near the edge is clamped onto the visible frame.
+    e.add(meta(4, 12, "com.example.c"), RuleAction::Native);
+    e.switch(1);
+    let stage = e.m.stage_of(w(4)).expect("staged");
+    let obs = e.d.obs();
+    let a = e.m.merge_into_active_at(stage, Point::new(1400.0, -50.0), &obs);
+    e.run(a);
+    let f = e.d.frames[&w(4)];
+    assert!(VISIBLE.contains_rect(&f), "{f:?} on screen");
+}
+
+#[test]
+fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 10, "com.example.a"), RuleAction::Native);
+    let pre = e.d.frames[&w(2)];
+    let dropped = Rect::new(30.0, 400.0, pre.w, pre.h);
+    e.d.frames.insert(w(2), dropped);
+    e.m.window_frame_changed(w(2), dropped);
+    let obs = e.d.obs();
+    let a = e.m.drop_window_on_strip(w(2), pre, &obs);
+    e.run(a);
+    assert_eq!(e.m.stages().len(), 2);
+    assert_eq!(e.active_number(), 1, "the view does not switch");
+    assert_eq!(titles(&e, 1), [1]);
+    assert!(e.d.parked(w(2)));
+    assert_eq!(e.m.window(w(2)).map(|x| x.restore), Some(pre));
+    assert_eq!(e.slot_numbers(), [2]);
+    e.switch(2);
+    assert_eq!(e.d.frames[&w(2)], pre, "comes back where it was before the drag");
 }

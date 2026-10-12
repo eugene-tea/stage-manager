@@ -2,11 +2,11 @@
 //! then restore frames, then raises back to front, then focus, then `StateChanged`.
 
 use super::{
-    Action, Display, DisplayId, Home, Model, Observation, Pid, Reveal, StageId, Target, WindowId,
-    WindowMeta, WindowRole, WindowState,
+    Action, Display, DisplayId, Home, Model, NativeTarget, Observation, Pid, Reveal, StageId,
+    Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
-use crate::engine::geometry::Rect;
-use crate::engine::park::is_parked;
+use crate::engine::geometry::{Point, Rect};
+use crate::engine::park::{clamp_to_visible, is_parked};
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
@@ -17,11 +17,17 @@ impl Model {
     /// with no known parent joins the active stage). Duplicate notifications for a known
     /// `WindowId` only refresh its title.
     ///
-    /// Standard windows: `current` joins the active stage at the front; `new` creates a stage
-    /// and switches to it; `stage:<name>` joins that stage (created if missing) and switches to
-    /// it when the window is focused in `obs`, else parks it there; `float` pins it; `ignore`
-    /// leaves it unmanaged. Placement (`center`, `cascade` from the stage's front window)
-    /// applies before any switch.
+    /// Standard windows: `native` follows Apple ([`Model::native_target`]): a window of an
+    /// app with a window in the active stage (or pinned) joins the active stage; a window of
+    /// an app whose windows sit only in parked stages joins the most recent of them and
+    /// switches there (with one-at-a-time grouping it opens a stage of its own instead, the
+    /// app's newest window shown alone); a window of an app with no managed window opens a
+    /// new stage and switches to it (an empty active stage is simply used). `current` joins
+    /// the active stage at the front; `new` creates a stage and switches to it;
+    /// `stage:<name>` joins that stage (created if missing) and switches to it when the window
+    /// is focused in `obs`, else parks it there; `float` pins it; `ignore` leaves it
+    /// unmanaged. Placement (`center`, `cascade` from the stage's front window) applies before
+    /// any switch.
     pub fn add_window(
         &mut self,
         meta: WindowMeta,
@@ -73,16 +79,28 @@ impl Model {
         }
 
         let active = self.ensure_active(display);
-        let (home, created) = match &decision.action {
-            RuleAction::Float => (Home::Pinned, false),
-            RuleAction::Current | RuleAction::Ignore => (Home::Stage(active), false),
-            RuleAction::New => (Home::Stage(self.create_stage(display, None)), true),
-            RuleAction::Stage(name) => match self.find_named(name) {
-                Some(s) => (Home::Stage(s), false),
-                None => (
-                    Home::Stage(self.create_stage(display, Some(name.clone()))),
-                    true,
-                ),
+        // (home, a stage was created for it, switch to its stage when that is inactive)
+        let (home, created, follow) = match &decision.action {
+            RuleAction::Float => (Home::Pinned, false, false),
+            RuleAction::Current | RuleAction::Ignore => (Home::Stage(active), false, false),
+            RuleAction::New => (Home::Stage(self.create_stage(display, None)), true, true),
+            RuleAction::Stage(name) => {
+                let focused = obs.focused == Some(id);
+                match self.find_named(name) {
+                    Some(s) => (Home::Stage(s), false, focused),
+                    None => (
+                        Home::Stage(self.create_stage(display, Some(name.clone()))),
+                        true,
+                        focused,
+                    ),
+                }
+            }
+            RuleAction::Native => match self.native_target(meta.pid, display) {
+                NativeTarget::Join(s) => (Home::Stage(s), false, true),
+                NativeTarget::Fresh if self.stage_is_empty(active) => {
+                    (Home::Stage(active), false, false)
+                }
+                NativeTarget::Fresh => (Home::Stage(self.create_stage(display, None)), true, true),
             },
         };
         let front_stage = match home {
@@ -131,7 +149,6 @@ impl Model {
                 actions.push(Action::SetFrame { id, frame: restore });
             }
         } else if let Home::Stage(s) = home {
-            let follow = decision.action == RuleAction::New || obs.focused == Some(id);
             if follow {
                 actions.extend(self.switch_to(s, obs));
                 return actions;
@@ -434,6 +451,192 @@ impl Model {
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Where Apple puts a new standard window of app `pid` (the window itself not yet
+    /// managed): see [`Model::add_window`] for `native`.
+    pub fn native_target(&self, pid: Pid, display: DisplayId) -> NativeTarget {
+        let active = self.active_stage(display);
+        let app: Vec<&WindowState> = self
+            .windows
+            .values()
+            .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard)
+            .collect();
+        if app
+            .iter()
+            .any(|w| w.home == Home::Pinned || Some(w.home) == active.map(Home::Stage))
+        {
+            return match active {
+                Some(a) => NativeTarget::Join(a),
+                None => NativeTarget::Fresh,
+            };
+        }
+        if self.options.settings.app_windows == AppWindows::OneAtATime {
+            return NativeTarget::Fresh;
+        }
+        app.iter()
+            .filter_map(|w| match w.home {
+                Home::Stage(s) => self.stage(s),
+                Home::Pinned => None,
+            })
+            .filter(|s| s.display == display)
+            .max_by_key(|s| s.last_active)
+            .map_or(NativeTarget::Fresh, |s| NativeTarget::Join(s.id))
+    }
+
+    pub(crate) fn stage_is_empty(&self, stage: StageId) -> bool {
+        self.stage(stage).is_some_and(|s| s.windows.is_empty())
+    }
+
+    /// Brings app `pid`'s windows from other stages into the active stage instead of
+    /// switching (Shift held on a Dock click or ⌘Tab). With [`AppWindows::AllAtOnce`] every
+    /// standard window of the app in an inactive stage of the display comes, most recently
+    /// active stage first and front to back within each; with [`AppWindows::OneAtATime`] only
+    /// the app's most recent one. They go in front of the active stage's windows, are restored
+    /// and raised, and the first is focused. Stages left empty go away. A no-op (no actions)
+    /// when the app has no window elsewhere.
+    pub fn bring_app_here(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let display = self.current_display(obs);
+        let active = self.ensure_active(display);
+        let mut sources: Vec<(u64, StageId, Vec<WindowId>)> = self
+            .stages
+            .iter()
+            .filter(|s| s.display == display && s.id != active)
+            .map(|s| {
+                let mine: Vec<WindowId> = s
+                    .windows
+                    .iter()
+                    .copied()
+                    .filter(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid))
+                    .collect();
+                (s.last_active, s.id, mine)
+            })
+            .filter(|(_, _, mine)| !mine.is_empty())
+            .collect();
+        sources.sort_by_key(|s| std::cmp::Reverse(s.0));
+        let mut moving: Vec<WindowId> = sources.iter().flat_map(|s| s.2.clone()).collect();
+        if self.options.settings.app_windows == AppWindows::OneAtATime {
+            moving.truncate(1);
+        }
+        if moving.is_empty() {
+            return actions;
+        }
+        self.revealed.remove(&display);
+        self.capture(active, obs);
+        for &id in &moving {
+            if let Some(Home::Stage(s)) = self.windows.get(&id).map(|w| w.home)
+                && let Some(stage) = self.stage_mut(s)
+            {
+                stage.windows.retain(|&w| w != id);
+                if stage.key == Some(id) {
+                    stage.key = stage.windows.first().copied();
+                }
+            }
+            self.set_home(id, Home::Stage(active), display);
+        }
+        let t = self.tick();
+        if let Some(a) = self.stage_mut(active) {
+            let mut windows = moving.clone();
+            windows.append(&mut a.windows);
+            a.windows = windows;
+            a.key = moving.first().copied();
+            a.last_active = t;
+        }
+        let mut order = Vec::new();
+        for &m in moving.iter().rev() {
+            order.push(m);
+            order.extend(self.children_of(m));
+        }
+        for &id in &order {
+            if self.windows.get(&id).is_some_and(|w| w.parked) {
+                self.restore_window(id, &mut actions);
+            }
+        }
+        for &id in &order {
+            actions.push(Action::Raise { id });
+        }
+        if let Some(&first) = moving.first() {
+            actions.push(Action::Focus { id: first });
+        }
+        for (_, s, _) in sources {
+            self.drop_if_dead(s, &mut actions);
+        }
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
+    }
+
+    /// A card dragged out of the strip and dropped in the main area: like
+    /// [`Model::merge_into_active`], but the stage's front window lands with its top-left
+    /// corner at `top_left` (its size kept, clamped onto the visible frame) and its children
+    /// move with it. The other windows keep their saved frames.
+    pub fn merge_into_active_at(
+        &mut self,
+        stage: StageId,
+        top_left: Point,
+        obs: &Observation,
+    ) -> Vec<Action> {
+        let Some(s) = self.stage(stage) else {
+            return Vec::new();
+        };
+        if self.is_active(stage) {
+            return Vec::new();
+        }
+        if let Some(front) = s.windows.first().copied()
+            && let Some(w) = self.windows.get(&front)
+        {
+            let visible = self.display(w.meta.display).visible;
+            let old = w.restore;
+            let placed = clamp_to_visible(
+                Rect::new(top_left.x, top_left.y, old.w, old.h),
+                visible,
+            );
+            let (dx, dy) = (placed.x - old.x, placed.y - old.y);
+            if let Some(w) = self.windows.get_mut(&front) {
+                w.restore = placed;
+            }
+            for c in self.children_of(front) {
+                let Some(cw) = self.windows.get(&c) else { continue };
+                let display = self.display(cw.meta.display).visible;
+                let moved = clamp_to_visible(cw.restore.translate(dx, dy), display);
+                if let Some(cw) = self.windows.get_mut(&c) {
+                    cw.restore = moved;
+                }
+            }
+        }
+        self.merge_into_active(stage, obs)
+    }
+
+    /// A window dragged by its title bar and dropped on the strip: it goes to a new stage of
+    /// its own (parked, its card in the strip), and its restore frame is `pre_drag`, the
+    /// frame it had before the drag, not where it was dropped. Its children move back by the
+    /// same offset. Same as [`Model::send_window`] with [`Target::New`] otherwise.
+    pub fn drop_window_on_strip(
+        &mut self,
+        id: WindowId,
+        pre_drag: Rect,
+        obs: &Observation,
+    ) -> Vec<Action> {
+        let Some(id) = self.resolve_standard(id) else {
+            return Vec::new();
+        };
+        let mut obs = obs.clone();
+        let dropped = obs
+            .frames
+            .get(&id)
+            .copied()
+            .or(self.windows.get(&id).map(|w| w.meta.frame));
+        if let Some(d) = dropped {
+            let (dx, dy) = (pre_drag.x - d.x, pre_drag.y - d.y);
+            for c in self.children_of(id) {
+                if let Some(f) = obs.frames.get_mut(&c) {
+                    *f = f.translate(dx, dy);
+                }
+            }
+        }
+        obs.frames.insert(id, pre_drag);
+        self.send_window(id, Target::New, &obs)
     }
 
     /// An app became frontmost (Dock click, ⌘Tab).

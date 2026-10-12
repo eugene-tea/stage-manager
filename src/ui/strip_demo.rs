@@ -120,6 +120,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags) -> StripSnapshot 
         user_visible: flags.user_visible,
         show_numbers: flags.show_numbers,
         active_frames,
+        window_drag: None,
     }
 }
 

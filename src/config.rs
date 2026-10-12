@@ -41,12 +41,15 @@ thumbnail_interval_ms = 1500
 
 [defaults]
 # What a new window does when no rule matches:
+#   "native"        Apple's Stage Manager: a window of an app already on the current stage
+#                   joins it; a window of an app that sits in another stage joins that stage
+#                   and brings it forward; a newly opened app gets a stage of its own
 #   "current"       join the active stage
 #   "new"           open a new stage and switch to it
 #   "stage:<name>"  join the named stage (created if missing)
 #   "float"         pin it: visible on every stage
 #   "ignore"        leave it unmanaged
-action = "current"
+action = "native"
 # Where it goes: "as-is", "center", or "cascade" (offset from the front window).
 placement = "as-is"
 
@@ -68,7 +71,15 @@ placement = "as-is"
 # app = "*"
 # placement = "cascade"
 
+[sugar]
+# Hold Shift to bring things here instead of going there: Shift while opening an app (Dock,
+# Finder, Spotlight Shift-Return, Launchpad) opens its window in the current stage; Shift on
+# a Dock click of an app in another stage brings its windows here; Shift-click on a card
+# brings the card's windows here. The app switcher (Cmd-Tab, Cmd-Shift-Tab) always switches.
+shift_brings_here = true
+
 [hotkeys]
+# Optional: everything works by mouse, Dock and Cmd-Tab; these are extras.
 # Modifiers: ctrl, alt (option), shift, cmd. "{n}" stands for the digits 1-9.
 # An empty string disables a hotkey.
 switch = "ctrl+alt+{n}"
@@ -111,6 +122,22 @@ impl Default for StripConfig {
     }
 }
 
+/// The `[sugar]` section: shortcuts that ride on gestures people already make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SugarConfig {
+    /// Shift held while opening an app, on a Dock click or on a card click brings windows
+    /// into the current stage instead of switching.
+    pub shift_brings_here: bool,
+}
+
+impl Default for SugarConfig {
+    fn default() -> Self {
+        Self {
+            shift_brings_here: true,
+        }
+    }
+}
+
 /// The `[stages]` section.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StagesConfig {
@@ -125,10 +152,12 @@ pub struct Config {
     pub strip: StripConfig,
     /// New-window rules with the `[defaults]` decision.
     pub rules: RuleSet,
-    /// Hotkeys.
+    /// Hotkeys (optional extras).
     pub hotkeys: HotkeyConfig,
     /// Named stages.
     pub stages: StagesConfig,
+    /// Modifier sugar.
+    pub sugar: SugarConfig,
 }
 
 /// A config problem that stops a file from loading.
@@ -160,6 +189,13 @@ struct Raw {
     rule: Vec<RawRule>,
     hotkeys: RawHotkeys,
     stages: RawStages,
+    sugar: RawSugar,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawSugar {
+    shift_brings_here: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -219,6 +255,7 @@ const KNOWN: &[(&str, &[&str])] = &[
         &["switch", "send", "new_stage", "toggle_pin", "toggle_strip"],
     ),
     ("stages", &["names"]),
+    ("sugar", &["shift_brings_here"]),
 ];
 
 fn unknown_keys(table: &toml::Table) -> Vec<String> {
@@ -353,6 +390,12 @@ impl Config {
                 rules: RuleSet::new(rules, defaults),
                 hotkeys,
                 stages: StagesConfig { names },
+                sugar: SugarConfig {
+                    shift_brings_here: raw
+                        .sugar
+                        .shift_brings_here
+                        .unwrap_or(SugarConfig::default().shift_brings_here),
+                },
             },
             warnings,
         })
@@ -557,6 +600,9 @@ toggle_strip = ""
 
 [stages]
 names = ["Work", "Chat", "work", " "]
+
+[sugar]
+shift_brings_here = false
 "#,
         );
         let c = p.config;
@@ -604,6 +650,8 @@ names = ["Work", "Chat", "work", " "]
             "unset keeps default"
         );
         assert_eq!(c.stages.names, ["Work", "Chat"]);
+        assert!(!c.sugar.shift_brings_here);
+        assert!(Config::default().sugar.shift_brings_here);
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
     }
 
@@ -641,6 +689,7 @@ swipe = true
             "[hotkeys]\nswitch = \"ctrl+alt+s\"",
             "[hotkeys]\nnew_stage = \"ctrl+alt+{n}\"",
             "[hotkeys]\ntoggle_pin = \"p\"",
+            "[sugar]\nshift_brings_here = \"yes\"",
             "strip = 5",
             "not toml at all [",
         ] {

@@ -10,8 +10,13 @@ use regex::Regex;
 /// What to do with a new standard window.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RuleAction {
-    /// Join the active stage (`"current"`, the default).
+    /// Apple's default (`"native"`, the default): a window of an app already in the active
+    /// stage joins it; a window of an app whose windows sit in a parked stage joins that
+    /// stage and switches to it; a window of an app with no managed windows opens a new
+    /// stage and switches to it. See `Model::add_window`.
     #[default]
+    Native,
+    /// Join the active stage (`"current"`).
     Current,
     /// Open a new stage and switch to it (`"new"`).
     New,
@@ -24,10 +29,11 @@ pub enum RuleAction {
 }
 
 impl RuleAction {
-    /// Parses `"current" | "new" | "stage:<name>" | "float" | "ignore"`.
+    /// Parses `"native" | "current" | "new" | "stage:<name>" | "float" | "ignore"`.
     pub fn parse(text: &str) -> Result<Self, String> {
         let t = text.trim();
         match t {
+            "native" => Ok(Self::Native),
             "current" => Ok(Self::Current),
             "new" => Ok(Self::New),
             "float" => Ok(Self::Float),
@@ -38,7 +44,7 @@ impl RuleAction {
                     "action {text:?}: a stage name is missing after \"stage:\""
                 )),
                 None => Err(format!(
-                    "action {text:?}: expected current, new, stage:<name>, float or ignore"
+                    "action {text:?}: expected native, current, new, stage:<name>, float or ignore"
                 )),
             },
         }
@@ -48,6 +54,7 @@ impl RuleAction {
 impl fmt::Display for RuleAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Native => f.write_str("native"),
             Self::Current => f.write_str("current"),
             Self::New => f.write_str("new"),
             Self::Stage(name) => write!(f, "stage:{name}"),
@@ -207,6 +214,9 @@ mod tests {
 
     #[test]
     fn parses_actions() {
+        assert_eq!(RuleAction::parse("native"), Ok(RuleAction::Native));
+        assert_eq!(RuleAction::default(), RuleAction::Native);
+        assert_eq!(RuleAction::Native.to_string(), "native");
         assert_eq!(RuleAction::parse("current"), Ok(RuleAction::Current));
         assert_eq!(RuleAction::parse("new"), Ok(RuleAction::New));
         assert_eq!(RuleAction::parse("float"), Ok(RuleAction::Float));
@@ -310,7 +320,7 @@ mod tests {
         );
         assert_eq!(
             set.decide("com.example.video", "Movie").action,
-            RuleAction::Current
+            RuleAction::Native
         );
     }
 
@@ -323,11 +333,11 @@ mod tests {
         assert_eq!(set.decide("com.example.app", "").action, RuleAction::Ignore);
         assert_eq!(
             set.decide("com.example.app.helper", "").action,
-            RuleAction::Current
+            RuleAction::Native
         );
         assert_eq!(
             set.decide("COM.EXAMPLE.APP", "").action,
-            RuleAction::Current
+            RuleAction::Native
         );
     }
 

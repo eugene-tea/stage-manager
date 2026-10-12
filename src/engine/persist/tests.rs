@@ -429,3 +429,149 @@ fn a_stuck_unmatched_window_on_the_active_stage_is_brought_back() {
     });
     assert!(set.is_some_and(|f| !is_parked(f, FRAME)));
 }
+
+// ----- first start: Apple's grouping ------------------------------------------------------
+
+fn app_window(id: u32, pid: i32, bundle: &str) -> WindowMeta {
+    WindowMeta {
+        title: format!("{bundle} {id}"),
+        ..meta(id, pid, bundle)
+    }
+}
+
+fn first_start(m: &mut Model, live: &[WindowMeta], z: &[u32], front: Option<i32>) -> Vec<Action> {
+    let a = rematch(&state(vec![], None), live);
+    let hints = LaunchHints {
+        z_order: z.iter().map(|&i| WindowId(i)).collect(),
+        frontmost: front,
+    };
+    m.apply_launch(live, &a, false, &hints)
+}
+
+fn members_of(m: &Model, id: u32) -> Vec<u32> {
+    let s = m.stage_of(WindowId(id)).expect("staged");
+    m.stage(s).expect("stage").windows.iter().map(|w| w.0).collect()
+}
+
+#[test]
+fn first_start_gives_every_app_its_own_stage_frontmost_active_recent_first() {
+    let live = [
+        app_window(1, 10, "com.example.a"),
+        app_window(2, 10, "com.example.a"),
+        app_window(3, 11, "com.example.b"),
+        app_window(4, 12, "com.example.c"),
+    ];
+    let mut m = model();
+    // Front to back: b, a (2 above 1), c.
+    let acts = first_start(&mut m, &live, &[3, 2, 1, 4], Some(11));
+    assert_eq!(m.stages().len(), 3);
+    assert_eq!(members_of(&m, 3), [3]);
+    assert_eq!(members_of(&m, 1), [2, 1], "one stage for both of a's windows, front first");
+    assert_eq!(m.main_active_stage(), m.stage_of(WindowId(3)), "the frontmost app is active");
+    let cards: Vec<Vec<u32>> = m
+        .strip()
+        .iter()
+        .map(|c| c.windows.iter().map(|w| w.0).collect())
+        .collect();
+    assert_eq!(cards, [vec![2, 1], vec![4]], "most recently used first");
+    for id in [1, 2, 4] {
+        assert!(
+            acts.iter().any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == id)),
+            "park {id}"
+        );
+    }
+    assert!(!acts.iter().any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == 3)));
+}
+
+#[test]
+fn first_start_without_a_frontmost_app_uses_the_frontmost_window() {
+    let live = [app_window(1, 10, "com.example.a"), app_window(2, 11, "com.example.b")];
+    let mut m = model();
+    first_start(&mut m, &live, &[2, 1], Some(99));
+    assert_eq!(m.main_active_stage(), m.stage_of(WindowId(2)));
+    assert_eq!(m.stages().len(), 2);
+}
+
+#[test]
+fn first_start_one_at_a_time_gives_every_window_a_stage() {
+    let live = [
+        app_window(1, 10, "com.example.a"),
+        app_window(2, 10, "com.example.a"),
+        app_window(3, 11, "com.example.b"),
+    ];
+    let mut options = ModelOptions::default();
+    options.settings.app_windows = crate::engine::settings::AppWindows::OneAtATime;
+    let mut m = model_with(options);
+    first_start(&mut m, &live, &[2, 3, 1], Some(10));
+    assert_eq!(m.stages().len(), 3);
+    assert_eq!(m.main_active_stage(), m.stage_of(WindowId(2)));
+    let cards: Vec<u32> = m.strip().iter().map(|c| c.windows[0].0).collect();
+    assert_eq!(cards, [1, 3], "the frontmost app's other window first, then by z-order");
+}
+
+#[test]
+fn first_start_keeps_declared_stages_and_activates_the_frontmost_app() {
+    let live = [app_window(1, 10, "com.example.a")];
+    let mut m = model_with(ModelOptions {
+        named_stages: vec!["Work".into()],
+        ..Default::default()
+    });
+    first_start(&mut m, &live, &[1], Some(10));
+    assert_eq!(m.stages().len(), 2);
+    assert_eq!(m.main_active_stage(), m.stage_of(WindowId(1)));
+    assert_eq!(m.strip()[0].name.as_deref(), Some("Work"));
+}
+
+#[test]
+fn relaunch_gives_unmatched_apps_their_own_stages_and_known_apps_their_stage() {
+    let s = state(
+        vec![
+            (None, vec![saved("com.example.a", "com.example.a 1", 0)]),
+            (None, vec![saved("com.example.b", "com.example.b 2", 0)]),
+        ],
+        Some(0),
+    );
+    let live = [
+        app_window(1, 10, "com.example.a"),
+        app_window(2, 11, "com.example.b"),
+        app_window(3, 11, "com.example.b"), // an extra window of a known app
+        app_window(4, 12, "com.example.c"), // a new app
+    ];
+    let a = rematch(&s, &live);
+    let mut m = model();
+    m.apply_launch(
+        &live,
+        &a,
+        false,
+        &LaunchHints {
+            z_order: vec![WindowId(4), WindowId(1), WindowId(3), WindowId(2)],
+            frontmost: Some(12),
+        },
+    );
+    assert_eq!(m.main_active_stage(), m.stage_of(WindowId(1)), "the saved active stage wins");
+    assert_eq!(members_of(&m, 2), [2, 3]);
+    assert_eq!(members_of(&m, 4), [4]);
+    assert_eq!(m.stages().len(), 3);
+}
+
+#[test]
+fn an_empty_saved_active_stage_gives_way_to_the_frontmost_new_app() {
+    let s = state(
+        vec![(None, vec![saved("com.example.a", "com.example.a 1", 0)]), (None, vec![])],
+        Some(1),
+    );
+    let live = [app_window(1, 10, "com.example.a"), app_window(2, 11, "com.example.b")];
+    let a = rematch(&s, &live);
+    let mut m = model();
+    m.apply_launch(
+        &live,
+        &a,
+        false,
+        &LaunchHints {
+            z_order: vec![WindowId(2), WindowId(1)],
+            frontmost: Some(11),
+        },
+    );
+    assert_eq!(m.main_active_stage(), m.stage_of(WindowId(2)));
+    assert_eq!(m.stages().len(), 2);
+}

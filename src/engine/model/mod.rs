@@ -174,6 +174,15 @@ pub enum Target {
     Named(String),
 }
 
+/// Where Apple's default puts a new window ([`Model::native_target`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTarget {
+    /// Join this stage (the active one, or the app's parked stage, which comes forward).
+    Join(StageId),
+    /// A stage of its own.
+    Fresh,
+}
+
 /// Model-wide options, set at construction and updated on config or settings reload.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ModelOptions {

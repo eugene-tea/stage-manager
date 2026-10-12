@@ -2,7 +2,7 @@
 //! tilt. All values are points in the strip panel's own coordinates (top-left origin,
 //! `y` grows down). Numbers come from `docs/UX-SPEC.md` ("Strip geometry").
 
-use crate::engine::geometry::{Rect, Size};
+use crate::engine::geometry::{Point, Rect, Size};
 use crate::ui::strip_model::CardSnapshot;
 
 /// Width of the strip panel (the strip area Apple keeps clear is about 0–200 pt).
@@ -187,6 +187,34 @@ pub fn layout_column(cards: &[CardSnapshot], height: f64, center_y: f64) -> Vec<
     out
 }
 
+/// A press that moves farther than this (points) turns into a card drag; less is a click.
+pub const DRAG_THRESHOLD: f64 = 4.0;
+/// How far past the strip's right edge a dragged card grows to its window's full size.
+pub const GHOST_GROW_DISTANCE: f64 = 260.0;
+/// The pointer's depth into a dropped window's title bar, from its top edge.
+pub const TITLE_GRAB: f64 = 14.0;
+
+/// The ghost of a card dragged out of the strip, in global coordinates: inside the strip it
+/// is the front thumbnail `thumb` (where it was pressed, grabbed at fractions `grab` of its
+/// size); past `strip_right` it grows toward the window's `full` size, reached
+/// [`GHOST_GROW_DISTANCE`] further, the grab point sliding up into the title bar. The pointer
+/// `p` stays at the grab point throughout.
+pub fn ghost_frame(thumb: Rect, grab: (f64, f64), full: Size, strip_right: f64, p: Point) -> Rect {
+    let t = ((p.x - strip_right) / GHOST_GROW_DISTANCE).clamp(0.0, 1.0);
+    let lerp = |a: f64, b: f64| a + (b - a) * t;
+    let w = lerp(thumb.w, full.w.max(thumb.w));
+    let h = lerp(thumb.h, full.h.max(thumb.h));
+    let ox = grab.0 * w;
+    let oy = lerp(grab.1 * thumb.h, TITLE_GRAB.min(h));
+    Rect::new(p.x - ox, p.y - oy, w, h)
+}
+
+/// Where a dropped card's front window goes (its top-left corner, global): the same
+/// horizontal grab point as the ghost, with its title bar under the pointer.
+pub fn drop_origin(full: Size, grab_x: f64, p: Point) -> Point {
+    Point::new(p.x - grab_x * full.w, p.y - TITLE_GRAB)
+}
+
 /// The y-rotation (radians) that puts the vanishing point [`VANISHING_DISTANCE`] right of
 /// the card's left edge, given the projection center's x (`center_x`, panel coordinates).
 pub fn tilt_angle(center_x: f64) -> f64 {
@@ -282,5 +310,22 @@ mod tests {
         assert!((0.90..0.95).contains(&ratio), "far edge ratio {ratio}");
         // The edges meet at the vanishing point: height shrinks linearly with projected x.
         assert!(((1.0 - ratio) * VANISHING_DISTANCE - w).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_ghost_grows_from_the_thumbnail_to_the_window_past_the_strip() {
+        let thumb = Rect::new(20.0, 500.0, 150.0, 100.0);
+        let full = Size::new(900.0, 600.0);
+        let grab = (0.5, 0.5);
+        let inside = ghost_frame(thumb, grab, full, 200.0, Point::new(95.0, 550.0));
+        assert_eq!(inside, thumb, "unchanged inside the strip");
+        let far = ghost_frame(thumb, grab, full, 200.0, Point::new(200.0 + GHOST_GROW_DISTANCE + 50.0, 550.0));
+        assert_eq!((far.w, far.h), (900.0, 600.0));
+        assert_eq!(far.y, 550.0 - TITLE_GRAB, "the title bar under the pointer");
+        assert_eq!(far.x + 0.5 * far.w, 510.0);
+        let mid = ghost_frame(thumb, grab, full, 200.0, Point::new(200.0 + GHOST_GROW_DISTANCE / 2.0, 550.0));
+        assert!(mid.w > thumb.w && mid.w < full.w);
+        let at = drop_origin(full, 0.5, Point::new(510.0, 550.0));
+        assert_eq!((at.x, at.y), (far.x, far.y), "the drop lands where the grown ghost was");
     }
 }

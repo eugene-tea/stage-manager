@@ -12,6 +12,17 @@
 //! - **Safety**: the parked-window registry is synced around every batch.
 //! - After every state change: the strip snapshot ([`strip_model::present`]) and a debounced
 //!   `state.json` save.
+//! - **Apple's defaults**: the first start groups windows one stage per app; new windows
+//!   follow the `native` rule action; app activation switches to the app's stage.
+//! - **Drag and drop**: a managed window dragged by its title bar while the left button is
+//!   down (AX move events between a global mouse-down and mouse-up) is announced to the strip,
+//!   which shows a drop target; released over the strip, it gets a stage of its own and keeps
+//!   its pre-drag frame. A card dragged out of the strip arrives as
+//!   [`StripEvent::CardDropped`].
+//! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
+//!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
+//!   current stage, and an activation (Dock click) of an app in another stage brings its
+//!   windows here. The app switcher (Command held) never counts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -22,6 +33,7 @@ use serde_json::{Value, json};
 
 use super::ax::AxElement;
 use super::ctl::Command;
+use super::input::{self, ACTIVATION_WINDOW, InputEvent, InputKind, LAUNCH_WINDOW, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
@@ -33,7 +45,7 @@ use crate::engine::model::{
     capacity_for_height,
 };
 use crate::engine::park::clamp_to_visible;
-use crate::engine::persist::{STATE_VERSION, StateFile, rematch};
+use crate::engine::persist::{LaunchHints, STATE_VERSION, StateFile, rematch};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripEvent, StripSnapshot};
@@ -136,6 +148,24 @@ pub fn wallpaper_reveal_enabled(s: &NativeSettings) -> bool {
     s.click_wallpaper_reveals_desktop && !s.macos_reveals_desktop_outside_stage_manager
 }
 
+/// The left button went down in another app: the restore frames of the windows shown then,
+/// so a window drag that follows knows where the window was before.
+#[derive(Debug, Default)]
+struct Press {
+    frames: HashMap<u32, Rect>,
+}
+
+/// A managed window being dragged by the user.
+#[derive(Debug, Clone, Copy)]
+struct WindowDrag {
+    id: u32,
+    pid: i32,
+    /// Its frame before the drag.
+    pre: Rect,
+    /// False when the drag resizes the window (its size changed); only moves can be dropped.
+    moving: bool,
+}
+
 /// The engine plus everything around it on the WM thread.
 pub struct Controller {
     model: Option<Model>,
@@ -149,6 +179,9 @@ pub struct Controller {
     echoes: Echoes,
     dirty: Option<(Instant, Instant)>,
     strip_dirty: bool,
+    triggers: Triggers,
+    press: Option<Press>,
+    drag: Option<WindowDrag>,
 }
 
 impl Controller {
@@ -181,6 +214,9 @@ impl Controller {
             echoes: Echoes::default(),
             dirty: None,
             strip_dirty: false,
+            triggers: Triggers::default(),
+            press: None,
+            drag: None,
         };
         this.notify_config();
         this
@@ -357,9 +393,11 @@ impl Controller {
                 apps: c.apps,
             })
             .collect();
+        let dragged = self.drag.filter(|d| d.moving);
         let active_frames = m
             .windows()
             .filter(|w| !w.parked && (w.home == Home::Pinned || active.is_some_and(|a| w.home == Home::Stage(a))))
+            .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
             .map(|w| w.meta.frame)
             .collect();
         strip_model::present(StripSnapshot {
@@ -369,6 +407,7 @@ impl Controller {
             user_visible: self.strip_visible,
             show_numbers: self.store.config().strip.show_numbers,
             active_frames,
+            window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
         });
     }
 
@@ -440,6 +479,7 @@ impl Controller {
                 }
             }
             WinEvent::Moved(id) => {
+                self.maybe_start_drag(ob, id, now);
                 let frame = ob.window(id).map(|w| w.frame);
                 if let (Some(m), Some(frame)) = (self.model.as_mut(), frame)
                     && m.window(WindowId(id)).is_some()
@@ -463,6 +503,12 @@ impl Controller {
                     return;
                 }
                 let obs = self.observe(ob);
+                if let Some(pid) = ob.window(id).map(|w| w.pid)
+                    && self.window_elsewhere(id)
+                    && self.bring_here_if_shift(ob, pid, &obs, now)
+                {
+                    return;
+                }
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.window_focused(WindowId(id), &obs);
                     if !actions.is_empty() {
@@ -477,6 +523,9 @@ impl Controller {
                     return;
                 }
                 let obs = self.observe(ob);
+                if self.bring_here_if_shift(ob, pid, &obs, now) {
+                    return;
+                }
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.app_activated(pid, &obs);
                     if !actions.is_empty() {
@@ -485,6 +534,109 @@ impl Controller {
                     self.execute(ob, actions);
                 }
             }
+        }
+    }
+
+    /// True when window `id` sits in a stage that is not active.
+    fn window_elsewhere(&self, id: u32) -> bool {
+        self.model.as_ref().is_some_and(|m| {
+            m.stage_of(WindowId(id)).is_some_and(|s| m.main_active_stage() != Some(s))
+        })
+    }
+
+    /// True when app `pid` has a standard window on the current stage (or pinned): its
+    /// activation switches nothing, so Shift has nothing to change (a Shift-click inside one
+    /// of its windows, to extend a selection, must not pull in its other windows).
+    fn app_present(&self, pid: i32) -> bool {
+        self.model.as_ref().is_some_and(|m| {
+            let active = m.main_active_stage();
+            m.windows().any(|w| {
+                w.meta.pid == pid
+                    && w.meta.role == WindowRole::Standard
+                    && (w.home == Home::Pinned || active.is_some_and(|a| w.home == Home::Stage(a)))
+            })
+        })
+    }
+
+    /// The Shift sugar for an activation that would switch stages: when Shift was held (not
+    /// with Command), bring app `pid`'s windows into the current stage instead. True when it
+    /// did.
+    fn bring_here_if_shift(&mut self, ob: &Observer, pid: i32, obs: &Observation, now: Instant) -> bool {
+        if !self.store.config().sugar.shift_brings_here
+            || self.app_present(pid)
+            || !self.triggers.shift_here(now, ACTIVATION_WINDOW, input::live_modifiers())
+        {
+            return false;
+        }
+        let Some(m) = self.model.as_mut() else { return false };
+        let actions = m.bring_app_here(pid, obs);
+        if actions.is_empty() {
+            return false;
+        }
+        self.triggers.consume();
+        tracing::info!(pid, "Shift held: the app's windows come to the current stage");
+        self.execute(ob, actions);
+        true
+    }
+
+    /// A move event while the left button is down after a mouse-down in another app: the
+    /// user is dragging a shown managed window (our own moves are echoes and do not count).
+    fn maybe_start_drag(&mut self, ob: &Observer, id: u32, now: Instant) {
+        if self.drag.is_some() || self.echoes.is_window_echo(id, now) {
+            return;
+        }
+        let (Some(press), Some(m)) = (&self.press, &self.model) else { return };
+        let Some(w) = m.window(WindowId(id)) else { return };
+        let shown = !w.parked
+            && (w.home == Home::Pinned || m.main_active_stage().is_some_and(|a| w.home == Home::Stage(a)));
+        if !shown || w.meta.role != WindowRole::Standard || !input::left_button_down() {
+            return;
+        }
+        let pre = press.frames.get(&id).copied().unwrap_or(w.restore);
+        let Some(now_frame) = ob.window(id).map(|t| t.frame) else { return };
+        let moving = (now_frame.w - pre.w).abs() < 1.0 && (now_frame.h - pre.h).abs() < 1.0;
+        self.drag = Some(WindowDrag { id, pid: w.meta.pid, pre, moving });
+        if moving {
+            tracing::info!(id, "window drag started");
+            self.present();
+        }
+    }
+
+    /// Global input in another app (mouse down/up, key down). `over_strip` tells, for a
+    /// mouse-up, whether the pointer is over the visible strip.
+    pub fn input(&mut self, ob: &mut Observer, event: InputEvent, over_strip: bool) {
+        let now = Instant::now();
+        self.triggers.record(now, Modifiers { shift: event.shift, cmd: event.cmd });
+        match event.kind {
+            InputKind::MouseDown => {
+                self.end_drag();
+                self.press = self.model.as_ref().map(|m| Press {
+                    frames: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.restore)).collect(),
+                });
+                self.mouse_down(ob, event.at);
+            }
+            InputKind::MouseUp => {
+                self.press = None;
+                let Some(drag) = self.drag.take() else { return };
+                if drag.moving && over_strip {
+                    tracing::info!(id = drag.id, "window dropped on the strip: a stage of its own");
+                    let obs = self.observe(ob);
+                    if let Some(m) = self.model.as_mut() {
+                        let actions = m.drop_window_on_strip(WindowId(drag.id), drag.pre, &obs);
+                        self.execute(ob, actions);
+                    }
+                } else if drag.moving {
+                    tracing::debug!(id = drag.id, "window drag ended in the main area");
+                }
+                self.present();
+            }
+            InputKind::KeyDown => {}
+        }
+    }
+
+    fn end_drag(&mut self) {
+        if self.drag.take().is_some_and(|d| d.moving) {
+            self.present();
         }
     }
 
@@ -528,7 +680,17 @@ impl Controller {
             unmatched = assignment.unmatched.len(),
             "building stages"
         );
-        let actions = model.apply_assignment(&live, &assignment, false);
+        let z_order: Vec<WindowId> = windows::list_windows()
+            .iter()
+            .filter(|w| w.onscreen && w.layer == 0)
+            .map(|w| WindowId(w.id))
+            .collect();
+        let frontmost = AxElement::system_wide().focused_application().ok().and_then(|a| a.pid().ok());
+        let first_start = state.is_none();
+        let actions = model.apply_launch(&live, &assignment, false, &LaunchHints { z_order, frontmost });
+        if first_start {
+            tracing::info!(stages = model.stages().len(), "first start: one stage per app, as Apple's Stage Manager does");
+        }
         self.model = Some(model);
         self.execute(ob, actions);
         for id in &assignment.unmatched {
@@ -555,10 +717,27 @@ impl Controller {
         if let Some(title) = ob.window(id).and_then(|w| w.element.title().ok()) {
             meta.title = title;
         }
-        let decision = match meta.role {
+        let mut decision = match meta.role {
             WindowRole::Standard => self.store.config().rules.decide(&meta.bundle_id, &meta.title),
             WindowRole::Child { .. } => Decision::default(),
         };
+        if meta.role == WindowRole::Standard
+            && self.store.config().sugar.shift_brings_here
+            && matches!(decision.action, RuleAction::Native | RuleAction::New | RuleAction::Stage(_))
+        {
+            let new_app = self
+                .model
+                .as_ref()
+                .is_some_and(|m| !m.windows().any(|w| w.meta.pid == meta.pid && w.meta.role == WindowRole::Standard));
+            let within = if new_app { LAUNCH_WINDOW } else { ACTIVATION_WINDOW };
+            if self.triggers.shift_here(Instant::now(), within, input::live_modifiers()) {
+                if new_app {
+                    self.triggers.consume();
+                }
+                tracing::info!(id, "Shift held: the new window joins the current stage");
+                decision.action = RuleAction::Current;
+            }
+        }
         if decision.action == RuleAction::Ignore {
             tracing::debug!(id, "rule: ignore");
             return;
@@ -647,11 +826,16 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
-        let StripEvent::CardClicked { stage, shift } = event;
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
-        let actions =
-            if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) };
+        let actions = match event {
+            StripEvent::CardClicked { stage, shift: true } => m.merge_into_active(StageId(stage), &obs),
+            StripEvent::CardClicked { stage, shift: false } => m.switch_to(StageId(stage), &obs),
+            StripEvent::CardDropped { stage, x, y } => {
+                tracing::info!(stage, x, y, "card dropped in the main area: its windows join the current stage");
+                m.merge_into_active_at(StageId(stage), Point::new(x, y), &obs)
+            }
+        };
         self.execute(ob, actions);
     }
 
@@ -788,7 +972,34 @@ impl Controller {
                 self.reload_config(ob);
                 json!({ "ok": self.config_error.is_none(), "error": self.config_error })
             }
-            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugClick { .. } => json!({ "ok": false, "error": "not a WM command" }),
+            Command::DebugFrame { id, frame } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-frame needs STAGE_MANAGER_TEST=1" });
+                }
+                let shown = self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| !w.parked);
+                match ob.window(id) {
+                    Some(w) if shown => {
+                        // Placed and brought to the front, so a test's pointer path is over it.
+                        let now = Instant::now();
+                        self.echoes.touch_window(id, now);
+                        self.echoes.touch_app(w.pid, now);
+                        let result = w
+                            .element
+                            .set_frame(frame)
+                            .and_then(|_| w.element.raise())
+                            .and_then(|_| w.element.set_main(true))
+                            .and_then(|_| AxElement::application(w.pid).set_frontmost(true));
+                        match result {
+                            Ok(()) => json!({ "ok": true }),
+                            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                        }
+                    }
+                    _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
+                }
+            }
+            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugClick { .. } | Command::DebugDrag { .. } => {
+                json!({ "ok": false, "error": "not a WM command" })
+            }
         }
     }
 
@@ -837,6 +1048,7 @@ impl Controller {
             "strip": m.strip().iter().map(|c| c.number).collect::<Vec<_>>(),
             "strip_capacity": m.options().strip.capacity,
             "strip_visible": self.strip_visible,
+            "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },
             "config_path": self.store.path(),
             "config_error": self.config_error,
