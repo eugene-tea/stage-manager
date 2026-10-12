@@ -20,10 +20,18 @@ NSWorkspace notifications     persists state.json               ctl socket (test
               ◀──snapshot───  StripModel to main via GCD
 ```
 
-- **One native Space.** A stage is a group of windows. Inactive stages are parked in the
-  bottom-right corner of their display (macOS keeps a sliver onscreen). Switching = save the
-  active stage's live frames and z-order, park it, restore the target's frames, raise back to
-  front, focus the remembered key window last.
+- **Stages per Space.** A stage is a group of windows on one Space (Desktop); every Space
+  has its own stages, active stage and strip, as Apple's does. Inactive stages are parked in
+  the bottom-right corner of their display (macOS keeps a sliver onscreen). Switching = save
+  the active stage's live frames and z-order, park it, restore the target's frames, raise
+  back to front, focus the remembered key window last. Nothing acts on another Space's
+  windows except the safety paths.
+- **Spaces by their windows.** No public API names a Space: the engine gives each a
+  synthetic id and recognizes it on `activeSpaceDidChangeNotification` from the window
+  server's on-screen list (the shown Space's windows only, parked slivers included). A
+  window is given to the engine only once it shows on screen; until then it waits (another
+  Space, minimized, app hidden). A once-a-second check catches windows moved between
+  Spaces and Space changes the notification missed. No SkyLight/CGS calls.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`): no Objective-C types, fully unit
   tested. It takes observations (live frames, z-order, focus) and returns a list of
   `Action`s (`Park`, `SetFrame`, `Raise`, `Focus`) that the platform layer executes.
@@ -59,11 +67,17 @@ Defence in depth, because a parked window that never returns is the worst bug:
    park zone is moved back to its saved frame from `state.json`, or centered on the display.
 7. **Restore frames are clamped** onto the visible display before being applied.
 
+Across Spaces: the registry keeps every Space's parked windows (AX elements taken while
+their Space showed). Quit is clean only when the window server lists no managed window in
+the park zone on any Space; otherwise the guardian keeps watching after its scan and scans
+again whenever such a window shows (its Space was visited), since AX lists most apps'
+windows only on the shown Space.
+
 ## Testing hooks
 
 - `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).
 - **ctl socket** (`$TMPDIR/stage-manager.sock`, line protocol): `switch N`, `send N`, `new`,
-  `pin`, `dump`, `unpark-all`. The `stage-manager ctl ...` subcommand talks to it. This lets
+  `pin`, `dump` (with a `spaces` section), `unpark-all`. The `stage-manager ctl ...` subcommand talks to it. This lets
   milestones be checked by script, not just by hand.
 - `STAGE_MANAGER_ONLY=<bundle ids>` limits management to listed apps, so automated runs touch
   only a fixture app's windows (`scripts/fixture/`: a Swift app that opens titled windows).

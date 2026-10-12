@@ -6,6 +6,7 @@
 #
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 strip native visible parity
 #   scripts/test-stages.sh m3 safety       # some phases
+#   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 #
 # Every app run uses STAGE_MANAGER_HOME=$TEST_HOME (default: a new /tmp/sm-test.* dir) and
@@ -32,4 +33,9 @@ if [ -z "${SKIP_BUILD:-}" ]; then
 fi
 # The app runs from the fixed dev copy (one screen-access approval for every worktree).
 scripts/dev-app.sh >/dev/null || exit 1
+# `spaces` is the guided two-Desktop check (scripts/test_spaces.py): run it alone, with a
+# person at the Mac to switch Desktops when asked.
+if [ "${1:-}" = "spaces" ]; then
+  exec python3 scripts/test_spaces.py
+fi
 exec python3 scripts/test_stages.py "$@"
