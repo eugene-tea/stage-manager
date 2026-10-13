@@ -145,6 +145,19 @@ fn expects(actions: &[Action]) -> Vec<Expect> {
         .collect()
 }
 
+/// A Dock press's prediction and what the app said, until the next Space change shows
+/// which Desktop the click went to (logged).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DockSeen {
+    at: Instant,
+    pid: i32,
+    active: bool,
+    predicted: Option<u64>,
+}
+
+/// A Space change this long after a Dock press counts as its click's.
+const DOCK_SEEN_FOR: Duration = Duration::from_millis(2000);
+
 /// A Dock click's prediction: the app and the window macOS will show, or why none.
 pub(super) type Prediction = Result<(i32, WindowId), &'static str>;
 
@@ -651,7 +664,7 @@ impl Controller {
     /// The app a Dock item is for and the window macOS will show for it on another
     /// Desktop, or why there is no prediction: the model's gates and the window list
     /// (`list`) first, the app asked (bounded) only when they pass.
-    fn dock_prediction(&self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
+    fn dock_prediction(&mut self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
         let m = self.model.as_ref().ok_or("not managing")?;
         let bundle = dock::bundle_id_at(&item.path).ok_or("the item's bundle has no id")?;
         let pid = match ob.pids_with_bundle(&bundle)[..] {
@@ -661,21 +674,62 @@ impl Controller {
         };
         m.dock_gates(pid)?;
         let main = *m.main_display();
-        if dock::visible_window_of(list, pid, |r| main.parks(r)) {
-            return Err("the app has a window on screen here (the window server's list)");
-        }
-        if self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid)) {
-            return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
-        }
-        match AxElement::application(pid).bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()) {
-            Ok(false) => {}
-            Ok(true) => return Err("the app is hidden"),
-            Err(_) => return Err("the app did not answer in 50 ms (hidden or not)"),
-        }
-        let focused = focused_window_of(pid);
-        let window = m.dock_arrival(pid, AppFacts { hidden: false, unplaced: false }, focused)?;
-        tracing::debug!(bundle, pid, ax_focused = ?focused.map(|f| f.0), window = window.0, "dock: the window macOS will show");
+        let visible_here = dock::visible_window_of(list, pid, |r| main.parks(r));
+        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
+        // One bounded round with the app: hidden, active, its focused (else main) window.
+        let app = AxElement::application(pid);
+        let answer = app.bounded(QUERY_AX_TIMEOUT_SECONDS, |a| {
+            let hidden = a.is_hidden();
+            let active = a.is_frontmost();
+            let focused = a.focused_window().ok().and_then(|w| w.window_id().ok());
+            let main = a.main_window().ok().and_then(|w| w.window_id().ok());
+            (hidden, active, focused, main)
+        });
+        let (hidden, active, focused, main_window) = answer;
+        let Ok(hidden) = hidden else { return Err("the app did not answer in 50 ms (hidden or not)") };
+        let active = active.unwrap_or(false);
+        let space_of = |id: Option<u32>| id.and_then(|id| m.space_of(WindowId(id))).map(|s| s.0);
+        tracing::info!(
+            bundle,
+            pid,
+            active,
+            hidden,
+            ax_focused = ?focused,
+            ax_focused_desktop = ?space_of(focused),
+            ax_main = ?main_window,
+            ax_main_desktop = ?space_of(main_window),
+            desktop_shown = m.current_space(main.id).0,
+            visible_here,
+            unplaced,
+            "dock: the app at the press"
+        );
+        let ax_window = focused.or(main_window).map(WindowId);
+        let facts = AppFacts { hidden, unplaced, active, visible_here };
+        let result = m.dock_arrival(pid, facts, ax_window);
+        let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
+        self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted });
+        let window = result?;
+        tracing::debug!(bundle, pid, window = window.0, "dock: the window macOS will show");
         Ok((pid, window))
+    }
+
+    /// A Space change after a Dock press: which Desktop came, against the prediction (the
+    /// day's log tells whether the rule holds).
+    pub(super) fn note_dock_arrival(&mut self, arrived: SpaceId, from: SpaceId) {
+        let Some(seen) = self.dock_seen.take() else { return };
+        if seen.at.elapsed() > DOCK_SEEN_FOR {
+            return;
+        }
+        tracing::info!(
+            pid = seen.pid,
+            active = seen.active,
+            predicted = ?seen.predicted,
+            from = from.0,
+            arrived = arrived.0,
+            right = seen.predicted == Some(arrived.0),
+            since_press_ms = ms(seen.at, Instant::now()),
+            "dock: the Desktop a Dock click went to"
+        );
     }
 
     /// Redraws the pane of `space`, a Desktop not shown (arranged ahead at a Dock click, or

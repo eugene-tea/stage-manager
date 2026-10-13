@@ -27,7 +27,8 @@
 
 use super::{Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowRole};
 
-/// What the platform knows of an app a Dock click is for, beyond the model.
+/// What the platform knows of an app a Dock click is for, beyond the model, asked at the
+/// press.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AppFacts {
     /// The app is hidden (⌘H).
@@ -35,6 +36,11 @@ pub struct AppFacts {
     /// The app has windows the model does not place (minimized, or on a Desktop not visited
     /// since launch): where macOS goes then is not certain.
     pub unplaced: bool,
+    /// The app is the active (frontmost) one.
+    pub active: bool,
+    /// It has a window on screen out of the park zone in the window server's list (on any
+    /// display).
+    pub visible_here: bool,
 }
 
 /// A stage switch made on a Desktop before it was recognized, and what undoes it.
@@ -97,54 +103,86 @@ impl Model {
     }
 
     /// A Dock click on app `pid`: the window macOS will show on another Desktop, or why no
-    /// prediction is made. macOS switches Desktops only with "When switching to an
-    /// application, switch to a Space with open windows for the application" on, and only
-    /// when the app has no window on the Desktop shown; it shows the app's main window:
-    /// `ax_focused` (its focused window, asked now) when that waits on another Desktop, else
-    /// (no answer) the key window of the app's most recently active stage on a Desktop not
-    /// shown, the window it was last focused in there (the window server's order of windows
-    /// off screen is no front-to-back order). On the safe side, no prediction for a hidden
-    /// app or one with windows the model does not place (`facts`).
-    pub fn dock_arrival(&self, pid: Pid, facts: AppFacts, ax_focused: Option<WindowId>) -> Result<WindowId, &'static str> {
+    /// prediction is made. With "When switching to an application, switch to a Space with
+    /// open windows for the application" on (else none), the app not hidden, in this order:
+    ///
+    /// - **The app is the active one** (`facts.active`): a click on its Dock item takes macOS
+    ///   to another Desktop holding its windows (the owner's log of 10-13: VS Code and Mail,
+    ///   each active with windows on two Desktops, every click went to the other one). Only
+    ///   when exactly one other Desktop holds them, none unplaced: the key window of its
+    ///   most recent stage there.
+    /// - **The app's own answer** (`ax_window`: its focused, else main window, asked at the
+    ///   press): macOS shows that window. A known window on another Desktop is the
+    ///   prediction, even when the app has windows on the Desktop shown (VS Code with a
+    ///   window on each); one on the Desktop shown means no switch.
+    /// - **No answer**: on the safe side, no prediction when the app has a window on the
+    ///   Desktop shown (in the model, or on screen in the window server's list) or windows
+    ///   the model does not place; else the key window of its most recent stage elsewhere.
+    pub fn dock_arrival(&self, pid: Pid, facts: AppFacts, ax_window: Option<WindowId>) -> Result<WindowId, &'static str> {
         self.dock_gates(pid)?;
         if facts.hidden {
             return Err("the app is hidden");
         }
-        if facts.unplaced {
-            return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
-        }
         let elsewhere = |id: WindowId| {
             self.resolve_standard(id)
                 .and_then(|s| self.windows.get(&s))
-                .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !self.is_shown_space(w.space))
+                .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !w.sticky && !self.is_shown_space(w.space))
                 .map(|w| w.meta.id)
         };
-        if let Some(w) = ax_focused.and_then(elsewhere) {
-            return Ok(w);
-        }
         let mine = |id: &WindowId| self.windows.get(id).is_some_and(|w| w.meta.pid == pid);
-        self.stages
-            .iter()
-            .filter(|s| !self.is_shown_space(s.space) && s.windows.iter().any(mine))
-            .max_by_key(|s| s.last_active)
-            .and_then(|s| s.key.filter(mine).or_else(|| s.windows.iter().copied().find(mine)))
-            .and_then(elsewhere)
-            .ok_or("the app did not say which window, and no stage of it is known elsewhere")
+        let key_of_recent = |space: Option<SpaceId>| {
+            self.stages
+                .iter()
+                .filter(|s| !self.is_shown_space(s.space) && space.is_none_or(|sp| s.space == sp) && s.windows.iter().any(mine))
+                .max_by_key(|s| s.last_active)
+                .and_then(|s| s.key.filter(mine).or_else(|| s.windows.iter().copied().find(mine)))
+                .and_then(elsewhere)
+        };
+        if facts.active {
+            if facts.unplaced {
+                return Err("the active app has windows not placed: which Desktop is next is not known");
+            }
+            let spaces = self.dock_spaces_elsewhere(pid);
+            let [space] = spaces[..] else {
+                return Err("the active app's windows are on several other Desktops");
+            };
+            return key_of_recent(Some(space)).ok_or("the active app has no stage on the other Desktop");
+        }
+        if let Some(answer) = ax_window.and_then(|id| self.resolve_standard(id)).filter(|id| mine(id)) {
+            return elsewhere(answer).ok_or("the app's focused window is on the Desktop shown");
+        }
+        if facts.unplaced {
+            return Err("the app did not answer, and has windows not placed (minimized, or on a Desktop not visited)");
+        }
+        if facts.visible_here || self.windows.values().any(|w| w.meta.pid == pid && (w.sticky || self.is_shown_space(w.space))) {
+            return Err("the app did not answer, and has a window on the Desktop shown");
+        }
+        key_of_recent(None).ok_or("the app did not say which window, and no stage of it is known elsewhere")
+    }
+
+    /// The Desktops not shown that hold a standard window of app `pid` (on every Desktop
+    /// windows left out).
+    fn dock_spaces_elsewhere(&self, pid: Pid) -> Vec<SpaceId> {
+        let mut spaces: Vec<SpaceId> = self
+            .windows
+            .values()
+            .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !w.sticky && !self.is_shown_space(w.space))
+            .map(|w| w.space)
+            .collect();
+        spaces.sort();
+        spaces.dedup();
+        spaces
     }
 
     /// The part of [`Model::dock_arrival`] the model alone decides, asked before anything
-    /// costs a query (a click on the Desktop shown is the common case): the setting on, a
-    /// managed window of app `pid`, none on a Desktop shown (or on every Desktop).
+    /// costs a query (an app with windows on the Desktop shown only is the common case): the
+    /// setting on, a standard window of app `pid` on a Desktop not shown.
     pub fn dock_gates(&self, pid: Pid) -> Result<(), &'static str> {
         if !self.options.settings.switch_to_app_space {
             return Err("\"switch to a Space with open windows for the application\" is off");
         }
-        let mine: Vec<&super::WindowState> = self.windows.values().filter(|w| w.meta.pid == pid).collect();
-        if mine.iter().any(|w| w.sticky || self.is_shown_space(w.space)) {
-            return Err("the app has a window on the Desktop shown");
-        }
-        if !mine.iter().any(|w| w.meta.role == WindowRole::Standard) {
-            return Err("the app has no managed window");
+        if self.dock_spaces_elsewhere(pid).is_empty() {
+            return Err("the app has no window on another Desktop");
         }
         Ok(())
     }

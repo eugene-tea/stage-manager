@@ -24,6 +24,7 @@ pub mod names {
     pub const SIZE: &str = "AXSize";
     pub const WINDOWS: &str = "AXWindows";
     pub const FOCUSED_WINDOW: &str = "AXFocusedWindow";
+    pub const MAIN_WINDOW: &str = "AXMainWindow";
     pub const MAIN: &str = "AXMain";
     pub const MINIMIZED: &str = "AXMinimized";
     pub const FULLSCREEN: &str = "AXFullScreen";
@@ -302,6 +303,16 @@ impl AxElement {
     /// `AXFocusedWindow` of an application element.
     pub fn focused_window(&self) -> AxResult<AxElement> {
         self.element_attr(names::FOCUSED_WINDOW)
+    }
+
+    /// `AXMainWindow` of an application element.
+    pub fn main_window(&self) -> AxResult<AxElement> {
+        self.element_attr(names::MAIN_WINDOW)
+    }
+
+    /// `AXFrontmost` of an application element: the app is the active one.
+    pub fn is_frontmost(&self) -> AxResult<bool> {
+        self.bool_attr(names::FRONTMOST)
     }
 
     /// `AXFocusedApplication` of the system-wide element: the frontmost app.

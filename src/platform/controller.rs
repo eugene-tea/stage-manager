@@ -467,6 +467,8 @@ pub struct Controller {
     dock_pid: Option<i32>,
     /// The moves of an arrangement made at a Dock click, until the window server shows them.
     verify: Option<arrival::Verify>,
+    /// The latest Dock press's prediction, until a Space change shows where it went.
+    dock_seen: Option<arrival::DockSeen>,
     /// While set, a batch leaves the strip snapshot for later (`strip_dirty`): an arrival
     /// hands the strip one snapshot, in its final order.
     defer_present: bool,
@@ -586,6 +588,7 @@ impl Controller {
             dock_press: None,
             dock_pid: None,
             verify: None,
+            dock_seen: None,
             defer_present: false,
             absent: HashMap::new(),
             elsewhere: HashMap::new(),
@@ -1903,6 +1906,7 @@ impl Controller {
         let mut actions = m.arrive(main.id, &live, &absent, &hints);
         let after = m.current_space(main.id);
         tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
+        self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
         let (more, predicted) = self.settle_ahead(ob, after, Instant::now());
         actions.extend(more);

@@ -592,6 +592,9 @@ planned steps (hands-free):
               then ctl switch to Desktop 1's Fixture stage, ctl debug-space <toward>; (2) open Alpha (the
               notice's fallback): Fixture 1-2 never show once the arrangement is sent; both: no transition for
               the arrival, the timeline printed
+  owner's     the fixture app with windows on both Desktops, its focused one (Fixture 1) parked on Desktop 1
+  case        behind Alpha's stage, Bravo active on Desktop 2: its Dock item $SM_DOCK_REPEATS (3) times, each
+              predicted at the press (Fixture 1) and clean (strict, as above)
   back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
               (Desktop 2's pane stays there)
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
@@ -982,6 +985,50 @@ def activation_to_desktop_1(d1, d2):
     say("\n== again by `open` (no Dock click: the fallback at the Space change notice) ==")
     if back_to_desktop_2(d2):
         arrive_on_desktop_1(d1, alpha, left, "open")
+    owners_case(d1, d2)
+
+
+def owners_case(d1, d2):
+    """The owner's case (10-13, VS Code with a window on each Desktop): the fixture app has
+    windows on both Desktops (Fixture 1-2 on Desktop 1, Fixture 3 on Desktop 2), its last
+    focused window is Fixture 1, parked on Desktop 1 behind Alpha's stage, and another app
+    (Bravo) is active on Desktop 2. A click on the fixture's Dock item: macOS goes to
+    Desktop 1 (the app's focused window's Desktop, though it has a window here) and the app
+    predicts it at the press. $SM_DOCK_REPEATS arrivals, every one clean (strict)."""
+    say("\n== the owner's case: an app with a window on each Desktop, its focused one on the other ==")
+    if current_space() != d1:
+        go("d1", "Switch to Desktop 1")
+    # Desktop 2 first: Bravo's stage active, so arriving there activates Bravo, not the fixture.
+    go("d2", "Switch to Desktop 2")
+    x = state()
+    bravo = stage_holding(x, "Bravo 1")
+    if bravo and x["active"] != bravo:
+        ctl("switch", bravo)
+    go("d1", "Switch to Desktop 1")
+    clean = []
+    for n in range(DOCK_REPEATS):
+        x = state()
+        fixture, alpha_stage = stage_holding(x, "Fixture 1"), stage_holding(x, "Alpha 1")
+        if not check(bool(fixture and alpha_stage), "Desktop 1 has the Fixture and Alpha stages"):
+            return
+        # Fixture 1 focused (the fixture app's key window), then Alpha's stage in front.
+        ctl("switch", fixture)
+        ts.wait_state(lambda y: y["active"] == fixture, "the Fixture stage", timeout=4)
+        ctl("switch", alpha_stage)
+        x = ts.wait_state(lambda y: any(w["title"] == "Fixture 1" and w["parked"] for w in y["windows"]),
+                          "Fixture 1 parked behind Alpha's stage", timeout=4)
+        if not check(x is not None, "Fixture 1 waits parked on Desktop 1, Alpha's stage in front"):
+            return
+        go("d2", "Switch to Desktop 2")
+        x = state()
+        check(x["active"] == stage_holding(x, "Bravo 1"), "Bravo's stage is active on Desktop 2 (Fixture 3 parked there)")
+        target = next(w for w in x["windows"] if w["title"] == "Fixture 1")
+        left = [w["id"] for w in x["windows"] if w["title"] == "Alpha 1"]
+        say(f"\n== the owner's case, Dock arrival {n + 1} of {DOCK_REPEATS} ==")
+        clean.append(arrive_on_desktop_1(d1, target, left, "dock", app="fixture"))
+        if current_space() != d1:
+            return
+    check(all(clean), f"the owner's case: every Dock arrival clean: {sum(1 for c in clean if c)} of {DOCK_REPEATS}")
 
 
 # How many Dock arrivals a hands-free run makes (the window server applied an arrangement made
@@ -1004,14 +1051,18 @@ def back_to_desktop_2(d2):
     return check(current_space() == d2, "back on Desktop 2 for the next arrival")
 
 
-def arrive_on_desktop_1(d1, alpha, left, how):
-    """One arrival on Desktop 1 for Alpha 1 from Desktop 2: `how` is "dock" (its Dock item,
-    `ctl debug-dock-click`), "open", or None (guided: the person clicks). True when it was
-    clean (judged hands-free: see `judge_arrival`)."""
+def arrive_on_desktop_1(d1, alpha, left, how, app="a"):
+    """One arrival on Desktop 1 for the window `alpha` (its title; Alpha 1 by default) from
+    Desktop 2: `how` is "dock" (the Dock item of `app`, a key of `ts.EXTRA` or "fixture",
+    `ctl debug-dock-click`), "open", or None (guided: the person clicks). `left`: the windows
+    of the stage Desktop 1 was left with. True when it was clean (judged hands-free: see
+    `judge_arrival`)."""
+    title = alpha["title"]
+    bundle, path = (ts.FIX_ID, ts.FIX_APP) if app == "fixture" else (ts.EXTRA[app][0], ts.EXTRA[app][1])
     s = state()
-    check(any(w["id"] == alpha["id"] and w["parked"] for w in s["windows"]), "Alpha 1 waits parked in an inactive stage of Desktop 1")
+    check(any(w["id"] == alpha["id"] and w["parked"] for w in s["windows"]), f"{title} waits parked in an inactive stage of Desktop 1")
     check(left and not any(w["parked"] for w in s["windows"] if w["id"] in left),
-          "Desktop 1 was left with the Fixture stage active (Fixture 1-2 shown there)")
+          f"Desktop 1 was left with another stage active ({len(left)} window(s) shown there)")
     sampler, t_open = None, time.time()
     if how:
         WATCH.pause()
@@ -1020,33 +1071,33 @@ def arrive_on_desktop_1(d1, alpha, left, how):
         time.sleep(0.1)  # the sampler's first look is before the activation
         t_open = time.time()
     if how == "dock":
-        say(f"    clicking {os.path.basename(ts.EXTRA['a'][1])}'s Dock item (ctl debug-dock-click, then AXPress)")
-        r = ctl("debug-dock-click", ts.EXTRA["a"][0])
+        say(f"    clicking {os.path.basename(path)}'s Dock item (ctl debug-dock-click, then AXPress)")
+        r = ctl("debug-dock-click", bundle)
         check(r.get("ok"), f"the Dock item was pressed ({r.get('error') or 'ok'})")
-        check(r.get("predicted") == alpha["id"], f"the click predicted Alpha 1 ({r.get('predicted')})")
+        check(r.get("predicted") == alpha["id"], f"the click predicted {title} ({r.get('predicted')})")
     elif how == "open":
-        say(f"    activating {os.path.basename(ts.EXTRA['a'][1])} (open: no Dock click)")
-        subprocess.run(["open", ts.EXTRA["a"][1]], capture_output=True)
+        say(f"    activating {os.path.basename(path)} (open: no Dock click)")
+        subprocess.run(["open", path], capture_output=True)
     else:
-        ask(f"Click {os.path.basename(ts.EXTRA['a'][1])[:-4]} in the Dock (or Cmd-Tab to it): macOS goes to Desktop 1")
+        ask(f"Click {os.path.basename(path)[:-4]} in the Dock (or Cmd-Tab to it): macOS goes to Desktop 1")
 
     def arrived():
         x = state()
         if x.get("space") != d1:
             return None
-        w = next((w for w in x["windows"] if w["title"] == "Alpha 1"), None)
-        return x if w and not w["parked"] and x["active"] == stage_holding(x, "Alpha 1") else None
+        w = next((w for w in x["windows"] if w["id"] == alpha["id"]), None)
+        return x if w and not w["parked"] and x["active"] == stage_holding(x, title) else None
 
-    s = ts.wait_until(arrived, 6, "Desktop 1 with Alpha 1's stage active")
+    s = ts.wait_until(arrived, 6, f"Desktop 1 with {title}'s stage active")
     if how:
         WATCH.desk("d1" if current_space() == d1 else "d2")
-    check(s is not None, "Desktop 1 came up with the activated window's stage active (Alpha 1 shown, not parked)"
+    check(s is not None, f"Desktop 1 came up with the activated window's stage active ({title} shown, not parked)"
           + ("" if s else f" (now: space {state().get('space')}, active {state().get('active')}, "
                           f"stages {ts.stage_titles(state())})"))
     if s:
         time.sleep(1.5)  # past the once-a-second checks: it stays
         x = state()
-        check(x["space"] == d1 and x["active"] == stage_holding(x, "Alpha 1"), "Alpha 1's stage stays active")
+        check(x["space"] == d1 and x["active"] == stage_holding(x, title), f"{title}'s stage stays active")
     if sampler:
         try:
             out, _ = sampler.communicate(timeout=10)
@@ -1122,7 +1173,7 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
     # Nothing below may pass for want of looking: the sampler saw the slide and the windows.
     check(slide_from is not None, "the window server was seen showing Desktop 1 during the 3 s sampled")
     last = samples[-1]["windows"] if samples else []
-    check(any(w["id"] in left for w in last), "Fixture 1-2 are listed at the last look (the stage left was looked at)")
+    check(any(w["id"] in left for w in last), "the stage left is listed at the last look (it was looked at)")
     if focus is not None and notice is not None and focus <= notice:
         check(ahead is not None, f"the focus came before the notice: arranged ahead (6T), not at the recognition ({path})")
     elif ahead is None:
@@ -1139,7 +1190,7 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
         clean = clean and not during and trigger == "dock-click"
         check(not during, "the stage left never shows once Desktop 1 is on screen, not even during the slide"
               + ("" if not during else f": {[rel(t) for t in during][:8]}"))
-    check(any(w["id"] == alpha_id and shown(w) for w in last), "Alpha 1 on screen out of the park zone at the last look")
+    check(any(w["id"] == alpha_id and shown(w) for w in last), "the window arrived for is on screen out of the park zone at the last look")
     for t, line in events:
         if t <= t_open + 3.0 and "arrival: the window server" in line:
             say(f"    app, {rel(t)}: {line.split(': ', 1)[-1][:300]}")
