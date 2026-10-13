@@ -298,6 +298,10 @@ pub const KEYS: &[KeyDef] = &[
         "Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock."),
     k("windows", "focus_echo_ms", i(0, 10_000), "700",
         "Focus changes this soon after we moved a window are taken as our own and never switch stages."),
+    k("windows", "park_inside", f(-10_000.0, 32.0), "1.0",
+        "Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it."),
+    k("windows", "park_drop", f(-32.0, 10_000.0), "-1.0",
+        "How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]

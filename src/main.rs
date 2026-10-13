@@ -46,6 +46,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-screen") => app::probe_screen(),
         #[cfg(target_os = "macos")]
+        Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
             println!("stage-manager {}", env!("CARGO_PKG_VERSION"));
@@ -55,7 +57,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }

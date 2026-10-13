@@ -311,6 +311,10 @@ pub struct WindowsConfig {
     /// A press on a parked window's sliver does nothing (Apple's parked windows cannot be
     /// grabbed); off, it reaches the app and its stage comes on release.
     pub inert_slivers: bool,
+    /// Points of a parked window asked to stay inside the corner's side.
+    pub park_inside: f64,
+    /// How far below the display's bottom a parked window's top is asked.
+    pub park_drop: f64,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -786,6 +790,8 @@ impl Config {
                 minimize_to_strip: v.flag("windows.minimize_to_strip"),
                 focus_echo_ms: v.uint("windows.focus_echo_ms"),
                 inert_slivers: v.flag("windows.inert_slivers"),
+                park_inside: v.num("windows.park_inside"),
+                park_drop: v.num("windows.park_drop"),
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
@@ -812,6 +818,7 @@ impl Config {
             strip: self.strip_options(capacity),
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
+            park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
         }
     }
 }

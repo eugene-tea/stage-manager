@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{Corner, clamp_to_visible, is_parked_in_at, park_frame_at};
+use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -232,6 +232,8 @@ pub struct ModelOptions {
     pub named_stages: Vec<String>,
     /// Keeping placed windows clear of the strip (off by default; the platform sets it).
     pub fit: FitOptions,
+    /// How park frames are asked (`[windows] park_inside`, `park_drop`).
+    pub park: ParkRequest,
 }
 
 /// State of a desktop reveal, so a second reveal brings the stage back.
@@ -439,6 +441,11 @@ impl Model {
     /// Sets how placed windows are kept clear of the strip.
     pub fn set_fit(&mut self, fit: FitOptions) {
         self.options.fit = fit;
+    }
+
+    /// How park frames are asked from now on (windows parked already stay where they are).
+    pub fn set_park_request(&mut self, req: ParkRequest) {
+        self.options.park = req;
     }
 
     /// Every parked window with its restore frame.
@@ -701,7 +708,7 @@ impl Model {
             return;
         }
         let d = self.display(w.meta.display);
-        let frame = park_frame_at(w.restore.size(), d.frame, d.corner);
+        let frame = park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = true;
         }

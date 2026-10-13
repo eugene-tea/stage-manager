@@ -88,7 +88,7 @@ use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, Hot
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
-use crate::engine::park::choose_corner;
+use crate::engine::park::{ParkRequest, choose_corner};
 use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
@@ -784,13 +784,14 @@ impl Controller {
     }
 
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
-    /// config.
+    /// config, and its park request with config.
     fn sync_fit(&mut self) {
         let (strip_visible, settings) = (self.strip_visible, self.settings);
         let config = self.store.config();
         if let Some(m) = self.model.as_mut() {
             let fit = fit_options(m.main_display().visible, strip_visible, &settings, config);
             m.set_fit(fit);
+            m.set_park_request(ParkRequest { inside: config.windows.park_inside, drop: config.windows.park_drop });
         }
     }
 
