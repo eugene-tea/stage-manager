@@ -642,7 +642,7 @@ mod app {
         wm.send(WmCommand::NativeSettings(settings.clone()));
 
         let wm_input = wm.clone();
-        let input_monitor = input::monitor(mtm, move |event| {
+        let on_input = move |event: input::InputEvent| {
             if event.is_switcher_key() {
                 // ⌘Tab or ⌘` may switch stages: fresh snapshots for the animation (never on
                 // other ⌘ shortcuts, which would capture every shown window on each ⌘C).
@@ -650,7 +650,10 @@ mod app {
             }
             let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
             wm_input.send(WmCommand::Input(event, drop));
-        }, strip::pointer_moved);
+        };
+        // Mouse moves go to the strip on this thread: off its cards the strip lets clicks
+        // through, so it learns where the pointer is from the global monitor there.
+        let input_monitor = input::monitor(mtm, on_input, strip::pointer_moved);
         if input_monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
