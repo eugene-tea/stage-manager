@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::StripStyle;
 
-use crate::engine::geometry::Rect;
+use crate::engine::geometry::{Point, Rect};
 
 /// Everything the strip needs to draw one frame of state.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +43,9 @@ pub struct StripSnapshot {
     /// like the window's pre-drag frame). Releasing there sends the window to a stage of its
     /// own; the controller decides that from the mouse-up.
     pub window_drag: Option<CardWindow>,
+    /// Where the button went down for that drag (global, top-left): the point of the window
+    /// the pointer holds, so its card is held at the same point.
+    pub window_drag_grab: Option<Point>,
     /// The launch's stages were just built and `[reveal] launch_reveal` is on: if a window
     /// covers the strip right now, show it for a moment anyway (once per launch).
     pub announce: bool,

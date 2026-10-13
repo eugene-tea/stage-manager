@@ -78,7 +78,9 @@ struct Landing {
     _ghost: CardGhost,
     window: u32,
     rect: Rect,
-    _timer: Retained<NSTimer>,
+    /// Tells this landing from a later one (its timer clears only its own).
+    seq: u64,
+    timer: Retained<NSTimer>,
 }
 
 /// Motion state kept by the strip.
@@ -90,6 +92,8 @@ pub(super) struct Motion {
     running: Option<Running>,
     window_card: Option<WindowCard>,
     landing: Option<Landing>,
+    /// Counts landings.
+    landing_seq: u64,
     /// The pointer when the current window drag was first seen, and the window.
     drag_seen: Option<(u32, Point)>,
     drag_monitor: Option<Retained<AnyObject>>,
@@ -105,6 +109,7 @@ impl Motion {
             running: None,
             window_card: None,
             landing: None,
+            landing_seq: 0,
             drag_seen: None,
             drag_monitor: None,
         }
@@ -136,10 +141,20 @@ impl Motion {
     /// the transition of its windows takes over.
     pub(super) fn keep_landing(&mut self, ghost: Option<CardGhost>, window: u32, rect: Rect) {
         let Some(ghost) = ghost else { return };
-        let timer = after(LANDING_MAX, || {
-            with_strip(|s| s.motion.landing = None);
+        if let Some(old) = self.landing.take() {
+            old.timer.invalidate();
+        }
+        self.landing_seq += 1;
+        let seq = self.landing_seq;
+        // Clears this landing only, never a newer one (review R1-ui 6).
+        let timer = after(LANDING_MAX, move || {
+            with_strip(|s| {
+                if s.motion.landing.as_ref().is_some_and(|l| l.seq == seq) {
+                    s.motion.landing = None;
+                }
+            });
         });
-        self.landing = Some(Landing { _ghost: ghost, window, rect, _timer: timer });
+        self.landing = Some(Landing { _ghost: ghost, window, rect, seq, timer });
     }
 }
 
@@ -373,12 +388,16 @@ impl Strip {
             strip_model::cover(t.id, cover);
             return;
         }
+        // Gone at once, never an implicit fade (review R1-ui 11).
+        objc2_quartz_core::CATransaction::begin();
+        objc2_quartz_core::CATransaction::setDisableActions(true);
         for stage in &held {
             if let Some(layers) = self.pane.cards.get(stage) {
                 layers.card.removeAnimationForKey(&objc2_foundation::NSString::from_str("fade"));
                 layers.card.setOpacity(0.0);
             }
         }
+        objc2_quartz_core::CATransaction::commit();
         self.motion.overlay.show();
         self.motion.overlay.flush();
         self.motion.landing = None;
@@ -489,6 +508,12 @@ impl Strip {
         objc2_quartz_core::CATransaction::commit();
         if self.motion.window_card.is_none() {
             self.motion.overlay.hide();
+        }
+        // A card shown now grows if the pointer rests on it.
+        if !r.held.is_empty() && self.pane.shown {
+            let p = self.pointer();
+            let g = self.geometry.global;
+            self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
         }
     }
 
@@ -603,7 +628,9 @@ impl Strip {
             return;
         };
         let m = self.m().clone();
-        let seen = self.motion.drag_seen.filter(|s| s.0 == w.id).map_or(p, |s| s.1);
+        // The grab point: where the button went down on the window (review R1-ui 7), else
+        // where the pointer was when the strip first heard of the drag.
+        let seen = self.snapshot.window_drag_grab.unwrap_or_else(|| self.motion.drag_seen.filter(|s| s.0 == w.id).map_or(p, |s| s.1));
         let f = w.frame;
         let grab = if f.w > 1.0 && f.h > 1.0 { ((seen.x - f.x) / f.w, (seen.y - f.y) / f.h) } else { (0.5, 0.05) };
         let corner = self.style.cards.corner_radius * m.k;

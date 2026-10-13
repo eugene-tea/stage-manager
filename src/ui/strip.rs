@@ -1043,6 +1043,10 @@ impl Strip {
         }
         self.layout_cards(force);
         if let (Some(t), Some(starts)) = (transition, starts) {
+            // Decide whether this snapshot shows the strip before aiming: a switch that
+            // reveals (or hides) the strip lands its snapshots where the cards will be, not
+            // where they were (review R1-ui 1).
+            self.update_visibility();
             self.begin_transition(t, starts);
         }
         if let Some(id) = self.snapshot.parked {
@@ -1508,8 +1512,12 @@ impl Strip {
             icon.setShadowRadius(icon_style.shadow_radius * k);
             icon.setShadowOffset(CGSize::new(0.0, icon_style.shadow_offset_y * k));
             let side = rect.w;
-            let image = self.icons.entry(*pid).or_insert_with(|| app_icon(*pid, side));
-            if let Some(img) = image {
+            // An icon not found (an app still launching) is looked up again next time.
+            if self.icons.get(pid).is_none_or(|i| i.is_none()) {
+                let found = app_icon(*pid, side);
+                self.icons.insert(*pid, found);
+            }
+            if let Some(Some(img)) = self.icons.get(pid) {
                 // SAFETY: a CGImage is valid layer contents.
                 unsafe { icon.setContents(Some(as_object(&**img))) };
             }
@@ -1606,18 +1614,31 @@ impl Strip {
     /// card is drawn now (a card still gliding to its slot is hit where it is seen, never at
     /// the slot it is headed for).
     fn card_at(&self, p: Point) -> Option<u64> {
-        let m = self.m();
         let mut hits = self
             .layouts
             .iter()
             .filter(|l| l.stage != DROP_STAGE)
-            .map(|l| (l.stage, l.bounds(m).translate(self.drawn_offset(l.stage).x, self.drawn_offset(l.stage).y)))
+            .map(|l| (l.stage, self.drawn_bounds(l)))
             .filter(|(_, b)| b.contains(p))
             .map(|(s, _)| s);
         // A lifted card is drawn above the others.
         let first = hits.next()?;
         let lifted = self.lifted_card.as_ref().map(|l| l.0);
         Some(if Some(first) == lifted { first } else { hits.find(|s| Some(*s) == lifted).unwrap_or(first) })
+    }
+
+    /// A card's box where it is drawn: on its way to its slot, and grown when hovered.
+    fn drawn_bounds(&self, l: &CardLayout) -> Rect {
+        let m = self.m();
+        let d = self.drawn_offset(l.stage);
+        let b = l.bounds(m).translate(d.x, d.y);
+        if self.hovered != Some(l.stage) {
+            return b;
+        }
+        let c = l.hover_center(m);
+        let (cx, cy) = (c.x + d.x, c.y + d.y);
+        let s = m.hover_scale;
+        Rect::new(cx + (b.x - cx) * s, cy + (b.y - cy) * s, b.w * s, b.h * s)
     }
 
     /// How far `stage`'s card is drawn from its slot (on its way there).
@@ -1684,7 +1705,9 @@ impl Strip {
     }
 
     fn mouse_down(&mut self, p: Point) {
-        self.pressed = if self.pane.shown { self.card_at(p) } else { None };
+        // A card a transition is still landing in is not drawn yet: a press there is nothing
+        // (it would switch straight back; review R1-ui 3).
+        self.pressed = if self.pane.shown { self.card_at(p).filter(|s| !self.motion.holds(*s)) } else { None };
         self.card_drag = self.pressed.and_then(|stage| self.drag_for(stage));
         if let Some(stage) = self.pressed {
             // A click is likely: fresh snapshots of what leaves and what arrives.
@@ -1858,6 +1881,10 @@ impl Strip {
     }
 
     fn set_hover(&mut self, card: Option<u64>) {
+        // A card not drawn yet (its transition's snapshots are landing there) does not grow:
+        // it shows at the size they land at, and grows once shown if the pointer is still on
+        // it (review R1-ui 4).
+        let card = card.filter(|s| !self.motion.holds(*s));
         if card == self.hovered {
             return;
         }

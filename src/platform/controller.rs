@@ -211,6 +211,8 @@ pub fn wallpaper_reveal_enabled(s: &NativeSettings) -> bool {
 #[derive(Debug, Default)]
 struct Press {
     frames: HashMap<u32, Rect>,
+    /// Where the button went down (global, top-left).
+    at: Point,
 }
 
 /// A managed window being dragged by the user.
@@ -222,6 +224,8 @@ struct WindowDrag {
     pre: Rect,
     /// False when the drag resizes the window (its size changed); only moves can be dropped.
     moving: bool,
+    /// Where the button went down: the point of the window the pointer holds.
+    grab: Point,
 }
 
 /// Incoming windows of a transition, held parked until their snapshots cover their frames.
@@ -775,6 +779,7 @@ impl Controller {
             style: self.style.clone(),
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
+            window_drag_grab: dragged.map(|d| d.grab),
             announce: std::mem::take(&mut self.announce),
             active_windows,
             transition,
@@ -1037,7 +1042,7 @@ impl Controller {
         let pre = press.frames.get(&id).copied().unwrap_or(w.restore);
         let Some(now_frame) = ob.window(id).map(|t| t.frame) else { return };
         let moving = (now_frame.w - pre.w).abs() < 1.0 && (now_frame.h - pre.h).abs() < 1.0;
-        self.drag = Some(WindowDrag { id, pid: w.meta.pid, pre, moving });
+        self.drag = Some(WindowDrag { id, pid: w.meta.pid, pre, moving, grab: press.at });
         if moving {
             tracing::info!(id, "window drag started");
             self.present();
@@ -1048,7 +1053,12 @@ impl Controller {
     /// over the visible strip, which slot a dragged window goes to.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent, drop: Option<StripDrop>) {
         let now = Instant::now();
-        self.triggers.record(now, Modifiers { shift: event.shift, cmd: event.cmd });
+        let mods = Modifiers { shift: event.shift, cmd: event.cmd };
+        if event.kind == InputKind::MouseUp {
+            self.triggers.record_release(now, mods);
+        } else {
+            self.triggers.record(now, mods);
+        }
         match event.kind {
             InputKind::MouseDown => {
                 // A click where an arriving window is about to be was meant for it: it
@@ -1057,6 +1067,7 @@ impl Controller {
                 self.flush_pending(ob);
                 self.end_drag();
                 self.press = self.model.as_ref().map(|m| Press {
+                    at: event.at,
                     frames: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.restore)).collect(),
                 });
                 let wallpaper = if for_arriving {
