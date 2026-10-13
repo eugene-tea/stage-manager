@@ -52,8 +52,11 @@ case "${1:-}" in
     rm -rf "$APP"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp "$BIN" "$APP/Contents/MacOS/stage-manager"
+    # The icon (scripts/icon.sh): Assets.car holds the Liquid Glass icon macOS 26 draws
+    # (CFBundleIconName); AppIcon.icns is the fallback older systems read (CFBundleIconFile).
+    cp resources/Assets.car resources/AppIcon.icns "$APP/Contents/Resources/"
     write_plist "$APP/Contents/Info.plist" dev.eugene.stagemanager "Stage Manager" stage-manager \
-      $'\t<key>LSUIElement</key>\n\t<true/>'
+      $'\t<key>LSUIElement</key>\n\t<true/>\n\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>\n\t<key>CFBundleIconName</key>\n\t<string>AppIcon</string>'
     echo "Bundled $APP ($VERSION)"
     ;;
   fixture)

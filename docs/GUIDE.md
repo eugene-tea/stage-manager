@@ -42,6 +42,10 @@ The first signing with a new key makes macOS ask whether codesign may use it: ch
 | `make install` | copies the signed app to `~/Applications` |
 | `make fixture` | builds and signs `target/SM Fixture.app` (test windows, below) |
 | `make check`   | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
+| `make icon`    | regenerates the app icon (`art/icon.py` → Icon Composer document → `actool`); needs Xcode 26+, outputs committed |
+| `make dmg-art` | re-renders the DMG window background from `art/dmg.py` and `art/dmg/text.json` (headless Chrome) |
+| `make dmg`     | `sign`, then `target/release/Stage-Manager.dmg` of the locally signed app (layout check, not for publishing) |
+| `make release` | the public DMG: Developer ID signed, notarized, stapled, plus the Homebrew cask; see [RELEASING.md](RELEASING.md) |
 
 `make run` passes `RUST_LOG` (overrides `[log] level`), `STAGE_MANAGER_NO_PROMPT`,
 `STAGE_MANAGER_ONLY`, `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST`

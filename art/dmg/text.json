@@ -1,0 +1,18 @@
+{
+  "_comment": "The DMG window's words. Edit here, then run `make dmg-art` (scripts/dmg-art.sh). Keep them in step with docs/APPROVALS.md and stay honest: the update check is the app's only network use.",
+  "title": "Drag Stage Manager into Applications",
+  "approvals_heading": "Then open it. macOS asks you to allow two things, once:",
+  "approvals": [
+    {
+      "icon": "arrange",
+      "name": "Accessibility",
+      "why": "To arrange your windows: it moves, hides and restores them as you switch stages."
+    },
+    {
+      "icon": "capture",
+      "name": "Screen Recording",
+      "why": "For the live thumbnails in the strip. The pictures stay in memory, never on disk."
+    }
+  ],
+  "privacy": "Nothing about your windows leaves your Mac. The only thing it sends is an update check to GitHub."
+}

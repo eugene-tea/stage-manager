@@ -8,10 +8,11 @@ use std::cell::RefCell;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+use objc2_app_kit::{NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, ns_string};
 
 use crate::platform::permissions::PermissionState;
+use crate::ui::glyph;
 
 /// What a menu click asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,22 +173,12 @@ fn item(mtm: MainThreadMarker, title: &str, action: Option<Sel>, target: &MenuTa
 }
 
 impl StatusMenu {
-    /// Creates the status item with the `rectangle.stack` symbol (text title as fallback).
+    /// Creates the status item with the app's glyph ([`glyph::status_image`]).
     pub fn new(mtm: MainThreadMarker) -> Self {
         let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
         if let Some(button) = status_item.button(mtm) {
-            let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                ns_string!("rectangle.stack"),
-                Some(ns_string!("Stage Manager")),
-            );
-            match image {
-                Some(image) => {
-                    image.setTemplate(true);
-                    button.setImage(Some(&image));
-                }
-                None => button.setTitle(ns_string!("SM")),
-            }
-            tracing::debug!(symbol = button.image().is_some(), visible = status_item.isVisible(), "status item created");
+            button.setImage(Some(&glyph::status_image()));
+            tracing::debug!(visible = status_item.isVisible(), "status item created");
         } else {
             tracing::warn!("status item has no button");
         }
