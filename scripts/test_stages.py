@@ -1269,14 +1269,18 @@ def phase_slots():
             next((c["z"] for c in p["cards"] if c["stage"] == dragged), 0) > max([c["z"] for c in p["cards"] if c["stage"] != dragged] or [0])
             for p in lifted)
         check(bool(lifted) and on_top, f"the dragged card is above every other card while dragged and gliding ({len(lifted)} of {len(seen)} samples)")
+        # The icon against the front thumbnail's left edge (its turn's axis, which the
+        # perspective leaves in place), in units of that edge's length (the hover scale
+        # grows both alike).
         rel = []
         for p in lifted:
             c = next((c for c in p["cards"] if c["stage"] == dragged), None)
-            if c and c.get("thumb") and c.get("icons"):
-                th, ic = c["thumb"], c["icons"][0]
-                rel.append(((ic["x"] - th["x"]) / th["w"], (ic["y"] - th["y"]) / th["h"], th["w"], th["h"]))
+            if c and c.get("thumb_left_edge") and c.get("icons"):
+                (tx, ty), (bx, by) = [(q["x"], q["y"]) for q in c["thumb_left_edge"]]
+                ic, h = c["icons"][0], max(by - ty, 1.0)
+                rel.append(((ic["x"] - bx) / h, (ic["y"] - by) / h, h))
         if check(len(rel) >= 3, f"the dragged card's thumbnail and icon were sampled ({len(rel)} samples)"):
-            dev = max(max(abs(r[0] - rel[0][0]) * r[2], abs(r[1] - rel[0][1]) * r[3]) for r in rel)
+            dev = max(max(abs(r[0] - rel[0][0]), abs(r[1] - rel[0][1])) * r[2] for r in rel)
             check(dev <= 1.0, f"its icon keeps its place on the thumbnail through the drag and the glide (largest drift {dev:.2f} pt)")
         time.sleep(0.5)
         st = state()
@@ -1299,9 +1303,15 @@ def phase_slots():
         target = (vis["x"] + 60, vis["y"] + vis["h"] * frac)
         words = [str(round(v, 1)) for p in (grab, (grab[0] - 60, grab[1]), target) for v in p] + ["hold=1500"]
         proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
-        time.sleep(0.9)
+        # The pointer moves 4 pt every 8 ms after a 120 ms press: wait until it is there.
+        travel = abs(grab[0] - 60 - target[0]) + abs(grab[1] - target[1]) + 60
+        time.sleep(0.12 + travel / 4 * 0.009 + 0.25)
         region = [vis["x"], vis["y"], s["strip_width"] + 120, vis["h"]]
-        got = ctl("debug-overlay", *region)
+        got = {}
+        while proc.poll() is None:
+            g = ctl("debug-overlay", *region)
+            if g.get("bounds"):
+                got = g
         proc.communicate(timeout=20)
         b = got.get("bounds")
         grab_y = 12 / f["h"]

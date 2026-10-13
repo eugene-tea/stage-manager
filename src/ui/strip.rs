@@ -1300,6 +1300,19 @@ impl Strip {
                 _ => to_global(layer.convertRect_toLayer(b, Some(root))),
             }
         };
+        // A plane's left edge (its turn's axis, at depth 0: no perspective moves it), top and
+        // bottom, global.
+        let left_edge = |layer: &CALayer| {
+            let b = layer.bounds();
+            let ends = [CGPoint::new(0.0, 0.0), CGPoint::new(0.0, b.size.height)];
+            ends.map(|p| {
+                let q = match (drawn(layer), root_drawn.as_deref()) {
+                    (Some(l), Some(r)) => l.convertPoint_toLayer(p, Some(r)),
+                    _ => layer.convertPoint_toLayer(p, Some(root)),
+                };
+                Point::new(g.x + q.x, g.y + q.y)
+            })
+        };
         let cards: Vec<serde_json::Value> = self
             .snapshot
             .cards
@@ -1307,12 +1320,14 @@ impl Strip {
             .filter_map(|c| {
                 let l = self.pane.cards.get(&c.stage)?;
                 let front = l.planes.last().map(|(_, p)| in_root(p));
+                let edge = l.planes.last().map(|(_, p)| left_edge(p));
                 let icons: Vec<Rect> = l.icons.iter().map(|x| in_root(x)).collect();
                 Some(serde_json::json!({
                     "stage": c.stage,
                     "z": l.card.zPosition(),
                     "opacity": l.card.opacity(),
                     "thumb": front,
+                    "thumb_left_edge": edge,
                     "icons": icons,
                 }))
             })
