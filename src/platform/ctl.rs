@@ -7,7 +7,10 @@
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift]` drags along
 //! the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
-//! topmost), and `debug-frame ID X Y W H` sets a shown managed window's frame.
+//! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
+//! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
+//! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
+//! screen. `space` (any time) is the Space shown as the engine sees it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -19,6 +22,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::paths;
+use super::space_keys::Direction;
 use crate::engine::geometry::{Point, Rect};
 
 /// A parsed ctl command.
@@ -26,6 +30,9 @@ use crate::engine::geometry::{Point, Rect};
 pub enum Command {
     /// Liveness check; answers with the pid and version.
     Ping,
+    /// The Space shown as the engine sees it: its synthetic id, full screen, a change still
+    /// settling, and how many Space changes were handled so far.
+    Space,
     /// Observed windows and apps.
     Dump,
     /// The engine's stages, windows, frames and parked flags.
@@ -80,6 +87,23 @@ pub enum Command {
         /// The frame, global top-left coordinates.
         frame: Rect,
     },
+    /// Types the Desktop switch shortcut ("Move left/right a space") at the HID tap and
+    /// waits for the Space change (needs `STAGE_MANAGER_TEST=1`).
+    DebugSpace {
+        /// Which neighbour.
+        direction: Direction,
+        /// Add the numeric-pad flag a hardware arrow key carries.
+        numpad: bool,
+    },
+    /// Puts a `STAGE_MANAGER_ONLY` app's window in or out of full screen through
+    /// Accessibility (`AXFullScreen`); any other window is refused (needs
+    /// `STAGE_MANAGER_TEST=1`).
+    DebugFullscreen {
+        /// The window id.
+        id: u32,
+        /// In (true) or out (false).
+        on: bool,
+    },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -107,6 +131,7 @@ impl Command {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
             ["ping"] => Ok(Self::Ping),
+            ["space"] => Ok(Self::Space),
             ["dump"] => Ok(Self::Dump),
             ["state"] => Ok(Self::State),
             ["quit"] => Ok(Self::Quit),
@@ -149,11 +174,27 @@ impl Command {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
             }
+            ["debug-space", dir, rest @ ..] if rest.is_empty() || rest == ["numpad"] => {
+                let direction = Direction::parse(dir).ok_or_else(|| format!("expected left or right, got {dir:?}"))?;
+                Ok(Self::DebugSpace { direction, numpad: !rest.is_empty() })
+            }
+            ["debug-fullscreen", id, on] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                let on = match *on {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("expected on or off, got {other:?}")),
+                };
+                Ok(Self::DebugFullscreen { id, on })
+            }
             [] => Err("empty command".into()),
             _ => Err(format!("unknown command: {}", words.join(" "))),
         }
     }
 }
+
+/// How long `debug-space` waits for the Space change after typing the shortcut.
+pub const SPACE_WAIT: Duration = Duration::from_secs(6);
 
 /// Answers a command; runs on a ctl connection thread.
 pub type Handler = Arc<dyn Fn(Command) -> serde_json::Value + Send + Sync>;
@@ -241,11 +282,13 @@ pub fn request(line: &str, timeout: Duration) -> std::io::Result<String> {
 pub fn run_client(words: &[String]) -> ExitCode {
     if words.is_empty() {
         eprintln!(
-            "usage: stage-manager ctl <ping|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload>"
+            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload>"
         );
         return ExitCode::from(2);
     }
-    match request(&words.join(" "), Duration::from_secs(5)) {
+    // A Desktop switch waits for the Space change (up to SPACE_WAIT) before it answers.
+    let timeout = if words[0] == "debug-space" { SPACE_WAIT + Duration::from_secs(5) } else { Duration::from_secs(5) };
+    match request(&words.join(" "), timeout) {
         Ok(reply) => {
             println!("{reply}");
             let ok = serde_json::from_str::<serde_json::Value>(&reply)
@@ -299,6 +342,23 @@ mod tests {
             Ok(Command::DebugFrame { id: 7, frame: Rect::new(200.0, 300.0, 800.0, 600.0) })
         );
         assert!(Command::parse("debug-click 60 70 alt").is_err());
+        assert_eq!(Command::parse("space"), Ok(Command::Space));
+        assert_eq!(
+            Command::parse("debug-space right"),
+            Ok(Command::DebugSpace { direction: Direction::Right, numpad: false })
+        );
+        assert_eq!(
+            Command::parse("debug-space left numpad"),
+            Ok(Command::DebugSpace { direction: Direction::Left, numpad: true })
+        );
+        assert!(Command::parse("debug-space up").is_err());
+        assert!(Command::parse("debug-space").is_err());
+        assert!(Command::parse("debug-space left fast").is_err());
+        assert_eq!(Command::parse("debug-fullscreen 42 on"), Ok(Command::DebugFullscreen { id: 42, on: true }));
+        assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
+        assert!(Command::parse("debug-fullscreen 42 toggle").is_err());
+        assert!(Command::parse("debug-fullscreen x on").is_err());
+        assert!(Command::parse("debug-fullscreen 42").is_err());
         assert!(Command::parse("").is_err());
         assert!(Command::parse("switch 0").is_err());
         assert!(Command::parse("switch x").is_err());

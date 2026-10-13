@@ -27,6 +27,8 @@ pub mod names {
     pub const MAIN: &str = "AXMain";
     pub const MINIMIZED: &str = "AXMinimized";
     pub const FULLSCREEN: &str = "AXFullScreen";
+    pub const FULLSCREEN_BUTTON: &str = "AXFullScreenButton";
+    pub const PRESS: &str = "AXPress";
     pub const HIDDEN: &str = "AXHidden";
     pub const FRONTMOST: &str = "AXFrontmost";
     pub const RAISE: &str = "AXRaise";
@@ -312,6 +314,16 @@ impl AxElement {
             Err(e) if e == AxError::ATTRIBUTE_UNSUPPORTED || e == AxError::NO_VALUE => Ok(false),
             other => other,
         }
+    }
+
+    /// Puts a window in or out of full screen (`AXFullScreen`; test support).
+    pub fn set_fullscreen(&self, on: bool) -> AxResult<()> {
+        self.set_bool_attr(names::FULLSCREEN, on)
+    }
+
+    /// Presses a window's full-screen button (the green button's full-screen action).
+    pub fn press_fullscreen_button(&self) -> AxResult<()> {
+        self.element_attr(names::FULLSCREEN_BUTTON)?.perform_action(names::PRESS)
     }
 
     /// `AXHidden` of an application element (⌘H); an app without the attribute is shown.
