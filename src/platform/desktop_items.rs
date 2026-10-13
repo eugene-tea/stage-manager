@@ -31,13 +31,14 @@ pub const FINDER_AX_TIMEOUT_SECONDS: f32 = 0.1;
 /// Reads Finder's desktop icons now (any thread but the main one's hot paths: up to a
 /// timeout per message). `None` when Finder does not answer (no Accessibility, a timeout, a
 /// message failing); [`DesktopIcons::Unexpected`] when it answers with a tree other than
-/// the one expected. No Finder running: no icons.
+/// the one expected. No Finder running is unreadable too (`None`, tried again shortly), never
+/// an empty desktop: Finder may be relaunching, and its icons are back once it is.
 pub fn finder_icons() -> Option<DesktopIcons> {
     let finder = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(FINDER_BUNDLE_ID))
         .iter()
         .find(|a| !a.isTerminated())
         .map(|a| a.processIdentifier());
-    let Some(pid) = finder else { return Some(DesktopIcons::Icons(Vec::new())) };
+    let pid = finder?;
     let app = read_tree(&AxElement::application(pid))?;
     Some(desktop_icons(finder_desktop_on(create_desktop().as_deref()), &app))
 }

@@ -135,6 +135,16 @@ const PATCH_ITEMS_FRESH: Duration = Duration::from_secs(5);
 /// and how soon after a mouse-up (a desktop icon may have been dropped) they are read.
 const PATCH_ITEMS_RETRY: Duration = Duration::from_millis(250);
 
+/// The longest wait between reads of Finder's desktop icons while they keep failing.
+const PATCH_ITEMS_RETRY_MAX: Duration = Duration::from_secs(4);
+
+/// How soon a read of Finder's desktop icons is tried again after `fails` failed reads in a
+/// row: [`PATCH_ITEMS_RETRY`], doubled for each further one up to [`PATCH_ITEMS_RETRY_MAX`]
+/// (a hung or absent Finder does not get a new thread four times a second).
+fn items_retry(fails: u32) -> Duration {
+    PATCH_ITEMS_RETRY.saturating_mul(1 << fails.saturating_sub(1).min(8)).min(PATCH_ITEMS_RETRY_MAX)
+}
+
 /// The earlier of a due time already set (a mouse-up's) and `at`.
 fn sooner(due: Option<Instant>, at: Instant) -> Instant {
     due.map_or(at, |d| d.min(at))
@@ -153,8 +163,9 @@ struct PatchItems {
     due: Option<Instant>,
     /// The read running.
     reading: Option<std::sync::mpsc::Receiver<Option<crate::engine::corner_patch::DesktopIcons>>>,
-    /// Reads have failed since the last good one (logged once a streak).
-    failing: bool,
+    /// Reads failed since the last good one (logged once a streak; spaces the retries,
+    /// [`items_retry`]).
+    fails: u32,
     /// What was last logged about a read that did not give icons.
     said: Option<String>,
 }
@@ -926,7 +937,7 @@ impl Controller {
     /// Finder's desktop icons for the patch at `rect` as known (`None`: not known, the patch
     /// stays off). Takes a finished read's answer, and starts a read (on its own thread,
     /// [`super::desktop_items::start_read`]) for a new rectangle or when one is due: the last
-    /// good read [`PATCH_ITEMS_FRESH`] old, a failed one [`PATCH_ITEMS_RETRY`] old. A read
+    /// good read [`PATCH_ITEMS_FRESH`] old, a failed one [`items_retry`] old. A read
     /// that fails keeps the icons known. None starts while `quiet` (a drag, the fast tick).
     fn patch_items(&mut self, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
         use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
@@ -949,27 +960,27 @@ impl Controller {
                         }
                     }
                     p.known = Some(items);
-                    p.failing = false;
+                    p.fails = 0;
                     p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
                     None
                 }
                 Some(DesktopIcons::TooMany(n)) => {
                     p.known = None;
-                    p.failing = false;
+                    p.fails = 0;
                     p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
                     Some(format!("{n} desktop items, more than the {MAX_ICONS} read; the patch stays off"))
                 }
                 Some(DesktopIcons::Unexpected(why)) => {
-                    p.failing = true;
-                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_RETRY));
+                    p.fails = p.fails.saturating_add(1);
+                    p.due = Some(sooner(p.due, now + items_retry(p.fails)));
                     Some(format!("Finder's desktop is not as expected ({why}); its icons are unknown"))
                 }
                 None => {
-                    if !p.failing {
+                    if p.fails == 0 {
                         tracing::debug!("corner patch: Finder's desktop icons unreadable; the last read stands, tried again");
                     }
-                    p.failing = true;
-                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_RETRY));
+                    p.fails = p.fails.saturating_add(1);
+                    p.due = Some(sooner(p.due, now + items_retry(p.fails)));
                     p.said.clone()
                 }
             };
@@ -1003,7 +1014,7 @@ impl Controller {
     /// activation raising a parked window undoes it), and has it ordered again when it was
     /// right and is not any more.
     fn update_patch(&mut self) {
-        use crate::engine::corner_patch::{Listed, PatchFacts, order_step, ordered_right, patch_rect, steady_rect, visibility};
+        use crate::engine::corner_patch::{Listed, PatchFacts, order_step, ordered_right, patch_rect, steady_rect, visibility, would_be_right};
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
@@ -1017,15 +1028,25 @@ impl Controller {
                 let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
                 let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rect, r));
                 self.patch_rect = rect;
-                let listed: Vec<Listed> = list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds }).collect();
+                let listed: Vec<Listed> =
+                    list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds, drawn: w.alpha > 0.0 && w.pid != own }).collect();
                 // The topmost parked window under the patch: what it is ordered against.
                 let above = rect.and_then(|r| {
                     list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
                 });
+                // Whether just above it could be right at all (no shown window under it that
+                // reaches the patch); when not, the fallback, without a show to find out.
+                let number = patch_ui::window_number();
+                let possible = match (rect, above) {
+                    (Some(r), Some(a)) => would_be_right(&listed, number.unwrap_or(0), a, r, &parked),
+                    _ => false,
+                };
                 // Checked only while the panel is on screen ordered against that window with
-                // this reorder count; otherwise its order is not known.
-                let check = match (patch_ui::window_number(), rect, above) {
-                    (Some(n), Some(r), Some(a)) if patch_ui::ordered_against() == Some((a, reorder)) && list.iter().any(|w| w.id == n) => {
+                // this reorder count, and that order could be right; otherwise not known.
+                let check = match (number, rect, above) {
+                    (Some(n), Some(r), Some(a))
+                        if possible && patch_ui::ordered_against() == Some((a, reorder)) && list.iter().any(|w| w.id == n) =>
+                    {
                         Some(ordered_right(&listed, n, r, &parked))
                     }
                     _ => None,
@@ -1052,13 +1073,11 @@ impl Controller {
                     rect,
                     overview: self.overview.showing().is_some() || self.overview.freezes(now) || self.space_pending,
                     ordered,
-                    can_order: above.is_some(),
+                    can_order: possible,
                     fullscreen: self.fullscreen,
-                    shown: list
-                        .iter()
-                        .filter(|w| w.layer == 0 && w.pid != own && w.alpha > 0.0 && !parked.contains(&w.id))
-                        .map(|w| w.bounds)
-                        .collect(),
+                    // The same filter as the order's check (`Listed::counts`, the rectangle
+                    // tested by `visibility`).
+                    shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
                     dragging,
                     transition: self.pending.is_some(),
                     items,
@@ -3502,6 +3521,16 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finder_that_keeps_failing_is_read_less_and_less_often() {
+        assert_eq!(items_retry(1), PATCH_ITEMS_RETRY, "the first failure: the next tick");
+        assert_eq!(items_retry(2), Duration::from_millis(500));
+        assert_eq!(items_retry(3), Duration::from_secs(1));
+        assert_eq!(items_retry(5), PATCH_ITEMS_RETRY_MAX);
+        assert_eq!(items_retry(u32::MAX), PATCH_ITEMS_RETRY_MAX);
+        assert_eq!(items_retry(0), PATCH_ITEMS_RETRY);
+    }
 
     #[test]
     fn a_quit_mid_batch_still_brings_back_what_the_model_shows() {

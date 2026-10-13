@@ -17,6 +17,10 @@
 //!   patch may show whenever slivers are there. Not known yet (never shown, hidden, or a
 //!   new window to order against), it shows ordered against that window and is checked at
 //!   the next plan. Found wrong after being right, it is ordered again (unknown again).
+//!   An order that cannot be right whatever macOS does (a shown window reaching the patch
+//!   sits below the parked window: a stage switch's windows just parked are in front of the
+//!   one just shown) is known from the list before any show ([`would_be_right`]): the patch
+//!   takes the fallback without showing over that window for a tick.
 //! - **Found not ordered right** (the fallback; macOS did not honour the order): the patch
 //!   sits above every normal window there, so it shows only while no shown window reaches
 //!   its rectangle, no window is being dragged and no switch is running ([`visibility`]).
@@ -97,16 +101,41 @@ pub struct Listed {
     pub layer: i64,
     /// Bounds, top-left origin.
     pub bounds: Rect,
+    /// Drawn (alpha above 0) and another app's (this app's own windows never count).
+    pub drawn: bool,
+}
+
+impl Listed {
+    /// Whether the window counts for the patch at `rect`: a normal window, drawn, another
+    /// app's, reaching the rectangle. The one filter for [`ordered_right`],
+    /// [`would_be_right`] and [`PatchFacts::shown`] (with the parked ones left out).
+    pub fn counts(&self, rect: Rect) -> bool {
+        self.layer == 0 && self.drawn && self.bounds.intersect(&rect).is_some()
+    }
 }
 
 /// True when the patch (`patch`, at `rect`) sits above every parked window (`parked`) that
-/// reaches its rectangle and below every other normal window that does: what ordering it
-/// relative to the topmost parked window should give. False when the patch is not listed.
+/// reaches its rectangle and below every other window that does ([`Listed::counts`]): what
+/// ordering it relative to the topmost parked window should give. False when the patch is
+/// not listed.
 pub fn ordered_right(front_to_back: &[Listed], patch: u32, rect: Rect, parked: &HashSet<u32>) -> bool {
     let Some(at) = front_to_back.iter().position(|w| w.id == patch) else { return false };
-    front_to_back.iter().enumerate().filter(|(_, w)| w.id != patch && w.layer == 0 && w.bounds.intersect(&rect).is_some()).all(
+    front_to_back.iter().enumerate().filter(|(_, w)| w.id != patch && w.counts(rect)).all(
         |(i, w)| if parked.contains(&w.id) { i > at } else { i < at },
     )
+}
+
+/// Whether ordering the patch (`patch`, at `rect`) just above `above` could be right: the
+/// list with the patch taken out and put back just above `above`, checked by
+/// [`ordered_right`]. False when a shown window reaching the rectangle sits below `above`
+/// (or a parked one above it), or `above` is not listed: then no order against `above` is
+/// right, and the patch must not show to find out. Only whether macOS honours the order
+/// across apps is left for a live show to tell.
+pub fn would_be_right(front_to_back: &[Listed], patch: u32, above: u32, rect: Rect, parked: &HashSet<u32>) -> bool {
+    let mut list: Vec<Listed> = front_to_back.iter().filter(|w| w.id != patch).copied().collect();
+    let Some(at) = list.iter().position(|w| w.id == above) else { return false };
+    list.insert(at, Listed { id: patch, layer: 0, bounds: rect, drawn: true });
+    ordered_right(&list, patch, rect, parked)
 }
 
 /// What the WM thread remembers of the patch's order between plans.
@@ -171,7 +200,8 @@ pub struct PatchFacts {
     /// The patch's order ([`order_step`]): right, found wrong, or `None` while not known
     /// (never shown, hidden, ordered against another window, ordered anew).
     pub ordered: Option<bool>,
-    /// A parked window lies under the patch to order it against.
+    /// A parked window lies under the patch to order it against, and ordering just above it
+    /// could be right ([`would_be_right`]).
     pub can_order: bool,
     /// A full-screen app's Space shows.
     pub fullscreen: bool,
@@ -279,7 +309,7 @@ pub fn desktop_icons(desktop_on: bool, app: &[AxNode]) -> DesktopIcons {
             for image in images {
                 match image.frame {
                     Some(f) if !f.is_degenerate() => icons.push(f),
-                    Some(_) => {}
+                    Some(_) => return DesktopIcons::Unexpected("a desktop icon with an empty frame"),
                     None => return DesktopIcons::Unexpected("a desktop icon with no frame"),
                 }
             }
@@ -358,17 +388,59 @@ mod tests {
     #[test]
     fn ordered_right_means_above_the_parked_and_below_the_rest() {
         let rect = Rect::new(2440.0, 1240.0, 120.0, 200.0);
-        let shown = Listed { id: 1, layer: 0, bounds: Rect::new(2000.0, 1000.0, 600.0, 400.0) };
-        let patch = Listed { id: 9, layer: 0, bounds: rect };
-        let p1 = Listed { id: 7, layer: 0, bounds: sliver(52.0) };
-        let p2 = Listed { id: 8, layer: 0, bounds: sliver(32.0) };
-        let elsewhere = Listed { id: 2, layer: 0, bounds: Rect::new(0.0, 0.0, 300.0, 300.0) };
-        let dock = Listed { id: 3, layer: 20, bounds: Rect::new(0.0, 1364.0, 2560.0, 76.0) };
+        let shown = Listed { id: 1, layer: 0, bounds: Rect::new(2000.0, 1000.0, 600.0, 400.0), drawn: true };
+        let patch = Listed { id: 9, layer: 0, bounds: rect, drawn: true };
+        let p1 = Listed { id: 7, layer: 0, bounds: sliver(52.0), drawn: true };
+        let p2 = Listed { id: 8, layer: 0, bounds: sliver(32.0), drawn: true };
+        let elsewhere = Listed { id: 2, layer: 0, bounds: Rect::new(0.0, 0.0, 300.0, 300.0), drawn: true };
+        let dock = Listed { id: 3, layer: 20, bounds: Rect::new(0.0, 1364.0, 2560.0, 76.0), drawn: true };
         let parked: HashSet<u32> = [7, 8].into();
         assert!(ordered_right(&[dock, shown, patch, p1, elsewhere, p2], 9, rect, &parked));
         assert!(!ordered_right(&[p1, patch, p2], 9, rect, &parked), "a sliver above the patch");
         assert!(!ordered_right(&[patch, shown, p1], 9, rect, &parked), "the patch over a shown window");
         assert!(!ordered_right(&[shown, p1], 9, rect, &parked), "not listed");
+    }
+
+    #[test]
+    fn windows_not_drawn_or_our_own_do_not_count_for_the_order() {
+        // The same filter as the shown windows the fallback looks at: an invisible window
+        // (alpha 0) or one of this app's own above or below the patch changes nothing.
+        let rect = Rect::new(2440.0, 1240.0, 120.0, 200.0);
+        let over = Rect::new(2000.0, 1000.0, 600.0, 400.0);
+        let patch = Listed { id: 9, layer: 0, bounds: rect, drawn: true };
+        let p1 = Listed { id: 7, layer: 0, bounds: sliver(52.0), drawn: true };
+        let clear = Listed { id: 1, layer: 0, bounds: over, drawn: false };
+        let parked: HashSet<u32> = [7].into();
+        assert!(ordered_right(&[patch, clear, p1], 9, rect, &parked), "an undrawn window under the patch");
+        assert!(would_be_right(&[clear, p1], 9, 7, rect, &parked));
+        let drawn = Listed { drawn: true, ..clear };
+        assert!(!ordered_right(&[patch, drawn, p1], 9, rect, &parked), "drawn, it counts");
+        assert!(drawn.counts(rect) && !clear.counts(rect));
+        assert!(!Listed { layer: 3, ..drawn }.counts(rect), "not a normal window");
+    }
+
+    #[test]
+    fn an_order_that_cannot_be_right_is_known_before_any_show() {
+        let rect = Rect::new(2440.0, 1240.0, 120.0, 200.0);
+        let shown = Listed { id: 1, layer: 0, bounds: Rect::new(2000.0, 1000.0, 600.0, 400.0), drawn: true };
+        let p1 = Listed { id: 7, layer: 0, bounds: sliver(52.0), drawn: true };
+        let p2 = Listed { id: 8, layer: 0, bounds: sliver(32.0), drawn: true };
+        let elsewhere = Listed { id: 2, layer: 0, bounds: Rect::new(0.0, 0.0, 300.0, 300.0), drawn: true };
+        let parked: HashSet<u32> = [7, 8].into();
+        // The shown window in front of the topmost parked one: just above 7 is right.
+        assert!(would_be_right(&[shown, p1, elsewhere, p2], 9, 7, rect, &parked));
+        // A stage switch: the windows just parked are in front, the one just shown behind
+        // them. Just above 7 puts the patch over the shown window: never right.
+        assert!(!would_be_right(&[p1, p2, shown], 9, 7, rect, &parked));
+        assert!(!would_be_right(&[p1, shown, p2], 9, 7, rect, &parked));
+        // A window behind the parked one that does not reach the patch changes nothing.
+        assert!(would_be_right(&[p1, elsewhere, p2], 9, 7, rect, &parked));
+        // The patch already listed somewhere (on screen): taken out first.
+        let patch = Listed { id: 9, layer: 0, bounds: rect, drawn: true };
+        assert!(would_be_right(&[patch, shown, p1, p2], 9, 7, rect, &parked), "wrong now, right once ordered");
+        assert!(!would_be_right(&[shown, patch, p1, p2], 9, 8, rect, &parked), "above 8 leaves 7 over it");
+        // `above` not listed: not right.
+        assert!(!would_be_right(&[shown, p2], 9, 7, rect, &parked));
     }
 
     fn facts() -> PatchFacts {
@@ -438,6 +510,8 @@ mod tests {
         assert!(matches!(desktop_icons(true, &[strange]), DesktopIcons::Unexpected(_)), "children, none an image");
         let frameless = desktop(vec![AxNode::leaf(roles::IMAGE, None)]);
         assert!(matches!(desktop_icons(true, &[frameless]), DesktopIcons::Unexpected(_)));
+        let empty = desktop(vec![icon(10.0, 10.0), AxNode::leaf(roles::IMAGE, Some(Rect::new(2400.0, 1300.0, 0.0, 64.0)))]);
+        assert!(matches!(desktop_icons(true, &[empty]), DesktopIcons::Unexpected(_)), "a zero-size icon frame is unknown, never dropped");
     }
 
     #[test]

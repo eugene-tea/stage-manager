@@ -169,9 +169,10 @@ impl RenderMemo {
         Want::Start
     }
 
-    /// The render of `key` finished (`ok`); false when it is not the one wanted any more.
-    fn finished(&mut self, key: &str, ok: bool) -> bool {
-        if self.rendering.as_ref().map(|(k, _)| k.as_str()) != Some(key) {
+    /// The render of `key` for `region` finished (`ok`); false when it is not the one wanted
+    /// any more (another key, or the same key for another region).
+    fn finished(&mut self, key: &str, region: Rect, ok: bool) -> bool {
+        if !self.rendering.as_ref().is_some_and(|(k, r)| k == key && *r == region) {
             return false;
         }
         self.rendering = None;
@@ -189,12 +190,32 @@ impl RenderMemo {
 
 thread_local! {
     static PATCH: std::cell::RefCell<Option<Patch>> = const { std::cell::RefCell::new(None) };
+    /// The latest plan that found the patch busy, applied [`BUSY_RETRY`] later unless a newer
+    /// one is applied first.
+    static WAITING: std::cell::RefCell<Option<PatchPlan>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Applies a plan (main thread).
+/// How long a call that found the patch busy (a call into AppKit that ran the main queue)
+/// waits before it runs again.
+const BUSY_RETRY: Duration = Duration::from_millis(20);
+
+/// Runs `f` on the main queue [`BUSY_RETRY`] from now.
+fn again_shortly(f: impl FnOnce() + Send + 'static) {
+    let when = dispatch2::DispatchTime::try_from(BUSY_RETRY).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = dispatch2::DispatchQueue::main().after(when, f);
+}
+
+/// Applies a plan (main thread); while the patch is busy, [`BUSY_RETRY`] later. Plans come
+/// in order, so the latest wins: one waiting is dropped when a newer one is applied.
 pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
     PATCH.with(|p| {
-        let mut p = p.borrow_mut();
+        let Ok(mut p) = p.try_borrow_mut() else {
+            if WAITING.with(|w| w.replace(Some(plan))).is_none() {
+                again_shortly(apply_waiting);
+            }
+            return;
+        };
+        WAITING.with(|w| w.take());
         let patch = p.get_or_insert_with(|| Patch::new(mtm));
         let fresh = plan.show.is_some() && (patch.plan.show.is_none() || plan.space != patch.plan.space);
         patch.plan = plan;
@@ -203,6 +224,14 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
         }
         patch.reconcile(mtm);
     });
+}
+
+/// The plan that found the patch busy, if no newer one was applied meanwhile.
+fn apply_waiting() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    if let Some(plan) = WAITING.with(|w| w.take()) {
+        apply(mtm, plan);
+    }
 }
 
 /// The app's poll (each second, main thread): reads the wallpaper again while the patch is
@@ -243,10 +272,9 @@ pub fn appearance_changed(mtm: MainThreadMarker) {
 
 fn settle(mtm: MainThreadMarker, why: &'static str) {
     let until = Instant::now() + SETTLE;
-    PATCH.with(|p| {
-        if let Ok(mut p) = p.try_borrow_mut()
-            && let Some(patch) = p.as_mut()
-        {
+    let busy = PATCH.with(|p| {
+        let Ok(mut p) = p.try_borrow_mut() else { return true };
+        if let Some(patch) = p.as_mut() {
             tracing::debug!(why, "corner patch: hidden until the wallpaper is read again");
             patch.hide();
             if why == "a Space change" {
@@ -257,7 +285,18 @@ fn settle(mtm: MainThreadMarker, why: &'static str) {
             patch.wall = None;
             patch.reconcile(mtm);
         }
+        false
     });
+    if busy {
+        // Busy (a call into AppKit that ran the main queue): the change is not lost; once
+        // more shortly, the settling counted from then.
+        again_shortly(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                settle(mtm, why);
+            }
+        });
+        return;
+    }
     let when = dispatch2::DispatchTime::try_from(SETTLE).unwrap_or(dispatch2::DispatchTime::NOW);
     let _ = dispatch2::DispatchQueue::main().after(when, settled);
 }
@@ -268,7 +307,7 @@ fn settled() {
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else {
             // Busy: once more, shortly.
-            let _ = dispatch2::DispatchQueue::main().after(dispatch2::DispatchTime::try_from(Duration::from_millis(20)).unwrap_or(dispatch2::DispatchTime::NOW), settled);
+            again_shortly(settled);
             return;
         };
         let Some(patch) = p.as_mut() else { return };
@@ -281,15 +320,21 @@ fn settled() {
     });
 }
 
-/// The main display changed (size, scale, color space): read the wallpaper again.
+/// The main display changed (size, scale, color space): read the wallpaper again (while the
+/// patch is busy, [`BUSY_RETRY`] later).
 pub fn display_changed(mtm: MainThreadMarker) {
-    PATCH.with(|p| {
-        if let Ok(mut p) = p.try_borrow_mut()
-            && let Some(patch) = p.as_mut()
-        {
-            patch.wall = None;
-            patch.reconcile(mtm);
+    PATCH.with(|p| match p.try_borrow_mut() {
+        Ok(mut p) => {
+            if let Some(patch) = p.as_mut() {
+                patch.wall = None;
+                patch.reconcile(mtm);
+            }
         }
+        Err(_) => again_shortly(|| {
+            if let Some(mtm) = MainThreadMarker::new() {
+                display_changed(mtm);
+            }
+        }),
     });
 }
 
@@ -386,7 +431,7 @@ impl Patch {
             self.hide();
             let region = wp::region(Size::new(wall.screen.w, wall.screen.h), wp::local(rect, wall.screen));
             if self.renders.want(&key, region) == Want::Start {
-                start_render(job, wall.screen, rect);
+                start_render(job, wall.screen, rect, region);
             }
             return;
         };
@@ -441,9 +486,9 @@ impl Patch {
         NUMBER.store(self.panel.windowNumber() as u32, Ordering::SeqCst);
     }
 
-    /// A render finished (main thread): keep it when it is still the one wanted.
-    fn rendered(&mut self, mtm: MainThreadMarker, key: String, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
-        if !self.renders.finished(&key, result.is_ok()) {
+    /// A render of `region` finished (main thread): keep it when it is still the one wanted.
+    fn rendered(&mut self, mtm: MainThreadMarker, key: String, region: Rect, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
+        if !self.renders.finished(&key, region, result.is_ok()) {
             return;
         }
         match result {
@@ -459,30 +504,30 @@ impl Patch {
     }
 }
 
-/// Hands a finished render to the patch (main thread); while the patch is busy (a call
-/// into AppKit that ran the main queue), once more on the next turn of the main queue.
-fn deliver(key: String, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
+/// Hands a finished render of `region` to the patch (main thread); while the patch is busy
+/// (a call into AppKit that ran the main queue), once more [`BUSY_RETRY`] later.
+fn deliver(key: String, region: Rect, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
             if let Some(p) = p.as_mut() {
-                p.rendered(mtm, key, scale, result);
+                p.rendered(mtm, key, region, scale, result);
             }
         }
-        Err(_) => dispatch2::DispatchQueue::main().exec_async(move || deliver(key, scale, result)),
+        Err(_) => again_shortly(move || deliver(key, region, scale, result)),
     });
 }
 
 /// Renders on a thread of its own (decoding a large HEIC frame takes a moment) and hands
-/// the result to the main thread.
-fn start_render(job: Job, screen: Rect, rect: Rect) {
+/// the result to the main thread, with the `region` it was started for.
+fn start_render(job: Job, screen: Rect, rect: Rect, region: Rect) {
     let key = job.key();
     let spawned = std::thread::Builder::new().name("corner-patch-render".into()).spawn(move || {
         let started = Instant::now();
         let result = picture_for(&job, screen, rect);
         tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: rendered");
         let scale = job.scale;
-        dispatch2::DispatchQueue::main().exec_async(move || deliver(key, scale, result));
+        dispatch2::DispatchQueue::main().exec_async(move || deliver(key, region, scale, result));
     });
     if let Err(e) = spawned {
         tracing::warn!("corner patch: cannot start a render: {e}");
@@ -499,11 +544,11 @@ mod tests {
         let mut m = RenderMemo::default();
         assert_eq!(m.want("a", region), Want::Start);
         assert_eq!(m.want("a", region), Want::Wait, "in flight");
-        assert!(m.finished("a", false));
+        assert!(m.finished("a", region, false));
         assert_eq!(m.want("a", region), Want::Failed, "failed: no new render every read");
         assert_eq!(m.want("a", Rect::new(0.0, 0.0, 10.0, 10.0)), Want::Failed, "nor for another region");
         assert_eq!(m.want("b", region), Want::Start, "a new key renders");
-        assert!(m.finished("b", true));
+        assert!(m.finished("b", region, true));
         assert_eq!(m.want("b", region), Want::Start, "a success is kept as the picture, not here");
     }
 
@@ -513,9 +558,23 @@ mod tests {
         let mut m = RenderMemo::default();
         assert_eq!(m.want("a", region), Want::Start);
         assert_eq!(m.want("b", region), Want::Start, "the picture changed meanwhile");
-        assert!(!m.finished("a", false), "a's answer is stale");
+        assert!(!m.finished("a", region, false), "a's answer is stale");
         assert_eq!(m.failed, None, "and a stale failure is not remembered");
         m.drop_in_flight();
-        assert!(!m.finished("b", true), "dropped at a Space change");
+        assert!(!m.finished("b", region, true), "dropped at a Space change");
+    }
+
+    #[test]
+    fn an_answer_for_another_region_is_not_the_one_wanted() {
+        let (old, new) = (Rect::new(0.0, 0.0, 10.0, 10.0), Rect::new(0.0, 0.0, 20.0, 30.0));
+        let mut m = RenderMemo::default();
+        assert_eq!(m.want("a", old), Want::Start);
+        // The rectangle grew past the block while it rendered: the same key, a new region.
+        assert_eq!(m.want("a", new), Want::Start);
+        assert!(!m.finished("a", old, true), "the old region's picture is not kept");
+        assert!(!m.finished("a", old, false), "nor its failure remembered");
+        assert_eq!(m.failed, None);
+        assert_eq!(m.want("a", new), Want::Wait, "the new one is still in flight");
+        assert!(m.finished("a", new, true));
     }
 }
