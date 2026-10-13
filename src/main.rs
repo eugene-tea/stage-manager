@@ -488,6 +488,7 @@ mod app {
         });
         let wm_spaces = wm.clone();
         let spaces = apps::observe_space_changes(move || {
+            strip::space_changed();
             wm_spaces.send(WmCommand::SpaceChanged);
         });
 

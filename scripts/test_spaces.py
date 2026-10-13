@@ -670,6 +670,7 @@ def run():
     panel = wait_for("the strip panel on Desktop 2",
                      lambda: (lambda p: p.get("on_active_space") and p.get("ordered_in") and p.get("shown"))(state().get("strip_panel") or {}), 4)
     say(f"    strip panel: {state().get('strip_panel')}")
+    say(f"    strip panels (one per Desktop): {state().get('strip_panels')}")
     check(panel is True, "the strip panel is on Desktop 2, ordered in and slid in")
     listed = ts.strip_panel([w for w in ts.our_windows()])
     check(listed is not None, f"the window server lists the strip on screen ({listed and listed['bounds']})")
@@ -704,6 +705,15 @@ def run():
     check(s is not None, "Desktop 1 recognized by its windows")
     if s:
         check(set(strip_titles(s)) <= {"Alpha 1", "Fixture 1", "Fixture 2"}, f"Desktop 1's strip: {strip_titles(s)}")
+
+        def own_pane():
+            panes = state().get("strip_panels") or []
+            mine = [p for p in panes if p["active"]]
+            return len(panes) == 2 and bool(mine) and mine[0]["on_active_space"] and mine[0]["space"] == d1
+
+        back_home = wait_for("Desktop 1's own strip panel", own_pane, 4)
+        check(back_home is True, "Desktop 1's own strip panel is back, on the Desktop shown; Desktop 2's stays there"
+              f" ({state().get('strip_panels')})")
     sp = spaces()
     check(len(sp.get("list", [])) == 2, f"ctl dump lists two Spaces: {sp}")
 

@@ -1855,6 +1855,7 @@ impl Controller {
                 .collect::<Vec<_>>(),
             "strip_level": format!("{:?}", self.style.level),
             "strip_panel": strip_model::panel_status(),
+            "strip_panels": strip_model::pane_statuses(),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },
             "config_path": self.store.path(),
             "config_error": self.config_error,

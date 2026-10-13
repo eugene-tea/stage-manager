@@ -109,6 +109,15 @@ impl Motion {
         self.running.as_ref().is_some_and(|r| r.held.contains(&stage))
     }
 
+    /// The user went to another Space: an idle overlay gets a fresh panel, which goes to the
+    /// Space shown when it is first ordered in (a panel ordered in before keeps going back
+    /// to the Space it was on).
+    pub(super) fn space_changed(&mut self, mtm: MainThreadMarker) {
+        if self.running.is_none() && self.window_card.is_none() {
+            self.overlay.renew(mtm);
+        }
+    }
+
     /// A thumbnail arrived: the dragged window's card uses it while it has no snapshot.
     pub(super) fn thumbnail_arrived(&mut self, id: u32, image: &CGImage) {
         if let Some(c) = self.window_card.as_mut().filter(|c| c.window == id && !c.has_image) {
@@ -283,7 +292,7 @@ impl Strip {
             return;
         }
         for stage in &held {
-            if let Some(layers) = self.cards.get(stage) {
+            if let Some(layers) = self.pane.cards.get(stage) {
                 for layer in [&layers.card, &layers.flat] {
                     layer.removeAllAnimations();
                     layer.setOpacity(0.0);
@@ -347,7 +356,7 @@ impl Strip {
             g.remove();
         }
         for stage in &r.held {
-            if let Some(layers) = self.cards.get(stage) {
+            if let Some(layers) = self.pane.cards.get(stage) {
                 layers.card.setOpacity(1.0);
                 layers.flat.setOpacity(1.0);
             }

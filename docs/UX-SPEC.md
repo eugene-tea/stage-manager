@@ -213,8 +213,14 @@ Ours:
   window reporting `AXFullScreen` waits for the animation to settle (at most 2 s); a window
   appearing then is not managed; a full-screen Space is known by a window on screen in full
   screen. The Desktop keeps its id, stages and windows.
-- The strip belongs to one Space at a time: on a Space change it is taken off, its cards
-  replaced without animation, and put on the Space shown (deviation 4).
+- Each Desktop has its own strip panel, made on the Desktop's first visit while it shows;
+  it stays on that Desktop and slides with it, with the cards it had, as Apple's does. A
+  window that does not join every Space stays on the Space it was first ordered in (ordering
+  it out and in again does not move it; measured 10-12: a single panel moved around stayed
+  on Desktop 1, so a card click on Desktop 2 found nothing there). Which panel a Desktop has
+  is read from the panels (`isOnActiveSpace`), not from our synthetic Space ids; two on one
+  Desktop (a Desktop removed in Mission Control hands its windows to another) are cut to
+  one. A full-screen app's Space has none.
 
 ## Grouping (`AppWindowGroupingBehavior`)
 
@@ -257,8 +263,9 @@ Ours:
 4. **Spaces are recognized, not named.** No public API names a Space, so Spaces are told
    apart by their windows: an empty Desktop is forgotten when left, and a Desktop whose
    windows are all hidden or minimized is taken for a new one until one of them shows. The
-   new Space's strip appears once the Space has slid in (Apple's slides in with it); the
-   old Space's strip slides away with its Space, as Apple's does.
+   strip of a Desktop visited before slides in with it, as Apple's does, showing the cards
+   it had when left until the new snapshot updates them; on a Desktop's first visit its
+   strip appears once the Space has slid in (its panel is made then).
 5. **Drag and drop stand-ins.** The Accessibility API cannot scale a live window, so a
    window dragged over the strip keeps its size under a card-sized snapshot of it (turned
    like a card, under the pointer, above everything) that stands in for Apple's shrinking

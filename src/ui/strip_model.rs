@@ -257,6 +257,38 @@ pub fn panel_status() -> PanelStatus {
     panel_status_slot().lock().map(|s| *s).unwrap_or_default()
 }
 
+/// One Desktop's strip panel (the strip keeps one per Desktop visited), for `ctl state`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct PaneStatus {
+    /// The Space id of the cards it showed last.
+    pub space: u64,
+    /// The pane of the Desktop shown (or last shown, on a full-screen app's Space).
+    pub active: bool,
+    /// Ordered in (`isVisible`).
+    pub ordered_in: bool,
+    /// On the Space shown now (`isOnActiveSpace`).
+    pub on_active_space: bool,
+    /// Slid in.
+    pub shown: bool,
+}
+
+fn pane_status_slot() -> &'static Mutex<Vec<PaneStatus>> {
+    static S: OnceLock<Mutex<Vec<PaneStatus>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The strip publishes every pane's state, the active one first (main thread).
+pub fn publish_pane_statuses(panes: Vec<PaneStatus>) {
+    if let Ok(mut s) = pane_status_slot().lock() {
+        *s = panes;
+    }
+}
+
+/// Every pane's state last published, the active one first (any thread).
+pub fn pane_statuses() -> Vec<PaneStatus> {
+    pane_status_slot().lock().map(|s| s.clone()).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------------------
 // Transition handshake
 
