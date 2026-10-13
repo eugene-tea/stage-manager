@@ -31,7 +31,8 @@ click on Desktop 2 switches stages and never changes the Desktop (the strip pane
 Desktop shown); going back shows Desktop 1's stages; quit with a window parked on the other
 Desktop brings it back (Accessibility reaching another Space); a relaunch rebuilds both
 Desktops' stages; kill -9 with a window parked on the other Desktop: the guardian waits,
-says what for, brings it back as soon as you go there and only then ends; a full-screen
+says what for, brings it back as soon as you go there (on screen outside the park zone for a
+second, the guardian's log saying it brought it back) and only then ends; a full-screen
 window's Space has no strip, entering and leaving full screen (twice) keeps the Desktop's id,
 its stages and windows, and the engine's view does not flap.
 
@@ -157,6 +158,49 @@ def switch_to_windows(what, ids):
 
 def guardian_lines():
     return [line.split("guardian: ", 1)[-1][:200] for line in ts.log_text().splitlines() if "guardian: " in line]
+
+
+class GuardianBack:
+    """The guardian drill's verdict once the parked window's Desktop shows: `back` once every
+    parked window is listed on screen outside the park zone for a whole second (one listing
+    while a Desktop slides in may show an in-between frame); `early` when the guardian is
+    gone while they are not back, with GRACE for the window server to list a window the
+    guardian moved just before it ended."""
+    HOLD, GRACE = 1.0, 1.5
+
+    def __init__(self):
+        self.since = self.gone_at = None
+        self.back = self.early = False
+
+    def step(self, now, guardian_alive, out):
+        """One sample: the guardian looked at first, then the windows."""
+        if out:
+            self.since = now if self.since is None else self.since
+            self.back = self.back or now - self.since >= self.HOLD
+        else:
+            self.since = None
+            if not guardian_alive:
+                self.gone_at = now if self.gone_at is None else self.gone_at
+                self.early = self.early or now - self.gone_at >= self.GRACE
+        return self.back
+
+
+def watch_guardian_until_back(app, ids, timeout):
+    """Samples the guardian of app pid `app` and windows `ids` until they are back
+    ([`GuardianBack`]); returns the verdict."""
+    v, end = GuardianBack(), time.time() + timeout
+    while time.time() < end and not v.back:
+        guard()
+        alive = bool(ts.pids_of(f"stage-manager --guardian {app}$"))
+        try:
+            wins, d = ts.fixture_windows()
+        except Exception:  # noqa: BLE001
+            wins, d = [], None
+        mine = [w for w in wins if w["id"] in ids]
+        out = d is not None and len(mine) == len(ids) and all(w["onscreen"] and not ts.is_parked(w["bounds"], d) for w in mine)
+        v.step(time.time(), alive, out)
+        time.sleep(0.2)
+    return v
 
 
 def clear_of_strip(s):
@@ -510,7 +554,7 @@ planned steps (hands-free):
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
   guardian    debug-space <back> to Desktop 1; kill -9 the app; checks: still parked, the guardian waits;
               `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
-              checks: restored, the guardian ends
+              checks: restored (held a second), the guardian alive until then and logged it, it ends
   full screen twice: ctl debug-fullscreen <a shown Fixture window> on, checks, off, checks
   cleanup     (also on Ctrl-C/SIGTERM) full screen off on every fixture window; back to the start Desktop
               (not when someone else changed the Desktop); quit the app; no window parked; quit the fixtures
@@ -762,11 +806,15 @@ def run():
         appless_switch("d2", "Switch to Desktop 2", d2_ids)
     else:
         switch_to_windows("Switch to Desktop 2", d2_ids)
-    back = wait_for("the parked window to come back", lambda: not parked_anywhere(), 8)
-    check(back is True, "the guardian brought Desktop 2's parked window back once Desktop 2 showed")
+    v = watch_guardian_until_back(app, parked, 12)
+    check(v.back, f"Desktop 2's parked window {parked} is back: on screen outside the park zone for a second")
+    check(not v.early, "the guardian kept watching until the window was seen back (it never ended while it was parked)")
+    lines = guardian_lines()
+    told = [i for i in parked if any("window brought back" in line and re.search(rf"(?<![a-z])id={i}\b", line) for line in lines)]
+    check(told == parked, f"the guardian's log says it brought {parked} back (brought back: {told})")
     ended = wait_for("the guardian to end", lambda: not ts.pids_of(f"stage-manager --guardian {app}$"), 6)
     check(ended is True, "the guardian ended once nothing was left")
-    for line in guardian_lines()[-8:]:
+    for line in guardian_lines()[-14:]:
         say(f"    log: {line}")
 
     say("\n== a full-screen app's Space has no strip; the Desktop keeps its id ==")

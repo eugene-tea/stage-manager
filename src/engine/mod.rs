@@ -5,6 +5,7 @@
 
 pub mod fullscreen;
 pub mod geometry;
+pub mod guard_watch;
 pub mod model;
 pub mod park;
 pub mod persist;

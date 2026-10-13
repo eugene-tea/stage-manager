@@ -2,17 +2,20 @@
 //! launch in its own session, it waits for the app to exit (kqueue `NOTE_EXIT`). After a
 //! clean exit (the app's clean-exit marker) it has nothing to do. Otherwise:
 //!
-//! 1. It reads the windows the app had registered as parked (the parked file the registry
-//!    keeps, [`paths::parked_file`]) and runs the recovery scan.
-//! 2. It then waits for every window still stranded in the park zone, on any Space: the
-//!    registered ones and any allowed app's ([`recovery::stranded_windows`]). Accessibility
-//!    reaches most apps' windows only on the Space shown, so a window parked on another
-//!    Desktop is moved back as soon as the window server lists it on screen again (the user
-//!    went there): looked at every [`POLL`], retried while it stays stranded and shown (the
-//!    app may list it a moment after its Space slides in). The log says what it waits for
-//!    whenever that changes.
-//! 3. It never exits while a window is still stranded, unless Stage Manager runs again (the
-//!    new app owns every window then) or it is told to stop (SIGTERM, SIGINT, SIGHUP: one last
+//! 1. It reads the windows the app had registered (the parked file the registry keeps,
+//!    [`paths::parked_file`]) and runs the recovery scan.
+//! 2. It then watches ([`guard_watch::Watch`]): every registered window, and any allowed
+//!    app's window found in the park zone, on any Space, waits until the guardian has *seen it
+//!    back* (read through Accessibility outside the park zone, or listed on screen outside it
+//!    in settled passes a second apart) or *gone* (not listed on any Space for 3 s). A single
+//!    listing never ends the watch: while a Space slides in the window server may list a
+//!    window at an in-between frame or not at all. Accessibility reaches most apps' windows
+//!    only on the Space shown, so a window parked on another Desktop is moved back once the
+//!    window server lists it on screen (the user went there): looked at every [`POLL`],
+//!    retried while it stays shown. Every change in how a waiting window looks is logged,
+//!    and why each one is let go.
+//! 3. It never exits while a window still waits, unless Stage Manager runs again (the new
+//!    app owns every window then) or it is told to stop (SIGTERM, SIGINT, SIGHUP: one last
 //!    scan first). A panic inside a pass is logged and the watch goes on.
 
 use std::collections::HashMap;
@@ -24,7 +27,8 @@ use std::time::{Duration, Instant};
 use super::ax::AxElement;
 use super::safety::{self, guarded};
 use super::{ctl, observe, paths, windows};
-use crate::engine::recovery::{self, Listed, Registered, Stranded};
+use crate::engine::guard_watch::{Event, Look, Watch, Waiting};
+use crate::engine::recovery::{Listed, Registered, ScanDisplays, is_stranded};
 
 /// The AX messaging timeout used by the guardian.
 const AX_TIMEOUT_SECONDS: f32 = 0.25;
@@ -148,6 +152,7 @@ impl Attempts {
 
 /// The watch after the scan: see the module docs.
 fn watch(registered: &[Registered]) {
+    let mut w = Watch::new(registered);
     let mut reported: Option<Vec<(u32, bool)>> = None;
     let mut attempts: HashMap<u32, Attempts> = HashMap::new();
     loop {
@@ -158,7 +163,7 @@ fn watch(registered: &[Registered]) {
             tracing::warn!(restored = r.restored, failed = r.failed, "guardian: stopped");
             return;
         }
-        let pass = guarded("the guardian's watch", || watch_pass(registered, &mut reported, &mut attempts));
+        let pass = guarded("the guardian's watch", || watch_pass(&mut w, &mut reported, &mut attempts));
         if matches!(pass, Some(Pass::Done)) {
             return;
         }
@@ -166,75 +171,155 @@ fn watch(registered: &[Registered]) {
     }
 }
 
-/// One look at the window list: done when nothing waits; otherwise logs what waits (when
-/// that changed) and moves back every waiting window whose Space shows.
-fn watch_pass(registered: &[Registered], reported: &mut Option<Vec<(u32, bool)>>, attempts: &mut HashMap<u32, Attempts>) -> Pass {
+/// One look at the window list: done when nothing waits; otherwise logs what changed and
+/// reaches every waiting window on screen through Accessibility (moving it back when it is
+/// still parked).
+fn watch_pass(w: &mut Watch, reported: &mut Option<Vec<(u32, bool)>>, attempts: &mut HashMap<u32, Attempts>) -> Pass {
     let displays = safety::scan_displays();
-    let stranded = recovery::stranded_windows(&listed_windows(), registered, &displays);
-    if stranded.is_empty() {
-        tracing::info!("guardian: no window is left parked; done");
+    let now = Instant::now();
+    for e in w.observe(now, &listed_windows(), &displays) {
+        log_event(&e);
+    }
+    if w.is_empty() {
+        tracing::info!("guardian: no window is left waiting; done");
         return Pass::Done;
     }
     if ctl::request("ping", Duration::from_millis(500)).is_ok() {
-        let ids: Vec<u32> = stranded.iter().map(|w| w.id).collect();
+        let ids: Vec<u32> = w.waiting().map(|x| x.id).collect();
         tracing::info!(windows = ?ids, "guardian: Stage Manager runs again and takes over these windows");
         return Pass::Done;
     }
-    let now_state: Vec<(u32, bool)> = stranded.iter().map(|w| (w.id, w.shown)).collect();
+    let now_state: Vec<(u32, bool)> = w.waiting().map(|x| (x.id, x.look.is_some_and(|l| l.shown()))).collect();
     if reported.as_ref() != Some(&now_state) {
-        report(&stranded);
+        report(w);
         *reported = Some(now_state);
     }
-    attempts.retain(|id, _| stranded.iter().any(|w| w.id == *id));
-    let now = Instant::now();
-    let due: Vec<&Stranded> = stranded
-        .iter()
-        .filter(|w| w.shown)
-        .filter(|w| attempts.get(&w.id).is_none_or(|a| a.due(now)))
-        .collect();
-    if due.is_empty() {
-        return Pass::Wait;
-    }
-    // Registered windows go back to their registered frames; any other is the recovery
-    // scan's (state.json, else centered), once per pass.
-    let mut scan = false;
-    for w in &due {
-        let a = attempts.entry(w.id).or_default();
-        a.count += 1;
-        a.last = Some(now);
-        let loud = a.count == 1 || a.count == FAST_ATTEMPTS || a.count.is_multiple_of(20);
-        match w.restore {
-            Some(frame) => match restore_registered(w.pid, w.id, frame) {
-                Ok(()) => tracing::warn!(id = w.id, pid = w.pid, to = %frame, "guardian: its Desktop shows; window brought back"),
-                Err(why) if loud => tracing::warn!(id = w.id, pid = w.pid, attempt = a.count, "guardian: its Desktop shows, but {why}; retrying"),
-                Err(why) => tracing::debug!(id = w.id, attempt = a.count, "guardian: {why}; retrying"),
-            },
-            None => scan = true,
-        }
-    }
-    if scan {
-        let r = safety::recovery_scan("guardian: a Desktop with parked windows shows");
-        tracing::info!(restored = r.restored, failed = r.failed, "guardian: scanned the shown Desktop");
+    attempts.retain(|id, _| w.waiting().any(|x| x.id == *id));
+    reach_shown(w, &displays, attempts, now);
+    if w.is_empty() {
+        tracing::info!("guardian: no window is left waiting; done");
+        return Pass::Done;
     }
     Pass::Wait
 }
 
-/// Logs every waiting window: on a Desktop not shown (waiting for it to show) or shown
-/// (being moved back).
-fn report(stranded: &[Stranded]) {
-    let away: Vec<String> = stranded.iter().filter(|w| !w.shown).map(describe).collect();
-    let here: Vec<String> = stranded.iter().filter(|w| w.shown).map(describe).collect();
+/// Every waiting window listed on screen, through Accessibility: one already outside the
+/// park zone is let go; a registered one still parked goes back to its registered frame and
+/// is read back; any other is the recovery scan's (`state.json`, else centered), once per
+/// pass, then read back.
+fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u32, Attempts>, now: Instant) {
+    let mut scanned: Vec<Waiting> = Vec::new();
+    for x in w.shown() {
+        let a = attempts.entry(x.id).or_default();
+        if !a.due(now) {
+            continue;
+        }
+        let element = match ax_window(x.pid, x.id) {
+            Ok(e) => e,
+            Err(why) => {
+                a.count += 1;
+                a.last = Some(now);
+                log_attempt(&x, a.count, &why);
+                continue;
+            }
+        };
+        match element.frame() {
+            Ok(f) if !is_stranded(f, displays) => {
+                if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
+                    log_event(&e);
+                }
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(id = x.id, "guardian: cannot read its frame ({e})"),
+        }
+        a.count += 1;
+        a.last = Some(now);
+        match Watch::restore_frame(&x, displays) {
+            Some(frame) => match element.set_frame(frame) {
+                Ok(()) => match element.frame() {
+                    Ok(f) if !is_stranded(f, displays) => {
+                        tracing::warn!(id = x.id, pid = x.pid, to = %f, "guardian: its Desktop shows; window brought back");
+                        if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
+                            log_event(&e);
+                        }
+                    }
+                    Ok(f) => log_attempt(&x, a.count, &format!("it reads {f} after the move")),
+                    Err(e) => log_attempt(&x, a.count, &format!("its frame cannot be read after the move ({e})")),
+                },
+                Err(e) => log_attempt(&x, a.count, &format!("it refused the move ({e})")),
+            },
+            None => scanned.push(x),
+        }
+    }
+    if scanned.is_empty() {
+        return;
+    }
+    let r = safety::recovery_scan("guardian: a Desktop with parked windows shows");
+    tracing::info!(restored = r.restored, failed = r.failed, "guardian: scanned the shown Desktop");
+    for x in scanned {
+        match ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
+            Ok(f) if !is_stranded(f, displays) => {
+                if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
+                    log_event(&e);
+                }
+            }
+            Ok(f) => log_attempt(&x, attempts.get(&x.id).map_or(1, |a| a.count), &format!("it reads {f} after the scan")),
+            Err(why) => log_attempt(&x, attempts.get(&x.id).map_or(1, |a| a.count), &why),
+        }
+    }
+}
+
+/// A failed attempt at a shown window: loud at the first, the last fast one and every 20th.
+fn log_attempt(x: &Waiting, attempt: u32, why: &str) {
+    if attempt == 1 || attempt == FAST_ATTEMPTS || attempt.is_multiple_of(20) {
+        tracing::warn!(id = x.id, pid = x.pid, attempt, "guardian: its Desktop shows, but {why}; retrying");
+    } else {
+        tracing::debug!(id = x.id, attempt, "guardian: {why}; retrying");
+    }
+}
+
+/// Logs one change of the watch.
+fn log_event(e: &Event) {
+    match e {
+        Event::ScreenChanged { on_screen } => {
+            tracing::debug!(on_screen, "guardian: the windows on screen changed; listings are trusted again once that settles");
+        }
+        Event::Joined { id, pid, registered } => {
+            let kind = if *registered { "registered" } else { "found in the park zone" };
+            tracing::warn!(id, pid, "guardian: a window {kind} joins the watch");
+        }
+        Event::Looks { id, pid, look } => match look {
+            Look::Parked { .. } | Look::OutShown { .. } => tracing::info!(id, pid, "guardian: window {look}"),
+            Look::OutUnsettled { .. } | Look::OutAway { .. } | Look::Missing => {
+                tracing::warn!(id, pid, "guardian: window {look}")
+            }
+        },
+        Event::LetGo { id, pid, why } => tracing::warn!(id, pid, "guardian: let go of a window: {why}"),
+    }
+}
+
+/// Logs every waiting window: on a Desktop not shown (waiting for it to show), shown (being
+/// moved back or checked), or not listed.
+fn report(w: &Watch) {
+    let pick = |f: fn(&Look) -> bool| -> Vec<String> {
+        w.waiting().filter(|x| x.look.is_some_and(|l| f(&l))).map(describe).collect()
+    };
+    let away = pick(|l| !l.shown() && *l != Look::Missing);
+    let here = pick(|l| l.shown());
+    let missing = pick(|l| *l == Look::Missing);
     tracing::warn!(
         on_desktops_not_shown = ?away,
         shown_now = ?here,
-        "guardian: waiting for {} parked window(s); each comes back once its Desktop shows",
-        stranded.len()
+        not_listed = ?missing,
+        "guardian: waiting for {} window(s) not yet seen back; each comes back once its Desktop shows",
+        w.waiting().count()
     );
 }
 
-fn describe(w: &Stranded) -> String {
+fn describe(w: &Waiting) -> String {
     let bundle = safety::bundle_id_of(w.pid).unwrap_or_else(|| "?".into());
-    let kind = if w.restore.is_some() { "registered" } else { "found in the park zone" };
+    let kind = if w.registered.is_some() { "registered" } else { "found in the park zone" };
     format!("{} (pid {} {bundle}, {kind})", w.id, w.pid)
 }
 
@@ -256,14 +341,12 @@ fn listed_windows() -> Vec<Listed> {
         .collect()
 }
 
-/// Moves window `id` of `pid` to `frame` through Accessibility; the reason when it cannot.
-fn restore_registered(pid: i32, id: u32, frame: crate::engine::geometry::Rect) -> Result<(), String> {
+/// Window `id` of `pid` through Accessibility; the reason when it cannot be reached.
+fn ax_window(pid: i32, id: u32) -> Result<AxElement, String> {
     let list = AxElement::application(pid).windows().map_err(|e| format!("its app does not answer ({e})"))?;
-    let element = list
-        .into_iter()
+    list.into_iter()
         .find(|w| w.window_id().ok() == Some(id))
-        .ok_or_else(|| "its app does not list it through Accessibility yet".to_string())?;
-    element.set_frame(frame).map_err(|e| format!("it refused the move ({e})"))
+        .ok_or_else(|| "its app does not list it through Accessibility yet".to_string())
 }
 
 extern "C" fn on_stop(sig: libc::c_int) {

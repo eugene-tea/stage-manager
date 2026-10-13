@@ -351,8 +351,11 @@ again untouched until then. Version 1 files (one Space) are read as one Space.
    config directory). While a window stays stranded on another Space (Accessibility reaches
    most apps' windows only on the Space shown), it watches the window list every 0.5 s and
    moves the window back as soon as it shows (you went to its Space), retrying while it
-   stays shown; it never exits while one is left, unless Stage Manager runs again. Its log
-   says what it waits for.
+   stays shown. A window is done only once the guardian has seen it back (read through
+   Accessibility outside the park zone, or listed on screen outside it in settled passes a
+   second apart; a Space sliding in can list a window at an in-between frame) or gone (not
+   listed on any Space for 3 s); it never exits while one waits, unless Stage Manager runs
+   again. Its log says what it waits for, every change, and why each window was let go.
 6. The **recovery scan** at launch and in the guardian: every window of every managed app
    stranded in the park zone goes back to its `state.json` frame, or is centered.
 7. Every restore frame is **clamped** onto the visible screen.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Offline unit tests for the hands-free Spaces check's parsing and state
 (scripts/test_spaces.py): the screen-lock flag, the Desktop watcher's verdicts and the Space
-change rule. Nothing is launched or switched. Run: python3 scripts/test_spaces_unit.py
+change rule, the guardian drill's verdict. Nothing is launched or switched.
+Run: python3 scripts/test_spaces_unit.py
 """
 
 import os
@@ -66,6 +67,34 @@ class SpaceChange(unittest.TestCase):
         self.assertTrue(t.moved(self.before, dict(self.before, changes=3)))
         self.assertTrue(t.moved(self.before, dict(self.before, space=2)))
         self.assertTrue(t.moved(self.before, dict(self.before, fullscreen=True)))
+
+
+class GuardianDrill(unittest.TestCase):
+    def run_samples(self, samples):
+        v = t.GuardianBack()
+        for now, alive, out in samples:
+            v.step(now, alive, out)
+        return v
+
+    def test_back_while_the_guardian_watches(self):
+        v = self.run_samples([(0.0, True, False), (0.2, True, True), (0.6, False, True), (1.2, False, True)])
+        self.assertTrue(v.back)
+        self.assertFalse(v.early)
+
+    def test_one_in_between_listing_is_not_back(self):
+        v = self.run_samples([(0.0, True, False), (0.2, True, True), (0.4, True, False), (1.3, True, False)])
+        self.assertFalse(v.back)
+
+    def test_the_guardian_ending_while_the_window_is_parked_fails(self):
+        # The 10-12 run: the guardian ended on one listing; the window stayed parked.
+        v = self.run_samples([(0.0, True, False), (0.2, False, False), (1.0, False, False), (1.8, False, False)])
+        self.assertTrue(v.early)
+        self.assertFalse(v.back)
+
+    def test_the_window_server_listing_a_moved_window_late_is_fine(self):
+        v = self.run_samples([(0.0, True, False), (0.2, False, False), (0.4, False, True), (1.5, False, True)])
+        self.assertTrue(v.back)
+        self.assertFalse(v.early)
 
 
 class Screenshots(unittest.TestCase):
