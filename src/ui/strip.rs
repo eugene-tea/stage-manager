@@ -330,9 +330,18 @@ define_class!(
             true
         }
 
+        // Taken here so the release comes to this view too.
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
-            with_strip(Strip::tab_clicked);
+        fn mouse_down(&self, _event: &NSEvent) {}
+
+        // The tab acts on release, once the click is over: ordered out while its own click
+        // was still being handled, the window server put it back on screen at the release
+        // (measured 10-12: gone for 60 ms, then listed again over the revealed strip).
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            DispatchQueue::main().exec_async(|| {
+                with_strip(Strip::tab_clicked);
+            });
         }
     }
 );
@@ -1041,6 +1050,10 @@ impl Strip {
     fn present(&mut self, snapshot: StripSnapshot) {
         if snapshot.style != self.style {
             self.style = snapshot.style.clone();
+            // The reveal's delays are no part of the geometry: a new `[reveal]` (the config
+            // read at launch, a reload) takes effect here, not only when the display changes
+            // (the strip was built with the defaults, so `hide_delay_ms` never applied).
+            self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
         let geometry = Geometry::current(self.mtm, &self.style);
         if geometry != self.geometry {
@@ -2124,7 +2137,7 @@ impl Strip {
             && strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global)
     }
 
-    /// A click on the edge tab reveals the strip at once.
+    /// A click on the edge tab reveals the strip at once (on release).
     fn tab_clicked(&mut self) {
         tracing::debug!("edge tab clicked");
         self.visibility.reveal_now();

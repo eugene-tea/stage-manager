@@ -180,7 +180,10 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   keeps the Desktop's stages (a Space change during macOS's full-screen animation waits for
   it to settle). Stage numbers (hotkeys, `ctl switch N`) count the current Space's stages.
   Mission Control, App Exposé and Show Desktop hide the strip (and every other panel of
-  ours) as they hide Apple's; it is back on the same Desktop when they end.
+  ours) as they hide Apple's; it is back on the same Desktop when they end. While one shows,
+  and for a second after it closes, no Space is inferred from the window list (App Exposé
+  lists the app's windows of other Desktops on screen); a Desktop clicked in Mission Control
+  is recognized once Mission Control has closed.
 - **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
   card; clicking it again opens the app's next window.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
@@ -491,7 +494,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | Command | Does |
 |---------|------|
 | `ping` | `{"ok":true,"pong":true,"pid":…,"version":…}` |
-| `space` | the Space shown as the engine sees it: synthetic id, full screen, a change still settling, Space changes so far |
+| `space` | the Space shown as the engine sees it: synthetic id, full screen, a change still settling, Space changes so far, the overview showing (Mission Control or App Exposé, Show Desktop) and whether Space inference waits for it |
 | `dump` | observed apps and windows (says so when Accessibility is missing), and `spaces`: each Space's synthetic id, display, whether it shows, its active stage and stage ids (no titles), plus windows waiting to show and saved Spaces not visited yet |
 | `state` | stages (with their Space), windows, restore and live frames, parked flags, strip, the Space shown, config error |
 | `switch N` | switch to stage N (of the Space shown) |
