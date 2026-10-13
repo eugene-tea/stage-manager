@@ -1497,6 +1497,12 @@ impl Controller {
                     return;
                 }
                 self.forget_held(ob);
+                if input::left_button_down() {
+                    // Clicked or grabbed by the user: a move made ahead for it is no longer
+                    // sent again under them (R11 3). A focus alone may be macOS's own at an
+                    // arrival, and keeps it.
+                    self.user_took(id, "clicked");
+                }
                 if self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked)
                     && input::left_button_down()
                 {
@@ -1688,6 +1694,7 @@ impl Controller {
         let Some(now_frame) = ob.window(id).map(|t| t.frame) else { return };
         let moving = (now_frame.w - pre.w).abs() < 1.0 && (now_frame.h - pre.h).abs() < 1.0;
         self.drag = Some(WindowDrag { id, pid: w.meta.pid, pre, moving, grab: press.at });
+        self.user_took(id, "dragged");
         if moving {
             tracing::info!(id, "window drag started");
             self.present();
@@ -1776,6 +1783,8 @@ impl Controller {
     /// the window where the user left it when that is outside the park zone.
     fn focus_after_press_done(&mut self, ob: &mut Observer) {
         let Some(id) = self.focus_after_press.take() else { return };
+        // The user holds it: no check of a move made ahead parks it again (R11 3).
+        self.user_took(id, "grabbed by its sliver");
         if self.space_pending {
             // A Space change is settling: the grab waits for it (the tick tries again), or the
             // window would sit on screen counted as parked until the next arrival parks it
@@ -2148,7 +2157,7 @@ impl Controller {
         tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
-        let (more, predicted) = self.settle_ahead(ob, after, Instant::now());
+        let (more, predicted) = self.settle_ahead(ob, list, after, Instant::now());
         actions.extend(more);
         // One batch and one strip snapshot for the arrival: the strip of the Desktop shown
         // takes over in its final order, never first with the stage left active.

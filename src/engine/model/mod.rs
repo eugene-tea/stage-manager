@@ -708,12 +708,26 @@ impl Model {
         if w.home == Home::Pinned {
             return;
         }
-        let d = self.display(w.meta.display);
-        let frame = park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park);
+        let frame = self.park_frame_for(w);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = true;
         }
         actions.push(Action::Park { id, frame });
+    }
+
+    /// The frame that parks window `w`: its restore size in its display's park corner.
+    fn park_frame_for(&self, w: &WindowState) -> Rect {
+        let d = self.display(w.meta.display);
+        park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park)
+    }
+
+    /// Where the model left window `id`: its park frame while parked (where bringing it back
+    /// starts from), else its last frame. `meta.frame` alone does not say it for a parked
+    /// window: its frames are ignored while parked ([`Model::window_frame_changed`]), so it
+    /// keeps the frame the window had before it was parked.
+    pub fn frame_left(&self, id: WindowId) -> Option<Rect> {
+        let w = self.windows.get(&id)?;
+        Some(if w.parked { self.park_frame_for(w) } else { w.meta.frame })
     }
 
     /// Brings one window to its clamped restore frame, fitted into the stage area first.

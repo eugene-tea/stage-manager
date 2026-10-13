@@ -441,6 +441,13 @@ impl AxElement {
         url.file_system_path(CFURLPathStyle::CFURLPOSIXPathStyle).map(|s| s.to_string()).ok_or(AxError::Value)
     }
 
+    /// [`Self::window_id`] with this element's messaging timeout set to `seconds` first (a
+    /// window element just asked of an app is on the global timeout, seconds long), put back
+    /// after ([`Self::bounded`]).
+    pub fn window_id_within(&self, seconds: f32) -> AxResult<u32> {
+        self.bounded(seconds, AxElement::window_id)
+    }
+
     /// The `CGWindowID` of a window element (via `_AXUIElementGetWindow`).
     pub fn window_id(&self) -> AxResult<u32> {
         let mut id: u32 = 0;

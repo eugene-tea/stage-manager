@@ -111,13 +111,16 @@ impl Model {
     ///   each active with windows on two Desktops, every click went to the other one). Only
     ///   when exactly one other Desktop holds them, none unplaced: the key window of its
     ///   most recent stage there.
+    /// - **An inactive app with a window on the Desktop shown** (in the model, parked or not,
+    ///   or on screen in the window server's list): macOS activates it here, no switch (the
+    ///   owner's log of 10-13 09:55:50, VS Code inactive with a window on each Desktop, and
+    ///   the hands-free run go10: the fixture app's focused window on the other Desktop did
+    ///   not take macOS there).
     /// - **The app's own answer** (`ax_window`: its focused, else main window, asked at the
     ///   press): macOS shows that window. A known window on another Desktop is the
-    ///   prediction, even when the app has windows on the Desktop shown (VS Code with a
-    ///   window on each); one on the Desktop shown means no switch.
-    /// - **No answer**: on the safe side, no prediction when the app has a window on the
-    ///   Desktop shown (in the model, or on screen in the window server's list) or windows
-    ///   the model does not place; else the key window of its most recent stage elsewhere.
+    ///   prediction; one on the Desktop shown means no switch.
+    /// - **No answer**: no prediction when the app has windows the model does not place;
+    ///   else the key window of its most recent stage elsewhere.
     pub fn dock_arrival(&self, pid: Pid, facts: AppFacts, ax_window: Option<WindowId>) -> Result<WindowId, &'static str> {
         self.dock_gates(pid)?;
         if facts.hidden {
@@ -148,14 +151,17 @@ impl Model {
             };
             return key_of_recent(Some(space)).ok_or("the active app has no stage on the other Desktop");
         }
+        if self.windows.values().any(|w| w.meta.pid == pid && w.sticky) {
+            return Err("the inactive app has a window on every Desktop: macOS activates it here");
+        }
+        if facts.visible_here || self.windows.values().any(|w| w.meta.pid == pid && self.is_shown_space(w.space)) {
+            return Err("the inactive app has a window on the Desktop shown: macOS activates it here");
+        }
         if let Some(answer) = ax_window.and_then(|id| self.resolve_standard(id)).filter(|id| mine(id)) {
             return elsewhere(answer).ok_or("the app's focused window is on the Desktop shown");
         }
         if facts.unplaced {
             return Err("the app did not answer, and has windows not placed (minimized, or on a Desktop not visited)");
-        }
-        if facts.visible_here || self.windows.values().any(|w| w.meta.pid == pid && (w.sticky || self.is_shown_space(w.space))) {
-            return Err("the app did not answer, and has a window on the Desktop shown");
         }
         key_of_recent(None).ok_or("the app did not say which window, and no stage of it is known elsewhere")
     }
