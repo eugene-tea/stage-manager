@@ -172,9 +172,12 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
 - **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
   card; clicking it again opens the app's next window.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
-  click again to bring it back. This follows System Settings → Desktop & Dock → "Click
-  wallpaper to reveal desktop": with **Only in Stage Manager** (the default) we reveal; with
-  **Always**, macOS itself moves windows aside and we leave the click alone.
+  click again to bring it back; a double click counts as one click. This follows System
+  Settings → Desktop & Dock → "Click wallpaper to reveal desktop": with **Only in Stage
+  Manager** we reveal; with **Always** (macOS's default: an unset
+  `EnableStandardClickToShowDesktop` means Always), macOS itself moves every window aside
+  and we move nothing, so the two never run together. Either way Finder's activation that
+  follows the click never switches stages.
 - **Quit** from the menu bar item brings every parked window back first, and every window
   we narrowed or moved clear of the strip back to its earlier frame.
 

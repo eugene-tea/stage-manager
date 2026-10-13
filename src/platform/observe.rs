@@ -101,6 +101,16 @@ pub fn only_from_env() -> Option<HashSet<String>> {
     parse_only(std::env::var("STAGE_MANAGER_ONLY").ok().as_deref())
 }
 
+/// An app's `AXWindows` answer: its windows, and whether to read the list again later.
+/// No value is an app without windows; any other error (busy, not ready) is retried.
+pub fn windows_or_retry<T>(result: Result<Vec<T>, AxError>) -> (Vec<T>, bool) {
+    match result {
+        Ok(w) => (w, false),
+        Err(e) if e == AxError::NO_VALUE => (Vec::new(), false),
+        Err(_) => (Vec::new(), true),
+    }
+}
+
 /// Whether an app may be observed and managed: not us, not excluded, a real pid, and on the
 /// `only` list when there is one.
 pub fn app_allowed(only: Option<&HashSet<String>>, own_pid: i32, pid: i32, bundle_id: Option<&str>) -> bool {
@@ -329,14 +339,13 @@ impl Observer {
         if registered == 0 {
             return Err(last_err.unwrap_or(AxError::Value));
         }
-        let ax_windows = match element.windows() {
-            Ok(w) => w,
-            Err(e) if e == AxError::NO_VALUE => Vec::new(),
-            Err(e) => {
-                tracing::debug!(pid, "AXWindows failed: {e}");
-                Vec::new()
-            }
-        };
+        let (ax_windows, retry) = windows_or_retry(element.windows());
+        if retry {
+            // Busy (CannotComplete at the timeout) or not ready: its windows would stay
+            // unmanaged until it is activated; the retry passes read the list again.
+            tracing::debug!(pid, "AXWindows failed; rescanning the app on the next retry passes");
+            self.recheck.entry(pid).or_insert(0);
+        }
         self.observed.insert(pid, ObservedApp { element, observer });
         tracing::debug!(pid, bundle = self.bundle_of(pid), "observing app");
         let mut ids: Vec<u32> = ax_windows.into_iter().filter_map(|w| self.track_window(pid, w, cg)).collect();
@@ -491,6 +500,13 @@ impl Observer {
     /// True when the window is minimized now (asked through AX; false when AX cannot tell).
     pub fn is_minimized_now(&self, id: u32) -> bool {
         self.windows.get(&id).is_some_and(|w| w.element.is_minimized().unwrap_or(false))
+    }
+
+    /// True when the window is in full screen now (on its own Space; asked through AX, which
+    /// still reaches a tracked window off the shown Space for the apps measured; false when
+    /// AX cannot tell).
+    pub fn is_fullscreen_now(&self, id: u32) -> bool {
+        self.windows.get(&id).is_some_and(|w| w.element.is_fullscreen().unwrap_or(false))
     }
 
     /// True when app `pid` is hidden now (⌘H; asked through AX).
@@ -690,6 +706,14 @@ fn cg_lookup() -> HashMap<u32, CgWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_axwindows_error_is_retried_unless_there_is_no_value() {
+        assert_eq!(windows_or_retry(Ok(vec![1, 2])), (vec![1, 2], false));
+        assert_eq!(windows_or_retry::<u32>(Err(AxError::NO_VALUE)), (vec![], false), "no windows: nothing to retry");
+        assert_eq!(windows_or_retry::<u32>(Err(AxError::CANNOT_COMPLETE)), (vec![], true), "busy at the timeout");
+        assert_eq!(windows_or_retry::<u32>(Err(AxError::Value)), (vec![], true));
+    }
 
     #[test]
     fn only_filter_parses_comma_lists() {

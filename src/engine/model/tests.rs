@@ -744,6 +744,40 @@ fn focusing_a_parked_window_switches_to_its_stage() {
     assert!(e.m.window_focused(w(1), &obs).is_empty());
 }
 
+#[test]
+fn a_parked_window_dragged_out_by_its_sliver_stays_where_it_was_dropped() {
+    // Stage 1: A's windows 1 and 3 (3 key); stage 2: B's window 2, active. The user grabs
+    // window 1's sliver in the corner and drops it in the middle of the screen.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(3, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert!(e.d.parked(w(1)) && e.d.parked(w(3)));
+    let dropped = Rect::new(400.0, 300.0, 600.0, 400.0);
+    e.d.frames.insert(w(1), dropped);
+    let obs = e.d.obs();
+    let a = e.m.parked_window_dropped(w(1), dropped, &obs);
+    e.run(a);
+    assert_eq!(e.active_number(), 1, "its stage comes once the button is up");
+    assert_eq!(e.d.frames[&w(1)], dropped, "no jump back to its old frame");
+    assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(dropped));
+    assert_eq!(e.d.focused, Some(w(1)), "the grabbed window is the one focused");
+    assert!(!e.d.parked(w(3)) && e.d.parked(w(2)));
+
+    // Let go still inside the park zone: its stage comes, at its old frame.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    let before = e.m.window(w(1)).map(|x| x.restore);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    let corner = e.d.frames[&w(1)];
+    let obs = e.d.obs();
+    let a = e.m.parked_window_dropped(w(1), corner.translate(-3.0, -2.0), &obs);
+    e.run(a);
+    assert_eq!(e.active_number(), 1);
+    assert_eq!(e.m.window(w(1)).map(|x| x.restore), before, "a frame in the park zone never becomes a restore frame");
+    assert!(!e.d.parked(w(1)));
+}
+
 // ----- reveal desktop ---------------------------------------------------------------------
 
 #[test]

@@ -44,6 +44,28 @@ const TICK_SECONDS: f64 = 0.25;
 /// App-observation retries run every this many ticks (about once a second).
 const RETRY_EVERY: u32 = 4;
 
+/// After quit's unpark, how long the window server may take to list the windows in place
+/// before one still in the park zone counts as stranded (it lists the old frames for a few
+/// milliseconds after the moves).
+const UNPARK_SETTLE: Duration = Duration::from_secs(1);
+
+/// How often the window list is read again during [`UNPARK_SETTLE`].
+const UNPARK_POLL: Duration = Duration::from_millis(50);
+
+/// Asks `probe` until it answers nothing or `max` has passed, sleeping `step` between asks;
+/// returns its last answer (what is still there after the settle).
+fn settled<T>(mut probe: impl FnMut() -> Vec<T>, max: Duration, step: Duration, mut sleep: impl FnMut(Duration)) -> Vec<T> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let found = probe();
+        if found.is_empty() || waited >= max {
+            return found;
+        }
+        sleep(step);
+        waited += step;
+    }
+}
+
 /// Work for the WM thread.
 pub enum WmCommand {
     /// The full list of running regular apps (sent once at launch).
@@ -264,8 +286,10 @@ impl WmState {
             WmCommand::Shutdown(reply) => {
                 let failed = self.controller.unpark_all(&self.observer);
                 // A window still in a park zone on any Space (one AX could not reach there)
-                // leaves the exit unclean, so the guardian watches until it is back.
-                let stranded = safety::stranded_allowed();
+                // leaves the exit unclean, so the guardian watches until it is back. Read
+                // after a settle: right after the moves the window server still lists the
+                // windows at their parked frames.
+                let stranded = settled(safety::stranded_allowed, UNPARK_SETTLE, UNPARK_POLL, std::thread::sleep);
                 if !stranded.is_empty() {
                     tracing::warn!(windows = ?stranded.iter().map(|w| w.id).collect::<Vec<_>>(), "windows still parked after unparking (another Space?)");
                 }
@@ -336,4 +360,43 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
     tracing::debug!("WM thread running");
     CFRunLoop::run();
     tracing::debug!("WM thread stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_listed_in_place_after_a_few_reads_are_not_stranded() {
+        // The window server lists the old frames for the first reads after the moves.
+        let mut reads = 0;
+        let mut slept = Duration::ZERO;
+        let left = settled(
+            || {
+                reads += 1;
+                if reads <= 3 { vec![4551, 4550] } else { Vec::new() }
+            },
+            UNPARK_SETTLE,
+            UNPARK_POLL,
+            |d| slept += d,
+        );
+        assert!(left.is_empty(), "no false warning");
+        assert_eq!(reads, 4);
+        assert_eq!(slept, UNPARK_POLL * 3);
+    }
+
+    #[test]
+    fn a_window_really_still_parked_is_reported_after_the_settle() {
+        let mut slept = Duration::ZERO;
+        let left = settled(|| vec![4600], UNPARK_SETTLE, UNPARK_POLL, |d| slept += d);
+        assert_eq!(left, [4600]);
+        assert!(slept >= UNPARK_SETTLE && slept < UNPARK_SETTLE + UNPARK_POLL, "waited about a second: {slept:?}");
+    }
+
+    #[test]
+    fn nothing_parked_answers_at_once() {
+        let mut slept = Duration::ZERO;
+        assert!(settled(Vec::<u32>::new, UNPARK_SETTLE, UNPARK_POLL, |d| slept += d).is_empty());
+        assert_eq!(slept, Duration::ZERO);
+    }
 }

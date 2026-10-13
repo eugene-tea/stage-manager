@@ -21,7 +21,7 @@ made the geometry and timing measurable without a screen recording.
 | Show recent apps in Stage Manager | `AutoHide` (1 = hidden) | 0 | 1 hides our strip until edge hover |
 | Show windows from an application: All at Once / One at a Time | `AppWindowGroupingBehavior` (1 = all at once) | 1 | See "Grouping" |
 | Show items: On Desktop, in Stage Manager | `HideDesktop` (1 = hidden) | 0 | Read; Finder desktop icons are not ours to hide (deviation) |
-| Click wallpaper to reveal desktop | `EnableStandardClickToShowDesktop` | absent (default) | Click wallpaper toggles desktop reveal |
+| Click wallpaper to reveal desktop | `EnableStandardClickToShowDesktop` (1 or absent = Always, macOS's default since Sonoma; 0 = Only in Stage Manager) | absent (= Always) | Only in Stage Manager: our click toggles the desktop reveal. Always: macOS moves every window aside itself and our reveal stays off, so the two never fight |
 | Widgets in Stage Manager | `StageManagerHideWidgets` | 1 | Not applicable |
 
 Our `config.toml` never repeats these. It only adds what macOS lacks.
@@ -129,7 +129,11 @@ card-on-card merge can be added later; it is not built.
 
 - **Trigger:** a card click acts on **mouse-up**. Motion starts within one frame.
   Activations from the Dock or ⌘Tab start about **110–200 ms** after the input, after the
-  app activates.
+  app activates. Ours: a card click or hotkey makes the new stage's app frontmost and its
+  key window main at once, with the parks; the windows themselves arrive behind their
+  growing snapshots, so keystrokes typed during the animation already go to the new stage
+  (before 10-12 the focus waited ~430 ms for the snapshots). Typing does not cut the
+  animation short.
 - **Curve:** incoming windows grow from their card to their saved frame along a
   **critically damped spring, ω ≈ 15.5 rad/s**. Progress is about 2 % at 20 ms, 14 % at
   55 ms, 50 % at 110–120 ms, 90 % at 250 ms and 99 % at 400–430 ms. It is fully settled by
@@ -154,7 +158,8 @@ card-on-card merge can be added later; it is not built.
 | Shift + Dock click on an app in another stage | (No native meaning) | Sugar: the app's windows come to the current stage instead (all of them; the most recent with One at a Time) |
 | Open an app with Shift held (Dock, Finder, Spotlight Shift-Return, Launchpad) | (No native meaning; the app opens in a new stage) | Sugar: its new window joins the current stage |
 | ⌘Tab / ⌘⇧Tab | Switches stages (⌘⇧Tab cycles backward) | Same; Shift never changes the app switcher |
-| Click wallpaper | **Reveal desktop:** the active stage goes into the strip and the main area is empty. A second wallpaper click brings it back | Same, following `EnableStandardClickToShowDesktop`; the revealed stage's card takes its slot at once (a free slot, else the least recently used card's) |
+| Click wallpaper | **Reveal desktop:** the active stage goes into the strip and the main area is empty. A second wallpaper click brings it back | Same, following `EnableStandardClickToShowDesktop` (ours only with Only in Stage Manager); the revealed stage's card takes its slot at once (a free slot, else the least recently used card's) |
+| Double-click wallpaper | Not measured (Apple's docs are silent) | One click: the second click of a double click (macOS's click count 2, within the user's double-click interval) toggles nothing, so the stage does not come straight back (the owner's log of 10-12: two clicks 40 ms apart revealed and brought it back) |
 | Click wallpaper with Finder windows in a stage of the strip | Finder becomes the frontmost app (the desktop is Finder's) and its windows stay in the strip; they come back only when their card is picked, one of them is clicked, or Finder is activated on purpose (Dock, ⌘Tab) (expected, not measured: Apple's docs are silent) | Same. macOS reports Finder activated and its main window focused 0.1–0.5 s after the click; that echo is ignored for up to 1 s after a wallpaper click, unless the user does something else first (a click off the wallpaper, a key press). Before 10-12 the echo brought Finder's stage, so each further click toggled Finder's windows in and out |
 | Click a card while the desktop shows | That stage comes back (Apple's docs: "Click an app on the left side of the screen"); what the other cards do was not measured | Same: exactly that stage; the desktop has no card, so nothing takes the clicked card's slot and the other cards keep their order (the column re-centers); and Finder's late echo of the wallpaper click does not switch again. The card of the stage just revealed brings it back as it was |
 | Window overlapping the strip area | The strip hides while it overlaps; Apple never moves or resizes the window (measured 10-12: VS Code at x = −6, Fork at 47, Chrome at 166 stayed, also on every switch) | Same. Optional: `[windows] fit = "move"` moves a placed window right just enough (strip column plus `fit_margin`), `"narrow"` also narrows one too wide; pre-fit frames come back on quit |
@@ -208,10 +213,16 @@ Ours:
   does (one stage per app) or as `state.json` saved them.
 - A window moved to another Space (Mission Control, or dragged across with the pointer)
   leaves its stage and joins the current stage of the Space it shows on. A window shown on
-  every Space ("Assign To: All Desktops") is treated as pinned.
+  every Space ("Assign To: All Desktops") is treated as pinned, once it has shown on three
+  Space changes in a row, the last back where it came from (a window moved to another
+  Desktop and straight back looks the same for two, and stays an ordinary window). A
+  window in full screen still belongs to its Desktop: it never counts as missing there.
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
   Accessibility before bringing its app forward (never all its windows), so macOS has no
   reason to switch Spaces.
+- While a Space change settles (a full-screen animation waited out), card clicks, hotkeys,
+  wallpaper clicks and ctl stage commands do nothing (ctl answers "a Space change is
+  settling"): the model still shows the Desktop being left.
 - On a full-screen Space the strip is not shown and no stage changes. Entering or leaving
   full screen, macOS shows a short-lived stand-in window covering the whole display (no
   title, subrole `AXUnknown`) while the app's window animates, and the Space change comes in
