@@ -78,7 +78,7 @@ use objc2_quartz_core::{
     kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
 };
 
-use crate::config::{MotionStyle, Rgba, StripLevel, StripStyle};
+use crate::config::{Rgba, StripLevel, StripStyle};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Target};
@@ -101,8 +101,8 @@ const REHOME_CHECKS: [f64; 2] = [0.4, 1.2];
 /// A window dragged over the strip goes between cards only (dropping it onto a card's
 /// stage is not built).
 const WINDOW_DROP_BAND: f64 = 0.0;
-/// The shortest fade of a card dropped onto another, in seconds.
-const MERGE_FADE: f64 = 0.15;
+/// A released card drawn pressed lets go after this if no transition took it (seconds).
+const SQUEEZE_MAX: f64 = 0.6;
 /// What a card dropped onto another shrinks to, about the target's middle.
 const MERGE_SHRINK: f64 = 0.5;
 /// The edge tab's window: width and height in points (the drawn pill is narrower).
@@ -568,11 +568,11 @@ fn turn(m: &Metrics) -> CATransform3D {
     CATransform3D::new_rotation(m.tilt, 0.0, 1.0, 0.0)
 }
 
-fn spring(motion: &MotionStyle, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
+fn spring(s: motion_math::Spring, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
     let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
-    anim.setMass(motion.spring_mass);
-    anim.setStiffness(motion.spring_stiffness);
-    anim.setDamping(motion.spring_damping);
+    anim.setMass(s.mass);
+    anim.setStiffness(s.stiffness);
+    anim.setDamping(s.damping);
     anim.setDuration(anim.settlingDuration());
     // SAFETY: from/to are NSValues of the animated property's type.
     unsafe {
@@ -596,35 +596,37 @@ fn ease(key: &str, from: &AnyObject, to: &AnyObject, seconds: f64) -> Retained<C
 }
 
 /// Moves `layer` to `to` along the spring, starting from where it is drawn now.
-fn spring_position(motion: &MotionStyle, layer: &CALayer, to: CGPoint) {
+fn spring_position(s: motion_math::Spring, layer: &CALayer, to: CGPoint) {
     // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
     let from = unsafe { layer.presentationLayer() }.map(|p| p.position()).unwrap_or_else(|| layer.position());
     layer.setPosition(to);
     if (from.x - to.x).abs() < 0.25 && (from.y - to.y).abs() < 0.25 {
         return;
     }
-    let anim = spring(motion, "position", &NSValue::new(from), &NSValue::new(to));
+    let anim = spring(s, "position", &NSValue::new(from), &NSValue::new(to));
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("position")));
 }
 
-/// Moves `layer` to `to` on the spring, or at once (cancelling any glide).
-fn move_to(motion: &MotionStyle, layer: &CALayer, to: CGPoint, immediate: bool) {
-    if immediate {
-        layer.removeAnimationForKey(&NSString::from_str("position"));
-        layer.setPosition(to);
-    } else {
-        spring_position(motion, layer, to);
+/// Moves `layer` to `to` on the spring `glide`, or at once (`immediate`, or no animation:
+/// cancelling any glide).
+fn move_to(glide: Option<motion_math::Spring>, layer: &CALayer, to: CGPoint, immediate: bool) {
+    match glide.filter(|_| !immediate) {
+        Some(s) => spring_position(s, layer, to),
+        None => {
+            layer.removeAnimationForKey(&NSString::from_str("position"));
+            layer.setPosition(to);
+        }
     }
 }
 
 /// Moves `layer`'s `sublayerTransform` to `to` along the spring, from what is drawn now.
-fn spring_sublayer_transform(motion: &MotionStyle, layer: &CALayer, to: CATransform3D) {
+fn spring_sublayer_transform(s: motion_math::Spring, layer: &CALayer, to: CATransform3D) {
     // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
     let from = unsafe { layer.presentationLayer() }
         .map(|p| p.sublayerTransform())
         .unwrap_or_else(|| layer.sublayerTransform());
     layer.setSublayerTransform(to);
-    let anim = spring(motion, "sublayerTransform", &transform_value(from), &transform_value(to));
+    let anim = spring(s, "sublayerTransform", &transform_value(from), &transform_value(to));
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("sublayerTransform")));
 }
 
@@ -943,6 +945,9 @@ struct Strip {
     has_snapshot: bool,
     hovered: Option<u64>,
     pressed: Option<u64>,
+    /// The card drawn pressed (`[cards] press_scale`): from the mouse-down until its
+    /// transition takes it, the press turns into a drag, or nothing came of the click.
+    squeezed: Option<u64>,
     thumbs: HashMap<u32, CFRetained<CGImage>>,
     icons: HashMap<i32, Option<CFRetained<CGImage>>>,
     visibility: Visibility,
@@ -984,6 +989,7 @@ impl Strip {
             has_snapshot: false,
             hovered: None,
             pressed: None,
+            squeezed: None,
             thumbs: HashMap::new(),
             icons: HashMap::new(),
             visibility: Visibility::default(),
@@ -1005,6 +1011,16 @@ impl Strip {
 
     fn m(&self) -> &Metrics {
         &self.geometry.m
+    }
+
+    /// The cards' glide (`[motion] spring_*` at `[animation] speed`); `None`: no animation.
+    fn glide(&self) -> Option<motion_math::Spring> {
+        self.style.animation.animates().then(|| motion_math::glide_spring(&self.style))
+    }
+
+    /// The strip's slide (`[motion] slide_*` at `[animation] speed`); `None`: no animation.
+    fn slide_spring(&self) -> Option<motion_math::Spring> {
+        self.style.animation.animates().then(|| motion_math::slide_spring(&self.style))
     }
 
     /// How far left the cards sit when hidden.
@@ -1061,6 +1077,9 @@ impl Strip {
             self.geometry = geometry;
         }
         let transition = snapshot.transition.clone();
+        if let Some(sent) = transition.as_ref().and_then(|t| t.sent) {
+            tracing::debug!(id = transition.as_ref().map(|t| t.id), queued_ms = sent.elapsed().as_millis() as u64, "transition reached the strip");
+        }
         // Where incoming windows grow from: their cards before this snapshot replaces them
         // (slid as the strip is now; moved to its new slide state below).
         let dx_before = self.current_dx();
@@ -1146,8 +1165,9 @@ impl Strip {
     /// goes and its panel goes back below windows; its cards stay as they are, so it slides
     /// back in with them when the Desktop shows again.
     fn leave_pane(&mut self) {
-        self.set_hover(None);
         self.pressed = None;
+        self.squeezed = None;
+        self.set_hover(None);
         self.card_drag = None;
         self.drop_over = false;
         self.pane.tab.show(false, self.mtm);
@@ -1329,6 +1349,18 @@ impl Strip {
         self.hovered == Some(stage) || self.merge_onto() == Some(stage)
     }
 
+    /// The size a card is drawn at, of its resting size: pressed (`[cards] press_scale`),
+    /// grown (`hover_scale`) or at rest.
+    fn card_scale(&self, stage: u64) -> f64 {
+        if self.squeezed == Some(stage) {
+            self.style.cards.press_scale
+        } else if self.grown(stage) {
+            self.m().hover_scale
+        } else {
+            1.0
+        }
+    }
+
     /// Lays out the column ([`Strip::shown_cards`]) and moves every card's layers to its slot;
     /// a card being reordered follows the pointer instead.
     fn layout_cards(&mut self, force: bool) {
@@ -1455,14 +1487,15 @@ impl Strip {
         strip_model::publish_cards(frames);
     }
 
-    /// The hover transform of a card's container (anchored at the eye): a scale about the
-    /// card's center at `layout`.
-    fn hover_transform(&self, layout: &CardLayout, hovered: bool) -> CATransform3D {
-        if !hovered {
+    /// The transform of a card's container (anchored at the eye): a scale about the card's
+    /// center at `layout` by [`Strip::card_scale`].
+    fn card_transform(&self, layout: &CardLayout) -> CATransform3D {
+        let s = self.card_scale(layout.stage);
+        if s == 1.0 {
             return identity();
         }
         let m = self.m();
-        scale_about(m.hover_scale, layout.hover_center(m), m.eye)
+        scale_about(s, layout.hover_center(m), m.eye)
     }
 
     /// Where a card's unit sits: its content was built for the card at `built`, and the card
@@ -1476,7 +1509,6 @@ impl Strip {
     fn place_card(&mut self, layout: &CardLayout, card: &CardSnapshot, force_rebuild: bool, immediate: bool) {
         let size = self.geometry.panel.size;
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height));
-        let hovered = self.grown(card.stage);
         // Planes a merge preview adds fade in.
         let fresh: Vec<u32> = match self.pane.cards.get(&card.stage) {
             Some(l) if self.merge_onto() == Some(card.stage) => {
@@ -1505,7 +1537,7 @@ impl Strip {
                 unit.setPosition(CGPoint::new(0.0, 0.0));
                 card_layer.addSublayer(&unit);
                 self.pane.cards_root.addSublayer(&card_layer);
-                let fade = self.style.cards.fade_ms as f64 / 1000.0;
+                let fade = self.style.animation.seconds(self.style.cards.fade_ms);
                 if self.motion.holds(card.stage) {
                     // A transition's snapshots are landing here; the card shows when they do.
                     card_layer.setOpacity(0.0);
@@ -1541,18 +1573,18 @@ impl Strip {
                 l.unit.removeAnimationForKey(&NSString::from_str("position"));
                 l.unit.setPosition(CGPoint::new(d.x - l.built.x, d.y - l.built.y));
                 CATransaction::commit();
-                let fade = self.style.cards.fade_ms as f64 / 1000.0;
+                let fade = self.style.animation.seconds(self.style.cards.fade_ms);
                 for (_, plane) in l.planes.iter().filter(|(id, _)| fresh.contains(id)) {
                     fade_in(plane, fade);
                 }
             }
         }
-        let motion = self.style.motion.clone();
-        let hover = self.hover_transform(layout, hovered);
+        let glide = self.glide();
+        let hover = self.card_transform(layout);
         if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
             // The whole card glides to its new place as one unit.
             let to = Self::unit_offset(layout, layers.built);
-            move_to(&motion, &layers.unit, to, immediate);
+            move_to(glide, &layers.unit, to, immediate);
             layers.card.setTransform(hover);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
@@ -1738,12 +1770,12 @@ impl Strip {
         let m = self.m();
         let d = self.drawn_offset(l.stage);
         let b = l.bounds(m).translate(d.x, d.y);
-        if !self.grown(l.stage) {
+        let s = self.card_scale(l.stage);
+        if s == 1.0 {
             return b;
         }
         let c = l.hover_center(m);
         let (cx, cy) = (c.x + d.x, c.y + d.y);
-        let s = m.hover_scale;
         Rect::new(cx + (b.x - cx) * s, cy + (b.y - cy) * s, b.w * s, b.h * s)
     }
 
@@ -1772,12 +1804,11 @@ impl Strip {
 
     /// Puts the lifted card back among the others once its glide has settled.
     fn settle_lifted(&mut self) {
+        let settle = self.glide().map_or(0.0, |s| motion_math::settle_time(s, 0.002));
         let Some((stage, timer)) = self.lifted_card.as_mut() else { return };
         if let Some(t) = timer.take() {
             t.invalidate();
         }
-        let m = &self.style.motion;
-        let spring = motion_math::Spring { stiffness: m.spring_stiffness, damping: m.spring_damping, mass: m.spring_mass };
         let stage = *stage;
         let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
             with_strip(|s| {
@@ -1788,7 +1819,7 @@ impl Strip {
             });
         });
         // SAFETY: the block runs once on the main run loop.
-        let t = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(motion_math::settle_time(spring, 0.002), false, &block) };
+        let t = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(settle, false, &block) };
         if let Some(l) = self.lifted_card.as_mut() {
             l.1 = Some(t);
         }
@@ -1816,8 +1847,13 @@ impl Strip {
         self.pressed = if self.pane.shown { self.card_at(p).filter(|s| !self.motion.holds(*s)) } else { None };
         self.card_drag = self.pressed.and_then(|stage| self.drag_for(stage));
         if let Some(stage) = self.pressed {
-            // A click is likely: fresh snapshots of what leaves and what arrives.
+            // A click is likely: fresh snapshots of what leaves and what arrives, and the
+            // engine's look at the windows taken now rather than at the release.
             self.prefetch(Some(stage));
+            strip_model::emit(StripEvent::CardPressed { stage });
+            // Apple's card answers the press at once: it eases back from its hover growth to
+            // a little under its resting size.
+            self.squeeze(Some(stage));
         }
         tracing::trace!(x = p.x, y = p.y, card = ?self.pressed, "strip mouse down");
     }
@@ -1875,6 +1911,7 @@ impl Strip {
         let was_onto = self.merge_onto();
         if was == DragMode::Pressed {
             tracing::debug!(stage, ?mode, "card drag started");
+            self.squeeze(None);
         }
         {
             let Some(drag) = self.card_drag.as_mut() else { return };
@@ -1980,11 +2017,37 @@ impl Strip {
             let origin = strip_layout::drop_origin(drag.full, drag.grab.0, at);
             return Some(StripEvent::CardDropped { stage: drag.stage, x: origin.x, y: origin.y });
         }
-        let pressed = self.pressed.take()?;
+        let Some(pressed) = self.pressed.take() else {
+            self.squeeze(None);
+            return None;
+        };
         if !self.pane.shown || self.card_at(p) != Some(pressed) {
+            self.squeeze(None);
             return None;
         }
+        // The card stays pressed until its transition takes it (the incoming snapshots grow
+        // from it as drawn); if none comes, it lets go.
+        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+            with_strip(|s| {
+                if s.squeezed == Some(pressed) && !s.motion.holds(pressed) {
+                    s.squeeze(None);
+                }
+            });
+        });
+        // SAFETY: the block runs once on the main run loop.
+        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(SQUEEZE_MAX, false, &block) };
         Some(self.click_event(pressed, p, shift))
+    }
+
+    /// Draws `stage`'s card pressed (`None`: no card), easing the card that was and the one
+    /// that is now over `[cards] press_ms`.
+    fn squeeze(&mut self, stage: Option<u64>) {
+        if self.squeezed == stage {
+            return;
+        }
+        let was = std::mem::replace(&mut self.squeezed, stage);
+        let seconds = self.style.animation.seconds(if stage.is_some() { self.style.cards.press_ms } else { self.style.cards.hover_ms });
+        self.ease_cards([was, stage], seconds);
     }
 
     /// A click on `stage`'s card at `p`: on an app icon (without shift) or the card.
@@ -2034,7 +2097,7 @@ impl Strip {
         }
         let Some(layers) = self.pane.cards.remove(&stage) else { return };
         let m = self.m().clone();
-        let seconds = (self.style.cards.fade_ms as f64 / 1000.0).max(MERGE_FADE);
+        let seconds = self.style.animation.seconds(self.style.drag.merge_ms);
         let toward = self.layouts.iter().find(|l| l.stage == into).map(|l| {
             let c = l.hover_center(&m);
             let d = self.drawn_offset(into);
@@ -2052,7 +2115,7 @@ impl Strip {
         let card = layers.card.clone();
         let gone = RcBlock::new(move |_t: NonNull<NSTimer>| card.removeFromSuperlayer());
         // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds + 0.05, false, &gone) };
+        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, false, &gone) };
     }
 
     fn hover_at(&mut self, p: Option<Point>) {
@@ -2106,17 +2169,26 @@ impl Strip {
             self.prefetch(card);
         }
         let previous = std::mem::replace(&mut self.hovered, card);
+        if self.squeezed.is_some() && self.squeezed != card && self.pressed.is_none() {
+            // The pointer left a released card that was drawn pressed.
+            self.squeezed = None;
+        }
         self.ease_growth([previous, card]);
     }
 
-    /// Eases each of `stages`' cards to its size now: grown or not ([`Strip::grown`]).
+    /// Eases each of `stages`' cards to its size now ([`Strip::card_scale`]) over
+    /// `[cards] hover_ms`.
     fn ease_growth(&self, stages: [Option<u64>; 2]) {
-        let seconds = self.style.cards.hover_ms as f64 / 1000.0;
+        self.ease_cards(stages, self.style.animation.seconds(self.style.cards.hover_ms));
+    }
+
+    /// Eases each of `stages`' cards to its size now over `seconds` (0: at once).
+    fn ease_cards(&self, stages: [Option<u64>; 2], seconds: f64) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for stage in stages.into_iter().flatten() {
             let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
-            let t = self.hover_transform(&layout, self.grown(stage));
+            let t = self.card_transform(&layout);
             if let Some(layers) = self.pane.cards.get(&stage) {
                 ease_transform(&layers.card, t, seconds);
             }
@@ -2265,20 +2337,23 @@ impl Strip {
         self.publish_panel();
         self.update_pass_through(None);
         if !shown {
-            self.set_hover(None);
             self.pressed = None;
+            self.squeezed = None;
+            self.set_hover(None);
             self.card_drag = None;
         }
         let dx = self.current_dx();
-        let motion = self.style.motion.clone();
+        let slide = self.slide_spring().filter(|_| animated);
         let m = self.m().clone();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
-            if animated {
-                spring_sublayer_transform(&motion, &layers.card, perspective(&m, dx));
-            } else {
-                layers.card.setSublayerTransform(perspective(&m, dx));
+            match slide {
+                Some(s) => spring_sublayer_transform(s, &layers.card, perspective(&m, dx)),
+                None => {
+                    layers.card.removeAnimationForKey(&NSString::from_str("sublayerTransform"));
+                    layers.card.setSublayerTransform(perspective(&m, dx));
+                }
             }
         }
         CATransaction::commit();

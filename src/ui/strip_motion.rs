@@ -40,7 +40,7 @@ use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTime
 use super::{Ghost as CardGhost, Strip, with_strip};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Target};
-use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, time_to_progress};
+use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, time_to_progress};
 use crate::ui::overlay::{Ghost, Overlay};
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, StripEvent, Transition, TransitionReport};
@@ -189,9 +189,9 @@ impl Strip {
         self.motion.overlay.shown().then(|| (self.motion.overlay.window_number(), self.motion.overlay.origin()))
     }
 
+    /// The windows' spring (`[animation]` at its speed).
     fn spring(&self) -> Spring {
-        let a = &self.style.animation;
-        Spring { stiffness: a.spring_stiffness, damping: a.spring_damping, mass: a.spring_mass }
+        switch_spring(&self.style)
     }
 
     /// Lays the overlay over the main display with the strip's eye.
@@ -210,10 +210,11 @@ impl Strip {
         let x = g.x - o.x + layout.frame.x + slot.rect.x + self.current_dx();
         let top = g.y - o.y + layout.frame.y + slot.rect.y;
         let mut plane = Plane::thumb(x, top, slot.rect.size(), m.tilt, self.style.cards.corner_radius * m.k);
-        if self.hovered == Some(layout.stage) {
+        // As the card is drawn: grown under the pointer, or pressed (the click's card).
+        let s = self.card_scale(layout.stage);
+        if s != 1.0 {
             let c = layout.hover_center(m);
             let c = Point::new(g.x - o.x + c.x + self.current_dx(), g.y - o.y + c.y);
-            let s = m.hover_scale;
             plane.left_mid = Point::new(c.x + (plane.left_mid.x - c.x) * s, c.y + (plane.left_mid.y - c.y) * s);
             plane.size = Size::new(plane.size.w * s, plane.size.h * s);
         }
@@ -307,7 +308,7 @@ impl Strip {
     /// snapshots of the incoming ones grow from `starts`; tells the controller what is covered.
     pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
         self.finish_transition();
-        if !self.style.animation.enabled {
+        if !self.style.animation.animates() {
             strip_model::cover(t.id, Cover::default());
             return;
         }
@@ -573,7 +574,7 @@ impl Strip {
     /// Tells the snapshot capturer what to keep: the active stage's windows and those of
     /// `card` (or the hovered card), at full size. `now` captures them at once.
     fn update_snapshot_targets(&mut self, card: Option<u64>, now: bool) {
-        if !self.style.animation.enabled {
+        if !self.style.animation.animates() {
             self.motion.capturer.set_targets(Vec::new());
             return;
         }
@@ -598,7 +599,7 @@ impl Strip {
 
     /// A full-size snapshot arrived.
     pub(super) fn set_snapshot(&mut self, id: u32, image: CFRetained<CGImage>) {
-        if !self.style.animation.enabled {
+        if !self.style.animation.animates() {
             return;
         }
         let bytes = CGImage::width(Some(&image)) * CGImage::height(Some(&image)) * 4;

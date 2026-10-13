@@ -98,6 +98,10 @@ use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEvent, StripSnapshot, Transition};
 use crate::ui::transition_plan;
 
+/// The windows read at a card's press serve its click this long (a press held longer reads
+/// them again at the release).
+const PRESSED_OBS_MAX: Duration = Duration::from_secs(1);
+
 /// How long focus and activation events for windows and apps we just touched are ignored
 /// by default (`[windows] focus_echo_ms`).
 pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
@@ -440,6 +444,10 @@ pub struct Controller {
     overview: OverviewWatch,
     /// A notified Space change waits for an overview to close (said once in the log).
     arrival_held: bool,
+    /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
+    /// that follows uses them instead of reading every frame again through AX after the
+    /// release. Any event, batch or Space change forgets them.
+    pressed_obs: Option<(Instant, Observation)>,
     /// A focus or activation that came before its Desktop was recognized (its window on a
     /// Desktop not shown, not known yet, or a Space change settling): replayed on arrival
     /// ([`FocusReplay`], [`Model::bring_focus_forward`]).
@@ -554,6 +562,7 @@ impl Controller {
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
             arrival_held: false,
+            pressed_obs: None,
             focus_replay: FocusReplay::default(),
             absent: HashMap::new(),
             elsewhere: HashMap::new(),
@@ -706,6 +715,7 @@ impl Controller {
         if actions.is_empty() {
             return 0;
         }
+        self.pressed_obs = None;
         let parked = self.parked_entries(ob);
         safety::registry_add(parked.clone());
         let now = Instant::now();
@@ -913,7 +923,7 @@ impl Controller {
     fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
         self.flush_pending(ob);
         let anim = self.store.config().style.animation.clone();
-        if !anim.enabled || !self.strip_visible {
+        if !anim.animates() || !self.strip_visible {
             return self.execute(ob, actions);
         }
         let Some(t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
@@ -921,7 +931,7 @@ impl Controller {
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let started = Instant::now();
-        self.present_with(Some(t));
+        self.present_with(Some(Transition { sent: Some(started), ..t }));
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
         tracing::debug!(id, ?cover, waited_ms = started.elapsed().as_millis() as u64, "transition covered");
         if cover.outgoing || cover.incoming {
@@ -1160,6 +1170,8 @@ impl Controller {
 
     fn on_event(&mut self, ob: &mut Observer, event: WinEvent) {
         let now = Instant::now();
+        // Something changed since a card was pressed: the click reads the windows afresh.
+        self.pressed_obs = None;
         // Any other event brings windows held behind a transition's snapshots in at once;
         // moves, retitles and the echoes of our own focus (sent before the windows arrive,
         // so the keyboard goes to the new stage at once) leave the animation alone.
@@ -2273,6 +2285,14 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
+        if let StripEvent::CardPressed { stage } = event {
+            // Read the windows now, while the button is down (~100 ms before the release),
+            // so the click's motion starts without waiting on AX. Not while a transition's
+            // windows are still on their way (their frames are not the ones to save).
+            self.pressed_obs = (self.pending.is_none() && !self.frozen() && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
+            tracing::trace!(stage, read = self.pressed_obs.is_some(), "card pressed");
+            return;
+        }
         if let StripEvent::Unveil { id } = event {
             if self.pending.as_ref().is_some_and(|p| p.id == id) {
                 self.flush_pending(ob);
@@ -2303,7 +2323,11 @@ impl Controller {
             }
             return;
         }
-        let obs = self.observe(ob);
+        let pressed = self.pressed_obs.take().filter(|(at, _)| at.elapsed() < PRESSED_OBS_MAX).map(|(_, obs)| obs);
+        let obs = match pressed {
+            Some(obs) if matches!(event, StripEvent::CardClicked { .. } | StripEvent::IconClicked { .. }) => obs,
+            _ => self.observe(ob),
+        };
         let Some(m) = self.model.as_mut() else { return };
         let actions = match event {
             StripEvent::CardClicked { stage, shift } => {
@@ -2332,7 +2356,7 @@ impl Controller {
                 );
                 m.merge_stages(StageId(stage), StageId(into), &obs)
             }
-            StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } => Vec::new(),
+            StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } | StripEvent::CardPressed { .. } => Vec::new(),
         };
         let changed = actions.contains(&Action::StateChanged);
         self.execute_animated(ob, actions);
@@ -2659,7 +2683,8 @@ impl Controller {
             "desktop_revealed": m.desktop_revealed(),
             "strip_hidden_for_desktop": self.strip_hidden_for_desktop && m.desktop_revealed(),
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
-            "animation": self.store.config().style.animation.enabled,
+            "animation": self.store.config().style.animation.animates(),
+            "animation_speed": self.store.config().style.animation.speed(),
             "capture": super::capture::status(),
             "strip_cards": strip_model::published_cards()
                 .into_iter()

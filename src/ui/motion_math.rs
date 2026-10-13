@@ -1,12 +1,16 @@
 //! Motion math, pure: the spring's progress over time, the planes snapshots move between,
 //! where a drop lands in the column, and the snapshot cache's bookkeeping.
 //!
-//! - **Spring.** Apple moves windows on a spring that starts at rest: mass 1, stiffness 240,
-//!   damping 31 (critically damped, ω ≈ 15.5 rad/s: 50 % at ~110 ms, 90 % at ~250 ms, 99 % at
-//!   ~430 ms; `docs/UX-SPEC.md`, "Transitions"). [`spring_progress`] gives the fraction of the
-//!   way covered after `t` seconds for any mass, stiffness and damping; [`time_to_progress`]
-//!   when a fraction is first reached (the moment an incoming window may take its place behind
-//!   its growing snapshot, `[animation] unpark_at`).
+//! - **Spring.** Apple moves windows on a spring that starts at rest one frame after the
+//!   mouse-up: mass 1, stiffness 272, damping 33 (critically damped, ω ≈ 16.5 rad/s: 50 % at
+//!   ~100 ms, 90 % at ~235 ms, 99 % at ~400 ms from its start; fitted 10-12 to 37 windows of the
+//!   laptop session, `docs/UX-SPEC.md`, "Transitions"); cards glide at ω ≈ 17.0 and the strip
+//!   slides at ω ≈ 16.8. [`spring_progress`] gives the fraction of the way covered after `t`
+//!   seconds for any mass, stiffness and damping; [`time_to_progress`] when a fraction is first
+//!   reached (the moment an incoming window may take its place behind its growing snapshot,
+//!   `[animation] unpark_at`). `[animation] speed` scales every spring ([`Spring::at_speed`]:
+//!   the same curve, ω times the speed) and duration; [`switch_spring`], [`glide_spring`] and
+//!   [`slide_spring`] are the style's springs with it applied.
 //! - **Planes.** A snapshot is a plane turned about its left edge, like a strip card: at a
 //!   window's frame it is flat and full size; on a card it is the card's thumbnail, turned by
 //!   the strip's tilt and seen from the strip's eye. Moving between the two on one spring
@@ -18,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use crate::config::StripStyle;
 use crate::engine::geometry::{Point, Rect, Size};
 
 /// Spring parameters (`[animation]` or `[motion]`).
@@ -29,8 +34,37 @@ pub struct Spring {
 }
 
 impl Spring {
-    /// Apple's, measured.
-    pub const APPLE: Spring = Spring { stiffness: 240.0, damping: 31.0, mass: 1.0 };
+    /// Apple's windows in a switch, measured (`[animation]`'s default).
+    pub const APPLE: Spring = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
+
+    /// The same motion `speed` times as fast: ω times `speed`, the same damping ratio
+    /// (stiffness times speed², damping times speed). A speed of 0 or less leaves it as it is
+    /// (nothing animates then; the callers jump instead).
+    pub fn at_speed(self, speed: f64) -> Spring {
+        if speed <= 0.0 || speed == 1.0 {
+            return self;
+        }
+        Spring { stiffness: self.stiffness * speed * speed, damping: self.damping * speed, mass: self.mass }
+    }
+}
+
+/// The windows' spring in a switch, the desktop reveal, ⌘M and drops (`[animation]`), at the
+/// style's speed.
+pub fn switch_spring(style: &StripStyle) -> Spring {
+    let a = &style.animation;
+    Spring { stiffness: a.spring_stiffness, damping: a.spring_damping, mass: a.spring_mass }.at_speed(a.speed())
+}
+
+/// The cards' glide to new slots (`[motion] spring_*`), at the style's speed.
+pub fn glide_spring(style: &StripStyle) -> Spring {
+    let m = &style.motion;
+    Spring { stiffness: m.spring_stiffness, damping: m.spring_damping, mass: m.spring_mass }.at_speed(style.animation.speed())
+}
+
+/// The strip's slide out and back in (`[motion] slide_*`), at the style's speed.
+pub fn slide_spring(style: &StripStyle) -> Spring {
+    let m = &style.motion;
+    Spring { stiffness: m.slide_stiffness, damping: m.slide_damping, mass: m.slide_mass }.at_speed(style.animation.speed())
 }
 
 /// The fraction of the way a spring released at rest has covered after `t` seconds (0 at the
@@ -224,21 +258,59 @@ impl<T> SnapshotCache<T> {
 mod tests {
     use super::*;
 
+    /// Apple's switch, measured (10-12, the laptop session at ~120 Hz): the median progress
+    /// of 37 incoming windows (size, from card to frame) at these ms after the mouse-up. The
+    /// motion starts one frame (~11 ms) after the mouse-up.
+    const MEASURED: [(f64, f64); 8] =
+        [(50.0, 0.132), (100.0, 0.401), (150.0, 0.657), (200.0, 0.815), (250.0, 0.914), (300.0, 0.959), (400.0, 0.991), (500.0, 0.998)];
+    const START_MS: f64 = 11.0;
+
     #[test]
     fn apples_spring_matches_the_measured_curve() {
         let s = Spring::APPLE;
-        let p = |ms: f64| spring_progress(s, ms / 1000.0);
-        assert!(p(20.0) > 0.02 && p(20.0) < 0.06, "{}", p(20.0));
-        assert!((p(55.0) - 0.20).abs() < 0.07, "{}", p(55.0));
-        assert!(p(110.0) > 0.45 && p(120.0) < 0.58, "{} {}", p(110.0), p(120.0));
-        assert!((p(250.0) - 0.90).abs() < 0.02, "{}", p(250.0));
-        assert!(p(430.0) >= 0.99);
+        for (ms, measured) in MEASURED {
+            let ours = spring_progress(s, (ms - START_MS) / 1000.0);
+            assert!((ours - measured).abs() < 0.035, "{ms} ms after the mouse-up: ours {ours:.3}, Apple's {measured}");
+        }
         let t99 = time_to_progress(s, 0.99);
-        assert!((0.40..=0.44).contains(&t99), "99 % at {t99}");
-        let t97 = time_to_progress(s, 0.97);
-        assert!((0.30..0.36).contains(&t97), "97 % at {t97}");
+        assert!((0.38..=0.42).contains(&t99), "99 % at {t99}");
         let settle = settle_time(s, 0.001);
-        assert!((0.5..0.7).contains(&settle), "settled at {settle}");
+        assert!((0.45..0.65).contains(&settle), "settled at {settle}");
+        // The spring before 10-12 (240/31, ω 15.5) lagged Apple's: 99 % ~30 ms later.
+        let old = Spring { stiffness: 240.0, damping: 31.0, mass: 1.0 };
+        assert!(time_to_progress(old, 0.99) - t99 > 0.02);
+    }
+
+    #[test]
+    fn speed_scales_every_spring_on_the_same_curve() {
+        let s = Spring::APPLE;
+        let t = time_to_progress(s, 0.9);
+        let twice = s.at_speed(2.0);
+        assert!((time_to_progress(twice, 0.9) - t / 2.0).abs() < 0.002, "twice as fast");
+        let half = s.at_speed(0.5);
+        assert!((time_to_progress(half, 0.9) - t * 2.0).abs() < 0.004, "half as fast");
+        assert!((0..1000).all(|i| spring_progress(twice, i as f64 / 1000.0) <= 1.0 + 1e-9), "still no overshoot");
+        assert_eq!(s.at_speed(1.0), s);
+        assert_eq!(s.at_speed(0.0), s, "speed 0 is the callers' to handle (no animation)");
+        // The style's springs: each its own section, all at [animation] speed.
+        let mut style = StripStyle::default();
+        assert_eq!(switch_spring(&style), Spring::APPLE, "the default is Apple's");
+        let glide = glide_spring(&style);
+        let slide = slide_spring(&style);
+        let omega = |s: Spring| (s.stiffness / s.mass).sqrt();
+        assert!((omega(glide) - 17.0).abs() < 0.1 && (omega(slide) - 16.8).abs() < 0.1, "{} {}", omega(glide), omega(slide));
+        style.animation.speed = 2.0;
+        assert!((omega(switch_spring(&style)) - 2.0 * omega(Spring::APPLE)).abs() < 1e-9);
+        assert!((omega(glide_spring(&style)) - 2.0 * omega(glide)).abs() < 1e-9);
+        assert!((omega(slide_spring(&style)) - 2.0 * omega(slide)).abs() < 1e-9);
+        assert!((style.animation.seconds(210) - 0.105).abs() < 1e-9, "durations too");
+        style.animation.speed = 0.1;
+        assert_eq!(style.animation.speed(), crate::config::MIN_SPEED, "the slowest is 0.25");
+        style.animation.speed = 0.0;
+        assert!(!style.animation.animates() && style.animation.seconds(210) == 0.0, "0 is no animation");
+        style.animation.speed = 1.0;
+        style.animation.enabled = false;
+        assert!(!style.animation.animates() && style.animation.seconds(210) == 0.0, "enabled = false is no animation");
     }
 
     #[test]

@@ -141,6 +141,9 @@ pub struct CardStyle {
     pub second_app_dy: f64,
     pub hover_scale: f64,
     pub hover_ms: u64,
+    /// A pressed card's size, of its resting one.
+    pub press_scale: f64,
+    pub press_ms: u64,
     pub fade_ms: u64,
 }
 
@@ -160,9 +163,14 @@ pub struct IconStyle {
 /// `[motion]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MotionStyle {
+    /// The cards' glide.
     pub spring_stiffness: f64,
     pub spring_damping: f64,
     pub spring_mass: f64,
+    /// The strip's slide.
+    pub slide_stiffness: f64,
+    pub slide_damping: f64,
+    pub slide_mass: f64,
     pub slide_distance: f64,
 }
 
@@ -187,12 +195,16 @@ pub struct DragStyle {
     pub grow_distance: f64,
     pub lifted_opacity: f64,
     pub ghost_opacity: f64,
+    /// A card dropped onto another shrinks into it and fades this long.
+    pub merge_ms: u64,
 }
 
 /// `[animation]`: switches drawn as moving snapshots.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnimationStyle {
     pub enabled: bool,
+    /// Multiplies the speed of every animation; 0 = none.
+    pub speed: f64,
     pub spring_stiffness: f64,
     pub spring_damping: f64,
     pub spring_mass: f64,
@@ -248,6 +260,28 @@ pub struct StripStyle {
 impl Default for StripStyle {
     fn default() -> Self {
         Config::default().style
+    }
+}
+
+/// The slowest `[animation] speed` other than 0 (none).
+pub const MIN_SPEED: f64 = 0.25;
+
+impl AnimationStyle {
+    /// `[animation] speed` as applied: 0 when `enabled = false` or `speed = 0` (nothing
+    /// animates), else at least [`MIN_SPEED`].
+    pub fn speed(&self) -> f64 {
+        if !self.enabled || self.speed <= 0.0 { 0.0 } else { self.speed.max(MIN_SPEED) }
+    }
+
+    /// True when anything animates.
+    pub fn animates(&self) -> bool {
+        self.speed() > 0.0
+    }
+
+    /// A duration of `ms` milliseconds at this speed, in seconds (0 when nothing animates).
+    pub fn seconds(&self, ms: u64) -> f64 {
+        let speed = self.speed();
+        if speed <= 0.0 { 0.0 } else { ms as f64 / 1000.0 / speed }
     }
 }
 
@@ -673,6 +707,8 @@ impl Config {
                     second_app_dy: v.num("cards.second_app_dy"),
                     hover_scale: v.num("cards.hover_scale"),
                     hover_ms: v.uint("cards.hover_ms"),
+                    press_scale: v.num("cards.press_scale"),
+                    press_ms: v.uint("cards.press_ms"),
                     fade_ms: v.uint("cards.fade_ms"),
                 },
                 icons: IconStyle {
@@ -689,6 +725,9 @@ impl Config {
                     spring_stiffness: v.num("motion.spring_stiffness"),
                     spring_damping: v.num("motion.spring_damping"),
                     spring_mass: v.num("motion.spring_mass"),
+                    slide_stiffness: v.num("motion.slide_stiffness"),
+                    slide_damping: v.num("motion.slide_damping"),
+                    slide_mass: v.num("motion.slide_mass"),
                     slide_distance: v.num("motion.slide_distance"),
                 },
                 reveal: RevealStyle {
@@ -706,9 +745,11 @@ impl Config {
                     grow_distance: v.num("drag.grow_distance"),
                     lifted_opacity: v.num("drag.lifted_opacity"),
                     ghost_opacity: v.num("drag.ghost_opacity"),
+                    merge_ms: v.uint("drag.merge_ms"),
                 },
                 animation: AnimationStyle {
                     enabled: v.flag("animation.enabled"),
+                    speed: v.num("animation.speed"),
                     spring_stiffness: v.num("animation.spring_stiffness"),
                     spring_damping: v.num("animation.spring_damping"),
                     spring_mass: v.num("animation.spring_mass"),
@@ -975,7 +1016,13 @@ mod tests {
         assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         let a = &c.style.animation;
-        assert!(a.enabled && (a.spring_stiffness, a.spring_damping, a.spring_mass) == (240.0, 31.0, 1.0));
+        assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
+        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
+        let m = &c.style.motion;
+        assert_eq!((m.spring_stiffness, m.spring_damping, m.spring_mass), (289.0, 34.0, 1.0), "Apple's card glide");
+        assert_eq!((m.slide_stiffness, m.slide_damping, m.slide_mass), (282.0, 33.6, 1.0), "Apple's slide");
+        let k = &c.style.cards;
+        assert_eq!((k.hover_scale, k.hover_ms, k.press_scale, k.press_ms), (1.06, 210, 0.987, 100), "Apple's hover and press");
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }
@@ -989,6 +1036,66 @@ mod tests {
         assert_eq!(p.config.log, LogConfig { level: LogLevel::Info, days: 3, max_mb_per_day: 5, max_mb_total: 1 });
         assert_eq!(p.warnings.len(), 1, "max_mb_total clamped: {:?}", p.warnings);
         assert!(Config::parse("[log]\nlevel = \"loud\"\n").is_err());
+    }
+
+    #[test]
+    fn animation_speed_scales_or_stops_everything() {
+        let speed = |text: &str| parse(text).config.style.animation;
+        let a = speed("[animation]\nspeed = 2\n");
+        assert_eq!((a.speed(), a.seconds(210)), (2.0, 0.105));
+        let a = speed("[animation]\nspeed = 0.5\n");
+        assert_eq!((a.speed(), a.seconds(100)), (0.5, 0.2));
+        let a = speed("[animation]\nspeed = 0\n");
+        assert!(!a.animates() && a.seconds(210) == 0.0, "0 is no animation");
+        let a = speed("[animation]\nspeed = 0.1\n");
+        assert_eq!(a.speed(), MIN_SPEED, "the slowest other than none");
+        let p = parse("[animation]\nspeed = 9\n");
+        assert_eq!(p.config.style.animation.speed(), 4.0);
+        assert_eq!(p.warnings.len(), 1, "clamped with a warning: {:?}", p.warnings);
+        let a = speed("[animation]\nenabled = false\nspeed = 2\n");
+        assert!(!a.animates(), "enabled = false wins");
+    }
+
+    /// Every animation's timing ([`schema`] keys of the guide's "Animations" table).
+    const ANIMATION_KEYS: &[&str] = &[
+        "animation.enabled",
+        "animation.speed",
+        "animation.spring_stiffness",
+        "animation.spring_damping",
+        "animation.spring_mass",
+        "animation.unpark_at",
+        "motion.spring_stiffness",
+        "motion.spring_damping",
+        "motion.spring_mass",
+        "motion.slide_stiffness",
+        "motion.slide_damping",
+        "motion.slide_mass",
+        "motion.slide_distance",
+        "cards.hover_ms",
+        "cards.hover_scale",
+        "cards.press_ms",
+        "cards.press_scale",
+        "cards.fade_ms",
+        "drag.merge_ms",
+    ];
+
+    #[test]
+    fn every_animation_key_reaches_the_strip_live() {
+        // A reload hands the strip a new style whenever it differs (the controller's
+        // `reload_config`), and every motion reads it at its start: each key must be part of
+        // the style.
+        let base = Config::default().style;
+        for path in ANIMATION_KEYS {
+            let d = schema::find(path).unwrap_or_else(|| panic!("{path} is a key"));
+            let other = match d.kind {
+                Kind::Bool => (d.default != "true").to_string(),
+                Kind::Float { min, max } => format!("{:?}", if d.default.parse::<f64>().ok() == Some(max) { min } else { max }),
+                Kind::Int { min, max } => (if d.default.parse::<i64>().ok() == Some(max) { min } else { max }).to_string(),
+                _ => panic!("{path}: not a timing"),
+            };
+            let text = format!("[{}]\n{} = {other}\n", d.section, d.key);
+            assert_ne!(parse(&text).config.style, base, "{path} = {other} changes the strip's style");
+        }
     }
 
     #[test]

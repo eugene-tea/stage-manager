@@ -81,6 +81,9 @@ pub struct Transition {
     /// Parked windows about to come back, front to back, at the frames they will get;
     /// `stage` is the stage whose card (in the previous snapshot) they grow from.
     pub incoming: Vec<MovingWindow>,
+    /// When the controller announced it (the strip logs how long the main thread took to
+    /// get to it: a busy main thread delays the motion's start).
+    pub sent: Option<std::time::Instant>,
 }
 
 /// One window of a [`Transition`].
@@ -163,6 +166,9 @@ pub enum StripEvent {
     /// A card was clicked (acts on mouse-up, as Apple's does). `shift` adds the card's
     /// windows to the active stage instead of switching.
     CardClicked { stage: u64, shift: bool },
+    /// A card was pressed (mouse-down): a click is likely, so the controller reads the
+    /// windows' frames now rather than after the release (the motion starts sooner).
+    CardPressed { stage: u64 },
     /// A card was dragged out of the strip and released in the main area: its windows join
     /// the active stage, and the stage's front window goes with its top-left corner at
     /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer.
