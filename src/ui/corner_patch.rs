@@ -15,17 +15,18 @@
 //!   wallpapers follow on their own). Each frame's IOSurface becomes the layer's contents.
 //!   The windows are looked up again on a Space change and at each new rectangle.
 //! - **Ordering**: just above the topmost parked window under it
-//!   (`orderWindow:relativeTo:` with that window's number); 60 ms later the window server's
-//!   list says whether macOS honoured that across processes ([`ordered`], logged once); the
-//!   WM thread's next plan shows the patch only where it may.
-//! - Hidden at once when the plan says so (no sliver, an overview, the fallback's moving
-//!   windows), and the stream stops.
+//!   (`orderWindow:relativeTo:` with that window's number); the WM thread checks the order
+//!   in the window server's list at every plan (the panel's number: [`window_number`]) and
+//!   shows the patch only where it may, sending the plan again to order it anew when it
+//!   was right and is not any more.
+//! - Hidden at once when the plan says so (no sliver, an overview, a full-screen Space, the
+//!   fallback's moving windows), and the stream stops. The stream restarts only for a new
+//!   rectangle (the WM thread keeps one that barely changed).
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use block2::RcBlock;
-use dispatch2::{DispatchQueue, DispatchTime};
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
@@ -42,9 +43,8 @@ use objc2_screen_capture_kit::{
 };
 
 use super::panels;
-use crate::engine::corner_patch::{Listed, ordered_right};
 use crate::engine::geometry::Rect;
-use crate::platform::{capture, desktop, windows};
+use crate::platform::{capture, desktop};
 
 /// What the WM thread asks of the patch.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,21 +53,22 @@ pub struct PatchPlan {
     pub show: Option<Rect>,
     /// The topmost parked window under it, to order the patch just above.
     pub above: Option<u32>,
-    /// Every parked window (for the ordering check).
-    pub parked: Vec<u32>,
+    /// Bumped to order the patch again with an otherwise equal plan (it was ordered right
+    /// and is not any more).
+    pub reorder: u32,
     /// Most frames a second.
     pub fps: u32,
 }
 
-/// The last ordering check: 0 none yet, 1 right, 2 wrong.
-static ORDERED: AtomicU8 = AtomicU8::new(0);
+/// The patch panel's window number once it exists (0 before).
+static NUMBER: AtomicU32 = AtomicU32::new(0);
 
-/// Whether the last ordering of the patch was found right in the window server's list.
-pub fn ordered() -> Option<bool> {
-    match ORDERED.load(Ordering::SeqCst) {
-        1 => Some(true),
-        2 => Some(false),
-        _ => None,
+/// The patch panel's window number, for the WM thread's ordering check; `None` before the
+/// panel exists.
+pub fn window_number() -> Option<u32> {
+    match NUMBER.load(Ordering::SeqCst) {
+        0 => None,
+        n => Some(n),
     }
 }
 
@@ -196,10 +197,7 @@ impl Patch {
             tracing::debug!(%rect, above = ?plan.above, "corner patch: shown");
         }
         self.shown = Some(rect);
-        let number = self.panel.windowNumber() as u32;
-        let parked: HashSet<u32> = plan.parked.into_iter().collect();
-        // The window server lists the new order a moment later.
-        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(60_000_000), move || check_order(number, rect, &parked));
+        NUMBER.store(self.panel.windowNumber() as u32, Ordering::SeqCst);
     }
 
     fn show_surface(&self, surface: &IOSurfaceRef) {
@@ -308,22 +306,5 @@ fn run_stream(filter: &SCContentFilter, rect: Rect, fps: u32) -> Option<(Retaine
         stream.startCaptureWithCompletionHandler(Some(&started));
         tracing::info!(%rect, fps, "corner patch: live capture of the desktop under the corner");
         Some((stream, output, rect))
-    }
-}
-
-/// Checks the patch's place in the window server's list, logging the first verdict and
-/// every change.
-fn check_order(patch: u32, rect: Rect, parked: &HashSet<u32>) {
-    let list: Vec<Listed> =
-        windows::on_screen().into_iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds }).collect();
-    let right = ordered_right(&list, patch, rect, parked);
-    let code = if right { 1 } else { 2 };
-    let was = ORDERED.swap(code, Ordering::SeqCst);
-    if was != code {
-        if right {
-            tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
-        } else {
-            tracing::warn!("corner patch: not where it was ordered; it shows only while no window reaches the corner");
-        }
     }
 }

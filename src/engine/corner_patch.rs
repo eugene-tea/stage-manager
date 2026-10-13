@@ -5,17 +5,22 @@
 //!
 //! - **Where** ([`patch_rect`]): the parked windows' slivers as the window server lists them,
 //!   each grown by the shadow's reach ([`DEFAULT_REACH`], `[windows] corner_patch_reach`),
-//!   on the display.
+//!   on the display. A park or unpark that shrinks it a little keeps the rectangle in use
+//!   ([`steady_rect`]), so its live capture is not restarted for every sliver that comes
+//!   and goes.
 //! - **Ordering.** The patch is a normal-level window ordered just above the topmost parked
 //!   window under it (`orderWindow:relativeTo:` with another app's window number). Whether
-//!   macOS honours that across processes is checked after every ordering against the window
-//!   server's list ([`ordered_right`]). Ordered right, every shown window stays above the
-//!   patch on its own; the patch may show whenever slivers are there.
+//!   it sits right is checked afresh at every plan against the window server's list
+//!   ([`ordered_right`]): an activation raising a parked window, or a hide and show, can undo
+//!   it at any time. Ordered right, every shown window stays above the patch on its own; the
+//!   patch may show whenever slivers are there. Found wrong after being right, it is ordered
+//!   again.
 //! - **Not ordered right** (the fallback): the patch sits above every normal window there,
 //!   so it shows only while no shown window reaches its rectangle, no window is being
 //!   dragged and no switch is running ([`visibility`]).
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
-//!   the overview watch hides it), nor once the app stands down (nothing parked).
+//!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
+//!   down (nothing parked).
 
 use std::collections::HashSet;
 
@@ -39,6 +44,26 @@ pub fn patch_rect(slivers: &[Rect], display: Rect, reach: f64) -> Option<Rect> {
         });
     }
     out.and_then(|r| r.intersect(&display))
+}
+
+/// How much bigger (points, on any side) than needed the rectangle in use may stay.
+pub const STEADY_SLACK: f64 = 48.0;
+
+/// The rectangle to use: the one in use (`prev`) while it still covers `next` and is at most
+/// [`STEADY_SLACK`] bigger on every side (a sliver that came and went), else `next`.
+pub fn steady_rect(prev: Option<Rect>, next: Rect) -> Rect {
+    match prev {
+        Some(p)
+            if p.contains_rect(&next)
+                && next.x - p.x <= STEADY_SLACK
+                && next.y - p.y <= STEADY_SLACK
+                && p.max_x() - next.max_x() <= STEADY_SLACK
+                && p.max_y() - next.max_y() <= STEADY_SLACK =>
+        {
+            p
+        }
+        _ => next,
+    }
 }
 
 fn union(a: Rect, b: Rect) -> Rect {
@@ -78,8 +103,11 @@ pub struct PatchFacts {
     pub rect: Option<Rect>,
     /// Mission Control, App Exposé or Show Desktop is up (or settling).
     pub overview: bool,
-    /// The last ordering was found right ([`ordered_right`]); `None` before any check.
+    /// The patch is ordered right now ([`ordered_right`] on the current list); `None` before
+    /// the patch exists.
     pub ordered: Option<bool>,
+    /// A full-screen app's Space shows.
+    pub fullscreen: bool,
     /// Shown (not parked) normal windows on screen, any app's.
     pub shown: Vec<Rect>,
     /// A window is being dragged, or the left button is down.
@@ -96,6 +124,9 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
     let Some(rect) = f.rect else { return Err("no sliver shows") };
     if f.overview {
         return Err("an overview is up");
+    }
+    if f.fullscreen {
+        return Err("a full-screen Space shows");
     }
     if f.ordered == Some(true) {
         return Ok(rect);
@@ -171,6 +202,32 @@ mod tests {
         assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err(), "never over Mission Control");
         assert!(visibility(&PatchFacts { on: false, ..f.clone() }).is_err());
         assert!(visibility(&PatchFacts { rect: None, ..f }).is_err());
+    }
+
+    #[test]
+    fn never_on_a_full_screen_space() {
+        for ordered in [None, Some(false), Some(true)] {
+            let f = PatchFacts { ordered, fullscreen: true, ..facts() };
+            assert_eq!(visibility(&f), Err("a full-screen Space shows"), "{ordered:?}");
+        }
+    }
+
+    #[test]
+    fn a_rect_that_barely_shrinks_stays_and_one_that_grows_moves() {
+        let wide = patch_rect(&[sliver(32.0), sliver(52.0)], MAIN, 60.0).expect("slivers");
+        let narrow = patch_rect(&[sliver(32.0)], MAIN, 60.0).expect("a sliver");
+        assert_ne!(wide, narrow);
+        // Safari's sliver goes (an unpark): the capture keeps its rectangle.
+        assert_eq!(steady_rect(Some(wide), narrow), wide);
+        // It comes back: the same rectangle again, no restart.
+        assert_eq!(steady_rect(Some(wide), wide), wide);
+        // Fresh, or growing past the one in use: the new one.
+        assert_eq!(steady_rect(None, narrow), narrow);
+        assert_eq!(steady_rect(Some(narrow), wide), wide);
+        // Shrinking a lot (most slivers gone): the new one.
+        let small = Rect::new(2500.0, 1300.0, 60.0, 140.0);
+        let big = Rect::new(2300.0, 1000.0, 260.0, 440.0);
+        assert_eq!(steady_rect(Some(big), small), small);
     }
 
     #[test]

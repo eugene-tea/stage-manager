@@ -86,6 +86,8 @@ pub enum WinEvent {
     AppHidden(i32),
     /// An observed app was unhidden (NSWorkspace).
     AppUnhidden(i32),
+    /// An app quit (NSWorkspace; its windows' `Destroyed` come with it).
+    AppTerminated(i32),
     /// A window was minimized (⌘M, the yellow button).
     Minimized(u32),
 }
@@ -636,6 +638,9 @@ impl Observer {
                     self.log_app("app terminated", &app);
                 }
                 self.unobserve_app(app.pid);
+                if self.observing {
+                    self.events.push(WinEvent::AppTerminated(app.pid));
+                }
             }
             AppEvent::Activated(app, at) => {
                 let queued_ms = at.elapsed().as_millis() as u64;

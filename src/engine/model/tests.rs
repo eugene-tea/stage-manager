@@ -781,6 +781,31 @@ fn an_activation_asks_the_focus_only_when_the_answer_depends_on_it() {
 }
 
 #[test]
+fn an_activation_asks_the_focus_when_it_could_pick_another_display() {
+    let second = Display {
+        id: DisplayId(2),
+        frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
+        visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
+        corner: Default::default(),
+    };
+    let mut e = Env::new();
+    let actions = e.m.set_displays(vec![display(), second]);
+    e.run(actions);
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
+    e.add(meta(3, 10, "com.example.a"), RuleAction::New);
+    // One stage of app 10 elsewhere on main: the answer is that stage whatever the focus.
+    assert!(!e.m.activation_needs_focus(10));
+    // A window of it on the second display: its focus picks app_activated's display.
+    let mut m5 = meta(5, 10, "com.example.a");
+    m5.display = DisplayId(2);
+    m5.frame = Rect::new(1600.0, 100.0, 500.0, 400.0);
+    e.add(m5, RuleAction::Current);
+    assert!(e.m.activation_needs_focus(10));
+    assert!(!e.m.activation_needs_focus(11), "another app on main only");
+}
+
+#[test]
 fn an_app_with_a_pinned_window_does_not_pull_a_switch() {
     let mut e = Env::new();
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);

@@ -439,6 +439,12 @@ pub struct Controller {
     hides: hide::Hides,
     /// The corner patch's last plan sent to the main thread.
     patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
+    /// The corner patch's rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
+    patch_rect: Option<Rect>,
+    /// The patch's order as last checked (`None`: no patch or no rectangle).
+    patch_ordered: Option<bool>,
+    /// The patch was once found ordered right (logged once).
+    patch_honoured: bool,
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
@@ -588,6 +594,9 @@ impl Controller {
             arrive_now: HashSet::new(),
             hides: hide::Hides::default(),
             patch_sent: None,
+            patch_rect: None,
+            patch_ordered: None,
+            patch_honoured: false,
             unplaced: BTreeSet::new(),
             fullscreen: false,
             space_pending: false,
@@ -699,12 +708,15 @@ impl Controller {
     }
 
     /// The observation an activation's switch needs, without asking any app: the z-order
-    /// from the window server, the shown windows' frames as tracked (kept current by their
-    /// move and resize notices, which also keep the model's frames current), and the focused
-    /// window only when the switch depends on it ([`Model::activation_needs_focus`]), asked
-    /// of the activated app alone with a bounded timeout. [`Self::observe`] asked every shown
-    /// window's frame and the system-wide focus through Accessibility, which for an app busy
-    /// activating (and the one it took over from) cost most of the activation's gap (6V).
+    /// and the shown windows' frames from the window server's list (one read; a window not
+    /// listed on screen keeps its tracked frame, kept current by its move and resize
+    /// notices), and the focused window only when the switch depends on it
+    /// ([`Model::activation_needs_focus`]), asked of the activated app alone with a bounded
+    /// timeout. [`Self::observe`] asked every shown window's frame and the system-wide focus
+    /// through Accessibility, which for an app busy activating (and the one it took over
+    /// from) cost most of the activation's gap (6V). The tracked frame alone is not enough:
+    /// an app that posts no move notice would get its windows back where they were before
+    /// the user moved them (the switch keeps these frames as their restore frames).
     fn observe_activation(&self, ob: &Observer, pid: i32, needs_focus: bool) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
         let space = m.current_space(m.main_display().id);
@@ -715,10 +727,21 @@ impl Controller {
             .map(|w| WindowId(w.id))
             .filter(|id| m.window(*id).is_some())
             .collect();
+        // CG bounds are top-left global points, as AX frames are (the observer takes them
+        // as a window's frame when AX has none).
+        let listed: HashMap<u32, Rect> =
+            list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
         let frames = m
             .windows()
             .filter(|w| !w.parked && (w.space == space || w.sticky))
-            .filter_map(|w| ob.window(w.meta.id.0).map(|t| (w.meta.id, t.frame)))
+            .filter_map(|w| {
+                let tracked = ob.window(w.meta.id.0)?.frame;
+                let frame = activation_frame(tracked, listed.get(&w.meta.id.0).copied());
+                if frame != tracked {
+                    tracing::debug!(id = w.meta.id.0, %tracked, %frame, "activation: the window server's frame differs from the tracked one; it wins");
+                }
+                Some((w.meta.id, frame))
+            })
             .collect();
         let focused = if needs_focus { arrival::focused_window_of(pid) } else { None };
         Observation { frames, z_order, focused }
@@ -777,29 +800,48 @@ impl Controller {
     }
 
     /// Tells the inert-slivers tap ([`super::sliver_tap`], `[windows] inert_slivers`) the park
-    /// corner's zone and which windows sit parked (with incoming windows still held in the
-    /// corner behind a transition's snapshots).
+    /// corner's zone of each display with a parked window (the main display's always) and
+    /// which windows sit parked (with incoming windows still held in the corner behind a
+    /// transition's snapshots).
     fn publish_shield(&self) {
         let Some(m) = &self.model else { return };
         let on = self.store.config().windows.inert_slivers;
-        let d = m.main_display();
         let mut parked: HashSet<u32> =
             if on { m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect() } else { HashSet::new() };
         if on && let Some(p) = &self.pending {
             parked.extend(p.entries.keys().copied());
         }
-        let zones = if on { vec![sliver::corner_zone(d.frame, d.visible, d.corner)] } else { Vec::new() };
+        let zones = if on {
+            let mut used: Vec<DisplayId> = vec![m.main_display().id];
+            for id in &parked {
+                if let Some(w) = m.window(WindowId(*id)) {
+                    let d = m.known_display(w.meta.display);
+                    if !used.contains(&d) {
+                        used.push(d);
+                    }
+                }
+            }
+            sliver::zones(used.into_iter().map(|id| {
+                let d = m.display(id);
+                (d.frame, d.visible, d.corner)
+            }))
+        } else {
+            Vec::new()
+        };
         super::sliver_tap::publish(sliver::Shield { on, zones, parked });
     }
 
     /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
     /// it to the main thread when it changed. Reads the window server's on-screen list only
-    /// while `[windows] corner_patch` is on.
+    /// while `[windows] corner_patch` is on; checks the patch's order in it every time (an
+    /// activation raising a parked window undoes it), and has it ordered again when it was
+    /// right and is not any more.
     fn update_patch(&mut self) {
-        use crate::engine::corner_patch::{PatchFacts, patch_rect, visibility};
+        use crate::engine::corner_patch::{Listed, PatchFacts, ordered_right, patch_rect, steady_rect, visibility};
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
         let (on, reach, fps) = (config.windows.corner_patch, config.windows.corner_patch_reach, config.windows.corner_patch_fps);
+        let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
         let plan = match &self.model {
             Some(m) if on => {
                 let list = windows::on_screen();
@@ -807,13 +849,35 @@ impl Controller {
                 let parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
                 let display = m.main_display().frame;
                 let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let rect = patch_rect(&slivers, display, reach);
+                let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rect, r));
+                self.patch_rect = rect;
+                let listed: Vec<Listed> = list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds }).collect();
+                let ordered = match (patch_ui::window_number(), rect) {
+                    (Some(n), Some(r)) => Some(ordered_right(&listed, n, r, &parked)),
+                    _ => None,
+                };
+                let was_shown = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
+                if was_shown && ordered != self.patch_ordered {
+                    match ordered {
+                        Some(true) if !self.patch_honoured => {
+                            self.patch_honoured = true;
+                            tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
+                        }
+                        Some(false) if self.patch_ordered == Some(true) => {
+                            reorder = reorder.wrapping_add(1);
+                            tracing::debug!("corner patch: no longer just above the parked windows; ordered again");
+                        }
+                        _ => tracing::debug!(?ordered, "corner patch: order checked"),
+                    }
+                }
+                self.patch_ordered = ordered;
                 let now = Instant::now();
                 let facts = PatchFacts {
                     on,
                     rect,
                     overview: self.overview.showing().is_some() || self.overview.freezes(now) || self.space_pending,
-                    ordered: patch_ui::ordered(),
+                    ordered,
+                    fullscreen: self.fullscreen,
                     shown: list
                         .iter()
                         .filter(|w| w.layer == 0 && w.pid != own && w.alpha > 0.0 && !parked.contains(&w.id))
@@ -826,11 +890,13 @@ impl Controller {
                 let above = show.and_then(|r| {
                     list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
                 });
-                let mut parked: Vec<u32> = parked.into_iter().collect();
-                parked.sort_unstable();
-                PatchPlan { show, above, parked, fps }
+                PatchPlan { show, above, reorder, fps }
             }
-            _ => PatchPlan { show: None, above: None, parked: Vec::new(), fps },
+            _ => {
+                self.patch_rect = None;
+                self.patch_ordered = None;
+                PatchPlan { show: None, above: None, reorder, fps }
+            }
         };
         if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none()) {
             return;
@@ -1357,6 +1423,7 @@ impl Controller {
                 | WinEvent::AppActivated(_)
                 | WinEvent::AppHidden(_)
                 | WinEvent::AppUnhidden(_)
+                | WinEvent::AppTerminated(_)
         ) {
             self.flush_pending(ob);
         }
@@ -1460,6 +1527,7 @@ impl Controller {
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid, true),
             WinEvent::AppUnhidden(pid) => self.on_app_hidden(ob, pid, false),
+            WinEvent::AppTerminated(pid) => self.app_terminated(pid),
             WinEvent::AppActivated(pid) => {
                 let waiting: Vec<u32> =
                     self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
@@ -3197,6 +3265,23 @@ fn fallback_displays() -> Vec<Display> {
     }]
 }
 
+/// A shown window's frame for an activation's switch: the window server's bounds
+/// (`listed`) when they disagree with the tracked frame by more than a point (CG rounds to
+/// whole points; an app may have moved the window without a notice), else the tracked one.
+fn activation_frame(tracked: Rect, listed: Option<Rect>) -> Rect {
+    match listed {
+        Some(cg)
+            if (cg.x - tracked.x).abs() > 1.0
+                || (cg.y - tracked.y).abs() > 1.0
+                || (cg.w - tracked.w).abs() > 1.0
+                || (cg.h - tracked.h).abs() > 1.0 =>
+        {
+            cg
+        }
+        _ => tracked,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3419,5 +3504,20 @@ mod tests {
         );
         assert!(!drag_plausible(title_bar, frame, Some(title_bar)), "the pointer has not moved");
         assert!(!drag_plausible(title_bar, None, Some(Point::new(230.0, 120.0))), "not shown at the press");
+    }
+
+    #[test]
+    fn an_activation_takes_the_window_servers_frame_when_the_tracked_one_is_stale() {
+        let tracked = Rect::new(100.0, 200.0, 800.0, 600.0);
+        // An app that moved its window without a notice: the window server's bounds win.
+        let moved = Rect::new(400.0, 260.0, 800.0, 600.0);
+        assert_eq!(activation_frame(tracked, Some(moved)), moved);
+        let resized = Rect::new(100.0, 200.0, 900.0, 600.0);
+        assert_eq!(activation_frame(tracked, Some(resized)), resized);
+        // CG's whole points against a fractional AX frame: the exact tracked one stays.
+        let exact = Rect::new(100.5, 200.25, 800.0, 599.5);
+        assert_eq!(activation_frame(exact, Some(tracked)), exact);
+        // Not listed on screen: the tracked frame.
+        assert_eq!(activation_frame(tracked, None), tracked);
     }
 }

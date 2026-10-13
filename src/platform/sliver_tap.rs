@@ -12,7 +12,9 @@
 //! passes after a few rectangle tests. Only a press inside a zone reads the window server's
 //! on-screen list to find the topmost window there. A swallowed press swallows its drags and
 //! its release ([`PressGate`]); each one is logged with what it cost. A tap macOS switched off
-//! (a timeout, user input) is switched on again at once.
+//! (a timeout, user input) is switched on again at once. A window not parked that covers a
+//! whole zone takes every press there (the tap passes them); if it lets clicks through (an
+//! overlay), the slivers under it stay pressable: noted in the log once ([`zone_owner`]).
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -27,13 +29,15 @@ use objc2_core_graphics::{
 
 use super::windows;
 use crate::engine::geometry::Point;
-use crate::engine::sliver::{Button, Listed, Press, PressGate, Shield};
+use crate::engine::sliver::{Button, Listed, Press, PressGate, Shield, zone_owner};
 
 static SHIELD: Mutex<Option<Shield>> = Mutex::new(None);
 /// Only the tap thread uses it.
 static GATE: Mutex<PressGate> = Mutex::new(PressGate::new());
 static PORT: AtomicPtr<CFMachPort> = AtomicPtr::new(std::ptr::null_mut());
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// A window owning a whole zone was noted in the log (once a run).
+static OWNER_NOTED: AtomicBool = AtomicBool::new(false);
 
 /// Hands the tap what it needs to judge a press: whether the shield is on, the corner zones
 /// and the parked windows. Cheap; call after every change. Starts the tap the first time the
@@ -143,13 +147,41 @@ fn on_sliver(at: Point) -> bool {
     };
     let Some(shield) = shield else { return false };
     let started = Instant::now();
-    let hit = shield.hits(&listed(), at, std::process::id() as i32);
+    let own = std::process::id() as i32;
+    let list = listed();
+    let hit = shield.hits(&list, at, own);
     let took_us = started.elapsed().as_micros() as u64;
     match hit {
         Some(id) => tracing::info!(id, x = at.x, y = at.y, took_us, "inert slivers: a press on a parked window's sliver swallowed"),
-        None => tracing::debug!(x = at.x, y = at.y, took_us, "inert slivers: a press in the corner, not on a sliver: passed"),
+        None => {
+            tracing::debug!(x = at.x, y = at.y, took_us, "inert slivers: a press in the corner, not on a sliver: passed");
+            note_zone_owner(&shield, &list, at, own);
+        }
     }
     hit.is_some()
+}
+
+/// Logs once a run a window not parked that covers the whole zone of a passed press.
+fn note_zone_owner(shield: &Shield, list: &[Listed], at: Point, own: i32) {
+    if OWNER_NOTED.load(Ordering::Relaxed) {
+        return;
+    }
+    let owner = shield
+        .zones
+        .iter()
+        .filter(|z| at.x >= z.x && at.x < z.max_x() && at.y >= z.y && at.y < z.max_y())
+        .find_map(|z| zone_owner(list, *z, own, &shield.parked).map(|w| (*z, w)));
+    if let Some((zone, w)) = owner
+        && !OWNER_NOTED.swap(true, Ordering::Relaxed)
+    {
+        tracing::info!(
+            id = w.id,
+            pid = w.pid,
+            bounds = %w.bounds,
+            zone = %zone,
+            "inert slivers: a window not parked covers the whole corner zone; presses there are its (one that lets clicks through leaves the slivers under it pressable). Noted once"
+        );
+    }
 }
 
 unsafe extern "C-unwind" fn callback(

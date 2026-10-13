@@ -42,6 +42,32 @@ pub fn corner_zone(frame: Rect, visible: Rect, corner: Corner) -> Rect {
     }
 }
 
+/// The zones of every display in use (`displays`: each one's frame, visible frame and park
+/// corner), one per display and corner, without repeats.
+pub fn zones(displays: impl IntoIterator<Item = (Rect, Rect, Corner)>) -> Vec<Rect> {
+    let mut out: Vec<Rect> = Vec::new();
+    for (frame, visible, corner) in displays {
+        let z = corner_zone(frame, visible, corner);
+        if !out.contains(&z) {
+            out.push(z);
+        }
+    }
+    out
+}
+
+/// The topmost window (our own and transparent ones seen through) that covers the whole of
+/// `zone` and is not parked: while it is there, every press in the zone is its, so the tap
+/// passes them all; one that lets clicks through (an overlay) leaves the slivers under it
+/// pressable. Worth a note in the log.
+pub fn zone_owner(front_to_back: &[Listed], zone: Rect, own_pid: i32, parked: &HashSet<u32>) -> Option<Listed> {
+    front_to_back
+        .iter()
+        .copied()
+        .filter(|w| w.pid != own_pid && w.alpha > 0.0)
+        .find(|w| w.bounds.intersect(&zone).is_some())
+        .filter(|w| !parked.contains(&w.id) && w.bounds.contains_rect(&zone))
+}
+
 /// A window on screen at a press, as the window server lists it (front to back).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Listed {
@@ -73,7 +99,7 @@ fn contains(r: Rect, p: Point) -> bool {
 pub struct Shield {
     /// `[windows] inert_slivers`, and the app managing windows.
     pub on: bool,
-    /// The corner zones of the main display ([`corner_zone`]).
+    /// The corner zones of every display with a parked window ([`zones`]).
     pub zones: Vec<Rect>,
     /// Windows parked now (every Space: the shown one's are the ones on screen).
     pub parked: HashSet<u32>,
@@ -263,6 +289,38 @@ mod tests {
                 assert!(zone.h <= MAIN.h / 4.0, "{corner:?}: a small zone {zone:?}");
             }
         }
+    }
+
+    #[test]
+    fn each_display_in_use_has_its_zone_once() {
+        let second = Rect::new(2560.0, 0.0, 1920.0, 1080.0);
+        let z = zones([
+            (MAIN, VISIBLE, Corner::BottomRight),
+            (second, second, Corner::BottomLeft),
+            (MAIN, VISIBLE, Corner::BottomRight),
+        ]);
+        assert_eq!(z.len(), 2, "{z:?}");
+        assert!(z[1].x >= second.x && z[1].max_x() <= second.x + PARK_MARGIN, "the second display's own corner: {z:?}");
+        let s = Shield { on: true, zones: z, parked: [7].into() };
+        assert!(s.may_hit(Point::new(2560.5, 1075.0)), "a press in the second display's corner is judged");
+        assert!(s.may_hit(Point::new(2559.5, 1430.0)));
+    }
+
+    #[test]
+    fn a_window_over_the_whole_zone_owns_it() {
+        let zone = corner_zone(MAIN, VISIBLE, Corner::BottomRight);
+        let parked: HashSet<u32> = [7].into();
+        let overlay = Listed { id: 3, pid: 50, bounds: MAIN, alpha: 1.0 };
+        assert_eq!(zone_owner(&[overlay, sliver(7, 52.0)], zone, OWN, &parked), Some(overlay));
+        // Seen through: ours, transparent ones.
+        let ours = Listed { pid: OWN, ..overlay };
+        let clear = Listed { alpha: 0.0, ..overlay };
+        assert_eq!(zone_owner(&[ours, clear, sliver(7, 52.0)], zone, OWN, &parked), None);
+        // A window over part of it, or a sliver on top: nobody owns the zone.
+        let part = Listed { id: 4, pid: 51, bounds: Rect::new(2000.0, 1300.0, 560.0, 100.0), alpha: 1.0 };
+        assert_eq!(zone_owner(&[part, overlay], zone, OWN, &parked), None);
+        assert_eq!(zone_owner(&[sliver(7, 52.0), overlay], zone, OWN, &parked), None);
+        assert_eq!(zone_owner(&[], zone, OWN, &parked), None);
     }
 
     #[test]

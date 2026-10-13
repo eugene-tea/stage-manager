@@ -974,9 +974,14 @@ impl Model {
     /// sit in more than one inactive stage of the shown Space, or, showing one app's windows
     /// at a time, it has a window here and one in an inactive stage. Otherwise the answer is
     /// the same whatever the focus, so the platform need not ask the app (busy activating)
-    /// for it.
+    /// for it. The display is [`Self::app_activated`]'s own ([`Self::current_display`]):
+    /// without a focus that is the main display, so an app with a window on another display
+    /// (whose focus would move the answer there) needs the focus too.
     pub fn activation_needs_focus(&self, pid: Pid) -> bool {
-        let display = self.displays[0].id;
+        let display = self.current_display(&Observation::default());
+        if self.windows.values().any(|w| w.meta.pid == pid && self.known_display(w.meta.display) != display) {
+            return true;
+        }
         let space = self.current_space(display);
         let Some(&active) = self.active.get(&space) else { return true };
         let present = self.windows.values().any(|w| {

@@ -17,12 +17,15 @@
 //!   app is ours no more; the activation's switch follows as for any app (its windows already
 //!   in place count as arriving at once). An in-place window the switch did not bring (the
 //!   focus picked another stage, or no switch came: Show All) goes to the corner a moment
-//!   later ([`RECONCILE_AFTER`]).
+//!   later ([`RECONCILE_AFTER`]), once no activation of the app is held and no switch is
+//!   running ([`reconcile_due`]).
 //! - **The user's hides** are never adopted (an app hidden already is never "ours") and
 //!   never undone. Finder is never hidden.
-//! - **Safety**: every app we hid is recorded ([`safety::set_hidden`]) in the parked file;
-//!   every unpark path unhides it (quit through the batch above, the panic hook, the signals,
-//!   the guardian).
+//! - **Safety**: every app we hid is recorded ([`safety::set_hidden`]) in the parked file
+//!   before it is asked to hide, and stays recorded until our unhide returns (a crash in
+//!   between leaves it listed); every unpark path unhides it (quit through the batch above,
+//!   the panic hook, the signals, the guardian), each only while the pid still runs the same
+//!   bundle. An app that quits is forgotten at once ([`Controller::app_terminated`]).
 //! - **Space checks** count an app we hid, or just unhid (its windows not on screen yet), as
 //!   hidden ([`Controller::counts_hidden`]), so its windows never look as if they left the
 //!   Desktop.
@@ -33,6 +36,7 @@ use std::time::{Duration, Instant};
 use super::Controller;
 use crate::engine::geometry::Point;
 use crate::engine::hide::{HideFacts, may_hide};
+use crate::engine::focus_replay::Wanted;
 use crate::engine::model::{Action, WindowId};
 use crate::platform::observe::Observer;
 use crate::platform::windows::{self, FINDER_BUNDLE_ID};
@@ -47,6 +51,11 @@ const UNHIDE_ECHO: Duration = Duration::from_secs(1);
 /// After macOS unhid an app of ours: when its in-place windows the switch left parked go to
 /// the corner.
 const RECONCILE_AFTER: Duration = Duration::from_millis(150);
+/// The Accessibility timeout for the moves this module makes on its own (in place, back to
+/// the corner): an app that does not answer must not hold the WM thread up. As
+/// `arrival`'s query timeout; the app goes back to the global timeout right after
+/// ([`crate::platform::ax::AxElement::bounded`]).
+const HIDE_AX_TIMEOUT_SECONDS: f32 = 0.05;
 /// A window smaller than this (either side) does not count as an unmanaged window of an app
 /// (helper and offscreen utility windows).
 const UNMANAGED_MIN: f64 = 50.0;
@@ -66,6 +75,9 @@ pub(super) struct Ours {
 #[derive(Debug, Default)]
 pub(super) struct Hides {
     ours: BTreeMap<i32, Ours>,
+    /// Apps a batch is bringing back (out of `ours`), still recorded until our unhide of
+    /// each returns ([`Controller::after_batch_hides`]): their bundle ids.
+    taking: BTreeMap<i32, String>,
     refused: HashMap<i32, Instant>,
     unhiding: HashMap<i32, Instant>,
     reconcile: Vec<(i32, BTreeSet<u32>, Instant)>,
@@ -76,6 +88,43 @@ impl Hides {
     pub(super) fn ours(&self, pid: i32) -> bool {
         self.ours.contains_key(&pid)
     }
+
+    /// What the parked file lists: the apps we hid, and those a batch is unhiding.
+    fn recorded(&self) -> BTreeMap<i32, String> {
+        let mut out: BTreeMap<i32, String> = self.taking.clone();
+        out.extend(self.ours.iter().map(|(&pid, o)| (pid, o.bundle.clone())));
+        out
+    }
+
+    /// Moves app `pid` from ours to the batch's unhides; its in-place windows.
+    fn take_for_batch(&mut self, pid: i32) -> Option<BTreeSet<u32>> {
+        let o = self.ours.remove(&pid)?;
+        self.taking.insert(pid, o.bundle);
+        Some(o.in_place)
+    }
+
+    /// App `pid` quit: nothing of it is ours any more (its pid may come back as another
+    /// app's). True when something was forgotten that the parked file listed.
+    fn forget(&mut self, pid: i32) -> bool {
+        let listed = self.ours.remove(&pid).is_some() | self.taking.remove(&pid).is_some();
+        self.refused.remove(&pid);
+        self.unhiding.remove(&pid);
+        self.reconcile.retain(|(p, _, _)| *p != pid);
+        listed
+    }
+}
+
+/// Whether an app's in-place windows that macOS's unhide left behind go to the corner now:
+/// [`RECONCILE_AFTER`] has passed since the unhide, no activation of the app is held (its
+/// switch may still bring them) and no switch's transition is running.
+pub(super) fn reconcile_due(waited: Duration, held: bool, transition: bool) -> bool {
+    waited >= RECONCILE_AFTER && !held && !transition
+}
+
+/// Whether pid's running app (`now`: its bundle id) is still the one we hid (`recorded`): a
+/// pid macOS gave to another app since is never unhidden.
+pub(super) fn same_app(now: Option<&str>, recorded: &str) -> bool {
+    now.is_some_and(|b| b == recorded)
 }
 
 impl Controller {
@@ -86,7 +135,15 @@ impl Controller {
     }
 
     fn record_hides(&self) {
-        safety::set_hidden(self.hides.ours.iter().map(|(&pid, o)| (pid, o.bundle.clone())).collect());
+        safety::set_hidden(self.hides.recorded());
+    }
+
+    /// App `pid` quit (NSWorkspace): forgets it in every list, and in the parked file.
+    pub(super) fn app_terminated(&mut self, pid: i32) {
+        if self.hides.forget(pid) {
+            tracing::info!(pid, "hide: an app we hid quit; forgotten");
+            self.record_hides();
+        }
     }
 
     /// Every tick: confirms hides asked, moves the kept windows of confirmed ones in place,
@@ -121,7 +178,7 @@ impl Controller {
                     for (id, frame) in keep {
                         let Some(w) = ob.window(id) else { continue };
                         self.echoes.touch_window(id, now);
-                        match w.element.set_frame(frame) {
+                        match w.element.bounded(HIDE_AX_TIMEOUT_SECONDS, |e| e.set_frame(frame)) {
                             Ok(()) => {
                                 in_place.insert(id);
                             }
@@ -166,7 +223,6 @@ impl Controller {
         let managed: HashSet<u32> = m.windows().map(|w| w.meta.id.0).collect();
         // Read once, and only when an app passes every cheap test first.
         let mut list: Option<Vec<windows::CgWindow>> = None;
-        let mut asked = false;
         for pid in candidates {
             let bundle = ob.bundle_id(pid).map(String::from).or_else(|| apps::bundle_of(pid)).unwrap_or_default();
             let waiting = self.unplaced.iter().filter(|id| ob.window(**id).is_some_and(|w| w.pid == pid)).count();
@@ -191,26 +247,27 @@ impl Controller {
             }
             match may_hide(&facts) {
                 Ok(()) => {
+                    // Recorded before macOS is asked: a crash right after the hide still
+                    // finds it in the parked file.
+                    self.hides.ours.insert(pid, Ours { bundle: bundle.clone(), asked: now, confirmed: false, in_place: BTreeSet::new() });
+                    self.record_hides();
                     let ok = apps::hide(pid);
                     tracing::info!(pid, bundle, ok, "hide: every window of the app is parked; hiding it");
-                    if ok {
-                        self.hides.ours.insert(pid, Ours { bundle, asked: now, confirmed: false, in_place: BTreeSet::new() });
-                        asked = true;
-                    } else {
+                    if !ok {
+                        self.hides.ours.remove(&pid);
                         self.hides.refused.insert(pid, now);
+                        self.record_hides();
                     }
                 }
                 Err(why) => tracing::trace!(pid, bundle, why, "hide: the app stays parked"),
             }
         }
-        if asked {
-            self.record_hides();
-        }
     }
 
     /// Before a batch runs: the apps we hid that it brings a window of back (a `SetFrame`,
     /// a focus) are ours no more; their in-place windows the model still counts parked go to
-    /// the corner first, unseen. Returns those apps, for [`Self::after_batch_hides`].
+    /// the corner first, unseen. They stay recorded until [`Self::after_batch_hides`] has
+    /// unhidden them. Returns those apps, for it.
     pub(super) fn before_batch_hides(&mut self, ob: &Observer, actions: &[Action]) -> Vec<i32> {
         if self.hides.ours.is_empty() {
             return Vec::new();
@@ -225,23 +282,31 @@ impl Controller {
             .collect();
         let now = Instant::now();
         for &pid in &touched {
-            let Some(o) = self.hides.ours.remove(&pid) else { continue };
-            self.repark(ob, pid, &o.in_place, now);
-        }
-        if !touched.is_empty() {
-            self.record_hides();
+            let Some(in_place) = self.hides.take_for_batch(pid) else { continue };
+            self.repark(ob, pid, &in_place, now);
         }
         touched.into_iter().collect()
     }
 
-    /// After a batch: unhides the apps [`Self::before_batch_hides`] took back.
+    /// After a batch: unhides the apps [`Self::before_batch_hides`] took back (each only while
+    /// its pid still runs the bundle we hid), then records them as ours no more.
     pub(super) fn after_batch_hides(&mut self, pids: Vec<i32>) {
+        if pids.is_empty() {
+            return;
+        }
         let now = Instant::now();
         for pid in pids {
-            let ok = apps::unhide(pid);
-            self.hides.unhiding.insert(pid, now);
-            tracing::info!(pid, ok, "hide: a window of an app we hid comes back; unhiding it");
+            let Some(bundle) = self.hides.taking.get(&pid).cloned() else { continue };
+            if same_app(apps::bundle_of(pid).as_deref(), &bundle) {
+                let ok = apps::unhide(pid);
+                self.hides.unhiding.insert(pid, now);
+                tracing::info!(pid, ok, "hide: a window of an app we hid comes back; unhiding it");
+            } else {
+                tracing::info!(pid, bundle, "hide: an app we hid is gone (or its pid is another app's); not unhidden");
+            }
+            self.hides.taking.remove(&pid);
         }
+        self.record_hides();
     }
 
     /// Sends app `pid`'s in-place windows the model counts parked to the corner.
@@ -255,7 +320,7 @@ impl Controller {
         for (id, at) in moves {
             let Some(w) = ob.window(id) else { continue };
             self.echoes.touch_window(id, now);
-            match w.element.set_position(at) {
+            match w.element.bounded(HIDE_AX_TIMEOUT_SECONDS, |e| e.set_position(at)) {
                 Ok(()) => tracing::debug!(pid, id, "hide: an in-place window this switch leaves goes to the corner"),
                 Err(e) => tracing::warn!(pid, id, "hide: an in-place window cannot go to the corner: {e}"),
             }
@@ -287,8 +352,14 @@ impl Controller {
     }
 
     fn reconcile(&mut self, ob: &Observer, now: Instant) {
-        let (due, later): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.hides.reconcile).into_iter().partition(|(_, _, t)| now.duration_since(*t) >= RECONCILE_AFTER);
+        if self.hides.reconcile.is_empty() {
+            return;
+        }
+        let held = self.focus_replay.peek(now).map(Wanted::pid);
+        let transition = self.pending.is_some();
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.hides.reconcile)
+            .into_iter()
+            .partition(|(pid, _, t)| reconcile_due(now.duration_since(*t), held == Some(*pid), transition));
         self.hides.reconcile = later;
         for (pid, in_place, _) in due {
             self.repark(ob, pid, &in_place, now);
@@ -300,12 +371,15 @@ impl Controller {
     fn unhide_all(&mut self, ob: &Observer) {
         let now = Instant::now();
         let all: Vec<(i32, Ours)> = std::mem::take(&mut self.hides.ours).into_iter().collect();
-        for (pid, o) in all {
-            self.repark(ob, pid, &o.in_place, now);
-            let ok = apps::unhide(pid);
-            self.hides.unhiding.insert(pid, now);
-            tracing::info!(pid, ok, "hide: unhidden");
+        for (pid, o) in &all {
+            self.repark(ob, *pid, &o.in_place, now);
+            if same_app(apps::bundle_of(*pid).as_deref(), &o.bundle) {
+                let ok = apps::unhide(*pid);
+                self.hides.unhiding.insert(*pid, now);
+                tracing::info!(pid, ok, "hide: unhidden");
+            }
         }
+        // Recorded once the unhides returned.
         self.record_hides();
     }
 
@@ -320,5 +394,65 @@ impl Controller {
             })
             .filter(|id| ob.window(*id).is_some_and(|w| self.hides.ours(w.pid)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ours(bundle: &str) -> Ours {
+        Ours { bundle: bundle.into(), asked: Instant::now(), confirmed: true, in_place: [7, 8].into() }
+    }
+
+    #[test]
+    fn a_batch_s_unhide_stays_recorded_until_it_returns() {
+        let mut h = Hides::default();
+        h.ours.insert(10, ours("com.example.alpha"));
+        h.ours.insert(11, ours("com.example.bravo"));
+        let in_place = h.take_for_batch(10).expect("ours");
+        assert_eq!(in_place, [7, 8].into());
+        assert!(!h.ours(10), "ours no more for the batch's rules");
+        let rec = h.recorded();
+        assert_eq!(rec.get(&10).map(String::as_str), Some("com.example.alpha"), "still in the parked file");
+        assert_eq!(rec.len(), 2);
+        assert_eq!(h.take_for_batch(10), None, "taken once");
+        h.taking.remove(&10);
+        assert_eq!(h.recorded().keys().copied().collect::<Vec<_>>(), vec![11]);
+    }
+
+    #[test]
+    fn a_quit_app_is_forgotten_everywhere() {
+        let mut h = Hides::default();
+        let now = Instant::now();
+        h.ours.insert(10, ours("com.example.alpha"));
+        h.taking.insert(12, "com.example.charlie".into());
+        h.refused.insert(10, now);
+        h.unhiding.insert(10, now);
+        h.reconcile.push((10, [7].into(), now));
+        h.reconcile.push((11, [9].into(), now));
+        assert!(h.forget(10));
+        assert!(!h.ours(10) && h.refused.is_empty() && h.unhiding.is_empty());
+        assert_eq!(h.reconcile.len(), 1, "another app's reconcile stays");
+        assert!(h.forget(12), "one a batch was unhiding");
+        assert!(!h.forget(13), "never ours: nothing listed changes");
+        assert!(h.recorded().is_empty());
+    }
+
+    #[test]
+    fn a_reused_pid_is_never_unhidden() {
+        assert!(same_app(Some("com.example.alpha"), "com.example.alpha"));
+        assert!(!same_app(Some("com.example.other"), "com.example.alpha"));
+        assert!(!same_app(None, "com.example.alpha"), "gone");
+    }
+
+    #[test]
+    fn reconcile_waits_for_a_held_activation_and_a_running_switch() {
+        let late = RECONCILE_AFTER + Duration::from_millis(1);
+        assert!(!reconcile_due(Duration::from_millis(10), false, false), "too soon");
+        assert!(reconcile_due(late, false, false));
+        assert!(!reconcile_due(late, true, false), "its activation is held");
+        assert!(!reconcile_due(late, false, true), "a switch is running");
+        assert!(reconcile_due(late * 20, false, false), "later, once both are done");
     }
 }
