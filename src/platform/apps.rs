@@ -16,7 +16,9 @@ use objc2_app_kit::{
     NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
     NSWorkspaceDidUnhideApplicationNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue};
+use objc2_foundation::{
+    NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue, NSString,
+};
 use serde::Serialize;
 
 /// A running application.
@@ -142,6 +144,19 @@ pub fn observe_space_changes(sink: impl Fn() + 'static) -> WorkspaceObservers {
         )
     };
     WorkspaceObservers { center, tokens: vec![token] }
+}
+
+/// Observes `AppleInterfaceThemeChangedNotification` (the distributed notification macOS
+/// posts when Light, Dark or Auto flips the appearance) on the main queue; calls `sink`
+/// each time. The app's effective appearance may still be the old one at the call.
+pub fn observe_appearance(sink: impl Fn() + 'static) -> WorkspaceObservers {
+    let center = NSDistributedNotificationCenter::defaultCenter();
+    let main_queue = NSOperationQueue::mainQueue();
+    let block = RcBlock::new(move |_note: NonNull<NSNotification>| sink());
+    let name = NSString::from_str("AppleInterfaceThemeChangedNotification");
+    // SAFETY: the block runs on the main queue only, where `sink` lives.
+    let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(&name), None, Some(&main_queue), &block) };
+    WorkspaceObservers { center: center.into_super(), tokens: vec![token] }
 }
 
 fn running_app_of(note: &NSNotification) -> Option<Retained<NSRunningApplication>> {

@@ -7,7 +7,9 @@ use std::ffi::c_void;
 use std::fmt;
 use std::ptr::NonNull;
 
-use objc2_application_services::{AXError as RawAxError, AXObserver, AXUIElement, AXValue, AXValueType};
+use objc2_application_services::{
+    AXCopyMultipleAttributeOptions, AXError as RawAxError, AXObserver, AXUIElement, AXValue, AXValueType,
+};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
     CGSize, kCFRunLoopDefaultMode,
@@ -290,6 +292,29 @@ impl AxElement {
         Ok(Rect::from_parts(self.position()?, self.size()?))
     }
 
+    /// `AXRole`, `AXPosition` and `AXSize` in one message
+    /// (`AXUIElementCopyMultipleAttributeValues`): the role, and the frame when the element
+    /// has one (an attribute it lacks comes back as an error value, read as no frame).
+    pub fn role_and_frame(&self) -> AxResult<(String, Option<Rect>)> {
+        let attrs = [names::ROLE, names::POSITION, names::SIZE].map(CFString::from_static_str);
+        let attrs = CFArray::from_retained_objects(&attrs);
+        let mut out: *const CFArray = std::ptr::null();
+        // SAFETY: an array of attribute-name strings and a valid out pointer; on success it
+        // holds a +1 reference to an array of the values, in order.
+        let code = unsafe {
+            self.0.copy_multiple_attribute_values(attrs.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut out))
+        };
+        AxError::check(code)?;
+        let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
+        // SAFETY: the Copy rule hands us ownership of one reference to a CFArray of CF values.
+        let values: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(ptr)) };
+        let role = values.get(0).and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string())).ok_or(AxError::WrongType(names::ROLE))?;
+        let position: Option<CGPoint> = values.get(1).and_then(|v| ax_value(&v, AXValueType::CGPoint));
+        let size: Option<CGSize> = values.get(2).and_then(|v| ax_value(&v, AXValueType::CGSize));
+        let frame = position.zip(size).map(|(p, s)| Rect::new(p.x, p.y, s.width, s.height));
+        Ok((role, frame))
+    }
+
     /// `AXWindows` of an application element.
     pub fn windows(&self) -> AxResult<Vec<AxElement>> {
         let v = self.attribute(names::WINDOWS)?;
@@ -455,6 +480,17 @@ impl AxElement {
         AxError::check(unsafe { _AXUIElementGetWindow(&self.0, &mut id) })?;
         if id == 0 { Err(AxError::NO_VALUE) } else { Ok(id) }
     }
+}
+
+/// `v` as an `AXValue` of `kind` (`CGPoint`/`CGSize`); `None` for anything else (an error
+/// value included).
+fn ax_value<T: Default>(v: &CFType, kind: AXValueType) -> Option<T> {
+    let value = v.downcast_ref::<AXValue>()?;
+    let mut out = T::default();
+    // SAFETY: `out` has the C layout of `kind` (CGPoint/CGSize) and is writable; the call
+    // checks the value's type and writes nothing on a mismatch.
+    let ok = unsafe { value.value(kind, NonNull::from(&mut out).cast::<c_void>()) };
+    ok.then_some(out)
 }
 
 /// The C callback type of an observer.

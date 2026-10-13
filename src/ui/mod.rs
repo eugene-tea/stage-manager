@@ -10,6 +10,7 @@ pub mod glyph;
 pub mod motion_math;
 pub mod overlay;
 pub mod panels;
+pub mod patch_probe;
 pub mod preview;
 pub mod settings_window;
 pub mod shell;

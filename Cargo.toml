@@ -33,11 +33,8 @@ objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 objc2-screen-capture-kit = "0.3"
 objc2-quartz-core = "0.3"
-# The wallpaper corner patch's live capture: SCStream frames (CMSampleBuffer) shown as
-# their IOSurfaces.
-objc2-core-media = "0.3"
-objc2-core-video = { version = "0.3", features = ["objc2-io-surface"] }
-objc2-io-surface = "0.3"
+# The wallpaper corner patch: the desktop picture's frames and metadata, read from its file.
+objc2-image-io = "0.3"
 block2 = "0.6"
 dispatch2 = "0.3"
 # SMAppService: launch at login.

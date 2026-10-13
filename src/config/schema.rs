@@ -319,11 +319,9 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "hide_parked_apps", Kind::Bool, "false",
         "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
     k("windows", "corner_patch", Kind::Bool, "false",
-        "Cover the parked windows' slivers with a live picture of the desktop under them (wallpaper, desktop icons, widgets; Screen Recording). A prototype: off by default."),
+        "Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture); off while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. A prototype: off by default."),
     k("windows", "corner_patch_reach", f(0.0, 400.0), "60.0",
         "How far past a sliver the corner patch reaches, in points, to cover its shadow."),
-    k("windows", "corner_patch_fps", i(1, 60), "10",
-        "Most frames a second of the corner patch's live picture (a still wallpaper sends none)."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]
@@ -359,11 +357,14 @@ pub const KEYS: &[KeyDef] = &[
 pub const RULE_KEYS: &[&str] = &["app", "title", "action", "placement"];
 
 /// Keys from earlier versions that are no longer read, with what replaced them.
-pub const RETIRED: &[(&str, &str, &str)] = &[(
-    "stages",
-    "fit_windows",
-    "it is ignored; [windows] fit = \"off\", \"move\" or \"narrow\" replaced it",
-)];
+pub const RETIRED: &[(&str, &str, &str)] = &[
+    ("stages", "fit_windows", "it is ignored; [windows] fit = \"off\", \"move\" or \"narrow\" replaced it"),
+    (
+        "windows",
+        "corner_patch_fps",
+        "it is ignored; the corner patch draws the wallpaper from its file, with no live capture",
+    ),
+];
 
 /// A key by `section.key` path.
 pub fn find(path: &str) -> Option<&'static KeyDef> {
@@ -476,6 +477,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-6.toml"),
     include_str!("legacy/default-7.toml"),
     include_str!("legacy/default-8.toml"),
+    include_str!("legacy/default-9.toml"),
 ];
 
 #[cfg(test)]
