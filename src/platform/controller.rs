@@ -375,6 +375,10 @@ fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>) -> 
     }
 }
 
+/// After a wallpaper click left to macOS's reveal, how long a check finding every window on
+/// screen waits before the reveal counts as over (macOS slides them away over a moment).
+const MACOS_REVEAL_SETTLE: Duration = Duration::from_secs(3);
+
 /// How often unrestored windows are checked and retried.
 const UNRESTORED_RETRY: Duration = Duration::from_secs(1);
 
@@ -450,6 +454,11 @@ pub struct Controller {
     unrestored: BTreeMap<u32, Unrestored>,
     /// When the unrestored windows were last checked.
     unrestored_checked: Instant,
+    /// When a wallpaper click was left to macOS's own reveal (Show Desktop: every window slides
+    /// aside): until its windows are back, a check never counts them gone, so the reveal is
+    /// never read as a Space change (review R2 V8). Ends with a click off the wallpaper or a
+    /// Space change.
+    macos_reveal_at: Option<Instant>,
     /// Shown windows (the active stage's, pinned ones) the window server did not show at the
     /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
     /// a change seen by the once-a-second check sends a new snapshot.
@@ -541,6 +550,7 @@ impl Controller {
             unrestored: BTreeMap::new(),
             unrestored_checked: Instant::now(),
             active_off_screen: BTreeSet::new(),
+            macos_reveal_at: None,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -1394,6 +1404,9 @@ impl Controller {
                 if !wallpaper && self.desktop_echo.user_acted() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
                 }
+                if !wallpaper {
+                    self.macos_reveal_at = None;
+                }
             }
             InputKind::MouseUp => {
                 self.press = None;
@@ -1643,6 +1656,7 @@ impl Controller {
             return;
         }
         let now = Instant::now();
+        self.macos_reveal_at = None;
         self.space_changes += 1;
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
@@ -1830,6 +1844,17 @@ impl Controller {
             })
             .map(|(id, _)| id)
             .collect();
+        if let Some(at) = self.macos_reveal_at {
+            if !missing.is_empty() {
+                // macOS's own reveal slid the windows aside: they are not gone.
+                tracing::debug!(missing = missing.len(), "macOS reveals the desktop: its windows off screen are not counted");
+                self.absent.clear();
+                return;
+            }
+            if now.duration_since(at) >= MACOS_REVEAL_SETTLE {
+                self.macos_reveal_at = None;
+            }
+        }
         self.absent.retain(|id, _| missing.contains(id));
         let mut gone = Vec::new();
         for &id in &missing {
@@ -2033,11 +2058,14 @@ impl Controller {
                 tracing::info!(x = p.x, y = p.y, "wallpaper click");
                 self.reveal(ob, true);
             }
-            WallpaperClick::LeftToMacOs => tracing::info!(
-                x = p.x,
-                y = p.y,
-                "wallpaper click: macOS reveals the desktop itself (Click wallpaper to reveal desktop: Always)"
-            ),
+            WallpaperClick::LeftToMacOs => {
+                self.macos_reveal_at = Some(Instant::now());
+                tracing::info!(
+                    x = p.x,
+                    y = p.y,
+                    "wallpaper click: macOS reveals the desktop itself (Click wallpaper to reveal desktop: Always)"
+                )
+            }
             WallpaperClick::SameClick => {
                 tracing::info!(x = p.x, y = p.y, clicks, "wallpaper double click: one click, nothing toggles again")
             }
