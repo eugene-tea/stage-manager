@@ -1,18 +1,26 @@
 {
-  "_comment": "The DMG window's words. Edit here, then run `make dmg-art` (scripts/dmg-art.sh). Keep them in step with docs/APPROVALS.md and stay honest: the update check is the app's only network use.",
+  "_comment": "The DMG window's words. Edit here, then run `make dmg-art` (scripts/dmg-art.sh). Keep them in step with docs/APPROVALS.md and the app's own texts, and honest: the update check is the app's only network use.",
   "title": "Drag Stage Manager into Applications",
-  "approvals_heading": "Then open it. macOS asks you to allow two things, once:",
+  "approvals_heading": "Then open it. Stage Manager walks you through:",
   "approvals": [
+    {
+      "icon": "switch",
+      "name": "Turn off Apple’s Stage Manager",
+      "tag": "",
+      "why": "Stage Manager offers to do it for you."
+    },
     {
       "icon": "arrange",
       "name": "Accessibility",
-      "why": "To arrange your windows: it moves, hides and restores them as you switch stages."
+      "tag": "Required",
+      "why": "Lets Stage Manager move, hide and bring back your windows."
     },
     {
       "icon": "capture",
       "name": "Screen Recording",
-      "why": "For the live thumbnails in the strip. The pictures stay in memory, never on disk."
+      "tag": "Optional",
+      "why": "Live pictures of your windows on the cards. Without it, cards show plain window shapes with the app’s icon."
     }
   ],
-  "privacy": "Nothing about your windows leaves your Mac. The only thing it sends is an update check to GitHub."
+  "privacy": "Nothing about your windows leaves your Mac. Update checks: once a day, from GitHub. Nothing about you or this Mac is sent."
 }

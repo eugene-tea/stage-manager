@@ -15,10 +15,10 @@ import html
 import json
 from pathlib import Path
 
-WIDTH, HEIGHT = 680, 480
+WIDTH, HEIGHT = 680, 540
 ICON_SIZE = 112
-APP_ICON = (190, 146)  # icon centres, in window points (y down)
-APPS_ICON = (490, 146)
+APP_ICON = (190, 140)  # icon centres, in window points (y down)
+APPS_ICON = (490, 140)
 
 THEMES = {
     "light": {
@@ -43,6 +43,11 @@ THEMES = {
 
 # Small line pictures for the approval rows (24 × 24 view box), stroked in the accent colour.
 PICTURES = {
+    # A switch turned off: turning Apple's Stage Manager off.
+    "switch": (
+        '<rect x="2.5" y="7" width="19" height="10" rx="5"/>'
+        '<circle cx="7.5" cy="12" r="3" fill="currentColor" stroke="none"/>'
+    ),
     # A window with a four-way move mark: arranging windows.
     "arrange": (
         '<rect x="2.5" y="4" width="19" height="16" rx="3.5"/>'
@@ -62,11 +67,15 @@ PICTURES = {
 def page(theme: str, text: dict) -> str:
     t = THEMES[theme]
     e = html.escape
+
+    def tag(a):
+        return f' <span class="tag">{e(a["tag"])}</span>' if a.get("tag") else ""
+
     rows = "\n".join(
         f"""      <div class="row">
         <svg class="pic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
              stroke-linecap="round" stroke-linejoin="round">{PICTURES[a["icon"]]}</svg>
-        <div><div class="name">{e(a["name"])}</div><div class="why">{e(a["why"])}</div></div>
+        <div><div class="name">{e(a["name"])}{tag(a)}</div><div class="why">{e(a["why"])}</div></div>
       </div>"""
         for a in text["approvals"]
     )
@@ -82,12 +91,14 @@ def page(theme: str, text: dict) -> str:
   .title {{ position: absolute; top: 26px; width: 100%; text-align: center;
            font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }}
   .arrow {{ position: absolute; left: {arrow_from}px; top: {ay - 14}px; }}
-  .panel {{ position: absolute; left: 36px; right: 36px; top: 254px; padding: 15px 20px 13px;
+  .panel {{ position: absolute; left: 36px; right: 36px; top: 244px; padding: 15px 20px 13px;
            background: {t["panel"]}; border: 1px solid {t["panel_edge"]}; border-radius: 14px; }}
   .lead {{ font-weight: 600; margin-bottom: 10px; }}
-  .row {{ display: flex; gap: 12px; align-items: flex-start; margin: 0 0 9px; }}
+  .row {{ display: flex; gap: 12px; align-items: flex-start; margin: 0 0 8px; }}
   .pic {{ flex: none; width: 24px; height: 24px; color: {t["accent"]}; margin-top: 1px; }}
   .name {{ font-weight: 600; }}
+  .tag {{ font-weight: 500; font-size: 11px; color: {t["secondary"]}; border: 1px solid {t["panel_edge"]};
+          border-radius: 5px; padding: 0 5px; margin-left: 5px; position: relative; top: -1px; }}
   .why {{ color: {t["secondary"]}; }}
   .privacy {{ margin-top: 10px; padding-top: 9px; border-top: 1px solid {t["panel_edge"]};
              color: {t["secondary"]}; font-size: 12px; }}

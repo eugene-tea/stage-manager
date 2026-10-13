@@ -77,6 +77,9 @@
   .card { background: var(--card); border: 1px solid var(--edge); border-radius: 18px; padding: 26px 26px 24px; }
   .card h3 { font-size: 21px; line-height: 1.2; font-weight: 600; margin: 12px 0 6px; letter-spacing: 0.011em; }
   .card p { margin: 0; color: var(--secondary); font-size: 16px; }
+  .tag { margin-top: 14px; font-size: 12px; font-weight: 600; color: var(--secondary);
+         text-transform: uppercase; letter-spacing: 0.06em; }
+  .tag + h3 { margin-top: 2px; }
   .card svg { width: 34px; height: 34px; color: var(--accent); display: block; }
   .privacy { text-align: center; color: var(--secondary); max-width: 640px; margin: 32px auto 0; font-size: 16px; }
 
@@ -140,21 +143,29 @@
 
 <section>
   <div class="wrap">
-    <h2>Two approvals, and why</h2>
-    <p class="lede">The first time you open it, macOS asks you to allow two things. Each one is for a single job.</p>
+    <h2>What it asks for, and why</h2>
+    <p class="lede">The first time you open it, a small welcome window walks you through these, one row each.</p>
     <div class="grid">
       <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="7" width="19" height="10" rx="5"/><circle cx="7.5" cy="12" r="3" fill="currentColor" stroke="none"/></svg>
+        <div class="tag">Before you start</div>
+        <h3>Turn off Apple’s Stage Manager</h3>
+        <p>This one takes over from it. Stage Manager offers to turn Apple’s off for you, and moves nothing until it is off.</p>
+      </div>
+      <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="3.5"/><path d="M2.5 8.5h19"/><path d="M12 11v7M8.5 14.5h7M10.5 12.5 12 11l1.5 1.5M10.5 16.5 12 18l1.5-1.5M10 13l-1.5 1.5L10 16M14 13l1.5 1.5L14 16"/></svg>
+        <div class="tag">Required</div>
         <h3>Accessibility</h3>
-        <p>To arrange your windows: it moves, hides and restores them as you switch stages. Without it, Stage Manager waits and says so in its menu.</p>
+        <p>Lets Stage Manager move, hide and bring back your windows. Without it, nothing can be arranged; it waits until access is allowed.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="3.5"/><path d="M2.5 8.5h19"/><circle cx="12" cy="14.25" r="3" fill="currentColor" stroke="none"/></svg>
+        <div class="tag">Optional</div>
         <h3>Screen Recording</h3>
-        <p>For the live thumbnails in the strip. The pictures stay in memory, never on disk. Without it, the strip draws plain cards.</p>
+        <p>Live pictures of your windows on the cards and in switches. Without it, cards show plain window shapes with the app’s icon.</p>
       </div>
     </div>
-    <p class="privacy">Nothing about your windows leaves your Mac. The only thing Stage Manager sends is an update check to GitHub, and you can turn that off in Settings.</p>
+    <p class="privacy">Nothing about your windows leaves your Mac. Stage Manager checks for updates once a day, from GitHub; nothing about you or this Mac is sent, and Settings can turn the check off.</p>
   </div>
 </section>
 
