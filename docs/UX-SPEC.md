@@ -441,7 +441,8 @@ Ours:
    The prototype `[windows] corner_patch` (off by default) covers them with a small panel
    showing the desktop picture under them, drawn from the wallpaper's file (no screen
    capture): it stays off where that cannot be exact (videos, aerials, shuffles, Photos,
-   a dynamic picture whose style is unknown) and while a desktop icon lies under it;
+   a dynamic picture whose style is unknown; Center, Tile and Fit with no fill colour until
+   checked live) and while a desktop icon lies under it or Finder's icons are unknown;
    widgets in the corner would be covered (their places are not public).
 4. **Spaces are recognized, not named.** No public API names a Space, so Spaces are told
    apart by their windows: an empty Desktop is forgotten when left, and a Desktop whose

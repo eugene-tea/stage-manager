@@ -11,16 +11,21 @@
 //! - **Ordering.** The patch is a normal-level window ordered just above the topmost parked
 //!   window under it (`orderWindow:relativeTo:` with another app's window number). Whether
 //!   it sits right is checked afresh at every plan against the window server's list
-//!   ([`ordered_right`]): an activation raising a parked window, or a hide and show, can undo
+//!   ([`ordered_right`]), once the panel is on screen ordered against the window wanted now
+//!   ([`order_step`]): an activation raising a parked window, or a hide and show, can undo
 //!   it at any time. Ordered right, every shown window stays above the patch on its own; the
-//!   patch may show whenever slivers are there. Found wrong after being right, it is ordered
-//!   again.
-//! - **Not ordered right** (the fallback): the patch sits above every normal window there,
-//!   so it shows only while no shown window reaches its rectangle, no window is being
-//!   dragged and no switch is running ([`visibility`]).
+//!   patch may show whenever slivers are there. Not known yet (never shown, hidden, or a
+//!   new window to order against), it shows ordered against that window and is checked at
+//!   the next plan. Found wrong after being right, it is ordered again (unknown again).
+//! - **Found not ordered right** (the fallback; macOS did not honour the order): the patch
+//!   sits above every normal window there, so it shows only while no shown window reaches
+//!   its rectangle, no window is being dragged and no switch is running ([`visibility`]).
 //! - **Desktop items.** The patch draws the picture only: a Finder desktop icon under it
-//!   (read through Accessibility, [`item_reach`]) keeps it off. Widgets' places are not
-//!   public; with widgets shown on the desktop the patch would cover one in the corner (logged).
+//!   (read through Accessibility, [`desktop_icons`], [`item_reach`]) keeps it off, and so
+//!   does not knowing: no good read yet, more icons than are read ([`MAX_ICONS`]), or a tree
+//!   that is not the one expected. A read that fails keeps the last good one. Widgets'
+//!   places are not public; with widgets shown on the desktop the patch would cover one in
+//!   the corner (logged).
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
 //!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
 //!   down (nothing parked).
@@ -34,8 +39,9 @@ use super::geometry::Rect;
 pub const DEFAULT_REACH: f64 = 60.0;
 
 /// The patch's rectangle: every sliver (`slivers`: parked windows' bounds as listed) that
-/// shows on `display`, grown by `reach` on every side, kept on the display. `None` when no
-/// sliver shows.
+/// shows on `display`, grown by `reach` on every side, rounded out to whole points (so the
+/// picture's crop, whole pixels, is exactly the panel's size), kept on the display. `None`
+/// when no sliver shows.
 pub fn patch_rect(slivers: &[Rect], display: Rect, reach: f64) -> Option<Rect> {
     let reach = if reach.is_finite() { reach.clamp(0.0, 400.0) } else { DEFAULT_REACH };
     let mut out: Option<Rect> = None;
@@ -46,7 +52,13 @@ pub fn patch_rect(slivers: &[Rect], display: Rect, reach: f64) -> Option<Rect> {
             Some(u) => union(u, grown),
         });
     }
-    out.and_then(|r| r.intersect(&display))
+    out.and_then(|r| r.intersect(&display)).map(whole_points).and_then(|r| r.intersect(&display))
+}
+
+/// `r` grown to whole points on every side.
+fn whole_points(r: Rect) -> Rect {
+    let (x, y) = (r.x.floor(), r.y.floor());
+    Rect::new(x, y, r.max_x().ceil() - x, r.max_y().ceil() - y)
 }
 
 /// How much bigger (points, on any side) than needed the rectangle in use may stay.
@@ -97,6 +109,56 @@ pub fn ordered_right(front_to_back: &[Listed], patch: u32, rect: Rect, parked: &
     )
 }
 
+/// What the WM thread remembers of the patch's order between plans.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct OrderState {
+    /// The last check's answer.
+    pub last: Option<bool>,
+    /// The parked window the patch was found not ordered above after being ordered against
+    /// it (and ordered anew, where it had been right): macOS did not honour that order.
+    pub refused: Option<u32>,
+}
+
+/// One plan's knowledge of the order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrderStep {
+    /// For [`PatchFacts::ordered`].
+    pub ordered: Option<bool>,
+    /// Order the patch again (it was right and is not any more).
+    pub reorder: bool,
+}
+
+/// The order as this plan knows it: `above` the parked window to order against now,
+/// `check` [`ordered_right`] when the panel is on screen ordered against `above` with the
+/// current reorder count (`None` otherwise: not known). Right is right; wrong after right
+/// orders it again (not known until checked again); wrong otherwise is macOS refusing that
+/// order, remembered for `above` so an unknown order there falls back rather than showing
+/// the patch over windows again and again.
+pub fn order_step(state: &mut OrderState, above: Option<u32>, check: Option<bool>) -> OrderStep {
+    let Some(above) = above else {
+        state.last = None;
+        return OrderStep { ordered: None, reorder: false };
+    };
+    if state.refused.is_some_and(|r| r != above) {
+        state.refused = None;
+    }
+    match check {
+        Some(true) => {
+            *state = OrderState { last: Some(true), refused: None };
+            OrderStep { ordered: Some(true), reorder: false }
+        }
+        Some(false) if state.last == Some(true) => {
+            state.last = Some(false);
+            OrderStep { ordered: None, reorder: true }
+        }
+        Some(false) => {
+            *state = OrderState { last: Some(false), refused: Some(above) };
+            OrderStep { ordered: Some(false), reorder: false }
+        }
+        None => OrderStep { ordered: (state.refused == Some(above)).then_some(false), reorder: false },
+    }
+}
+
 /// What the patch's visibility depends on.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PatchFacts {
@@ -106,9 +168,11 @@ pub struct PatchFacts {
     pub rect: Option<Rect>,
     /// Mission Control, App Exposé or Show Desktop is up (or settling).
     pub overview: bool,
-    /// The patch is ordered right now ([`ordered_right`] on the current list); `None` before
-    /// the patch exists.
+    /// The patch's order ([`order_step`]): right, found wrong, or `None` while not known
+    /// (never shown, hidden, ordered against another window, ordered anew).
     pub ordered: Option<bool>,
+    /// A parked window lies under the patch to order it against.
+    pub can_order: bool,
     /// A full-screen app's Space shows.
     pub fullscreen: bool,
     /// Shown (not parked) normal windows on screen, any app's.
@@ -117,8 +181,9 @@ pub struct PatchFacts {
     pub dragging: bool,
     /// A switch's transition is running.
     pub transition: bool,
-    /// Finder's desktop icons with their labels ([`item_reach`]), as last read.
-    pub items: Vec<Rect>,
+    /// Finder's desktop icons with their labels ([`item_reach`]), as last read well; `None`
+    /// while they are not known (no good read yet, too many to read).
+    pub items: Option<Vec<Rect>>,
 }
 
 /// How far past a desktop icon's image (Accessibility's `AXImage` frame) its label and
@@ -129,6 +194,104 @@ pub const ITEM_REACH: (f64, f64, f64) = (36.0, 6.0, 44.0);
 pub fn item_reach(icon: Rect) -> Rect {
     let (side, above, below) = ITEM_REACH;
     Rect::new(icon.x - side, icon.y - above, icon.w + 2.0 * side, icon.h + above + below)
+}
+
+/// One element of Finder's Accessibility tree as read for [`desktop_icons`]: its role, its
+/// frame (read for icons only) and its children (read only where the desktop's icons lie).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AxNode {
+    /// `AXRole`.
+    pub role: String,
+    /// `AXPosition` and `AXSize`, where read.
+    pub frame: Option<Rect>,
+    /// The children read.
+    pub children: Vec<AxNode>,
+    /// How many children the element has (more than [`Self::children`] when not all were
+    /// read).
+    pub count: usize,
+}
+
+impl AxNode {
+    /// An element with `role` and these children (all of them read).
+    pub fn new(role: &str, children: Vec<AxNode>) -> Self {
+        Self { role: role.into(), frame: None, count: children.len(), children }
+    }
+
+    /// An icon-like element with `role` at `frame`.
+    pub fn leaf(role: &str, frame: Option<Rect>) -> Self {
+        Self { role: role.into(), frame, children: Vec::new(), count: 0 }
+    }
+}
+
+/// The most desktop icons read (one Accessibility message each); more keep the patch off.
+pub const MAX_ICONS: usize = 200;
+
+/// Accessibility roles in Finder's desktop tree.
+pub mod roles {
+    /// A display's desktop.
+    pub const SCROLL_AREA: &str = "AXScrollArea";
+    /// The desktop's icon view.
+    pub const GROUP: &str = "AXGroup";
+    /// An icon's image.
+    pub const IMAGE: &str = "AXImage";
+}
+
+/// What a read of Finder's desktop found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DesktopIcons {
+    /// Every icon's image frame (global, top-left).
+    Icons(Vec<Rect>),
+    /// More than [`MAX_ICONS`]: not read; where they lie is unknown.
+    TooMany(usize),
+    /// The tree is not the one expected: unreadable, never "no icons".
+    Unexpected(&'static str),
+}
+
+/// The desktop icons in Finder's application element's children (`app`), Finder's desktop
+/// being on (`desktop_on`, `com.apple.finder` `CreateDesktop`) or off.
+///
+/// Expected: one `AXScrollArea` per display's desktop, holding an `AXGroup` (the icon
+/// view; scroll bars are other children) whose `AXImage` children are the icons. With the
+/// desktop on and no scroll area, a scroll area with no icon view, or an icon view with
+/// children none of which is an image, the tree is unexpected. An empty icon view is an
+/// empty desktop.
+pub fn desktop_icons(desktop_on: bool, app: &[AxNode]) -> DesktopIcons {
+    let areas: Vec<&AxNode> = app.iter().filter(|n| n.role == roles::SCROLL_AREA).collect();
+    if areas.is_empty() {
+        return if desktop_on { DesktopIcons::Unexpected("Finder lists no desktop") } else { DesktopIcons::Icons(Vec::new()) };
+    }
+    let mut icons = Vec::new();
+    let mut total = 0;
+    for area in areas {
+        let views: Vec<&AxNode> = area.children.iter().filter(|n| n.role == roles::GROUP).collect();
+        if views.is_empty() {
+            return DesktopIcons::Unexpected("a desktop with no icon view");
+        }
+        for view in views {
+            total += view.count;
+            if total > MAX_ICONS || view.children.len() < view.count {
+                return DesktopIcons::TooMany(total.max(MAX_ICONS + 1));
+            }
+            let images: Vec<&AxNode> = view.children.iter().filter(|n| n.role == roles::IMAGE).collect();
+            if images.is_empty() && !view.children.is_empty() {
+                return DesktopIcons::Unexpected("the desktop's icon view lists no icon images");
+            }
+            for image in images {
+                match image.frame {
+                    Some(f) if !f.is_degenerate() => icons.push(f),
+                    Some(_) => {}
+                    None => return DesktopIcons::Unexpected("a desktop icon with no frame"),
+                }
+            }
+        }
+    }
+    DesktopIcons::Icons(icons)
+}
+
+/// Whether Finder draws the desktop (`com.apple.finder` `CreateDesktop`, as text: absent is
+/// on; `defaults write` without a type stores the text `false`).
+pub fn finder_desktop_on(raw: Option<&str>) -> bool {
+    !raw.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
 }
 
 /// Whether the patch shows, and why not.
@@ -143,13 +306,18 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
     if f.fullscreen {
         return Err("a full-screen Space shows");
     }
-    if f.items.iter().any(|i| i.intersect(&rect).is_some()) {
+    let Some(items) = &f.items else { return Err("Finder's desktop icons are not known") };
+    if items.iter().any(|i| i.intersect(&rect).is_some()) {
         return Err("a desktop icon lies under the corner");
     }
-    if f.ordered == Some(true) {
-        return Ok(rect);
+    match f.ordered {
+        Some(true) => return Ok(rect),
+        // Shown ordered against the parked window; checked at the next plan.
+        None if f.can_order => return Ok(rect),
+        _ => {}
     }
-    // Above every normal window: only where none reaches, and never while windows move.
+    // Found above every normal window (or nothing to order against): only where none
+    // reaches, and never while windows move.
     if f.dragging {
         return Err("a window may be dragged");
     }
@@ -204,7 +372,7 @@ mod tests {
     }
 
     fn facts() -> PatchFacts {
-        PatchFacts { on: true, rect: Some(Rect::new(2440.0, 1240.0, 120.0, 200.0)), ..PatchFacts::default() }
+        PatchFacts { on: true, rect: Some(Rect::new(2440.0, 1240.0, 120.0, 200.0)), items: Some(Vec::new()), ..PatchFacts::default() }
     }
 
     #[test]
@@ -226,10 +394,80 @@ mod tests {
     fn a_desktop_icon_under_the_corner_keeps_it_off() {
         // An icon at the bottom of Finder's rightmost column, its label reaching the patch.
         let icon = Rect::new(2440.0 - 48.0 - 20.0, 1300.0, 48.0, 48.0);
-        let f = PatchFacts { ordered: Some(true), items: vec![item_reach(icon)], ..facts() };
+        let f = PatchFacts { ordered: Some(true), items: Some(vec![item_reach(icon)]), ..facts() };
         assert_eq!(visibility(&f), Err("a desktop icon lies under the corner"));
         let away = Rect::new(2000.0, 100.0, 48.0, 48.0);
-        assert!(visibility(&PatchFacts { items: vec![item_reach(away)], ..f }).is_ok());
+        assert!(visibility(&PatchFacts { items: Some(vec![item_reach(away)]), ..f.clone() }).is_ok());
+        assert_eq!(visibility(&PatchFacts { items: None, ..f }), Err("Finder's desktop icons are not known"), "not known: off");
+    }
+
+    fn icon(x: f64, y: f64) -> AxNode {
+        AxNode::leaf(roles::IMAGE, Some(Rect::new(x, y, 64.0, 64.0)))
+    }
+
+    fn scroll_bar() -> AxNode {
+        AxNode::new("AXScrollBar", vec![AxNode::leaf("AXValueIndicator", None), AxNode::leaf("AXButton", None)])
+    }
+
+    fn desktop(view: Vec<AxNode>) -> AxNode {
+        AxNode::new(roles::SCROLL_AREA, vec![AxNode::new(roles::GROUP, view), scroll_bar()])
+    }
+
+    #[test]
+    fn finders_desktop_tree_gives_its_icon_images_only() {
+        let menu = AxNode::new("AXMenuBar", vec![AxNode::leaf("AXMenuBarItem", None)]);
+        let app = [menu.clone(), desktop(vec![icon(2400.0, 1300.0), icon(2400.0, 100.0), AxNode::leaf("AXStaticText", None)])];
+        let got = desktop_icons(true, &app);
+        assert_eq!(got, DesktopIcons::Icons(vec![Rect::new(2400.0, 1300.0, 64.0, 64.0), Rect::new(2400.0, 100.0, 64.0, 64.0)]), "scroll bar parts are no icons");
+        // Two displays: both desktops' icons.
+        let two = [desktop(vec![icon(10.0, 10.0)]), desktop(vec![icon(3000.0, 10.0)])];
+        assert!(matches!(desktop_icons(true, &two), DesktopIcons::Icons(v) if v.len() == 2));
+        // An empty desktop: no icons, known.
+        assert_eq!(desktop_icons(true, &[desktop(Vec::new())]), DesktopIcons::Icons(Vec::new()));
+        // Finder's desktop off: no scroll area is no icons.
+        assert_eq!(desktop_icons(false, std::slice::from_ref(&menu)), DesktopIcons::Icons(Vec::new()));
+    }
+
+    #[test]
+    fn an_unexpected_tree_is_unreadable_never_no_icons() {
+        let menu = AxNode::new("AXMenuBar", Vec::new());
+        assert!(matches!(desktop_icons(true, &[menu]), DesktopIcons::Unexpected(_)), "desktop on, no scroll area");
+        let no_view = AxNode::new(roles::SCROLL_AREA, vec![scroll_bar()]);
+        assert!(matches!(desktop_icons(true, &[no_view]), DesktopIcons::Unexpected(_)));
+        let strange = desktop(vec![AxNode::leaf("AXButton", Some(Rect::new(0.0, 0.0, 10.0, 10.0)))]);
+        assert!(matches!(desktop_icons(true, &[strange]), DesktopIcons::Unexpected(_)), "children, none an image");
+        let frameless = desktop(vec![AxNode::leaf(roles::IMAGE, None)]);
+        assert!(matches!(desktop_icons(true, &[frameless]), DesktopIcons::Unexpected(_)));
+    }
+
+    #[test]
+    fn too_many_icons_are_not_read() {
+        let crowded = AxNode { count: MAX_ICONS + 40, ..AxNode::new(roles::GROUP, Vec::new()) };
+        let app = [AxNode::new(roles::SCROLL_AREA, vec![crowded])];
+        assert_eq!(desktop_icons(true, &app), DesktopIcons::TooMany(MAX_ICONS + 40));
+        // Two desktops past the cap together.
+        let half: Vec<AxNode> = (0..MAX_ICONS / 2 + 1).map(|i| icon(i as f64, 0.0)).collect();
+        assert!(matches!(desktop_icons(true, &[desktop(half.clone()), desktop(half)]), DesktopIcons::TooMany(_)));
+    }
+
+    #[test]
+    fn finders_desktop_setting_reads_as_defaults_writes_it() {
+        assert!(finder_desktop_on(None));
+        assert!(finder_desktop_on(Some("1")));
+        assert!(finder_desktop_on(Some("true")));
+        assert!(!finder_desktop_on(Some("0")));
+        assert!(!finder_desktop_on(Some("false")));
+        assert!(!finder_desktop_on(Some("NO")));
+    }
+
+    #[test]
+    fn the_patch_rectangle_is_whole_points() {
+        let r = patch_rect(&[Rect::new(2559.4, 1331.25, 1200.0, 900.0)], MAIN, 60.5).expect("a sliver");
+        assert_eq!(r, Rect::new(2498.0, 1270.0, 62.0, 170.0));
+        for v in [r.x, r.y, r.w, r.h] {
+            assert_eq!(v.fract(), 0.0, "{r:?}");
+        }
+        assert!(MAIN.contains_rect(&r));
     }
 
     #[test]
@@ -259,9 +497,56 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_order_shows_against_the_parked_window_whatever_windows_do() {
+        // Never shown yet, a maximized window over the corner: shown, ordered against the
+        // topmost parked window, checked at the next plan.
+        let f = PatchFacts {
+            ordered: None,
+            can_order: true,
+            shown: vec![Rect::new(0.0, 0.0, 2560.0, 1440.0)],
+            dragging: true,
+            transition: true,
+            ..facts()
+        };
+        assert!(visibility(&f).is_ok());
+        // Found wrong: the fallback, and the window keeps it off.
+        assert_eq!(visibility(&PatchFacts { ordered: Some(false), ..f.clone() }), Err("a window may be dragged"));
+        // Nothing to order against: the fallback.
+        assert!(visibility(&PatchFacts { can_order: false, ..f.clone() }).is_err());
+        // Overviews, full screen and icons still win.
+        assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err());
+        assert!(visibility(&PatchFacts { items: None, ..f }).is_err());
+    }
+
+    #[test]
+    fn the_order_is_known_only_once_checked_against_the_window_wanted() {
+        let mut st = OrderState::default();
+        // Never shown: unknown, so it shows and is ordered against window 7.
+        assert_eq!(order_step(&mut st, Some(7), None), OrderStep { ordered: None, reorder: false });
+        // On screen against 7 and right.
+        assert_eq!(order_step(&mut st, Some(7), Some(true)), OrderStep { ordered: Some(true), reorder: false });
+        // A parked window raised over it: ordered again, unknown meanwhile (still shown).
+        assert_eq!(order_step(&mut st, Some(7), Some(false)), OrderStep { ordered: None, reorder: true });
+        assert_eq!(order_step(&mut st, Some(7), None), OrderStep { ordered: None, reorder: false }, "the reorder not applied yet");
+        // Still wrong after the reorder: macOS refuses; the fallback from now on for 7.
+        assert_eq!(order_step(&mut st, Some(7), Some(false)), OrderStep { ordered: Some(false), reorder: false });
+        assert_eq!(order_step(&mut st, Some(7), None).ordered, Some(false), "hidden, refused: no new try over windows");
+        // Another window to order against: unknown again, tried.
+        assert_eq!(order_step(&mut st, Some(8), None).ordered, None);
+        assert_eq!(st.refused, None);
+        // Wrong at the first check against a window: refused at once.
+        let mut st = OrderState::default();
+        assert_eq!(order_step(&mut st, Some(9), Some(false)).ordered, Some(false));
+        // Right later (it showed by the fallback, ordered against 9 all the same): known right.
+        assert_eq!(order_step(&mut st, Some(9), Some(true)).ordered, Some(true));
+        // No parked window under it: nothing to order against.
+        assert_eq!(order_step(&mut st, None, None), OrderStep { ordered: None, reorder: false });
+    }
+
+    #[test]
     fn unordered_it_shows_only_with_the_corner_clear_and_still() {
-        for ordered in [None, Some(false)] {
-            let f = PatchFacts { ordered, ..facts() };
+        for (ordered, can_order) in [(None, false), (Some(false), true), (Some(false), false)] {
+            let f = PatchFacts { ordered, can_order, ..facts() };
             assert!(visibility(&f).is_ok());
             assert!(visibility(&PatchFacts { dragging: true, ..f.clone() }).is_err());
             assert!(visibility(&PatchFacts { transition: true, ..f.clone() }).is_err());

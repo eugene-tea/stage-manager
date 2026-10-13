@@ -22,6 +22,14 @@
 //! - **What is never drawn** ([`decide`]): videos and aerials, shuffles (a folder, Photos),
 //!   a system wallpaper description (`.madesktop`), a picture macOS's settings do not name
 //!   for the screen, Desktops with this picture set to different styles: the patch stays off.
+//!   Exact or off: Center and Tile (their rule, the picture at its own size in points, is
+//!   not checked against the screen yet) and Fit with no fill colour (what macOS shows
+//!   around the picture then is unchecked) stay off until a live check covers them. With
+//!   macOS's settings unreadable, only NSWorkspace's Fill, Fit and Stretch are taken.
+//! - **Crossfades.** macOS crossfades a dynamic picture from one frame to the next (light to
+//!   dark, an h24 or solar boundary) over about a second; the patch cuts from frame to frame
+//!   at the boundary (it hides while the new frame renders), so for that second the corner
+//!   differs from the rest of the screen. Not modelled: no public API tells the fade.
 //! - **Region** ([`region`], [`crop_px`]): the picture is rendered once for a block of the
 //!   corner ([`BLOCK`], grown to hold the patch) and the patch shows a pixel-aligned crop of
 //!   it, so a rectangle that changes needs no new render.
@@ -258,6 +266,13 @@ pub fn draws(placement: Placement, screen: Size, image: ImageSize, area: Rect) -
         .filter(|d| d.intersect(&area).is_some())
         .map(|d| Draw { dst: d.translate(-area.x, -area.y) })
         .collect()
+}
+
+/// True when one of `draws` covers the whole of an area of `size` (points): nothing of the
+/// background shows through.
+pub fn covered(draws: &[Draw], size: Size) -> bool {
+    let area = Rect::new(0.0, 0.0, size.w, size.h);
+    draws.iter().any(|d| d.dst.contains_rect(&area))
 }
 
 /// The block of the corner rendered at once (points): wider and taller than any patch the
@@ -724,6 +739,8 @@ pub struct Inputs<'a> {
     pub store: Option<&'a [StoreChoice]>,
     /// The picture's facts (`None`: unreadable).
     pub image: Option<&'a ImageFacts>,
+    /// NSWorkspace names a fill colour for the screen.
+    pub fill: bool,
     /// The effective appearance is dark.
     pub dark: bool,
     /// The clock and place.
@@ -765,6 +782,12 @@ pub fn decide(i: &Inputs) -> Result<Decision, &'static str> {
     let schedule = image.schedule.as_ref().map_err(|e| *e)?;
     let style = view.and_then(|v| v.style);
     let placement = view.and_then(|v| v.placement).or(i.workspace).ok_or("the picture's scaling has no System Settings form")?;
+    match placement {
+        Placement::Center => return Err("Center places the picture by an unverified rule; off until a live check covers it"),
+        Placement::Tile => return Err("Tile places the picture by an unverified rule; off until a live check covers it"),
+        Placement::Fit if !i.fill => return Err("Fit with no fill colour: what macOS shows around the picture is unverified"),
+        Placement::Fill | Placement::Fit | Placement::Stretch => {}
+    }
     let frame = frame(schedule, style, i.dark, &i.clock, image.primary, image.count)?;
     Ok(Decision { placement, frame, style, kind: schedule.kind() })
 }
@@ -1083,7 +1106,7 @@ mod tests {
     }
 
     fn inputs<'a>(path: &'a str, store: Option<&'a [StoreChoice]>, image: Option<&'a ImageFacts>) -> Inputs<'a> {
-        Inputs { path: Some(path), is_dir: false, workspace: Some(Placement::Fill), store, image, dark: true, clock: clock(0.0, 0.5) }
+        Inputs { path: Some(path), is_dir: false, workspace: Some(Placement::Fill), store, image, fill: true, dark: true, clock: clock(0.0, 0.5) }
     }
 
     #[test]
@@ -1111,5 +1134,39 @@ mod tests {
         assert!(decide(&inputs("/Pictures/beach.jpg", None, None)).is_err(), "unreadable picture");
         let no_scaling = Inputs { workspace: None, ..inputs("/Pictures/beach.jpg", None, Some(&still)) };
         assert!(decide(&no_scaling).is_err());
+    }
+
+    #[test]
+    fn exact_or_off_center_tile_and_a_fit_with_no_fill_colour_stay_off() {
+        let still = facts(Ok(Schedule::Still), 1);
+        let beach = "/Pictures/beach.jpg";
+        let with = |workspace: Option<Placement>, fill: bool| Inputs { workspace, fill, ..inputs(beach, None, Some(&still)) };
+        // The settings unreadable: NSWorkspace's Fill, Fit and Stretch only.
+        for p in [Placement::Fill, Placement::Fit, Placement::Stretch] {
+            assert_eq!(decide(&with(Some(p), true)).map(|d| d.placement), Ok(p));
+        }
+        assert!(decide(&with(Some(Placement::Center), true)).is_err());
+        // The settings naming Center or Tile.
+        for id in ["Center", "Tile"] {
+            let store = store_choices(&store_with(&[("file:///Pictures/beach.jpg", IMAGE, None, Some(id), false)]));
+            let i = Inputs { store: Some(&store), ..with(Some(Placement::Fill), true) };
+            let why = decide(&i).expect_err(id);
+            assert!(why.contains(id) && why.contains("unverified"), "{why}");
+        }
+        // Fit with no fill colour; Fill and Stretch need none.
+        assert!(decide(&with(Some(Placement::Fit), false)).is_err());
+        assert!(decide(&with(Some(Placement::Fill), false)).is_ok());
+        assert!(decide(&with(Some(Placement::Stretch), false)).is_ok());
+    }
+
+    #[test]
+    fn a_draw_covers_the_area_or_the_background_shows() {
+        let size = Size::new(480.0, 560.0);
+        let fill = draws(Placement::Fill, LAPTOP, square(), Rect::new(1320.0, 609.0, size.w, size.h));
+        assert!(covered(&fill, size));
+        let tall = ImageSize::new(1000.0, 2000.0, None, None);
+        let fit = draws(Placement::Fit, LAPTOP, tall, Rect::new(1000.0, 609.0, size.w, size.h));
+        assert!(!fit.is_empty() && !covered(&fit, size), "a gap beside the fitted picture");
+        assert!(!covered(&[], size));
     }
 }

@@ -319,7 +319,7 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "hide_parked_apps", Kind::Bool, "false",
         "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
     k("windows", "corner_patch", Kind::Bool, "false",
-        "Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture); off while it cannot be drawn exactly (videos, aerials, shuffles, Photos) or a desktop icon lies under it. A prototype: off by default."),
+        "Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture); off while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. A prototype: off by default."),
     k("windows", "corner_patch_reach", f(0.0, 400.0), "60.0",
         "How far past a sliver the corner patch reaches, in points, to cover its shadow."),
     k("windows", "inert_slivers", Kind::Bool, "true",

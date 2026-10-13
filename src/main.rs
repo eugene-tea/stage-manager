@@ -157,6 +157,7 @@ mod app {
         display: Option<Display>,
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
+        _appearance: WorkspaceObservers,
         _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
@@ -630,7 +631,15 @@ mod app {
         let wm_spaces = wm.clone();
         let spaces = apps::observe_space_changes(move || {
             strip::space_changed();
+            if let Some(mtm) = MainThreadMarker::new() {
+                stage_manager::ui::corner_patch::space_changed(mtm);
+            }
             wm_spaces.send(WmCommand::SpaceChanged);
+        });
+        let appearance = apps::observe_appearance(|| {
+            if let Some(mtm) = MainThreadMarker::new() {
+                stage_manager::ui::corner_patch::appearance_changed(mtm);
+            }
         });
 
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.
@@ -685,6 +694,7 @@ mod app {
             display: None,
             _workspace: workspace,
             _spaces: spaces,
+            _appearance: appearance,
             _input: input_monitor,
             _timer: timer,
         };

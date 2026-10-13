@@ -131,6 +131,34 @@ const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 /// rectangle reads them at once).
 const PATCH_ITEMS_FRESH: Duration = Duration::from_secs(5);
 
+/// How soon a read of Finder's desktop icons that failed is tried again (the next tick),
+/// and how soon after a mouse-up (a desktop icon may have been dropped) they are read.
+const PATCH_ITEMS_RETRY: Duration = Duration::from_millis(250);
+
+/// The earlier of a due time already set (a mouse-up's) and `at`.
+fn sooner(due: Option<Instant>, at: Instant) -> Instant {
+    due.map_or(at, |d| d.min(at))
+}
+
+/// Finder's desktop icons for the corner patch, read on a thread of their own
+/// ([`super::desktop_items::start_read`]).
+#[derive(Default)]
+struct PatchItems {
+    /// The icons (grown by their labels) of the last read that knew them; `None` before one,
+    /// or after a read found too many to read: the patch stays off.
+    known: Option<Vec<Rect>>,
+    /// The rectangle the last read was started for.
+    read_for: Option<Rect>,
+    /// When the next read is due (`None`: at once).
+    due: Option<Instant>,
+    /// The read running.
+    reading: Option<std::sync::mpsc::Receiver<Option<crate::engine::corner_patch::DesktopIcons>>>,
+    /// Reads have failed since the last good one (logged once a streak).
+    failing: bool,
+    /// What was last logged about a read that did not give icons.
+    said: Option<String>,
+}
+
 /// Longest wait for the strip to draw a transition's snapshots before windows move anyway.
 const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 
@@ -448,13 +476,14 @@ pub struct Controller {
     patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
     /// The corner patch's rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
     patch_rect: Option<Rect>,
-    /// The patch's order as last checked (`None`: no patch or no rectangle).
-    patch_ordered: Option<bool>,
+    /// The patch's order as last checked ([`crate::engine::corner_patch::order_step`]).
+    patch_order: crate::engine::corner_patch::OrderState,
+    /// Why the last plan hid the patch (logged once a change).
+    patch_why: Option<&'static str>,
     /// The patch was once found ordered right (logged once).
     patch_honoured: bool,
-    /// Finder's desktop icons (grown by their labels) as last read for the patch, when, and
-    /// for which rectangle ([`PATCH_ITEMS_FRESH`]).
-    patch_items: (Vec<Rect>, Option<(Instant, Rect)>),
+    /// Finder's desktop icons as last read for the patch ([`PatchItems`]).
+    patch_items: PatchItems,
     /// Widgets shown on the desktop were logged as possibly under the patch.
     patch_widgets_logged: bool,
     /// Tracked windows not given to the engine yet: not on screen when found (another
@@ -610,9 +639,10 @@ impl Controller {
             hides: hide::Hides::default(),
             patch_sent: None,
             patch_rect: None,
-            patch_ordered: None,
+            patch_order: Default::default(),
+            patch_why: None,
             patch_honoured: false,
-            patch_items: (Vec::new(), None),
+            patch_items: PatchItems::default(),
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
             fullscreen: false,
@@ -893,25 +923,70 @@ impl Controller {
         }
     }
 
-    /// Finder's desktop icons for the patch at `rect`, read again (Accessibility, Finder's
-    /// short timeout) for a new rectangle or once the last read is [`PATCH_ITEMS_FRESH`] old.
-    fn patch_items(&mut self, rect: Option<Rect>, now: Instant) -> Vec<Rect> {
-        let Some(rect) = rect else {
-            self.patch_items = (Vec::new(), None);
-            return Vec::new();
+    /// Finder's desktop icons for the patch at `rect` as known (`None`: not known, the patch
+    /// stays off). Takes a finished read's answer, and starts a read (on its own thread,
+    /// [`super::desktop_items::start_read`]) for a new rectangle or when one is due: the last
+    /// good read [`PATCH_ITEMS_FRESH`] old, a failed one [`PATCH_ITEMS_RETRY`] old. A read
+    /// that fails keeps the icons known. None starts while `quiet` (a drag, the fast tick).
+    fn patch_items(&mut self, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
+        use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
+        let answer = match self.patch_items.reading.as_ref().map(|r| r.try_recv()) {
+            Some(Ok(answer)) => Some(answer),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(None),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => None,
         };
-        let fresh = self.patch_items.1.is_some_and(|(at, r)| r == rect && now.duration_since(at) < PATCH_ITEMS_FRESH);
-        if !fresh {
-            let icons = super::desktop_items::finder_icons();
-            if icons.is_none() {
-                tracing::debug!("corner patch: Finder's desktop icons unreadable");
+        if let Some(answer) = answer {
+            let p = &mut self.patch_items;
+            p.reading = None;
+            let said = match answer {
+                Some(DesktopIcons::Icons(icons)) => {
+                    let items: Vec<Rect> = icons.into_iter().map(item_reach).collect();
+                    if let Some(r) = p.read_for {
+                        let under = items.iter().filter(|i| i.intersect(&r).is_some()).count();
+                        let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(&r).is_some()));
+                        if under > 0 && !was {
+                            tracing::info!(under, "corner patch: a desktop icon lies under the corner; the patch stays off while it does");
+                        }
+                    }
+                    p.known = Some(items);
+                    p.failing = false;
+                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
+                    None
+                }
+                Some(DesktopIcons::TooMany(n)) => {
+                    p.known = None;
+                    p.failing = false;
+                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
+                    Some(format!("{n} desktop items, more than the {MAX_ICONS} read; the patch stays off"))
+                }
+                Some(DesktopIcons::Unexpected(why)) => {
+                    p.failing = true;
+                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_RETRY));
+                    Some(format!("Finder's desktop is not as expected ({why}); its icons are unknown"))
+                }
+                None => {
+                    if !p.failing {
+                        tracing::debug!("corner patch: Finder's desktop icons unreadable; the last read stands, tried again");
+                    }
+                    p.failing = true;
+                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_RETRY));
+                    p.said.clone()
+                }
+            };
+            if said != p.said {
+                if let Some(line) = &said {
+                    tracing::info!("corner patch: {line}");
+                }
+                p.said = said;
             }
-            let items: Vec<Rect> = icons.unwrap_or_default().into_iter().map(crate::engine::corner_patch::item_reach).collect();
-            let under = items.iter().filter(|i| i.intersect(&rect).is_some()).count();
-            if under > 0 && self.patch_items.0.iter().all(|i| i.intersect(&rect).is_none()) {
-                tracing::info!(under, "corner patch: a desktop icon lies under the corner; the patch stays off while it does");
-            }
-            self.patch_items = (items, Some((now, rect)));
+        }
+        let rect = rect?;
+        let p = &mut self.patch_items;
+        let due = p.read_for != Some(rect) || p.due.is_none_or(|d| now >= d);
+        if due && p.reading.is_none() && !quiet {
+            p.read_for = Some(rect);
+            p.due = Some(now + PATCH_ITEMS_FRESH);
+            p.reading = super::desktop_items::start_read();
         }
         if !self.settings.hide_widgets_standard && !self.patch_widgets_logged {
             self.patch_widgets_logged = true;
@@ -919,7 +994,7 @@ impl Controller {
                 "corner patch: widgets may show on the desktop (StandardHideWidgets off); their places are not public, so one in the corner would be covered"
             );
         }
-        self.patch_items.0.clone()
+        self.patch_items.known.clone()
     }
 
     /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
@@ -928,7 +1003,7 @@ impl Controller {
     /// activation raising a parked window undoes it), and has it ordered again when it was
     /// right and is not any more.
     fn update_patch(&mut self) {
-        use crate::engine::corner_patch::{Listed, PatchFacts, ordered_right, patch_rect, steady_rect, visibility};
+        use crate::engine::corner_patch::{Listed, PatchFacts, order_step, ordered_right, patch_rect, steady_rect, visibility};
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
@@ -943,52 +1018,69 @@ impl Controller {
                 let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rect, r));
                 self.patch_rect = rect;
                 let listed: Vec<Listed> = list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds }).collect();
-                let ordered = match (patch_ui::window_number(), rect) {
-                    (Some(n), Some(r)) => Some(ordered_right(&listed, n, r, &parked)),
+                // The topmost parked window under the patch: what it is ordered against.
+                let above = rect.and_then(|r| {
+                    list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
+                });
+                // Checked only while the panel is on screen ordered against that window with
+                // this reorder count; otherwise its order is not known.
+                let check = match (patch_ui::window_number(), rect, above) {
+                    (Some(n), Some(r), Some(a)) if patch_ui::ordered_against() == Some((a, reorder)) && list.iter().any(|w| w.id == n) => {
+                        Some(ordered_right(&listed, n, r, &parked))
+                    }
                     _ => None,
                 };
-                let was_shown = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
-                if was_shown && ordered != self.patch_ordered {
-                    match ordered {
-                        Some(true) if !self.patch_honoured => {
-                            self.patch_honoured = true;
-                            tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
-                        }
-                        Some(false) if self.patch_ordered == Some(true) => {
-                            reorder = reorder.wrapping_add(1);
-                            tracing::debug!("corner patch: no longer just above the parked windows; ordered again");
-                        }
-                        _ => tracing::debug!(?ordered, "corner patch: order checked"),
-                    }
+                let was = self.patch_order;
+                let step = order_step(&mut self.patch_order, above, check);
+                if step.reorder {
+                    reorder = reorder.wrapping_add(1);
+                    tracing::debug!("corner patch: no longer just above the parked windows; ordered again");
+                } else if check == Some(true) && !self.patch_honoured {
+                    self.patch_honoured = true;
+                    tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
+                } else if self.patch_order.refused.is_some() && self.patch_order.refused != was.refused {
+                    tracing::info!("corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches");
+                } else if check.is_some() && check != was.last {
+                    tracing::debug!(?check, "corner patch: order checked");
                 }
-                self.patch_ordered = ordered;
+                let ordered = step.ordered;
                 let now = Instant::now();
-                let items = self.patch_items(rect, now);
+                let dragging = input::left_button_down() || self.drag.is_some();
+                let items = self.patch_items(rect, now, dragging || self.wants_fast_tick());
                 let facts = PatchFacts {
                     on,
                     rect,
                     overview: self.overview.showing().is_some() || self.overview.freezes(now) || self.space_pending,
                     ordered,
+                    can_order: above.is_some(),
                     fullscreen: self.fullscreen,
                     shown: list
                         .iter()
                         .filter(|w| w.layer == 0 && w.pid != own && w.alpha > 0.0 && !parked.contains(&w.id))
                         .map(|w| w.bounds)
                         .collect(),
-                    dragging: input::left_button_down() || self.drag.is_some(),
+                    dragging,
                     transition: self.pending.is_some(),
                     items,
                 };
-                let show = visibility(&facts).ok();
-                let above = show.and_then(|r| {
-                    list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
-                });
-                PatchPlan { show, above, reorder, space }
+                let visible = visibility(&facts);
+                let why = visible.err();
+                if why != self.patch_why {
+                    if let Some(why) = why {
+                        tracing::debug!(why, "corner patch: hidden by the plan");
+                    }
+                    self.patch_why = why;
+                }
+                let show = visible.ok();
+                PatchPlan { show, above: show.and(above), reorder, space }
             }
             _ => {
                 self.patch_rect = None;
-                self.patch_ordered = None;
-                self.patch_items = (Vec::new(), None);
+                self.patch_order = Default::default();
+                self.patch_why = None;
+                // The icons known stay (they do not depend on the patch); a read is due when
+                // the patch is wanted again.
+                self.patch_items.read_for = None;
                 PatchPlan { show: None, above: None, reorder, space }
             }
         };
@@ -1804,6 +1896,10 @@ impl Controller {
             self.triggers.record_release(now, mods);
         } else {
             self.triggers.record(now, mods);
+        }
+        if event.kind == InputKind::MouseUp {
+            // A desktop icon may have been dropped: Finder's icons are read again shortly.
+            self.patch_items.due = Some(now + PATCH_ITEMS_RETRY);
         }
         if matches!(event.kind, InputKind::MouseDown | InputKind::MouseUp) {
             // A press may start a window drag: the corner patch's fallback hides at once.

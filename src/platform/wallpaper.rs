@@ -176,6 +176,7 @@ impl Reader {
             workspace: workspace_placement,
             store: store.as_deref(),
             image: image.as_ref(),
+            fill: fill.is_some(),
             dark,
             clock,
         };
@@ -400,15 +401,18 @@ pub fn render(job: &Job, region: Rect) -> Result<CFRetained<CGImage>, String> {
         .ok_or("no bitmap context")?;
     CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::High);
     let full = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w, h));
+    let draws = wp::draws(job.placement, job.screen, size, region);
     match &job.fill {
         Some(fill) => {
             CGContext::set_fill_color_with_color(Some(&ctx), Some(fill));
             CGContext::fill_rect(Some(&ctx), full);
         }
-        None => CGContext::clear_rect(Some(&ctx), full),
+        // A clear bitmap shows black in the opaque panel: only where the picture covers it all.
+        None if wp::covered(&draws, Size::new(region.w, region.h)) => CGContext::clear_rect(Some(&ctx), full),
+        None => return Err("the picture leaves a gap and macOS names no fill colour".into()),
     }
     let s = job.scale;
-    for d in wp::draws(job.placement, job.screen, size, region) {
+    for d in draws {
         // CG's origin is the bottom-left: flip the top-left destination.
         let dst = CGRect::new(CGPoint::new(d.dst.x * s, h - (d.dst.y + d.dst.h) * s), CGSize::new(d.dst.w * s, d.dst.h * s));
         CGContext::draw_image(Some(&ctx), dst, Some(&image));

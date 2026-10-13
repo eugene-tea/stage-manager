@@ -12,20 +12,26 @@
 //!   a render thread ([`picture_for`]); the patch shows a whole-pixel crop of it
 //!   ([`crop_for`]), so a new rectangle inside the block needs no new render. Until the
 //!   picture for the current wallpaper is ready, and whenever it cannot be drawn exactly,
-//!   the patch stays hidden: the sliver is better than a wrong picture.
+//!   the patch stays hidden: the sliver is better than a wrong picture. A picture that
+//!   cannot be rendered is not tried again until its key changes ([`RenderMemo`]).
 //! - **Redraws**: the wallpaper is read again (main thread) when the patch is first wanted,
-//!   on a Space change (each Desktop may have its own picture), on a display change, every
-//!   [`READ_EVERY`] while the patch is wanted (NSWorkspace's URL and options, the settings
-//!   file's modification time, the picture's: cheap), at a time-of-day or solar frame's
-//!   boundary, and at once when the appearance changes (checked every poll, each second).
-//!   A read naming a different picture hides the patch until the new one is rendered.
+//!   on a display change, every [`READ_EVERY`] while the patch is wanted (NSWorkspace's URL
+//!   and options, the settings file's modification time, the picture's: cheap), and at a
+//!   time-of-day or solar frame's boundary. A read naming a different picture hides the
+//!   patch until the new one is rendered.
+//! - **Space and appearance changes** ([`space_changed`], [`appearance_changed`]): the patch
+//!   is ordered out at once (each Desktop may have its own picture; the frame may change
+//!   with the appearance), the Space's picture dropped, the wallpaper read again at once
+//!   and once more [`SETTLE`] later (NSWorkspace may still name the old Desktop's picture,
+//!   and the app's appearance may lag the notification, at the first read); nothing shows
+//!   before that second read.
 //! - **Ordering**: just above the topmost parked window under it
 //!   (`orderWindow:relativeTo:` with that window's number); the WM thread checks the order
 //!   in the window server's list at every plan (the panel's number: [`window_number`]) and
 //!   shows the patch only where it may, sending the plan again to order it anew when it
 //!   was right and is not any more.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
@@ -60,8 +66,26 @@ pub struct PatchPlan {
 /// How often the wallpaper is read again while the patch is wanted.
 pub const READ_EVERY: Duration = Duration::from_secs(2);
 
+/// How long after a Space or appearance change the wallpaper is read the second time, the
+/// patch hidden until then.
+pub const SETTLE: Duration = Duration::from_millis(300);
+
 /// The patch panel's window number once it exists (0 before).
 static NUMBER: AtomicU32 = AtomicU32::new(0);
+
+/// What the shown panel was last ordered against: the window number above the reorder
+/// count; [`NOT_ORDERED`] while hidden or ordered to the front.
+static ORDERED_AGAINST: AtomicU64 = AtomicU64::new(NOT_ORDERED);
+const NOT_ORDERED: u64 = u64::MAX;
+
+/// The window the shown panel was last ordered just above, and the plan's reorder count
+/// then; `None` while it is hidden (or was ordered to the front, nothing under it).
+pub fn ordered_against() -> Option<(u32, u32)> {
+    match ORDERED_AGAINST.load(Ordering::SeqCst) {
+        NOT_ORDERED => None,
+        v => Some(((v >> 32) as u32, v as u32)),
+    }
+}
 
 /// The patch panel's window number, for the WM thread's ordering check; `None` before the
 /// panel exists.
@@ -105,10 +129,62 @@ struct Patch {
     reader: Reader,
     wall: Option<(Instant, Wall)>,
     picture: Option<Picture>,
-    /// The key and region of the render in flight.
-    rendering: Option<(String, Rect)>,
+    /// The render in flight and the key that failed.
+    renders: RenderMemo,
+    /// Nothing shows before this (a Space or appearance change settling, [`SETTLE`]).
+    settle_until: Option<Instant>,
     /// What the log last said (a reason it is off, or what it draws).
     said: Option<String>,
+}
+
+/// The render in flight, and the picture key whose render failed (not tried again until
+/// the key changes: a new file version, frame, scale or screen).
+#[derive(Debug, Default, PartialEq)]
+struct RenderMemo {
+    rendering: Option<(String, Rect)>,
+    failed: Option<String>,
+}
+
+/// What [`RenderMemo::want`] says to do.
+#[derive(Debug, PartialEq)]
+enum Want {
+    /// Start this render.
+    Start,
+    /// It is in flight.
+    Wait,
+    /// This key failed: no render.
+    Failed,
+}
+
+impl RenderMemo {
+    /// A render of `key` for `region` is wanted.
+    fn want(&mut self, key: &str, region: Rect) -> Want {
+        if self.failed.as_deref() == Some(key) {
+            return Want::Failed;
+        }
+        if self.rendering.as_ref().is_some_and(|(k, r)| k == key && *r == region) {
+            return Want::Wait;
+        }
+        self.rendering = Some((key.to_owned(), region));
+        Want::Start
+    }
+
+    /// The render of `key` finished (`ok`); false when it is not the one wanted any more.
+    fn finished(&mut self, key: &str, ok: bool) -> bool {
+        if self.rendering.as_ref().map(|(k, _)| k.as_str()) != Some(key) {
+            return false;
+        }
+        self.rendering = None;
+        if !ok {
+            self.failed = Some(key.to_owned());
+        }
+        true
+    }
+
+    /// Forgets the render in flight (its answer is dropped when it comes).
+    fn drop_in_flight(&mut self) {
+        self.rendering = None;
+    }
 }
 
 thread_local! {
@@ -131,7 +207,7 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
 
 /// The app's poll (each second, main thread): reads the wallpaper again while the patch is
 /// wanted and the last read is [`READ_EVERY`] old, a frame boundary passed, or the
-/// appearance changed.
+/// appearance differs from the read's (a backstop: [`appearance_changed`] comes first).
 pub fn poll(mtm: MainThreadMarker) {
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else { return };
@@ -146,6 +222,59 @@ pub fn poll(mtm: MainThreadMarker) {
                 || w.dark != wallpaper::dark_appearance(mtm)
         });
         if stale {
+            patch.wall = None;
+            patch.reconcile(mtm);
+        }
+    });
+}
+
+/// The user went to another Space (main thread, at the notification): the patch goes at
+/// once, with the picture it showed (the new Desktop may have another); the wallpaper is
+/// read again now and once more [`SETTLE`] later, nothing shown before.
+pub fn space_changed(mtm: MainThreadMarker) {
+    settle(mtm, "a Space change");
+}
+
+/// The appearance changed (main thread, at `AppleInterfaceThemeChangedNotification`): as
+/// [`space_changed`], the picture kept (a frame's key tells whether it is still the one).
+pub fn appearance_changed(mtm: MainThreadMarker) {
+    settle(mtm, "an appearance change");
+}
+
+fn settle(mtm: MainThreadMarker, why: &'static str) {
+    let until = Instant::now() + SETTLE;
+    PATCH.with(|p| {
+        if let Ok(mut p) = p.try_borrow_mut()
+            && let Some(patch) = p.as_mut()
+        {
+            tracing::debug!(why, "corner patch: hidden until the wallpaper is read again");
+            patch.hide();
+            if why == "a Space change" {
+                patch.picture = None;
+                patch.renders.drop_in_flight();
+            }
+            patch.settle_until = Some(until);
+            patch.wall = None;
+            patch.reconcile(mtm);
+        }
+    });
+    let when = dispatch2::DispatchTime::try_from(SETTLE).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = dispatch2::DispatchQueue::main().after(when, settled);
+}
+
+/// [`SETTLE`] after a change: the second read, and the patch may show again.
+fn settled() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    PATCH.with(|p| {
+        let Ok(mut p) = p.try_borrow_mut() else {
+            // Busy: once more, shortly.
+            let _ = dispatch2::DispatchQueue::main().after(dispatch2::DispatchTime::try_from(Duration::from_millis(20)).unwrap_or(dispatch2::DispatchTime::NOW), settled);
+            return;
+        };
+        let Some(patch) = p.as_mut() else { return };
+        // A later change settles later.
+        if patch.settle_until.is_some_and(|t| Instant::now() + Duration::from_millis(5) >= t) {
+            patch.settle_until = None;
             patch.wall = None;
             patch.reconcile(mtm);
         }
@@ -197,13 +326,15 @@ impl Patch {
             reader: Reader::default(),
             wall: None,
             picture: None,
-            rendering: None,
+            renders: RenderMemo::default(),
+            settle_until: None,
             said: None,
         }
     }
 
     fn hide(&mut self) {
         self.showing = None;
+        ORDERED_AGAINST.store(NOT_ORDERED, Ordering::SeqCst);
         if self.shown.take().is_some() {
             self.panel.orderOut(None);
             tracing::debug!("corner patch: hidden");
@@ -254,12 +385,16 @@ impl Patch {
         let Some(image) = shown else {
             self.hide();
             let region = wp::region(Size::new(wall.screen.w, wall.screen.h), wp::local(rect, wall.screen));
-            if self.rendering.as_ref() != Some(&(key.clone(), region)) {
-                self.rendering = Some((key, region));
+            if self.renders.want(&key, region) == Want::Start {
                 start_render(job, wall.screen, rect);
             }
             return;
         };
+        if self.settle_until.is_some_and(|t| Instant::now() < t) {
+            // Rendered ahead; shown once the second read confirms the picture.
+            self.hide();
+            return;
+        }
         let style = decision.style.map_or_else(|| "-".into(), |s| format!("{s:?}").to_lowercase());
         self.say(
             format!(
@@ -290,8 +425,14 @@ impl Patch {
         CATransaction::commit();
         self.panel.setFrame_display(frame, false);
         match self.plan.above {
-            Some(id) => self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, id as isize),
-            None => self.panel.orderFrontRegardless(),
+            Some(id) => {
+                self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, id as isize);
+                ORDERED_AGAINST.store((u64::from(id) << 32) | u64::from(self.plan.reorder), Ordering::SeqCst);
+            }
+            None => {
+                self.panel.orderFrontRegardless();
+                ORDERED_AGAINST.store(NOT_ORDERED, Ordering::SeqCst);
+            }
         }
         if self.shown != Some(rect) {
             tracing::debug!(%rect, above = ?self.plan.above, "corner patch: shown");
@@ -302,10 +443,9 @@ impl Patch {
 
     /// A render finished (main thread): keep it when it is still the one wanted.
     fn rendered(&mut self, mtm: MainThreadMarker, key: String, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
-        if self.rendering.as_ref().map(|(k, _)| k) != Some(&key) {
+        if !self.renders.finished(&key, result.is_ok()) {
             return;
         }
-        self.rendering = None;
         match result {
             Ok((region, image)) => {
                 self.picture = Some(Picture { key, region, scale, image });
@@ -313,10 +453,24 @@ impl Patch {
             }
             Err(why) => {
                 self.hide();
-                self.say(format!("the picture cannot be drawn: {why}"), true);
+                self.say(format!("the picture cannot be drawn (not tried again until it changes): {why}"), true);
             }
         }
     }
+}
+
+/// Hands a finished render to the patch (main thread); while the patch is busy (a call
+/// into AppKit that ran the main queue), once more on the next turn of the main queue.
+fn deliver(key: String, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    PATCH.with(|p| match p.try_borrow_mut() {
+        Ok(mut p) => {
+            if let Some(p) = p.as_mut() {
+                p.rendered(mtm, key, scale, result);
+            }
+        }
+        Err(_) => dispatch2::DispatchQueue::main().exec_async(move || deliver(key, scale, result)),
+    });
 }
 
 /// Renders on a thread of its own (decoding a large HEIC frame takes a moment) and hands
@@ -328,16 +482,40 @@ fn start_render(job: Job, screen: Rect, rect: Rect) {
         let result = picture_for(&job, screen, rect);
         tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: rendered");
         let scale = job.scale;
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            let Some(mtm) = MainThreadMarker::new() else { return };
-            PATCH.with(|p| {
-                if let Some(p) = p.borrow_mut().as_mut() {
-                    p.rendered(mtm, key, scale, result);
-                }
-            });
-        });
+        dispatch2::DispatchQueue::main().exec_async(move || deliver(key, scale, result));
     });
     if let Err(e) = spawned {
         tracing::warn!("corner patch: cannot start a render: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_render_is_not_tried_again_until_its_key_changes() {
+        let region = Rect::new(1320.0, 609.0, 480.0, 560.0);
+        let mut m = RenderMemo::default();
+        assert_eq!(m.want("a", region), Want::Start);
+        assert_eq!(m.want("a", region), Want::Wait, "in flight");
+        assert!(m.finished("a", false));
+        assert_eq!(m.want("a", region), Want::Failed, "failed: no new render every read");
+        assert_eq!(m.want("a", Rect::new(0.0, 0.0, 10.0, 10.0)), Want::Failed, "nor for another region");
+        assert_eq!(m.want("b", region), Want::Start, "a new key renders");
+        assert!(m.finished("b", true));
+        assert_eq!(m.want("b", region), Want::Start, "a success is kept as the picture, not here");
+    }
+
+    #[test]
+    fn an_answer_no_longer_wanted_is_dropped() {
+        let region = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let mut m = RenderMemo::default();
+        assert_eq!(m.want("a", region), Want::Start);
+        assert_eq!(m.want("b", region), Want::Start, "the picture changed meanwhile");
+        assert!(!m.finished("a", false), "a's answer is stale");
+        assert_eq!(m.failed, None, "and a stale failure is not remembered");
+        m.drop_in_flight();
+        assert!(!m.finished("b", true), "dropped at a Space change");
     }
 }

@@ -22,7 +22,7 @@ use objc2_foundation::MainThreadMarker;
 use serde_json::json;
 
 use super::corner_patch::{crop_for, picture_for};
-use crate::engine::corner_patch::{DEFAULT_REACH, item_reach, patch_rect};
+use crate::engine::corner_patch::{DEFAULT_REACH, DesktopIcons, item_reach, patch_rect};
 use crate::engine::geometry::Rect;
 use crate::engine::park::is_parked_in_at;
 use crate::engine::wallpaper::Placement;
@@ -96,8 +96,14 @@ pub fn run(args: &[String]) -> ExitCode {
         },
     };
     let icons_started = Instant::now();
-    let icons = desktop_items::finder_icons();
+    let read = desktop_items::finder_icons();
     let icons_ms = icons_started.elapsed().as_secs_f64() * 1000.0;
+    let (icons, icons_why) = match read {
+        Some(DesktopIcons::Icons(i)) => (Some(i), None),
+        Some(DesktopIcons::TooMany(n)) => (None, Some(format!("{n} items, more than read"))),
+        Some(DesktopIcons::Unexpected(why)) => (None, Some(why.to_string())),
+        None => (None, Some("Finder did not answer".to_string())),
+    };
     let icons_under = icons.as_ref().map(|i| i.iter().filter(|r| item_reach(**r).intersect(&rect).is_some()).count());
     let read_started = Instant::now();
     let wall = Reader::default().read(mtm);
@@ -110,6 +116,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "dark": wall.dark,
         "icons": icons.as_ref().map(Vec::len),
         "icons_under": icons_under,
+        "icons_unknown": icons_why,
         "icons_ms": (icons_ms * 10.0).round() / 10.0,
         "read_ms": (read_ms * 10.0).round() / 10.0,
     });
