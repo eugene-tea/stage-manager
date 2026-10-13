@@ -307,7 +307,7 @@ impl Strip {
     /// Starts transition `t`: snapshots over the outgoing windows shrink into their cards,
     /// snapshots of the incoming ones grow from `starts`; tells the controller what is covered.
     pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
-        self.finish_transition();
+        self.finish_transition(false);
         if !self.style.animation.animates() {
             strip_model::cover(t.id, Cover::default());
             return;
@@ -486,12 +486,12 @@ impl Strip {
     /// Transition `id` has landed: the snapshots go and the held cards show, in one frame.
     fn end_transition(&mut self, id: u64) {
         if self.motion.running.as_ref().is_some_and(|r| r.id == id) {
-            self.finish_transition();
+            self.finish_transition(true);
         }
     }
 
-    /// Ends the running transition now (it landed, or a new one starts).
-    fn finish_transition(&mut self) {
+    /// Ends the running transition now (it `landed`, or a new one starts).
+    fn finish_transition(&mut self, landed: bool) {
         let Some(r) = self.motion.running.take() else { return };
         for t in &r.timers {
             t.invalidate();
@@ -509,6 +509,11 @@ impl Strip {
         objc2_quartz_core::CATransaction::commit();
         if self.motion.window_card.is_none() {
             self.motion.overlay.hide();
+        }
+        // A released card it held, still drawn pressed (its own click's transition, or
+        // another that took it before the press let go: R3 6), lets go now that it shows.
+        if landed && self.pressed.is_none() && self.squeezed.is_some_and(|s| r.held.contains(&s)) {
+            self.squeeze(None);
         }
         // A card shown now grows if the pointer rests on it.
         if !r.held.is_empty() && self.pane.shown {

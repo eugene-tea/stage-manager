@@ -59,7 +59,8 @@
 //!   drawn snapshots over them, outgoing windows park behind theirs, and incoming windows wait
 //!   (in the safety registry at their arrival frames) until the strip's growing snapshots
 //!   cover their frames ([`StripEvent::Unveil`]), or a click or another event arrives, or
-//!   [`PENDING_MAX`] passes. The batch's focus does not wait: the keyboard goes to the new
+//!   their backstop passes (the expected unveil at the configured speed plus a margin,
+//!   1.5 to 3 s: `motion_math::unveil_backstop`). The batch's focus does not wait: the keyboard goes to the new
 //!   stage at once, as Apple's does (`split_covered`).
 //! - **Space settle gate**: while a Space change waits out a full-screen animation, nothing
 //!   changes stages: window events, strip input, hotkeys, wallpaper clicks and ctl stage
@@ -96,7 +97,7 @@ use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEvent, StripSnapshot, Transition};
-use crate::ui::transition_plan;
+use crate::ui::{motion_math, transition_plan};
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
@@ -118,9 +119,6 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 /// Longest wait for the strip to draw a transition's snapshots before windows move anyway.
 const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 
-/// Incoming windows held behind their snapshots come back after this at the latest, even
-/// when the strip never says so.
-pub const PENDING_MAX: Duration = Duration::from_millis(1500);
 /// How often the window server's list is checked for windows changing Spaces.
 const SPACE_POLL: Duration = Duration::from_secs(1);
 
@@ -340,6 +338,8 @@ struct Pending {
     /// Their `SetFrame`s, then the batch's raises and focus, in order.
     actions: Vec<Action>,
     since: Instant,
+    /// They come back this long after `since` even when the strip never unveils them.
+    max: Duration,
     /// Registry entries bringing them to their arrival frames if anything goes wrong.
     entries: BTreeMap<u32, ParkedEntry>,
     /// Their arrival frames: a click there during the wait was meant for them.
@@ -446,7 +446,8 @@ pub struct Controller {
     arrival_held: bool,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
-    /// release. Any event, batch or Space change forgets them.
+    /// release. Any event, batch, Space change, config reload, retried restore or window
+    /// left for another display forgets them.
     pressed_obs: Option<(Instant, Observation)>,
     /// A focus or activation that came before its Desktop was recognized (its window on a
     /// Desktop not shown, not known yet, or a Space change settling): replayed on arrival
@@ -873,6 +874,8 @@ impl Controller {
                     match element.set_frame(u.entry.restore) {
                         Ok(()) => {
                             tracing::info!(id, tries = u.tries, restore = %u.entry.restore, "a failed restore went through on a retry");
+                            // A window moved: a click pressed before reads the frames again.
+                            self.pressed_obs = None;
                             if force {
                                 self.unrestored.remove(&id);
                             }
@@ -960,7 +963,8 @@ impl Controller {
                 _ => None,
             })
             .collect();
-        self.pending = Some(Pending { id, actions: later, since: Instant::now(), entries, frames });
+        let max = motion_math::unveil_backstop(&self.store.config().style);
+        self.pending = Some(Pending { id, actions: later, since: Instant::now(), max, entries, frames });
         let failed = self.execute(ob, now);
         self.note_parked();
         failed
@@ -1746,6 +1750,10 @@ impl Controller {
         tracing::debug!(changes = self.space_changes, "Space change notified");
         self.space_changed_at = Some(now);
         self.space_checked = now;
+        self.pressed_obs = None;
+        // A focus held for the Desktop being recognized counts from this change: a change
+        // inferred from the window list comes seconds after the focus (R3 4).
+        self.focus_replay.touch(now);
         self.foreign.clear();
         self.absent.clear();
         self.arrival_held = false;
@@ -1904,13 +1912,19 @@ impl Controller {
             return;
         }
         if !self.fullscreen
-            && let Some(Wanted::Window { id, .. }) = self.focus_replay.peek(now)
-            && self.model.as_ref().is_some_and(|m| m.window(id).is_some() && !m.waits_on_another_space(id))
+            && self.model.as_ref().is_some_and(|m| m.held_focus_acts_now(self.focus_replay.peek(now)))
         {
-            // A focus held while a settle froze things, with no Space change after it: its
-            // window is on this Desktop after all. (One whose Desktop is not shown stays held
-            // for its arrival: the check can fall between its focus and the Space change.)
-            self.bring_focus_forward(ob, "a wait ended");
+            if input::left_button_down() {
+                // A drag goes on (a sliver grab, a card): nothing switches under it; the
+                // focus stays held and is looked at again on the next check (R3 8).
+                tracing::debug!("a held focus waits for the mouse button to come up");
+            } else {
+                // A focus held while a settle froze things, with no Space change after it:
+                // its window is on this Desktop after all. (One whose Desktop is not shown
+                // stays held for its arrival: the check can fall between its focus and the
+                // Space change.)
+                self.bring_focus_forward(ob, "a wait ended");
+            }
         }
         // A change between a Desktop and a full-screen Space the notification missed is
         // handled as a Space change; during a full-screen animation nothing is counted.
@@ -1955,6 +1969,11 @@ impl Controller {
             .map(|w| w.meta.id.0)
             .collect();
         foreign.sort_unstable();
+        if !foreign.is_empty() {
+            // Maybe a Space change the notification missed: a focus held for it stays held
+            // through the looks that confirm it (R3 4).
+            self.focus_replay.touch(now);
+        }
         if self.foreign.observe(foreign.clone(), now, FOREIGN_SETTLE) {
             tracing::info!(windows = ?foreign, "windows of another Space are on screen; recognizing the Space again");
             self.on_space_changed(ob);
@@ -2051,6 +2070,10 @@ impl Controller {
             if *n >= SPACE_CHECKS {
                 leave.push(id);
             }
+        }
+        if !leave.is_empty() {
+            // What a card press read no longer holds (the model forgets these windows).
+            self.pressed_obs = None;
         }
         for id in leave {
             self.elsewhere.remove(&id);
@@ -2448,6 +2471,8 @@ impl Controller {
                 }
                 tracing::info!("config reloaded");
                 self.config_error = None;
+                // The fit and the strip may change: a pressed card's click reads afresh.
+                self.pressed_obs = None;
                 let config = self.store.config().clone();
                 logging::apply_config(&config.log);
                 if *self.style != config.style {
@@ -2474,8 +2499,8 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
-        if self.pending.as_ref().is_some_and(|p| now.duration_since(p.since) >= PENDING_MAX) {
-            tracing::warn!("the strip never unveiled a transition's windows; they come back now");
+        if let Some((id, max)) = self.pending.as_ref().filter(|p| now.duration_since(p.since) >= p.max).map(|p| (p.id, p.max)) {
+            tracing::warn!(id, max_ms = max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
             self.flush_pending(ob);
         }
         self.echoes.prune(now);

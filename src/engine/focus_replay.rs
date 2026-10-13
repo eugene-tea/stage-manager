@@ -16,7 +16,9 @@
 //! [`crate::engine::model::Model::bring_focus_forward`], which switches to the stage the
 //! user went there for. A held event older than [`FOCUS_REPLAY_MAX`] is dropped (it no
 //! longer says what the user is doing), and any act of the user's on the Desktop shown
-//! (a card click, a hotkey, a focus that acted) clears it.
+//! (a card click, a hotkey, a focus that acted) clears it. A Space change (notified, or
+//! inferred from the window list seconds later when the notification was missed) restarts
+//! that wait ([`FocusReplay::touch`]), never past [`FOCUS_REPLAY_CAP`] after the event.
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,11 @@ use super::model::{Pid, WindowId};
 /// recognized within ~0.1–0.7 s, Mission Control's exit and its settle (~0.8 s), a
 /// full-screen animation's settle (at most 2 s).
 pub const FOCUS_REPLAY_MAX: Duration = Duration::from_secs(3);
+
+/// However often a Space change restarts the wait, a held event is never replayed later
+/// than this after it came: a change the notification missed is confirmed by two looks at
+/// the window list a second apart after a one-second settle, then settles itself (R3 4).
+pub const FOCUS_REPLAY_CAP: Duration = Duration::from_secs(6);
 
 /// What the user went to another Desktop for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,33 +57,56 @@ impl Wanted {
     }
 }
 
-/// The last focus or activation that could not act yet, and when it came.
+/// The last focus or activation that could not act yet.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FocusReplay {
-    held: Option<(Wanted, Instant)>,
+    held: Option<Held>,
+}
+
+/// A held event: when it came, and when its wait last (re)started.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    wanted: Wanted,
+    came: Instant,
+    since: Instant,
+}
+
+impl Held {
+    fn fresh(&self, now: Instant) -> bool {
+        now.duration_since(self.since) < FOCUS_REPLAY_MAX && now.duration_since(self.came) < FOCUS_REPLAY_CAP
+    }
 }
 
 impl FocusReplay {
     /// Holds `wanted` (the newest wins), except that an activation of the app whose window
     /// focus is held does not replace that window (macOS reports both, in either order).
     pub fn hold(&mut self, wanted: Wanted, now: Instant) {
-        if let (Wanted::App(pid), Some((held @ Wanted::Window { .. }, at))) = (wanted, self.held)
-            && held.pid() == pid
-            && now.duration_since(at) < FOCUS_REPLAY_MAX
+        if let (Wanted::App(pid), Some(h)) = (wanted, self.held)
+            && matches!(h.wanted, Wanted::Window { .. })
+            && h.wanted.pid() == pid
+            && h.fresh(now)
         {
             return;
         }
-        self.held = Some((wanted, now));
+        self.held = Some(Held { wanted, came: now, since: now });
+    }
+
+    /// A Space change (notified, or seen in the window list): a held event still recent
+    /// enough waits [`FOCUS_REPLAY_MAX`] from now, within [`FOCUS_REPLAY_CAP`] of its coming.
+    pub fn touch(&mut self, now: Instant) {
+        if let Some(h) = self.held.as_mut().filter(|h| h.fresh(now)) {
+            h.since = now;
+        }
     }
 
     /// The held event, if it is recent enough; it is gone from here either way.
     pub fn take(&mut self, now: Instant) -> Option<Wanted> {
-        self.held.take().filter(|(_, at)| now.duration_since(*at) < FOCUS_REPLAY_MAX).map(|(w, _)| w)
+        self.held.take().filter(|h| h.fresh(now)).map(|h| h.wanted)
     }
 
     /// The held event, left held.
     pub fn peek(&self, now: Instant) -> Option<Wanted> {
-        self.held.filter(|(_, at)| now.duration_since(*at) < FOCUS_REPLAY_MAX).map(|(w, _)| w)
+        self.held.filter(|h| h.fresh(now)).map(|h| h.wanted)
     }
 
     /// Forgets it (the user acted on the Desktop shown).
@@ -108,6 +138,32 @@ mod tests {
         r.hold(Wanted::App(30), t0);
         r.clear();
         assert_eq!(r.take(t0), None);
+    }
+
+    #[test]
+    fn a_space_change_restarts_the_wait_within_the_cap() {
+        let t0 = Instant::now();
+        let win = Wanted::Window { id: WindowId(1), pid: 10 };
+        // A missed notification: the window list shows the change ~2.5 s after the focus,
+        // the arrival comes ~1 s later, past the plain 3 s hold.
+        let mut r = FocusReplay::default();
+        r.hold(win, t0);
+        r.touch(ms(t0, 2500));
+        assert_eq!(r.take(ms(t0, 3600)), Some(win));
+        // Without the change it would have gone.
+        r.hold(win, t0);
+        assert_eq!(r.take(ms(t0, 3600)), None);
+        // An expired one is not brought back by a change.
+        r.hold(win, t0);
+        r.touch(ms(t0, 3100));
+        assert_eq!(r.peek(ms(t0, 3200)), None);
+        // Changes over and over never keep it past the cap.
+        r.hold(win, t0);
+        for n in [2000, 4000, 5500] {
+            r.touch(ms(t0, n));
+        }
+        assert_eq!(r.peek(ms(t0, 5900)), Some(win));
+        assert_eq!(r.peek(t0 + FOCUS_REPLAY_CAP), None);
     }
 
     #[test]

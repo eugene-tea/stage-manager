@@ -747,24 +747,166 @@ mod focus_on_arrival {
     }
 
     #[test]
-    fn ax_asked_now_decides_over_what_was_held() {
-        // AX says the browser's window (Desktop 1's active stage) is focused now: the held
-        // editor focus (older) does not override it.
-        let (mut mac, _) = editor_on_both();
-        let t0 = Instant::now();
-        let mut replay = FocusReplay::default();
-        focus_event(&mut mac, &mut replay, 1, 10, false, t0);
-        mac.shown = 0;
-        let browser = mac.m.stage_of(w(2));
-        arrive_with(&mut mac, &mut replay, Some(2), t0 + Duration::from_millis(500));
-        assert_eq!(mac.m.main_active_stage(), browser);
-        assert!(mac.parked(1));
+    fn a_stale_ax_answer_never_hides_the_held_window_of_another_app() {
+        // R3 2: at the arrival AX may still name the previous frontmost app's window (the
+        // browser's, already in Desktop 1's active stage: nothing to do). The editor's window
+        // focus held meanwhile (another app) still brings its stage. Both orders: the owner's
+        // (the focus ~40 ms before the Space notice) and the focus during the settle after it.
+        for settling in [false, true] {
+            let (mut mac, editor) = editor_on_both();
+            let t0 = Instant::now();
+            let mut replay = FocusReplay::default();
+            if settling {
+                mac.shown = 0;
+            }
+            focus_event(&mut mac, &mut replay, 1, 10, settling, t0);
+            assert!(mac.elsewhere.is_empty(), "nothing acts before the Desktop is recognized");
+            mac.shown = 0;
+            mac.focused = Some(w(2));
+            arrive_with(&mut mac, &mut replay, Some(2), t0 + Duration::from_millis(650));
+            assert_eq!(mac.m.main_active_stage(), Some(editor), "settling {settling}: the editor's stage shows");
+            assert!(!mac.parked(1) && mac.parked(2));
+            assert_eq!(mac.focused, Some(w(1)));
+            assert!(mac.elsewhere.is_empty(), "nothing touched Desktop 2: {:?}", mac.elsewhere);
+        }
         // AX names the editor's window itself: its stage, with nothing held at all.
         let (mut mac, editor) = editor_on_both();
         let mut replay = FocusReplay::default();
         mac.shown = 0;
-        arrive_with(&mut mac, &mut replay, Some(1), t0);
+        arrive_with(&mut mac, &mut replay, Some(1), Instant::now());
         assert_eq!(mac.m.main_active_stage(), Some(editor));
+    }
+
+    /// Desktop 1 with three stages, the browser's active (the editor's window 1 and the mail
+    /// app's window 5 parked); the user is on Desktop 2.
+    fn three_stages_on_desktop_1() -> (Mac, StageId, StageId, StageId) {
+        let mut mac = two_desktops();
+        mac.put(0, 5, 40, "com.example.mail", "Inbox");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let editor = mac.m.stage_of(w(1)).expect("editor stage");
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        let mail = mac.m.stage_of(w(5)).expect("mail stage");
+        assert!(editor != browser && browser != mail && mail != editor, "a stage per app");
+        mac.click(browser);
+        assert!(mac.parked(1) && mac.parked(5));
+        mac.focused = Some(w(3));
+        mac.go(1);
+        mac.elsewhere.clear();
+        (mac, editor, browser, mail)
+    }
+
+    #[test]
+    fn an_ax_answer_that_acts_decides_over_a_held_window() {
+        // AX names the editor's parked window when the Desktop is recognized: its stage
+        // comes; the mail window's older focus (another app) does not override an answer
+        // that acts.
+        let (mut mac, editor, _, mail) = three_stages_on_desktop_1();
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        focus_event(&mut mac, &mut replay, 5, 40, false, t0);
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        arrive_with(&mut mac, &mut replay, Some(1), t0 + Duration::from_millis(600));
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert_ne!(mac.m.main_active_stage(), Some(mail));
+        assert!(mac.parked(5));
+    }
+
+    #[test]
+    fn a_held_window_of_axs_own_app_leaves_its_answer_standing() {
+        // The browser has a second window on Desktop 1, sent to a stage of its own. Its
+        // focus was held; at the arrival AX names the browser's other window, in the active
+        // stage: the same app, so AX's answer is the newer word and nothing changes.
+        let (mut mac, _, browser, _) = three_stages_on_desktop_1();
+        mac.put(0, 6, 20, "com.example.browser", "Other wiki");
+        mac.shown = 0;
+        mac.focused = Some(w(2));
+        mac.arrive();
+        let obs = mac.obs();
+        let a = mac.m.send_window(w(6), Target::New, &obs);
+        mac.run(a);
+        let other = mac.m.stage_of(w(6)).expect("its own stage");
+        assert_ne!(other, browser);
+        assert_eq!(mac.m.main_active_stage(), Some(browser));
+        assert!(mac.parked(6));
+        mac.focused = Some(w(3));
+        mac.go(1);
+        mac.elsewhere.clear();
+
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        focus_event(&mut mac, &mut replay, 6, 20, false, t0);
+        mac.shown = 0;
+        mac.focused = Some(w(2));
+        arrive_with(&mut mac, &mut replay, Some(2), t0 + Duration::from_millis(600));
+        assert_eq!(mac.m.main_active_stage(), Some(browser), "AX's answer stands");
+        assert!(mac.parked(6));
+    }
+
+    /// The controller's "a wait ended" check (no Space change after a settle): the held
+    /// focus is replayed only when its window is known and on the Desktop shown.
+    fn wait_ended(mac: &mut Mac, replay: &mut FocusReplay, ax_now: Option<u32>, now: Instant) -> bool {
+        if !mac.m.held_focus_acts_now(replay.peek(now)) {
+            return false;
+        }
+        let held = replay.take(now);
+        let obs = Observation { focused: ax_now.map(w), ..mac.obs() };
+        let a = mac.m.bring_focus_forward(ax_now.map(w), held, &obs);
+        mac.run(a);
+        true
+    }
+
+    #[test]
+    fn a_wait_ended_replays_a_focus_held_on_the_desktop_shown() {
+        // A full-screen animation settled with no Space change after it: the editor's
+        // window focus, held while it settled, is on the Desktop shown after all.
+        let (mut mac, editor, browser, _) = three_stages_on_desktop_1();
+        mac.shown = 0;
+        mac.focused = Some(w(2));
+        mac.arrive();
+        assert_eq!(mac.m.main_active_stage(), Some(browser));
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        focus_event(&mut mac, &mut replay, 1, 10, true, t0);
+        assert_eq!(mac.m.main_active_stage(), Some(browser), "held while settling");
+        assert!(wait_ended(&mut mac, &mut replay, None, t0 + Duration::from_millis(900)));
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert!(!mac.parked(1));
+        assert_eq!(replay.peek(t0 + Duration::from_millis(900)), None, "replayed once");
+    }
+
+    #[test]
+    fn a_wait_ended_leaves_a_focus_of_another_desktop_or_an_unknown_window_held() {
+        // Another Desktop's window: still held at the check, replayed on its arrival.
+        let (mut mac, editor) = editor_on_both();
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        focus_event(&mut mac, &mut replay, 1, 10, false, t0);
+        assert!(!wait_ended(&mut mac, &mut replay, Some(3), t0 + Duration::from_millis(100)));
+        assert!(replay.peek(t0 + Duration::from_millis(100)).is_some(), "still held");
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        arrive_with(&mut mac, &mut replay, None, t0 + Duration::from_millis(700));
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+
+        // A window not known yet (Desktop 1 never shown since launch): held at the check,
+        // found on the Desktop's first arrival, and its stage is the one that shows even
+        // though AX still names the browser.
+        let mut mac = two_desktops();
+        mac.focused = Some(w(3));
+        mac.go(1);
+        assert!(mac.m.window(w(1)).is_none(), "Desktop 1's windows are not known yet");
+        let mut replay = FocusReplay::default();
+        replay.hold(Wanted::Window { id: w(1), pid: 10 }, t0);
+        assert!(!wait_ended(&mut mac, &mut replay, Some(3), t0 + Duration::from_millis(100)));
+        mac.shown = 0;
+        mac.focused = Some(w(2));
+        arrive_with(&mut mac, &mut replay, Some(2), t0 + Duration::from_millis(800));
+        let editor = mac.m.stage_of(w(1)).expect("found");
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "the held window's stage shows");
+        assert!(!mac.parked(1) && mac.parked(2));
+        assert!(mac.elsewhere.is_empty(), "nothing touched Desktop 2: {:?}", mac.elsewhere);
     }
 
     #[test]
