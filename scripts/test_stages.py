@@ -1974,6 +1974,14 @@ def phase_visible():
         check(gone is not None, "a click on the tab reveals the strip (the tab hides)")
         shown = (state().get("strip_panel") or {}).get("shown")
         say(f"  strip after the tab click: shown {shown}")
+        if not shown:
+            # The click-through check needs the strip shown over Alpha 1: reveal it the way
+            # the motion phase does (the pointer resting at the left edge), not through the
+            # tab whose check just failed.
+            vis_now = state()["display"]["visible"]
+            ctl("debug-hover", vis_now["x"] + 1, vis_now["y"] + vis_now["h"] / 2, 900)
+            shown = wait_until(lambda: (state().get("strip_panel") or {}).get("shown"), 3, "the strip revealed at the edge")
+            say(f"  strip revealed at the edge for the click-through check: shown {bool(shown)}")
         # R1-ui 8: the strip, lifted over Alpha 1 (which covers the column), has no card (one
         # stage); a click in its empty column goes through to Alpha 1, never to the strip.
         a1 = live_frame("Alpha 1")
@@ -2246,7 +2254,9 @@ def expose_round(which, label, shot=None):
     round ran to the end."""
     say(f"\n  -- {label} --")
     s = state()
-    space_before = ctl("space").get("space")
+    sp_before = ctl("space")
+    space_before = sp_before.get("space")
+    mark = len(log_text())
     panes_before = [(p["space"], p["active"], p["on_active_space"]) for p in s.get("strip_panels") or []]
     panel = strip_panel()
     if not check(panel is not None and (s.get("strip_panel") or {}).get("shown"), f"{label}: the strip shows first"):
@@ -2281,11 +2291,24 @@ def expose_round(which, label, shot=None):
     hidden = listed is None or listed.get("alpha", 1.0) == 0
     check(hidden, f"{label}: the strip is not drawn while it shows (the window server "
           f"{'no longer lists it on screen' if listed is None else 'lists it on screen, alpha ' + str(listed.get('alpha'))})")
+    during_sp = ctl("space")
+    check(during_sp.get("inference_frozen") is True,
+          f"{label}: the app sees it and infers no Space meanwhile (overview {during_sp.get('overview')!r})")
     ctl("debug-expose", "escape")
     if seen:
         wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in overlays_before], 5, f"{label} to end")
     time.sleep(EXPOSE_SETTLE)
-    check(ctl("space").get("space") == space_before, f"{label}: the same Desktop after Escape (Space {space_before})")
+    sp_after = ctl("space")
+    check(sp_after.get("space") == space_before, f"{label}: the same Desktop after Escape (Space {space_before})")
+    # Two once-a-second checks past the freeze's settle: a re-recognition would be in by now.
+    time.sleep(1.5)
+    text = log_text()[mark:]
+    sp_after = ctl("space")
+    check(sp_after.get("space") == space_before and sp_after.get("changes") == sp_before.get("changes")
+          and "recognizing the Space again" not in text and not sp_after.get("inference_frozen"),
+          f"{label}: the Desktop is never recognized again, and inference resumes after it (Space {space_before} "
+          f"then {sp_after.get('space')}, changes {sp_before.get('changes')} then {sp_after.get('changes')}, "
+          f"frozen {sp_after.get('inference_frozen')})")
     back = wait_until(strip_panel, 3, "the strip listed on screen again")
     s = state()
     p = s.get("strip_panel") or {}
@@ -2349,6 +2372,9 @@ def show_desktop_round():
         cg = by_id.get(w["id"])
         say(f"  {w['title']} during {label}: " + (f"listed on screen {cg['onscreen']}, at {fmt(cg['bounds'])} (restore {fmt(w['restore'])})" if cg else "not listed"))
     say(f"  strip pane during {label}: listed on screen {strip_panel() is not None}")
+    during_sp = ctl("space")
+    check(during_sp.get("inference_frozen") is True and during_sp.get("overview") == "Show Desktop",
+          f"{label}: the app sees it and infers no Space meanwhile (overview {during_sp.get('overview')!r})")
     # Two once-a-second checks and the settle: a missed Space change would be counted by now.
     time.sleep(3.0)
     after = ctl("space")

@@ -270,6 +270,15 @@ Ours:
   behavior bits; `scripts/test-stages.sh expose` and the Spaces check's Mission Control
   round check it live (Mission Control and App Exposé typed with the user's own shortcuts,
   left with Escape, never a Desktop change).
+- While Mission Control, App Exposé or Show Desktop shows, the window server lists windows
+  the Desktop does not hold (App Exposé: the app's windows of other Desktops; Show Desktop:
+  the Desktop's windows slid off the display), so nothing is inferred from the list then and
+  for a second after (`engine::overview`; they are told by macOS's own windows covering the
+  display, measured 10-12: the Dock's at layer 20 and WindowManager's at 19 for Mission
+  Control and App Exposé, WindowManager's at 18 for Show Desktop). Windows of another
+  Desktop on screen count only when seen at two checks a second apart. A Desktop clicked in
+  Mission Control comes with its notification and is recognized once Mission Control has
+  closed.
 
 ## Grouping (`AppWindowGroupingBehavior`)
 

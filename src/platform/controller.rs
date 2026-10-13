@@ -84,6 +84,7 @@ use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::park::choose_corner;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
+use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Display, DisplayId, Home, Model, Observation, StageId, Target, WindowId, WindowMeta, WindowRole,
@@ -430,8 +431,14 @@ pub struct Controller {
     space_changes: u64,
     /// When the window server's list was last checked for Space changes.
     space_checked: Instant,
-    /// Managed windows of other Spaces on screen at the last check.
-    foreign: Vec<u32>,
+    /// Managed windows of other Spaces on screen: counted once the same ones show at two
+    /// checks a settle apart ([`Persisting`]).
+    foreign: Persisting,
+    /// Mission Control, App Exposé and Show Desktop: no Space is inferred from the window
+    /// list while one shows and for a settle after ([`OverviewWatch`]).
+    overview: OverviewWatch,
+    /// A notified Space change waits for an overview to close (said once in the log).
+    arrival_held: bool,
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
     /// Managed windows showing mostly on another display than the main one: checks in a
@@ -539,7 +546,9 @@ impl Controller {
             space_changed_at: None,
             space_changes: 0,
             space_checked: Instant::now(),
-            foreign: Vec::new(),
+            foreign: Persisting::default(),
+            overview: OverviewWatch::default(),
+            arrival_held: false,
             absent: HashMap::new(),
             elsewhere: HashMap::new(),
             seen_active: None,
@@ -1608,6 +1617,40 @@ impl Controller {
         Seen::of(covering, full)
     }
 
+    /// Looks for Mission Control, App Exposé or Show Desktop in the window list `list`
+    /// (macOS's own windows covering the main display `display`, [`overview::overview_in`])
+    /// and says in the log when one shows, closes, or is listed too long to be trusted.
+    /// True while Space inference waits ([`OverviewWatch::freezes`]).
+    fn look_for_overview(&mut self, list: &[windows::CgWindow], display: Rect, now: Instant) -> bool {
+        let sightings = list
+            .iter()
+            .map(|w| Sighting { owner: &w.owner, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen });
+        match self.overview.see(overview::overview_in(sightings, display), now) {
+            overview::Change::None => {}
+            overview::Change::Began(kind) => {
+                tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
+            }
+            overview::Change::Ended(kind) => {
+                tracing::info!("{} closed: Space inference resumes after a settle", kind.name());
+            }
+            overview::Change::Stuck(kind) => {
+                tracing::warn!(
+                    "{} has been listed for {} s without a break: taken for something else; Space inference resumes",
+                    kind.name(),
+                    overview::OVERVIEW_STUCK.as_secs()
+                );
+            }
+        }
+        let frozen = self.overview.freezes(now);
+        if frozen {
+            // What was counted before it showed is looked at afresh once it has closed.
+            self.foreign.clear();
+            self.absent.clear();
+            self.elsewhere.clear();
+        }
+        frozen
+    }
+
     /// True when the window list disagrees with the Space the engine thinks is shown (a
     /// Space change under way, its notification not handled yet): a known window of another
     /// Space is on screen, or none of this Space's windows is while one of them is missing
@@ -1664,6 +1707,7 @@ impl Controller {
         self.space_checked = now;
         self.foreign.clear();
         self.absent.clear();
+        self.arrival_held = false;
         let found = ob.rescan_all();
         self.unplaced.extend(found);
         self.space_pending = true;
@@ -1677,6 +1721,22 @@ impl Controller {
         let main = *m.main_display();
         let list = windows::list_windows();
         let now = Instant::now();
+        // Clicked in Mission Control (or switched there with the keyboard), the Desktop shows
+        // once Mission Control has closed: until then the list holds its layout (App Exposé
+        // even other Desktops' windows). The notification stays authoritative; the arrival
+        // waits for a list that shows the Desktop.
+        self.look_for_overview(&list, main.frame, now);
+        if self.overview.holds_arrival(now) {
+            if !self.arrival_held {
+                self.arrival_held = true;
+                tracing::info!(
+                    "Space changed while {} shows; the Desktop is recognized once it has closed",
+                    self.overview.showing().map_or("an overview", Overview::name)
+                );
+            }
+            return;
+        }
+        self.arrival_held = false;
         let was_waiting = self.settle.waiting(now);
         match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
             Verdict::Wait => {
@@ -1777,6 +1837,13 @@ impl Controller {
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
         let list = windows::list_windows();
+        // Mission Control, App Exposé, Show Desktop: the list shows their layout (other
+        // Desktops' windows, windows slid aside), not the Desktop. Nothing is inferred while
+        // one shows and for a settle after; a Desktop clicked there comes with its
+        // notification.
+        if self.look_for_overview(&list, main.frame, now) {
+            return;
+        }
         // A change between a Desktop and a full-screen Space the notification missed is
         // handled as a Space change; during a full-screen animation nothing is counted.
         match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
@@ -1810,20 +1877,21 @@ impl Controller {
         let Some(m) = self.model.as_ref() else { return };
         let space = m.current_space(main.id);
         let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
-        // Windows of other Spaces on screen, twice in a row: a Space change went unseen, the
-        // arrival guessed wrong, or a window was moved here. Arrive again.
-        let foreign: Vec<u32> = m
+        // The same windows of other Spaces on screen at two checks a settle apart (never one
+        // listing): a Space change went unseen, the arrival guessed wrong, or a window was
+        // moved here. Arrive again.
+        let mut foreign: Vec<u32> = m
             .windows()
             .filter(standard)
             .filter(|w| w.space != space && shown.contains(&w.meta.id.0))
             .map(|w| w.meta.id.0)
             .collect();
-        if !foreign.is_empty() && foreign == self.foreign {
+        foreign.sort_unstable();
+        if self.foreign.observe(foreign.clone(), now, FOREIGN_SETTLE) {
             tracing::info!(windows = ?foreign, "windows of another Space are on screen; recognizing the Space again");
             self.on_space_changed(ob);
             return;
         }
-        self.foreign = foreign;
 
         let here = m.windows().filter(standard).filter(|w| w.space == space).count();
         let here_shown =
@@ -1940,6 +2008,14 @@ impl Controller {
         if self.frozen() || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
+            }
+            return;
+        }
+        if self.look_for_overview(&list, main, Instant::now()) {
+            // App Exposé lists other Desktops' windows on screen: placed once it has closed
+            // (the once-a-second check offers it again).
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "Mission Control, App Exposé or Show Desktop shows; the window is placed once it has closed");
             }
             return;
         }
@@ -2384,6 +2460,8 @@ impl Controller {
                     "fullscreen": self.fullscreen,
                     "settling": self.space_pending,
                     "changes": self.space_changes,
+                    "overview": self.overview.showing().map(Overview::name),
+                    "inference_frozen": self.overview.freezes(Instant::now()),
                 }),
                 None => json!({ "ok": false, "error": not_managing() }),
             },
