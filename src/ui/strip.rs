@@ -1297,6 +1297,9 @@ impl Strip {
         let cards = &self.snapshot.cards;
         let own = cards.iter().position(|c| c.stage == stage).and_then(|i| cards.get(i + 1)).map(|c| c.stage);
         match self.spot_at(&self.resting_layouts(), p, Some(stage), band) {
+            // A card a transition is still landing in is not drawn yet: nothing to merge into
+            // (review R2 V5), as a press there is nothing.
+            Spot::Onto(into) if self.motion.holds(into) => (own, None),
             Spot::Onto(into) => (own, Some(into)),
             Spot::Before(before) if self.style.reorder => (before, None),
             Spot::Before(_) => (own, None),

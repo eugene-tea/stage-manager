@@ -2271,6 +2271,56 @@ fn one_at_a_time_a_click_on_the_grouped_card_puts_the_leaving_stage_in_that_slot
 }
 
 #[test]
+fn one_at_a_time_a_card_merge_takes_the_whole_group_and_lands_in_the_slot_dropped_on() {
+    // R2 V6: the grouped card carries the app's least recently shown stage while sitting in
+    // the group's first slot.
+    let one_at_a_time = || {
+        let mut options = ModelOptions::default();
+        options.settings.app_windows = AppWindows::OneAtATime;
+        let mut e = Env::with(options);
+        e.add(meta(1, 11, "com.example.b"), RuleAction::New);
+        e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+        e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        e.add(meta(5, 12, "com.example.c"), RuleAction::New);
+        e.add(meta(4, 10, "com.example.a"), RuleAction::New);
+        let space = e.m.current_space(MAIN);
+        if let Some(slots) = e.m.slots.get_mut(&space) {
+            slots.reverse();
+        }
+        e
+    };
+    // The app's grouped card dropped on C's card: every window of the app joins C.
+    let mut e = one_at_a_time();
+    let cards = e.m.strip();
+    let app = cards.iter().find(|c| c.apps == [11]).expect("the app's card").stage;
+    let c = cards.iter().find(|c| c.apps == [12]).expect("C's card").stage;
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(app, c, &obs);
+    e.run(a.clone());
+    assert_eq!(a, [Action::StateChanged], "nothing moves on screen");
+    let joined = &e.m.stage(c).expect("kept").windows;
+    assert!([1, 2, 3, 5].iter().all(|&i| joined.contains(&w(i))), "every window of the app joined: {joined:?}");
+    assert!(!e.m.strip().iter().any(|c| c.apps == [11]), "the app's card is gone: {:?}", e.m.strip());
+    check_invariants(&e, "after a grouped card merged");
+    // C's card dropped on the app's grouped card: C's window joins the stage whose slot the
+    // card sits in, and the merged card is there.
+    let mut e = one_at_a_time();
+    let cards = e.m.strip();
+    let k = cards.iter().position(|c| c.apps == [11]).expect("the app's card");
+    let slot_stage = e.m.strip_slots(MAIN)[k];
+    assert_ne!(cards[k].stage, slot_stage, "the card carries another stage than its slot's");
+    let c = cards.iter().find(|c| c.apps == [12]).expect("C's card").stage;
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(c, cards[k].stage, &obs);
+    e.run(a);
+    assert!(e.m.stage(slot_stage).expect("kept").windows.contains(&w(5)), "into the slot's stage");
+    let at = e.m.strip().iter().position(|card| card.windows.contains(&w(5))).expect("the merged card");
+    let slots = e.m.strip_slots(MAIN);
+    assert_eq!(slots.get(at), Some(&slot_stage), "the merged card is in the slot dropped on: {slots:?}");
+    check_invariants(&e, "after a card merged into a grouped card");
+}
+
+#[test]
 fn one_at_a_time_shows_an_app_once_and_its_card_cycles_through_its_windows() {
     let mut options = ModelOptions::default();
     options.settings.app_windows = AppWindows::OneAtATime;

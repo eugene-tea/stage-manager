@@ -694,7 +694,57 @@ impl Model {
     /// fixed order with `show_active`) it is [`Model::merge_into_active`]. A no-op for one
     /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
     /// Spaces, or a Space not shown now.
+    ///
+    /// With "One at a Time" both ids are cards' stages, and a grouped card carries the app's
+    /// least recently shown stage while sitting in the group's first slot
+    /// ([`Model::slot_showing`]): a grouped card dropped on a card merges every stage of its
+    /// app's group (the card shows them all), and a card dropped on a grouped card merges
+    /// into the stage whose slot that card sits in, so the merged card is where it was
+    /// dropped (review R2 V6).
     pub fn merge_stages(&mut self, stage: StageId, into: StageId, obs: &Observation) -> Vec<Action> {
+        let (sources, into) = self.merge_sources(stage, into);
+        let mut actions = Vec::new();
+        let mut changed = false;
+        for source in sources {
+            let done = self.merge_one(source, into, obs);
+            changed |= !done.is_empty();
+            actions.extend(done.into_iter().filter(|a| *a != Action::StateChanged));
+        }
+        if changed {
+            actions.push(Action::StateChanged);
+        }
+        actions
+    }
+
+    /// The stages a card drop of `stage` onto `into` merges, and the stage they merge into
+    /// ([`Model::merge_stages`]).
+    fn merge_sources(&self, stage: StageId, into: StageId) -> (Vec<StageId>, StageId) {
+        if self.options.settings.app_windows != AppWindows::OneAtATime {
+            return (vec![stage], into);
+        }
+        let Some(space) = self.stage(stage).map(|s| s.space) else { return (vec![stage], into) };
+        let into = self.slot_showing(space, into).unwrap_or(into);
+        let single_app = |id: StageId| {
+            let s = self.stage(id)?;
+            let pid = self.windows.get(s.windows.first()?)?.meta.pid;
+            s.windows.iter().all(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid)).then_some(pid)
+        };
+        let Some(pid) = single_app(stage).filter(|_| !self.is_active(stage)) else { return (vec![stage], into) };
+        let mut group: Vec<(u64, StageId)> = self
+            .stages
+            .iter()
+            .filter(|s| s.space == space && s.id != into && !self.is_active(s.id) && single_app(s.id) == Some(pid))
+            .map(|s| (s.last_active, s.id))
+            .collect();
+        group.sort();
+        if group.is_empty() {
+            return (vec![stage], into);
+        }
+        (group.into_iter().map(|g| g.1).collect(), into)
+    }
+
+    /// Merges one stage's windows into `into` ([`Model::merge_stages`] for one card).
+    fn merge_one(&mut self, stage: StageId, into: StageId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
         let (Some(src), Some(dest)) = (self.stage(stage), self.stage(into)) else {
             return actions;

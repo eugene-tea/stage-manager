@@ -2098,8 +2098,14 @@ impl Controller {
             return;
         }
         self.flush_pending(ob);
+        // The strip shows a reorder or a merge before the engine has decided: when the engine
+        // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
+        let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
         if self.frozen() {
             tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
+            if local_edit {
+                self.present();
+            }
             return;
         }
         if let StripEvent::CardMoved { stage, before } = event {
@@ -2107,7 +2113,11 @@ impl Controller {
             counters::bump(Count::Reorder);
             tracing::info!(stage, ?before, "card moved to another slot");
             let actions = m.move_card(StageId(stage), before.map(StageId));
+            let changed = actions.contains(&Action::StateChanged);
             self.execute(ob, actions);
+            if !changed {
+                self.present();
+            }
             return;
         }
         let obs = self.observe(ob);
@@ -2141,7 +2151,12 @@ impl Controller {
             }
             StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } => Vec::new(),
         };
+        let changed = actions.contains(&Action::StateChanged);
         self.execute_animated(ob, actions);
+        if local_edit && !changed {
+            tracing::debug!("the engine did not take the strip's edit; the strip shows the engine's cards again");
+            self.present();
+        }
     }
 
     /// Runs a batch animated (user input) or at once (scripted ctl commands).
