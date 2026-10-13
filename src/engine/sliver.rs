@@ -113,6 +113,22 @@ pub fn topmost_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &Dock
         .find(|w| w.pid != own_pid && w.alpha > 0.0 && contains(w.bounds, at) && !dock.clear_over(w, |b| contains(b, at)))
 }
 
+/// How far outside its frame a window takes a press: macOS's invisible resize border (seen
+/// 10-13: a press 3.1 pt left of a parked window's 1 pt sliver grabbed its left edge, and a
+/// double-click and drag pulled it out). Only where no window lies under the press itself.
+pub const GRAB_MARGIN: f64 = 8.0;
+
+/// The frontmost window of `front_to_back` whose frame grown by [`GRAB_MARGIN`] holds `at`,
+/// skipping what [`topmost_at`] skips: the window whose resize border takes a press that
+/// lands on no window.
+fn grabbing_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &DockBar) -> Option<Listed> {
+    let m = GRAB_MARGIN;
+    front_to_back.iter().copied().find(|w| {
+        let grown = Rect::new(w.bounds.x - m, w.bounds.y - m, w.bounds.w + 2.0 * m, w.bounds.h + 2.0 * m);
+        w.pid != own_pid && w.alpha > 0.0 && contains(grown, at) && !dock.clear_over(w, |b| contains(b, at))
+    })
+}
+
 /// Half-open containment, as the window server hit-tests: the right and bottom edges are
 /// outside.
 fn contains(r: Rect, p: Point) -> bool {
@@ -140,12 +156,16 @@ impl Shield {
     }
 
     /// The exact test, given the window server's on-screen list at the press: the topmost
-    /// window there is parked.
+    /// window there is parked; with no window there, the one whose resize border takes the
+    /// press ([`GRAB_MARGIN`]) is.
     pub fn hits(&self, front_to_back: &[Listed], at: Point, own_pid: i32) -> Option<u32> {
         if !self.may_hit(at) {
             return None;
         }
-        topmost_at(front_to_back, at, own_pid, &self.dock).map(|w| w.id).filter(|id| self.parked.contains(id))
+        topmost_at(front_to_back, at, own_pid, &self.dock)
+            .or_else(|| grabbing_at(front_to_back, at, own_pid, &self.dock))
+            .map(|w| w.id)
+            .filter(|id| self.parked.contains(id))
     }
 }
 
@@ -254,8 +274,27 @@ mod tests {
         assert_eq!(s.hits(&list, Point::new(2559.5, VISIBLE.max_y() - 45.0), OWN), Some(7));
         // Where both overlap, the front one (first listed) takes it.
         assert_eq!(s.hits(&list, Point::new(2559.5, VISIBLE.max_y() - 10.0), OWN), Some(7));
-        // One point left of the slivers: the wallpaper.
-        assert_eq!(s.hits(&list, Point::new(2558.5, VISIBLE.max_y() - 10.0), OWN), None);
+        // One point left of the slivers: their resize border; past it, the wallpaper.
+        assert_eq!(s.hits(&list, Point::new(2558.5, VISIBLE.max_y() - 10.0), OWN), Some(7));
+        assert_eq!(s.hits(&list, Point::new(2559.0 - GRAB_MARGIN - 1.0, VISIBLE.max_y() - 10.0), OWN), None);
+    }
+
+    #[test]
+    fn a_press_on_a_slivers_resize_border_is_swallowed() {
+        // 10-13: 3.1 pt left of the sliver, on no window: the parked window's resize border.
+        let s = sliver(7, 52.0);
+        let y = VISIBLE.max_y() - 20.0;
+        let list = [s];
+        assert_eq!(shield(&[7]).hits(&list, Point::new(s.bounds.x - 3.1, y), OWN), Some(7));
+        assert_eq!(shield(&[7]).hits(&list, Point::new(s.bounds.x - GRAB_MARGIN + 0.5, y), OWN), Some(7));
+        // Farther left: the wallpaper's.
+        assert_eq!(shield(&[7]).hits(&list, Point::new(s.bounds.x - GRAB_MARGIN - 1.0, y), OWN), None);
+        // A shown window under the press keeps it, its border in front or not.
+        let shown = Listed { id: 3, pid: 50, bounds: Rect::new(1200.0, 900.0, s.bounds.x - 1200.0 - 2.0, 600.0), alpha: 1.0, layer: 0 };
+        assert_eq!(shield(&[7]).hits(&[s, shown], Point::new(s.bounds.x - 3.1, y), OWN), None);
+        // A shown window's border in front of the sliver's takes it.
+        let near = Listed { bounds: Rect::new(1200.0, 900.0, s.bounds.x - 1200.0 - 5.0, 600.0), ..shown };
+        assert_eq!(shield(&[7]).hits(&[near, s], Point::new(s.bounds.x - 3.1, y), OWN), None);
     }
 
     #[test]
