@@ -2,6 +2,8 @@
 //! item uses) into PNGs, black on transparent, for previews and the docs:
 //!
 //!     cargo run --example glyph_png -- <out-dir>     # glyph@1x.png, glyph@2x.png, glyph@8x.png
+//!     cargo run --example glyph_png -- <out-dir> <corner radius> <far scale>   # a variant:
+//!         glyph-r<radius>-s<scale>@{1,2,8}x.png, to compare looks before changing the default
 //!
 //! Offscreen: no window, no screen access.
 
@@ -15,7 +17,15 @@ fn main() -> anyhow::Result<()> {
     let out = std::path::PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".into()));
     std::fs::create_dir_all(&out)?;
     let _mtm = MainThreadMarker::new().ok_or_else(|| anyhow::anyhow!("not on the main thread"))?;
-    let image = glyph::status_image();
+    let mut args = std::env::args().skip(2);
+    let (style, prefix) = match (args.next(), args.next()) {
+        (Some(r), Some(s)) => {
+            let style = glyph::Style { corner_radius: r.parse()?, far_scale: s.parse()? };
+            (style, format!("glyph-r{r}-s{s}"))
+        }
+        _ => (glyph::Style::DEFAULT, "glyph".to_string()),
+    };
+    let image = glyph::image(style);
     let (w, h) = glyph::SIZE;
     for scale in [1usize, 2, 8] {
         let (pw, ph) = ((w as usize * scale) as isize, (h as usize * scale) as isize);
@@ -35,7 +45,7 @@ fn main() -> anyhow::Result<()> {
         // SAFETY: PNG with no properties.
         let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
             .ok_or_else(|| anyhow::anyhow!("no PNG"))?;
-        let path = out.join(format!("glyph@{scale}x.png"));
+        let path = out.join(format!("{prefix}@{scale}x.png"));
         std::fs::write(&path, data.to_vec())?;
         println!("{}", path.display());
     }

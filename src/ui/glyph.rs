@@ -1,13 +1,15 @@
-//! The menu bar glyph: small stage thumbnails stacked at the left and a window at the right,
-//! the Stage Manager idea at menu bar size.
+//! The menu bar glyph: small stage cards stacked at the left and a window at the right, the
+//! Stage Manager idea at menu bar size.
 //!
 //! Original artwork drawn in code (no SF Symbol, no Apple image). It is a template image, so
 //! the menu bar tints it for light, dark and highlighted states. The proportions follow SF
-//! Symbols at the menu bar's default size, measured on the symbols themselves: the image is
-//! 14 pt tall with 12 pt of ink (`rectangle`, `macwindow`, `sidebar.left`), strokes are 1 pt,
-//! and a 12 pt rectangle's corners are about 3 pt. Edges sit on whole pixels at 2x.
+//! Symbols at the menu bar's default size, measured on the symbols themselves: a 14 pt tall
+//! image, 1 pt strokes, a landscape window like `macwindow` (15 × 11 pt, three dots at the top
+//! left) with a window's tight corners rather than a case's round ones. Straight edges sit on
+//! whole pixels at 2x; the dots are 3 px wide at 2x so they still read at 1x.
 //!
-//! [`shapes`] is the pure geometry (tested); [`status_image`] draws it.
+//! [`shapes`] is the pure geometry (tested), parameterised by a [`Style`] so previews can
+//! compare variants; [`status_image`] draws [`Style::DEFAULT`].
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -16,49 +18,91 @@ use objc2_app_kit::{NSBezierPath, NSColor, NSImage};
 use objc2_foundation::{NSPoint, NSRect, NSSize, ns_string};
 
 /// The image's size in points (width, height).
-pub const SIZE: (f64, f64) = (21.0, 14.0);
+pub const SIZE: (f64, f64) = (23.0, 14.0);
 
 /// The SF Symbols stroke at the menu bar's default size.
 pub const STROKE: f64 = 1.0;
 
-/// The thumbnails' far (right) edge over their near one: each is a card turned away about its
-/// left edge and seen from the stack's middle, as the strip draws its cards.
-pub const FAR_SCALE: f64 = 0.8;
+/// The window frame's outer edge: x, y, width, height (points, y down).
+const FRAME: (f64, f64, f64, f64) = (7.5, 1.5, 14.0, 11.0);
 
-/// The line the thumbnails stack on, and the eye height of their perspective.
+/// The line the cards stack on, and the eye height of their perspective.
 const MIDDLE_Y: f64 = 7.0;
+
+/// The look's two knobs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Style {
+    /// The window frame's outer corner radius.
+    pub corner_radius: f64,
+    /// The cards' far (right) edge over their near one: 1 is flat; below 1 the cards turn
+    /// away about their left edge, seen from the stack's middle, as the strip's cards do.
+    pub far_scale: f64,
+}
+
+impl Style {
+    /// The shipped look: window corners as tight as `macwindow`'s, cards with a hint of depth.
+    pub const DEFAULT: Style = Style { corner_radius: 2.0, far_scale: 0.94 };
+
+    /// The cards' corner radius: in the same proportion to their height as the window's.
+    pub fn card_radius(&self) -> f64 {
+        self.corner_radius * CARD_HEIGHT / FRAME.3
+    }
+}
+
+const CARD_WIDTH: f64 = 4.5;
+const CARD_HEIGHT: f64 = 3.0;
 
 /// One shape of the glyph, in its coordinates (points, y down from the top).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
-    /// A thumbnail: its near (left) edge spans `y … y + height` at `x`; its far edge, at
-    /// `x + width`, is the near one seen [`FAR_SCALE`] smaller toward [`MIDDLE_Y`]. Filled.
-    Card { x: f64, y: f64, width: f64, height: f64, radius: f64 },
+    /// A card: its near (left) edge spans `y … y + height` at `x`; its far edge, at
+    /// `x + width`, is the near one scaled by `far_scale` toward the stack's middle. Filled.
+    Card { x: f64, y: f64, width: f64, height: f64, radius: f64, far_scale: f64 },
     /// A rounded rectangle, filled or, with `stroke`, outlined by a stroke of that width
     /// centred on its edge.
     Rect { x: f64, y: f64, width: f64, height: f64, radius: f64, stroke: Option<f64> },
+    /// A filled dot (a title bar button).
+    Dot { cx: f64, cy: f64, diameter: f64 },
 }
 
 impl Shape {
     /// The corners (top-left, top-right, bottom-right, bottom-left) of a card's outline.
-    pub fn card_corners(x: f64, y: f64, width: f64, height: f64) -> [(f64, f64); 4] {
-        let far = |v: f64| MIDDLE_Y + (v - MIDDLE_Y) * FAR_SCALE;
+    pub fn card_corners(x: f64, y: f64, width: f64, height: f64, far_scale: f64) -> [(f64, f64); 4] {
+        let far = |v: f64| MIDDLE_Y + (v - MIDDLE_Y) * far_scale;
         [(x, y), (x + width, far(y)), (x + width, far(y + height)), (x, y + height)]
     }
 }
 
-/// The glyph: three tilted thumbnails (the strip) at the left, then the window: an outlined
-/// frame with a title bar rule.
-pub fn shapes() -> Vec<Shape> {
-    let card = |y: f64| Shape::Card { x: 1.5, y, width: 4.5, height: 3.0, radius: 0.75 };
-    // The frame's outer edge is 7.5 … 19.5 × 1 … 13; the stroke is centred half a stroke in.
+/// The glyph: three cards (the strip) at the left, then the window: an outlined frame with
+/// three title bar dots at its top left.
+pub fn shapes(style: Style) -> Vec<Shape> {
+    let (fx, fy, fw, fh) = FRAME;
+    let card = |y: f64| Shape::Card {
+        x: 1.5,
+        y,
+        width: CARD_WIDTH,
+        height: CARD_HEIGHT,
+        radius: style.card_radius(),
+        far_scale: style.far_scale,
+    };
     let half = STROKE / 2.0;
+    // Dots 1.5 pt wide, 2.5 pt apart, a point in from the stroke's inner edges.
+    let dot = |i: f64| Shape::Dot { cx: fx + STROKE + 1.75 + i * 2.5, cy: fy + STROKE + 1.75, diameter: 1.5 };
     vec![
-        card(1.0),
-        card(5.5),
-        card(10.0),
-        Shape::Rect { x: 7.5 + half, y: 1.0 + half, width: 12.0 - STROKE, height: 12.0 - STROKE, radius: 2.75, stroke: Some(STROKE) },
-        Shape::Rect { x: 8.0, y: 4.0, width: 11.0, height: STROKE, radius: 0.0, stroke: None },
+        card(fy),
+        card(fy + CARD_HEIGHT + 1.0),
+        card(fy + 2.0 * (CARD_HEIGHT + 1.0)),
+        Shape::Rect {
+            x: fx + half,
+            y: fy + half,
+            width: fw - STROKE,
+            height: fh - STROKE,
+            radius: (style.corner_radius - half).max(0.0),
+            stroke: Some(STROKE),
+        },
+        dot(0.0),
+        dot(1.0),
+        dot(2.0),
     ]
 }
 
@@ -77,15 +121,20 @@ fn rounded_polygon(corners: &[(f64, f64)], radius: f64) -> Retained<NSBezierPath
     path
 }
 
-/// The status item's image: [`shapes`] as a resolution-independent template image (drawn at
-/// whatever scale the menu bar needs). Main thread, as every AppKit drawing.
+/// The status item's image in the shipped style ([`Style::DEFAULT`]).
 pub fn status_image() -> Retained<NSImage> {
-    let draw = RcBlock::new(|_rect: NSRect| -> Bool {
+    image(Style::DEFAULT)
+}
+
+/// [`shapes`] as a resolution-independent template image (drawn at whatever scale the menu
+/// bar needs). Main thread, as every AppKit drawing.
+pub fn image(style: Style) -> Retained<NSImage> {
+    let draw = RcBlock::new(move |_rect: NSRect| -> Bool {
         NSColor::blackColor().set();
-        for shape in shapes() {
+        for shape in shapes(style) {
             match shape {
-                Shape::Card { x, y, width, height, radius } => {
-                    rounded_polygon(&Shape::card_corners(x, y, width, height), radius).fill();
+                Shape::Card { x, y, width, height, radius, far_scale } => {
+                    rounded_polygon(&Shape::card_corners(x, y, width, height, far_scale), radius).fill();
                 }
                 Shape::Rect { x, y, width, height, radius, stroke } => {
                     let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
@@ -97,6 +146,11 @@ pub fn status_image() -> Retained<NSImage> {
                         }
                         None => path.fill(),
                     }
+                }
+                Shape::Dot { cx, cy, diameter } => {
+                    let r = diameter / 2.0;
+                    let rect = NSRect::new(NSPoint::new(cx - r, cy - r), NSSize::new(diameter, diameter));
+                    NSBezierPath::bezierPathWithOvalInRect(rect).fill();
                 }
             }
         }
@@ -121,47 +175,76 @@ mod tests {
                 let g = stroke.unwrap_or(0.0) / 2.0;
                 (x - g, y - g, x + width + g, y + height + g)
             }
+            Shape::Dot { cx, cy, diameter } => (cx - diameter / 2.0, cy - diameter / 2.0, cx + diameter / 2.0, cy + diameter / 2.0),
         }
     }
 
+    fn frame(all: &[Shape]) -> (f64, f64, f64, f64) {
+        all.iter().find(|s| matches!(s, Shape::Rect { stroke: Some(_), .. })).map(outer).unwrap_or_default()
+    }
+
     #[test]
-    fn the_ink_is_twelve_points_tall_inside_the_image_like_the_symbols() {
-        let boxes: Vec<_> = shapes().iter().map(outer).collect();
+    fn the_ink_fits_the_image_with_a_symbols_margins() {
+        let boxes: Vec<_> = shapes(Style::DEFAULT).iter().map(outer).collect();
         let top = boxes.iter().map(|b| b.1).fold(f64::MAX, f64::min);
         let bottom = boxes.iter().map(|b| b.3).fold(f64::MIN, f64::max);
         let left = boxes.iter().map(|b| b.0).fold(f64::MAX, f64::min);
         let right = boxes.iter().map(|b| b.2).fold(f64::MIN, f64::max);
-        assert_eq!((top, bottom), (1.0, 13.0));
-        assert_eq!((left, SIZE.0 - right), (1.5, 1.5), "a symbol's side margins");
+        assert_eq!((top, SIZE.1 - bottom), (1.5, 1.5));
+        assert_eq!((left, SIZE.0 - right), (1.5, 1.5));
     }
 
     #[test]
-    fn three_thumbnails_stack_left_of_the_window_with_a_gap() {
-        let all = shapes();
+    fn the_window_is_landscape_with_tight_corners_like_macwindow() {
+        let (l, t, r, b) = frame(&shapes(Style::DEFAULT));
+        let (w, h) = (r - l, b - t);
+        assert!(w / h > 1.2, "landscape, not a case: {w} × {h}");
+        assert!(Style::DEFAULT.corner_radius / h < 0.2, "corners a window's, not a case's");
+    }
+
+    #[test]
+    fn three_dots_sit_in_the_title_bar_at_the_top_left_apart() {
+        let all = shapes(Style::DEFAULT);
+        let (l, t, r, _) = frame(&all);
+        let dots: Vec<_> = all.iter().filter(|s| matches!(s, Shape::Dot { .. })).map(outer).collect();
+        assert_eq!(dots.len(), 3);
+        for d in &dots {
+            assert!(d.0 >= l + STROKE + 1.0 && d.1 >= t + STROKE + 0.5, "inside the frame, clear of the stroke");
+            assert!(d.2 <= l + (r - l) * 0.65, "at the left");
+        }
+        for pair in dots.windows(2) {
+            assert!(pair[1].0 - pair[0].2 >= 1.0, "a whole point between dots, so they read at 1x");
+        }
+    }
+
+    #[test]
+    fn three_cards_stack_left_of_the_window_with_a_gap() {
+        let all = shapes(Style::DEFAULT);
         let cards: Vec<_> = all.iter().filter(|s| matches!(s, Shape::Card { .. })).map(outer).collect();
         assert_eq!(cards.len(), 3);
-        let frame = all.iter().find(|s| matches!(s, Shape::Rect { stroke: Some(_), .. })).map(outer);
-        let frame = frame.unwrap_or_default();
+        let f = frame(&all);
         for c in &cards {
-            assert!(frame.0 - c.2 >= 1.25, "a clear gap between the strip and the window");
+            assert!(f.0 - c.2 >= 1.25, "a clear gap between the strip and the window");
         }
         for pair in cards.windows(2) {
-            assert!(pair[1].1 - pair[0].3 >= 1.25, "thumbnails do not touch");
+            assert!(pair[1].1 - pair[0].3 >= 1.0, "cards do not touch");
         }
     }
 
     #[test]
-    fn thumbnails_turn_away_toward_the_middle_like_the_strip() {
-        let [_, top_right, bottom_right, _] = Shape::card_corners(0.0, 1.0, 4.0, 3.0);
-        assert!(top_right.1 > 1.0 && bottom_right.1 > 4.0 - 1.0, "above the middle, both far ends drop");
-        assert!((bottom_right.1 - top_right.1 - 3.0 * FAR_SCALE).abs() < 1e-9, "the far edge is shorter");
-        let [_, tr, br, _] = Shape::card_corners(0.0, 5.5, 4.0, 3.0);
-        assert!((tr.1 - 5.5 - (8.5 - br.1)).abs() < 1e-9, "the middle card is symmetric");
+    fn cards_have_only_a_hint_of_depth_and_corners_in_proportion() {
+        let s = Style::DEFAULT;
+        assert!(s.far_scale >= 0.9, "a hint of depth, not trapezoids");
+        let [_, tr, br, _] = Shape::card_corners(0.0, 1.5, 4.5, 3.0, s.far_scale);
+        assert!(tr.1 - 1.5 < 0.5 && (br.1 - tr.1 - 3.0 * s.far_scale).abs() < 1e-9);
+        let flat = Shape::card_corners(0.0, 1.5, 4.5, 3.0, 1.0);
+        assert_eq!(flat[1].1, 1.5, "far_scale 1 is flat");
+        assert!((s.card_radius() / CARD_HEIGHT - s.corner_radius / FRAME.3).abs() < 1e-9);
     }
 
     #[test]
-    fn straight_edges_land_on_whole_pixels_at_2x() {
-        for s in shapes() {
+    fn straight_edges_and_dots_land_on_whole_pixels_at_2x() {
+        for s in shapes(Style::DEFAULT) {
             let (l, t, r, b) = outer(&s);
             for edge in [l, t, r, b] {
                 assert_eq!((edge * 2.0).fract(), 0.0, "{s:?} edge {edge}");
