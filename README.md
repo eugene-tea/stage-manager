@@ -167,6 +167,8 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   Full-screen apps are Spaces of their own: no strip there; entering or leaving full screen
   keeps the Desktop's stages (a Space change during macOS's full-screen animation waits for
   it to settle). Stage numbers (hotkeys, `ctl switch N`) count the current Space's stages.
+  Mission Control, App Exposé and Show Desktop hide the strip (and every other panel of
+  ours) as they hide Apple's; it is back on the same Desktop when they end.
 - **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
   card; clicking it again opens the app's next window.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
@@ -464,20 +466,21 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
 | `debug-frame ID X Y W H` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`) |
 | `debug-space left\|right [numpad]` | type "Move left/right a space" (the shortcut from Keyboard Shortcuts, posted at the HID tap) and answer once the engine has handled the Space change, or after 6 s with `"changed":false` (only with `STAGE_MANAGER_TEST=1`); `stage-manager debug-post-space left\|right` launched with `open -n` does the same once while the app is down |
+| `debug-expose mission-control\|app-windows\|show-desktop\|escape` | type Mission Control's own shortcut ("Mission Control", "Application windows", "Show Desktop" from Keyboard Shortcuts, posted at the HID tap), or Escape to leave; never changes the Desktop (only with `STAGE_MANAGER_TEST=1`) |
 | `debug-fullscreen ID on\|off` | put a `STAGE_MANAGER_ONLY` app's standard window in or out of full screen through Accessibility (`AXFullScreen`, else its full-screen button); any other window is refused (only with `STAGE_MANAGER_TEST=1`) |
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
 "$B" ctl state | jq '.stages'
 "$B" probe-windows dev.eugene.stagemanager.fixture   # the window server's view of an app
-"$B" probe-screen                                    # windows covering the display (full screen)
+"$B" probe-screen                                    # windows covering the display (full screen; overlays: Mission Control)
 ```
 
 Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reachable.
 
 ## Test script
 
-`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion] [capture]` builds the app and private
+`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion] [expose] [capture]` builds the app and private
 fixtures (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`,
 plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native phase;
 `SM_FIXTURE_ID` picks another base ID, so runs never collide) and checks, against `ctl state` and the window
@@ -507,14 +510,17 @@ card click ending with every frame exact, and `level = "above_windows"`, all ove
 unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip column, the
 drags pass over our windows and the fixtures only, with the strip reached for the reorder and
 the click the way a person does when a window covers it (the pointer resting at the left
-edge). `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
+edge); and expose: Mission Control and App Exposé typed through the app (`ctl debug-expose`,
+never a Desktop change) with every strip pane `Transient`, the window server no longer
+listing the strip on screen while they show, and after Escape
+the strip back on the same Desktop, drawn as before, with a working card click. `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
 (`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
-whether it is the active one, ordered in, on the Space shown, slid in); and capture: real
+whether it is the active one, ordered in, on the Space shown, slid in, its collection behavior bits); and capture: real
 thumbnails and switch snapshots arrive (`ctl state`'s `capture`: mode, gate, images
 delivered) and a quit with captures running is clean. Every app run's log is kept as `stage-manager.run-NN.log` in
 the test home (renamed from the day's `YYYY-MM-DD.log`; the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
 is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
-`scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
+`scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), Mission Control and App Exposé are shown and left on Desktop 2 (each Desktop's pane must stay on its own Desktop), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
 Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
 drags are posted only where our own or a fixture's windows are topmost along the whole path,
 and the pointer is put back. Apple's own Stage Manager must be off for the window-position

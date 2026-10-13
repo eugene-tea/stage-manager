@@ -28,7 +28,10 @@ while a window is dragged over it, with the dragged window's card in the motion 
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
 across a relaunch; a card click animates and every frame is exact afterwards;
 `level = "above_windows"` keeps the strip on top), capture (the one phase with window
-captures on: real thumbnails and snapshots, and a quit that waits for captures in flight).
+captures on: real thumbnails and snapshots, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
+typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
+is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
+Desktop, drawn as before, and a card click switches).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -48,6 +51,7 @@ import json
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1672,10 +1676,247 @@ def live_frame_probe(k, title):
     return wins[i]["bounds"] if i < len(wins) else None
 
 
+# ----- expose: the strip hides in Mission Control and App Exposé -------------------------
+
+# NSWindowCollectionBehavior bits (src/ui/panels.rs).
+BEHAVIOR = {"can_join_all_spaces": 1, "move_to_active_space": 2, "managed": 4, "transient": 8, "stationary": 16}
+# A card pixel counts as changed when a channel moved by more than this (0-255).
+PIXEL_STEP = 32
+# Mission Control's own animation (about half a second), with room.
+EXPOSE_SETTLE = 1.2
+
+
+def behavior_names(bits):
+    return [n for n, b in BEHAVIOR.items() if bits & b]
+
+
+def panes_hide_in_expose(s):
+    """Every strip pane is Transient (hidden by Mission Control, App Exposé and Show Desktop),
+    never Stationary, and joins no other Space (no Spaces flag): (ok, description)."""
+    panes = s.get("strip_panels") or []
+    bad = [p for p in panes if not p["behavior"] & BEHAVIOR["transient"]
+           or p["behavior"] & (BEHAVIOR["stationary"] | BEHAVIOR["can_join_all_spaces"] | BEHAVIOR["move_to_active_space"])]
+    told = [f"space {p['space']}: {behavior_names(p['behavior'])}" for p in panes]
+    return bool(panes) and not bad, "; ".join(told) or "no pane"
+
+
+def screen_overlays():
+    """On-screen windows above or below the windows' layer that cover the main display
+    (`probe-screen`): Mission Control and App Exposé show one of the Dock's."""
+    r = run([BIN, "probe-screen"], timeout=10)
+    try:
+        return json.loads(r.stdout).get("overlays", [])
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+def read_bmp(path):
+    """(width, height, top-down rows, bytes per pixel) of an uncompressed or bitfields BMP,
+    as `screencapture -t bmp` writes it (32 bits a pixel)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:2] != b"BM":
+        raise ValueError(f"{path} is not a BMP")
+    offset, = struct.unpack_from("<I", data, 10)
+    width, height = struct.unpack_from("<ii", data, 18)
+    bpp, = struct.unpack_from("<H", data, 28)
+    if bpp not in (24, 32):
+        raise ValueError(f"{path}: {bpp} bits a pixel")
+    stride = ((bpp * width + 31) // 32) * 4
+    rows = [data[offset + i * stride: offset + i * stride + width * bpp // 8] for i in range(abs(height))]
+    if height > 0:  # bottom-up
+        rows.reverse()
+    return width, abs(height), rows, bpp // 8
+
+
+def grab(region, name):
+    """The screen in `region` (global points, x y w h) as pixels; None when it fails. The
+    file goes to the test home (never the repo) and is removed once read."""
+    path = os.path.join(HOME, f"expose-{name}.bmp")
+    args = ["screencapture", "-x", "-t", "bmp", "-R", ",".join(f"{v:.0f}" for v in region), path]
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(path):
+        say(f"  screen capture failed: {r.stderr.strip()}")
+        return None
+    try:
+        return (region, read_bmp(path))
+    except (OSError, ValueError, struct.error) as e:
+        say(f"  screen capture unreadable: {e}")
+        return None
+    finally:
+        os.remove(path)
+
+
+def card_region(s):
+    """The cards' frames (global points) and the box around them."""
+    cards = [c["frame"] for c in s.get("strip_cards") or []]
+    if not cards:
+        return [], None
+    x0, y0 = min(c["x"] for c in cards), min(c["y"] for c in cards)
+    x1, y1 = max(c["x"] + c["w"] for c in cards), max(c["y"] + c["h"] for c in cards)
+    return cards, (x0, y0, x1 - x0, y1 - y0)
+
+
+def changed_fraction(a, b, cards):
+    """The share of the cards' pixels (every 2nd pixel each way) that differ between two
+    grabs of the same region."""
+    region, (w, h, rows_a, bp) = a
+    _, (w2, h2, rows_b, _) = b
+    if (w, h) != (w2, h2):
+        return 1.0
+    scale = w / region[2]
+    total = changed = 0
+    for c in cards:
+        px0, px1 = int((c["x"] - region[0]) * scale), int((c["x"] + c["w"] - region[0]) * scale)
+        py0, py1 = int((c["y"] - region[1]) * scale), int((c["y"] + c["h"] - region[1]) * scale)
+        for y in range(max(py0, 0), min(py1, h), 2):
+            ra, rb = rows_a[y], rows_b[y]
+            for x in range(max(px0, 0), min(px1, w), 2):
+                i = x * bp
+                total += 1
+                if any(abs(ra[i + k] - rb[i + k]) > PIXEL_STEP for k in range(3)):
+                    changed += 1
+    return changed / total if total else 0.0
+
+
+def make_fixture_front(s):
+    """A shown fixture window raised and its app made frontmost (through Accessibility), so a
+    stray Escape could only ever reach a fixture. True when a fixture is frontmost."""
+    if frontmost_bundle() in ALL_IDS:
+        return True
+    shown = [w for w in s["windows"] if not w["parked"] and w["role"] == "standard"]
+    if shown:
+        r = shown[0]["restore"]
+        ctl("debug-frame", shown[0]["id"], r["x"], r["y"], r["w"], r["h"])
+        time.sleep(0.6)
+    return frontmost_bundle() in ALL_IDS
+
+
+def expose_round(which, label, shot=None):
+    """Mission Control (`which` = mission-control) or App Exposé (app-windows) through the
+    app (`ctl debug-expose`, the user's own shortcut), never a Desktop change: our panes are
+    not drawn while it shows (the window server no longer lists them on screen, or lists them
+    transparent), and after Escape the strip is back on the same Desktop, drawn as before (the
+    cards' pixels), and a card click switches. The cards' pixels while it shows are only
+    reported: Mission Control dims the desktop, so they change about 90 % whether the strip
+    is hidden or not (measured 10-12 with the old Stationary panes: listed on screen, alpha 1,
+    88 % changed); the window server's listing is what tells. `shot`
+    (name -> path or None) takes a by-eye screenshot while it shows. Returns True when the
+    round ran to the end."""
+    say(f"\n  -- {label} --")
+    s = state()
+    space_before = ctl("space").get("space")
+    panes_before = [(p["space"], p["active"], p["on_active_space"]) for p in s.get("strip_panels") or []]
+    panel = strip_panel()
+    if not check(panel is not None and (s.get("strip_panel") or {}).get("shown"), f"{label}: the strip shows first"):
+        return False
+    cards, region = card_region(s)
+    if not make_fixture_front(s):
+        check(False, f"{label}: a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        return False
+    before = grab(region, "before") if region else None
+    time.sleep(0.5)
+    again = grab(region, "again") if region else None
+    base = changed_fraction(before, again, cards) if before and again else 0.0
+    overlays_before = {o["id"] for o in screen_overlays()}
+    r = ctl("debug-expose", which)
+    if not r.get("ok") and which == "mission-control" and "turned off" in str(r.get("error")):
+        # The shortcut is off in Keyboard Shortcuts: Mission Control's own launcher.
+        say(f"  {r.get('error')}; opening Mission Control (com.apple.exposelauncher) instead")
+        r = {"ok": subprocess.run(["open", "-b", "com.apple.exposelauncher"]).returncode == 0, "key": "exposelauncher"}
+    if not check(r.get("ok"), f"{label}: shortcut typed ({r.get('key', r.get('error'))})"):
+        return False
+    seen = wait_until(lambda: [o for o in screen_overlays() if o["id"] not in overlays_before], 3, f"{label} to show")
+    say(f"  {label} {'seen: ' + str([(o['owner'], o['layer']) for o in seen]) if seen else 'not seen in the window list; going on after the wait'}")
+    time.sleep(EXPOSE_SETTLE)
+    listed = strip_panel()
+    during = grab(region, "during") if region else None
+    if shot:
+        shot(which)
+    moved = changed_fraction(before, during, cards) if before and during else None
+    say(f"  strip while it shows: listed on screen {listed is not None}"
+        + (f" (alpha {listed.get('alpha')})" if listed else "")
+        + (f"; cards' pixels changed {moved:.0%} (still screen {base:.0%})" if moved is not None else "; no pixel check (no cards)"))
+    hidden = listed is None or listed.get("alpha", 1.0) == 0
+    check(hidden, f"{label}: the strip is not drawn while it shows (the window server "
+          f"{'no longer lists it on screen' if listed is None else 'lists it on screen, alpha ' + str(listed.get('alpha'))})")
+    ctl("debug-expose", "escape")
+    if seen:
+        wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in overlays_before], 5, f"{label} to end")
+    time.sleep(EXPOSE_SETTLE)
+    check(ctl("space").get("space") == space_before, f"{label}: the same Desktop after Escape (Space {space_before})")
+    back = wait_until(strip_panel, 3, "the strip listed on screen again")
+    s = state()
+    p = s.get("strip_panel") or {}
+    check(back is not None and p.get("on_active_space") and p.get("shown"),
+          f"{label}: the strip is back on the Desktop shown ({p})")
+    panes_after = [(q["space"], q["active"], q["on_active_space"]) for q in s.get("strip_panels") or []]
+    check(panes_after == panes_before, f"{label}: every Desktop's pane where it was ({panes_before} then {panes_after})")
+    if before:
+        after = grab(region, "after")
+        diff = changed_fraction(before, after, cards) if after else 1.0
+        check(diff <= base + 0.15, f"{label}: the cards are drawn as before ({diff:.0%} changed, still screen {base:.0%})")
+    if cards:
+        target = s["strip_cards"][0]
+        f = target["frame"]
+        was = s["active"]
+        # Leaving Mission Control, macOS may keep another process's window (the desktop
+        # widgets') over the card for a moment; the app refuses to click there, so try again.
+        end, refused = time.time() + 4, []
+        while True:
+            r = ctl("debug-click", f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+            if r.get("ok") or "not ours" not in str(r.get("error")) or time.time() >= end:
+                break
+            refused.append(round(time.time() - end + 4, 1))
+            time.sleep(0.4)
+        if refused:
+            say(f"  the card was covered by another process's window for a moment (refused at {refused} s): {r.get('error', 'then clear')}")
+        s2 = wait_state(lambda x: x["active"] != was, f"{label}: the card click to switch", timeout=4)
+        check(r.get("ok") and s2 is not None, f"{label}: a card click switches afterwards ({r.get('error', 'ok')})")
+        if s2:
+            ctl("switch", was)
+            time.sleep(1.0)
+    return True
+
+
+def phase_expose():
+    say("\n== expose: the strip hides in Mission Control and App Exposé, and comes back ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(4)
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up"):
+        return
+    t = by_title(s)
+    # Stage 1 keeps only Fixture 3 (clear of the strip, so the strip stays shown); the others
+    # go to stage 2, the single card.
+    for n in (1, 2, 4):
+        do("send", 2, t[f"Fixture {n}"]["id"])
+    s = wait_state(lambda x: (x.get("strip_panel") or {}).get("shown") and x.get("strip_cards"), "the strip with its card", 4)
+    if not check(s is not None, "the strip shows one card"):
+        return
+    ok, told = panes_hide_in_expose(s)
+    check(ok, f"every strip pane is Transient, not Stationary, on one Desktop ({told})")
+    for which, label in (("mission-control", "Mission Control"), ("app-windows", "App Exposé")):
+        if not expose_round(which, label):
+            break
+    consistent("after Mission Control and App Exposé")
+    stop_app()
+    all_onscreen("expose quit")
+
+
 def frontmost_bundle():
-    r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
-    out = r.stdout.strip()
-    return out.split("=", 1)[1].strip().strip('"') if "=" in out else None
+    """The frontmost app's bundle ID. `lsappinfo info … front` prints nothing on this macOS,
+    so the front app's ASN is asked first; the reply is `bundleID="…"` (or `"CFBundleIdentifier"="…"`)."""
+    asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()
+    if not asn:
+        return None
+    out = subprocess.run(["lsappinfo", "info", "-only", "bundleid", asn], capture_output=True, text=True).stdout
+    m = re.search(r'(?:bundleID|"CFBundleIdentifier")\s*=\s*"([^"]+)"', out)
+    return m.group(1) if m else None
 
 
 def replayd_alerts(since):
@@ -1690,7 +1931,7 @@ def replayd_alerts(since):
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "capture"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "expose", "capture"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -1707,7 +1948,7 @@ def main():
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion,
-             "capture": phase_capture}[p]()
+             "expose": phase_expose, "capture": phase_capture}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

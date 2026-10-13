@@ -11,7 +11,9 @@
 //! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, and `debug-close ID` closes one (its close button). `space` (any time) is the Space shown as the engine sees it.
+//! screen, `debug-close ID` closes one (its close button), and `debug-expose mission-control|app-windows|show-desktop|escape` types Mission
+//! Control's own shortcut (or Escape, to leave it). `space` (any time) is the Space shown as
+//! the engine sees it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -24,7 +26,7 @@ use serde_json::json;
 
 use super::logging::{self, Process};
 use super::paths;
-use super::space_keys::Direction;
+use super::space_keys::{Direction, Expose};
 use crate::engine::geometry::{Point, Rect};
 
 /// A parsed ctl command.
@@ -115,6 +117,14 @@ pub enum Command {
         /// The window id.
         id: u32,
     },
+    /// Types one of Mission Control's shortcuts ("Mission Control", "Application windows",
+    /// "Show Desktop") as the user's settings have it, or Escape (`None`) to leave Mission
+    /// Control or App Exposé, at the HID tap (needs `STAGE_MANAGER_TEST=1`). Never changes the
+    /// Desktop shown.
+    DebugExpose {
+        /// Which shortcut; `None` is Escape.
+        which: Option<Expose>,
+    },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -190,6 +200,11 @@ impl Command {
                 let direction = Direction::parse(dir).ok_or_else(|| format!("expected left or right, got {dir:?}"))?;
                 Ok(Self::DebugSpace { direction, numpad: !rest.is_empty() })
             }
+            ["debug-expose", "escape"] => Ok(Self::DebugExpose { which: None }),
+            ["debug-expose", word] => match Expose::parse(word) {
+                Some(which) => Ok(Self::DebugExpose { which: Some(which) }),
+                None => Err(format!("expected mission-control, app-windows, show-desktop or escape, got {word:?}")),
+            },
             ["debug-fullscreen", id, on] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 let on = match *on {
@@ -416,6 +431,15 @@ mod tests {
         assert!(Command::parse("debug-fullscreen 42 toggle").is_err());
         assert!(Command::parse("debug-fullscreen x on").is_err());
         assert!(Command::parse("debug-fullscreen 42").is_err());
+        assert_eq!(
+            Command::parse("debug-expose mission-control"),
+            Ok(Command::DebugExpose { which: Some(Expose::MissionControl) })
+        );
+        assert_eq!(Command::parse("debug-expose app-windows"), Ok(Command::DebugExpose { which: Some(Expose::AppWindows) }));
+        assert_eq!(Command::parse("debug-expose show-desktop"), Ok(Command::DebugExpose { which: Some(Expose::ShowDesktop) }));
+        assert_eq!(Command::parse("debug-expose escape"), Ok(Command::DebugExpose { which: None }));
+        assert!(Command::parse("debug-expose").is_err());
+        assert!(Command::parse("debug-expose launchpad").is_err());
         assert!(Command::parse("").is_err());
         assert!(Command::parse("switch 0").is_err());
         assert!(Command::parse("switch x").is_err());

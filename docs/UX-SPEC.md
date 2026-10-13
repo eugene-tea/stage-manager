@@ -52,6 +52,10 @@ whose default is Apple's value (`stage-manager config --explain <key>`).
 | Click a card's app icon | all of the app's windows, also from other stages | same | — |
 | One at a Time, click the app again | opens its next window | same (one card per app, cycling) | — |
 | Shift on opening or activating an app | (no meaning) | brings it here (invisible unless Shift is held) | `[sugar] shift_brings_here` |
+| Mission Control (F3, Control-↑) | the strip disappears while it shows and is back when it ends (owner, 10-12) | same: every panel of ours is `Transient`, which Exposé hides; the strip, edge tab, drag ghost and motion overlay are not drawn and come back on the same Desktop (before 10-12 they were `Stationary` and stayed drawn over it). Mission Control lays out every window of the Desktop, parked ones included | — |
+| App Exposé (Control-↓) | the strip disappears | same (`Transient`) | — |
+| Show Desktop (F11) | the strip leaves with the windows (to observe: an Apple Community report of the strip and windows sliding off the edges) | hidden (`Transient`; to observe) | — |
+| Launchpad, the ⌘Tab switcher | drawn over everything; the strip stays under them | same; our panels are never in ⌘Tab or the ⌘\` window cycle (`IgnoresCycle`) | — |
 
 ## Strip geometry (measured; every number is a `[cards]` / `[icons]` key)
 
@@ -224,6 +228,15 @@ Ours:
   is read from the panels (`isOnActiveSpace`), not from our synthetic Space ids; two on one
   Desktop (a Desktop removed in Mission Control hands its windows to another) are cut to
   one. A full-screen app's Space has none.
+- Mission Control, App Exposé and Show Desktop hide every panel of ours, as Apple's strip
+  hides (owner, 10-12). AppKit's collection behavior has a Spaces choice and an Exposé
+  choice, set independently: ours keep the Spaces choice (none for a Desktop's pane and its
+  edge tab: the one Desktop they are first ordered in on, never a full-screen app's Space)
+  and take `Transient` for Exposé ("hidden in Exposé"), where they were `Stationary`
+  ("unaffected by Exposé", so drawn over Mission Control). `ctl state` lists each pane's
+  behavior bits; `scripts/test-stages.sh expose` and the Spaces check's Mission Control
+  round check it live (Mission Control and App Exposé typed with the user's own shortcuts,
+  left with Escape, never a Desktop change).
 
 ## Grouping (`AppWindowGroupingBehavior`)
 

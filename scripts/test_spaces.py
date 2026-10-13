@@ -36,7 +36,9 @@ Desktops' stages; kill -9 with a window parked on the other Desktop: the guardia
 says what for, brings it back as soon as you go there (on screen outside the park zone for a
 second, the guardian's log saying it brought it back) and only then ends; a full-screen
 window's Space has no strip, entering and leaving full screen (twice) keeps the Desktop's id,
-its stages and windows, and the engine's view does not flap.
+its stages and windows, and the engine's view does not flap; Mission Control and App Exposé
+(typed through the app, left with Escape, never a Desktop change) hide the strip, which then
+comes back on the same Desktop with each Desktop's pane still on its own Desktop.
 
 Every app run's log is kept (stage-manager.run-NN.log in the test home, renamed from the
 day's YYYY-MM-DD.log; the guardian writes on into its run's file).
@@ -552,7 +554,11 @@ planned steps (hands-free):
   Desktop 2   Fixture 3 (SIGUSR1) and Bravo 1; checks as guided; by eye: screenshot of the strip column
   card click  debug-click on a card while the window server is sampled every ~0.1 s for Desktop 1's
               windows (any = a jump); by eye: screenshot of the main display
-  back        ctl debug-space <back> to Desktop 1; checks as guided
+  expose      on Desktop 2: every pane Transient; ctl debug-expose mission-control, then app-windows (the
+              user's shortcuts; a fixture frontmost first); while it shows the window server no longer
+              lists the strip on screen; by eye: screenshot; ctl debug-expose escape; same Desktop, the
+              strip back and drawn as before, a card click switches, each Desktop's pane on its own Desktop
+  back        ctl debug-space <back> to Desktop 1; checks as guided (Desktop 2's pane stays there)
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
   guardian    debug-space <back> to Desktop 1; kill -9 the app; checks: still parked, the guardian waits;
               `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
@@ -745,6 +751,9 @@ def run():
         check(not yes("Did the screen jump to Desktop 1 (even for a moment)?"), "no jump to Desktop 1 (by eye)")
     check(ctl("switch", 1).get("ok") and current_space() == d2, "a hotkey switch stays on Desktop 2")
 
+    say("\n== Mission Control and App Exposé on Desktop 2: the strip hides, then comes back ==")
+    expose_on_desktop_2(d1, d2)
+
     say("\n== back on Desktop 1 ==")
     go("d1", "Switch back to Desktop 1 (Control-Left Arrow)")
     s = ts.wait_state(lambda x: x["space"] == d1, "Desktop 1 recognized", timeout=5)
@@ -760,6 +769,11 @@ def run():
         back_home = wait_for("Desktop 1's own strip panel", own_pane, 4)
         check(back_home is True, "Desktop 1's own strip panel is back, on the Desktop shown; Desktop 2's stays there"
               f" ({state().get('strip_panels')})")
+        others = [p for p in state().get("strip_panels") or [] if not p["active"]]
+        check(bool(others) and all(p["space"] == d2 and not p["on_active_space"] for p in others),
+              f"Desktop 2's pane did not follow to Desktop 1 (Transient panes stay on their Desktop): {others}")
+        ok, told = ts.panes_hide_in_expose(state())
+        check(ok, f"both panes are Transient, not Stationary, joining no other Space ({told})")
     sp = spaces()
     check(len(sp.get("list", [])) == 2, f"ctl dump lists two Spaces: {sp}")
 
@@ -871,6 +885,36 @@ def run():
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "the end: no fixture window parked on any Desktop")
+
+
+def expose_on_desktop_2(d1, d2):
+    """Mission Control, then App Exposé, typed through the app (`ctl debug-expose`, the
+    user's own shortcuts) and left with Escape; never a Desktop change (ts.expose_round has
+    the checks). Then each Desktop's pane is still on its own Desktop: Desktop 2's on the
+    Space shown, Desktop 1's not."""
+    s = state()
+    ok, told = ts.panes_hide_in_expose(s)
+    check(ok, f"every strip pane is Transient, not Stationary, joining no other Space ({told})")
+    if AUTO:
+        WATCH.pause()  # Mission Control draws other Desktops; the round checks the Desktop itself
+    take = (lambda name: by_eye(f"{name}: no strip at the left edge (Apple's hides)", shot(f"expose-{name}"))) if AUTO else None
+    try:
+        for which, label in (("mission-control", "Mission Control"), ("app-windows", "App Exposé")):
+            if not ts.expose_round(which, label, take):
+                break
+    finally:
+        if AUTO:
+            WATCH.desk("d2")
+    if not AUTO:
+        check(not yes("Did the screen show another Desktop at any point, or the strip over Mission Control?"),
+              "Mission Control: no other Desktop and no strip over it (by eye)")
+    s = state()
+    check(s["space"] == d2, f"still on Desktop 2 after Mission Control ({d2} then {s['space']})")
+    panes = s.get("strip_panels") or []
+    mine = [p for p in panes if p["active"]]
+    check(len(panes) == 2 and bool(mine) and mine[0]["space"] == d2 and mine[0]["on_active_space"]
+          and all(not p["on_active_space"] for p in panes if not p["active"]),
+          f"each Desktop's pane still on its own Desktop after Mission Control ({panes})")
 
 
 def fullscreen_on(round_no, desk):

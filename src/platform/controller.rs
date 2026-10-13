@@ -1907,7 +1907,8 @@ impl Controller {
             Command::Ping | Command::Quit | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugDrag { .. }
-            | Command::DebugSpace { .. } => {
+            | Command::DebugSpace { .. }
+            | Command::DebugExpose { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }
         }

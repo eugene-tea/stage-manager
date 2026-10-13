@@ -90,7 +90,7 @@ mod app {
     use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::fullscreen;
-    use stage_manager::platform::space_keys::{self, Direction, SpaceKey, SpaceView};
+    use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
     use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -440,6 +440,12 @@ mod app {
                 }
                 debug_space(&wm, direction, numpad)
             }
+            Command::DebugExpose { which } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");
+                }
+                debug_expose(which)
+            }
             Command::DebugDrag { points, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
@@ -453,6 +459,26 @@ mod app {
                 .ctl(other, Duration::from_secs(4))
                 .unwrap_or_else(|| ctl::error_reply("WM thread did not answer")),
         })
+    }
+
+    /// `ctl debug-expose`: types Mission Control's own shortcut as the user's settings have
+    /// it (or Escape) at the HID tap. The test watches the window server for the outcome.
+    fn debug_expose(which: Option<Expose>) -> serde_json::Value {
+        let Some(which) = which else {
+            return match space_keys::post_plain(space_keys::ESCAPE_KEY) {
+                Ok(()) => {
+                    tracing::info!("debug-expose: Escape typed");
+                    json!({ "ok": true, "key": "escape" })
+                }
+                Err(e) => ctl::error_reply(&e),
+            };
+        };
+        let key = SpaceKey::read_expose(which);
+        if let Err(e) = space_keys::post(&key, false) {
+            return ctl::error_reply(&e);
+        }
+        tracing::info!(which = which.name(), key = key.describe(), "debug-expose: shortcut typed");
+        json!({ "ok": true, "which": which.name(), "key": key.describe(), "key_from_settings": key.from_settings })
     }
 
     /// The Space shown as the engine sees it.
@@ -663,6 +689,7 @@ mod app {
                     "pid": w.pid,
                     "layer": w.layer,
                     "onscreen": w.onscreen,
+                    "alpha": w.alpha,
                     "bounds": w.bounds,
                     "z": z.get(&w.id),
                 })
@@ -674,19 +701,31 @@ mod app {
     }
 
     /// `probe-screen`: the on-screen windows covering the whole main display (menu bar
-    /// included), as a full-screen app's Space shows one; pids and bounds only.
+    /// included), as a full-screen app's Space shows one (`covering`: layer 0; pids and
+    /// bounds only), and those above or below the windows' layer (`overlays`: the owner's
+    /// process name, never a window title; Mission Control and App Exposé show one of the
+    /// Dock's, the Mission Control check's sign that they are up).
     pub fn probe_screen() -> ExitCode {
         let display = desktop::cg_display_bounds().first().copied();
-        let covering: Vec<_> = display
-            .map(|d| {
-                windows::list_windows()
-                    .into_iter()
-                    .filter(|w| w.onscreen && w.layer == 0 && fullscreen::covers_display(w.bounds, d))
-                    .map(|w| json!({ "id": w.id, "pid": w.pid, "bounds": w.bounds }))
-                    .collect()
-            })
-            .unwrap_or_default();
-        println!("{}", json!({ "ok": display.is_some(), "display": display, "covering": covering }));
+        let list = windows::list_windows();
+        let over = |layer0: bool| -> Vec<serde_json::Value> {
+            display
+                .map(|d| {
+                    list.iter()
+                        .filter(|w| w.onscreen && (w.layer == 0) == layer0 && fullscreen::covers_display(w.bounds, d))
+                        .map(|w| {
+                            if layer0 {
+                                json!({ "id": w.id, "pid": w.pid, "bounds": w.bounds })
+                            } else {
+                                json!({ "id": w.id, "pid": w.pid, "owner": w.owner, "layer": w.layer, "alpha": w.alpha })
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let out = json!({ "ok": display.is_some(), "display": display, "covering": over(true), "overlays": over(false) });
+        println!("{out}");
         ExitCode::SUCCESS
     }
 
