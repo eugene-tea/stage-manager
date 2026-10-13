@@ -1026,7 +1026,9 @@ impl Controller {
         // shown when one opened is left as it is (no plan, no reorder during it); hiding it
         // from the plan left the slivers bare until the close was seen (up to a second's
         // poll) and settled (10-13, F3 twice: the corner bare until a window was focused).
-        if on && self.overview.showing().is_some() && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
+        // A Desktop picked inside Mission Control plans as before (hidden until it is
+        // recognized): the old Desktop's patch must not come back on the new one.
+        if on && !self.space_pending && self.overview.showing().is_some() && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
             return;
         }
         let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
