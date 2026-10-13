@@ -64,6 +64,8 @@ struct Running {
     /// Cards hidden until their snapshots land.
     held: Vec<u64>,
     timers: Vec<Retained<NSTimer>>,
+    /// The window in place the snapshots pass under ([`Transition::under`]).
+    under: Option<u32>,
 }
 
 /// The card shown under the pointer while a window is dragged over the strip.
@@ -313,19 +315,8 @@ impl Strip {
             return;
         }
         self.place_overlay();
-        // Under a window only while nothing of ours must stay above it: the strip raised (its
-        // level above windows, or lifted) or a dragged window's card shown.
-        // Raised over windows (the edge revealing it, or its level above windows), the strip
-        // stays in front of the snapshots, which grow from and shrink into its cards from
-        // behind them: drawn over the cards and gone at the end, the cards popped back to the
-        // front (10-13, a laptop with windows over the strip). A dragged window's card keeps
-        // the overlay above everything.
-        let lifted = self.pane.lifted == Some(true) && self.motion.window_card.is_none();
-        let below = if lifted {
-            u32::try_from(self.pane.panel.windowNumber()).ok().map(|n| (n, objc2_app_kit::NSFloatingWindowLevel))
-        } else {
-            t.under.filter(|_| self.pane.lifted != Some(true) && self.motion.window_card.is_none()).map(|id| (id, objc2_app_kit::NSNormalWindowLevel))
-        };
+        let under = t.under;
+        let below = self.overlay_below(under);
         let style = self.style.animation.clone();
         let spring = self.spring();
         let o = self.motion.overlay.origin();
@@ -448,7 +439,7 @@ impl Strip {
         }
         let order: Vec<u64> = self.snapshot.cards.iter().map(|c| c.stage).collect();
         strip_model::publish_transition(TransitionReport { id, ghosts: report, order });
-        self.motion.running = Some(Running { id, ghosts, waiting, held, timers });
+        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under });
     }
 
     /// The incoming windows of transition `id` are in place at `frames` (read back from the
@@ -519,6 +510,30 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
+    }
+
+    /// Where the overlay goes for a transition (`under`: its window in place): just under the
+    /// strip's pane while the strip is raised over windows (the edge revealing it, or its
+    /// level above windows), so snapshots grow from and shrink into the cards from behind
+    /// them (drawn over the cards and gone at the end, the cards popped back to the front:
+    /// 10-13, a laptop with windows over the strip); else just under `under`; above every
+    /// window while a dragged window's card shows, or with neither.
+    fn overlay_below(&self, under: Option<u32>) -> Option<(u32, isize)> {
+        if self.motion.window_card.is_some() {
+            return None;
+        }
+        if self.pane.lifted == Some(true) {
+            return u32::try_from(self.pane.panel.windowNumber()).ok().map(|n| (n, objc2_app_kit::NSFloatingWindowLevel));
+        }
+        under.map(|id| (id, objc2_app_kit::NSNormalWindowLevel))
+    }
+
+    /// The strip was raised or lowered: a running transition's overlay goes where it now
+    /// belongs ([`Self::overlay_below`]).
+    pub(super) fn reorder_overlay(&mut self) {
+        let Some(under) = self.motion.running.as_ref().map(|r| r.under) else { return };
+        let below = self.overlay_below(under);
+        self.motion.overlay.show_below(below);
     }
 
     fn finish_transition(&mut self, landed: bool) {
