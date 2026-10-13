@@ -971,6 +971,9 @@ impl Controller {
                     Some(format!("{n} desktop items, more than the {MAX_ICONS} read; the patch stays off"))
                 }
                 Some(DesktopIcons::Unexpected(why)) => {
+                    // Not knowing is off: an older good read must not stand for a desktop
+                    // Finder now answers oddly (an icon just dropped with no frame yet).
+                    p.known = None;
                     p.fails = p.fails.saturating_add(1);
                     p.due = Some(sooner(p.due, now + items_retry(p.fails)));
                     Some(format!("Finder's desktop is not as expected ({why}); its icons are unknown"))
