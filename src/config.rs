@@ -216,6 +216,10 @@ pub struct AnimationStyle {
     pub shadow_offset_y: f64,
     pub snapshot_interval_ms: u64,
     pub snapshot_cache_mb: u64,
+    /// An activation of an app in another stage (Cmd-Tab, Dock, a click on its sliver) grows
+    /// its windows from their card like a card click; off (the default), they come to their
+    /// frames at once, since macOS has already raised them in the park corner.
+    pub activation_grows: bool,
 }
 
 /// `[strip] level`: where the strip sits among windows.
@@ -766,6 +770,7 @@ impl Config {
                     shadow_offset_y: v.num("animation.shadow_offset_y"),
                     snapshot_interval_ms: v.uint("animation.snapshot_interval_ms"),
                     snapshot_cache_mb: v.uint("animation.snapshot_cache_mb"),
+                    activation_grows: v.flag("animation.activation_grows"),
                 },
             },
             windows: WindowsConfig {

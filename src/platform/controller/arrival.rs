@@ -1004,7 +1004,7 @@ fn dock_edge(item: Rect, display: Rect) -> Option<crate::engine::geometry::Point
 
 /// App `pid`'s focused window, asked with a bounded timeout (the app goes back to the global
 /// one after).
-fn focused_window_of(pid: i32) -> Option<WindowId> {
+pub(super) fn focused_window_of(pid: i32) -> Option<WindowId> {
     AxElement::application(pid)
         .bounded(QUERY_AX_TIMEOUT_SECONDS, |app| app.focused_window().ok().and_then(|w| w.window_id().ok()))
         .map(WindowId)

@@ -716,6 +716,70 @@ fn one_at_a_time_follows_the_focused_window_even_when_present() {
     assert!(a.iter().all(|x| *x == Action::StateChanged) || a.is_empty());
 }
 
+/// The stage an activation of `pid` switches to with `focused` (None: no switch).
+fn activation_answer(e: &Env, pid: Pid, focused: Option<WindowId>) -> Option<StageId> {
+    let mut m = e.m.clone();
+    let obs = Observation { focused, ..e.d.obs() };
+    let a = m.app_activated(pid, &obs);
+    (!a.is_empty()).then(|| m.main_active_stage()).flatten()
+}
+
+#[test]
+fn an_activation_asks_the_focus_only_when_the_answer_depends_on_it() {
+    // (setup, pid, whether the focus can change the answer)
+    type Setup = fn(&mut Env);
+    let setups: [(&str, Setup, Pid, bool); 6] = [
+        ("one stage elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 10, false),
+        ("two stages elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::New);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 10, true),
+        ("present here, one elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::New);
+        }, 10, false),
+        ("present here only", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 11, false),
+        ("pinned here, one elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::Float);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 10, false),
+        ("unknown app", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+        }, 99, false),
+    ];
+    for one_at_a_time in [false, true] {
+        for (name, setup, pid, depends) in setups {
+            let mut options = ModelOptions::default();
+            if one_at_a_time {
+                options.settings.app_windows = AppWindows::OneAtATime;
+            }
+            let mut e = Env::with(options);
+            setup(&mut e);
+            let needs = e.m.activation_needs_focus(pid);
+            let ids: Vec<WindowId> = e.m.windows().map(|x| x.meta.id).collect();
+            let answers: Vec<Option<StageId>> = std::iter::once(None)
+                .chain(ids.iter().map(|&id| Some(id)))
+                .map(|f| activation_answer(&e, pid, f))
+                .collect();
+            let varies = answers.iter().any(|a| *a != answers[0]);
+            // Never skip the focus when it matters; ask it only where expected.
+            assert!(needs || !varies, "{name}, one at a time {one_at_a_time}: the focus changes the answer {answers:?}");
+            if !one_at_a_time {
+                assert_eq!(needs, depends, "{name}");
+            }
+        }
+    }
+}
+
 #[test]
 fn an_app_with_a_pinned_window_does_not_pull_a_switch() {
     let mut e = Env::new();

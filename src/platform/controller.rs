@@ -426,6 +426,11 @@ pub struct Controller {
     /// The transition whose incoming windows are in place, with their frames read back, for
     /// the next snapshot.
     arrived_note: Option<(u64, Vec<(u32, Rect)>)>,
+    /// Windows the next animated batch brings to their frames first and at once, outside the
+    /// transition (an activated app's windows, which macOS has already raised in the park
+    /// corner, or a natively unhidden app's, already in place): `[animation]
+    /// activation_grows` off.
+    arrive_now: HashSet<u32>,
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
@@ -572,6 +577,7 @@ impl Controller {
             next_transition: 0,
             parked_note: None,
             arrived_note: None,
+            arrive_now: HashSet::new(),
             unplaced: BTreeSet::new(),
             fullscreen: false,
             space_pending: false,
@@ -680,6 +686,48 @@ impl Controller {
             }
         }
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
+    }
+
+    /// The observation an activation's switch needs, without asking any app: the z-order
+    /// from the window server, the shown windows' frames as tracked (kept current by their
+    /// move and resize notices, which also keep the model's frames current), and the focused
+    /// window only when the switch depends on it ([`Model::activation_needs_focus`]), asked
+    /// of the activated app alone with a bounded timeout. [`Self::observe`] asked every shown
+    /// window's frame and the system-wide focus through Accessibility, which for an app busy
+    /// activating (and the one it took over from) cost most of the activation's gap (6V).
+    fn observe_activation(&self, ob: &Observer, pid: i32, needs_focus: bool) -> Observation {
+        let Some(m) = &self.model else { return Observation::default() };
+        let space = m.current_space(m.main_display().id);
+        let list = windows::list_windows();
+        let z_order: Vec<WindowId> = list
+            .iter()
+            .filter(|w| w.onscreen && w.layer == 0)
+            .map(|w| WindowId(w.id))
+            .filter(|id| m.window(*id).is_some())
+            .collect();
+        let frames = m
+            .windows()
+            .filter(|w| !w.parked && (w.space == space || w.sticky))
+            .filter_map(|w| ob.window(w.meta.id.0).map(|t| (w.meta.id, t.frame)))
+            .collect();
+        let focused = if needs_focus { arrival::focused_window_of(pid) } else { None };
+        Observation { frames, z_order, focused }
+    }
+
+    /// The windows of app `pid` a batch brings back (its `SetFrame`s): with `[animation]
+    /// activation_grows` off they come first and at once ([`Self::arrive_now`]).
+    fn arrive_now_for(&self, pid: i32, actions: &[Action], ob: &Observer) -> HashSet<u32> {
+        if self.store.config().style.animation.activation_grows {
+            return HashSet::new();
+        }
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::SetFrame { id, .. } => Some(id.0),
+                _ => None,
+            })
+            .filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid))
+            .collect()
     }
 
     // ----- executing actions -------------------------------------------------------------
@@ -954,11 +1002,29 @@ impl Controller {
     /// them. Without the strip's cover the batch runs at once.
     fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
         self.flush_pending(ob);
+        // An activated app's windows first, before the strip is told and anything parks:
+        // macOS has raised them in the park corner already, so every moment counts (6V).
+        let first = std::mem::take(&mut self.arrive_now);
+        let (early, actions): (Vec<Action>, Vec<Action>) =
+            actions.into_iter().partition(|a| matches!(a, Action::SetFrame { id, .. } if first.contains(&id.0)));
+        let mut failed = 0;
+        if !early.is_empty() {
+            let started = Instant::now();
+            let n = early.len();
+            failed += self.execute_batch(ob, early, true);
+            tracing::debug!(windows = n, took_ms = started.elapsed().as_millis() as u64, "the activated app's windows came to their frames first");
+        }
+        failed + self.execute_animated_rest(ob, actions, &first)
+    }
+
+    fn execute_animated_rest(&mut self, ob: &Observer, actions: Vec<Action>, first: &HashSet<u32>) -> usize {
         let anim = self.store.config().style.animation.clone();
         if !anim.animates() || !self.strip_visible {
             return self.execute(ob, actions);
         }
-        let Some(t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
+        // The windows already in place stay out of the transition: no snapshot grows over them.
+        let Some(mut t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
+        t.incoming.retain(|w| !first.contains(&w.window.id));
         let id = t.id;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
@@ -1206,7 +1272,12 @@ impl Controller {
         // so the keyboard goes to the new stage at once) leave the animation alone.
         if !matches!(
             event,
-            WinEvent::Moved(_) | WinEvent::Retitled(_) | WinEvent::Focused(_) | WinEvent::AppActivated(_)
+            WinEvent::Moved(_)
+                | WinEvent::Retitled(_)
+                | WinEvent::Focused(_)
+                | WinEvent::AppActivated(_)
+                | WinEvent::AppHidden(_)
+                | WinEvent::AppUnhidden(_)
         ) {
             self.flush_pending(ob);
         }
@@ -1301,10 +1372,15 @@ impl Controller {
                     if !actions.is_empty() {
                         tracing::info!(id, "focused window is in another stage; switching");
                     }
+                    if let Some(pid) = pid {
+                        self.arrive_now = self.arrive_now_for(pid, &actions, ob);
+                    }
                     self.execute_animated(ob, actions);
                 }
             }
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
+            WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid, true),
+            WinEvent::AppUnhidden(pid) => self.on_app_hidden(ob, pid, false),
             WinEvent::AppActivated(pid) => {
                 let waiting: Vec<u32> =
                     self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
@@ -1330,12 +1406,14 @@ impl Controller {
                     self.after_hold(ob, now);
                     return;
                 }
-                let obs = self.observe(ob);
+                let needs_focus = self.model.as_ref().is_none_or(|m| m.activation_needs_focus(pid));
+                let obs = self.observe_activation(ob, pid, needs_focus);
                 if self.bring_here_if_shift(ob, pid, &obs, now) {
                     self.forget_held(ob);
                     return;
                 }
                 let present = self.app_present(pid);
+                let since = ob.activated_at(pid);
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.app_activated(pid, &obs);
                     if actions.is_empty() && !present {
@@ -1349,14 +1427,23 @@ impl Controller {
                         tracing::debug!(pid, "activation of the app whose window focus is held; the focus stays held");
                     } else {
                         if !actions.is_empty() {
-                            tracing::info!(pid, "activated app lives in another stage; switching");
+                            let since_activation_ms = since.map(|t| t.elapsed().as_millis() as u64);
+                            let decide_ms = now.elapsed().as_millis() as u64;
+                            tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
                         }
                         self.forget_held(ob);
                     }
+                    self.arrive_now = self.arrive_now_for(pid, &actions, ob);
                     self.execute_animated(ob, actions);
                 }
             }
         }
+    }
+
+    /// An app was hidden or unhidden (NSWorkspace): `[windows] hide_parked_apps` follows
+    /// its own hides and unhides.
+    fn on_app_hidden(&mut self, _ob: &mut Observer, pid: i32, hidden: bool) {
+        tracing::debug!(pid, hidden, "app visibility changed");
     }
 
     /// How long before an activation a Shift press still counts (`[sugar]`).

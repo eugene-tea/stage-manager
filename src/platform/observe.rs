@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::time::Instant;
 
 use objc2_application_services::{AXObserver, AXUIElement};
 use objc2_core_foundation::CFString;
@@ -78,8 +79,13 @@ pub enum WinEvent {
     Retitled(u32),
     /// A window got focus.
     Focused(u32),
-    /// An observed app became frontmost (NSWorkspace).
+    /// An observed app became frontmost (NSWorkspace; its notice's instant:
+    /// [`Observer::activated_at`]).
     AppActivated(i32),
+    /// An observed app was hidden (NSWorkspace).
+    AppHidden(i32),
+    /// An observed app was unhidden (NSWorkspace).
+    AppUnhidden(i32),
     /// A window was minimized (⌘M, the yellow button).
     Minimized(u32),
 }
@@ -139,6 +145,8 @@ pub struct Observer {
     /// the next retry passes, counting attempts.
     recheck: HashMap<i32, u32>,
     events: Vec<WinEvent>,
+    /// When the main thread got each app's last activation notice.
+    activated_at: HashMap<i32, Instant>,
 }
 
 /// The AX callback type, installed by the WM thread.
@@ -169,6 +177,7 @@ impl Observer {
             pending: HashMap::new(),
             recheck: HashMap::new(),
             events: Vec::new(),
+            activated_at: HashMap::new(),
         }
     }
 
@@ -195,6 +204,11 @@ impl Observer {
     /// One tracked window.
     pub fn window(&self, id: u32) -> Option<&TrackedWindow> {
         self.windows.get(&id)
+    }
+
+    /// When the main thread got app `pid`'s last activation notice (NSWorkspace).
+    pub fn activated_at(&self, pid: i32) -> Option<Instant> {
+        self.activated_at.get(&pid).copied()
     }
 
     /// The bundle id of a running app, if known.
@@ -616,15 +630,18 @@ impl Observer {
                 }
             }
             AppEvent::Terminated(app) => {
+                self.activated_at.remove(&app.pid);
                 let known = self.apps.remove(&app.pid).is_some();
                 if known {
                     self.log_app("app terminated", &app);
                 }
                 self.unobserve_app(app.pid);
             }
-            AppEvent::Activated(app) => {
-                self.log_app("app activated", &app);
+            AppEvent::Activated(app, at) => {
+                let queued_ms = at.elapsed().as_millis() as u64;
+                self.log_app_queued("app activated", &app, queued_ms);
                 let pid = app.pid;
+                self.activated_at.insert(pid, at);
                 let allowed = self.allowed(&app);
                 self.apps.entry(pid).or_insert(app);
                 if self.observing && allowed {
@@ -637,6 +654,27 @@ impl Observer {
                     self.events.push(WinEvent::AppActivated(pid));
                 }
             }
+            AppEvent::Hidden(app) => {
+                self.log_app("app hidden", &app);
+                if self.observing && self.allowed(&app) {
+                    self.events.push(WinEvent::AppHidden(app.pid));
+                }
+            }
+            AppEvent::Unhidden(app) => {
+                self.log_app("app unhidden", &app);
+                if self.observing && self.allowed(&app) {
+                    self.events.push(WinEvent::AppUnhidden(app.pid));
+                }
+            }
+        }
+    }
+
+    fn log_app_queued(&self, what: &str, app: &AppInfo, queued_ms: u64) {
+        let name = app.name.as_deref().unwrap_or("?");
+        if self.allowed(app) {
+            tracing::info!(pid = app.pid, bundle = app.bundle_or_unknown(), name, queued_ms, "{what}");
+        } else {
+            tracing::debug!(pid = app.pid, bundle = app.bundle_or_unknown(), name, queued_ms, "{what} (not observed)");
         }
     }
 
