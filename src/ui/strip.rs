@@ -1038,7 +1038,9 @@ impl Strip {
             self.geometry = geometry;
         }
         let transition = snapshot.transition.clone();
-        // Where incoming windows grow from: their cards before this snapshot replaces them.
+        // Where incoming windows grow from: their cards before this snapshot replaces them
+        // (slid as the strip is now; moved to its new slide state below).
+        let dx_before = self.current_dx();
         let starts = transition.as_ref().map(|t| self.incoming_starts(t));
         // Another Space (or a full-screen one): the pane of the Desktop shown takes over (it
         // was left there with that Desktop's cards, or is new); the one left stays on its
@@ -1070,6 +1072,9 @@ impl Strip {
             // reveals (or hides) the strip lands its snapshots where the cards will be, not
             // where they were (review R1-ui 1).
             self.update_visibility();
+            // Incoming windows grow from where their cards will be too (review R2 V2): a
+            // start on a card follows the slide this snapshot decided.
+            let starts = slide_card_starts(starts, self.current_dx() - dx_before);
             self.begin_transition(t, starts);
         }
         if let Some(id) = self.snapshot.parked {
@@ -2229,4 +2234,20 @@ impl Strip {
             _ => {}
         }
     }
+}
+
+/// Where incoming windows grow from, by window: the plane and the card slot, if any.
+type Starts = HashMap<u32, (motion_math::Plane, Option<usize>)>;
+
+/// Moves the incoming windows' starts that sit on a card (those with a slot) by `dx`, the
+/// strip's slide since they were measured; window and off-screen starts stay.
+fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
+    if dx != 0.0 {
+        for (plane, slot) in starts.values_mut() {
+            if slot.is_some() {
+                plane.left_mid.x += dx;
+            }
+        }
+    }
+    starts
 }
