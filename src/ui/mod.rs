@@ -1,5 +1,6 @@
 //! AppKit UI: status item, strip panel and the motion overlay.
 
+pub mod glyph;
 pub mod motion_math;
 pub mod overlay;
 pub mod panels;
