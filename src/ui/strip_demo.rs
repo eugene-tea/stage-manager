@@ -314,6 +314,7 @@ impl Demo {
             outgoing: s.active_windows.iter().rev().map(moving).collect(),
             incoming: card.windows.iter().rev().map(moving).collect(),
             sent: None,
+            under: None,
         });
         tracing::info!(id, stage, "demo: playing a switch");
         strip_model::present(s.clone());

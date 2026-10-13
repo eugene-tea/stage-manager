@@ -1213,6 +1213,26 @@ impl Controller {
         failed + self.execute_animated_rest(ob, actions, &first)
     }
 
+    /// The frontmost window of the main display's active stage already in place (shown, and
+    /// not among `arriving`, whose snapshots grow from their card): a window just opened, an
+    /// activated app's moved first. A transition's snapshots pass under it (10-13: a new
+    /// System Settings window, the outgoing VS Code snapshot drawn over it, then Settings
+    /// popping up as it ended).
+    fn window_in_place(&self, arriving: &HashSet<u32>) -> Option<u32> {
+        let m = self.model.as_ref()?;
+        let stage = m.stage(m.main_active_stage()?)?;
+        let shown: HashSet<u32> = stage
+            .windows
+            .iter()
+            .filter(|id| !arriving.contains(&id.0) && m.window(**id).is_some_and(|w| !w.parked))
+            .map(|id| id.0)
+            .collect();
+        if shown.is_empty() {
+            return None;
+        }
+        windows::on_screen().into_iter().find(|w| w.layer == 0 && shown.contains(&w.id)).map(|w| w.id)
+    }
+
     fn execute_animated_rest(&mut self, ob: &Observer, actions: Vec<Action>, first: &HashSet<u32>) -> usize {
         let anim = self.store.config().style.animation.clone();
         if !anim.animates() || !self.strip_visible {
@@ -1223,6 +1243,7 @@ impl Controller {
         t.incoming.retain(|w| !first.contains(&w.window.id));
         let id = t.id;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
+        t.under = self.window_in_place(&arriving);
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let started = Instant::now();
         self.present_with(Some(Transition { sent: Some(started), ..t }));

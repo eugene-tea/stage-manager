@@ -21,7 +21,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSStatusWindowLevel, NSView, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSNormalWindowLevel, NSPanel, NSStatusWindowLevel, NSView, NSWindowOrderingMode,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
@@ -231,6 +232,9 @@ pub struct Overlay {
     /// The overlay's top-left corner, global coordinates.
     origin: Point,
     shown: bool,
+    /// The window the overlay is ordered just under (at the normal window level), while a
+    /// transition's snapshots pass under a window already in place ([`Self::show_under`]).
+    under: Option<u32>,
 }
 
 impl Overlay {
@@ -247,7 +251,7 @@ impl Overlay {
         let space = CALayer::new();
         root.addSublayer(&space);
         panel.setContentView(Some(&view));
-        Self { panel, view, root, space, origin: Point::new(0.0, 0.0), shown: false }
+        Self { panel, view, root, space, origin: Point::new(0.0, 0.0), shown: false, under: None }
     }
 
     /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them) and sets
@@ -284,6 +288,24 @@ impl Overlay {
 
     /// Shows the overlay (above every window, on the active Space).
     pub fn show(&mut self) {
+        self.show_under(None);
+    }
+
+    /// Shows the overlay just under window `under` (another app's, at the normal level), so
+    /// snapshots pass behind a window already in place, as Apple's do behind a window just
+    /// opened or activated; `None`: above every window.
+    pub fn show_under(&mut self, under: Option<u32>) {
+        if let Some(id) = under {
+            self.panel.setLevel(NSNormalWindowLevel);
+            self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Below, id as isize);
+            self.shown = true;
+            self.under = Some(id);
+            return;
+        }
+        if self.under.take().is_some() {
+            self.panel.setLevel(NSStatusWindowLevel);
+            self.shown = false;
+        }
         if !self.shown {
             self.shown = true;
             self.panel.orderFrontRegardless();
@@ -303,6 +325,7 @@ impl Overlay {
         panel.setContentView(Some(&self.view));
         let old = std::mem::replace(&mut self.panel, panel);
         old.close();
+        self.under = None;
     }
 
     /// Hides the overlay.

@@ -88,6 +88,9 @@ pub struct Transition {
     /// When the controller announced it (the strip logs how long the main thread took to
     /// get to it: a busy main thread delays the motion's start).
     pub sent: Option<std::time::Instant>,
+    /// The frontmost window of the arriving stage already in place (a window just opened,
+    /// an activated app's): the snapshots pass under it, not over it.
+    pub under: Option<u32>,
 }
 
 /// One window of a [`Transition`].

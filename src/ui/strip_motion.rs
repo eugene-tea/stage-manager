@@ -313,6 +313,7 @@ impl Strip {
             return;
         }
         self.place_overlay();
+        let under = t.under;
         let style = self.style.animation.clone();
         let spring = self.spring();
         let o = self.motion.overlay.origin();
@@ -399,7 +400,7 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        self.motion.overlay.show();
+        self.motion.overlay.show_under(under);
         self.motion.overlay.flush();
         self.motion.landing = None;
         strip_model::cover(t.id, cover);
