@@ -2363,6 +2363,11 @@ impl Strip {
         let window_drag = self.snapshot.window_drag.is_some();
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
+        // A strip in plain view stays under the pointer only for the switch its own card click
+        // started (the clicked card stays squeezed until it lands).
+        if !(self.transition_starting && self.squeezed.is_some()) {
+            self.visibility.forget_shown();
+        }
         let decision = self.visibility.step(mode, edge_pointer, &self.geometry.global, Instant::now());
         // A window dragged over the strip column reveals it and opens the gap under the pointer.
         let over = pointer.filter(|p| window_drag && self.snapshot.user_visible && self.geometry.global.contains(*p));

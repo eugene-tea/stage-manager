@@ -124,6 +124,13 @@ impl Visibility {
         self.hold_until = Some(now + for_how_long);
     }
 
+    /// Drops the carry-over of a strip in plain view ([`Self::step`]): only a switch the strip
+    /// itself started (a card click) keeps it under the pointer; a window resized into the
+    /// strip's column or a keyboard switch hides it, as Apple's does.
+    pub fn forget_shown(&mut self) {
+        self.was_shown = false;
+    }
+
     /// Advances the state with the pointer (global, top-left origin; `None` when unknown)
     /// and the strip area `strip` (global).
     pub fn step(&mut self, mode: Mode, pointer: Option<Point>, strip: &Rect, now: Instant) -> Decision {
@@ -219,6 +226,11 @@ mod tests {
         assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 10)).shown);
         // Only right after Shown: a later pass over the strip needs the edge.
         assert!(!v.step(Mode::EdgeOnly, inside, &STRIP, ms(t, 20)).shown);
+        // Not a card click (a resize into the column, a keyboard switch): forgotten, hidden.
+        let mut v = Visibility::default();
+        assert!(v.step(Mode::Shown, None, &STRIP, t).shown);
+        v.forget_shown();
+        assert!(!v.step(Mode::EdgeOnly, inside, &STRIP, ms(t, 10)).shown);
     }
 
     #[test]
