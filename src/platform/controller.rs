@@ -1217,8 +1217,17 @@ impl Controller {
     /// not among `arriving`, whose snapshots grow from their card): a window just opened, an
     /// activated app's moved first. A transition's snapshots pass under it (10-13: a new
     /// System Settings window, the outgoing VS Code snapshot drawn over it, then Settings
-    /// popping up as it ended).
-    fn window_in_place(&self, arriving: &HashSet<u32>) -> Option<u32> {
+    /// popping up as it ended). None (snapshots above every window, as before) when a window
+    /// leaving (`outgoing`) sits in front of it (Cmd-M, a window dragged to the strip), or
+    /// when the batch ends with an arriving window raised (a merge, a drop).
+    fn window_in_place(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, actions: &[Action]) -> Option<u32> {
+        let last_raised = actions.iter().rev().find_map(|a| match a {
+            Action::Raise { id } | Action::Focus { id } => Some(id.0),
+            _ => None,
+        });
+        if last_raised.is_some_and(|id| arriving.contains(&id)) {
+            return None;
+        }
         let m = self.model.as_ref()?;
         let stage = m.stage(m.main_active_stage()?)?;
         let shown: HashSet<u32> = stage
@@ -1230,7 +1239,8 @@ impl Controller {
         if shown.is_empty() {
             return None;
         }
-        windows::on_screen().into_iter().find(|w| w.layer == 0 && shown.contains(&w.id)).map(|w| w.id)
+        let front = windows::on_screen().into_iter().find(|w| w.layer == 0 && (shown.contains(&w.id) || outgoing.contains(&w.id)))?;
+        shown.contains(&front.id).then_some(front.id)
     }
 
     fn execute_animated_rest(&mut self, ob: &Observer, actions: Vec<Action>, first: &HashSet<u32>) -> usize {
@@ -1243,7 +1253,8 @@ impl Controller {
         t.incoming.retain(|w| !first.contains(&w.window.id));
         let id = t.id;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
-        t.under = self.window_in_place(&arriving);
+        let outgoing: HashSet<u32> = t.outgoing.iter().map(|w| w.window.id).collect();
+        t.under = self.window_in_place(&arriving, &outgoing, &actions);
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let started = Instant::now();
         self.present_with(Some(Transition { sent: Some(started), ..t }));

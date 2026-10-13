@@ -9,7 +9,7 @@
 //! 1. **Cheap first** ([`Shield::may_hit`]): only a press inside the corner zone of the park
 //!    corner ([`corner_zone`]) can hit a sliver. Everywhere else (nearly every press) the
 //!    answer is "pass" after a few rectangle tests, without asking the window server.
-//! 2. **Then exact** ([`topmost_at`]): the topmost on-screen window under the press, our own
+//! 2. **Then exact** ([`grabbing_at`]): the frontmost on-screen window under the press, our own
 //!    windows (the strip's panels, the motion overlay), transparent ones and the Dock's
 //!    window away from its bar ([`DockBar`]) skipped, each window's invisible resize border
 //!    ([`GRAB_MARGIN`]) counted as its own. Only when that window is one the model
@@ -131,8 +131,11 @@ pub const OTHER_GRAB_MARGIN: f64 = 4.0;
 /// skipping what [`topmost_at`] skips: the window server hit-tests front to back with the
 /// resize border counted, so a front window's border beats a back window's content.
 fn grabbing_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &DockBar, parked: &HashSet<u32>) -> Option<Listed> {
+    // Over a shown window's content the wide band would take its presses: there a parked
+    // window's border counts as wide as macOS's real one.
+    let over_shown = topmost_at(front_to_back, at, own_pid, dock).is_some_and(|w| !parked.contains(&w.id));
     front_to_back.iter().copied().find(|w| {
-        let m = if parked.contains(&w.id) { GRAB_MARGIN } else { OTHER_GRAB_MARGIN };
+        let m = if parked.contains(&w.id) && !over_shown { GRAB_MARGIN } else { OTHER_GRAB_MARGIN };
         let grown = Rect::new(w.bounds.x - m, w.bounds.y - m, w.bounds.w + 2.0 * m, w.bounds.h + 2.0 * m);
         w.pid != own_pid && w.alpha > 0.0 && contains(grown, at) && !dock.clear_over(w, |b| contains(b, at))
     })

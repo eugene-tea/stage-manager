@@ -313,7 +313,9 @@ impl Strip {
             return;
         }
         self.place_overlay();
-        let under = t.under;
+        // Under a window only while nothing of ours must stay above it: the strip raised (its
+        // level above windows, or lifted) or a dragged window's card shown.
+        let under = t.under.filter(|_| self.pane.lifted != Some(true) && self.motion.window_card.is_none());
         let style = self.style.animation.clone();
         let spring = self.spring();
         let o = self.motion.overlay.origin();

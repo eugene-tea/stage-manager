@@ -298,9 +298,15 @@ impl Overlay {
         if let Some(id) = under {
             self.panel.setLevel(NSNormalWindowLevel);
             self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Below, id as isize);
-            self.shown = true;
+            if self.panel.isVisible() {
+                self.shown = true;
+                self.under = Some(id);
+                return;
+            }
+            // The window is gone (closed, or off the Space shown): above every window.
+            tracing::debug!(id, "motion overlay: cannot go under that window; above every window");
             self.under = Some(id);
-            return;
+            self.shown = false;
         }
         if self.under.take().is_some() {
             self.panel.setLevel(NSStatusWindowLevel);
