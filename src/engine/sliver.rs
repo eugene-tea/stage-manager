@@ -11,7 +11,8 @@
 //!    answer is "pass" after a few rectangle tests, without asking the window server.
 //! 2. **Then exact** ([`topmost_at`]): the topmost on-screen window under the press, our own
 //!    windows (the strip's panels, the motion overlay), transparent ones and the Dock's
-//!    window away from its bar ([`DockBar`]) skipped. Only when that window is one the model
+//!    window away from its bar ([`DockBar`]) skipped, each window's invisible resize border
+//!    ([`GRAB_MARGIN`]) counted as its own. Only when that window is one the model
 //!    counts as parked is the press swallowed: a window of the active stage over the corner,
 //!    the Dock's bar, a menu bar extra or the wallpaper keep their presses.
 //! 3. **The whole gesture** ([`PressGate`]): a swallowed press swallows its drags and its
@@ -115,15 +116,23 @@ pub fn topmost_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &Dock
 
 /// How far outside its frame a window takes a press: macOS's invisible resize border (seen
 /// 10-13: a press 3.1 pt left of a parked window's 1 pt sliver grabbed its left edge, and a
-/// double-click and drag pulled it out). Only where no window lies under the press itself.
-pub const GRAB_MARGIN: f64 = 8.0;
+/// double-click and drag pulled it out). Wide on purpose: the exposed part is the window's
+/// rounded top-left corner, whose diagonal hot spot reaches farther than an edge's, and a
+/// press in this band costs at most a wallpaper click inside the corner zone.
+pub const GRAB_MARGIN: f64 = 12.0;
 
-/// The frontmost window of `front_to_back` whose frame grown by [`GRAB_MARGIN`] holds `at`,
-/// skipping what [`topmost_at`] skips: the window whose resize border takes a press that
-/// lands on no window.
-fn grabbing_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &DockBar) -> Option<Listed> {
-    let m = GRAB_MARGIN;
+/// The resize border counted for a window not parked: the measured edge (3.1 pt) with room.
+/// Narrower than [`GRAB_MARGIN`], so a shown window ending a few points short of the corner
+/// does not take a press on a sliver.
+pub const OTHER_GRAB_MARGIN: f64 = 4.0;
+
+/// The frontmost window of `front_to_back` whose frame grown by its resize border
+/// ([`GRAB_MARGIN`] parked, [`OTHER_GRAB_MARGIN`] else) holds `at`,
+/// skipping what [`topmost_at`] skips: the window server hit-tests front to back with the
+/// resize border counted, so a front window's border beats a back window's content.
+fn grabbing_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &DockBar, parked: &HashSet<u32>) -> Option<Listed> {
     front_to_back.iter().copied().find(|w| {
+        let m = if parked.contains(&w.id) { GRAB_MARGIN } else { OTHER_GRAB_MARGIN };
         let grown = Rect::new(w.bounds.x - m, w.bounds.y - m, w.bounds.w + 2.0 * m, w.bounds.h + 2.0 * m);
         w.pid != own_pid && w.alpha > 0.0 && contains(grown, at) && !dock.clear_over(w, |b| contains(b, at))
     })
@@ -155,15 +164,15 @@ impl Shield {
         self.on && !self.parked.is_empty() && self.zones.iter().any(|z| contains(*z, at))
     }
 
-    /// The exact test, given the window server's on-screen list at the press: the topmost
-    /// window there is parked; with no window there, the one whose resize border takes the
-    /// press ([`GRAB_MARGIN`]) is.
+    /// The exact test, given the window server's on-screen list at the press: the frontmost
+    /// window whose frame or resize border ([`GRAB_MARGIN`]) holds the press is parked. A
+    /// non-resizable parked window in front then takes a press within the margin over a
+    /// window behind: rarer and milder than the parked window's edge grabbed.
     pub fn hits(&self, front_to_back: &[Listed], at: Point, own_pid: i32) -> Option<u32> {
         if !self.may_hit(at) {
             return None;
         }
-        topmost_at(front_to_back, at, own_pid, &self.dock)
-            .or_else(|| grabbing_at(front_to_back, at, own_pid, &self.dock))
+        grabbing_at(front_to_back, at, own_pid, &self.dock, &self.parked)
             .map(|w| w.id)
             .filter(|id| self.parked.contains(id))
     }
@@ -289,9 +298,15 @@ mod tests {
         assert_eq!(shield(&[7]).hits(&list, Point::new(s.bounds.x - GRAB_MARGIN + 0.5, y), OWN), Some(7));
         // Farther left: the wallpaper's.
         assert_eq!(shield(&[7]).hits(&list, Point::new(s.bounds.x - GRAB_MARGIN - 1.0, y), OWN), None);
-        // A shown window under the press keeps it, its border in front or not.
+        // A parked window in front: its border beats the content of a shown window behind.
         let shown = Listed { id: 3, pid: 50, bounds: Rect::new(1200.0, 900.0, s.bounds.x - 1200.0 - 2.0, 600.0), alpha: 1.0, layer: 0 };
-        assert_eq!(shield(&[7]).hits(&[s, shown], Point::new(s.bounds.x - 3.1, y), OWN), None);
+        assert_eq!(shield(&[7]).hits(&[s, shown], Point::new(s.bounds.x - 3.1, y), OWN), Some(7));
+        // A shown window in front of it keeps its content.
+        assert_eq!(shield(&[7]).hits(&[shown, s], Point::new(s.bounds.x - 3.1, y), OWN), None);
+        // A shown window in front ending 10 pt short of the sliver: a press on the sliver is
+        // the sliver's.
+        let short = Listed { bounds: Rect::new(1200.0, 900.0, s.bounds.x - 1200.0 - 10.0, 600.0), ..shown };
+        assert_eq!(shield(&[7]).hits(&[short, s], Point::new(s.bounds.x + 0.5, y), OWN), Some(7));
         // A shown window's border in front of the sliver's takes it.
         let near = Listed { bounds: Rect::new(1200.0, 900.0, s.bounds.x - 1200.0 - 5.0, 600.0), ..shown };
         assert_eq!(shield(&[7]).hits(&[near, s], Point::new(s.bounds.x - 3.1, y), OWN), None);
