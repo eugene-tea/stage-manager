@@ -491,7 +491,7 @@ impl Strip {
     }
 
     /// Ends the running transition now (it `landed`, or a new one starts).
-    fn finish_transition(&mut self, landed: bool) {
+    pub(super) fn finish_transition(&mut self, landed: bool) {
         let Some(r) = self.motion.running.take() else { return };
         for t in &r.timers {
             t.invalidate();
