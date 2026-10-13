@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::{Action, DisplayId, Home, Model, Stage, StageId, WindowId, WindowMeta, WindowRole};
-use crate::engine::persist::{LaunchHints, SavedSpace, exact_matches, rematch};
+use crate::engine::persist::{LaunchHints, SavedSpace, bundle_matches, exact_matches, rematch};
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
 /// `state.json`. Never Apple's own id.
@@ -234,17 +234,14 @@ impl Model {
                 scores.entry(SpaceId(saved.id)).or_insert((0, false, 0)).0 += n;
             }
         }
-        // At launch with no exact match (titles change), the Space shown when saved.
+        // At launch with no exact match (titles change), the Space shown when saved, when
+        // the apps on screen say so too (V3: quit on Desktop 2, relaunched on Desktop 1).
         let launch = self.spaces.iter().all(|s| s.last_seen == 0);
         let winner = scores
             .iter()
             .max_by_key(|(id, (n, known, seen))| (*n, *known, *seen, std::cmp::Reverse(**id)))
             .map(|(id, _)| *id)
-            .or_else(|| {
-                launch
-                    .then(|| self.leftovers.iter().find(|l| l.current).map(|l| SpaceId(l.id)))
-                    .flatten()
-            });
+            .or_else(|| launch.then(|| self.launch_fallback(&arrivals)).flatten());
         let target = match winner {
             Some(id) if self.has_space(id) => id,
             Some(id) => {
@@ -261,6 +258,7 @@ impl Model {
         self.show_space(display, target, prev);
 
         self.learn_moves(target, &known, &mut actions);
+        self.match_screen(target, live, &mut actions);
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
 
@@ -278,6 +276,17 @@ impl Model {
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// The saved Space shown when the app quit, for a launch whose windows match no saved
+    /// title: taken only when at least one window on screen matches it by app and no other
+    /// saved Space matches more windows by app; else `None` (a new Space; every saved one
+    /// waits for its own visit).
+    fn launch_fallback(&self, arrivals: &[WindowMeta]) -> Option<SpaceId> {
+        let current = self.leftovers.iter().find(|l| l.current)?;
+        let n = bundle_matches(current, arrivals);
+        let beaten = self.leftovers.iter().any(|l| !l.current && bundle_matches(l, arrivals) > n);
+        (n > 0 && !beaten).then_some(SpaceId(current.id))
     }
 
     /// A managed window is no longer on the screen of the Space it lived on while its app is
@@ -304,7 +313,9 @@ impl Model {
 
     /// Each of `display`'s known Spaces scored by its standard windows: on screen
     /// (`present`) count one up, missing from the screen for no visible reason (`absent`) one
-    /// down: (score, known Space, last seen). Sticky windows and children do not count.
+    /// down: (score, known Space, last seen). Sticky windows do not count; children count
+    /// only on a Space without standard windows (a Desktop holding just a dialog is still
+    /// recognized by it).
     fn scores(
         &self,
         display: DisplayId,
@@ -315,7 +326,9 @@ impl Model {
         for (ids, weight) in [(present, 1), (absent, -1)] {
             for id in ids {
                 let Some(w) = self.windows.get(id) else { continue };
-                if w.sticky || w.meta.role != WindowRole::Standard {
+                let counts = w.meta.role == WindowRole::Standard
+                    || !self.windows.values().any(|o| o.space == w.space && o.meta.role == WindowRole::Standard);
+                if w.sticky || !counts {
                     continue;
                 }
                 let Some(space) = self.spaces.iter().find(|s| s.id == w.space && s.display == display) else {
@@ -325,6 +338,33 @@ impl Model {
             }
         }
         scores
+    }
+
+    /// Makes the screen match the model for `target`'s windows in `live`: one the model
+    /// counts as parked but shown outside the park zone (its display changed size while its
+    /// Space was not shown) is parked again; one the model counts as shown but found in the
+    /// park zone (a batch cut short while Accessibility was off, a crash) is brought back.
+    fn match_screen(&mut self, target: SpaceId, live: &[WindowMeta], actions: &mut Vec<Action>) {
+        let mut repark = Vec::new();
+        let mut unstick = Vec::new();
+        for m in live {
+            let Some(w) = self.windows.get(&m.id) else { continue };
+            if w.space != target && !w.sticky {
+                continue;
+            }
+            let in_zone = self.display(w.meta.display).parks(m.frame);
+            if w.parked && !in_zone {
+                repark.push(m.id);
+            } else if !w.parked && in_zone {
+                unstick.push(m.id);
+            }
+        }
+        for id in repark {
+            self.park_window(id, actions);
+        }
+        for id in unstick {
+            self.restore_window(id, actions);
+        }
     }
 
     /// Makes `target` the Space `display` shows, declaring named stages there; forgets

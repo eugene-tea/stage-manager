@@ -249,7 +249,7 @@ fn to_state_saves_stages_frames_key_children_and_pins() {
     assert_eq!(s.stages[1].name.as_deref(), Some("Mail"));
     assert_eq!(s.strip_slots, [1]);
     assert!(
-        !is_parked(s.stages[1].windows[0].frame, FRAME),
+        !parked_at(s.stages[1].windows[0].frame),
         "restore frame, not the park frame"
     );
 }
@@ -445,7 +445,7 @@ fn a_stuck_unmatched_window_on_the_active_stage_is_brought_back() {
         Action::SetFrame { id, frame } if id.0 == 1 => Some(*frame),
         _ => None,
     });
-    assert!(set.is_some_and(|f| !is_parked(f, FRAME)));
+    assert!(set.is_some_and(|f| !parked_at(f)));
 }
 
 // ----- first start: Apple's grouping ------------------------------------------------------

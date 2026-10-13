@@ -9,9 +9,14 @@
 //! - **Echoes**: focus and activation events for windows and apps we just touched are our
 //!   own actions coming back late; they are dropped for [`ECHO_WINDOW`] so a stale focus
 //!   never bounces us back to the stage we left.
-//! - **Safety**: the parked-window registry is synced around every batch. A batch stops
-//!   between actions once Quit is requested ([`safety::quit_requested`]), so Quit is
-//!   answered within one action's time.
+//! - **Safety**: the parked-window registry is synced around every batch. Once Quit is
+//!   requested ([`safety::quit_requested`]) a batch skips its remaining parks, raises and
+//!   focus, so Quit is answered soon, but never a `SetFrame`: the model already counts those
+//!   windows as shown, so no unpark would bring them back. A window the model counts as
+//!   parked keeps its registry entry (element and frame) while the observer has lost it
+//!   (Accessibility revoked, an element destroyed while ordered out): the registry and the
+//!   guardian's parked file never forget a parked window, and its actions go through that
+//!   element.
 //! - **Stage area**: while the strip shows, placed windows are kept clear of it (moved
 //!   right, narrowed when too wide unless `[stages] fit_windows = false`); their pre-fit
 //!   frames come back on quit ([`FitOptions`]).
@@ -65,6 +70,7 @@ use super::safety::{self, ParkedEntry};
 use super::{desktop, logging, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
+use crate::engine::displays::on_other_display;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
@@ -289,6 +295,9 @@ pub struct Controller {
     foreign: Vec<u32>,
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
+    /// Managed windows showing mostly on another display than the main one: checks in a
+    /// row (left alone there, README).
+    elsewhere: HashMap<u32, u32>,
     /// The Space shown and its active stage at the last strip snapshot (the day's log
     /// counts a switch when the stage changes on the same Space).
     seen_active: Option<(u64, Option<u64>)>,
@@ -377,6 +386,7 @@ impl Controller {
             space_checked: Instant::now(),
             foreign: Vec::new(),
             absent: HashMap::new(),
+            elsewhere: HashMap::new(),
             seen_active: None,
             seen_stages: None,
             desktop_echo: DesktopEcho::default(),
@@ -465,16 +475,23 @@ impl Controller {
     // ----- executing actions -------------------------------------------------------------
 
     /// Registry entries: parked windows and windows we fitted, with where safety paths
-    /// put them back (a fitted window's exact pre-fit frame).
+    /// put them back (a fitted window's exact pre-fit frame). A window the observer no longer
+    /// tracks keeps the element of its current registry entry.
     fn parked_entries(&self, ob: &Observer) -> BTreeMap<u32, ParkedEntry> {
         let Some(m) = &self.model else { return BTreeMap::new() };
         let mut entries: BTreeMap<u32, ParkedEntry> = m
             .safety_targets()
             .into_iter()
-            .filter_map(|(id, restore)| {
-                let w = ob.window(id.0)?;
-                let child = w.kind == WindowKind::Child;
-                Some((id.0, ParkedEntry { element: w.element.clone(), restore, child }))
+            .filter_map(|(id, restore)| match ob.window(id.0) {
+                Some(w) => {
+                    let child = w.kind == WindowKind::Child;
+                    Some((id.0, ParkedEntry { element: w.element.clone(), restore, child }))
+                }
+                None => {
+                    let kept = safety::registry_entry(id.0)?;
+                    tracing::debug!(id = id.0, "not tracked now; its registry entry is kept");
+                    Some((id.0, ParkedEntry { restore, ..kept }))
+                }
             })
             .collect();
         if let Some(p) = &self.pending {
@@ -496,9 +513,10 @@ impl Controller {
         }
     }
 
-    /// Executes actions in order; returns how many AX calls failed. Stops between actions
-    /// once Quit is requested (the model's state stays safe: unpark-all covers every window
-    /// it counts as parked, whether or not its park was carried out).
+    /// Executes actions in order; returns how many AX calls failed. Once Quit is requested
+    /// the rest of the batch runs only its `SetFrame`s: unpark-all covers every window the
+    /// model counts as parked, whether or not its park was carried out, but a window the
+    /// model already counts as shown would otherwise stay parked (the review's S2).
     fn execute(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
         self.execute_batch(ob, actions, true)
     }
@@ -512,12 +530,16 @@ impl Controller {
         let now = Instant::now();
         let mut failed = 0;
         let mut changed = false;
+        let mut interrupted = false;
         let total = actions.len();
         for (done, action) in actions.into_iter().enumerate() {
-            if interruptible && action != Action::StateChanged && safety::quit_requested() {
-                tracing::info!(done, total, "quit requested: the rest of this batch is skipped");
+            if interruptible && !interrupted && action != Action::StateChanged && safety::quit_requested() {
+                tracing::info!(done, total, "quit requested: the rest of this batch runs only its window restores");
                 changed = true;
-                break;
+                interrupted = true;
+            }
+            if interrupted && !matches!(action, Action::SetFrame { .. }) {
+                continue;
             }
             let id = match action {
                 Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id.0,
@@ -527,7 +549,28 @@ impl Controller {
                 }
             };
             let Some(w) = ob.window(id) else {
-                tracing::debug!(id, ?action, "action for an untracked window skipped");
+                // Lost by the observer (Accessibility revoked, say): a move still goes through
+                // the registry's element; a restore that cannot is a failure.
+                let kept = matches!(action, Action::SetFrame { .. } | Action::Park { .. })
+                    .then(|| safety::registry_entry(id))
+                    .flatten();
+                let result = match (action, kept) {
+                    (Action::SetFrame { frame, .. }, Some(e)) => Some(e.element.set_frame(frame)),
+                    (Action::Park { frame, .. }, Some(e)) => Some(e.element.set_position(frame.origin())),
+                    _ => None,
+                };
+                match result {
+                    Some(Ok(())) => tracing::debug!(id, ?action, "done through the registry's element"),
+                    Some(Err(e)) => {
+                        failed += 1;
+                        tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
+                    }
+                    None if matches!(action, Action::SetFrame { .. }) => {
+                        failed += 1;
+                        tracing::warn!(id, ?action, "cannot restore an untracked window");
+                    }
+                    None => tracing::debug!(id, ?action, "action for an untracked window skipped"),
+                }
                 continue;
             };
             self.echoes.touch_window(id, now);
@@ -554,7 +597,12 @@ impl Controller {
                 tracing::trace!(id, ?action, "done");
             }
         }
-        safety::registry_replace(self.parked_entries(ob));
+        if interrupted {
+            // Never drop an entry on the way out: whatever was registered stays registered.
+            safety::registry_add(self.parked_entries(ob));
+        } else {
+            safety::registry_replace(self.parked_entries(ob));
+        }
         self.remember();
         if changed {
             self.mark_dirty();
@@ -1111,8 +1159,20 @@ impl Controller {
                 .copied()
                 .filter(|id| self.model.as_ref().is_some_and(|m| m.window(WindowId(*id)).is_none()))
                 .collect();
-            for id in new {
-                self.on_found(ob, id);
+            if self.frozen() {
+                for id in new {
+                    self.on_found(ob, id);
+                }
+                return;
+            }
+            // Accessibility came back (R1-platform 9): recognize the Space again from the
+            // windows on screen, which also brings back a window the model counts as shown
+            // but finds parked, and parks one it counts as parked but finds shown.
+            tracing::info!(new = new.len(), "observation started again; recognizing the Space and checking every window");
+            self.unplaced.extend(new);
+            if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
+                let list = windows::list_windows();
+                self.arrive_here(ob, &list, main);
             }
             return;
         }
@@ -1124,7 +1184,8 @@ impl Controller {
         let main = displays[0];
         let mut model = Model::new(displays, options);
         let list = windows::list_windows();
-        let shown = on_screen(&list);
+        // Windows on another display are left alone; they wait until they show on the main one.
+        let shown = on_main_screen(&list, main.frame);
         let z = windows::z_order(&list);
         let candidates: Vec<WindowMeta> = ob
             .windows()
@@ -1312,7 +1373,7 @@ impl Controller {
     fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display) {
         let Some(m) = self.model.as_ref() else { return };
         let before = m.current_space(main.id);
-        let shown = on_screen(list);
+        let shown = on_main_screen(list, main.frame);
         let z = windows::z_order(list);
         let live: Vec<WindowMeta> = ob
             .windows()
@@ -1328,7 +1389,8 @@ impl Controller {
             self.unplaced.remove(&meta.id.0);
         }
         let hints = launch_hints(list);
-        let absent = self.absent_windows(ob, &shown);
+        // Absent means off every screen: a window on another display is not missing.
+        let absent = self.absent_windows(ob, &on_screen(list));
         let Some(m) = self.model.as_mut() else { return };
         let actions = m.arrive(main.id, &live, &absent, &hints);
         let after = m.current_space(main.id);
@@ -1381,11 +1443,13 @@ impl Controller {
             return;
         }
         let shown = on_screen(&list);
+        let shown_main = on_main_screen(&list, main.frame);
         self.unplaced.retain(|id| ob.window(*id).is_some());
-        let showing: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown.contains(id)).collect();
+        let showing: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown_main.contains(id)).collect();
         for id in showing {
             self.on_found(ob, id);
         }
+        self.leave_other_displays(ob, &shown, &shown_main);
 
         let Some(m) = self.model.as_ref() else { return };
         let space = m.current_space(main.id);
@@ -1406,6 +1470,8 @@ impl Controller {
         self.foreign = foreign;
 
         let here = m.windows().filter(standard).filter(|w| w.space == space).count();
+        let here_shown =
+            m.windows().filter(standard).filter(|w| w.space == space && shown.contains(&w.meta.id.0)).count();
         let missing: Vec<(u32, i32)> = m
             .windows()
             .filter(standard)
@@ -1430,17 +1496,51 @@ impl Controller {
         if gone.is_empty() {
             return;
         }
-        // Most of this Space's windows gone at once: another Space shows (the notification
-        // was missed); recognize it rather than forgetting them.
-        if gone.len() >= 2 && gone.len() * 2 >= here {
+        // Most (or all) of this Space's windows gone at once: another Space shows (the
+        // notification was missed) or the screen shows nothing of ours for a moment (display
+        // asleep, the login window); recognize it rather than forgetting them.
+        if missed_space_change(here, here_shown, gone.len()) {
             tracing::info!(missing = gone.len(), of = here, "most windows of this Space are gone from the screen; recognizing the Space again");
             self.on_space_changed(ob);
             return;
         }
-        for id in gone {
+        // Forget only a window the window server still lists (on another Space): one not
+        // listed at all is closing (its destroy notification follows) or the list is blind.
+        let listed: HashSet<u32> = list.iter().map(|w| w.id).collect();
+        for id in gone.into_iter().filter(|id| listed.contains(id)) {
             self.absent.remove(&id);
             let Some(m) = self.model.as_mut() else { return };
             tracing::info!(id, "window left this Space (not on screen, not minimized, app not hidden)");
+            let (actions, forgotten) = m.window_left_space(WindowId(id));
+            self.execute(ob, actions);
+            self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+        }
+    }
+
+    /// Managed windows (shown, standard) that show mostly on another display in two checks in
+    /// a row are let go: other displays are left alone (README). They wait, unmanaged, and
+    /// come back as new windows once they show on the main display.
+    fn leave_other_displays(&mut self, ob: &Observer, shown: &HashSet<u32>, shown_main: &HashSet<u32>) {
+        let Some(m) = self.model.as_ref() else { return };
+        let away: Vec<u32> = m
+            .windows()
+            .filter(|w| w.meta.role == WindowRole::Standard && !w.parked)
+            .map(|w| w.meta.id.0)
+            .filter(|id| shown.contains(id) && !shown_main.contains(id))
+            .collect();
+        self.elsewhere.retain(|id, _| away.contains(id));
+        let mut leave = Vec::new();
+        for id in away {
+            let n = self.elsewhere.entry(id).or_insert(0);
+            *n += 1;
+            if *n >= SPACE_CHECKS {
+                leave.push(id);
+            }
+        }
+        for id in leave {
+            self.elsewhere.remove(&id);
+            let Some(m) = self.model.as_mut() else { return };
+            tracing::info!(id, "window moved to another display; left alone there until it comes back");
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
@@ -1456,7 +1556,8 @@ impl Controller {
         }
         self.flush_pending(ob);
         let list = windows::list_windows();
-        let shown = on_screen(&list);
+        let main = self.model.as_ref().map_or(Rect::default(), |m| m.main_display().frame);
+        let shown = on_main_screen(&list, main);
         if self.frozen() || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
@@ -1474,7 +1575,7 @@ impl Controller {
             }
             return;
         }
-        if self.space_in_doubt(ob, &shown) {
+        if self.space_in_doubt(ob, &on_screen(&list)) {
             // Its notification came before the Space change's: placing it now would put it
             // (and maybe a stage switch, a focus) on the Space being left.
             if self.unplaced.insert(id) {
@@ -2037,8 +2138,29 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 
 /// Ids of the layer-0 windows the window server lists on screen: the shown Space's (parked
 /// ones included), never another Space's.
+/// True when this Space's windows missing from the screen mean another Space shows (a Space
+/// change the notification missed) rather than single windows leaving: none of its windows
+/// is on screen any more (a one-window Desktop too, the review's S5), or at least two and at
+/// least half of them are gone. `here` counts the Space's standard windows, `here_shown`
+/// those on screen, `gone` those missing for no reason in consecutive checks.
+fn missed_space_change(here: usize, here_shown: usize, gone: usize) -> bool {
+    gone > 0 && (here_shown == 0 || (gone >= 2 && gone * 2 >= here))
+}
+
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
+}
+
+/// The windows on screen on the main display: [`on_screen`] minus those that show mostly on
+/// another display ([`on_other_display`]), which are left alone (README: stages live on the
+/// main display only). `main` is the main display's frame.
+fn on_main_screen(list: &[windows::CgWindow], main: Rect) -> HashSet<u32> {
+    let others: Vec<Rect> = desktop::cg_display_bounds().into_iter().skip(1).collect();
+    list.iter()
+        .filter(|w| w.onscreen && w.layer == 0)
+        .filter(|w| others.is_empty() || !on_other_display(w.bounds, main, &others))
+        .map(|w| w.id)
+        .collect()
 }
 
 /// Recency hints for windows placed on arrival: the window list's z-order and the frontmost
@@ -2116,6 +2238,21 @@ fn fallback_displays() -> Vec<Display> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_desktop_with_nothing_left_on_screen_is_recognized_again_not_forgotten() {
+        // S5 / R1-platform 12: one window, gone from the screen: another Space shows.
+        assert!(missed_space_change(1, 0, 1));
+        // Two of three gone, one still shown: a missed Space change by the majority rule.
+        assert!(missed_space_change(3, 1, 2));
+        // Every window gone at once.
+        assert!(missed_space_change(5, 0, 5));
+        // One of three left this Space while the others stay: forgotten one by one.
+        assert!(!missed_space_change(3, 2, 1));
+        // One of five gone, even with a second one missing but not yet twice: not a change.
+        assert!(!missed_space_change(5, 3, 1));
+        assert!(!missed_space_change(1, 0, 0), "nothing gone, nothing to decide");
+    }
 
     #[test]
     fn echoes_expire() {

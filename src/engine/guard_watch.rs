@@ -13,6 +13,11 @@
 //! - or not listed at all (on any Space: closed, or its app quit) in every pass for
 //!   [`GONE_AFTER`].
 //!
+//! A pass whose listing shows no window on screen at all (the window server answered nothing,
+//! or the session is not the console's: fast user switching, the login window, a sleeping
+//! display) is **blind**: it is no observation, so nothing is let go and every streak starts
+//! again after it. `GONE_AFTER` counts only passes that listed something.
+//!
 //! The window server's list alone is never final. While a Space slides in it may list a
 //! window at an in-between frame, or not at all, for a pass (hands-free Desktop run 2, 10-12:
 //! the guardian took one such listing of a window still parked on Desktop 2 for "back" and
@@ -177,6 +182,12 @@ pub enum Event {
         /// How it looks now.
         look: Look,
     },
+    /// The listing showed no window on screen (or nothing at all): the pass observed nothing.
+    /// Sent once per blind stretch.
+    Blind {
+        /// Windows listed (on any Space).
+        listed: usize,
+    },
     /// A window was let go.
     LetGo {
         /// `CGWindowID`.
@@ -213,6 +224,7 @@ pub struct Watch {
     waiting: BTreeMap<u32, Waiting>,
     on_screen: Option<BTreeSet<u32>>,
     changed_at: Option<Instant>,
+    blind: bool,
 }
 
 impl Watch {
@@ -255,6 +267,21 @@ impl Watch {
     pub fn observe(&mut self, now: Instant, listed: &[Listed], displays: &ScanDisplays) -> Vec<Event> {
         let mut events = Vec::new();
         let on_screen: BTreeSet<u32> = listed.iter().filter(|l| l.onscreen).map(|l| l.id).collect();
+        if on_screen.is_empty() {
+            // No observation: no streak may run on through it, and whatever is listed next
+            // counts as a change (it settles first).
+            if !self.blind {
+                events.push(Event::Blind { listed: listed.len() });
+            }
+            self.blind = true;
+            self.on_screen = None;
+            for w in self.waiting.values_mut() {
+                w.missing_since = None;
+                w.out_since = None;
+            }
+            return events;
+        }
+        self.blind = false;
         if self.on_screen.as_ref() != Some(&on_screen) {
             // The first pass counts as a change too: nothing is known about what came before.
             self.changed_at = Some(now);
@@ -519,7 +546,7 @@ mod tests {
         let mut allowed = at(2, parked(), false);
         allowed.allowed = true;
         let not_allowed = at(3, parked(), false);
-        let ev = w.observe(t0, &[allowed, not_allowed], &displays());
+        let ev = w.observe(t0, &[allowed, not_allowed, at(9, RESTORE, true)], &displays());
         assert!(ev.contains(&Event::Joined { id: 2, pid: 7, registered: false }));
         assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![2]);
         assert_eq!(w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())), None);
@@ -534,6 +561,48 @@ mod tests {
         }
         let ev = w.observe(t0 + Duration::from_millis(2500), &[back], &displays());
         assert!(ev.iter().any(|e| matches!(e, Event::LetGo { id: 2, why: Release::SeenBack { .. }, .. })));
+    }
+
+    /// The review's S3: three (or thirty) empty listings in a row (another user's session, the
+    /// login window) are no observation; a window is gone only after `GONE_AFTER` of passes
+    /// that listed something.
+    #[test]
+    fn empty_listings_never_let_a_window_go() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        assert_eq!(pass(&mut w, t0, 0, &on_desktop_1()), None);
+        let mut blind = 0;
+        for ms in (500..20_000).step_by(500) {
+            let ev = w.observe(t0 + Duration::from_millis(ms), &[], &displays());
+            blind += ev.iter().filter(|e| matches!(e, Event::Blind { .. })).count();
+            assert!(!ev.iter().any(|e| matches!(e, Event::LetGo { .. })), "{ms} ms");
+        }
+        assert_eq!(blind, 1, "reported once per blind stretch");
+        // Windows listed, none on screen (the login window): blind too.
+        let off: Vec<Listed> = on_desktop_1().into_iter().map(|l| Listed { onscreen: false, ..l }).collect();
+        assert_eq!(pass(&mut w, t0, 20_000, &off), None);
+        // Back, and window 1 really is gone now: only after GONE_AFTER of real passes.
+        let without = vec![at(9, RESTORE, true)];
+        assert_eq!(pass(&mut w, t0, 20_500, &without), None, "the blind stretch does not count");
+        assert_eq!(pass(&mut w, t0, 22_500, &without), None);
+        assert!(matches!(pass(&mut w, t0, 23_500, &without), Some(Release::Gone { .. })));
+    }
+
+    /// The review's S1 for the guardian: with a Dock at the bottom macOS keeps the parked
+    /// window above it; an allowed app's window there joins the watch and is never "seen
+    /// back" there.
+    #[test]
+    fn a_window_parked_above_a_bottom_dock_joins_and_waits() {
+        let d = ScanDisplays { main: MAIN, visible: Rect::new(0.0, 30.0, 2560.0, 1334.0), others: vec![] };
+        let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
+        let t0 = Instant::now();
+        let mut w = Watch::new(&[]);
+        let list = [Listed { allowed: true, ..at(2, above_dock, true) }, at(9, RESTORE, true)];
+        for ms in (0..10_000).step_by(500) {
+            let ev = w.observe(t0 + Duration::from_millis(ms), &list, &d);
+            assert!(!ev.iter().any(|e| matches!(e, Event::LetGo { .. })), "{ms} ms");
+        }
+        assert!(matches!(w.waiting().next().and_then(|x| x.look), Some(Look::Parked { shown: true, .. })));
     }
 
     #[test]

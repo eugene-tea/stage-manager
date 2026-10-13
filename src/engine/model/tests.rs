@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::geometry::Point;
-use crate::engine::park::{clamp_to_visible, is_parked};
+use crate::engine::park::clamp_to_visible;
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
 use crate::engine::testkit::*;
@@ -224,7 +224,8 @@ fn center_placement_moves_the_new_window() {
         RuleAction::Current,
         Placement::Center,
     );
-    let expected = Rect::new(420.0, 263.0, 600.0, 400.0);
+    // Centered in the visible frame (menu bar above, Dock below).
+    let expected = Rect::new(420.0, 225.0, 600.0, 400.0);
     assert_eq!(
         a.first(),
         Some(&Action::SetFrame {
@@ -269,7 +270,7 @@ fn a_new_window_born_in_the_park_zone_gets_a_safe_restore_frame() {
     m1.frame = Rect::new(1420.0, 880.0, 600.0, 400.0);
     e.add(m1, RuleAction::Current);
     let r = e.m.window(w(1)).map(|x| x.restore).expect("managed");
-    assert!(!is_parked(r, FRAME));
+    assert!(!parked_at(r));
     assert!(!e.d.parked(w(1)), "it is brought out of the corner");
 }
 
@@ -459,10 +460,7 @@ fn switch_never_records_a_parked_frame_as_restore() {
     e.d.frames
         .insert(w(2), Rect::new(1430.0, 890.0, 600.0, 400.0));
     e.switch(1);
-    assert!(!is_parked(
-        e.m.window(w(2)).map(|x| x.restore).expect("w2"),
-        FRAME
-    ));
+    assert!(!parked_at(e.m.window(w(2)).map(|x| x.restore).expect("w2")));
     assert_eq!(e.d.frames[&w(1)], good);
 }
 
@@ -866,6 +864,89 @@ fn removed_display_moves_its_stages_to_main() {
     }));
 }
 
+/// The 5K the owner docks to (menu bar on it).
+const BIG: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+const BIG_VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1334.0);
+
+fn parks_in(actions: &[Action]) -> Vec<(WindowId, Rect)> {
+    actions
+        .iter()
+        .filter_map(|a| match *a {
+            Action::Park { id, frame } => Some((id, frame)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Three stages, the second active; windows 1 and 3 parked.
+fn three_stages() -> Env {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 20, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 30, "com.example.c"), RuleAction::New);
+    e.switch(2);
+    assert!(e.d.parked(w(1)) && e.d.parked(w(3)) && !e.d.parked(w(2)));
+    e
+}
+
+#[test]
+fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
+    // V1-A: same id, a bigger frame (scaling changed, or the panel became main).
+    let mut e = three_stages();
+    let active = e.m.main_active_stage();
+    let big = Display { id: MAIN, frame: BIG, visible: BIG_VISIBLE };
+    let a = e.m.set_displays(vec![big]);
+    let mut parks = parks_in(&a);
+    parks.sort_by_key(|p| p.0);
+    assert_eq!(parks.iter().map(|p| p.0).collect::<Vec<_>>(), [w(1), w(3)], "{a:?}");
+    for (id, f) in parks {
+        assert!(big.parks(f), "{id:?} at {f:?}");
+        assert_eq!(f.size(), e.m.window(id).expect("window").restore.size(), "kept its size");
+    }
+    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { .. } | Action::Focus { .. })));
+    assert_eq!(e.m.main_active_stage(), active);
+    // A Dock moved (only the visible frame changes): parked again too, nothing else.
+    let docked = Display { visible: Rect::new(0.0, 30.0, 2480.0, 1410.0), ..big };
+    let a = e.m.set_displays(vec![docked]);
+    assert_eq!(parks_in(&a).len(), 2);
+    // Nothing changed: nothing to do.
+    let a = e.m.set_displays(vec![docked]);
+    assert!(parks_in(&a).is_empty());
+}
+
+#[test]
+fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
+    // V1-B: docking moves the menu bar to the 5K (a new main display id), undocking back.
+    let mut e = three_stages();
+    let active = e.m.main_active_stage();
+    let space = e.m.current_space(MAIN);
+    let stages: Vec<StageId> = e.m.stages().iter().map(|s| s.id).collect();
+    let slots = e.m.strip_slots(MAIN);
+    let ext = Display { id: DisplayId(7), frame: BIG, visible: BIG_VISIBLE };
+    let a = e.m.set_displays(vec![ext]);
+    assert_eq!(e.m.main_active_stage(), active, "the active stage stays active, never the oldest");
+    assert_eq!(e.m.current_space(DisplayId(7)), space, "same Space");
+    assert_eq!(e.m.stages().iter().map(|s| s.id).collect::<Vec<_>>(), stages);
+    assert_eq!(e.m.strip_slots(DisplayId(7)), slots);
+    assert!(e.m.stages().iter().all(|s| s.display == DisplayId(7)));
+    assert!(e.m.windows().all(|x| x.meta.display == DisplayId(7)));
+    assert!(!e.m.window(w(2)).expect("w2").parked, "the active stage's window stays shown");
+    let parks = parks_in(&a);
+    assert_eq!(parks.len(), 2, "{a:?}");
+    assert!(parks.iter().all(|(id, f)| *id != w(2) && ext.parks(*f)));
+    // Undocking: back to the built-in display under its own id.
+    let a = e.m.set_displays(vec![display()]);
+    assert_eq!(e.m.main_active_stage(), active);
+    assert_eq!(e.m.current_space(MAIN), space);
+    assert!(parks_in(&a).iter().all(|(_, f)| display().parks(*f)));
+    e.run(a);
+    let a = e.m.unpark_all();
+    e.run(a);
+    for id in [1, 2, 3] {
+        assert!(!e.d.parked(w(id)), "w{id} reachable after unpark-all");
+    }
+}
+
 #[test]
 fn renamed_declarations_release_empty_stages() {
     let mut m = model_with(ModelOptions {
@@ -1157,9 +1238,11 @@ impl Rng {
 
 fn check_invariants(e: &Env, step: &str) {
     let m = &e.m;
+    // The display may have changed (the property test changes it): its own park zone.
+    let parked_at = |f: Rect| m.main_display().parks(f);
     // Every live window the desk shows parked is known to the model as parked.
     for (&id, &f) in &e.d.frames {
-        if is_parked(f, FRAME) {
+        if parked_at(f) {
             assert!(
                 m.window(id).is_some_and(|w| w.parked),
                 "{step}: {id:?} parked on the desk but not in the model"
@@ -1169,7 +1252,7 @@ fn check_invariants(e: &Env, step: &str) {
     // Restore frames are never in the park zone.
     for w in m.windows() {
         assert!(
-            !is_parked(w.restore, FRAME),
+            !parked_at(w.restore),
             "{step}: restore frame of {:?} is parked",
             w.meta.id
         );
@@ -1217,13 +1300,13 @@ fn check_invariants(e: &Env, step: &str) {
         };
         if shown {
             assert!(
-                !is_parked(f, FRAME),
+                !parked_at(f),
                 "{step}: {:?} should be visible",
                 w.meta.id
             );
         } else {
             assert!(
-                is_parked(f, FRAME) && w.parked,
+                parked_at(f) && w.parked,
                 "{step}: {:?} should be parked",
                 w.meta.id
             );
@@ -1274,7 +1357,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
         for _ in 0..150 {
             let alive: Vec<WindowId> = e.d.frames.keys().copied().collect();
             let managed: Vec<WindowId> = e.m.windows().map(|w| w.meta.id).collect();
-            let op = rng.below(19);
+            let op = rng.below(23);
             let step = format!("seed {seed} op {op} after {log:?}");
             match op {
                 0..=2 => {
@@ -1449,6 +1532,68 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         e.run(a);
                     }
                 }
+                18 => {
+                    // The main display changes: resized (same id), docked or undocked (a new
+                    // id, frames kept or not), back again.
+                    let d = match rng.below(4) {
+                        0 => display(),
+                        1 => Display {
+                            frame: Rect::new(0.0, 0.0, 1680.0, 1050.0),
+                            visible: Rect::new(0.0, 25.0, 1680.0, 950.0),
+                            ..display()
+                        },
+                        2 => Display { id: DisplayId(9), ..display() },
+                        _ => Display {
+                            id: DisplayId(9),
+                            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+                            visible: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+                        },
+                    };
+                    log.push(format!("display {} {}", d.id.0, d.frame));
+                    // macOS keeps every window reachable when a display changes: one that was
+                    // not hidden in the old corner and would be now is moved on screen.
+                    let old = *e.m.main_display();
+                    for f in e.d.frames.values_mut() {
+                        if !old.parks(*f) && d.parks(*f) {
+                            *f = clamp_to_visible(*f, d.visible);
+                        }
+                    }
+                    let a = e.m.set_displays(vec![d]);
+                    e.d.visible = Some(d.visible);
+                    e.run(a);
+                }
+                19 => {
+                    // The Space is recognized again (a missed notification, a launch).
+                    let live: Vec<WindowMeta> = e
+                        .m
+                        .windows()
+                        .filter_map(|w| e.d.frames.get(&w.meta.id).map(|f| WindowMeta { frame: *f, ..w.meta.clone() }))
+                        .collect();
+                    log.push("arrive".into());
+                    let hints = crate::engine::persist::LaunchHints { z_order: e.d.z.clone(), frontmost: None };
+                    let a = e.m.arrive(MAIN, &live, &[], &hints);
+                    e.run(a);
+                }
+                20 => {
+                    // A window leaves for another Desktop (it and its children go with it).
+                    if let Some(id) = rng.pick(&managed) {
+                        log.push(format!("left space {}", id.0));
+                        let (a, forgotten) = e.m.window_left_space(id);
+                        e.run(a);
+                        for f in forgotten {
+                            e.d.close(f);
+                        }
+                    }
+                }
+                21 => {
+                    let stages: Vec<StageId> = e.m.stages().iter().map(|s| s.id).collect();
+                    if let Some(stage) = rng.pick(&stages) {
+                        let before = rng.pick(&stages).filter(|_| rng.below(3) > 0);
+                        log.push(format!("move card {} before {before:?}", stage.0));
+                        let a = e.m.move_card(stage, before);
+                        e.run(a);
+                    }
+                }
                 _ => {
                     // The user drags a visible standard window onto the strip.
                     let draggable: Vec<WindowId> = managed
@@ -1481,8 +1626,10 @@ fn property_no_sequence_of_operations_loses_a_window() {
         e.run(a);
         for (&id, &f) in &e.d.frames {
             assert!(
-                !is_parked(f, FRAME),
-                "seed {seed}: {id:?} still parked after unpark_all"
+                !e.m.main_display().parks(f),
+                "seed {seed}: {id:?} still parked after unpark_all at {f} ({:?}, display {:?})",
+                e.m.window(id).map(|w| (w.parked, w.restore, w.home)),
+                e.m.main_display()
             );
         }
     }
@@ -1909,6 +2056,37 @@ fn minimize_sends_the_window_to_the_strip_and_keeps_the_view() {
     assert_eq!(e.m.window(w(1)).map(|x| x.restore), before, "its frame waits for its return");
     let obs = e.d.obs();
     assert!(e.m.minimize_to_strip(w(1), &obs).is_empty(), "a parked window is left alone");
+}
+
+#[test]
+fn one_at_a_time_a_click_on_the_grouped_card_puts_the_leaving_stage_in_that_slot() {
+    // V2: the grouped card sits in its first stage's slot but carries the app's least
+    // recently shown stage, whose own slot is elsewhere (hidden behind the group).
+    let mut options = ModelOptions::default();
+    options.settings.app_windows = AppWindows::OneAtATime;
+    let mut e = Env::with(options);
+    e.add(meta(1, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(5, 12, "com.example.c"), RuleAction::New);
+    e.add(meta(4, 10, "com.example.a"), RuleAction::New);
+    let space = e.m.current_space(MAIN);
+    if let Some(slots) = e.m.slots.get_mut(&space) {
+        slots.reverse();
+    }
+    let before = e.m.strip();
+    let k = before.iter().position(|c| c.apps == [11]).expect("the app's card");
+    let target = before[k].stage;
+    assert_ne!(Some(target), e.m.strip_slots(MAIN).get(k).copied(), "the card carries another stage than its slot's");
+    let leaving = e.m.main_active_stage().expect("active");
+    let obs = e.d.obs();
+    let a = e.m.switch_to(target, &obs);
+    e.run(a);
+    let after = e.m.strip();
+    assert_eq!(after.len(), before.len() + 1, "the stage left behind joins; the group stays: {after:?}");
+    assert_eq!(after[k].stage, leaving, "the stage left behind lands where the user clicked: {after:?}");
+    assert!(after.iter().any(|c| c.apps == [11]), "the app's card stays in view");
+    assert_eq!(e.m.main_active_stage(), Some(target));
 }
 
 #[test]

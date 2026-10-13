@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{clamp_to_visible, is_parked, park_frame};
+use super::park::{clamp_to_visible, is_parked_in, park_frame};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -90,6 +90,14 @@ pub struct Display {
     pub frame: Rect,
     /// The usable frame (no menu bar, no Dock).
     pub visible: Rect,
+}
+
+impl Display {
+    /// True when `frame` sits in this display's park zone, where macOS really leaves a parked
+    /// window (above a bottom Dock too): the one park test ([`is_parked_in`]).
+    pub fn parks(&self, frame: Rect) -> bool {
+        is_parked_in(frame, self.frame, self.visible)
+    }
 }
 
 /// A group of windows shown together.
@@ -409,7 +417,7 @@ impl Model {
     pub(crate) fn safety_target(&self, w: &WindowState) -> Rect {
         let d = self.display(w.meta.display);
         match w.original {
-            Some(o) if !o.is_degenerate() && !is_parked(o, d.frame) && !is_parked(o, d.visible) => o,
+            Some(o) if !o.is_degenerate() && !d.parks(o) => o,
             Some(o) => clamp_to_visible(o, d.visible),
             None => clamp_to_visible(w.restore, d.visible),
         }
@@ -613,9 +621,7 @@ impl Model {
             return false;
         };
         let display = *self.display(w.meta.display);
-        let usable = !frame.is_degenerate()
-            && !is_parked(frame, display.frame)
-            && !is_parked(frame, display.visible);
+        let usable = !frame.is_degenerate() && !display.parks(frame);
         if let Some(w) = self.windows.get_mut(&id) {
             w.meta.frame = frame;
             if usable {
@@ -666,7 +672,7 @@ impl Model {
     /// `frame` is unusable.
     pub(crate) fn safe_restore(&self, frame: Rect, display: DisplayId) -> Rect {
         let d = self.display(display);
-        if frame.is_degenerate() || is_parked(frame, d.frame) || is_parked(frame, d.visible) {
+        if frame.is_degenerate() || d.parks(frame) {
             clamp_to_visible(frame, d.visible)
         } else {
             frame

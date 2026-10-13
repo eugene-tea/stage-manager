@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use super::*;
 use crate::engine::geometry::Rect;
 use crate::engine::model::{NativeTarget, Observation, Pid, Target};
-use crate::engine::park::is_parked;
 use crate::engine::persist::{StateFile, rematch};
 use crate::engine::rules::Decision;
 use crate::engine::testkit::*;
@@ -69,7 +68,7 @@ impl Mac {
             match *a {
                 Action::SetFrame { id, frame } | Action::Park { id, frame } => {
                     if let Some(w) = self.wins.get_mut(&id.0) {
-                        w.1 = frame;
+                        w.1 = macos_places(frame);
                     }
                 }
                 Action::Focus { id } => self.focused = Some(id),
@@ -138,7 +137,7 @@ impl Mac {
     }
 
     fn parked(&self, id: u32) -> bool {
-        is_parked(self.wins[&id].1, FRAME)
+        parked_at(self.wins[&id].1)
     }
 
     fn space(&self) -> SpaceId {
@@ -433,6 +432,84 @@ fn a_first_launch_without_title_matches_uses_the_desktop_shown_when_saved() {
     again.go(0);
     assert_eq!(again.space(), d1);
     assert_eq!(again.m.stages().len(), 2, "matched by app into the saved stages");
+}
+
+#[test]
+fn a_first_launch_on_another_desktop_does_not_take_the_saved_current_one() {
+    // V3: quit on Desktop 2, titles changed, relaunched on Desktop 1.
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    let d1 = mac.space();
+    mac.go(1);
+    let d2 = mac.space();
+    let file = mac.m.to_state();
+    let mut again = Mac::new();
+    again.m.restore_spaces(file.spaces);
+    // Desktop 1's apps (editor + browser), new titles: Desktop 1 matches more by app.
+    again.put(0, 21, 10, "com.example.editor", "Renamed notes");
+    again.put(0, 22, 20, "com.example.browser", "Another page");
+    again.focused = Some(w(21));
+    again.go(0);
+    assert_ne!(again.space(), d2, "not the Desktop shown at quit");
+    assert_eq!(again.m.unvisited_saved_spaces(), 2, "both saved Desktops wait for their visits");
+    let _ = d1;
+    // Only apps no saved Desktop has: a new Space too.
+    let mut third = Mac::new();
+    third.m.restore_spaces(mac.m.to_state().spaces);
+    third.put(0, 31, 40, "com.example.music", "Player");
+    third.go(0);
+    assert_ne!(third.space(), d2);
+}
+
+#[test]
+fn a_parked_window_found_outside_the_park_zone_on_arrival_is_parked_again() {
+    // V1-A for a Desktop not shown: the display changed size while Desktop 1 was away; its
+    // parked window now shows mid-screen when Desktop 1 comes back.
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    assert!(mac.parked(2));
+    mac.go(1);
+    mac.wins.get_mut(&2).expect("window").1 = Rect::new(700.0, 300.0, 600.0, 400.0);
+    let a = mac.go(0);
+    assert!(a.iter().any(|x| matches!(x, Action::Park { id, .. } if *id == w(2))), "{a:?}");
+    assert!(mac.parked(2));
+    assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+}
+
+#[test]
+fn send_and_pin_by_id_never_touch_another_desktops_window() {
+    // L2: `ctl send N ID` / `ctl pin ID` naming a window of a Desktop not shown.
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    mac.go(1);
+    let obs = mac.obs();
+    assert!(mac.m.send_window(w(2), Target::New, &obs).is_empty());
+    assert!(mac.m.toggle_pin(w(2), &obs).is_empty());
+    assert!(mac.m.toggle_pin(w(1), &obs).is_empty());
+    assert!(mac.elsewhere.is_empty());
+    // The shown Desktop's windows still can.
+    assert!(!mac.m.toggle_pin(w(3), &obs).is_empty());
+}
+
+#[test]
+fn a_shown_window_found_parked_on_arrival_is_brought_back() {
+    // R1-platform 9: a batch cut short while Accessibility was off left a window the model
+    // counts as shown in the park zone; recognizing the Space again brings it back.
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    assert!(!mac.parked(1) && !mac.m.window(w(1)).expect("w1").parked);
+    let size = mac.wins[&1].1.size();
+    mac.wins.get_mut(&1).expect("window").1 =
+        macos_places(crate::engine::park::park_frame(size, FRAME));
+    assert!(mac.parked(1));
+    let a = mac.arrive();
+    assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if *id == w(1))), "{a:?}");
+    assert!(!mac.parked(1));
+    assert!(mac.parked(2), "the parked stage stays parked");
 }
 
 #[test]

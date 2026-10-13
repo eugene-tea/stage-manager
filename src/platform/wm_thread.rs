@@ -251,6 +251,14 @@ impl WmState {
                 self.observer.set_settings(settings);
             }
             WmCommand::Displays(displays) => self.controller.set_displays(&mut self.observer, displays),
+            // Without Accessibility no window can move: a stage change now would leave the
+            // model out of step with the screen (its parked windows unregistered), so the
+            // user's input waits for observation (R1-platform 9).
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_)
+                if self.controller.managing() && !self.observer.observing() =>
+            {
+                tracing::debug!("Accessibility is off: input ignored");
+            }
             WmCommand::Input(event, drop) => self.controller.input(&mut self.observer, event, drop),
             WmCommand::Hotkey(command) => self.controller.hotkey(&mut self.observer, command),
             WmCommand::Strip(event) => self.controller.strip_event(&mut self.observer, event),
