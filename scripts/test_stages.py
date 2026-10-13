@@ -25,7 +25,7 @@ window dropped above the first card takes that slot; a card dragged to another s
 across a relaunch; a card click animates and every frame is exact afterwards;
 `level = "above_windows"` keeps the strip on top), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
-is Transient, the strip is not drawn while they show, and after Escape it is back on the same
+is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
 Desktop, drawn as before, and a card click switches).
 
 Tests that need an extension turn it on in their own config.toml.
@@ -1513,8 +1513,11 @@ def expose_round(which, label, shot=None):
     """Mission Control (`which` = mission-control) or App Exposé (app-windows) through the
     app (`ctl debug-expose`, the user's own shortcut), never a Desktop change: our panes are
     not drawn while it shows (the window server no longer lists them on screen, or lists them
-    transparent, or the cards' pixels changed where the strip was), and after Escape the
-    strip is back on the same Desktop, drawn as before, and a card click switches. `shot`
+    transparent), and after Escape the strip is back on the same Desktop, drawn as before (the
+    cards' pixels), and a card click switches. The cards' pixels while it shows are only
+    reported: Mission Control dims the desktop, so they change about 90 % whether the strip
+    is hidden or not (measured 10-12 with the old Stationary panes: listed on screen, alpha 1,
+    88 % changed); the window server's listing is what tells. `shot`
     (name -> path or None) takes a by-eye screenshot while it shows. Returns True when the
     round ran to the end."""
     say(f"\n  -- {label} --")
@@ -1551,10 +1554,9 @@ def expose_round(which, label, shot=None):
     say(f"  strip while it shows: listed on screen {listed is not None}"
         + (f" (alpha {listed.get('alpha')})" if listed else "")
         + (f"; cards' pixels changed {moved:.0%} (still screen {base:.0%})" if moved is not None else "; no pixel check (no cards)"))
-    by_list = listed is None or listed.get("alpha", 1.0) == 0
-    by_pixels = moved is not None and moved >= 0.25 and moved >= base + 0.15
-    check(by_list or by_pixels, f"{label}: the strip is not drawn while it shows"
-          f" (window server: {'gone' if by_list else 'still listed'}; pixels: {'changed' if by_pixels else 'unchanged'})")
+    hidden = listed is None or listed.get("alpha", 1.0) == 0
+    check(hidden, f"{label}: the strip is not drawn while it shows (the window server "
+          f"{'no longer lists it on screen' if listed is None else 'lists it on screen, alpha ' + str(listed.get('alpha'))})")
     ctl("debug-expose", "escape")
     if seen:
         wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in overlays_before], 5, f"{label} to end")
@@ -1575,7 +1577,17 @@ def expose_round(which, label, shot=None):
         target = s["strip_cards"][0]
         f = target["frame"]
         was = s["active"]
-        r = ctl("debug-click", f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+        # Leaving Mission Control, macOS may keep another process's window (the desktop
+        # widgets') over the card for a moment; the app refuses to click there, so try again.
+        end, refused = time.time() + 4, []
+        while True:
+            r = ctl("debug-click", f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+            if r.get("ok") or "not ours" not in str(r.get("error")) or time.time() >= end:
+                break
+            refused.append(round(time.time() - end + 4, 1))
+            time.sleep(0.4)
+        if refused:
+            say(f"  the card was covered by another process's window for a moment (refused at {refused} s): {r.get('error', 'then clear')}")
         s2 = wait_state(lambda x: x["active"] != was, f"{label}: the card click to switch", timeout=4)
         check(r.get("ok") and s2 is not None, f"{label}: a card click switches afterwards ({r.get('error', 'ok')})")
         if s2:
@@ -1614,9 +1626,14 @@ def phase_expose():
 
 
 def frontmost_bundle():
-    r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
-    out = r.stdout.strip()
-    return out.split("=", 1)[1].strip().strip('"') if "=" in out else None
+    """The frontmost app's bundle ID. `lsappinfo info … front` prints nothing on this macOS,
+    so the front app's ASN is asked first; the reply is `bundleID="…"` (or `"CFBundleIdentifier"="…"`)."""
+    asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()
+    if not asn:
+        return None
+    out = subprocess.run(["lsappinfo", "info", "-only", "bundleid", asn], capture_output=True, text=True).stdout
+    m = re.search(r'(?:bundleID|"CFBundleIdentifier")\s*=\s*"([^"]+)"', out)
+    return m.group(1) if m else None
 
 
 def main():

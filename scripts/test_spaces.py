@@ -553,8 +553,8 @@ planned steps (hands-free):
   card click  debug-click on a card while the window server is sampled every ~0.1 s for Desktop 1's
               windows (any = a jump); by eye: screenshot of the main display
   expose      on Desktop 2: every pane Transient; ctl debug-expose mission-control, then app-windows (the
-              user's shortcuts; a fixture frontmost first); while it shows the strip is not drawn (window
-              server or the cards' pixels); by eye: screenshot; ctl debug-expose escape; same Desktop, the
+              user's shortcuts; a fixture frontmost first); while it shows the window server no longer
+              lists the strip on screen; by eye: screenshot; ctl debug-expose escape; same Desktop, the
               strip back and drawn as before, a card click switches, each Desktop's pane on its own Desktop
   back        ctl debug-space <back> to Desktop 1; checks as guided (Desktop 2's pane stays there)
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided

@@ -448,8 +448,8 @@ unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip 
 drags pass over our windows and the fixtures only, with the strip reached for the reorder and
 the click the way a person does when a window covers it (the pointer resting at the left
 edge); and expose: Mission Control and App Exposé typed through the app (`ctl debug-expose`,
-never a Desktop change) with every strip pane `Transient`, the strip not drawn while they
-show (the window server no longer lists it, or the cards' pixels changed), and after Escape
+never a Desktop change) with every strip pane `Transient`, the window server no longer
+listing the strip on screen while they show, and after Escape
 the strip back on the same Desktop, drawn as before, with a working card click. `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
 (`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
 whether it is the active one, ordered in, on the Space shown, slid in, its collection behavior bits). Every app run's log is kept as `stage-manager.run-NN.log` in
