@@ -62,7 +62,39 @@ pub struct Ahead {
     recency: (u64, u64),
 }
 
+/// A stage made active ahead on its Desktop, with its recency then: the moves sent for it
+/// may be checked and sent again only while it stands ([`Model::ahead_holds`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AheadMark {
+    /// The Desktop arranged.
+    pub space: SpaceId,
+    /// The stage made active there.
+    pub stage: StageId,
+    /// Its recency right after: every switch to or from it, every merge or gather into
+    /// it, moves it on.
+    recency: u64,
+}
+
 impl Model {
+    /// The mark of `ahead` as the model stands now (right after it was arranged).
+    pub fn ahead_mark(&self, ahead: &Ahead) -> AheadMark {
+        AheadMark { space: ahead.space, stage: ahead.stage, recency: self.stage(ahead.stage).map_or(0, |s| s.last_active) }
+    }
+
+    /// True while the stage `mark` names is still the active one of its Desktop and no switch
+    /// (to another stage and back, an undo, a merge, a reveal) touched it since: what was
+    /// arranged ahead is what the model shows there.
+    pub fn ahead_holds(&self, mark: &AheadMark) -> bool {
+        self.active.get(&mark.space) == Some(&mark.stage)
+            && self.stage(mark.stage).is_some_and(|s| s.last_active == mark.recency && s.space == mark.space)
+    }
+
+    /// True while the model still has window `id` as a move made ahead left it: parked or
+    /// shown as `park` says, in stage `stage` (`None`: pinned).
+    pub fn move_holds(&self, id: WindowId, park: bool, stage: Option<StageId>) -> bool {
+        self.windows.get(&id).is_some_and(|w| w.parked == park) && self.stage_of(id) == stage
+    }
+
     /// Makes the stage of window `id` (or of the window a child of it follows) the active
     /// stage of its Desktop, which no display shows now, with `id` as its key window: the
     /// stage active there is parked, `id`'s stage brought back (no raise, no focus: nothing

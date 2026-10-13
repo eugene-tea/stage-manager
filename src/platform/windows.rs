@@ -2,10 +2,11 @@
 //! z-order.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 
-use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
+    CGWindowListCopyWindowInfo, CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
     kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
     kCGWindowOwnerPID,
 };
@@ -67,6 +68,34 @@ pub fn list_windows() -> Vec<CgWindow> {
 /// The on-screen windows only (desktop elements excluded), front to back: one query.
 pub fn on_screen() -> Vec<CgWindow> {
     query(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
+}
+
+/// The windows `ids` as the window server describes them now, on screen or not, on any
+/// Desktop (`CGWindowListCreateDescriptionFromArray`): one query for a few windows, no walk
+/// of every window as [`list_windows`] does. An id the window server does not know is left
+/// out.
+pub fn describe(ids: &[u32]) -> Vec<CgWindow> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    // The array holds the CGWindowIDs themselves as its values (no callbacks), as the call
+    // expects.
+    let mut values: Vec<*const c_void> = ids.iter().map(|&id| id as usize as *const c_void).collect();
+    let Ok(count) = CFIndex::try_from(values.len()) else { return Vec::new() };
+    // SAFETY: `values` holds `count` pointer-sized values and outlives the call; null
+    // callbacks make CF store them as they are, never retained or released.
+    let Some(array) = (unsafe { CFArray::new(None, values.as_mut_ptr(), count, std::ptr::null()) }) else {
+        tracing::warn!("CFArrayCreate returned nothing for a window description");
+        return Vec::new();
+    };
+    // SAFETY: an array of CGWindowIDs, as the call is documented to take.
+    let Some(described) = (unsafe { CGWindowListCreateDescriptionFromArray(Some(&array)) }) else {
+        return Vec::new();
+    };
+    // SAFETY: the description is documented as an array of CFDictionary; items are
+    // type-checked below.
+    let described: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(described) };
+    described.iter().filter_map(|item| parse_window(&item)).collect()
 }
 
 fn query(options: CGWindowListOption) -> Vec<CgWindow> {
@@ -193,5 +222,19 @@ mod tests {
     fn listing_the_real_window_server_does_not_panic() {
         let list = list_windows();
         assert!(list.iter().all(|w| w.id != 0));
+    }
+
+    #[test]
+    fn describing_windows_by_id_reads_only_those() {
+        assert!(describe(&[]).is_empty());
+        let list = list_windows();
+        let ids: Vec<u32> = list.iter().take(3).map(|w| w.id).collect();
+        let described = describe(&ids);
+        assert!(described.iter().all(|w| ids.contains(&w.id)), "only the windows asked");
+        for w in &described {
+            let listed = list.iter().find(|l| l.id == w.id).expect("listed");
+            assert_eq!(w.pid, listed.pid, "window {}: the same owner", w.id);
+        }
+        assert!(describe(&[u32::MAX]).is_empty(), "an id the window server does not know");
     }
 }
