@@ -450,6 +450,10 @@ pub struct Controller {
     unrestored: BTreeMap<u32, Unrestored>,
     /// When the unrestored windows were last checked.
     unrestored_checked: Instant,
+    /// Shown windows (the active stage's, pinned ones) the window server did not show at the
+    /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
+    /// a change seen by the once-a-second check sends a new snapshot.
+    active_off_screen: BTreeSet<u32>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -536,6 +540,7 @@ impl Controller {
             focus_after_press: None,
             unrestored: BTreeMap::new(),
             unrestored_checked: Instant::now(),
+            active_off_screen: BTreeSet::new(),
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -767,6 +772,24 @@ impl Controller {
             self.present();
         }
         failed
+    }
+
+    /// True when the shown windows the window server leaves out (`shown` is its on-screen
+    /// set) differ from those at the last strip snapshot.
+    fn active_shown_changed(&self, shown: &HashSet<u32>) -> bool {
+        let Some(m) = &self.model else { return false };
+        let Some(active) = m.main_active_stage() else { return !self.active_off_screen.is_empty() };
+        let space = m.current_space(m.main_display().id);
+        let off: BTreeSet<u32> = m
+            .windows()
+            .filter(|w| {
+                !w.parked
+                    && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || w.home == Home::Stage(active))
+            })
+            .map(|w| w.meta.id.0)
+            .filter(|id| !shown.contains(id))
+            .collect();
+        off != self.active_off_screen
     }
 
     /// Keeps a window whose `SetFrame` failed registered (with the frame it was asked to
@@ -1011,7 +1034,10 @@ impl Controller {
             .collect();
         let dragged = self.drag.filter(|d| d.moving);
         let space = m.current_space(m.main_display().id);
-        let active_frames = m
+        // Only windows the window server shows: a hidden app's (⌘H) or a minimized window
+        // never keeps the strip auto-hidden (R1-ui 2).
+        let on = on_screen(&windows::list_windows());
+        let (active_frames, off): (Vec<_>, Vec<_>) = m
             .windows()
             .filter(|w| {
                 !w.parked
@@ -1019,8 +1045,9 @@ impl Controller {
                         || active.is_some_and(|a| w.home == Home::Stage(a)))
             })
             .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
-            .map(|w| w.meta.frame)
-            .collect();
+            .partition(|w| on.contains(&w.meta.id.0));
+        let active_frames = active_frames.into_iter().map(|w| w.meta.frame).collect();
+        self.active_off_screen = off.into_iter().map(|w| w.meta.id.0).collect();
         let active_windows = active
             .and_then(|a| m.stage(a))
             .map(|s| {
@@ -1742,6 +1769,10 @@ impl Controller {
         }
         let shown = on_screen(&list);
         let shown_main = on_main_screen(&list, main.frame);
+        if self.active_shown_changed(&shown) {
+            tracing::debug!("a shown window was hidden or came back: the strip looks again");
+            self.strip_dirty = true;
+        }
         self.unplaced.retain(|id| ob.window(*id).is_some());
         let showing: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown_main.contains(id)).collect();
         for id in showing {
