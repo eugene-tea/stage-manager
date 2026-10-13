@@ -34,6 +34,10 @@
 //!   here; windows of this Space gone from the screen (app not hidden, not minimized) left
 //!   it. On a full-screen app's Space there is no strip and no stage changes; a Space change
 //!   during the full-screen animation waits for it to settle ([`crate::engine::fullscreen`]).
+//! - **Wallpaper clicks**: a click on the wallpaper reveals the desktop. macOS hands the
+//!   desktop to Finder, so Finder's activation and its main window's focus follow the click;
+//!   that echo never switches stages or unparks a window ([`DesktopEcho`]), as with Apple's.
+//!   A deliberate Finder activation (Dock click, ⌘Tab, its card) still brings its stage.
 //! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
 //!   current stage, and an activation (Dock click) of an app in another stage brings its
@@ -60,6 +64,7 @@ use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
 use super::{desktop, logging, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
+use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
@@ -289,6 +294,11 @@ pub struct Controller {
     seen_active: Option<(u64, Option<u64>)>,
     /// The stages at the last strip snapshot (`None` before the first).
     seen_stages: Option<BTreeSet<u64>>,
+    /// Finder's activation and focus that follow a wallpaper click.
+    desktop_echo: DesktopEcho,
+    /// `[strip] hide_while_desktop_shown`: a wallpaper click hid the strip, until the
+    /// reveal ends or any window activation.
+    strip_hidden_for_desktop: bool,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -369,6 +379,8 @@ impl Controller {
             absent: HashMap::new(),
             seen_active: None,
             seen_stages: None,
+            desktop_echo: DesktopEcho::default(),
+            strip_hidden_for_desktop: false,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -760,7 +772,7 @@ impl Controller {
             cards,
             active_stage: active.map(|s| s.0),
             hide_recent_apps: m.strip_auto_hides(),
-            user_visible: self.strip_visible,
+            user_visible: self.strip_visible && !(self.strip_hidden_for_desktop && m.desktop_revealed()),
             style: self.style.clone(),
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
@@ -877,6 +889,12 @@ impl Controller {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
+                let bundle = ob.window(id).and_then(|w| ob.bundle_id(w.pid));
+                if self.desktop_echo.classify(bundle, now) == Cause::WallpaperEcho {
+                    tracing::debug!(id, "Finder window focus after a wallpaper click: ignored (the desktop is Finder's)");
+                    return;
+                }
+                self.show_strip_after_desktop("a window was focused");
                 if self.frozen() {
                     return;
                 }
@@ -906,6 +924,11 @@ impl Controller {
                     tracing::debug!(pid, "activation echo of our own action ignored");
                     return;
                 }
+                if self.desktop_echo.classify(ob.bundle_id(pid), now) == Cause::WallpaperEcho {
+                    tracing::debug!(pid, "Finder activation after a wallpaper click: ignored (the desktop is Finder's)");
+                    return;
+                }
+                self.show_strip_after_desktop("an app was activated");
                 if self.frozen() {
                     return;
                 }
@@ -1036,10 +1059,14 @@ impl Controller {
                 self.press = self.model.as_ref().map(|m| Press {
                     frames: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.restore)).collect(),
                 });
-                if for_arriving {
+                let wallpaper = if for_arriving {
                     tracing::debug!("click during a transition, on an arriving window");
+                    false
                 } else {
-                    self.mouse_down(ob, event.at);
+                    self.mouse_down(ob, event.at)
+                };
+                if !wallpaper && self.desktop_echo.user_acted() {
+                    tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
                 }
             }
             InputKind::MouseUp => {
@@ -1058,7 +1085,12 @@ impl Controller {
                 }
                 self.present();
             }
-            InputKind::KeyDown => self.flush_pending(ob),
+            InputKind::KeyDown => {
+                self.flush_pending(ob);
+                if self.desktop_echo.user_acted() {
+                    tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
+                }
+            }
         }
     }
 
@@ -1522,35 +1554,62 @@ impl Controller {
     }
 
     /// A left mouse-down in another app at `p`: on the wallpaper it reveals the desktop.
-    pub fn mouse_down(&mut self, ob: &mut Observer, p: Point) {
+    /// True when it was a wallpaper click (Finder's activation and focus that follow are
+    /// its echo, [`DesktopEcho`]).
+    pub fn mouse_down(&mut self, ob: &mut Observer, p: Point) -> bool {
         if self.model.is_none() || self.fullscreen || !wallpaper_reveal_enabled(&self.settings) {
-            return;
+            return false;
         }
         if self.model.as_ref().is_some_and(|m| !m.main_display().frame.contains(p)) {
-            return;
+            return false;
         }
         // Our own windows (the strip below windows, the motion overlay above them) never
         // receive other apps' clicks, so they never hide the wallpaper.
         let own = std::process::id() as i32;
         let list: Vec<_> = windows::list_windows().into_iter().filter(|w| w.pid != own).collect();
         if !desktop::is_wallpaper_click(&list, p) {
-            return;
+            return false;
         }
         tracing::info!(x = p.x, y = p.y, "wallpaper click");
+        self.desktop_echo.wallpaper_clicked(Instant::now());
         self.reveal(ob, true);
+        true
     }
 
+    /// Reveals the desktop, or brings the revealed stage back (a second click). With
+    /// `[strip] hide_while_desktop_shown` the strip hides while the desktop shows, and the
+    /// windows move without the strip's animation (there is no card to grow from or shrink
+    /// into).
     fn reveal(&mut self, ob: &mut Observer, animated: bool) -> usize {
         let obs = self.observe(ob);
+        let hide = self.store.config().strip.hide_while_desktop_shown;
+        let hidden_before = self.strip_hidden_for_desktop && self.model.as_ref().is_some_and(Model::desktop_revealed);
         let Some(m) = self.model.as_mut() else { return 0 };
         let actions = m.reveal_desktop(&obs);
+        let revealed = m.desktop_revealed();
         let n = actions.len();
-        if animated {
+        self.strip_hidden_for_desktop = hide && revealed;
+        if self.strip_hidden_for_desktop {
+            tracing::debug!("the desktop shows: the strip hides ([strip] hide_while_desktop_shown)");
+        }
+        if animated && !hidden_before && !self.strip_hidden_for_desktop {
             self.execute_animated(ob, actions);
         } else {
             self.execute(ob, actions);
         }
+        if hidden_before != self.strip_hidden_for_desktop {
+            self.present();
+        }
         n
+    }
+
+    /// `[strip] hide_while_desktop_shown`: any window activation brings the hidden strip
+    /// back (the reveal's own Finder echo does not count).
+    fn show_strip_after_desktop(&mut self, why: &str) {
+        if std::mem::take(&mut self.strip_hidden_for_desktop) {
+            tracing::debug!(why, "the strip comes back after the desktop reveal");
+            self.present();
+        }
     }
 
     /// A hotkey was pressed.
@@ -1789,6 +1848,18 @@ impl Controller {
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
             }
+            Command::DebugClose { id } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-close needs STAGE_MANAGER_TEST=1" });
+                }
+                match test_window(ob, id, "debug-close").and_then(|e| e.press_close_button().map_err(|e| e.to_string())) {
+                    Ok(()) => {
+                        tracing::info!(id, "debug-close");
+                        json!({ "ok": true })
+                    }
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            }
             Command::Dump => {
                 let mut dump = ob.dump();
                 dump["spaces"] = self.spaces_json();
@@ -1898,6 +1969,8 @@ impl Controller {
             "fit_windows": m.options().fit.shrink,
             "fit": format!("{:?}", self.store.config().windows.fit).to_lowercase(),
             "strip_visible": self.strip_visible,
+            "desktop_revealed": m.desktop_revealed(),
+            "strip_hidden_for_desktop": self.strip_hidden_for_desktop && m.desktop_revealed(),
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "animation": self.store.config().style.animation.enabled,
             "capture": super::capture::status(),
@@ -1982,7 +2055,27 @@ fn launch_hints(list: &[windows::CgWindow]) -> LaunchHints {
 /// window that refuses the attribute gets its full-screen button pressed instead. A window
 /// already where asked is left alone.
 fn test_fullscreen(ob: &Observer, id: u32, on: bool) -> Result<Value, String> {
-    let only = ob.only().ok_or("debug-fullscreen needs STAGE_MANAGER_ONLY (fixture apps only)")?;
+    let element = test_window(ob, id, "debug-fullscreen")?;
+    let before = element.is_fullscreen().map_err(|e| e.to_string())?;
+    if before == on {
+        return Ok(json!({ "ok": true, "fullscreen_before": before, "changed": false }));
+    }
+    let via = match element.set_fullscreen(on) {
+        Ok(()) => "AXFullScreen",
+        Err(e) => {
+            tracing::info!(id, "debug-fullscreen: AXFullScreen refused ({e}); pressing the full-screen button");
+            element.press_fullscreen_button().map_err(|b| format!("AXFullScreen: {e}; full-screen button: {b}"))?;
+            "AXFullScreenButton"
+        }
+    };
+    tracing::info!(id, on, via, "debug-fullscreen");
+    Ok(json!({ "ok": true, "fullscreen_before": before, "changed": true, "via": via }))
+}
+
+/// A standard window `id` a test may act on through Accessibility: one of an app on the
+/// `STAGE_MANAGER_ONLY` list, never ours; any other is refused (`what` names the command).
+fn test_window(ob: &Observer, id: u32, what: &str) -> Result<AxElement, String> {
+    let only = ob.only().ok_or(format!("{what} needs STAGE_MANAGER_ONLY (fixture apps only)"))?;
     let cg = windows::list_windows().into_iter().find(|w| w.id == id).ok_or(format!("no window {id}"))?;
     let bundle = ob.bundle_id(cg.pid).map(str::to_string).unwrap_or_default();
     if cg.pid == std::process::id() as i32 || !only.contains(&bundle) {
@@ -2000,20 +2093,7 @@ fn test_fullscreen(ob: &Observer, id: u32, on: bool) -> Result<Value, String> {
     if element.subrole().ok().as_deref() != Some(super::ax::names::SUBROLE_STANDARD) {
         return Err(format!("window {id} is not a standard window"));
     }
-    let before = element.is_fullscreen().map_err(|e| e.to_string())?;
-    if before == on {
-        return Ok(json!({ "ok": true, "fullscreen_before": before, "changed": false }));
-    }
-    let via = match element.set_fullscreen(on) {
-        Ok(()) => "AXFullScreen",
-        Err(e) => {
-            tracing::info!(id, "debug-fullscreen: AXFullScreen refused ({e}); pressing the full-screen button");
-            element.press_fullscreen_button().map_err(|b| format!("AXFullScreen: {e}; full-screen button: {b}"))?;
-            "AXFullScreenButton"
-        }
-    };
-    tracing::info!(id, on, via, "debug-fullscreen");
-    Ok(json!({ "ok": true, "fullscreen_before": before, "changed": true, "via": via }))
+    Ok(element)
 }
 
 /// The focused window: the frontmost app's `AXFocusedWindow`, as a `CGWindowID`.

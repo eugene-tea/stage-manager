@@ -225,6 +225,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
 | `strip.show_active` | `false` | true or false | Also show the active stage as a card (fixed order only; Apple never does). |
+| `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
 | `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area a window must cover to hide the strip. |
