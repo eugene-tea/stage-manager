@@ -182,6 +182,11 @@ fn after(seconds: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
 
 impl Strip {
     /// True when the motion overlay draws top-down (see `overlay`).
+    /// True while a transition's snapshots are on their way.
+    pub(super) fn motion_running(&self) -> bool {
+        self.motion.running.is_some()
+    }
+
     pub(super) fn motion_top_down(&self) -> bool {
         self.motion.overlay.top_down()
     }
@@ -559,6 +564,11 @@ impl Strip {
         // another that took it before the press let go: R3 6), lets go now that it shows.
         if landed && self.pressed.is_none() && self.squeezed.is_some_and(|s| r.held.contains(&s)) {
             self.squeeze(None);
+        }
+        // A strip held raised for the transition goes back below windows if nothing needs it
+        // up any more.
+        if landed && self.pane.lifted == Some(true) {
+            self.update_visibility();
         }
         // A card shown now grows if the pointer rests on it.
         if !r.held.is_empty() && self.pane.shown {

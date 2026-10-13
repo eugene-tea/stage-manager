@@ -988,6 +988,9 @@ struct Strip {
     logged_order: Vec<u64>,
     /// A window drag is over the strip: the gap shows (at `drop_before`'s card).
     drop_over: bool,
+    /// A transition is about to begin in this snapshot ([`Self::update_visibility`] keeps a
+    /// raised strip raised for it).
+    transition_starting: bool,
     drop_before: Option<u64>,
     /// The launch reveal happened (once per launch).
     announced: bool,
@@ -1027,6 +1030,7 @@ impl Strip {
             lifted_card: None,
             logged_order: Vec::new(),
             drop_over: false,
+            transition_starting: false,
             drop_before: None,
             announced: false,
             space_epoch: 0,
@@ -1148,11 +1152,13 @@ impl Strip {
             // Decide whether this snapshot shows the strip before aiming: a switch that
             // reveals (or hides) the strip lands its snapshots where the cards will be, not
             // where they were (review R1-ui 1).
+            self.transition_starting = true;
             self.update_visibility();
             // Incoming windows grow from where their cards will be too (review R2 V2): a
             // start on a card follows the slide this snapshot decided.
             let starts = slide_card_starts(starts, self.current_dx() - dx_before);
             self.begin_transition(t, starts);
+            self.transition_starting = false;
         }
         if let Some(id) = self.snapshot.parked {
             self.outgoing_parked(id);
@@ -2381,9 +2387,15 @@ impl Strip {
         }
         // Below windows (Apple's) unless something needs it on top: a window or a card being
         // dragged, or the edge revealing it over a window that covers it.
+        // A raised strip stays raised while a transition runs (or starts): the leaving windows
+        // still cover it until their snapshots land; it goes back below once the transition
+        // has landed (10-13, a laptop: a card click to a stage clear of the strip dropped it
+        // at once, under the window leaving).
+        let held_up = self.pane.lifted == Some(true) && (self.transition_starting || self.motion_running());
         let lift = self.style.level == StripLevel::AboveWindows
             || drop_over
             || card_dragging
+            || held_up
             || (self.pane.shown && mode == Mode::EdgeOnly);
         self.set_lifted(lift);
         self.window_drag_card(over);
