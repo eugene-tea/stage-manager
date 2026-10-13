@@ -1378,6 +1378,19 @@ impl Controller {
         let before = m.current_space(main.id);
         let shown = on_main_screen(list, main.frame);
         let z = windows::z_order(list);
+        // Known windows' frames read fresh: the engine matches the screen to the model on
+        // arrival (a parked window found shown is parked again, a shown one found parked is
+        // brought back), so a frame missed by a notification must not mislead it.
+        let known: Vec<u32> = ob
+            .windows()
+            .keys()
+            .copied()
+            .filter(|id| shown.contains(id) && m.window(WindowId(*id)).is_some())
+            .collect();
+        for id in known {
+            ob.refresh_frame(id);
+        }
+        let Some(m) = self.model.as_ref() else { return };
         let live: Vec<WindowMeta> = ob
             .windows()
             .keys()
