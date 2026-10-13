@@ -1428,6 +1428,13 @@ impl Controller {
     /// the window where the user left it when that is outside the park zone.
     fn focus_after_press_done(&mut self, ob: &mut Observer) {
         let Some(id) = self.focus_after_press.take() else { return };
+        if self.space_pending {
+            // A Space change is settling: the grab waits for it (the tick tries again), or the
+            // window would sit on screen counted as parked until the next arrival parks it
+            // again (review R2 L1).
+            self.focus_after_press = Some(id);
+            return;
+        }
         if self.frozen() {
             return;
         }
@@ -1675,6 +1682,11 @@ impl Controller {
                 self.space_pending = false;
                 self.fullscreen = false;
                 self.space_changed_at = Some(now);
+                // A sliver grab let go while the change settled runs first, so the arrival
+                // finds the window where the user dropped it, already unparked (R2 L1).
+                if self.focus_after_press.is_some() && !input::left_button_down() {
+                    self.focus_after_press_done(ob);
+                }
                 self.arrive_here(ob, &list, main);
             }
         }
@@ -2327,6 +2339,12 @@ impl Controller {
         );
         if acts && let Some(why) = self.frozen_reason() {
             return json!({ "ok": false, "error": why });
+        }
+        // Without Accessibility no window moves: a stage change now would leave the model out
+        // of step with the screen, its parked windows unregistered (review R2 L2), as the
+        // wm thread's gate does for the user's input.
+        if acts && self.managing() && !ob.observing() {
+            return json!({ "ok": false, "error": "Accessibility is off" });
         }
         match cmd {
             Command::State => self.state_json(ob),
