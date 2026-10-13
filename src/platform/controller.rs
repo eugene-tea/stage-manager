@@ -152,6 +152,8 @@ pub enum UiUpdate {
     },
     /// The strip's Show/Hide state.
     StripVisible(bool),
+    /// The wallpaper corner patch's plan (`[windows] corner_patch`).
+    CornerPatch(crate::ui::corner_patch::PatchPlan),
 }
 
 type UiSink = Box<dyn Fn(UiUpdate) + Send + Sync>;
@@ -435,6 +437,8 @@ pub struct Controller {
     arrive_now: HashSet<u32>,
     /// `[windows] hide_parked_apps`: the apps we hid ([`hide`]).
     hides: hide::Hides,
+    /// The corner patch's last plan sent to the main thread.
+    patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
@@ -583,6 +587,7 @@ impl Controller {
             arrived_note: None,
             arrive_now: HashSet::new(),
             hides: hide::Hides::default(),
+            patch_sent: None,
             unplaced: BTreeSet::new(),
             fullscreen: false,
             space_pending: false,
@@ -787,6 +792,53 @@ impl Controller {
         super::sliver_tap::publish(sliver::Shield { on, zones, parked });
     }
 
+    /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
+    /// it to the main thread when it changed. Reads the window server's on-screen list only
+    /// while `[windows] corner_patch` is on.
+    fn update_patch(&mut self) {
+        use crate::engine::corner_patch::{PatchFacts, patch_rect, visibility};
+        use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
+        let config = self.store.config();
+        let (on, reach, fps) = (config.windows.corner_patch, config.windows.corner_patch_reach, config.windows.corner_patch_fps);
+        let plan = match &self.model {
+            Some(m) if on => {
+                let list = windows::on_screen();
+                let own = std::process::id() as i32;
+                let parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
+                let display = m.main_display().frame;
+                let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
+                let rect = patch_rect(&slivers, display, reach);
+                let now = Instant::now();
+                let facts = PatchFacts {
+                    on,
+                    rect,
+                    overview: self.overview.showing().is_some() || self.overview.freezes(now) || self.space_pending,
+                    ordered: patch_ui::ordered(),
+                    shown: list
+                        .iter()
+                        .filter(|w| w.layer == 0 && w.pid != own && w.alpha > 0.0 && !parked.contains(&w.id))
+                        .map(|w| w.bounds)
+                        .collect(),
+                    dragging: input::left_button_down() || self.drag.is_some(),
+                    transition: self.pending.is_some(),
+                };
+                let show = visibility(&facts).ok();
+                let above = show.and_then(|r| {
+                    list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
+                });
+                let mut parked: Vec<u32> = parked.into_iter().collect();
+                parked.sort_unstable();
+                PatchPlan { show, above, parked, fps }
+            }
+            _ => PatchPlan { show: None, above: None, parked: Vec::new(), fps },
+        };
+        if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none()) {
+            return;
+        }
+        self.patch_sent = Some(plan.clone());
+        notify_ui(UiUpdate::CornerPatch(plan));
+    }
+
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
     /// config, and its park request with config.
     fn sync_fit(&mut self) {
@@ -900,6 +952,7 @@ impl Controller {
         }
         self.after_batch_hides(unhide);
         self.publish_shield();
+        self.update_patch();
         self.remember();
         if changed {
             self.mark_dirty();
@@ -1582,6 +1635,10 @@ impl Controller {
             self.triggers.record_release(now, mods);
         } else {
             self.triggers.record(now, mods);
+        }
+        if matches!(event.kind, InputKind::MouseDown | InputKind::MouseUp) {
+            // A press may start a window drag: the corner patch's fallback hides at once.
+            self.update_patch();
         }
         match event.kind {
             InputKind::MouseDown => {
@@ -2738,6 +2795,7 @@ impl Controller {
                 self.check_spaces(ob);
             }
             self.hide_pass(ob);
+            self.update_patch();
         }
         if self.strip_dirty {
             self.present();

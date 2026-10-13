@@ -41,6 +41,15 @@ pub fn motion_overlay() -> B {
     B::MoveToActiveSpace | B::Transient | B::IgnoresCycle
 }
 
+/// The wallpaper corner patch (`[windows] corner_patch`): like the motion overlay, on the
+/// Space shown (moves there when shown), hidden by Mission Control, App Exposé and Show
+/// Desktop, out of ⌘` and the Window menu's cycle; never on a full-screen Space. Its panel
+/// is non-activating and click-through, never key or main, so ⌘Tab and switchers that list
+/// apps never see it (an accessory app with no window that can be key).
+pub fn corner_patch() -> B {
+    B::MoveToActiveSpace | B::Transient | B::IgnoresCycle
+}
+
 /// The names of the flags set in `bits` (for `ctl state` and logs), in a fixed order.
 pub fn names(bits: usize) -> Vec<&'static str> {
     const ALL: [(B, &str); 9] = [
@@ -70,7 +79,7 @@ mod tests {
 
     #[test]
     fn every_panel_is_hidden_by_expose_and_out_of_the_cycle() {
-        for b in [desktop_panel(), drag_ghost(), motion_overlay()] {
+        for b in [desktop_panel(), drag_ghost(), motion_overlay(), corner_patch()] {
             assert!(b.contains(B::Transient), "{:?}", names(b.0));
             assert_eq!(count(b, &EXPOSE), 1, "one Exposé choice: {:?}", names(b.0));
             assert!(count(b, &SPACES) <= 1, "one Spaces choice: {:?}", names(b.0));
@@ -91,6 +100,14 @@ mod tests {
     fn the_ghost_and_the_overlay_keep_their_spaces_choice() {
         assert!(drag_ghost().contains(B::CanJoinAllSpaces | B::FullScreenAuxiliary));
         assert!(motion_overlay().contains(B::MoveToActiveSpace));
+    }
+
+    #[test]
+    fn the_corner_patch_never_shows_in_switchers_or_overviews() {
+        let b = corner_patch();
+        assert_eq!(names(b.0), ["move_to_active_space", "transient", "ignores_cycle"]);
+        assert!(!b.contains(B::Managed) && !b.contains(B::Stationary), "never laid out or kept by Exposé");
+        assert!(!b.contains(B::FullScreenAuxiliary) && !b.contains(B::CanJoinAllSpaces));
     }
 
     #[test]

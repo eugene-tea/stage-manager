@@ -318,6 +318,12 @@ pub struct WindowsConfig {
     /// Apps whose every window sits in inactive stages are hidden instead of parked in view
     /// (a prototype).
     pub hide_parked_apps: bool,
+    /// A live picture of the desktop over the parked windows' slivers (a prototype).
+    pub corner_patch: bool,
+    /// How far past a sliver the patch reaches (its shadow).
+    pub corner_patch_reach: f64,
+    /// Most frames a second of the patch's live picture.
+    pub corner_patch_fps: u32,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -796,6 +802,9 @@ impl Config {
                 park_inside: v.num("windows.park_inside"),
                 park_drop: v.num("windows.park_drop"),
                 hide_parked_apps: v.flag("windows.hide_parked_apps"),
+                corner_patch: v.flag("windows.corner_patch"),
+                corner_patch_reach: v.num("windows.corner_patch_reach"),
+                corner_patch_fps: v.uint("windows.corner_patch_fps") as u32,
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,

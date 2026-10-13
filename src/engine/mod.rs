@@ -3,6 +3,7 @@
 //! The engine compiles and tests on any OS. The platform layer feeds it observations and
 //! executes the [`model::Action`]s it returns.
 
+pub mod corner_patch;
 pub mod desktop_echo;
 pub mod displays;
 pub mod focus_replay;

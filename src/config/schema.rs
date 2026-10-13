@@ -304,6 +304,12 @@ pub const KEYS: &[KeyDef] = &[
         "How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it."),
     k("windows", "hide_parked_apps", Kind::Bool, "false",
         "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
+    k("windows", "corner_patch", Kind::Bool, "false",
+        "Cover the parked windows' slivers with a live picture of the desktop under them (wallpaper, desktop icons, widgets; Screen Recording). A prototype: off by default."),
+    k("windows", "corner_patch_reach", f(0.0, 400.0), "60.0",
+        "How far past a sliver the corner patch reaches, in points, to cover its shadow."),
+    k("windows", "corner_patch_fps", i(1, 60), "10",
+        "Most frames a second of the corner patch's live picture (a still wallpaper sends none)."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]

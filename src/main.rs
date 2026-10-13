@@ -242,6 +242,12 @@ mod app {
                     }
                 }
                 UiUpdate::StripVisible(v) => self.strip_visible = v,
+                UiUpdate::CornerPatch(plan) => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        stage_manager::ui::corner_patch::apply(mtm, plan);
+                    }
+                    return;
+                }
             }
             self.refresh_menu();
         }
