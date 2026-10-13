@@ -357,6 +357,18 @@ mod tests {
     }
 
     #[test]
+    fn a_quick_note_in_the_corner_keeps_its_press() {
+        // 10-13, the hot corner set to Quick Note: its preview is a window of its own
+        // (LinkedNotesUIService, 254×254 in the corner), not drawn in the Dock's window, so a
+        // press on it passes with the Dock's window seen through.
+        let dock = Listed { id: 46, pid: DOCK, bounds: MAIN, alpha: 1.0, layer: DOCK_LAYER };
+        let note = Listed { id: 55, pid: 80, bounds: Rect::new(MAIN.max_x() - 254.0, MAIN.max_y() - 254.0, 254.0, 254.0), alpha: 1.0, layer: 25 };
+        let at = Point::new(2559.5, VISIBLE.max_y() - 20.0);
+        assert_eq!(shield(&[7]).hits(&[dock, note, sliver(7, 52.0)], at, OWN), None);
+        assert_eq!(shield(&[7]).hits(&[note, dock, sliver(7, 52.0)], at, OWN), None);
+    }
+
+    #[test]
     fn our_own_and_transparent_windows_are_seen_through() {
         let overlay = Listed { id: 90, pid: OWN, bounds: MAIN, alpha: 1.0, layer: 0 };
         let clear = Listed { id: 91, pid: 60, bounds: MAIN, alpha: 0.0, layer: 0 };
