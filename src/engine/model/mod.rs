@@ -32,7 +32,7 @@ use super::park::{Corner, clamp_to_visible, is_parked_in_at, park_frame_at};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
-pub use ahead::{Ahead, AppFacts};
+pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use spaces::{Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 
