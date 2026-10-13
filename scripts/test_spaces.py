@@ -975,15 +975,19 @@ def activation_to_desktop_1(d1, d2):
         arrive_on_desktop_1(d1, alpha, left, None)
         return
     clean = []
-    for n in range(DOCK_REPEATS):
-        if n and not back_to_desktop_2(d2):
-            return
-        say(f"\n== Dock arrival {n + 1} of {DOCK_REPEATS} ==")
-        clean.append(arrive_on_desktop_1(d1, alpha, left, "dock"))
-    check(all(clean), f"every Dock arrival clean: {sum(1 for c in clean if c)} of {DOCK_REPEATS} "
-          "(the stage left never out of the park zone once Desktop 1 is on screen)")
+    try:
+        for n in range(DOCK_REPEATS):
+            if n and not back_to_desktop_2(d1, d2):
+                break
+            say(f"\n== Dock arrival {n + 1} of {DOCK_REPEATS} ==")
+            clean.append(arrive_on_desktop_1(d1, alpha, left, "dock"))
+    finally:
+        # Every attempt counts, a broken loop's missing ones as not clean (R9 10).
+        check(len(clean) == DOCK_REPEATS and all(clean),
+              f"every Dock arrival clean: {sum(1 for c in clean if c)} of {DOCK_REPEATS} "
+              "(the stage left never out of the park zone once Desktop 1 is on screen)")
     say("\n== again by `open` (no Dock click: the fallback at the Space change notice) ==")
-    if back_to_desktop_2(d2):
+    if back_to_desktop_2(d1, d2):
         arrive_on_desktop_1(d1, alpha, left, "open")
     owners_case(d1, d2)
 
@@ -1002,12 +1006,27 @@ def owners_case(d1, d2):
     go("d2", "Switch to Desktop 2")
     x = state()
     bravo = stage_holding(x, "Bravo 1")
+    if not check(x.get("space") == d2, f"on Desktop 2 to make Bravo's stage active (Space {x.get('space')})"):
+        return
     if bravo and x["active"] != bravo:
         ctl("switch", bravo)
     go("d1", "Switch to Desktop 1")
     clean = []
+    try:
+        owners_arrivals(d1, d2, clean)
+    finally:
+        check(len(clean) == DOCK_REPEATS and all(clean),
+              f"the owner's case: every Dock arrival clean: {sum(1 for c in clean if c)} of {DOCK_REPEATS}")
+
+
+def owners_arrivals(d1, d2, clean):
+    """The owner's case's arrivals, each appended to `clean`; returns early (the rest
+    counted as not clean by the caller) when the setup on Desktop 1 cannot be made."""
     for n in range(DOCK_REPEATS):
         x = state()
+        # Stage numbers are per Desktop: every switch here must be on Desktop 1 (R9 9).
+        if not check(x.get("space") == d1, f"on Desktop 1 to set the owner's case up (Space {x.get('space')})"):
+            return
         fixture, alpha_stage = stage_holding(x, "Fixture 1"), stage_holding(x, "Alpha 1")
         if not check(bool(fixture and alpha_stage), "Desktop 1 has the Fixture and Alpha stages"):
             return
@@ -1026,20 +1045,21 @@ def owners_case(d1, d2):
         left = [w["id"] for w in x["windows"] if w["title"] == "Alpha 1"]
         say(f"\n== the owner's case, Dock arrival {n + 1} of {DOCK_REPEATS} ==")
         clean.append(arrive_on_desktop_1(d1, target, left, "dock", app="fixture"))
-        if current_space() != d1:
-            return
-    check(all(clean), f"the owner's case: every Dock arrival clean: {sum(1 for c in clean if c)} of {DOCK_REPEATS}")
 
 
 # How many Dock arrivals a hands-free run makes (the window server applied an arrangement made
 # ahead only when its Desktop showed in one run of three, 10-13).
-DOCK_REPEATS = int(os.environ.get("SM_DOCK_REPEATS") or 3)
+DOCK_REPEATS = max(1, int(os.environ.get("SM_DOCK_REPEATS") or 3))
 
 
-def back_to_desktop_2(d2):
+def back_to_desktop_2(d1, d2):
     """From Desktop 1 after an arrival: its Fixture stage active again (Alpha 1 parked),
-    then Desktop 2. False (with a failed check) when that does not happen."""
+    then Desktop 2. False (with a failed check) when that does not happen, or when the
+    arrival never left Desktop 2 (stage numbers are per Desktop: a switch there would
+    reshuffle Desktop 2's stages, R9 9)."""
     x = state()
+    if not check(x.get("space") == d1, f"on Desktop 1 after the arrival, to set it up again (Space {x.get('space')})"):
+        return False
     fixture_stage = stage_holding(x, "Fixture 1")
     if fixture_stage:
         ctl("switch", fixture_stage)

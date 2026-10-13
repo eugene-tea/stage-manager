@@ -50,7 +50,7 @@ use crate::engine::model::{Action, Ahead, AppFacts, Observation, SpaceId, Window
 use crate::platform::ax::{AxElement, names};
 use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::observe::{Observer, WindowKind};
-use crate::platform::safety::ParkedEntry;
+use crate::platform::safety::{self, ParkedEntry};
 use crate::platform::windows::{self, CgWindow};
 use crate::ui::strip_model::{self, StripSnapshot};
 
@@ -101,13 +101,23 @@ pub const VERIFY_FOR: Duration = Duration::from_millis(600);
 pub const VERIFY_EVERY: Duration = Duration::from_millis(20);
 
 /// One move of an arrangement made on a Desktop not shown, as the window server should show
-/// it: parked (in the park zone), or at a frame.
+/// it: parked (in the park zone), or at a frame; with how often it was sent again.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Expect {
     id: u32,
     frame: Rect,
     park: bool,
+    /// Times sent again (at most [`RESEND_MAX`]).
+    tries: u32,
+    /// A resend timed out or failed: not sent again.
+    gave_up: bool,
+    /// The 1 pt nudge went through, the exact move did not: the exact one is owed.
+    nudged_only: bool,
 }
+
+/// A move is sent again at most this many times (the measured case needed one, when the
+/// Desktop showed).
+pub const RESEND_MAX: u32 = 3;
 
 /// The moves of an arrangement made on a Desktop not shown, until the window server shows
 /// them (measured 10-13: in one run of three it applied them only when that Desktop became
@@ -116,20 +126,18 @@ pub(super) struct Expect {
 pub(super) struct Verify {
     sent: Instant,
     next: Instant,
-    tries: u32,
+    rounds: u32,
     moves: Vec<Expect>,
 }
 
 /// True when the window server's `bounds` for a move are what it asked: in the park zone
-/// (`parks`) for a park, else within 2 pt of the frame.
+/// (`parks`) for a park; else out of it, within 2 pt of the frame's origin (the size is the
+/// app's: a terminal or a fixed-size window keeps its own).
 fn shows(e: &Expect, bounds: Rect, parks: impl Fn(Rect) -> bool) -> bool {
     if e.park {
         parks(bounds)
     } else {
-        (bounds.x - e.frame.x).abs() <= 2.0
-            && (bounds.y - e.frame.y).abs() <= 2.0
-            && (bounds.w - e.frame.w).abs() <= 2.0
-            && (bounds.h - e.frame.h).abs() <= 2.0
+        !parks(bounds) && (bounds.x - e.frame.x).abs() <= 2.0 && (bounds.y - e.frame.y).abs() <= 2.0
     }
 }
 
@@ -138,8 +146,10 @@ fn expects(actions: &[Action]) -> Vec<Expect> {
     actions
         .iter()
         .filter_map(|a| match *a {
-            Action::Park { id, frame } => Some(Expect { id: id.0, frame, park: true }),
-            Action::SetFrame { id, frame } => Some(Expect { id: id.0, frame, park: false }),
+            Action::Park { id, frame } => Some(Expect { id: id.0, frame, park: true, tries: 0, gave_up: false, nudged_only: false }),
+            Action::SetFrame { id, frame } => {
+                Some(Expect { id: id.0, frame, park: false, tries: 0, gave_up: false, nudged_only: false })
+            }
             _ => None,
         })
         .collect()
@@ -491,63 +501,123 @@ impl Controller {
         );
         self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at });
         if !expected.is_empty() {
-            self.verify = Some(Verify { sent, next: sent, tries: 0, moves: expected });
-            self.check_arrangement(ob, Instant::now());
+            // The first look a fast tick later: right after the calls the window server's
+            // list may not show them yet even when they took (R9 1).
+            self.verify = Some(Verify { sent, next: sent + VERIFY_EVERY, rounds: 0, moves: expected });
         }
         true
+    }
+
+    /// True while the WM thread's fast tick has work: an arrangement's moves to check.
+    pub fn wants_fast_tick(&self) -> bool {
+        self.verify.is_some()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
     /// when due ([`Self::check_arrangement`]).
     pub fn fast_tick(&mut self, ob: &Observer) {
         let now = Instant::now();
-        if self.verify.as_ref().is_some_and(|v| now >= v.next) {
+        if self.model.is_none() {
+            self.verify = None;
+        } else if self.verify.as_ref().is_some_and(|v| now >= v.next) {
             self.check_arrangement(ob, now);
         }
     }
 
-    /// Reads the window server's frames of an arrangement's moves: those it does not show
-    /// yet are sent again (once 1 pt off, then exactly: AppKit drops a move to where it
-    /// thinks the window already is), every [`VERIFY_EVERY`] for [`VERIFY_FOR`] or until it
-    /// shows them all; what it showed is logged. Dropped once the arrangement is settled.
+    /// Ends the check of an arrangement's moves (`why`: it was confirmed, undone, the Desktop
+    /// is arriving), logging what the window server showed by then.
+    pub(super) fn finish_verify(&mut self, why: &str) {
+        let Some(v) = self.verify.take() else { return };
+        let resent: u32 = v.moves.iter().map(|e| e.tries).sum();
+        tracing::info!(why, rounds = v.rounds, resent, after_ms = ms(v.sent, Instant::now()), "arrival: the check of the arrangement's moves ends");
+    }
+
+    /// Reads the window server's frames of an arrangement's moves ([`shows`]): those it does
+    /// not show yet are sent again ([`Self::resend`]), every [`VERIFY_EVERY`] for
+    /// [`VERIFY_FOR`] or until it shows them all; what it showed is logged. Never once its
+    /// Desktop is arriving (a Space change settling: the user may hold its windows).
     fn check_arrangement(&mut self, ob: &Observer, now: Instant) {
-        let Some(v) = self.verify.as_mut() else { return };
         let live = self.ahead.as_ref().is_some_and(|s| s.trigger == Trigger::DockClick);
+        if !live {
+            self.finish_verify("the arrangement is settled");
+            return;
+        }
+        if self.space_pending {
+            self.finish_verify("its Desktop is arriving");
+            return;
+        }
         let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let Some(v) = self.verify.as_mut() else { return };
         let list = windows::list_windows();
-        let (missing, shown): (Vec<Expect>, Vec<Expect>) = v.moves.iter().partition(|e| {
-            !list.iter().find(|w| w.id == e.id).is_some_and(|w| shows(e, w.bounds, |r| main.parks(r)))
-        });
+        let shown_by_server = |e: &Expect| {
+            !e.nudged_only && list.iter().find(|w| w.id == e.id).is_some_and(|w| shows(e, w.bounds, |r| main.parks(r)))
+        };
+        let missing: Vec<usize> = (0..v.moves.len()).filter(|&i| !shown_by_server(&v.moves[i])).collect();
         let elapsed = ms(v.sent, now);
         let bounds: Vec<String> = missing
             .iter()
-            .map(|e| format!("{}: {}", e.id, list.iter().find(|w| w.id == e.id).map_or("unlisted".into(), |w| w.bounds.to_string())))
+            .map(|&i| {
+                let id = v.moves[i].id;
+                format!("{id}: {}", list.iter().find(|w| w.id == id).map_or("unlisted".into(), |w| w.bounds.to_string()))
+            })
             .collect();
-        if missing.is_empty() || !live || now.saturating_duration_since(v.sent) >= VERIFY_FOR {
+        let sendable = missing.iter().any(|&i| !v.moves[i].gave_up && v.moves[i].tries < RESEND_MAX);
+        if missing.is_empty() || !sendable || now.saturating_duration_since(v.sent) >= VERIFY_FOR {
             if missing.is_empty() {
-                tracing::info!(moves = shown.len(), tries = v.tries, after_ms = elapsed, "arrival: the window server shows the arrangement");
+                tracing::info!(moves = v.moves.len(), rounds = v.rounds, after_ms = elapsed, "arrival: the window server shows the arrangement");
             } else {
-                tracing::info!(missing = ?bounds, shown = shown.len(), tries = v.tries, after_ms = elapsed, live, "arrival: the window server never showed some moves of the arrangement");
+                tracing::info!(missing = ?bounds, rounds = v.rounds, after_ms = elapsed, "arrival: the window server never showed some moves of the arrangement");
             }
             self.verify = None;
             return;
         }
-        if v.tries == 0 {
-            tracing::info!(missing = ?bounds, shown = shown.len(), after_ms = elapsed, "arrival: the window server does not show every move yet; sending them again");
-        }
-        v.tries += 1;
+        tracing::info!(missing = ?bounds, round = v.rounds + 1, after_ms = elapsed, "arrival: the window server does not show every move yet; sending them again");
+        v.rounds += 1;
         v.next = now + VERIFY_EVERY;
-        for e in &missing {
-            let Some(w) = ob.window(e.id) else { continue };
-            self.echoes.touch_window(e.id, now);
-            let nudged = Rect::new(e.frame.x + 1.0, e.frame.y, e.frame.w, e.frame.h);
-            let result = if e.park {
-                w.element.set_position(nudged.origin()).and_then(|_| w.element.set_position(e.frame.origin()))
-            } else {
-                w.element.set_frame(nudged).and_then(|_| w.element.set_frame(e.frame))
-            };
-            if let Err(err) = result {
-                tracing::debug!(id = e.id, "arrival: a move sent again failed: {err}");
+        let mut moves = std::mem::take(&mut v.moves);
+        for i in missing {
+            let e = &mut moves[i];
+            if e.gave_up || e.tries >= RESEND_MAX {
+                continue;
+            }
+            self.resend(ob, e, now);
+        }
+        if let Some(v) = self.verify.as_mut() {
+            v.moves = moves;
+        }
+    }
+
+    /// Sends move `e` again, bounded: once 1 pt off, then exactly (AppKit drops a move to
+    /// where it thinks the window already is), or only exactly when the nudge went through
+    /// last time and the exact move did not. Through the registry's element when the
+    /// observer lost the window. A failure or a timeout gives the move up.
+    fn resend(&mut self, ob: &Observer, e: &mut Expect, now: Instant) {
+        let element = ob.window(e.id).map(|w| w.element.clone()).or_else(|| safety::registry_entry(e.id).map(|r| r.element));
+        let Some(element) = element else {
+            tracing::debug!(id = e.id, "arrival: a move to send again has no element; given up");
+            e.gave_up = true;
+            return;
+        };
+        e.tries += 1;
+        self.echoes.touch_window(e.id, now);
+        let (frame, park) = (e.frame, e.park);
+        let nudged = Rect::new(frame.x + 1.0, frame.y, frame.w, frame.h);
+        let send = |el: &AxElement, r: Rect| if park { el.set_position(r.origin()) } else { el.set_frame(r) };
+        let skip_nudge = e.nudged_only;
+        let (nudge, exact) = element.bounded(QUERY_AX_TIMEOUT_SECONDS, |el| {
+            let nudge = if skip_nudge { Ok(()) } else { send(el, nudged) };
+            let exact = if nudge.is_ok() { send(el, frame) } else { Ok(()) };
+            (nudge, exact)
+        });
+        match (nudge, exact) {
+            (Ok(()), Ok(())) => e.nudged_only = false,
+            (Ok(()), Err(err)) => {
+                tracing::debug!(id = e.id, "arrival: the exact move sent again failed; owed: {err}");
+                e.nudged_only = true;
+            }
+            (Err(err), _) => {
+                tracing::debug!(id = e.id, "arrival: a move sent again failed; given up: {err}");
+                e.gave_up = true;
             }
         }
     }
@@ -756,8 +826,9 @@ impl Controller {
     /// app's); an undo's restores (a Desktop not shown) stay registered until seen.
     pub(super) fn settle_ahead(&mut self, ob: &Observer, arrived: SpaceId, now: Instant) -> (Vec<Action>, Option<WindowId>) {
         let Some(sent) = self.ahead.take() else { return (Vec::new(), None) };
-        let Some(m) = self.model.as_mut() else { return (Vec::new(), None) };
         let hit = sent.ahead.space == arrived;
+        self.finish_verify(if hit { "the Desktop arranged came" } else { "another Desktop came" });
+        let Some(m) = self.model.as_mut() else { return (Vec::new(), None) };
         let present = m.stage_of(sent.ahead.window) == Some(sent.ahead.stage);
         let actions = if hit { m.finish_ahead(&sent.ahead) } else { m.undo_ahead(&sent.ahead) };
         tracing::info!(
@@ -788,6 +859,7 @@ impl Controller {
     /// Undoes an arrangement made ahead (`why`): the prediction no longer holds.
     pub(super) fn undo_ahead(&mut self, ob: &Observer, why: &str) {
         let Some(sent) = self.ahead.take() else { return };
+        self.finish_verify("the arrangement is undone");
         let Some(m) = self.model.as_mut() else { return };
         let actions = m.undo_ahead(&sent.ahead);
         tracing::info!(
@@ -1069,11 +1141,13 @@ mod tests {
     #[test]
     fn a_move_is_shown_when_the_window_server_lists_it_there() {
         let parks = |r: Rect| r.x >= 1700.0 && r.y >= 1100.0;
-        let park = Expect { id: 1, frame: Rect::new(1785.0, 1155.0, 600.0, 400.0), park: true };
+        let fresh = |id, frame, park| Expect { id, frame, park, tries: 0, gave_up: false, nudged_only: false };
+        let park = fresh(1, Rect::new(1785.0, 1155.0, 600.0, 400.0), true);
         assert!(shows(&park, Rect::new(1786.0, 1150.0, 600.0, 400.0), parks), "anywhere in the park zone");
         assert!(!shows(&park, Rect::new(80.0, 78.0, 600.0, 400.0), parks), "still where it was");
-        let back = Expect { id: 2, frame: Rect::new(80.0, 78.0, 520.0, 392.0), park: false };
+        let back = fresh(2, Rect::new(80.0, 78.0, 520.0, 392.0), false);
         assert!(shows(&back, Rect::new(81.0, 78.0, 520.0, 392.0), parks));
+        assert!(shows(&back, Rect::new(80.0, 78.0, 507.0, 388.0), parks), "a size the app chose (a terminal's grid) (R9 3)");
         assert!(!shows(&back, Rect::new(1785.0, 1155.0, 520.0, 392.0), parks), "still parked");
         let actions = [
             Action::Park { id: WindowId(1), frame: park.frame },

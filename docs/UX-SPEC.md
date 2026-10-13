@@ -333,9 +333,12 @@ Ours:
   does not always apply those moves at once (10-13: in one hands-free run of three the
   stage left showed through the whole slide and was parked only when the Desktop became
   the one shown; the Accessibility calls had all succeeded): so the moves are checked
-  against the window server's list every 20 ms for 0.6 s and the ones it does not show are
-  sent again (1 pt off, then exactly, since AppKit drops a move to where it thinks the
-  window is), and what it showed is logged ("arrival: the window server shows the
+  against the window server's list every 20 ms (the first look 20 ms after them) for up to
+  0.6 s, while the Desktop is not arriving yet, and the ones it does not show (a park in the
+  park zone; a restore at its position, the size being the app's) are sent again, at most
+  three times each, each send bounded at 50 ms (1 pt off, then exactly, since AppKit drops
+  a move to where it thinks the window is; a failure gives that move up), and what it
+  showed is logged ("arrival: the window server shows the
   arrangement", or which moves it never showed). Its own moves
   make the window's late focus an echo; a focus of another known window of that app still
   counts (macOS showed another window than predicted: undone, arranged for that one at the
