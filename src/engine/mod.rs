@@ -18,6 +18,7 @@ pub mod recovery;
 pub mod rules;
 pub mod settings;
 pub mod stage_area;
+pub mod stand_down;
 #[cfg(test)]
 pub(crate) mod testkit;
 

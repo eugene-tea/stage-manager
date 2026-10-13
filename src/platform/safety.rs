@@ -73,6 +73,15 @@ pub fn quit_requested() -> bool {
 
 static REGISTRY: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new());
 
+/// Windows a stand-down could not bring back (another Space's): owned by no controller, kept
+/// in the registry through every [`registry_replace`] until they are back
+/// ([`crate::engine::stand_down`]).
+static HELD: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new());
+
+fn lock_held() -> MutexGuard<'static, BTreeMap<u32, ParkedEntry>> {
+    HELD.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// The main display's visible frame as last reported (for scans in this process).
 static VISIBLE: Mutex<Option<Rect>> = Mutex::new(None);
 
@@ -103,14 +112,62 @@ pub fn registry_add(entries: impl IntoIterator<Item = (u32, ParkedEntry)>) {
     write_parked_file(&listed);
 }
 
-/// Replaces the registry with exactly `entries` (after a batch).
+/// Replaces the registry with `entries` (after a batch), plus the held windows (a
+/// stand-down's) that `entries` does not take over.
 pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
     let listed = {
+        let mut held = lock_held();
+        // A held window the controller parks itself is its own again.
+        held.retain(|id, _| !entries.contains_key(id));
+        let merged = crate::engine::stand_down::merge_held(entries, &held);
+        drop(held);
         let mut guard = lock_registry();
-        *guard = entries;
+        *guard = merged;
         registered(&guard)
     };
     write_parked_file(&listed);
+}
+
+/// A stand-down's leftovers: every window still in the registry is held until it is back.
+/// Returns how many are held.
+pub fn hold_remaining() -> usize {
+    let remaining = lock_registry().clone();
+    let mut held = lock_held();
+    held.extend(remaining);
+    held.len()
+}
+
+/// How many windows are held.
+pub fn held_len() -> usize {
+    lock_held().len()
+}
+
+/// Tries every held window again (its Space may show now); those back leave the hold and
+/// the registry. True when none is left.
+pub fn retry_held() -> bool {
+    let held = lock_held().clone();
+    if held.is_empty() {
+        return true;
+    }
+    let mut back = Vec::new();
+    for (id, entry) in &held {
+        match entry.element.set_frame(entry.restore) {
+            Ok(()) => back.push(*id),
+            Err(e) => tracing::debug!(id, "safety: a held window cannot come back yet: {e}"),
+        }
+    }
+    if !back.is_empty() {
+        counters::bump(Count::Recovery);
+        tracing::info!(back = back.len(), left = held.len() - back.len(), "safety: held windows brought back");
+        lock_held().retain(|id, _| !back.contains(id));
+        let listed = {
+            let mut guard = lock_registry();
+            guard.retain(|id, _| !back.contains(id));
+            registered(&guard)
+        };
+        write_parked_file(&listed);
+    }
+    lock_held().is_empty()
 }
 
 /// The registry as the guardian needs it: ids, pids and restore frames.
@@ -261,6 +318,10 @@ pub fn unpark_registry(wait: Duration) -> Option<Report> {
             }
         }
     }
+    // Restored held windows are done.
+    let still: Vec<u32> = guard.keys().copied().collect();
+    drop(guard);
+    lock_held().retain(|id, _| still.contains(id));
     if let Ok(mut f) = LAST_FAILURES.lock() {
         *f = failures;
     }

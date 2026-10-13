@@ -2,12 +2,19 @@
 //! they exist. Read with `CFPreferencesAppSynchronize` + `CFPreferencesCopyAppValue`,
 //! re-read every 2 s by the main thread, and exposed as raw `key → i64` values for the
 //! engine to interpret.
+//!
+//! Writes ([`write`]) happen only on a user's click in Settings or a prompt: "Show recent
+//! apps" (`AutoHide`) and "Show windows from an application" (`AppWindowGroupingBehavior`),
+//! the same keys Apple's own Customize sheet writes, and turning Apple's Stage Manager off
+//! (`GloballyEnabled`). Never `EnableStandardClickToShowDesktop` (it changes macOS beyond
+//! Stage Manager). Unit tests and test runs (`STAGE_MANAGER_HOME`) never write, unless
+//! `SM_TEST_TOGGLE_APPLE_SM=1` (the owner's opt-in live test).
 
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use objc2_core_foundation::{
-    CFBoolean, CFNumber, CFPreferencesAppSynchronize, CFPreferencesCopyAppValue, CFString,
+    CFBoolean, CFNumber, CFPreferencesAppSynchronize, CFPreferencesCopyAppValue, CFPreferencesSetAppValue, CFString,
 };
 
 /// The preferences domain of Apple's Stage Manager.
@@ -77,6 +84,64 @@ pub fn apple_stage_manager_enabled(settings: &RawSettings) -> bool {
     settings.get(GLOBALLY_ENABLED).copied().unwrap_or(0) != 0
 }
 
+/// The keys [`write`] may change.
+pub const WRITABLE: [&str; 3] = ["AutoHide", "AppWindowGroupingBehavior", GLOBALLY_ENABLED];
+
+/// The owner's opt-in for a live test that toggles Apple's Stage Manager.
+pub const TEST_TOGGLE_ENV: &str = "SM_TEST_TOGGLE_APPLE_SM";
+
+/// Why this process may not write `com.apple.WindowManager`, or `None` when it may.
+pub fn write_refusal() -> Option<&'static str> {
+    if cfg!(test) {
+        return Some("unit tests never write com.apple.WindowManager");
+    }
+    if super::paths::custom_home().is_some() && std::env::var_os(TEST_TOGGLE_ENV).is_none() {
+        return Some("a test run (STAGE_MANAGER_HOME) never writes com.apple.WindowManager");
+    }
+    None
+}
+
+/// Writes one of [`WRITABLE`] (`AutoHide` and `GloballyEnabled` as booleans,
+/// `AppWindowGroupingBehavior` as a number), synchronizes, and re-reads. Only on a user's
+/// click.
+pub fn write(key: &str, value: i64) -> Result<(), String> {
+    if !WRITABLE.contains(&key) {
+        return Err(format!("{key} is not written by Stage Manager"));
+    }
+    if let Some(why) = write_refusal() {
+        return Err(why.to_string());
+    }
+    let domain = CFString::from_static_str(DOMAIN);
+    let cf_key = CFString::from_str(key);
+    if key == "AppWindowGroupingBehavior" {
+        let n = CFNumber::new_i64(value);
+        // SAFETY: a CFNumber is a property list value; key and domain are valid strings.
+        unsafe { CFPreferencesSetAppValue(&cf_key, Some(&n), &domain) };
+    } else {
+        let b = CFBoolean::new(value != 0);
+        // SAFETY: a CFBoolean is a property list value; key and domain are valid strings.
+        unsafe { CFPreferencesSetAppValue(&cf_key, Some(b), &domain) };
+    }
+    if !CFPreferencesAppSynchronize(&domain) {
+        return Err("macOS did not save the setting".into());
+    }
+    tracing::info!(key, value, "macOS setting written (the user's click)");
+    Ok(())
+}
+
+/// Turns Apple's Stage Manager off (`GloballyEnabled = false`), on the user's click only.
+pub fn turn_off_apple_stage_manager() -> Result<(), String> {
+    write(GLOBALLY_ENABLED, 0)
+}
+
+/// On-screen windows of Apple's `WindowManager` process (layer 0 or above): its strip's
+/// cards and their icons while Apple's Stage Manager runs. The public signal that it has
+/// really stopped is this count falling to what it is with Stage Manager off (none outside
+/// a wallpaper-click reveal) together with `GloballyEnabled` reading back 0.
+pub fn window_manager_windows() -> usize {
+    super::windows::list_windows().iter().filter(|w| w.onscreen && w.owner == "WindowManager").count()
+}
+
 /// Human-readable changes between two readings, one line per key (`Key: old → new`).
 pub fn describe_changes(old: &RawSettings, new: &RawSettings) -> Vec<String> {
     let show = |v: Option<&i64>| v.map_or_else(|| "unset".to_string(), |v| v.to_string());
@@ -107,6 +172,14 @@ mod tests {
         assert!(apple_stage_manager_enabled(&s(&[(GLOBALLY_ENABLED, 1)])));
         assert!(!apple_stage_manager_enabled(&s(&[(GLOBALLY_ENABLED, 0)])));
         assert!(!apple_stage_manager_enabled(&RawSettings::new()));
+    }
+
+    #[test]
+    fn unit_tests_never_write_apples_settings() {
+        assert!(write_refusal().is_some());
+        assert!(write("AutoHide", 1).is_err());
+        assert!(turn_off_apple_stage_manager().is_err());
+        assert!(write("EnableStandardClickToShowDesktop", 0).is_err(), "never written");
     }
 
     #[test]

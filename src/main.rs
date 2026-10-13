@@ -7,9 +7,12 @@
 //! - `stage-manager log summary [DATE]` prints a day's counts, marks, warnings and errors;
 //!   `log path [DATE]` prints its file.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
-//! - `stage-manager config --print-defaults | --explain <section.key> | --reference |
-//!   --check [file]` prints the commented default config, explains a key, prints the guide's
-//!   configuration table, or validates a file.
+//! - `stage-manager config check [file] | --print-defaults | --explain <section.key> |
+//!   --reference` validates a file (errors with line numbers), prints the commented default
+//!   config, explains a key, or prints the guide's configuration table.
+//! - `stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate [--dark|--light]
+//!   [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
+//!   no Accessibility, no login item), or renders it to a PNG and exits.
 //! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts.
 //! - `stage-manager probe-screen` prints the on-screen windows that cover the main display
@@ -31,6 +34,8 @@ fn main() -> ExitCode {
         Some("log") => stage_manager::platform::logging::command(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("strip-demo") => stage_manager::ui::strip_demo::run(),
+        #[cfg(target_os = "macos")]
+        Some("preview") => stage_manager::ui::preview::run(&args[2..]),
         Some("config") => {
             let (code, out) = stage_manager::config::command(&args[2..]);
             if code == 0 { print!("{out}") } else { eprint!("{out}") }
@@ -52,7 +57,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
             );
             ExitCode::from(2)
         }
@@ -75,11 +80,11 @@ mod app {
     use block2::RcBlock;
     use dispatch2::DispatchQueue;
     use objc2::rc::Retained;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
-    use objc2_foundation::{MainThreadMarker, NSString, NSTimer, NSURL};
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication};
+    use objc2_foundation::{MainThreadMarker, NSString, NSTimer};
     use serde_json::json;
 
-    use stage_manager::config::{Config, HotkeyConfig, default_file};
+    use stage_manager::config::{Config, HotkeyConfig};
     use stage_manager::engine::model::Display;
     use stage_manager::platform::apps::{self, WorkspaceObservers};
     use stage_manager::platform::controller::{self, UiUpdate};
@@ -87,16 +92,18 @@ mod app {
     use stage_manager::platform::desktop;
     use stage_manager::platform::input::{self, InputKind, InputMonitor};
     use stage_manager::platform::native_settings::{self, RawSettings};
-    use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
+    use stage_manager::platform::permissions::{self, PermissionState};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::fullscreen;
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
     use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
+    use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
-    /// Permission, settings and display poll period.
-    const POLL_SECONDS: f64 = 2.0;
+    /// Permission, settings (Apple's Stage Manager coming on included) and display poll
+    /// period.
+    const POLL_SECONDS: f64 = 1.0;
 
     /// How long Quit waits for the WM thread to put `windows` windows back: the action in
     /// flight when Quit came (a batch stops between actions), then a frame per window, each
@@ -161,12 +168,12 @@ mod app {
         fn menu_state(&self) -> MenuState {
             MenuState {
                 permissions: self.permissions,
+                capture_on: shell::capture_on(),
+                capture_refused: self.capture_refused,
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
-                strip_visible: self.strip_visible,
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
                 last_mark: self.last_mark.clone(),
-                capture_refused: self.capture_refused,
             }
         }
 
@@ -174,7 +181,7 @@ mod app {
             self.menu.update(&self.menu_state());
         }
 
-        /// Runs every 2 s: permissions, `com.apple.WindowManager`, the main display.
+        /// Runs every second: permissions, `com.apple.WindowManager`, the main display.
         fn poll(&mut self) {
             let now = PermissionState::current();
             if now != self.permissions {
@@ -201,6 +208,7 @@ mod app {
                 self.refresh_menu();
             }
             self.send_display_if_changed();
+            shell::poll(self.permissions, &self.settings, self.capture_refused);
         }
 
         fn send_display_if_changed(&mut self) {
@@ -224,6 +232,7 @@ mod app {
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
                 UiUpdate::Config { error, hotkeys, thumbnail_interval_ms, capture: on } => {
+                    shell::config_changed(error.clone());
                     self.config_error = error;
                     capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
@@ -243,24 +252,11 @@ mod app {
 
         fn on_menu(&mut self, action: MenuAction) {
             match action {
-                MenuAction::GrantAccessibility => {
-                    // A user click: let macOS list the app in the pane, then open it.
-                    permissions::check_accessibility(true);
-                    open_url(PrivacyPane::Accessibility.url());
-                }
-                MenuAction::GrantScreenRecording => {
-                    // A user click: refused captures try again now.
-                    capture::retry_now();
-                    permissions::request_screen_recording();
-                    open_url(PrivacyPane::ScreenRecording.url());
-                }
-                MenuAction::ToggleStrip => {
-                    self.wm.send(WmCommand::ToggleStrip);
-                }
-                MenuAction::ReloadConfig => {
-                    self.wm.send(WmCommand::ReloadConfig);
-                }
-                MenuAction::OpenConfig => open_config(),
+                MenuAction::Allow(_)
+                | MenuAction::About
+                | MenuAction::CheckForUpdates
+                | MenuAction::Settings
+                | MenuAction::TurnOffAppleStageManager => shell::menu(action),
                 MenuAction::MarkProblem => {
                     // Off the main thread: the dumps come from the WM thread.
                     let wm = self.wm.clone();
@@ -285,34 +281,9 @@ mod app {
         }
     }
 
-    fn open_config() {
-        let path = paths::config_file();
-        if !path.exists() {
-            let written = std::fs::create_dir_all(paths::config_dir()).and_then(|_| std::fs::write(&path, default_file()));
-            if let Err(e) = written {
-                tracing::warn!("cannot create {}: {e}", path.display());
-                return;
-            }
-        }
-        if let Err(e) = std::process::Command::new("/usr/bin/open").arg("-t").arg(&path).status() {
-            tracing::warn!("cannot open {}: {e}", path.display());
-        }
-    }
-
     fn warn_if_apple_stage_manager(settings: &RawSettings) {
         if native_settings::apple_stage_manager_enabled(settings) {
-            tracing::warn!("Apple's Stage Manager is on (GloballyEnabled = 1); turn it off while Stage Manager runs");
-        }
-    }
-
-    fn open_url(url: &str) {
-        match NSURL::URLWithString(&NSString::from_str(url)) {
-            Some(url) => {
-                if !NSWorkspace::sharedWorkspace().openURL(&url) {
-                    tracing::warn!("could not open {url:?}");
-                }
-            }
-            None => tracing::warn!("bad URL {url}"),
+            tracing::warn!("Apple's Stage Manager is on (GloballyEnabled = 1): standing down until it is off");
         }
     }
 
@@ -390,7 +361,12 @@ mod app {
                 "pong": true,
                 "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
+                "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
+            Command::Settings => {
+                DispatchQueue::main().exec_async(shell::show_settings);
+                json!({ "ok": true })
+            }
             Command::Quit => {
                 DispatchQueue::main().exec_async(quit);
                 json!({ "ok": true, "quitting": true })
@@ -582,9 +558,15 @@ mod app {
             return ExitCode::FAILURE;
         };
 
-        if ctl::request("ping", Duration::from_millis(500)).is_ok() {
-            tracing::error!("another Stage Manager is already running; exiting");
-            return ExitCode::FAILURE;
+        // A generous wait: a running app slow to answer must not get a second manager
+        // beside it (no app running answers "refused" at once).
+        if ctl::request("ping", Duration::from_secs(2)).is_ok() {
+            // Opened again (`open -n`, a terminal): the running one shows its Settings, the
+            // way back when the menu bar icon is hidden. (A Finder or Spotlight launch never
+            // gets here: macOS hands it to the running app as a reopen.)
+            let shown = ctl::request("settings", Duration::from_secs(2)).is_ok();
+            tracing::info!(shown, "Stage Manager is already running; asked it to show Settings");
+            return ExitCode::SUCCESS;
         }
 
         let app = NSApplication::sharedApplication(mtm);
@@ -630,7 +612,8 @@ mod app {
             wm_spaces.send(WmCommand::SpaceChanged);
         });
 
-        let permissions = permissions::check_at_launch();
+        // No system prompts at launch: the welcome window (or the menu) asks, on a click.
+        let permissions = PermissionState::current();
         tracing::info!(
             accessibility = permissions.accessibility,
             screen_recording = permissions.screen_recording,
@@ -690,6 +673,13 @@ mod app {
         // The loaded config's interval follows in the first UiUpdate::Config.
         strip::install(mtm, Config::default().strip.thumbnail_interval_ms);
         status_menu::set_action_handler(|action| with_app(|app| app.on_menu(action)));
+        let hooks = shell::Hooks {
+            set_menu_icon: |visible| with_app(|app| app.menu.set_visible(visible)),
+            refresh_menu: || with_app(|app| app.refresh_menu()),
+            poll_now: || with_app(App::poll),
+        };
+        let raw = native_settings::current();
+        shell::install(mtm, wm.clone(), hooks, permissions, raw);
 
         if permissions.accessibility {
             wm.send(WmCommand::Accessibility(true));

@@ -2637,7 +2637,7 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::Ping | Command::Quit | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
+            Command::Ping | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugDrag { .. }
             | Command::DebugStrip

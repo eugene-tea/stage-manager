@@ -326,12 +326,6 @@ impl Demo {
 
     fn on_menu(&mut self, action: MenuAction) {
         match action {
-            MenuAction::ToggleStrip => {
-                self.flags.user_visible = !self.flags.user_visible;
-                tracing::info!(visible = self.flags.user_visible, "demo: strip toggled");
-                self.menu.update(&self.menu_state());
-                self.refresh();
-            }
             MenuAction::Quit => {
                 tracing::info!("demo: quitting");
                 crate::platform::capture::quiesce(std::time::Duration::from_secs(2));
@@ -342,15 +336,7 @@ impl Demo {
     }
 
     fn menu_state(&self) -> MenuState {
-        MenuState {
-            permissions: PermissionState::current(),
-            apple_stage_manager_on: false,
-            strip_visible: self.flags.user_visible,
-            config_error: None,
-            mark_shown: false,
-            last_mark: None,
-            capture_refused: false,
-        }
+        MenuState { permissions: PermissionState::current(), capture_on: true, ..MenuState::default() }
     }
 }
 

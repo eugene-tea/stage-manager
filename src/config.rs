@@ -11,6 +11,7 @@
 //! Unknown keys and out-of-range numbers produce warnings (numbers are clamped); a value of
 //! the wrong type is an error, and a bad file keeps the previous config.
 
+pub mod edit;
 pub mod hotkey;
 pub mod schema;
 
@@ -394,9 +395,28 @@ fn log_config(v: &Values) -> LogConfig {
     }
 }
 
+/// `[app]`: the app itself (Settings writes these).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppConfig {
+    /// Open at login (an installed copy registers a login item).
+    pub launch_at_login: bool,
+    /// The menu bar icon shows.
+    pub show_menu_bar_icon: bool,
+    /// Check for a newer release at most once a day.
+    pub check_for_updates: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Config::default().app
+    }
+}
+
 /// The whole configuration, validated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    /// The app itself: login item, menu bar icon, update checks.
+    pub app: AppConfig,
     /// Strip order and capacity.
     pub strip: StripConfig,
     /// How the strip looks and moves.
@@ -555,6 +575,39 @@ fn validate(d: &schema::KeyDef, v: &toml::Value, warnings: &mut Vec<String>) -> 
     })
 }
 
+/// The 1-based line of `key` in `[section]` of `text`, if it sits there as a plain
+/// `key = value` line (not in a dotted key or an inline table).
+pub fn locate(text: &str, section: &str, key: &str) -> Option<usize> {
+    let mut current = String::new();
+    for (n, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t.starts_with("[[") {
+            // An array of tables (`[[rule]]`): no section's keys from here on.
+            current = String::from("[[");
+            continue;
+        }
+        if let Some(name) = t.strip_prefix('[') {
+            current = name.split(']').next().unwrap_or("").trim().to_string();
+            continue;
+        }
+        if current == section
+            && let Some(rest) = t.strip_prefix(key)
+            && rest.trim_start().starts_with('=')
+        {
+            return Some(n + 1);
+        }
+    }
+    None
+}
+
+/// `message` prefixed with the line of `[section] key` in `text`, when it can be found.
+fn at_line(text: &str, section: &str, key: &str, message: String) -> String {
+    match locate(text, section, key) {
+        Some(line) => format!("line {line}: {message}"),
+        None => message,
+    }
+}
+
 fn default_values() -> BTreeMap<String, toml::Value> {
     KEYS.iter()
         .map(|d| {
@@ -601,10 +654,10 @@ impl Config {
                     continue;
                 }
                 let Some(d) = KEYS.iter().find(|d| d.section == section && d.key == key) else {
-                    warnings.push(format!("unknown key {key:?} in [{section}] ignored"));
+                    warnings.push(at_line(text, section, key, format!("unknown key {key:?} in [{section}] ignored")));
                     continue;
                 };
-                let checked = validate(d, v, &mut warnings).map_err(err)?;
+                let checked = validate(d, v, &mut warnings).map_err(|e| err(at_line(text, section, key, e)))?;
                 values.insert(d.path(), checked);
             }
         }
@@ -660,6 +713,11 @@ impl Config {
         }
 
         let config = Config {
+            app: AppConfig {
+                launch_at_login: v.flag("app.launch_at_login"),
+                show_menu_bar_icon: v.flag("app.show_menu_bar_icon"),
+                check_for_updates: v.flag("app.check_for_updates"),
+            },
             strip: StripConfig {
                 order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
                 show_active: v.flag("strip.show_active"),
@@ -918,8 +976,9 @@ impl ConfigStore {
     }
 }
 
-/// `stage-manager config ...`: `--print-defaults`, `--explain <section.key>`,
-/// `--reference` (the guide's table), `--check [file]`. Returns the exit code and output.
+/// `stage-manager config ...`: `check [file]` (or `--check`: errors and warnings with their
+/// line numbers), `--print-defaults`, `--explain <section.key>`, `--reference` (the guide's
+/// table). Returns the exit code and output.
 pub fn command(args: &[String]) -> (i32, String) {
     match args.first().map(String::as_str) {
         Some("--print-defaults") => (0, default_file()),
@@ -939,7 +998,7 @@ pub fn command(args: &[String]) -> (i32, String) {
             },
             None => (2, "usage: stage-manager config --explain <section.key>\n".into()),
         },
-        Some("--check") => {
+        Some("check" | "--check") => {
             let path = args.get(1).map(PathBuf::from).or_else(default_path);
             let Some(path) = path else { return (2, "no config path\n".into()) };
             match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Config::parse(&t).map_err(|e| e.0)) {
@@ -955,7 +1014,7 @@ pub fn command(args: &[String]) -> (i32, String) {
         }
         _ => (
             2,
-            "usage: stage-manager config --print-defaults | --explain <section.key> | --reference | --check [file]\n".into(),
+            "usage: stage-manager config check [file] | --print-defaults | --explain <section.key> | --reference\n".into(),
         ),
     }
 }
@@ -1008,6 +1067,11 @@ mod tests {
     #[test]
     fn the_defaults_are_apples() {
         let c = Config::default();
+        assert_eq!(
+            c.app,
+            AppConfig { launch_at_login: true, show_menu_bar_icon: true, check_for_updates: true },
+            "the menu bar icon and launch at login are on (the owner's word, 10-13; Apple's Stage Manager has neither)"
+        );
         assert_eq!(c.windows.fit, FitMode::Off, "windows keep their exact frames");
         assert!(!c.style.reveal.edge_tab && !c.style.reveal.launch_reveal);
         assert!(!c.style.show_numbers && !c.style.show_names);
@@ -1114,6 +1178,16 @@ mod tests {
             readme.contains(&schema::markdown_reference()),
             "docs/GUIDE.md's configuration reference is out of date: paste `stage-manager config --reference`"
         );
+    }
+
+    /// R8 L2: a `[[rule]]` table ends the section before it.
+    #[test]
+    fn line_numbers_never_point_into_a_later_rule() {
+        let text = "[defaults]\nplacement = \"center\"\n\n[[rule]]\napp = \"x\"\naction = \"new\"\n";
+        assert_eq!(locate(text, "defaults", "placement"), Some(2));
+        assert_eq!(locate(text, "defaults", "action"), None, "the rule's action is not [defaults]'");
+        let err = Config::parse("[[rule]]\napp = \"x\"\naction = \"new\"\n\n[defaults]\naction = 3\n").expect_err("bad");
+        assert!(err.0.contains("line 6"), "{}", err.0);
     }
 
     #[test]

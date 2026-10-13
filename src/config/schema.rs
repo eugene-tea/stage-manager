@@ -111,6 +111,13 @@ const fn i(min: i64, max: i64) -> Kind {
 /// The sections, in file order.
 pub const SECTIONS: &[SectionDef] = &[
     SectionDef {
+        name: "app",
+        doc: &[
+            "The app itself. Settings (the menu bar icon, then Settings…) writes these keys; an edit",
+            "here shows there.",
+        ],
+    },
+    SectionDef {
         name: "strip",
         doc: &["The strip of recent stages on the left. Lengths are points."],
     },
@@ -169,6 +176,13 @@ pub const SECTIONS: &[SectionDef] = &[
 
 /// Every key, grouped by section in [`SECTIONS`] order.
 pub const KEYS: &[KeyDef] = &[
+    // [app]
+    k("app", "launch_at_login", Kind::Bool, "true",
+        "Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers."),
+    k("app", "show_menu_bar_icon", Kind::Bool, "true",
+        "Show the menu bar icon (Apple's Stage Manager has none; on by the owner's word). Without it, open Stage Manager again from Applications to reach Settings."),
+    k("app", "check_for_updates", Kind::Bool, "true",
+        "Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way."),
     // [strip]
     k("strip", "order", Kind::Choice(&["native", "fixed"]), "\"native\"",
         "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"fixed\" is creation order."),
@@ -350,13 +364,15 @@ const HEADER: &str = "\
 # Stage Manager configuration.
 #
 # Out of the box Stage Manager looks and behaves like Apple's Stage Manager. Every key below
-# is commented out and shows its built-in default; uncomment a line to change it. Settings
-# macOS already has (\"Show recent apps\", \"Show windows from an application\", \"Click
-# wallpaper to reveal desktop\") are read live from System Settings > Desktop & Dock and are
-# not repeated here. Saved changes apply within a second.
+# is commented out and shows its built-in default; uncomment a line to change it. The
+# Settings window (menu bar icon > Settings…) changes the most used keys for you and keeps
+# every comment. Settings macOS already has (\"Show recent apps\", \"Show windows from an
+# application\", \"Click wallpaper to reveal desktop\") are read live from System Settings >
+# Desktop & Dock and are not repeated here. Saved changes apply within a second.
 #
-# `stage-manager config --explain <section.key>` explains one key;
-# `stage-manager config --print-defaults` prints this file.
+# `stage-manager config check` checks this file; `stage-manager config --explain
+# <section.key>` explains one key; `stage-manager config --print-defaults` prints this file.
+# Notes for AI agents: https://github.com/eugene-tea/stage-manager/blob/HEAD/docs/AGENTS.md
 ";
 
 const RULES_DOC: &str = "\
@@ -443,6 +459,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-5.toml"),
     include_str!("legacy/default-6.toml"),
     include_str!("legacy/default-7.toml"),
+    include_str!("legacy/default-8.toml"),
 ];
 
 #[cfg(test)]
