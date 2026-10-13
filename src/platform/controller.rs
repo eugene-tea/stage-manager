@@ -1021,6 +1021,14 @@ impl Controller {
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
+        // Mission Control, App Exposé, Show Desktop: the panel is Transient, so macOS hides it
+        // while one shows and shows it again the moment it closes, with the windows. A patch
+        // shown when one opened is left as it is (no plan, no reorder during it); hiding it
+        // from the plan left the slivers bare until the close was seen (up to a second's
+        // poll) and settled (10-13, F3 twice: the corner bare until a window was focused).
+        if on && self.overview.showing().is_some() && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
+            return;
+        }
         let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
         let plan = match &self.model {
             Some(m) if on => {
@@ -1074,7 +1082,9 @@ impl Controller {
                 let facts = PatchFacts {
                     on,
                     rect,
-                    overview: self.overview.showing().is_some() || self.overview.freezes(now) || self.space_pending,
+                    // Not the settle after an overview (that is for Space inference): the patch
+                    // comes back with the windows.
+                    overview: self.overview.showing().is_some() || self.space_pending,
                     ordered,
                     can_order: possible,
                     fullscreen: self.fullscreen,
