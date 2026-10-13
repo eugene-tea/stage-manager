@@ -213,7 +213,9 @@ Native (Apple's Stage Manager guide; the 5K session; the owner's report of 10-12
 - **Full-screen apps** are Spaces of their own, with no strip.
 - **Dock and ⌘Tab** may switch Spaces according to macOS's own setting ("When switching to
   an application, switch to a Space with open windows for the application", Desktop & Dock
-  → Mission Control). Stage Manager follows; it never fights it.
+  → Mission Control). Stage Manager follows; it never fights it. A Dock click, ⌘Tab or
+  activation that lands on a window of another Desktop shows that Desktop with **that
+  window's stage** active.
 - Switching Spaces slides the whole screen (2609 pt in about 230–310 ms at 5K); the new
   Space's strip slides in with it.
 
@@ -239,6 +241,16 @@ Ours:
   Space changes in a row, the last back where it came from (a window moved to another
   Desktop and straight back looks the same for two, and stays an ordinary window). A
   window in full screen still belongs to its Desktop: it never counts as missing there.
+- Arriving on a Desktop through an app (Dock, ⌘Tab, an activation), its window's stage
+  comes at once (no animation: the Desktop's slide just showed it), whatever order macOS's
+  events came in. The owner's log of 10-12 (VS Code with a window on each Desktop, his Dock
+  click): the window's focus came ~40 ms before the Space change notice and ~0.7 s before
+  the Desktop was recognized, and was lost, so the Desktop came up with its previous stage.
+  Now a focus or activation that cannot act yet (its window on a Desktop not shown, not
+  known yet, or a Space change settling) is held for up to 3 s
+  (`engine::focus_replay`); on arrival AX is asked for the focused window now and, when that
+  names no window of the Desktop shown, the held one is replayed. A card click, a hotkey or
+  a focus that acted forgets it.
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
   Accessibility before bringing its app forward (never all its windows), so macOS has no
   reason to switch Spaces.
@@ -275,7 +287,12 @@ Ours:
   the Desktop's windows slid off the display), so nothing is inferred from the list then and
   for a second after (`engine::overview`; they are told by macOS's own windows covering the
   display, measured 10-12: the Dock's at layer 20 and WindowManager's at 19 for Mission
-  Control and App Exposé, WindowManager's at 18 for Show Desktop). Windows of another
+  Control and App Exposé, WindowManager's at 18 for Show Desktop). WindowManager's window
+  tells them: the Dock's full-display window alone is an auto-hiding Dock brought up by the
+  pointer (measured 10-12 on the owner's Mac: listed 2.9 s while the pointer rested on the
+  bottom edge, no WindowManager window with it; before round 6R every Dock click to another
+  Desktop was read as Mission Control and held the arrival), and it only carries a Mission
+  Control already shown through its exit (at most 1.5 s). Windows of another
   Desktop on screen count only when seen at two checks a second apart. A Desktop clicked in
   Mission Control comes with its notification and is recognized once Mission Control has
   closed.

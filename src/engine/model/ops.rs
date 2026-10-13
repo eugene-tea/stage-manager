@@ -964,6 +964,42 @@ impl Model {
         }
     }
 
+    /// True when window `id` (or the window a child of it follows) is managed and lives on a
+    /// Space no display shows now (sticky windows are on every Space): its focus cannot act
+    /// until that Space is recognized ([`crate::engine::focus_replay`]).
+    pub fn waits_on_another_space(&self, id: WindowId) -> bool {
+        self.resolve_standard(id)
+            .and_then(|w| self.windows.get(&w))
+            .is_some_and(|w| !w.sticky && !self.is_shown_space(w.space))
+    }
+
+    /// A Desktop was just recognized (or a wait ended): show the stage of the window the user
+    /// went there for, as Apple's Stage Manager does when a Dock click, ⌘Tab or an activation
+    /// lands on a window of another Desktop. `focused` is the frontmost app's focused window
+    /// asked now; when it is a managed window of a Space shown now it decides (its stage
+    /// comes if inactive; nothing happens if it is already shown), whatever order the events
+    /// came in. Otherwise `held`, the focus or activation that came while the Space was
+    /// changing ([`crate::engine::focus_replay::FocusReplay`]), decides the same way: a window
+    /// of a shown Space brings its stage; an app is [`Model::app_activated`] again. A window
+    /// or app with nothing on a shown Space changes nothing.
+    pub fn bring_focus_forward(
+        &mut self,
+        focused: Option<WindowId>,
+        held: Option<crate::engine::focus_replay::Wanted>,
+        obs: &Observation,
+    ) -> Vec<Action> {
+        use crate::engine::focus_replay::Wanted;
+        let here = |m: &Self, id: WindowId| m.resolve_standard(id).is_some() && !m.waits_on_another_space(id);
+        if let Some(f) = focused.filter(|f| here(self, *f)) {
+            return self.window_focused(f, obs);
+        }
+        match held {
+            Some(Wanted::Window { id, .. }) if here(self, id) => self.window_focused(id, obs),
+            Some(Wanted::Window { pid, .. } | Wanted::App(pid)) => self.app_activated(pid, obs),
+            None => Vec::new(),
+        }
+    }
+
     /// A parked window the user grabbed by its sliver and let go (the button is up again)
     /// at `frame`. Apple's parked windows cannot be grabbed, so nothing switched while the
     /// drag went on; now its stage comes as for any focus ([`Model::window_focused`]), with

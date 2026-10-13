@@ -2,7 +2,7 @@
 """Offline unit tests for the hands-free Spaces check's parsing and state
 (scripts/test_spaces.py): the screen-lock flag, the Desktop watcher's verdicts and the Space
 change rule, the guardian drill's verdict, the Mission Control check's pixels and pane
-behavior. Nothing is launched or switched.
+behavior, the activation check's stage lookup. Nothing is launched or switched.
 Run: python3 scripts/test_spaces_unit.py
 """
 
@@ -164,6 +164,15 @@ class ExposeBehavior(unittest.TestCase):
             ok, _ = t.ts.panes_hide_in_expose({"strip_panels": [{"space": 1, "behavior": bits}]})
             self.assertFalse(ok, bits)
         self.assertFalse(t.ts.panes_hide_in_expose({"strip_panels": []})[0])
+
+
+class StageHolding(unittest.TestCase):
+    def test_the_stage_of_a_titled_window(self):
+        s = {"windows": [{"id": 7, "title": "Alpha 1"}, {"id": 8, "title": "Fixture 1"}],
+             "stages": [{"number": 1, "windows": [8]}, {"number": 2, "windows": [7]}]}
+        self.assertEqual(t.stage_holding(s, "Alpha 1"), 2)
+        self.assertEqual(t.stage_holding(s, "Fixture 1"), 1)
+        self.assertIsNone(t.stage_holding(s, "Bravo 1"))
 
 
 if __name__ == "__main__":

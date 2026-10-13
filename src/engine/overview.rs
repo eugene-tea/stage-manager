@@ -14,9 +14,14 @@
 //! Mission Control and App Exposé a `Dock` window at layer 20 and a `WindowManager` one at
 //! layer 19 (the `WindowManager` one goes first when it closes, the `Dock` one ~0.5 s after
 //! Escape, when the windows are back in place); Show Desktop a `WindowManager` window at
-//! layer 18 for as long as the desktop is revealed. With none of them up, neither process
-//! lists a window covering the display above layer 0. Owner names are process names, not
-//! localized.
+//! layer 18 for as long as the desktop is revealed. The `Dock` window alone is not one of
+//! them: an auto-hiding Dock lists the same full-display layer-20 window for as long as the
+//! pointer brings it up (measured 10-12 on the owner's Mac: 2.9 s while the pointer rested
+//! on the bottom edge, no `WindowManager` window with it; his Dock clicks to another Desktop
+//! were read as Mission Control, round 6R). So only `WindowManager`'s window begins one; the
+//! `Dock` window alone only carries a Mission Control already shown through its exit
+//! ([`OverviewWatch::see`]). With none of them up, neither process lists a window covering
+//! the display above layer 0. Owner names are process names, not localized.
 //!
 //! **Freezing** ([`OverviewWatch`]): while one shows and for [`OVERVIEW_SETTLE`] after it
 //! closes, nothing infers a Space from the window list (no recognizing the Space again, no
@@ -45,6 +50,11 @@ pub const OVERVIEW_ARRIVAL_SETTLE: Duration = Duration::from_millis(300);
 /// An overview listed without a break for this long is taken for something else (a window of
 /// macOS's we do not know): it no longer freezes anything, so the app can never stay frozen.
 pub const OVERVIEW_STUCK: Duration = Duration::from_secs(300);
+
+/// The Dock's cover alone carries a Mission Control at most this long after WindowManager's
+/// window was last listed (measured: its exit lists the Dock's ~0.5 s after Escape; longer,
+/// the pointer is holding the Dock up).
+pub const OVERVIEW_EXIT_CARRY: Duration = Duration::from_millis(1500);
 
 /// Windows of another Space on screen count only when seen at two checks this far apart.
 pub const FOREIGN_SETTLE: Duration = Duration::from_secs(1);
@@ -88,20 +98,37 @@ pub struct Sighting<'a> {
     pub onscreen: bool,
 }
 
-/// The overview the window list shows on `display` (the main display's frame), if any.
-pub fn overview_in<'a>(list: impl IntoIterator<Item = Sighting<'a>>, display: Rect) -> Option<Overview> {
-    let mut found = None;
+/// What one look at the window list shows over `display` ([`overview_in`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sight {
+    /// An overview `WindowManager`'s own window says shows.
+    pub overview: Option<Overview>,
+    /// The Dock's full-display window is listed: Mission Control or App Exposé on its way out
+    /// when one showed, else just the Dock brought up (auto-hide), which is no overview.
+    pub dock_cover: bool,
+}
+
+impl From<Option<Overview>> for Sight {
+    fn from(overview: Option<Overview>) -> Self {
+        Self { overview, dock_cover: false }
+    }
+}
+
+/// What the window list shows on `display` (the main display's frame).
+pub fn overview_in<'a>(list: impl IntoIterator<Item = Sighting<'a>>, display: Rect) -> Sight {
+    let mut sight = Sight::default();
     for w in list {
         if !w.onscreen || !covers_display(w.bounds, display) {
             continue;
         }
         match (w.owner, w.layer) {
-            ("Dock", DOCK_LAYER) | ("WindowManager", EXPOSE_LAYER) => return Some(Overview::MissionControl),
-            ("WindowManager", SHOW_DESKTOP_LAYER) => found = Some(Overview::ShowDesktop),
+            ("WindowManager", EXPOSE_LAYER) => sight.overview = Some(Overview::MissionControl),
+            ("WindowManager", SHOW_DESKTOP_LAYER) if sight.overview.is_none() => sight.overview = Some(Overview::ShowDesktop),
+            ("Dock", DOCK_LAYER) => sight.dock_cover = true,
             _ => {}
         }
     }
-    found
+    sight
 }
 
 /// What changed at a look ([`OverviewWatch::see`]), for the log.
@@ -122,6 +149,8 @@ pub enum Change {
 pub struct OverviewWatch {
     /// The overview listed at the last look and since when.
     showing: Option<(Overview, Instant)>,
+    /// When the shown overview's own window (WindowManager's) was last listed.
+    told_at: Option<Instant>,
     /// When the last one was seen gone.
     ended: Option<Instant>,
     /// The current one was listed too long to be trusted.
@@ -129,8 +158,19 @@ pub struct OverviewWatch {
 }
 
 impl OverviewWatch {
-    /// Takes what a look at the window list at `now` shows.
-    pub fn see(&mut self, seen: Option<Overview>, now: Instant) -> Change {
+    /// Takes what a look at the window list at `now` shows. The Dock's cover alone keeps a
+    /// Mission Control (or App Exposé) that showed going until it goes too (their exit); it
+    /// never begins one (an auto-hiding Dock brought up lists the same window).
+    pub fn see(&mut self, sight: impl Into<Sight>, now: Instant) -> Change {
+        let sight = sight.into();
+        if sight.overview.is_some() {
+            self.told_at = Some(now);
+        }
+        let carried = self.told_at.is_some_and(|t| now.duration_since(t) < OVERVIEW_EXIT_CARRY);
+        let seen = match (sight.overview, self.showing) {
+            (None, Some((Overview::MissionControl, _))) if sight.dock_cover && carried => Some(Overview::MissionControl),
+            (seen, _) => seen,
+        };
         match (seen, self.showing) {
             (Some(kind), Some((was, since))) if kind == was => {
                 if !self.stuck && now.duration_since(since) >= OVERVIEW_STUCK {

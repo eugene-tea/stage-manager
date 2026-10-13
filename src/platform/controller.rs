@@ -82,6 +82,7 @@ use super::{desktop, logging, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
+use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::park::choose_corner;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
@@ -439,6 +440,10 @@ pub struct Controller {
     overview: OverviewWatch,
     /// A notified Space change waits for an overview to close (said once in the log).
     arrival_held: bool,
+    /// A focus or activation that came before its Desktop was recognized (its window on a
+    /// Desktop not shown, not known yet, or a Space change settling): replayed on arrival
+    /// ([`FocusReplay`], [`Model::bring_focus_forward`]).
+    focus_replay: FocusReplay,
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
     /// Managed windows showing mostly on another display than the main one: checks in a
@@ -549,6 +554,7 @@ impl Controller {
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
             arrival_held: false,
+            focus_replay: FocusReplay::default(),
             absent: HashMap::new(),
             elsewhere: HashMap::new(),
             seen_active: None,
@@ -1214,9 +1220,23 @@ impl Controller {
                 }
                 self.flush_pending(ob);
                 self.show_strip_after_desktop("a window was focused");
+                let pid = ob.window(id).map(|w| w.pid);
+                let unknown = self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_none());
+                let elsewhere = self.model.as_ref().is_some_and(|m| m.waits_on_another_space(WindowId(id)));
+                if let Some(pid) = pid
+                    && (self.frozen() || elsewhere || (unknown && self.unplaced.contains(&id)))
+                {
+                    // Its Desktop is not recognized yet (a Dock click or ⌘Tab to a window of
+                    // another Desktop, often before the Space change notice): replayed once
+                    // it is, never dropped.
+                    tracing::debug!(id, pid, settling = self.space_pending, elsewhere, unknown, "focus held until its Desktop is recognized");
+                    self.focus_replay.hold(Wanted::Window { id: WindowId(id), pid }, now);
+                    return;
+                }
                 if self.frozen() {
                     return;
                 }
+                self.focus_replay.clear();
                 if self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked)
                     && input::left_button_down()
                 {
@@ -1262,16 +1282,25 @@ impl Controller {
                 self.flush_pending(ob);
                 self.show_strip_after_desktop("an app was activated");
                 if self.frozen() {
+                    tracing::debug!(pid, "activation held until the Desktop is recognized");
+                    self.focus_replay.hold(Wanted::App(pid), now);
                     return;
                 }
                 let obs = self.observe(ob);
                 if self.bring_here_if_shift(ob, pid, &obs, now) {
+                    self.focus_replay.clear();
                     return;
                 }
+                let present = self.app_present(pid);
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.app_activated(pid, &obs);
-                    if !actions.is_empty() {
+                    if actions.is_empty() && !present {
+                        // Nothing to show here: macOS may be on its way to the app's window
+                        // on another Desktop (its focus may have come first and be held).
+                        self.focus_replay.hold(Wanted::App(pid), now);
+                    } else {
                         tracing::info!(pid, "activated app lives in another stage; switching");
+                        self.focus_replay.clear();
                     }
                     self.execute_animated(ob, actions);
                 }
@@ -1809,17 +1838,35 @@ impl Controller {
         tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
         self.execute(ob, actions);
         self.pin_floats(ob, &arrivals);
-        // Arriving through an app (Dock, Cmd-Tab) whose window waits in a stage here: show it.
-        let obs = self.observe(ob);
-        if let (Some(f), Some(m)) = (obs.focused, self.model.as_mut()) {
-            let actions = m.window_focused(f, &obs);
-            if !actions.is_empty() {
-                tracing::info!(id = f.0, "the focused window waits in a stage of this Space; switching");
-            }
-            self.execute(ob, actions);
-        }
+        // Arriving through an app (Dock, ⌘Tab, an activation) whose window waits in a stage
+        // here: show it, as Apple's does.
+        self.bring_focus_forward(ob, "arrival");
         self.present();
         self.mark_dirty();
+    }
+
+    /// The window the user went to this Desktop for (or a wait ended): AX is asked for the
+    /// focused window now, and the focus or activation held meanwhile is replayed
+    /// ([`Model::bring_focus_forward`]); its stage comes at once, the Desktop's slide having
+    /// just shown it (Apple's shows the Desktop with that stage already active).
+    fn bring_focus_forward(&mut self, ob: &mut Observer, why: &str) {
+        let now = Instant::now();
+        let held = self.focus_replay.take(now);
+        let mut obs = self.observe(ob);
+        // The frontmost app's focused window asked now; when the system-wide answer fails
+        // (an app busy with the Space change times out), the held app's own.
+        if obs.focused.is_none()
+            && let Some(pid) = held.map(Wanted::pid)
+        {
+            obs.focused = AxElement::application(pid).focused_window().ok().and_then(|w| w.window_id().ok()).map(WindowId);
+        }
+        let Some(m) = self.model.as_mut() else { return };
+        tracing::debug!(why, ax_focused = ?obs.focused.map(|f| f.0), ?held, "the window the Desktop was shown for");
+        let actions = m.bring_focus_forward(obs.focused, held, &obs);
+        if !actions.is_empty() {
+            tracing::info!(why, ax_focused = ?obs.focused.map(|f| f.0), ?held, "the focused window waits in a stage of this Space; switching");
+        }
+        self.execute(ob, actions);
     }
 
     /// About once a second: windows waiting that now show on screen are new windows; known
@@ -1843,6 +1890,15 @@ impl Controller {
         // notification.
         if self.look_for_overview(&list, main.frame, now) {
             return;
+        }
+        if !self.fullscreen
+            && let Some(Wanted::Window { id, .. }) = self.focus_replay.peek(now)
+            && self.model.as_ref().is_some_and(|m| m.window(id).is_some() && !m.waits_on_another_space(id))
+        {
+            // A focus held while a settle froze things, with no Space change after it: its
+            // window is on this Desktop after all. (One whose Desktop is not shown stays held
+            // for its arrival: the check can fall between its focus and the Space change.)
+            self.bring_focus_forward(ob, "a wait ended");
         }
         // A change between a Desktop and a full-screen Space the notification missed is
         // handled as a Space change; during a full-screen animation nothing is counted.
@@ -2189,6 +2245,7 @@ impl Controller {
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
         self.flush_pending(ob);
+        self.focus_replay.clear();
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
             tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
             return;
@@ -2223,6 +2280,7 @@ impl Controller {
             return;
         }
         self.flush_pending(ob);
+        self.focus_replay.clear();
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
         let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
