@@ -21,7 +21,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSStatusWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSPanel, NSStatusWindowLevel, NSView, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
@@ -34,6 +34,7 @@ use objc2_quartz_core::{
 use crate::config::AnimationStyle;
 use crate::engine::geometry::Point;
 use crate::ui::motion_math::{Plane, Spring};
+use crate::ui::panels;
 
 /// Every key path a ghost animates.
 const KEYS: [&str; 4] = ["position", "bounds", "transform", "cornerRadius"];
@@ -212,12 +213,9 @@ fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     panel.setHasShadow(false);
     panel.setLevel(NSStatusWindowLevel);
     panel.setIgnoresMouseEvents(true);
-    // On the active Space only: it moves there when shown, and is renewed on a Space change.
-    panel.setCollectionBehavior(
-        NSWindowCollectionBehavior::MoveToActiveSpace
-            | NSWindowCollectionBehavior::Transient
-            | NSWindowCollectionBehavior::IgnoresCycle,
-    );
+    // On the active Space only: it moves there when shown, and is renewed on a Space change;
+    // hidden by Mission Control.
+    panel.setCollectionBehavior(panels::motion_overlay());
     panel.setHidesOnDeactivate(false);
     // SAFETY: the panel is owned by the overlay, which closes it when it is replaced.
     unsafe { panel.setReleasedWhenClosed(false) };

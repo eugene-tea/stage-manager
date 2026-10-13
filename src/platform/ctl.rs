@@ -2,7 +2,8 @@
 //! and answering each with one line of JSON. `stage-manager ctl <words...>` is the client.
 //!
 //! Commands: `ping`, `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
-//! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`. Without an `ID`, `send`, `new`
+//! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`, `mark [NOTE…]` (a problem mark
+//! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
@@ -10,10 +11,13 @@
 //! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, `debug-strip` tells what the strip draws this frame (cards in slot order, each
-//! card's front thumbnail and icons where they are drawn, the lifted card) and
+//! screen, `debug-close ID` closes one (its close button), `debug-expose
+//! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
+//! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
+//! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
-//! read back from a capture of our own overlay window. `space` (any time) is the Space shown as the engine sees it.
+//! read back from a capture of our own overlay window. `space` (any time) is the Space shown
+//! as the engine sees it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -24,8 +28,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use super::logging::{self, Process};
 use super::paths;
-use super::space_keys::Direction;
+use super::space_keys::{Direction, Expose};
 use crate::engine::geometry::{Point, Rect};
 
 /// A parsed ctl command.
@@ -58,6 +63,9 @@ pub enum Command {
     UnparkAll,
     /// Re-read config.toml.
     Reload,
+    /// Write a problem mark into the day's log: the note (may be empty), a state dump and
+    /// the last seconds of detailed lines.
+    Mark(String),
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
     /// Test only: quit the way the menu's Quit item does (from inside a menu action).
@@ -117,6 +125,20 @@ pub enum Command {
         /// The region, global top-left coordinates.
         region: Option<Rect>,
     },
+    /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
+    /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
+    DebugClose {
+        /// The window id.
+        id: u32,
+    },
+    /// Types one of Mission Control's shortcuts ("Mission Control", "Application windows",
+    /// "Show Desktop") as the user's settings have it, or Escape (`None`) to leave Mission
+    /// Control or App Exposé, at the HID tap (needs `STAGE_MANAGER_TEST=1`). Never changes the
+    /// Desktop shown.
+    DebugExpose {
+        /// Which shortcut; `None` is Escape.
+        which: Option<Expose>,
+    },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -156,6 +178,7 @@ impl Command {
             ["reveal"] => Ok(Self::Reveal),
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
+            ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-drag", rest @ ..] => {
@@ -204,6 +227,11 @@ impl Command {
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
                 Ok(Self::DebugOverlay { region: Some(Rect::new(n(x)?, n(y)?, n(w)?, n(h)?)) })
             }
+            ["debug-expose", "escape"] => Ok(Self::DebugExpose { which: None }),
+            ["debug-expose", word] => match Expose::parse(word) {
+                Some(which) => Ok(Self::DebugExpose { which: Some(which) }),
+                None => Err(format!("expected mission-control, app-windows, show-desktop or escape, got {word:?}")),
+            },
             ["debug-fullscreen", id, on] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 let on = match *on {
@@ -212,6 +240,10 @@ impl Command {
                     other => return Err(format!("expected on or off, got {other:?}")),
                 };
                 Ok(Self::DebugFullscreen { id, on })
+            }
+            ["debug-close", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugClose { id })
             }
             [] => Err("empty command".into()),
             _ => Err(format!("unknown command: {}", words.join(" "))),
@@ -308,7 +340,7 @@ pub fn request(line: &str, timeout: Duration) -> std::io::Result<String> {
 pub fn run_client(words: &[String]) -> ExitCode {
     if words.is_empty() {
         eprintln!(
-            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload>"
+            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload|mark [NOTE]>"
         );
         return ExitCode::from(2);
     }
@@ -325,6 +357,43 @@ pub fn run_client(words: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("stage-manager is not reachable at {}: {e}", paths::socket_path().display());
             ExitCode::from(2)
+        }
+    }
+}
+
+/// How long `mark` waits for the app (it asks the WM thread for two dumps).
+const MARK_WAIT: Duration = Duration::from_secs(12);
+
+/// `stage-manager mark [NOTE…]`: asks the running app to write a problem mark (state dump
+/// and recent detail included). With the app not running, the mark is written here, without
+/// a dump. Prints where it went.
+pub fn run_mark(words: &[String]) -> ExitCode {
+    logging::init(Process::Tool { name: "mark", echo: false });
+    let note = words.join(" ");
+    let line = if note.trim().is_empty() { "mark".to_string() } else { format!("mark {note}") };
+    match request(&line, MARK_WAIT) {
+        Ok(reply) => {
+            let v: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
+            if v["ok"] == true {
+                println!("problem marked at {} in {}", v["at"].as_str().unwrap_or("?"), v["file"].as_str().unwrap_or("?"));
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("the app could not mark: {}", v["error"].as_str().unwrap_or(&reply));
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            let why = format!("Stage Manager is not reachable ({e}): no state to dump");
+            match logging::write_mark(&note, &[("app", why.clone())]) {
+                Ok(m) => {
+                    println!("{why}; problem marked at {} in {}", m.at, m.file.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{why}; cannot mark: {e}");
+                    ExitCode::from(1)
+                }
+            }
         }
     }
 }
@@ -349,6 +418,8 @@ mod tests {
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
+        assert_eq!(Command::parse("mark"), Ok(Command::Mark(String::new())));
+        assert_eq!(Command::parse("mark  strip  gone "), Ok(Command::Mark("strip gone".into())));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(
@@ -386,9 +457,20 @@ mod tests {
         assert!(Command::parse("debug-space left fast").is_err());
         assert_eq!(Command::parse("debug-fullscreen 42 on"), Ok(Command::DebugFullscreen { id: 42, on: true }));
         assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
+        assert_eq!(Command::parse("debug-close 42"), Ok(Command::DebugClose { id: 42 }));
+        assert!(Command::parse("debug-close").is_err());
         assert!(Command::parse("debug-fullscreen 42 toggle").is_err());
         assert!(Command::parse("debug-fullscreen x on").is_err());
         assert!(Command::parse("debug-fullscreen 42").is_err());
+        assert_eq!(
+            Command::parse("debug-expose mission-control"),
+            Ok(Command::DebugExpose { which: Some(Expose::MissionControl) })
+        );
+        assert_eq!(Command::parse("debug-expose app-windows"), Ok(Command::DebugExpose { which: Some(Expose::AppWindows) }));
+        assert_eq!(Command::parse("debug-expose show-desktop"), Ok(Command::DebugExpose { which: Some(Expose::ShowDesktop) }));
+        assert_eq!(Command::parse("debug-expose escape"), Ok(Command::DebugExpose { which: None }));
+        assert!(Command::parse("debug-expose").is_err());
+        assert!(Command::parse("debug-expose launchpad").is_err());
         assert!(Command::parse("").is_err());
         assert!(Command::parse("switch 0").is_err());
         assert!(Command::parse("switch x").is_err());

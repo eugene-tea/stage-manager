@@ -13,7 +13,11 @@ synthetic click and shift-click on a card of the real strip; the click is posted
 only when its own strip window is topmost at that point), native (Apple's defaults with three
 more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
-along the whole path, and the pointer is put back), visible (by default, Apple's: no window
+along the whole path, and the pointer is put back; then wallpaper clicks with a Finder
+window of the test's own scratch folder: Finder's echo never brings its window back, card
+clicks while the desktop shows, a deliberate Finder activation, `[strip]
+hide_while_desktop_shown`; skipped while the owner has Finder windows open or Apple's own
+wallpaper click would act), visible (by default, Apple's: no window
 is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of the strip on
 first start, switch and creation, a too-wide one narrowed and given back its exact frame on
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
@@ -25,12 +29,22 @@ window dropped above the first card takes that slot; a card dragged to another s
 across a relaunch; a card click animates and every frame is exact afterwards;
 `level = "above_windows"` keeps the strip on top), slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
-landing on the card or window it aimed at; a 2 pt and a 7 pt wobble are clicks; a card
-dragged down stays whole and above the others; a window dragged over the strip shows its card
-under the pointer at the top and bottom quarter, read back from the overlay's pixels; a slowed
-switch's snapshot lands on its window).
+landing on the card or window it aimed at; a click on the slot a transition is still landing
+in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
+above the others; with SM_PIXELS=1, a window dragged over the strip shows its card under the
+pointer at the top and bottom quarter and a slowed switch's snapshot lands on its window, read
+back from the overlay's pixels), capture (the one phase with window
+captures on: real thumbnails and snapshots, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
+typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
+is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
+Desktop, drawn as before, and a card click switches).
 
 Tests that need an extension turn it on in their own config.toml.
+
+Window captures (ScreenCaptureKit) are off in every app run (STAGE_MANAGER_NO_CAPTURE=1:
+cards and switch ghosts are drawn without pictures) except the capture phase's single
+launch, because macOS may answer a capture with a screen-access alert (README, Known
+limitations). The run ends with the number of replayd alerts macOS showed meanwhile.
 
 No phase runs while the owner's installed app is up, and only our own app's guardian is
 ever signalled.
@@ -43,6 +57,7 @@ import json
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -70,7 +85,12 @@ HOME = os.environ.get("TEST_HOME") or tempfile.mkdtemp(prefix="sm-test.", dir="/
 os.makedirs(HOME, exist_ok=True)
 ONLY = ",".join(ALL_IDS)
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME, STAGE_MANAGER_ONLY=ONLY)
-LOG = os.path.join(HOME, "stage-manager.log")
+
+
+def log_path():
+    """Today's log in the test home (the app writes one file per local day)."""
+    return os.path.join(HOME, time.strftime("%Y-%m-%d") + ".log")
+
 
 passed, failed = [], []
 
@@ -194,16 +214,18 @@ def owner_app_running():
 def archive_log():
     """Keeps the last app run's log as stage-manager.run-NN.log (renamed, not removed: its
     guardian keeps writing into the same file), so a run leaves the whole story."""
-    if not os.path.exists(LOG):
+    log = log_path()
+    if not os.path.exists(log):
         return None
     n = 1 + max([int(f[len("stage-manager.run-"):-4]) for f in os.listdir(HOME)
                  if f.startswith("stage-manager.run-") and f.endswith(".log") and f[18:-4].isdigit()] or [0])
     path = os.path.join(HOME, f"stage-manager.run-{n:02d}.log")
-    os.rename(LOG, path)
+    os.rename(log, path)
     return path
 
 
-def start_app(expect_windows, extra_env=None, fresh_log=True):
+def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
+    """Launches the app (window captures off unless `capture`) and waits for its windows."""
     if app_pid():
         stop_app()
     if fresh_log:
@@ -215,6 +237,8 @@ def start_app(expect_windows, extra_env=None, fresh_log=True):
         "STAGE_MANAGER_NO_PROMPT": "1",
         "RUST_LOG": "info,stage_manager=debug",
     }
+    if not capture:
+        env["STAGE_MANAGER_NO_CAPTURE"] = "1"
     env.update(extra_env or {})
     for k, v in env.items():
         args += ["--env", f"{k}={v}"]
@@ -249,7 +273,7 @@ def stop_app():
 
 def log_text():
     try:
-        with open(LOG, encoding="utf-8", errors="replace") as f:
+        with open(log_path(), encoding="utf-8", errors="replace") as f:
             return f.read()
     except FileNotFoundError:
         return ""
@@ -864,6 +888,227 @@ def phase_native():
     stop_app()
     all_onscreen("native quit")
     stop_all_fixtures()
+    native_wallpaper()
+
+
+# ----- native: wallpaper clicks and Finder ----------------------------------------------
+
+
+FINDER = "com.apple.finder"
+
+
+def wm_default(key):
+    """A `com.apple.WindowManager` value as text, or None when absent."""
+    r = subprocess.run(["defaults", "read", "com.apple.WindowManager", key], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def finder_windows():
+    """Finder's standard windows (layer 0; the desktop is below), on any Space."""
+    return [w for w in probe(FINDER)["windows"] if w["layer"] == 0]
+
+
+def finder_parked():
+    """Every Finder standard window sits in the park zone (and there is one)."""
+    p = probe(FINDER)
+    wins = [w for w in p["windows"] if w["layer"] == 0]
+    return bool(wins) and all(is_parked(w["bounds"], p["display"]) for w in wins)
+
+
+def shown(s, title):
+    """Window `title` is in the active stage and not parked."""
+    w = by_title(s).get(title)
+    return w is not None and not w["parked"] and w["home"] == s["active"]
+
+
+def switched_since_click():
+    """Lines since the first wallpaper click of this run that switched stages."""
+    text = log_text()
+    i = text.find("wallpaper click x=")
+    return [ln for ln in text[i:].splitlines() if "; switching" in ln] if i >= 0 else []
+
+
+def wallpaper_point(s, avoid):
+    """A point on the main display where only the wallpaper is (Finder's desktop window
+    topmost): right of the strip column, clear of every window in `avoid` (bounds) and of
+    the managed windows' saved frames. Found by asking the app to click there: it posts
+    nothing while another app's window is topmost, so a refused point costs nothing.
+    Returns the point clicked, or None."""
+    vis = s["display"]["visible"]
+    frames = avoid + [w["restore"] for w in s["windows"]]
+
+    def clear(x, y):
+        return not any(f["x"] - 20 <= x <= f["x"] + f["w"] + 20 and f["y"] - 20 <= y <= f["y"] + f["h"] + 20
+                       for f in frames)
+
+    x0 = vis["x"] + s["strip_width"] + 80
+    for y in range(int(vis["y"] + 120), int(vis["y"] + vis["h"] - 120), 140):
+        for x in range(int(vis["x"] + vis["w"] - 120), int(x0), -160):
+            if clear(x, y) and ctl("debug-click", x, y).get("ok"):
+                return x, y
+    return None
+
+
+def wallpaper_click(pt, what):
+    r = ctl("debug-click", *pt)
+    check(r.get("ok"), f"{what}: clicked the wallpaper ({r.get('error', 'ok')})")
+    time.sleep(1.5)  # past the reveal and Finder's echo
+    return state()
+
+
+def click_card(s, title, what):
+    """Clicks the card of the stage holding `title` (its drawn frame); True when posted."""
+    home = by_title(s)[title]["home"]
+    b = next((c["frame"] for c in s.get("strip_cards", []) if c["number"] == home), None)
+    r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2) if b else {"ok": False, "error": "no card drawn"}
+    return check(r.get("ok"), f"clicked {what} ({r.get('error', 'ok')}{whose(r.get('error'))})")
+
+
+def strip_titles(s):
+    """The strip, top to bottom, as each card's sorted window titles."""
+    st = stage_titles(s)
+    return [sorted(st.get(n, [])) for n in s["strip"]]
+
+
+def native_wallpaper():
+    """Apple's wallpaper click with Finder in play (the owner's report of 10-12: "Finder comes
+    back and leaves, back and leaves, on each desktop click"). macOS gives the desktop to
+    Finder, so each click activates Finder and may focus its window; that echo must never
+    bring Finder's window back. A second click brings back the stage the first revealed
+    (UX-SPEC), never Finder's. A card clicked while the desktop shows brings exactly that
+    stage; the other cards keep their order. A deliberate Finder activation (`open -b`: the
+    Dock's and the app switcher's path) brings Finder's stage, as Apple's does.
+
+    Finder is managed here (STAGE_MANAGER_ONLY gains com.apple.finder), so the sub-test runs
+    only when Finder has no window of its own: the test opens one on a scratch folder in the
+    test home, while the app runs, and closes it (through the app) at the end. It also needs
+    Apple's Stage Manager off and "Click wallpaper to reveal desktop" not set to Always
+    (macOS itself would move every window aside on the synthetic click)."""
+    say("-- wallpaper clicks with a Finder window (the test's own scratch folder)")
+    if wm_default("GloballyEnabled") == "1":
+        say("  skipped: Apple's Stage Manager is on; a real wallpaper click would act on every window")
+        return
+    if wm_default("EnableStandardClickToShowDesktop") == "1":
+        say("  skipped: \"Click wallpaper to reveal desktop\" is Always; macOS would move every window aside")
+        return
+    if finder_windows():
+        say(f"  skipped: Finder has {len(finder_windows())} window(s) of the owner's open; managing Finder would move them")
+        return
+    folder = os.path.join(HOME, "finder-scratch")
+    os.makedirs(folder, exist_ok=True)
+    env = {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_ONLY": ONLY + "," + FINDER}
+    try:
+        write_config(None)
+        start_extra("a", 1)
+        start_extra("b", 1)
+        activate("a")
+        time.sleep(1.0)
+        if not check(start_app(2, extra_env=env) is not None, "app up with Finder managed"):
+            return
+        subprocess.run(["open", folder], check=True)
+        s = wait_state(lambda x: any(w["bundle_id"] == FINDER for w in x["windows"]), "the scratch Finder window managed", 10)
+        if not check(s is not None and len(finder_windows()) == 1, "a Finder window on the scratch folder, managed"):
+            return
+        finder = next(w["title"] for w in s["windows"] if w["bundle_id"] == FINDER)
+        time.sleep(1.0)
+        activate("a")
+        s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
+        check(s is not None and not shown(s, finder) and finder_parked(),
+              f"Alpha's stage is shown; Finder's window sits parked in its own stage ({s and stage_titles(s)})")
+        alpha_frame = by_title(state())["Alpha 1"]["restore"]
+        time.sleep(1.0)
+        pt = wallpaper_point(state(), [w["bounds"] for w in finder_windows()])
+        if not check(pt is not None, "found a spot where only the wallpaper is (and clicked it)"):
+            return
+        time.sleep(1.5)
+
+        say("-- first click: the desktop; Finder's echo is ignored")
+        s = state()
+        check(s["desktop_revealed"] and not active_titles(s), f"the desktop is revealed ({stage_titles(s)})")
+        check(finder_parked(), "Finder's window stays parked")
+        check(by_title(s)["Alpha 1"]["parked"] and by_title(s)["Bravo 1"]["parked"], "every fixture window is parked")
+        check(["Alpha 1"] in strip_titles(s), "the revealed stage's card is in the strip")
+        check("after a wallpaper click: ignored" in log_text(), "Finder's activation or focus after the click was ignored")
+        check(not switched_since_click(), f"nothing switched after the click ({switched_since_click()})")
+        consistent("first wallpaper click")
+
+        say("-- second click: the revealed stage comes back (UX-SPEC), never Finder's")
+        s = wallpaper_click(pt, "second click")
+        check(shown(s, "Alpha 1"), f"Alpha's stage is back ({stage_titles(s)})")
+        check(finder_parked() and not shown(s, finder), "Finder's window stays parked")
+        consistent("second wallpaper click")
+
+        say("-- third click: the desktop again")
+        s = wallpaper_click(pt, "third click")
+        check(s["desktop_revealed"] and finder_parked() and by_title(s)["Alpha 1"]["parked"],
+              "the desktop is revealed again; Finder's window stays parked")
+        check(not switched_since_click(), f"no wallpaper click or echo switched stages ({switched_since_click()})")
+        consistent("third wallpaper click")
+
+        say("-- a card click while the desktop shows: the stage just revealed, as it was")
+        others = [c for c in strip_titles(s) if c != ["Alpha 1"]]
+        if click_card(s, "Alpha 1", "the revealed stage's card"):
+            time.sleep(1.5)  # past Finder's echo
+            s = state()
+            check(shown(s, "Alpha 1") and close(by_title(s)["Alpha 1"]["restore"], alpha_frame),
+                  "exactly that stage, at its frame")
+            check(finder_parked() and by_title(s)["Bravo 1"]["parked"], "every other window stays parked")
+            check(strip_titles(s) == others, f"the other cards keep their order ({strip_titles(s)} vs {others})")
+            consistent("card click while revealed")
+
+        say("-- a card click while the desktop shows: another stage")
+        s = wallpaper_click(pt, "fourth click")
+        others = [c for c in strip_titles(s) if c != ["Bravo 1"]]
+        if click_card(s, "Bravo 1", "Bravo's card"):
+            time.sleep(1.5)
+            s = state()
+            check(shown(s, "Bravo 1"), "exactly Bravo's stage, no bounce")
+            check(finder_parked() and by_title(s)["Alpha 1"]["parked"], "every other window stays parked")
+            check(strip_titles(s) == others, f"the other cards keep their order ({strip_titles(s)} vs {others})")
+            consistent("second card click while revealed")
+
+        say("-- a deliberate Finder activation brings Finder's stage")
+        wallpaper_click(pt, "fifth click")
+        time.sleep(0.5)  # well past the click's echo
+        subprocess.run(["open", "-b", FINDER], check=True)
+        s = wait_state(lambda x: shown(x, finder), "Finder's stage after open -b", timeout=4)
+        check(s is not None and not finder_parked(),
+              "open -b com.apple.finder with the desktop shown: Finder's stage comes (Apple's Dock click)")
+        activate("b")
+        wait_state(lambda x: shown(x, "Bravo 1"), "Bravo's stage")
+        time.sleep(1.0)
+        subprocess.run(["open", "-b", FINDER], check=True)
+        s = wait_state(lambda x: shown(x, finder), "Finder's stage after open -b", timeout=4)
+        check(s is not None and not finder_parked() and by_title(s)["Bravo 1"]["parked"],
+              "open -b com.apple.finder from another app: Finder's stage comes (Apple's app switcher)")
+        check(len(finder_windows()) == 1, f"no new Finder window ({len(finder_windows())})")
+
+        say("-- [strip] hide_while_desktop_shown = true")
+        with open(os.path.join(HOME, "config.toml"), "w") as f:
+            f.write("[strip]\nhide_while_desktop_shown = true\n")
+        do("reload")
+        activate("a")
+        wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
+        time.sleep(1.0)
+        s = wallpaper_click(pt, "click with the option on")
+        check(s["desktop_revealed"] and s["strip_hidden_for_desktop"], "the strip hides while the desktop shows")
+        check(finder_parked() and s["strip_hidden_for_desktop"], "Finder's echo changes nothing (the strip stays hidden)")
+        activate("b")
+        s = wait_state(lambda x: not x["strip_hidden_for_desktop"], "the strip back")
+        check(s is not None and shown(s, "Bravo 1"), "an activation brings the strip back with its stage")
+    finally:
+        # The test's own Finder window goes (through our app, while it runs), then the app.
+        for w in finder_windows():
+            r = ctl("debug-close", w["id"])
+            if not r.get("ok"):
+                say(f"  could not close Finder window {w['id']}: {r}")
+        wait_until(lambda: not finder_windows(), 5, "the scratch Finder window to close")
+        stop_app()
+        check(not finder_windows(), "the scratch Finder window is closed")
+        all_onscreen("wallpaper quit")
+        stop_all_fixtures()
+        write_config(None)
+        subprocess.run(["rm", "-rf", folder])
 
 
 # ----- motion: strip level, drops into a slot, card reorder, switch animation -----------
@@ -1238,6 +1483,19 @@ def phase_slots():
     check(clicks == expected, f"fast clicks: each click hit the card drawn under the pointer ({clicks} vs {expected})")
     check([c["number"] for c in s.get("strip_cards", [])] == s["strip"], "fast clicks: the cards are drawn in the engine's order")
 
+    say("-- a second click on the slot a transition is still landing in does nothing")
+    s0 = state()
+    slot = 2 % n_cards
+    c = center(s0["strip_cards"][slot]["frame"])
+    target, active0, order0 = s0["strip"][slot], s0["active"], s0["strip"]
+    ctl("debug-click", *c)
+    time.sleep(0.1)
+    ctl("debug-click", *c)
+    time.sleep(1.5)
+    s = state()
+    check(s["active"] == target and swap_holds(order0, s["strip"], slot, active0),
+          f"the second click hit the landing (invisible) card and did nothing (active {s['active']}, wanted {target}; {order0} -> {s['strip']})")
+
     say("-- a press that wobbles is a click, never a reorder")
     for wobble in (2, 7):
         s0 = state()
@@ -1287,8 +1545,11 @@ def phase_slots():
         n = numbers_by_id(st).get(dragged)
         check(n in st["strip"] and st["strip"].index(n) == 3, f"it took slot 3 ({st['strip']}, the dragged card is {n})")
 
+    pixels = bool(os.environ.get("SM_PIXELS"))
+    if not pixels:
+        say("-- (SM_PIXELS unset: the checks read back from the overlay's pixels are skipped; they capture our own overlay window)")
     say("-- a window dragged over the strip: its card is under the pointer (top and bottom quarter)")
-    for frac in (0.25, 0.75):
+    for frac in ((0.25, 0.75) if pixels else ()):
         s = state()
         shown = [w for w in s["windows"] if w["home"] == s["active"] and not w["parked"] and w["role"] == "standard"]
         if not shown:
@@ -1326,7 +1587,7 @@ def phase_slots():
     ctl("reload")
     time.sleep(1.0)
     s = state()
-    if s.get("strip_cards"):
+    if pixels and s.get("strip_cards"):
         slot = 0
         target = s["strip"][slot]
         incoming = [w for w in s["windows"] if w["home"] == target and w["role"] == "standard"]
@@ -1354,6 +1615,46 @@ def phase_slots():
     all_onscreen("slots quit")
     write_config(None)
     stop_all_fixtures()
+# ----- capture: the one launch with window captures on -----------------------------------
+
+
+def phase_capture():
+    """The only app run with window captures on: thumbnails and switch snapshots are real
+    pictures, and a quit with captures running waits for those in flight (an exit with one
+    in flight makes macOS alert about screen access). The only phase that may raise that
+    alert: on the first run from a new app path, which macOS approves once."""
+    say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(3)
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    if not check(s is not None, "app up with captures on"):
+        return
+    check(s.get("capture", {}).get("mode") == "on", f"captures are on ({s.get('capture')})")
+    t = by_title(s)
+    # Fixture 3 stays (clear of the strip, so it shows); 1 and 2 make the one card.
+    for n in (1, 2):
+        do("send", 2, t[f"Fixture {n}"]["id"])
+    s = wait_until(lambda: (lambda x: x if x.get("capture", {}).get("images", 0) >= 2 else None)(state()),
+                   10, "window pictures")
+    cap = state().get("capture", {})
+    check(s is not None and cap.get("gate") == "open",
+          f"window pictures arrive and captures stay open ({cap})")
+    for n in (2, 1):
+        do("switch", n)
+        time.sleep(1.2)
+        consistent(f"a switch to stage {n} with real snapshots")
+    cap = state().get("capture", {})
+    check(cap.get("images", 0) > (s or {}).get("capture", {}).get("images", 0),
+          f"pictures keep coming ({cap.get('images')} so far)")
+    stop_app()
+    text = log_text()
+    check("bye" in text and "window captures on" in text, "a clean quit after captures ran")
+    check("refused window captures" not in text, "macOS did not refuse a capture")
+    all_onscreen("capture quit")
 
 
 # ----- visible: the stage area beside the strip, the edge tab, quit right after a start --
@@ -1560,11 +1861,12 @@ def phase_visible():
     start_extra("a", 3)
     start_extra("b", 2)
     start_extra("c", 2)
-    if os.path.exists(LOG):
-        os.remove(LOG)
+    if os.path.exists(log_path()):
+        os.remove(log_path())
     args = ["open", "-n", APP]
     for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": ONLY, "STAGE_MANAGER_NO_PROMPT": "1",
-                 "STAGE_MANAGER_TEST": "1", "RUST_LOG": "info,stage_manager=debug"}.items():
+                 "STAGE_MANAGER_NO_CAPTURE": "1", "STAGE_MANAGER_TEST": "1",
+                 "RUST_LOG": "info,stage_manager=debug"}.items():
         args += ["--env", f"{k}={v}"]
     subprocess.run(args, check=True)
     pid = wait_until(app_pid, 15, "the app")
@@ -1680,20 +1982,269 @@ def live_frame_probe(k, title):
     return wins[i]["bounds"] if i < len(wins) else None
 
 
+# ----- expose: the strip hides in Mission Control and App Exposé -------------------------
+
+# NSWindowCollectionBehavior bits (src/ui/panels.rs).
+BEHAVIOR = {"can_join_all_spaces": 1, "move_to_active_space": 2, "managed": 4, "transient": 8, "stationary": 16}
+# A card pixel counts as changed when a channel moved by more than this (0-255).
+PIXEL_STEP = 32
+# Mission Control's own animation (about half a second), with room.
+EXPOSE_SETTLE = 1.2
+
+
+def behavior_names(bits):
+    return [n for n, b in BEHAVIOR.items() if bits & b]
+
+
+def panes_hide_in_expose(s):
+    """Every strip pane is Transient (hidden by Mission Control, App Exposé and Show Desktop),
+    never Stationary, and joins no other Space (no Spaces flag): (ok, description)."""
+    panes = s.get("strip_panels") or []
+    bad = [p for p in panes if not p["behavior"] & BEHAVIOR["transient"]
+           or p["behavior"] & (BEHAVIOR["stationary"] | BEHAVIOR["can_join_all_spaces"] | BEHAVIOR["move_to_active_space"])]
+    told = [f"space {p['space']}: {behavior_names(p['behavior'])}" for p in panes]
+    return bool(panes) and not bad, "; ".join(told) or "no pane"
+
+
+def screen_overlays():
+    """On-screen windows above or below the windows' layer that cover the main display
+    (`probe-screen`): Mission Control and App Exposé show one of the Dock's."""
+    r = run([BIN, "probe-screen"], timeout=10)
+    try:
+        return json.loads(r.stdout).get("overlays", [])
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+def read_bmp(path):
+    """(width, height, top-down rows, bytes per pixel) of an uncompressed or bitfields BMP,
+    as `screencapture -t bmp` writes it (32 bits a pixel)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:2] != b"BM":
+        raise ValueError(f"{path} is not a BMP")
+    offset, = struct.unpack_from("<I", data, 10)
+    width, height = struct.unpack_from("<ii", data, 18)
+    bpp, = struct.unpack_from("<H", data, 28)
+    if bpp not in (24, 32):
+        raise ValueError(f"{path}: {bpp} bits a pixel")
+    stride = ((bpp * width + 31) // 32) * 4
+    rows = [data[offset + i * stride: offset + i * stride + width * bpp // 8] for i in range(abs(height))]
+    if height > 0:  # bottom-up
+        rows.reverse()
+    return width, abs(height), rows, bpp // 8
+
+
+def grab(region, name):
+    """The screen in `region` (global points, x y w h) as pixels; None when it fails. The
+    file goes to the test home (never the repo) and is removed once read."""
+    path = os.path.join(HOME, f"expose-{name}.bmp")
+    args = ["screencapture", "-x", "-t", "bmp", "-R", ",".join(f"{v:.0f}" for v in region), path]
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(path):
+        say(f"  screen capture failed: {r.stderr.strip()}")
+        return None
+    try:
+        return (region, read_bmp(path))
+    except (OSError, ValueError, struct.error) as e:
+        say(f"  screen capture unreadable: {e}")
+        return None
+    finally:
+        os.remove(path)
+
+
+def card_region(s):
+    """The cards' frames (global points) and the box around them."""
+    cards = [c["frame"] for c in s.get("strip_cards") or []]
+    if not cards:
+        return [], None
+    x0, y0 = min(c["x"] for c in cards), min(c["y"] for c in cards)
+    x1, y1 = max(c["x"] + c["w"] for c in cards), max(c["y"] + c["h"] for c in cards)
+    return cards, (x0, y0, x1 - x0, y1 - y0)
+
+
+def changed_fraction(a, b, cards):
+    """The share of the cards' pixels (every 2nd pixel each way) that differ between two
+    grabs of the same region."""
+    region, (w, h, rows_a, bp) = a
+    _, (w2, h2, rows_b, _) = b
+    if (w, h) != (w2, h2):
+        return 1.0
+    scale = w / region[2]
+    total = changed = 0
+    for c in cards:
+        px0, px1 = int((c["x"] - region[0]) * scale), int((c["x"] + c["w"] - region[0]) * scale)
+        py0, py1 = int((c["y"] - region[1]) * scale), int((c["y"] + c["h"] - region[1]) * scale)
+        for y in range(max(py0, 0), min(py1, h), 2):
+            ra, rb = rows_a[y], rows_b[y]
+            for x in range(max(px0, 0), min(px1, w), 2):
+                i = x * bp
+                total += 1
+                if any(abs(ra[i + k] - rb[i + k]) > PIXEL_STEP for k in range(3)):
+                    changed += 1
+    return changed / total if total else 0.0
+
+
+def make_fixture_front(s):
+    """A shown fixture window raised and its app made frontmost (through Accessibility), so a
+    stray Escape could only ever reach a fixture. True when a fixture is frontmost."""
+    if frontmost_bundle() in ALL_IDS:
+        return True
+    shown = [w for w in s["windows"] if not w["parked"] and w["role"] == "standard"]
+    if shown:
+        r = shown[0]["restore"]
+        ctl("debug-frame", shown[0]["id"], r["x"], r["y"], r["w"], r["h"])
+        time.sleep(0.6)
+    return frontmost_bundle() in ALL_IDS
+
+
+def expose_round(which, label, shot=None):
+    """Mission Control (`which` = mission-control) or App Exposé (app-windows) through the
+    app (`ctl debug-expose`, the user's own shortcut), never a Desktop change: our panes are
+    not drawn while it shows (the window server no longer lists them on screen, or lists them
+    transparent), and after Escape the strip is back on the same Desktop, drawn as before (the
+    cards' pixels), and a card click switches. The cards' pixels while it shows are only
+    reported: Mission Control dims the desktop, so they change about 90 % whether the strip
+    is hidden or not (measured 10-12 with the old Stationary panes: listed on screen, alpha 1,
+    88 % changed); the window server's listing is what tells. `shot`
+    (name -> path or None) takes a by-eye screenshot while it shows. Returns True when the
+    round ran to the end."""
+    say(f"\n  -- {label} --")
+    s = state()
+    space_before = ctl("space").get("space")
+    panes_before = [(p["space"], p["active"], p["on_active_space"]) for p in s.get("strip_panels") or []]
+    panel = strip_panel()
+    if not check(panel is not None and (s.get("strip_panel") or {}).get("shown"), f"{label}: the strip shows first"):
+        return False
+    cards, region = card_region(s)
+    if not make_fixture_front(s):
+        check(False, f"{label}: a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        return False
+    before = grab(region, "before") if region else None
+    time.sleep(0.5)
+    again = grab(region, "again") if region else None
+    base = changed_fraction(before, again, cards) if before and again else 0.0
+    overlays_before = {o["id"] for o in screen_overlays()}
+    r = ctl("debug-expose", which)
+    if not r.get("ok") and which == "mission-control" and "turned off" in str(r.get("error")):
+        # The shortcut is off in Keyboard Shortcuts: Mission Control's own launcher.
+        say(f"  {r.get('error')}; opening Mission Control (com.apple.exposelauncher) instead")
+        r = {"ok": subprocess.run(["open", "-b", "com.apple.exposelauncher"]).returncode == 0, "key": "exposelauncher"}
+    if not check(r.get("ok"), f"{label}: shortcut typed ({r.get('key', r.get('error'))})"):
+        return False
+    seen = wait_until(lambda: [o for o in screen_overlays() if o["id"] not in overlays_before], 3, f"{label} to show")
+    say(f"  {label} {'seen: ' + str([(o['owner'], o['layer']) for o in seen]) if seen else 'not seen in the window list; going on after the wait'}")
+    time.sleep(EXPOSE_SETTLE)
+    listed = strip_panel()
+    during = grab(region, "during") if region else None
+    if shot:
+        shot(which)
+    moved = changed_fraction(before, during, cards) if before and during else None
+    say(f"  strip while it shows: listed on screen {listed is not None}"
+        + (f" (alpha {listed.get('alpha')})" if listed else "")
+        + (f"; cards' pixels changed {moved:.0%} (still screen {base:.0%})" if moved is not None else "; no pixel check (no cards)"))
+    hidden = listed is None or listed.get("alpha", 1.0) == 0
+    check(hidden, f"{label}: the strip is not drawn while it shows (the window server "
+          f"{'no longer lists it on screen' if listed is None else 'lists it on screen, alpha ' + str(listed.get('alpha'))})")
+    ctl("debug-expose", "escape")
+    if seen:
+        wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in overlays_before], 5, f"{label} to end")
+    time.sleep(EXPOSE_SETTLE)
+    check(ctl("space").get("space") == space_before, f"{label}: the same Desktop after Escape (Space {space_before})")
+    back = wait_until(strip_panel, 3, "the strip listed on screen again")
+    s = state()
+    p = s.get("strip_panel") or {}
+    check(back is not None and p.get("on_active_space") and p.get("shown"),
+          f"{label}: the strip is back on the Desktop shown ({p})")
+    panes_after = [(q["space"], q["active"], q["on_active_space"]) for q in s.get("strip_panels") or []]
+    check(panes_after == panes_before, f"{label}: every Desktop's pane where it was ({panes_before} then {panes_after})")
+    if before:
+        after = grab(region, "after")
+        diff = changed_fraction(before, after, cards) if after else 1.0
+        check(diff <= base + 0.15, f"{label}: the cards are drawn as before ({diff:.0%} changed, still screen {base:.0%})")
+    if cards:
+        target = s["strip_cards"][0]
+        f = target["frame"]
+        was = s["active"]
+        # Leaving Mission Control, macOS may keep another process's window (the desktop
+        # widgets') over the card for a moment; the app refuses to click there, so try again.
+        end, refused = time.time() + 4, []
+        while True:
+            r = ctl("debug-click", f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+            if r.get("ok") or "not ours" not in str(r.get("error")) or time.time() >= end:
+                break
+            refused.append(round(time.time() - end + 4, 1))
+            time.sleep(0.4)
+        if refused:
+            say(f"  the card was covered by another process's window for a moment (refused at {refused} s): {r.get('error', 'then clear')}")
+        s2 = wait_state(lambda x: x["active"] != was, f"{label}: the card click to switch", timeout=4)
+        check(r.get("ok") and s2 is not None, f"{label}: a card click switches afterwards ({r.get('error', 'ok')})")
+        if s2:
+            ctl("switch", was)
+            time.sleep(1.0)
+    return True
+
+
+def phase_expose():
+    say("\n== expose: the strip hides in Mission Control and App Exposé, and comes back ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(4)
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up"):
+        return
+    t = by_title(s)
+    # Stage 1 keeps only Fixture 3 (clear of the strip, so the strip stays shown); the others
+    # go to stage 2, the single card.
+    for n in (1, 2, 4):
+        do("send", 2, t[f"Fixture {n}"]["id"])
+    s = wait_state(lambda x: (x.get("strip_panel") or {}).get("shown") and x.get("strip_cards"), "the strip with its card", 4)
+    if not check(s is not None, "the strip shows one card"):
+        return
+    ok, told = panes_hide_in_expose(s)
+    check(ok, f"every strip pane is Transient, not Stationary, on one Desktop ({told})")
+    for which, label in (("mission-control", "Mission Control"), ("app-windows", "App Exposé")):
+        if not expose_round(which, label):
+            break
+    consistent("after Mission Control and App Exposé")
+    stop_app()
+    all_onscreen("expose quit")
+
+
 def frontmost_bundle():
-    r = subprocess.run(["lsappinfo", "info", "-only", "bundleid", "front"], capture_output=True, text=True)
-    out = r.stdout.strip()
-    return out.split("=", 1)[1].strip().strip('"') if "=" in out else None
+    """The frontmost app's bundle ID. `lsappinfo info … front` prints nothing on this macOS,
+    so the front app's ASN is asked first; the reply is `bundleID="…"` (or `"CFBundleIdentifier"="…"`)."""
+    asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()
+    if not asn:
+        return None
+    out = subprocess.run(["lsappinfo", "info", "-only", "bundleid", asn], capture_output=True, text=True).stdout
+    m = re.search(r'(?:bundleID|"CFBundleIdentifier")\s*=\s*"([^"]+)"', out)
+    return m.group(1) if m else None
+
+
+def replayd_alerts(since):
+    """How many screen-access alerts macOS (replayd) showed since `since` (any app), or
+    None when the log cannot be read."""
+    r = subprocess.run(["log", "show", "--style", "compact", "--start", since, "--predicate",
+                        'process == "replayd" AND eventMessage CONTAINS "showAlertWithTitle"'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return sum(1 for line in r.stdout.splitlines() if line.rstrip().endswith("]:140"))
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "slots"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
     if pids_of("Stage Manager.app/Contents/MacOS/stage-manager$") and not app_pid():
         say("note: another Stage Manager is running (not ours); it uses another home and is left alone")
     say(f"home: {HOME}")
+    since = time.strftime("%Y-%m-%d %H:%M:%S")
     front = frontmost_bundle()
     try:
         for p in phases:
@@ -1702,7 +2253,8 @@ def main():
                 failed.append("the owner's app is running")
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
-             "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots}[p]()
+             "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
+             "expose": phase_expose, "capture": phase_capture}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
@@ -1710,7 +2262,10 @@ def main():
         stop_all_fixtures()
         if front and front not in ALL_IDS:
             subprocess.run(["open", "-b", front], capture_output=True)
-    say(f"\n{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager*.log)")
+    time.sleep(1.0)
+    alerts = replayd_alerts(since)
+    say(f"\nscreen-access alerts macOS showed during this run (any app): {'unknown' if alerts is None else alerts}")
+    say(f"{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager.run-*.log and today's {HOME}/YYYY-MM-DD.log)")
     for f in failed:
         say(f"  FAIL {f}")
     return 1 if failed else 0

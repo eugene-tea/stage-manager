@@ -38,14 +38,14 @@ The first signing with a new key makes macOS ask whether codesign may use it: ch
 | `make bundle`  | assembles `target/Stage Manager.app` (`LSUIElement`, bundle ID `dev.eugene.stagemanager`, version from `Cargo.toml`) |
 | `make sign`    | signs the bundle by SHA-1 with "Stage Manager Local Signing" (hardened runtime, no timestamp); fails pointing at `scripts/make-cert.sh` when the identity is missing; never ad-hoc |
 | `make dev`     | `sign`, then copies the app to `~/Library/Application Support/Stage Manager Dev/` (`scripts/dev-app.sh`). macOS asks for screen access once per app location, so dev runs and tests always launch from there, whichever worktree built them |
-| `make run`     | `sign`, copies the app to the dev location, then launches it through LaunchServices (`open -n`) and tails `~/Library/Logs/Stage Manager/stage-manager.log`; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
+| `make run`     | `sign`, copies the app to the dev location, then launches it through LaunchServices (`open -n`) and tails today's log (`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`) from this run's first line; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
 | `make install` | copies the signed app to `~/Applications` |
 | `make fixture` | builds and signs `target/SM Fixture.app` (test windows, below) |
 | `make check`   | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
 
-`make run` passes `RUST_LOG` (default `info,stage_manager=debug`), `STAGE_MANAGER_NO_PROMPT`,
-`STAGE_MANAGER_ONLY`, `STAGE_MANAGER_HOME` and `STAGE_MANAGER_TEST` through to the app when
-they are set.
+`make run` passes `RUST_LOG` (overrides `[log] level`), `STAGE_MANAGER_NO_PROMPT`,
+`STAGE_MANAGER_ONLY`, `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST`
+through to the app when they are set.
 
 Why LaunchServices: a binary started straight from a terminal has its TCC grants checked
 against the terminal. Launched with `open`, macOS checks the bundle's own signature.
@@ -54,12 +54,20 @@ against the terminal. Launched with `open`, macOS checks the bundle's own signat
 
 - **Accessibility** — observing and moving windows. Without it the app runs, says so in the
   menu, and starts observing within 2 s of the grant (no relaunch).
-- **Screen Recording** — strip thumbnails (ScreenCaptureKit). The strip also asks through
-  `SCShareableContent`, which is what lists the app in System Settings on recent macOS.
+- **Screen Recording** — strip thumbnails and switch-animation snapshots (ScreenCaptureKit).
+  The strip also asks through `SCShareableContent`, which is what lists the app in System
+  Settings on recent macOS. `[strip] capture = false` turns window pictures off: cards and
+  switch ghosts are drawn plain and the app never touches screen capture.
 
 At launch the app asks macOS for whatever is missing (system dialogs), unless
 `STAGE_MANAGER_NO_PROMPT` is set. The menu shows "Grant Accessibility…" / "Grant Screen
 Recording…" while a grant is missing; each opens the matching Privacy pane.
+
+macOS may also show its own screen-access alert ("… is requesting to bypass the system
+private window picker and directly access your screen and audio"); see Known limitations.
+If macOS refuses a capture as not permitted, the app stops capturing (plain cards and
+ghosts), says so once in the log, tries again after 10 minutes (doubling up to 2 hours),
+and "Grant Screen Recording…" shows in the menu; clicking it tries again at once.
 
 The stable signature keeps the grants across rebuilds. Its designated requirement is
 `identifier "dev.eugene.stagemanager" and certificate leaf = H"<sha1>"`; check with
@@ -159,6 +167,8 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   Full-screen apps are Spaces of their own: no strip there; entering or leaving full screen
   keeps the Desktop's stages (a Space change during macOS's full-screen animation waits for
   it to settle). Stage numbers (hotkeys, `ctl switch N`) count the current Space's stages.
+  Mission Control, App Exposé and Show Desktop hide the strip (and every other panel of
+  ours) as they hide Apple's; it is back on the same Desktop when they end.
 - **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
   card; clicking it again opens the app's next window.
 - **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
@@ -217,6 +227,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
 | `strip.show_active` | `false` | true or false | Also show the active stage as a card (fixed order only; Apple never does). |
+| `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
 | `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area a window must cover to hide the strip. |
@@ -229,6 +240,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `strip.scale_to_display` | `false` | true or false | Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not. |
 | `strip.thumbnail_interval_ms` | `1500` | whole number, 250 to 60000 | How often thumbnails are refreshed, in milliseconds. |
 | `strip.thumbnail_resolution` | `2.0` | number, 0.5 to 4 | Thumbnails are captured at this multiple of their drawn size. |
+| `strip.capture` | `true` | true or false | Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture. |
 | `cards.x` | `15.0` | number, -100 to 400 | Left edge of every card, from the screen's left edge. |
 | `cards.full_height` | `161.0` | number, 10 to 1000 | A window as tall as the visible screen becomes a card this tall; every window gets the same scale. |
 | `cards.min_height` | `97.0` | number, 0 to 1000 | Small windows are drawn at least this tall. |
@@ -305,6 +317,10 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
+| `log.level` | `"debug"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "debug" (the trial default) records every decision, "info" only the main ones. |
+| `log.days` | `14` | whole number, 1 to 365 | Day files older than this many days are deleted. |
+| `log.max_mb_per_day` | `100` | whole number, 1 to 10000 | A day's file this big takes only warnings, errors, marks and counts from then on. |
+| `log.max_mb_total` | `500` | whole number, 1 to 100000 | The log folder's cap: the oldest days go first, never today's. |
 
 `cards.tilt` and `cards.perspective` default to `"auto"`: Apple's values for the display,
 measured on a 1800 pt wide laptop (44.2°, 1346 pt) and a 2560 pt wide 5K display (47.9°,
@@ -364,15 +380,63 @@ Every Space counts: the registry holds parked windows of every Space (their AX e
 were taken while their Space showed), and Quit is clean only when the window server lists
 no managed app's window in the park zone on any Space; otherwise the guardian takes over.
 
+## Daily log and problem marks
+
+The app, its guardian and one-shot commands write one file per local day,
+`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`, switching to the next file at local midnight
+while running. Every line has the local time to the millisecond, the UTC offset and the
+process:
+
+```text
+2026-10-12 15:04:05.123 +02:00 app[6612] INFO  platform::controller: card clicked stage=7 number=2 shift=false
+2026-10-12 15:04:05.130 +02:00 app[6612] INFO  platform::controller: stage switch from=1 to=2 stage=7
+2026-10-12 16:00:00.251 +02:00 app[6612] COUNT counts kind=hour since=09:12 switches=41 card_clicks=17 …
+```
+
+- **Level** (`[log] level`, default `"debug"` for the trial): every decision the app makes
+  (window events, new windows and their rule, stage switches and new stages, card clicks,
+  drags and drops, reorders, Space changes, full screen, captures starting to fail or working
+  again, recoveries), never per-move or per-frame lines (those are `trace`). Changes apply on
+  config reload; `RUST_LOG` overrides it.
+- **Limits:** a day's file is capped at `[log] max_mb_per_day` (100 MB): past it, only
+  warnings, errors, marks and counts are written, after one line saying so. Day files older
+  than `[log] days` (14) are deleted, and the oldest days go first while the folder is over
+  `[log] max_mb_total` (500 MB); today's file never. Checked at launch and every hour. The
+  earlier single `stage-manager.log` (and `.log.1`) is deleted by the same age rule.
+- **Counts:** the app counts switches, card clicks, drops, reorders, new windows, new
+  stages, Space changes, full-screen entries, captures ok and failed, recoveries, warnings,
+  errors and panics, and writes them as a `COUNT` line every hour, at midnight (into the day
+  that ends) and at quit.
+- **Mark a Problem** (status menu, shown while the level is `debug` or `trace`), or
+  `stage-manager mark ["note"]` from a terminal: writes a delimited block with the local
+  time and the note, then `ctl state` and `ctl dump` (Spaces, stages, windows, frames, strip
+  panels; or that the WM thread did not answer) and the last 30 s of lines at `trace` kept
+  in memory, whatever the file's level. With the app not running, `mark` writes the time and
+  note alone. The menu item then shows when the last mark went in.
+- **Reading a day:** `stage-manager log summary [YYYY-MM-DD|yesterday]` prints the day's
+  counts (the last `COUNT` line of each app run, added up), the runs and unclean exits,
+  every mark with its line number, and every warning and error deduplicated (numbers folded,
+  with how often and when), short enough to paste. `stage-manager log path [DATE]` prints
+  the file.
+
+**Privacy:** the log stays on this Mac. Window titles and app bundle IDs appear in it (they
+help debugging), so the files are readable by their owner only; nothing sends them anywhere,
+and no log is ever committed to this repository.
+
+A working day at the default level should come to roughly 1 to 3 MB (about 7 000 to 20 000
+lines; the measurement is in `PLAN.md`, "Before public release"), far under the day's cap.
+
 ## Environment
 
 | Variable | Effect |
 |----------|--------|
-| `RUST_LOG` | log filter (default `info,stage_manager=debug`) |
+| `RUST_LOG` | log filter (`target=level` directives); overrides `[log] level` |
+| `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone (default `~/Library/Logs/Stage Manager`, or `STAGE_MANAGER_HOME`) |
 | `STAGE_MANAGER_NO_PROMPT` | never show permission dialogs at launch |
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
 | `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
 | `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-*`) and `debug-post-space` |
+| `STAGE_MANAGER_NO_CAPTURE` | window captures off whatever `[strip] capture` says (test runs): no ScreenCaptureKit call, plain cards and ghosts |
 
 ## ctl socket
 
@@ -394,6 +458,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `reveal` | reveal the desktop / bring the stage back (a wallpaper click) |
 | `unpark-all` | bring every parked window back (the stages stay; a safety command) |
 | `reload` | re-read `config.toml` |
+| `mark [NOTE…]` | write a problem mark into the day's log (`stage-manager mark` is the client); answers its time and file |
 | `quit` | unpark everything and quit |
 | `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
 | `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there; the refusal lists our own windows) |
@@ -401,20 +466,21 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
 | `debug-frame ID X Y W H` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`) |
 | `debug-space left\|right [numpad]` | type "Move left/right a space" (the shortcut from Keyboard Shortcuts, posted at the HID tap) and answer once the engine has handled the Space change, or after 6 s with `"changed":false` (only with `STAGE_MANAGER_TEST=1`); `stage-manager debug-post-space left\|right` launched with `open -n` does the same once while the app is down |
+| `debug-expose mission-control\|app-windows\|show-desktop\|escape` | type Mission Control's own shortcut ("Mission Control", "Application windows", "Show Desktop" from Keyboard Shortcuts, posted at the HID tap), or Escape to leave; never changes the Desktop (only with `STAGE_MANAGER_TEST=1`) |
 | `debug-fullscreen ID on\|off` | put a `STAGE_MANAGER_ONLY` app's standard window in or out of full screen through Accessibility (`AXFullScreen`, else its full-screen button); any other window is refused (only with `STAGE_MANAGER_TEST=1`) |
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
 "$B" ctl state | jq '.stages'
 "$B" probe-windows dev.eugene.stagemanager.fixture   # the window server's view of an app
-"$B" probe-screen                                    # windows covering the display (full screen)
+"$B" probe-screen                                    # windows covering the display (full screen; overlays: Mission Control)
 ```
 
 Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reachable.
 
 ## Test script
 
-`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion]` builds the app and private
+`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion] [expose] [capture]` builds the app and private
 fixtures (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`,
 plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native phase;
 `SM_FIXTURE_ID` picks another base ID, so runs never collide) and checks, against `ctl state` and the window
@@ -444,12 +510,17 @@ card click ending with every frame exact, and `level = "above_windows"`, all ove
 unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip column, the
 drags pass over our windows and the fixtures only, with the strip reached for the reorder and
 the click the way a person does when a window covers it (the pointer resting at the left
-edge). `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
+edge); and expose: Mission Control and App Exposé typed through the app (`ctl debug-expose`,
+never a Desktop change) with every strip pane `Transient`, the window server no longer
+listing the strip on screen while they show, and after Escape
+the strip back on the same Desktop, drawn as before, with a working card click. `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
 (`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
-whether it is the active one, ordered in, on the Space shown, slid in). Every app run's log is kept as `stage-manager.run-NN.log` in
-the test home (the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
+whether it is the active one, ordered in, on the Space shown, slid in, its collection behavior bits); and capture: real
+thumbnails and switch snapshots arrive (`ctl state`'s `capture`: mode, gate, images
+delivered) and a quit with captures running is clean. Every app run's log is kept as `stage-manager.run-NN.log` in
+the test home (renamed from the day's `YYYY-MM-DD.log`; the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
 is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
-`scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
+`scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), Mission Control and App Exposé are shown and left on Desktop 2 (each Desktop's pane must stay on its own Desktop), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
 Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
 drags are posted only where our own or a fixture's windows are topmost along the whole path,
 and the pointer is put back. Apple's own Stage Manager must be off for the window-position
@@ -457,6 +528,13 @@ checks: while it is on it scales inactive apps' windows into its own strip. Ever
 `STAGE_MANAGER_HOME` (default a new `/tmp/sm-test.*`, or `TEST_HOME`) and
 `STAGE_MANAGER_ONLY` set to the fixtures. The fixture comes to the front during switches;
 the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips the build.
+
+Window captures are off in every app run (`STAGE_MANAGER_NO_CAPTURE=1`; cards and switch
+ghosts are drawn plain) except the `capture` phase's single launch, so **only the `capture`
+phase may raise macOS's screen-access alert**, and only on the first run from a new app path
+(the fixed dev copy is approved once; see Known limitations). Every phase of
+`scripts/test-stages.sh spaces` runs with captures off. A run ends with the number of
+screen-access alerts macOS showed meanwhile (from replayd's log, any app).
 
 ## Known limitations
 
@@ -480,6 +558,27 @@ the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips
 - ⌘M: the window is parked, then un-minimized there, so macOS may show a short restore
   animation toward the bottom-right corner (Apple's window shrinks into the strip).
 - Thumbnails are stills refreshed every 1.5 s (Apple's cards are live).
+- **macOS's screen-access alert.** Since macOS 15, an app that captures windows with
+  ScreenCaptureKit directly (not through Apple's content picker, which asks the user to pick
+  what to share and does not suit a strip of every window) gets an alert from replayd: "…
+  is requesting to bypass the system private window picker and directly access your screen
+  and audio" [Allow] [Open System Settings], and again about monthly. What replayd's log
+  showed on the development Mac (36 alerts in 8 hours of test runs, 10-12):
+  - Approvals are kept per **app path** (one entry per bundle URL in replayd's
+    `ScreenCaptureApprovals.plist`): the first capture from a new location alerts once (4 of
+    the 36: three worktrees' `target/` copies and the fixed dev copy). A rebuild or a
+    fresh copy at an approved path did not alert again (the dev copy was replaced on every
+    test run after its first alert), so it is not per code signature hash nor per process.
+    The entry's `kScreenCapturePrivacyHintPolicy` is 2592000 s: the monthly reminder.
+  - The other 32 came from **a process that exited with a capture in flight**. replayd
+    checks a capture's approval after answering it; for a pid that has just exited it logs
+    "Error resolving binary path and audit token", cannot match the approved path, and
+    alerts for an app that is gone: one alert per capture in flight (two at once when both
+    capturers were mid-round), which is how they stacked on test quits and drills.
+  - So the app now waits for its captures in flight before it exits (Quit, SIGTERM/SIGINT,
+    a panic; up to 2 s), the first capture of a process goes alone and nothing else is
+    issued until it answers, and test runs keep captures off but for one launch. A
+    `kill -9` while a capture is in flight can still raise one alert.
 - A dialog or panel's parent is a guess: the app's frontmost standard window at the time.
 - New windows are matched to rules by their title when they appear; an app that sets the
   title later is matched with the early title.
@@ -545,6 +644,9 @@ limited to the fixture.
 
 - `src/engine`, `src/config.rs` — pure Rust engine and configuration (unit tested);
   `src/config/schema.rs` lists every key with its type, range, default and doc line.
+- `src/logbook` — the daily log, pure Rust (unit tested): local dates and stamps, the day's
+  file with its cap, retention, the event counters, the ring of recent lines, marks and
+  `log summary`; `platform::logging` is its tracing layer.
 - `src/platform` — macOS glue: `ax` (AXUIElement / AXObserver wrappers), `wm_thread` (the
   thread that owns every AX call), `observe` (observed apps and windows), `controller` (the
   engine on the WM thread: observations in, actions out, strip snapshots, `state.json`),

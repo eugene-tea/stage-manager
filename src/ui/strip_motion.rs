@@ -6,7 +6,9 @@
 //!   `[animation] snapshot_interval_ms`, and at once when the pointer reaches a card or presses
 //!   one, so they are fresh when a switch starts), plus the hovered card's windows. A window's
 //!   last snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows
-//!   back when its stage returns; a card's thumbnail stands in when there is none.
+//!   back when its stage returns; a card's thumbnail stands in when there is none. With
+//!   captures off (`[strip] capture = false`, `STAGE_MANAGER_NO_CAPTURE`) or refused by
+//!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
 //!   snapshots appear exactly over them and shrink into their card's slot on the spring;
 //!   incoming windows' snapshots grow from their card to their frames. The slot is the
@@ -37,7 +39,7 @@ use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTime
 
 use super::{Ghost as CardGhost, Strip, with_strip};
 use crate::engine::geometry::{Point, Rect, Size};
-use crate::platform::capture::{Capturer, Target};
+use crate::platform::capture::{self, Capturer, Target};
 use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, time_to_progress};
 use crate::ui::overlay::{Ghost, Overlay};
 use crate::ui::strip_layout::CardLayout;
@@ -303,6 +305,8 @@ impl Strip {
         let mut waiting = Vec::new();
         let mut held = Vec::new();
         let mut report = Vec::new();
+        // With captures off or refused no snapshot is coming: plain ghosts stand in.
+        let plain = !capture::pictures_expected();
         for w in &t.outgoing {
             let id = w.window.id;
             let (end, card, aimed) = match self.card_for(&self.layouts, w).and_then(|(slot, l)| self.plane_on(l, id).map(|p| (p, l.stage, slot))) {
@@ -314,11 +318,13 @@ impl Strip {
             let ghost = match dragged {
                 Some(c) => c.ghost,
                 None => {
-                    let Some(image) = self.motion.cache.get(id).cloned() else {
+                    let image = self.motion.cache.get(id).cloned();
+                    if image.is_none() && !plain {
                         tracing::debug!(id, "no snapshot of an outgoing window; it just goes");
                         continue;
-                    };
-                    self.motion.overlay.ghost(id, Some(&image), Plane::window(w.window.frame, o, style.corner_radius), &style, 1.0)
+                    }
+                    let at = Plane::window(w.window.frame, o, style.corner_radius);
+                    self.motion.overlay.ghost(id, image.as_deref(), at, &style, 1.0)
                 }
             };
             // It holds still over the window until the window has parked behind it.
@@ -343,11 +349,11 @@ impl Strip {
         for w in &t.incoming {
             let id = w.window.id;
             let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
-            let (Some(image), Some((start, from))) = (image, starts.get(&id).copied()) else {
+            let (true, Some((start, from))) = (image.is_some() || plain, starts.get(&id).copied()) else {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
-            let mut ghost = self.motion.overlay.ghost(id, Some(&image), start, &style, 1.0);
+            let mut ghost = self.motion.overlay.ghost(id, image.as_deref(), start, &style, 1.0);
             let end = Plane::window(w.window.frame, o, style.corner_radius);
             ghost.spring_to(end, spring);
             report.push(GhostReport {

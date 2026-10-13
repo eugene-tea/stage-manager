@@ -358,6 +358,15 @@ impl Model {
         self.active_stage(self.main_display().id)
     }
 
+    /// True while the main display shows the desktop a wallpaper click revealed: the empty
+    /// stage the reveal made active is still active and still empty.
+    pub fn desktop_revealed(&self) -> bool {
+        let space = self.current_space(self.main_display().id);
+        self.revealed.get(&space).is_some_and(|r| {
+            self.active.get(&space) == Some(&r.desktop) && self.stage(r.desktop).is_some_and(|s| s.windows.is_empty())
+        })
+    }
+
     /// A managed window by ID.
     pub fn window(&self, id: WindowId) -> Option<&WindowState> {
         self.windows.get(&id)

@@ -31,10 +31,11 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, names};
-use super::{desktop, observe, paths, windows};
+use super::{desktop, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::persist::StateFile;
 use crate::engine::recovery::{self, LiveWindow, Registered, ScanDisplays};
+use crate::logbook::counters::{self, Count};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
 const MENU_BAR_GUESS: f64 = 38.0;
@@ -221,6 +222,9 @@ pub fn unpark_registry(wait: Duration) -> Option<Report> {
 pub fn emergency_unpark(reason: &str) -> bool {
     match unpark_registry(Duration::from_millis(200)) {
         Some(r) if r.failed == 0 => {
+            if r.restored > 0 {
+                counters::bump(Count::Recovery);
+            }
             tracing::warn!(reason, restored = r.restored, "safety: registry unparked");
             true
         }
@@ -284,6 +288,7 @@ pub fn guarded<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
     match result {
         Ok(v) => Some(v),
         Err(_) => {
+            // The panic hook counted it.
             tracing::error!("panic in {what}; recovered");
             None
         }
@@ -295,12 +300,16 @@ pub fn guarded<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        counters::bump(Count::Panic);
         tracing::error!("panic: {info}");
         default(info);
         if GUARDED.try_with(Cell::get).unwrap_or(false) {
             return;
         }
         emergency_unpark("panic");
+        // A capture in flight at exit makes macOS alert about screen access.
+        super::capture::quiesce(std::time::Duration::from_secs(1));
+        logging::write_counts("panic");
         std::process::exit(101);
     }));
 }
@@ -460,6 +469,9 @@ pub fn recovery_scan(reason: &str) -> Report {
                 tracing::error!(reason, bundle = live[i].bundle_id, "recovery: cannot move window: {e}");
             }
         }
+    }
+    if report.restored > 0 {
+        counters::bump(Count::Recovery);
     }
     tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, "recovery scan");
     report

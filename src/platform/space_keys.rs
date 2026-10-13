@@ -7,6 +7,10 @@
 //! at the HID event tap from the app, which has Accessibility. Public API only: the key is
 //! read from the user's own `com.apple.symbolichotkeys` settings (so a remapped shortcut is
 //! honoured) and posted with `CGEventPost`; nothing asks the window server for Spaces.
+//!
+//! The Mission Control check (`ctl debug-expose`) posts Mission Control's own shortcuts the
+//! same way ("Mission Control", "Application windows", "Show Desktop": symbolic hotkeys 32,
+//! 33 and 36, Control-↑, Control-↓ and F11 by default), and Escape to leave.
 
 use std::ptr::NonNull;
 use std::time::Duration;
@@ -62,6 +66,63 @@ impl Direction {
     }
 }
 
+/// One of Exposé's own shortcuts (Keyboard Shortcuts → Mission Control).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expose {
+    /// "Mission Control" (every window of the Desktop; F3 or Control-↑).
+    MissionControl,
+    /// "Application windows" (App Exposé: the front app's windows; Control-↓).
+    AppWindows,
+    /// "Show Desktop" (windows pushed aside; F11).
+    ShowDesktop,
+}
+
+impl Expose {
+    /// `mission-control`, `app-windows` or `show-desktop`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "mission-control" => Some(Self::MissionControl),
+            "app-windows" => Some(Self::AppWindows),
+            "show-desktop" => Some(Self::ShowDesktop),
+            _ => None,
+        }
+    }
+
+    /// The word [`Expose::parse`] takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MissionControl => "mission-control",
+            Self::AppWindows => "app-windows",
+            Self::ShowDesktop => "show-desktop",
+        }
+    }
+
+    /// The symbolic hotkey's id in `com.apple.symbolichotkeys`.
+    pub fn hotkey_id(self) -> u32 {
+        match self {
+            Self::MissionControl => 32,
+            Self::AppWindows => 33,
+            Self::ShowDesktop => 36,
+        }
+    }
+
+    /// The macOS default: key code and modifiers (Control-↑, Control-↓, F11; Fn as macOS
+    /// stores it for arrow and function keys).
+    fn default_key(self) -> (u16, u64) {
+        match self {
+            Self::MissionControl => (126, DEFAULT_MODIFIERS),
+            Self::AppWindows => (125, DEFAULT_MODIFIERS),
+            Self::ShowDesktop => (103, FN),
+        }
+    }
+}
+
+/// The Fn modifier bit (`CGEventFlags::MaskSecondaryFn`).
+const FN: u64 = 0x80_0000;
+
+/// The Escape key's virtual key code (leaves Mission Control and App Exposé).
+pub const ESCAPE_KEY: u16 = 53;
+
 /// Control plus Fn, as macOS stores the default shortcut's modifiers (arrow keys carry the
 /// Fn flag).
 pub const DEFAULT_MODIFIERS: u64 = 0x84_0000;
@@ -89,13 +150,28 @@ impl SpaceKey {
     /// From a hotkey entry's `enabled` and `value.parameters` (`[character, keycode,
     /// modifiers]`); anything missing or malformed is the macOS default.
     pub fn from_parameters(direction: Direction, enabled: Option<bool>, parameters: Option<&[i64]>) -> Self {
+        Self::from_entry((direction.default_keycode(), DEFAULT_MODIFIERS), enabled, parameters)
+    }
+
+    /// Exposé's shortcut from a hotkey entry, as [`SpaceKey::from_parameters`].
+    pub fn expose_from_parameters(which: Expose, enabled: Option<bool>, parameters: Option<&[i64]>) -> Self {
+        Self::from_entry(which.default_key(), enabled, parameters)
+    }
+
+    /// Reads one of Exposé's shortcuts from `com.apple.symbolichotkeys`.
+    pub fn read_expose(which: Expose) -> Self {
+        let (enabled, parameters) = read_entry(which.hotkey_id());
+        Self::expose_from_parameters(which, enabled, parameters.as_deref())
+    }
+
+    fn from_entry(default: (u16, u64), enabled: Option<bool>, parameters: Option<&[i64]>) -> Self {
         let named = parameters.and_then(|p| match p {
             [_, code, mods] if (0..=0xFFFF).contains(code) && *mods >= 0 => Some((*code as u16, *mods as u64)),
             _ => None,
         });
         Self {
-            keycode: named.map_or(direction.default_keycode(), |n| n.0),
-            modifiers: named.map_or(DEFAULT_MODIFIERS, |n| n.1),
+            keycode: named.map_or(default.0, |n| n.0),
+            modifiers: named.map_or(default.1, |n| n.1),
             enabled: enabled.unwrap_or(true),
             from_settings: named.is_some(),
         }
@@ -109,7 +185,7 @@ impl SpaceKey {
 
     /// Short description for replies and logs (`ctrl+fn+124`).
     pub fn describe(&self) -> String {
-        let names = [(0x2_0000, "shift"), (CONTROL, "ctrl"), (0x8_0000, "alt"), (0x10_0000, "cmd"), (0x80_0000, "fn")];
+        let names = [(0x2_0000, "shift"), (CONTROL, "ctrl"), (0x8_0000, "alt"), (0x10_0000, "cmd"), (FN, "fn")];
         let mut parts: Vec<String> =
             names.iter().filter(|(bit, _)| self.modifiers & bit != 0).map(|(_, n)| n.to_string()).collect();
         parts.push(self.keycode.to_string());
@@ -186,6 +262,13 @@ pub fn post(key: &SpaceKey, numpad: bool) -> Result<(), String> {
         post_key(CONTROL_KEY, false, 0)?;
     }
     result
+}
+
+/// Posts one key with no modifiers (Escape, to leave Mission Control or App Exposé).
+pub fn post_plain(keycode: u16) -> Result<(), String> {
+    post_key(keycode, true, 0)?;
+    std::thread::sleep(Duration::from_millis(30));
+    post_key(keycode, false, 0)
 }
 
 /// The Space shown as the engine sees it (`ctl space`).
@@ -282,6 +365,33 @@ mod tests {
     }
 
     #[test]
+    fn expose_shortcuts_default_to_macos_and_honour_settings() {
+        let k = SpaceKey::expose_from_parameters(Expose::MissionControl, None, None);
+        assert_eq!((k.keycode, k.modifiers, k.enabled), (126, DEFAULT_MODIFIERS, true));
+        assert_eq!(k.describe(), "ctrl+fn+126");
+        let k = SpaceKey::expose_from_parameters(Expose::AppWindows, None, None);
+        assert_eq!(k.keycode, 125);
+        let k = SpaceKey::expose_from_parameters(Expose::ShowDesktop, None, None);
+        assert_eq!(k.describe(), "fn+103");
+        // F3 set as Mission Control's key in Keyboard Shortcuts.
+        let k = SpaceKey::expose_from_parameters(Expose::MissionControl, Some(true), Some(&[65535, 99, 0x80_0000]));
+        assert_eq!((k.keycode, k.modifiers, k.from_settings), (99, FN, true));
+        assert!(!SpaceKey::expose_from_parameters(Expose::ShowDesktop, Some(false), None).enabled);
+    }
+
+    #[test]
+    fn expose_words_parse() {
+        for e in [Expose::MissionControl, Expose::AppWindows, Expose::ShowDesktop] {
+            assert_eq!(Expose::parse(e.name()), Some(e));
+        }
+        assert_eq!(Expose::parse("launchpad"), None);
+        assert_eq!(
+            [Expose::MissionControl, Expose::AppWindows, Expose::ShowDesktop].map(Expose::hotkey_id),
+            [32, 33, 36]
+        );
+    }
+
+    #[test]
     fn directions_parse() {
         assert_eq!(Direction::parse("left"), Some(Direction::Left));
         assert_eq!(Direction::parse("right").map(Direction::hotkey_id), Some(81));
@@ -293,6 +403,9 @@ mod tests {
         for d in [Direction::Left, Direction::Right] {
             let k = SpaceKey::read(d);
             assert!(k.keycode > 0);
+        }
+        for e in [Expose::MissionControl, Expose::AppWindows, Expose::ShowDesktop] {
+            assert!(SpaceKey::read_expose(e).keycode > 0);
         }
     }
 }

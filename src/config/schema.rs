@@ -151,6 +151,13 @@ pub const SECTIONS: &[SectionDef] = &[
     },
     SectionDef { name: "stages", doc: &[] },
     SectionDef { name: "defaults", doc: &["What a new window does when no [[rule]] matches."] },
+    SectionDef {
+        name: "log",
+        doc: &[
+            "The daily log: ~/Library/Logs/Stage Manager/YYYY-MM-DD.log, local times. It never",
+            "leaves this Mac; window titles may appear in it. RUST_LOG overrides `level`.",
+        ],
+    },
 ];
 
 /// Every key, grouped by section in [`SECTIONS`] order.
@@ -163,6 +170,8 @@ pub const KEYS: &[KeyDef] = &[
     k("strip", "reorder", Kind::Bool, "true",
         "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
     k("strip", "show_active", Kind::Bool, "false", "Also show the active stage as a card (fixed order only; Apple never does)."),
+    k("strip", "hide_while_desktop_shown", Kind::Bool, "false",
+        "Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown."),
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
     k("strip", "show_names", Kind::Bool, "false", "Draw stage names under cards. Apple shows none."),
     k("strip", "width", f(60.0, 800.0), "200.0",
@@ -178,6 +187,8 @@ pub const KEYS: &[KeyDef] = &[
         "Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not."),
     k("strip", "thumbnail_interval_ms", i(250, 60_000), "1500", "How often thumbnails are refreshed, in milliseconds."),
     k("strip", "thumbnail_resolution", f(0.5, 4.0), "2.0", "Thumbnails are captured at this multiple of their drawn size."),
+    k("strip", "capture", Kind::Bool, "true",
+        "Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture."),
     // [cards]
     k("cards", "x", f(-100.0, 400.0), "15.0", "Left edge of every card, from the screen's left edge."),
     k("cards", "full_height", f(10.0, 1000.0), "161.0",
@@ -280,6 +291,13 @@ pub const KEYS: &[KeyDef] = &[
         "\"native\" is Apple's: a window joins its app's stage, a newly opened app gets its own."),
     k("defaults", "placement", Kind::Placement, "\"as-is\"",
         "Where it goes: \"as-is\", \"center\", or \"cascade\" (offset from the front window)."),
+    // [log]
+    k("log", "level", Kind::Choice(&["error", "warn", "info", "debug", "trace"]), "\"debug\"",
+        "How much the log keeps: \"debug\" (the trial default) records every decision, \"info\" only the main ones."),
+    k("log", "days", i(1, 365), "14", "Day files older than this many days are deleted."),
+    k("log", "max_mb_per_day", i(1, 10_000), "100",
+        "A day's file this big takes only warnings, errors, marks and counts from then on."),
+    k("log", "max_mb_total", i(1, 100_000), "500", "The log folder's cap: the oldest days go first, never today's."),
 ];
 
 /// The `[[rule]]` keys (an array of tables, documented by example in the file).
@@ -397,6 +415,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-2.toml"),
     include_str!("legacy/default-3.toml"),
     include_str!("legacy/default-4.toml"),
+    include_str!("legacy/default-5.toml"),
 ];
 
 #[cfg(test)]

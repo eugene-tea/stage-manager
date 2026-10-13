@@ -2,6 +2,7 @@
 
 pub mod motion_math;
 pub mod overlay;
+pub mod panels;
 pub mod status_menu;
 pub mod strip;
 pub mod strip_demo;

@@ -278,6 +278,9 @@ pub struct PaneStatus {
     pub on_active_space: bool,
     /// Slid in.
     pub shown: bool,
+    /// Its panel's `NSWindowCollectionBehavior` bits as AppKit reports them (see
+    /// [`crate::ui::panels`]): 8 is `Transient` (hidden by Mission Control), 16 `Stationary`.
+    pub behavior: usize,
 }
 
 fn pane_status_slot() -> &'static Mutex<Vec<PaneStatus>> {

@@ -61,7 +61,7 @@ use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel,
     NSNormalWindowLevel, NSPanel, NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
@@ -77,6 +77,7 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Target};
 use crate::ui::motion_math::{self, DropSpot};
+use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
 use crate::ui::strip_model::{self, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
 use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
@@ -348,8 +349,9 @@ impl EdgeTab {
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
         panel.setLevel(NSFloatingWindowLevel);
-        // Lives on its pane's Desktop (the one it is first ordered in on), never full screen.
-        panel.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
+        // Lives on its pane's Desktop (the one it is first ordered in on), never full screen;
+        // hidden by Mission Control, App Exposé and Show Desktop.
+        panel.setCollectionBehavior(panels::desktop_panel());
         panel.setHidesOnDeactivate(false);
         panel.setBecomesKeyOnlyIfNeeded(true);
         // SAFETY: the panel is owned by the tab for the life of the app.
@@ -682,12 +684,7 @@ impl Ghost {
         panel.setHasShadow(false);
         panel.setLevel(NSFloatingWindowLevel + 1);
         panel.setIgnoresMouseEvents(true);
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::IgnoresCycle
-                | NSWindowCollectionBehavior::FullScreenAuxiliary,
-        );
+        panel.setCollectionBehavior(panels::drag_ghost());
         // SAFETY: the panel is owned by the ghost and closed by it.
         unsafe { panel.setReleasedWhenClosed(false) };
         let view = NSView::initWithFrame(NSView::alloc(mtm), rect);
@@ -815,8 +812,9 @@ impl Pane {
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
         panel.setLevel(BELOW_WINDOWS);
-        // One Desktop (the one it is first ordered in on), never a full-screen app's Space.
-        panel.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
+        // One Desktop (the one it is first ordered in on), never a full-screen app's Space;
+        // hidden by Mission Control, App Exposé and Show Desktop, as Apple's strip is.
+        panel.setCollectionBehavior(panels::desktop_panel());
         panel.setHidesOnDeactivate(false);
         panel.setBecomesKeyOnlyIfNeeded(true);
         panel.setAcceptsMouseMovedEvents(true);
@@ -872,6 +870,7 @@ impl Pane {
             ordered_in: self.panel.isVisible(),
             on_active_space: self.panel.isOnActiveSpace(),
             shown: self.shown,
+            behavior: self.panel.collectionBehavior().0,
         }
     }
 }

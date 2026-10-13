@@ -103,10 +103,15 @@ pub struct StripConfig {
     pub order: StripOrder,
     /// Show the active stage as a card (fixed order only).
     pub show_active: bool,
+    /// Hide the strip while a wallpaper click shows the desktop (an option; Apple keeps it
+    /// shown, as the way back to a stage). It comes back on any window activation.
+    pub hide_while_desktop_shown: bool,
     /// How many cards show.
     pub capacity: CapacityRule,
     /// Thumbnail refresh interval.
     pub thumbnail_interval_ms: u64,
+    /// Capture window pictures (thumbnails, switch snapshots).
+    pub capture: bool,
 }
 
 /// `[cards]`: the look of each card.
@@ -282,6 +287,75 @@ pub struct StagesConfig {
     pub names: Vec<String>,
 }
 
+/// `[log] level`: how much the daily log keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogLevel {
+    /// Errors only.
+    Error,
+    /// Warnings and errors.
+    Warn,
+    /// The main events.
+    Info,
+    /// Every decision the app makes (the trial default).
+    #[default]
+    Debug,
+    /// Also per-move and per-frame detail.
+    Trace,
+}
+
+impl LogLevel {
+    /// The level named in the config (`"debug"`, …); anything else is the default.
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "error" => Self::Error,
+            "warn" => Self::Warn,
+            "info" => Self::Info,
+            "trace" => Self::Trace,
+            _ => Self::Debug,
+        }
+    }
+
+    /// The filter directives it stands for (`RUST_LOG` syntax): other crates stay at
+    /// `info` while ours are at `debug` or `trace`.
+    pub fn directives(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "info,stage_manager=debug",
+            Self::Trace => "info,stage_manager=trace",
+        }
+    }
+}
+
+/// `[log]`: the daily log's level and limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogConfig {
+    /// How much it keeps.
+    pub level: LogLevel,
+    /// Day files kept (today included).
+    pub days: u32,
+    /// A day's file cap, in MB.
+    pub max_mb_per_day: u64,
+    /// The folder's cap, in MB.
+    pub max_mb_total: u64,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Config::default().log
+    }
+}
+
+fn log_config(v: &Values) -> LogConfig {
+    LogConfig {
+        level: LogLevel::parse(v.text("log.level")),
+        days: v.int("log.days").clamp(1, 365) as u32,
+        max_mb_per_day: v.uint("log.max_mb_per_day"),
+        max_mb_total: v.uint("log.max_mb_total"),
+    }
+}
+
 /// The whole configuration, validated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -299,6 +373,8 @@ pub struct Config {
     pub stages: StagesConfig,
     /// Modifier sugar.
     pub sugar: SugarConfig,
+    /// The daily log.
+    pub log: LogConfig,
 }
 
 impl Default for Config {
@@ -544,6 +620,7 @@ impl Config {
             strip: StripConfig {
                 order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
                 show_active: v.flag("strip.show_active"),
+                hide_while_desktop_shown: v.flag("strip.hide_while_desktop_shown"),
                 capacity: CapacityRule {
                     fixed: v.count("strip.capacity"),
                     pitch: v.num("strip.capacity_pitch"),
@@ -552,6 +629,7 @@ impl Config {
                     max: v.count("strip.capacity_max"),
                 },
                 thumbnail_interval_ms: v.uint("strip.thumbnail_interval_ms"),
+                capture: v.flag("strip.capture"),
             },
             style: StripStyle {
                 level: match v.text("strip.level") {
@@ -656,6 +734,7 @@ impl Config {
                 launch_window_ms: v.uint("sugar.launch_window_ms"),
                 activation_window_ms: v.uint("sugar.activation_window_ms"),
             },
+            log: log_config(&v),
         };
         Ok(Parsed { config, warnings })
     }
@@ -886,10 +965,22 @@ mod tests {
         assert!(c.windows.minimize_to_strip);
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
         assert!(c.style.reorder, "invisible until a card is dragged");
+        assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         let a = &c.style.animation;
         assert!(a.enabled && (a.spring_stiffness, a.spring_damping, a.spring_mass) == (240.0, 31.0, 1.0));
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
+    }
+
+    #[test]
+    fn the_log_section_has_the_trial_defaults_and_parses() {
+        let c = Config::default().log;
+        assert_eq!(c, LogConfig { level: LogLevel::Debug, days: 14, max_mb_per_day: 100, max_mb_total: 500 });
+        assert_eq!(c.level.directives(), "info,stage_manager=debug");
+        let p = parse("[log]\nlevel = \"info\"\ndays = 3\nmax_mb_per_day = 5\nmax_mb_total = 0\n");
+        assert_eq!(p.config.log, LogConfig { level: LogLevel::Info, days: 3, max_mb_per_day: 5, max_mb_total: 1 });
+        assert_eq!(p.warnings.len(), 1, "max_mb_total clamped: {:?}", p.warnings);
+        assert!(Config::parse("[log]\nlevel = \"loud\"\n").is_err());
     }
 
     #[test]
@@ -916,6 +1007,7 @@ level = "above_windows"
 reorder = false
 show_active = true
 show_numbers = true
+hide_while_desktop_shown = true
 thumbnail_interval_ms = 2000
 capacity = 4
 
@@ -963,7 +1055,7 @@ unpark_at = 0.9
         assert!(!c.style.reorder);
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert_eq!(c.strip.order, StripOrder::Fixed);
-        assert!(c.strip.show_active && c.style.show_numbers);
+        assert!(c.strip.show_active && c.style.show_numbers && c.strip.hide_while_desktop_shown);
         assert_eq!(c.strip.thumbnail_interval_ms, 2000);
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 4);
         assert_eq!(c.style.cards.tilt, Auto::Value(30.0));

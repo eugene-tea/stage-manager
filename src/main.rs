@@ -2,6 +2,10 @@
 //!
 //! - `stage-manager` runs the menu bar app.
 //! - `stage-manager ctl <words...>` sends one command to the running app's ctl socket.
+//! - `stage-manager mark [NOTE...]` writes a problem mark into the day's log (through the
+//!   app, with a state dump; without it when the app is not running).
+//! - `stage-manager log summary [DATE]` prints a day's counts, marks, warnings and errors;
+//!   `log path [DATE]` prints its file.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
 //! - `stage-manager config --print-defaults | --explain <section.key> | --reference |
 //!   --check [file]` prints the commented default config, explains a key, prints README's
@@ -21,6 +25,10 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         #[cfg(target_os = "macos")]
         Some("ctl") => stage_manager::platform::ctl::run_client(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("mark") => stage_manager::platform::ctl::run_mark(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("log") => stage_manager::platform::logging::command(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("strip-demo") => stage_manager::ui::strip_demo::run(),
         Some("config") => {
@@ -44,7 +52,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
             );
             ExitCode::from(2)
         }
@@ -82,8 +90,8 @@ mod app {
     use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::fullscreen;
-    use stage_manager::platform::space_keys::{self, Direction, SpaceKey, SpaceView};
-    use stage_manager::platform::{guardian, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
+    use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
@@ -99,6 +107,9 @@ mod app {
         let secs = 2.0 + per_window * windows as f64;
         Duration::from_secs_f64(secs.clamp(4.0, 30.0))
     }
+
+    /// How long exit waits for window captures in flight (see [`capture::quiesce`]).
+    const CAPTURE_QUIESCE: Duration = Duration::from_secs(2);
 
     /// After a signal, the main thread gets the shutdown timeout plus this before the
     /// watcher thread unparks on its own.
@@ -120,8 +131,11 @@ mod app {
         settings: RawSettings,
         strip_visible: bool,
         config_error: Option<String>,
+        last_mark: Option<String>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
+        /// Window captures were refused when the menu was last drawn.
+        capture_refused: bool,
         display: Option<Display>,
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
@@ -150,6 +164,9 @@ mod app {
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
                 strip_visible: self.strip_visible,
                 config_error: self.config_error.clone(),
+                mark_shown: logging::verbose_now(),
+                last_mark: self.last_mark.clone(),
+                capture_refused: self.capture_refused,
             }
         }
 
@@ -170,6 +187,11 @@ mod app {
                     self.wm.send(WmCommand::Accessibility(now.accessibility));
                 }
                 self.permissions = now;
+                self.refresh_menu();
+            }
+            let refused = capture::refused();
+            if refused != self.capture_refused {
+                self.capture_refused = refused;
                 self.refresh_menu();
             }
             if let Some(settings) = native_settings::refresh() {
@@ -193,8 +215,9 @@ mod app {
 
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
-                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms } => {
+                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms, capture: on } => {
                     self.config_error = error;
+                    capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
                         strip::set_thumbnail_interval(thumbnail_interval_ms);
                         self.thumbnail_interval_ms = Some(thumbnail_interval_ms);
@@ -218,6 +241,8 @@ mod app {
                     open_url(PrivacyPane::Accessibility.url());
                 }
                 MenuAction::GrantScreenRecording => {
+                    // A user click: refused captures try again now.
+                    capture::retry_now();
                     permissions::request_screen_recording();
                     open_url(PrivacyPane::ScreenRecording.url());
                 }
@@ -228,6 +253,25 @@ mod app {
                     self.wm.send(WmCommand::ReloadConfig);
                 }
                 MenuAction::OpenConfig => open_config(),
+                MenuAction::MarkProblem => {
+                    // Off the main thread: the dumps come from the WM thread.
+                    let wm = self.wm.clone();
+                    let spawned = std::thread::Builder::new().name("mark".into()).spawn(move || {
+                        let reply = mark_problem(&wm, "");
+                        let at = reply["at"].as_str().map(str::to_string);
+                        DispatchQueue::main().exec_async(move || {
+                            with_app(|app| {
+                                if at.is_some() {
+                                    app.last_mark = at;
+                                }
+                                app.refresh_menu();
+                            })
+                        });
+                    });
+                    if let Err(e) = spawned {
+                        tracing::warn!("cannot mark a problem: {e}");
+                    }
+                }
                 MenuAction::Quit => quit(),
             }
         }
@@ -275,6 +319,8 @@ mod app {
             return;
         }
         safety::request_quit();
+        // No new window capture from here on; those in flight are waited for at exit.
+        capture::begin_shutdown();
         let timeout = shutdown_timeout(safety::registry_len());
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
         let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
@@ -302,8 +348,31 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        // A capture still in flight at exit makes macOS alert about screen access. Before the
+        // counts, so the captures it waits for are in them.
+        capture::quiesce(CAPTURE_QUIESCE);
+        logging::write_counts("quit");
         tracing::info!("bye");
         std::process::exit(code);
+    }
+
+    /// How long a problem mark waits for each of the WM thread's dumps.
+    const MARK_DUMP_WAIT: Duration = Duration::from_secs(3);
+
+    /// Writes a problem mark: the note, `ctl state` and `ctl dump` (each, or that the WM
+    /// thread did not answer: a hung WM thread is worth marking too) and the recent detailed
+    /// lines. Runs off the main thread.
+    fn mark_problem(wm: &WmHandle, note: &str) -> serde_json::Value {
+        let ask = |cmd: Command| {
+            wm.ctl(cmd, MARK_DUMP_WAIT)
+                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                .unwrap_or_else(|| "the WM thread did not answer".to_string())
+        };
+        let sections = [("state", ask(Command::State)), ("dump", ask(Command::Dump))];
+        match logging::write_mark(note, &sections) {
+            Ok(m) => json!({ "ok": true, "at": m.at, "file": m.file }),
+            Err(e) => ctl::error_reply(&e),
+        }
     }
 
     fn ctl_handler(wm: WmHandle) -> ctl::Handler {
@@ -317,6 +386,19 @@ mod app {
             Command::Quit => {
                 DispatchQueue::main().exec_async(quit);
                 json!({ "ok": true, "quitting": true })
+            }
+            Command::Mark(note) => {
+                let reply = mark_problem(&wm, &note);
+                let at = reply["at"].as_str().map(str::to_string);
+                if at.is_some() {
+                    DispatchQueue::main().exec_async(move || {
+                        with_app(|app| {
+                            app.last_mark = at;
+                            app.refresh_menu();
+                        })
+                    });
+                }
+                reply
             }
             Command::DebugMenuQuit => {
                 if std::env::var_os(TEST_ENV).is_none() {
@@ -380,6 +462,12 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugExpose { which } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");
+                }
+                debug_expose(which)
+            }
             Command::DebugDrag { points, shift, hold_ms } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
@@ -393,6 +481,26 @@ mod app {
                 .ctl(other, Duration::from_secs(4))
                 .unwrap_or_else(|| ctl::error_reply("WM thread did not answer")),
         })
+    }
+
+    /// `ctl debug-expose`: types Mission Control's own shortcut as the user's settings have
+    /// it (or Escape) at the HID tap. The test watches the window server for the outcome.
+    fn debug_expose(which: Option<Expose>) -> serde_json::Value {
+        let Some(which) = which else {
+            return match space_keys::post_plain(space_keys::ESCAPE_KEY) {
+                Ok(()) => {
+                    tracing::info!("debug-expose: Escape typed");
+                    json!({ "ok": true, "key": "escape" })
+                }
+                Err(e) => ctl::error_reply(&e),
+            };
+        };
+        let key = SpaceKey::read_expose(which);
+        if let Err(e) = space_keys::post(&key, false) {
+            return ctl::error_reply(&e);
+        }
+        tracing::info!(which = which.name(), key = key.describe(), "debug-expose: shortcut typed");
+        json!({ "ok": true, "which": which.name(), "key": key.describe(), "key_from_settings": key.from_settings })
     }
 
     /// The Space shown as the engine sees it.
@@ -455,7 +563,7 @@ mod app {
 
     /// Runs the menu bar app until Quit.
     pub fn run() -> ExitCode {
-        logging::init();
+        logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
         if let Some(home) = paths::custom_home() {
@@ -554,8 +662,10 @@ mod app {
             settings,
             strip_visible: true,
             config_error: None,
+            last_mark: None,
             hotkeys: None,
             thumbnail_interval_ms: None,
+            capture_refused: false,
             display: None,
             _workspace: workspace,
             _spaces: spaces,
@@ -601,6 +711,7 @@ mod app {
                     "pid": w.pid,
                     "layer": w.layer,
                     "onscreen": w.onscreen,
+                    "alpha": w.alpha,
                     "bounds": w.bounds,
                     "z": z.get(&w.id),
                 })
@@ -612,19 +723,31 @@ mod app {
     }
 
     /// `probe-screen`: the on-screen windows covering the whole main display (menu bar
-    /// included), as a full-screen app's Space shows one; pids and bounds only.
+    /// included), as a full-screen app's Space shows one (`covering`: layer 0; pids and
+    /// bounds only), and those above or below the windows' layer (`overlays`: the owner's
+    /// process name, never a window title; Mission Control and App Exposé show one of the
+    /// Dock's, the Mission Control check's sign that they are up).
     pub fn probe_screen() -> ExitCode {
         let display = desktop::cg_display_bounds().first().copied();
-        let covering: Vec<_> = display
-            .map(|d| {
-                windows::list_windows()
-                    .into_iter()
-                    .filter(|w| w.onscreen && w.layer == 0 && fullscreen::covers_display(w.bounds, d))
-                    .map(|w| json!({ "id": w.id, "pid": w.pid, "bounds": w.bounds }))
-                    .collect()
-            })
-            .unwrap_or_default();
-        println!("{}", json!({ "ok": display.is_some(), "display": display, "covering": covering }));
+        let list = windows::list_windows();
+        let over = |layer0: bool| -> Vec<serde_json::Value> {
+            display
+                .map(|d| {
+                    list.iter()
+                        .filter(|w| w.onscreen && (w.layer == 0) == layer0 && fullscreen::covers_display(w.bounds, d))
+                        .map(|w| {
+                            if layer0 {
+                                json!({ "id": w.id, "pid": w.pid, "bounds": w.bounds })
+                            } else {
+                                json!({ "id": w.id, "pid": w.pid, "owner": w.owner, "layer": w.layer, "alpha": w.alpha })
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let out = json!({ "ok": display.is_some(), "display": display, "covering": over(true), "overlays": over(false) });
+        println!("{out}");
         ExitCode::SUCCESS
     }
 
