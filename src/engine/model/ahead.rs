@@ -25,7 +25,17 @@
 //! ([`Model::arrive`]: a parked window found shown is parked again, a shown one found parked
 //! is brought back) covers a move macOS did not carry out on a Desktop not shown.
 
-use super::{Action, Home, Model, Observation, SpaceId, StageId, WindowId};
+use super::{Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowRole};
+
+/// What the platform knows of an app a Dock click is for, beyond the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AppFacts {
+    /// The app is hidden (⌘H).
+    pub hidden: bool,
+    /// The app has windows the model does not place (minimized, or on a Desktop not visited
+    /// since launch): where macOS goes then is not certain.
+    pub unplaced: bool,
+}
 
 /// A stage switch made on a Desktop before it was recognized, and what undoes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +94,49 @@ impl Model {
         let mut actions = self.switch_in(space, previous, stage, obs);
         actions.retain(|a| !matches!(a, Action::Raise { .. } | Action::Focus { .. }));
         Some((ahead, actions))
+    }
+
+    /// A Dock click on app `pid`: the window macOS will show on another Desktop, or why no
+    /// prediction is made. macOS switches Desktops only with "When switching to an
+    /// application, switch to a Space with open windows for the application" on, and only
+    /// when the app has no window on the Desktop shown; it shows the app's main window,
+    /// `ax_focused` (its focused window, asked now) when that waits on another Desktop, else
+    /// its frontmost window there in the window server's order (`z_order`, front to back,
+    /// every Desktop). On the safe side, no prediction for a hidden app or one with windows
+    /// the model does not place (`facts`).
+    pub fn dock_arrival(
+        &self,
+        pid: Pid,
+        facts: AppFacts,
+        ax_focused: Option<WindowId>,
+        z_order: &[WindowId],
+    ) -> Result<WindowId, &'static str> {
+        if !self.options.settings.switch_to_app_space {
+            return Err("\"switch to a Space with open windows for the application\" is off");
+        }
+        if facts.hidden {
+            return Err("the app is hidden");
+        }
+        if facts.unplaced {
+            return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
+        }
+        let mine: Vec<&super::WindowState> = self.windows.values().filter(|w| w.meta.pid == pid).collect();
+        if mine.iter().any(|w| w.sticky || self.is_shown_space(w.space)) {
+            return Err("the app has a window on the Desktop shown");
+        }
+        let elsewhere = |id: WindowId| {
+            self.resolve_standard(id)
+                .and_then(|s| self.windows.get(&s))
+                .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !self.is_shown_space(w.space))
+                .map(|w| w.meta.id)
+        };
+        if !mine.iter().any(|w| w.meta.role == WindowRole::Standard) {
+            return Err("the app has no managed window");
+        }
+        ax_focused
+            .and_then(elsewhere)
+            .or_else(|| z_order.iter().find_map(|id| elsewhere(*id)))
+            .ok_or("none of the app's windows is in the window server's order")
     }
 
     /// The predicted Desktop arrived with the stage arranged ahead still active: raises its

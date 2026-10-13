@@ -44,8 +44,9 @@
 //!   it. On a full-screen app's Space there is no strip and no stage changes; a Space change
 //!   during the full-screen animation waits for it to settle ([`crate::engine::fullscreen`]).
 //!   A Dock click, ⌘Tab or activation that lands on a window waiting in a stage of another
-//!   Desktop: that stage is arranged at the Space change notice, before the Desktop is
-//!   recognized, and the arrival is never animated ([`arrival`]).
+//!   Desktop: that stage is arranged at the Dock click itself (before the slide), else at the
+//!   Space change notice, before the Desktop is recognized; the arrival is never animated
+//!   ([`arrival`], [`super::dock`]).
 //! - **Wallpaper clicks**: a click on the wallpaper reveals the desktop: ours with "Click
 //!   wallpaper to reveal desktop" set to Only in Stage Manager, macOS's own with Always (the
 //!   default, also when the key is unset), never both ([`wallpaper_click`]); a double click
@@ -460,6 +461,8 @@ pub struct Controller {
     focus_replay: FocusReplay,
     /// The held window's Desktop, arranged before it was recognized ([`arrival`]).
     ahead: Option<arrival::AheadSent>,
+    /// A left mouse-down on an application item of the Dock, until its mouse-up.
+    dock_press: Option<super::dock::DockPress>,
     /// While set, a batch leaves the strip snapshot for later (`strip_dirty`): an arrival
     /// hands the strip one snapshot, in its final order.
     defer_present: bool,
@@ -576,6 +579,7 @@ impl Controller {
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             ahead: None,
+            dock_press: None,
             defer_present: false,
             absent: HashMap::new(),
             elsewhere: HashMap::new(),
@@ -1082,22 +1086,7 @@ impl Controller {
         let Some(m) = &self.model else { return };
         let current = space == m.current_space(m.main_display().id);
         let active = m.active_stage_in(space);
-        let cards = m
-            .strip_in(space)
-            .into_iter()
-            .map(|c| CardSnapshot {
-                stage: c.stage.0,
-                number: c.number,
-                name: c.name,
-                windows: c
-                    .windows
-                    .iter()
-                    .filter_map(|id| m.window(*id))
-                    .map(|w| CardWindow { id: w.meta.id.0, pid: w.meta.pid, frame: w.restore })
-                    .collect(),
-                apps: c.apps,
-            })
-            .collect();
+        let cards = cards_in(m, space);
         let dragged = self.drag.filter(|d| d.moving);
         // Only windows the window server shows: a hidden app's (⌘H) or a minimized window
         // never keeps the strip auto-hidden (R1-ui 2).
@@ -1140,6 +1129,7 @@ impl Controller {
             arrived: self.arrived_note.take(),
             space: space.0,
             fullscreen: current && self.fullscreen,
+            away: false,
         });
     }
 
@@ -1274,8 +1264,7 @@ impl Controller {
                     let predicted = self.predicted_space(id);
                     tracing::debug!(id, pid, settling = self.space_pending, elsewhere, unknown, predicted, "focus held until its Desktop is recognized");
                     self.focus_replay.hold(Wanted::Window { id: WindowId(id), pid }, now);
-                    let may_arrange = elsewhere && !self.frozen();
-                    self.after_hold(ob, now, may_arrange);
+                    self.after_hold(ob, now);
                     return;
                 }
                 if self.frozen() {
@@ -1329,7 +1318,7 @@ impl Controller {
                 if self.frozen() {
                     tracing::debug!(pid, "activation held until the Desktop is recognized");
                     self.focus_replay.hold(Wanted::App(pid), now);
-                    self.after_hold(ob, now, false);
+                    self.after_hold(ob, now);
                     return;
                 }
                 let obs = self.observe(ob);
@@ -1344,9 +1333,15 @@ impl Controller {
                         // Nothing to show here: macOS may be on its way to the app's window
                         // on another Desktop (its focus may have come first and be held).
                         self.focus_replay.hold(Wanted::App(pid), now);
-                        self.after_hold(ob, now, false);
+                        self.after_hold(ob, now);
+                    } else if actions.is_empty() && self.held_is_of(pid, now) {
+                        // The app's own activation, its window's focus held (either order):
+                        // that focus still says where the user goes (R5 2).
+                        tracing::debug!(pid, "activation of the app whose window focus is held; the focus stays held");
                     } else {
-                        tracing::info!(pid, "activated app lives in another stage; switching");
+                        if !actions.is_empty() {
+                            tracing::info!(pid, "activated app lives in another stage; switching");
+                        }
                         self.forget_held(ob);
                     }
                     self.execute_animated(ob, actions);
@@ -1469,6 +1464,8 @@ impl Controller {
         match event.kind {
             InputKind::MouseDown => {
                 tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
+                // A press on a Dock item: its click may take the user to another Desktop.
+                self.dock_pressed(event.at, now);
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
@@ -1494,6 +1491,8 @@ impl Controller {
                 }
             }
             InputKind::MouseUp => {
+                let modifiers = event.cmd || event.shift || event.other_modifiers;
+                self.dock_released(ob, event.at, modifiers, now);
                 self.press = None;
                 self.focus_after_press_done(ob);
                 let Some(drag) = self.drag.take() else { return };
@@ -1922,6 +1921,7 @@ impl Controller {
         let held_at = self.focus_replay.came(now);
         let held = self.focus_replay.take(now);
         let mut obs = self.observe(ob);
+        let ax_answer = obs.focused;
         if predicted.is_some() {
             obs.focused = predicted;
         }
@@ -1934,7 +1934,14 @@ impl Controller {
         }
         let since_input_ms = self.since_input_ms(now);
         let Some(m) = self.model.as_mut() else { return };
-        tracing::debug!(why, ax_focused = ?obs.focused.map(|f| f.0), ?held, "the window the Desktop was shown for");
+        tracing::debug!(
+            why,
+            ax_focused = ?obs.focused.map(|f| f.0),
+            ax_answer = ?ax_answer.map(|f| f.0),
+            predicted = ?predicted.map(|f| f.0),
+            ?held,
+            "the window the Desktop was shown for"
+        );
         let actions = m.bring_focus_forward(obs.focused, held, &obs);
         if !actions.is_empty() {
             tracing::info!(
@@ -2676,6 +2683,12 @@ impl Controller {
                 self.reload_config(ob);
                 json!({ "ok": self.config_error.is_none(), "error": self.config_error })
             }
+            Command::DebugDockClick { bundle } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
+                }
+                self.debug_dock_click(ob, &bundle)
+            }
             Command::DebugFrame { id, frame, only } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-frame needs STAGE_MANAGER_TEST=1" });
@@ -2881,6 +2894,25 @@ fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::
 
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
+}
+
+/// The strip's cards of `space`, in slot order.
+fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
+    m.strip_in(space)
+        .into_iter()
+        .map(|c| CardSnapshot {
+            stage: c.stage.0,
+            number: c.number,
+            name: c.name,
+            windows: c
+                .windows
+                .iter()
+                .filter_map(|id| m.window(*id))
+                .map(|w| CardWindow { id: w.meta.id.0, pid: w.meta.pid, frame: w.restore })
+                .collect(),
+            apps: c.apps,
+        })
+        .collect()
 }
 
 /// The windows on screen on the main display: [`on_screen`] minus those that show mostly on

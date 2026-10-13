@@ -11,6 +11,7 @@ pub mod capture_gate;
 pub mod controller;
 pub mod ctl;
 pub mod desktop;
+pub mod dock;
 pub mod guardian;
 pub mod hotkeys;
 pub mod input;

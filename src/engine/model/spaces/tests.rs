@@ -1241,6 +1241,54 @@ mod arranged_ahead {
         consistent(&mac);
     }
 
+    /// Desktop 1: the editor (window 1), the browser (2, active) and mail (5, parked);
+    /// Desktop 2 shown: the editor's window 3 and chat.
+    fn mail_parked_on_desktop_1() -> Mac {
+        let mut mac = two_desktops();
+        mac.put(0, 5, 40, "com.example.mail", "Inbox");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        assert!(mac.parked(5));
+        mac.focused = Some(w(3));
+        mac.go(1);
+        mac.elsewhere.clear();
+        mac
+    }
+
+    #[test]
+    fn a_dock_click_predicts_the_window_macos_will_show_on_another_desktop() {
+        use crate::engine::model::AppFacts;
+        let mac = mail_parked_on_desktop_1();
+        let none = AppFacts::default();
+        assert_eq!(mac.m.dock_arrival(40, none, None, &[w(4), w(5)]), Ok(w(5)), "its frontmost window, in the server's order");
+        assert_eq!(mac.m.dock_arrival(40, none, Some(w(5)), &[]), Ok(w(5)), "its focused window");
+        assert!(mac.m.dock_arrival(40, none, None, &[]).is_err(), "no order known: no guess");
+        assert!(mac.m.dock_arrival(10, none, Some(w(1)), &[w(1)]).is_err(), "a window on the Desktop shown: macOS stays");
+        assert!(mac.m.dock_arrival(99, none, None, &[]).is_err(), "not managed (not running)");
+        assert!(mac.m.dock_arrival(40, AppFacts { hidden: true, unplaced: false }, Some(w(5)), &[w(5)]).is_err(), "hidden");
+        assert!(mac.m.dock_arrival(40, AppFacts { hidden: false, unplaced: true }, Some(w(5)), &[w(5)]).is_err(), "unplaced windows");
+        let mut off = mac.m.clone();
+        off.set_settings(crate::engine::settings::NativeSettings { switch_to_app_space: false, ..Default::default() });
+        assert!(off.dock_arrival(40, none, Some(w(5)), &[w(5)]).is_err(), "switching to the app's Space is off");
+    }
+
+    #[test]
+    fn a_dock_click_arranges_the_desktop_the_slide_shows_and_the_arrival_confirms_it() {
+        let mut mac = mail_parked_on_desktop_1();
+        let window = mac.m.dock_arrival(40, Default::default(), Some(w(5)), &[]).expect("predicted");
+        let (ahead, actions) = mac.m.arrange_ahead(window, None).expect("arranged");
+        mac.run(actions);
+        assert!(!mac.parked(5) && mac.parked(2), "Desktop 1 arranged before it shows");
+        mac.shown = 0;
+        mac.focused = Some(w(5));
+        let at = arrival(&mut mac, Some(&ahead), Some(Wanted::Window { id: w(5), pid: 40 }));
+        assert!(moves(&at).is_empty(), "nothing moves at the arrival: {at:?}");
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage());
+        consistent(&mac);
+    }
+
     #[test]
     fn nothing_is_arranged_when_there_is_nothing_to_arrange_or_undo() {
         let (mut mac, _, browser) = editor_on_both();

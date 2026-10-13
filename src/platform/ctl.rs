@@ -8,7 +8,8 @@
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
-//! topmost), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! topmost), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
+//! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -130,6 +131,13 @@ pub enum Command {
         /// The region, global top-left coordinates.
         region: Option<Rect>,
     },
+    /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
+    /// click on it (the Dock-click prediction runs as for a real click), then presses it
+    /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
+    DebugDockClick {
+        /// The app's bundle id.
+        bundle: String,
+    },
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -246,6 +254,7 @@ impl Command {
                 };
                 Ok(Self::DebugFullscreen { id, on })
             }
+            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string() }),
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
@@ -453,6 +462,11 @@ mod tests {
         );
         assert!(Command::parse("debug-frame 7 200 300 800 600 raise").is_err());
         assert!(Command::parse("debug-frame 7 200 300 800").is_err());
+        assert_eq!(
+            Command::parse("debug-dock-click dev.example.app"),
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into() })
+        );
+        assert!(Command::parse("debug-dock-click").is_err());
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert_eq!(Command::parse("space"), Ok(Command::Space));
         assert_eq!(

@@ -97,6 +97,11 @@ pub struct NativeSettings {
     /// Widgets hidden on the desktop (`StandardHideWidgets = 1`). Not applicable; kept for
     /// display.
     pub hide_widgets_standard: bool,
+    /// "When switching to an application, switch to a Space with open windows for the
+    /// application" (Desktop & Dock → Mission Control; `com.apple.dock`
+    /// `workspaces-auto-swoosh`, absent = on): a Dock click on an app with no window on the
+    /// Desktop shown takes macOS to one that has one.
+    pub switch_to_app_space: bool,
 }
 
 impl Default for NativeSettings {
@@ -105,6 +110,9 @@ impl Default for NativeSettings {
         Self::from_values(&HashMap::new())
     }
 }
+
+/// The `com.apple.dock` key behind [`NativeSettings::switch_to_app_space`].
+pub const SWITCH_TO_APP_SPACE: &str = "workspaces-auto-swoosh";
 
 impl NativeSettings {
     /// Interprets raw `com.apple.WindowManager` values; missing keys take Apple's defaults.
@@ -125,6 +133,7 @@ impl NativeSettings {
             stage_manager_enabled: flag("GloballyEnabled"),
             hide_widgets_in_stage_manager: flag("StageManagerHideWidgets"),
             hide_widgets_standard: flag("StandardHideWidgets"),
+            switch_to_app_space: values.get(SWITCH_TO_APP_SPACE).is_none_or(|v| v.as_bool()),
         }
     }
 }
@@ -195,5 +204,14 @@ mod tests {
         assert!(!s.macos_reveals_desktop_outside_stage_manager, "written as a boolean by System Settings");
         let s = NativeSettings::from_values(&values(&[("EnableStandardClickToShowDesktop", PrefValue::Bool(true))]));
         assert!(s.macos_reveals_desktop_outside_stage_manager);
+    }
+
+    #[test]
+    fn switching_to_an_apps_space_is_on_unless_turned_off() {
+        assert!(NativeSettings::default().switch_to_app_space, "absent: on (Apple's default)");
+        let off = NativeSettings::from_values(&values(&[(SWITCH_TO_APP_SPACE, PrefValue::Bool(false))]));
+        assert!(!off.switch_to_app_space);
+        let on = NativeSettings::from_values(&values(&[(SWITCH_TO_APP_SPACE, PrefValue::Int(1))]));
+        assert!(on.switch_to_app_space);
     }
 }

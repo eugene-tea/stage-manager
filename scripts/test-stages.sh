@@ -11,8 +11,6 @@
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac
 #   scripts/test-stages.sh spaces --auto --dry-run   # preflight and planned steps only
-#   SM_ARRANGE_AT_FOCUS=1 scripts/test-stages.sh spaces --auto   # the app arranges a Desktop
-#                                          # at the held focus (round 6T; after the probe says yes)
 #   SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 #
 # Every app run uses STAGE_MANAGER_HOME=$TEST_HOME (default: a new /tmp/sm-test.* dir) and

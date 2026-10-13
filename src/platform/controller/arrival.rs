@@ -2,86 +2,76 @@
 //!
 //! A Dock click, ⌘Tab or an activation that lands on a window waiting in an inactive stage
 //! of another Desktop makes macOS slide that Desktop in; Apple's Stage Manager slides it in
-//! with that window's stage already active. The owner's log of 10-13 (VS Code with a window
-//! on each Desktop): the window's focus at +0 ms (held: its Desktop is not the one shown,
-//! [`crate::engine::focus_replay`]), the Space change notice at +4 ms, the Desktop
-//! recognized at +64 ms (every app's window list read again first), the switch sent at
-//! +80–86 ms, after the slide had begun: the Desktop came in with its previous stage and
-//! switched once it showed.
+//! with that window's stage already active. Every public notice of it comes at the **end**
+//! of the slide (measured 10-13: from an `open` activation the arriving Desktop's windows on
+//! screen from +90 ms, the leaving one's until +327 ms, the activation ~+324 ms, the Space
+//! change notice +346 ms; the owner's Dock click: the focus +419 ms and the notice +423 ms
+//! after the mouse-down). So the switch goes out as early as the facts allow
+//! ([`crate::engine::model::Model::arrange_ahead`]):
 //!
-//! So the switch goes out as early as the facts allow ([`crate::engine::model::Model::arrange_ahead`]):
-//!
-//! - **At the notice** (always): the window server already lists the held window on screen,
-//!   so its Desktop is the one sliding in. Its stage is arranged, and its strip redrawn in
-//!   its final order, before the window lists are read again: ~60–80 ms earlier than the
-//!   arrival's own switch. With no focus held yet (its event comes after the notice: the
-//!   WM thread handles the notice through to the recognition before it sees that event),
-//!   the frontmost app's focused window is asked for at once, with a short Accessibility
-//!   timeout; one waiting on the Desktop sliding in is held and arranged for the same way.
+//! - **At the Dock click** ([`crate::platform::dock`]): a click on an application item of
+//!   the Dock is the earliest sign of where the user goes. When macOS will switch Desktops
+//!   for it ([`crate::engine::model::Model::dock_arrival`]: "switch to a Space with open
+//!   windows for the application" on, the app with no window on the Desktop shown, its
+//!   windows all placed, not hidden), the window macOS will show (the app's focused window,
+//!   else its frontmost in the window server's order) has its Desktop arranged at once:
+//!   macOS carries out moves of windows on a Desktop not shown (the 6T probe, 10-13), and
+//!   that Desktop's own strip pane is redrawn in its final order. The window is held as its
+//!   focus would be. No Space change within [`DOCK_SWITCH_WAIT`] undoes it.
+//! - **At the notice**: an arrangement made at the click whose window the window server
+//!   does not list on the main screen now is undone (another Desktop slid in). With none,
+//!   when the held window, or with none held the activated (else frontmost) app's focused
+//!   window asked at once (a bounded Accessibility query), waits on the Desktop listed now,
+//!   its stage is arranged before every app's window list is read again.
 //! - **While a Space change settles** (a full-screen animation, an overview closing): a
 //!   focus held then is arranged for as soon as the window server lists its window, unless
-//!   a window covers the display or an overview shows.
-//! - **At the focus** ([`ARRANGE_AT_FOCUS`], off until the hands-free Spaces check proves
-//!   that macOS carries out moves of windows on a Desktop not shown): the stage is arranged
-//!   the moment the focus is held, before the slide.
+//!   a window of that Desktop covers the display or an overview shows.
 //!
 //! When the Desktop is recognized, the prediction is confirmed (the stage's windows raised,
 //! the window focused; nothing moves) or undone ([`crate::engine::model::Model::undo_ahead`]);
-//! another focus held instead, the user acting on the Desktop shown, a full-screen Space or
-//! no Space change within the hold ([`crate::engine::focus_replay::FOCUS_REPLAY_MAX`]) undo
+//! the user acting on the Desktop shown, a full-screen Space, or the hold running out undo
 //! it too; a focus held meanwhile undoes it only when it names another known window, or
 //! another app (an unknown window of the same app, a palette opening, does not). Every
-//! window an arrangement or an undo brings back stays in the safety registry until the
-//! window server shows it out of the park zone (macOS may not move a window of a Desktop
-//! not shown). At a confirmed arrival the predicted window counts as the focused one: an
-//! Accessibility answer still naming the previous app's window never switches back.
-//! The arrival's own switch, when nothing was arranged ahead, is part of the arrival's batch
-//! and never animated: the Desktop's slide is the motion (Apple's).
+//! window an arrangement made on a Desktop not shown, or an undo, brings back stays in the
+//! safety registry until the window server shows it out of the park zone. At a confirmed
+//! arrival the predicted window counts as the focused one (AX's own answer is logged beside
+//! it): an answer still naming the previous app's window never switches back. The arrival's
+//! own switch, when nothing was arranged ahead, is part of the arrival's batch and never
+//! animated: the Desktop's slide is the motion (Apple's).
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::{Controller, Unrestored, on_main_screen};
+use super::{Controller, Unrestored, cards_in, on_main_screen};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Action, Ahead, Observation, SpaceId, WindowId};
-use crate::platform::ax::AxElement;
+use crate::engine::model::{Action, Ahead, AppFacts, Observation, SpaceId, WindowId};
+use crate::platform::ax::{AxElement, names};
+use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::ParkedEntry;
 use crate::platform::windows::{self, CgWindow};
+use crate::ui::strip_model::{self, StripSnapshot};
 
-/// Arrange the Desktop at the held focus itself, before macOS shows it (round 6T step 3).
-/// Off until the hands-free Spaces check (`scripts/test-stages.sh spaces --auto`, its probe
-/// of a window frame set on a Desktop not shown) proves macOS carries such moves out; the
-/// arrangement at the Space change notice does not depend on it.
-/// `STAGE_MANAGER_ARRANGE_AT_FOCUS=1` (or `0`) overrides it for a run.
-pub const ARRANGE_AT_FOCUS: bool = false;
+/// The Accessibility timeout for asking an app its focused window on the way to a Desktop
+/// (at the notice, at a Dock click): an app busy with the switch must not hold it up. The
+/// app goes back to the global timeout right after ([`AxElement::bounded`]).
+const QUERY_AX_TIMEOUT_SECONDS: f32 = 0.05;
 
-/// [`ARRANGE_AT_FOCUS`], or the environment's word for this run.
-fn arrange_at_focus() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("STAGE_MANAGER_ARRANGE_AT_FOCUS").as_deref() {
-        Ok("1") => true,
-        Ok("0") => false,
-        _ => ARRANGE_AT_FOCUS,
-    })
-}
-
-/// The Accessibility timeout for asking the frontmost app its focused window at the
-/// notice: an app busy with the Space change must not hold the arrival up.
-const NOTICE_AX_TIMEOUT_SECONDS: f32 = 0.05;
+/// An arrangement made at a Dock click is undone when no Space change has come this long
+/// after it (the notice comes ~0.35–0.45 s after the click).
+pub const DOCK_SWITCH_WAIT: Duration = Duration::from_millis(1000);
 
 /// When a Desktop was arranged ahead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Trigger {
-    /// At the held focus, the Desktop not shown yet.
-    Focus,
+    /// At a click on the app's Dock item, the Desktop not shown yet.
+    DockClick,
     /// At the Space change notice, for the focus held before it.
     Notice,
-    /// At the Space change notice, for the frontmost app's focused window (its focus event
-    /// not seen yet).
+    /// At the Space change notice, for the app's focused window (its focus event not seen
+    /// yet).
     NoticeAx,
     /// While the Space change settles, for a focus held meanwhile.
     Settle,
@@ -90,11 +80,16 @@ pub(super) enum Trigger {
 impl Trigger {
     fn name(self) -> &'static str {
         match self {
-            Trigger::Focus => "focus",
+            Trigger::DockClick => "dock-click",
             Trigger::Notice => "notice",
             Trigger::NoticeAx => "notice-ax",
             Trigger::Settle => "settle",
         }
+    }
+
+    /// Arranged while its Desktop was not shown (its restores registered until seen).
+    fn away(self) -> bool {
+        self == Trigger::DockClick
     }
 }
 
@@ -105,10 +100,12 @@ pub(super) struct AheadSent {
     /// The window's app.
     pid: i32,
     trigger: Trigger,
-    /// When the focus it was arranged for came.
+    /// When the focus (or the click) it was arranged for came.
     focus_at: Instant,
     /// When the arrangement went out.
     sent_at: Instant,
+    /// Space changes notified before it went out.
+    changes_at: u64,
 }
 
 /// Milliseconds from `then` to `now`.
@@ -127,10 +124,12 @@ fn listed_for_arrival(list: &[CgWindow], id: u32, shown_main: &HashSet<u32>, mai
     list.iter().any(|w| w.id == id && w.layer == 0 && shown_main.contains(&w.id) && !fullscreen::covers_display(w.bounds, main))
 }
 
-/// True when a window on screen covers the whole display: a full-screen window, or the
-/// stand-in macOS shows while a window enters or leaves full screen.
-fn display_covered(list: &[CgWindow], main: Rect) -> bool {
-    list.iter().any(|w| w.onscreen && w.layer == 0 && fullscreen::covers_display(w.bounds, main))
+/// True when a window on screen covers the whole display (a full-screen window, or the
+/// stand-in macOS shows while a window enters or leaves full screen), leaving out the
+/// windows known to live on another Desktop than the arriving one (`elsewhere`: a zoomed
+/// window of the Desktop being left).
+fn display_covered(list: &[CgWindow], main: Rect, elsewhere: impl Fn(u32) -> bool) -> bool {
+    list.iter().any(|w| w.onscreen && w.layer == 0 && fullscreen::covers_display(w.bounds, main) && !elsewhere(w.id))
 }
 
 /// The app of the frontmost window on screen (layer 0) that is not ours (`own`).
@@ -161,6 +160,60 @@ fn listed_order(list: &[CgWindow], managed: impl Fn(WindowId) -> bool) -> Observ
     Observation { frames: Default::default(), z_order, focused: None }
 }
 
+/// What a focus held now does to the arrangement: undo it (`.0`: what is held contradicts
+/// one that stands), arrange for the held window (`.1`: a window focus held while a Space
+/// change settles, no overview showing, nothing standing after the undo).
+fn hold_step(contradicted: bool, ahead: bool, held_window: bool, pending: bool, overview: bool) -> (bool, bool) {
+    let undo = ahead && contradicted;
+    (undo, (!ahead || undo) && held_window && pending && !overview)
+}
+
+/// What the Space change notice does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeStep {
+    /// An overview shows: its list is not the Desktop's.
+    Nothing,
+    /// An arrangement stands and its window is listed on the main screen.
+    Keep,
+    /// An arrangement stands and its window is not listed: another Desktop slid in. Undone,
+    /// then as [`NoticeStep::Arrange`].
+    Undo,
+    /// None stands: look for one to make.
+    Arrange,
+}
+
+/// The notice's step: `overview` shows, `ahead_listed` is whether a standing arrangement's
+/// window is listed on the main screen (`None`: none stands).
+fn notice_step(overview: bool, ahead_listed: Option<bool>) -> NoticeStep {
+    match (overview, ahead_listed) {
+        (true, _) => NoticeStep::Nothing,
+        (false, Some(true)) => NoticeStep::Keep,
+        (false, Some(false)) => NoticeStep::Undo,
+        (false, None) => NoticeStep::Arrange,
+    }
+}
+
+/// Why an arrangement is undone at a tick, if it is: never while a Space change settles; one
+/// made at a Dock click with no Space change [`DOCK_SWITCH_WAIT`] after it; any other whose
+/// focus is no longer held (or what is held says otherwise).
+fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration, contradicted: bool) -> Option<&'static str> {
+    if pending {
+        None
+    } else if trigger == Trigger::DockClick && !changed && waited >= DOCK_SWITCH_WAIT {
+        Some("no Space change came after the Dock click")
+    } else if contradicted {
+        Some("its Desktop did not come")
+    } else {
+        None
+    }
+}
+
+/// True when forgetting a held focus also undoes the arrangement: never while a Space change
+/// settles (nobody acts on the Desktop shown then; stage commands are refused).
+fn forget_undoes(pending: bool) -> bool {
+    !pending
+}
+
 impl Controller {
     /// Milliseconds since the user's latest input, when it is recent (a Dock click, a key).
     pub(super) fn since_input_ms(&self, now: Instant) -> Option<u64> {
@@ -184,51 +237,53 @@ impl Controller {
         contradicts(self.focus_replay.peek(now), sent.ahead.window, sent.pid, |id| m.and_then(|m| m.resolve_standard(id)))
     }
 
-    /// A focus or activation was just held: an arrangement it contradicts is undone; a held
-    /// window's Desktop is arranged now while a Space change settles (as soon as the window
-    /// server lists the window), or with [`ARRANGE_AT_FOCUS`] at once (`may_arrange`: the
-    /// window waits on a Desktop not shown, nothing settling).
-    pub(super) fn after_hold(&mut self, ob: &Observer, now: Instant, may_arrange: bool) {
-        if self.ahead_contradicted(now) {
+    /// True when a held window focus should survive an activation of app `pid` that changed
+    /// nothing here (R5 2: macOS reports the focus and the activation in either order).
+    pub(super) fn held_is_of(&self, pid: i32, now: Instant) -> bool {
+        matches!(self.focus_replay.peek(now), Some(Wanted::Window { pid: p, .. }) if p == pid)
+    }
+
+    /// A focus or activation was just held ([`hold_step`]): an arrangement it contradicts is
+    /// undone; while a Space change settles, a held window's Desktop is arranged as soon as
+    /// the window server lists the window.
+    pub(super) fn after_hold(&mut self, ob: &Observer, now: Instant) {
+        let held = match self.focus_replay.peek(now) {
+            Some(Wanted::Window { id, .. }) => Some(id),
+            _ => None,
+        };
+        let overview = self.overview.showing().is_some() || self.overview.holds_arrival(now);
+        let (undo, arrange) =
+            hold_step(self.ahead_contradicted(now), self.ahead.is_some(), held.is_some(), self.space_pending, overview);
+        if undo {
             self.undo_ahead(ob, "another focus or activation came");
         }
-        if self.ahead.is_some() {
-            return;
-        }
-        let Some(Wanted::Window { id, .. }) = self.focus_replay.peek(now) else { return };
-        if self.space_pending {
-            let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
-            let list = windows::list_windows();
-            if self.overview.showing().is_some() || self.overview.holds_arrival(now) {
-                return;
-            }
-            if self.arrange_if_listed(ob, &list, main.frame, id, Trigger::Settle, now) {
-                // The Desktop sliding in shows its strip arranged too ([`Self::strip_space`]).
-                self.present();
-            }
-        } else if may_arrange && arrange_at_focus() {
-            let Some(standard) = self.model.as_ref().and_then(|m| m.resolve_standard(id)) else { return };
-            self.arrange_ahead(ob, standard, Trigger::Focus, now, None);
+        let (true, Some(id)) = (arrange, held) else { return };
+        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let list = windows::list_windows();
+        if self.arrange_if_listed(ob, &list, main.frame, id, Trigger::Settle, now) {
+            // The Desktop sliding in shows its strip arranged too ([`Self::strip_space`]).
+            self.present();
         }
     }
 
-    /// The Space change notice. An arrangement made at the focus whose window is not on
-    /// screen now (the user went elsewhere) is undone. Else, when the held window, or with
-    /// none held the frontmost app's focused window, waits on the Desktop the window server
-    /// lists now (the one sliding in), its stage is arranged now, before every app's window
-    /// list is read again and the Desktop recognized.
+    /// The Space change notice ([`notice_step`]). An arrangement whose window the window
+    /// server does not list on the main screen now is undone (another Desktop slid in).
+    /// With none, when the held window, or with none held the activated (else frontmost)
+    /// app's focused window, waits on the Desktop listed now (the one sliding in), its stage
+    /// is arranged before every app's window list is read again and the Desktop recognized.
     pub(super) fn arrange_at_notice(&mut self, ob: &mut Observer, now: Instant) {
         let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
         let list = windows::list_windows();
-        if self.look_for_overview(&list, main.frame, now) || self.overview.holds_arrival(now) {
-            return;
-        }
-        if let Some(sent) = &self.ahead {
-            let shown = on_main_screen(&list, main.frame);
-            if sent.trigger == Trigger::Focus && !listed_for_arrival(&list, sent.ahead.window.0, &shown, main.frame) {
+        let overview = self.look_for_overview(&list, main.frame, now) || self.overview.holds_arrival(now);
+        let shown = on_main_screen(&list, main.frame);
+        let listed = self.ahead.as_ref().map(|s| listed_for_arrival(&list, s.ahead.window.0, &shown, main.frame));
+        match notice_step(overview, listed) {
+            NoticeStep::Nothing | NoticeStep::Keep => return,
+            NoticeStep::Undo => {
+                // Then as with none: the Desktop that did slide in may be arranged now.
                 self.undo_ahead(ob, "its window is not on screen at the Space change notice");
             }
-            return;
+            NoticeStep::Arrange => {}
         }
         match self.focus_replay.peek(now) {
             Some(Wanted::Window { id, .. }) => {
@@ -244,9 +299,7 @@ impl Controller {
                     _ => front_pid(&list, std::process::id() as i32),
                 };
                 let Some(pid) = pid else { return };
-                let app = AxElement::application(pid);
-                let _ = app.set_messaging_timeout(NOTICE_AX_TIMEOUT_SECONDS);
-                let Some(id) = app.focused_window().ok().and_then(|w| w.window_id().ok()).map(WindowId) else { return };
+                let Some(id) = focused_window_of(pid) else { return };
                 if self.arrange_if_listed(ob, &list, main.frame, id, Trigger::NoticeAx, now) {
                     // Held as its focus event would have been (replayed on arrival).
                     self.focus_replay.hold(Wanted::Window { id, pid }, now);
@@ -256,16 +309,19 @@ impl Controller {
     }
 
     /// Arranges window `id`'s Desktop when the window waits on a Desktop not shown (for the
-    /// model) and the window server lists it on the main screen with nothing covering the
-    /// display; the stage left is saved in the list's order. True when arranged.
+    /// model) and the window server lists it on the main screen with no window of that
+    /// Desktop covering the display; the stage left is saved in the list's order. True when
+    /// arranged.
     fn arrange_if_listed(&mut self, ob: &Observer, list: &[CgWindow], main: Rect, id: WindowId, trigger: Trigger, now: Instant) -> bool {
         let Some(m) = self.model.as_ref() else { return false };
         if !m.waits_on_another_space(id) {
             return false;
         }
         let Some(standard) = m.resolve_standard(id) else { return false };
+        let target = m.space_of(standard);
+        let elsewhere = |w: u32| m.space_of(WindowId(w)).is_some_and(|s| Some(s) != target);
         let shown = on_main_screen(list, main);
-        if !listed_for_arrival(list, standard.0, &shown, main) || display_covered(list, main) {
+        if !listed_for_arrival(list, standard.0, &shown, main) || display_covered(list, main, elsewhere) {
             return false;
         }
         let obs = listed_order(list, |w| m.window(w).is_some());
@@ -273,18 +329,19 @@ impl Controller {
     }
 
     /// Arranges window `id`'s Desktop for it ([`crate::engine::model::Model::arrange_ahead`]);
-    /// at the focus (a Desktop not shown) the windows it brings back stay registered until
-    /// seen out of the park zone. True when arranged.
+    /// on a Desktop not shown the windows it brings back stay registered until seen out of
+    /// the park zone. True when arranged.
     fn arrange_ahead(&mut self, ob: &Observer, id: WindowId, trigger: Trigger, now: Instant, obs: Option<Observation>) -> bool {
         let focus_at = self.focus_replay.came(now).unwrap_or(now);
+        let changes_at = self.space_changes;
         let Some(m) = self.model.as_mut() else { return false };
         let pid = m.window(id).map(|w| w.meta.pid).unwrap_or_default();
         let Some((ahead, actions)) = m.arrange_ahead(id, obs.as_ref()) else {
-            tracing::debug!(id = id.0, trigger = trigger.name(), "nothing to arrange ahead for the held window");
+            tracing::debug!(id = id.0, trigger = trigger.name(), "nothing to arrange ahead for the window");
             return false;
         };
         let moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count();
-        if trigger == Trigger::Focus {
+        if trigger.away() {
             self.keep_registered(ob, &actions);
         }
         // The strip shows the Desktop being left until the arrival: its snapshot can wait.
@@ -303,8 +360,108 @@ impl Controller {
             since_input_ms = self.since_input_ms(sent),
             "arrival: the Desktop arranged ahead for the window it is shown for"
         );
-        self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent });
+        self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at });
         true
+    }
+
+    /// A left mouse-down at `p`: over an application item of the Dock, the press is kept
+    /// for its mouse-up ([`dock::is_click`]).
+    pub(super) fn dock_pressed(&mut self, p: crate::engine::geometry::Point, now: Instant) {
+        self.dock_press = None;
+        if self.model.is_none() || self.frozen() {
+            return;
+        }
+        let Some(dock) = dock::dock_pid() else { return };
+        if !dock::dock_under(&windows::list_windows(), p, dock) {
+            return;
+        }
+        let item = dock::item_at(dock, p);
+        tracing::debug!(x = p.x, y = p.y, item = ?item.as_ref().map(|i| &i.path), "dock: pressed");
+        self.dock_press = item.map(|item| DockPress { item, at: p, when: now });
+    }
+
+    /// A left mouse-up at `p` (`modifiers`: any of ⌘⌥⌃⇧ held): a click on the Dock item
+    /// pressed goes to [`Self::dock_clicked`].
+    pub(super) fn dock_released(&mut self, ob: &Observer, p: crate::engine::geometry::Point, modifiers: bool, now: Instant) {
+        let Some(press) = self.dock_press.take() else { return };
+        if dock::is_click(&press, p, now, modifiers) {
+            self.dock_clicked(ob, &press.item, now);
+        } else {
+            tracing::debug!(path = press.item.path, held_ms = ms(press.when, now), modifiers, "dock: a press, not a click; no prediction");
+        }
+    }
+
+    /// A click on `item` (an application item of the Dock), at `clicked`: when macOS will
+    /// take the user to another Desktop for it, that Desktop is arranged now
+    /// ([`crate::engine::model::Model::dock_arrival`]). Returns the window predicted.
+    pub(super) fn dock_clicked(&mut self, ob: &Observer, item: &DockItem, clicked: Instant) -> Option<WindowId> {
+        let started = Instant::now();
+        let why = match self.dock_prediction(ob, item) {
+            Ok((pid, window)) => {
+                if self.frozen() {
+                    "a Space change is settling"
+                } else if let Some(sent) = &self.ahead {
+                    if sent.ahead.window == window {
+                        return Some(window);
+                    }
+                    "another arrangement stands"
+                } else if self.arrange_ahead(ob, window, Trigger::DockClick, started, None) {
+                    self.focus_replay.hold(Wanted::Window { id: window, pid }, started);
+                    if let Some(space) = self.ahead_space() {
+                        self.present_away(space);
+                    }
+                    tracing::info!(
+                        path = item.path,
+                        window = window.0,
+                        since_click_ms = ms(clicked, Instant::now()),
+                        "dock: the Desktop the click goes to is arranged"
+                    );
+                    return Some(window);
+                } else {
+                    "its stage is already the one shown there"
+                }
+            }
+            Err(why) => why,
+        };
+        tracing::info!(path = item.path, why, since_click_ms = ms(clicked, Instant::now()), "dock: no prediction");
+        None
+    }
+
+    /// The app a Dock item is for and the window macOS will show for it on another
+    /// Desktop, or why there is no prediction.
+    fn dock_prediction(&self, ob: &Observer, item: &DockItem) -> Result<(i32, WindowId), &'static str> {
+        let m = self.model.as_ref().ok_or("not managing")?;
+        let bundle = dock::bundle_id_at(&item.path).ok_or("the item's bundle has no id")?;
+        let pid = match ob.pids_with_bundle(&bundle)[..] {
+            [] => return Err("the app is not running (or not managed)"),
+            [pid] => pid,
+            _ => return Err("several instances of the app run"),
+        };
+        let app = AxElement::application(pid);
+        let hidden = app.bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()).unwrap_or(true);
+        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
+        let z: Vec<WindowId> = windows::list_windows().iter().filter(|w| w.pid == pid && w.layer == 0).map(|w| WindowId(w.id)).collect();
+        let focused = focused_window_of(pid);
+        let window = m.dock_arrival(pid, AppFacts { hidden, unplaced }, focused, &z)?;
+        tracing::debug!(bundle, pid, ax_focused = ?focused.map(|f| f.0), window = window.0, "dock: the window macOS will show");
+        Ok((pid, window))
+    }
+
+    /// Redraws the pane of `space`, a Desktop not shown (arranged ahead at a Dock click, or
+    /// that arrangement undone), with its cards, so it slides in as it is.
+    fn present_away(&mut self, space: SpaceId) {
+        let Some(m) = self.model.as_ref() else { return };
+        if m.current_space(m.main_display().id) == space {
+            return;
+        }
+        strip_model::present(StripSnapshot {
+            cards: cards_in(m, space),
+            active_stage: m.active_stage_in(space).map(|s| s.0),
+            style: self.style.clone(),
+            space: space.0,
+            away: true,
+            ..StripSnapshot::default()
+        });
     }
 
     /// A Desktop was recognized (`arrived`): an arrangement made ahead is confirmed (its
@@ -354,13 +511,19 @@ impl Controller {
         );
         self.keep_registered(ob, &actions);
         self.execute(ob, actions);
+        if sent.trigger == Trigger::DockClick {
+            // The focus held for the click was the prediction's: it goes with it.
+            if matches!(self.focus_replay.peek(Instant::now()), Some(Wanted::Window { id, .. }) if id == sent.ahead.window) {
+                self.focus_replay.clear();
+            }
+            self.present_away(sent.ahead.space);
+        }
     }
 
     /// Forgets a held focus (the user acted on the Desktop shown) and undoes what was
-    /// arranged ahead for it. While a Space change settles nobody acts on the Desktop shown
-    /// (stage commands are refused then): the arrangement stays.
+    /// arranged ahead for it ([`forget_undoes`]).
     pub(super) fn forget_held(&mut self, ob: &Observer) {
-        if self.space_pending {
+        if !forget_undoes(self.space_pending) {
             return;
         }
         self.focus_replay.clear();
@@ -369,11 +532,13 @@ impl Controller {
         }
     }
 
-    /// About every tick: an arrangement made ahead whose focus is no longer held (or what is
-    /// held says otherwise) and whose Desktop never came (no Space change settling) is undone.
+    /// About every tick: an arrangement whose Desktop did not come is undone ([`expire_step`]).
     pub(super) fn expire_ahead(&mut self, ob: &Observer, now: Instant) {
-        if self.ahead.is_some() && !self.space_pending && self.ahead_contradicted(now) {
-            self.undo_ahead(ob, "its Desktop did not come");
+        let Some(sent) = &self.ahead else { return };
+        let changed = self.space_changes != sent.changes_at;
+        let waited = now.saturating_duration_since(sent.sent_at);
+        if let Some(why) = expire_step(sent.trigger, self.space_pending, changed, waited, self.ahead_contradicted(now)) {
+            self.undo_ahead(ob, why);
         }
     }
 
@@ -389,6 +554,33 @@ impl Controller {
             self.unrestored.insert(id.0, Unrestored { entry, tries: 0 });
         }
     }
+
+    /// `debug-dock-click BUNDLE` (test only): the Dock item of a `STAGE_MANAGER_ONLY` app
+    /// goes through [`Self::dock_clicked`] exactly as a click on it does, then is pressed
+    /// (`AXPress`, which activates the app as a click does, the Dock auto-hidden or not).
+    pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
+        let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
+        if !only.split(',').any(|b| b.trim() == bundle) {
+            return serde_json::json!({ "ok": false, "error": format!("{bundle} is not on the STAGE_MANAGER_ONLY list") });
+        }
+        let Some(dock) = dock::dock_pid() else { return serde_json::json!({ "ok": false, "error": "the Dock does not run" }) };
+        let Some((element, item)) = dock::item_for_bundle(dock, bundle) else {
+            return serde_json::json!({ "ok": false, "error": format!("no Dock item for {bundle}") });
+        };
+        let clicked = Instant::now();
+        let predicted = self.dock_clicked(ob, &item, clicked);
+        let pressed = element.bounded(QUERY_AX_TIMEOUT_SECONDS * 4.0, |e| e.perform_action(names::PRESS));
+        tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
+        serde_json::json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })
+    }
+}
+
+/// App `pid`'s focused window, asked with a bounded timeout (the app goes back to the global
+/// one after).
+fn focused_window_of(pid: i32) -> Option<WindowId> {
+    AxElement::application(pid)
+        .bounded(QUERY_AX_TIMEOUT_SECONDS, |app| app.focused_window().ok().and_then(|w| w.window_id().ok()))
+        .map(WindowId)
 }
 
 #[cfg(test)]
@@ -420,8 +612,9 @@ mod tests {
         assert!(!listed_for_arrival(&list, 3, &on, MAIN), "covering the display: a full-screen Space");
         assert!(!listed_for_arrival(&list, 4, &on, MAIN), "not a window's layer");
         assert!(!listed_for_arrival(&list, 9, &on, MAIN), "not listed");
-        assert!(display_covered(&list, MAIN), "a full-screen window or stand-in");
-        assert!(!display_covered(&list[..2], MAIN));
+        assert!(display_covered(&list, MAIN, |_| false), "a full-screen window or stand-in");
+        assert!(!display_covered(&list[..2], MAIN, |_| false));
+        assert!(!display_covered(&list, MAIN, |id| id == 3), "a zoomed window of the Desktop being left (R5 5)");
     }
 
     #[test]
@@ -450,6 +643,45 @@ mod tests {
         assert!(contradicts(held(42, 20), window, 10, resolve), "an unknown window of another app");
         assert!(contradicts(Some(Wanted::App(20)), window, 10, resolve), "another app");
         assert!(contradicts(None, window, 10, resolve), "nothing held any more: the hold expired");
+    }
+
+    #[test]
+    fn a_focus_held_while_a_change_settles_is_arranged_for_unless_an_overview_shows() {
+        // (contradicted, ahead, held window, pending, overview) -> (undo, arrange)
+        assert_eq!(hold_step(false, false, true, true, false), (false, true), "settling: arranged");
+        assert_eq!(hold_step(false, false, true, false, false), (false, false), "no change settling: at the notice");
+        assert_eq!(hold_step(false, false, true, true, true), (false, false), "an overview: its list is not the Desktop's");
+        assert_eq!(hold_step(false, false, false, true, false), (false, false), "an activation alone");
+        assert_eq!(hold_step(false, true, true, true, false), (false, false), "the same window: the arrangement stands");
+        assert_eq!(hold_step(true, true, true, true, false), (true, true), "another window: undone, then arranged for it");
+        assert_eq!(hold_step(true, true, false, false, false), (true, false), "another app's activation: undone");
+    }
+
+    #[test]
+    fn the_notice_undoes_an_arrangement_whose_window_is_not_listed() {
+        assert_eq!(notice_step(false, Some(false)), NoticeStep::Undo, "another Desktop slid in (L3, every trigger)");
+        assert_eq!(notice_step(false, Some(true)), NoticeStep::Keep);
+        assert_eq!(notice_step(false, None), NoticeStep::Arrange);
+        assert_eq!(notice_step(true, Some(false)), NoticeStep::Nothing, "an overview's list proves nothing");
+    }
+
+    #[test]
+    fn nothing_acting_while_a_change_settles_keeps_the_arrangement() {
+        // V4: refused hotkeys and strip input never reach `forget_held`; it keeps it anyway.
+        assert!(!forget_undoes(true));
+        assert!(forget_undoes(false));
+    }
+
+    #[test]
+    fn a_dock_click_with_no_space_change_after_it_is_undone() {
+        let ms = Duration::from_millis;
+        let dock = Trigger::DockClick;
+        assert_eq!(expire_step(dock, false, false, ms(400), false), None, "the slide is under way");
+        assert!(expire_step(dock, false, false, DOCK_SWITCH_WAIT, false).is_some(), "no Space change in a second");
+        assert_eq!(expire_step(dock, false, true, ms(1500), false), None, "the change came: the arrival decides");
+        assert_eq!(expire_step(dock, true, false, ms(1500), true), None, "never while a change settles");
+        assert!(expire_step(Trigger::Notice, false, true, ms(10), true).is_some(), "the hold is gone");
+        assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), false), None);
     }
 
     #[test]

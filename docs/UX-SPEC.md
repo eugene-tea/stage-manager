@@ -296,11 +296,31 @@ Ours:
   the notice (50 ms Accessibility timeout); a focus held while a change settles is
   arranged for as soon as the window server lists its window. Without a held window the arrival's switch is part of the arrival's own
   batch, and the strip gets one snapshot for it. Either way the arriving strip is laid out
-  at once (no glide, no fade). Whether moves of a Desktop's windows sent before the slide (at the
-  focus) show during it depends on whether macOS carries out moves on a Desktop not shown;
-  the hands-free Spaces check probes it (`ctl debug-frame … only` on a Desktop 1 window
-  from Desktop 2) and samples the window server through the slide. The arrangement at the
-  focus (`STAGE_MANAGER_ARRANGE_AT_FOCUS=1`, off by default) waits for that proof. A wrong
+  at once (no glide, no fade).
+- Measured live on 10-13 (the hands-free Spaces check): macOS carries out moves of windows
+  on a Desktop not shown (a window of Desktop 1 moved 40 pt while Desktop 2 showed), and
+  every public notice of a Dock arrival comes at the **end** of the slide: from an `open`
+  activation the arriving Desktop's windows were on screen from +90 ms and the leaving
+  one's until +327 ms; the activation ~+324 ms, the notice +346 ms, the arrangement +363 ms,
+  the recognition +399 ms; the stage left showed through the whole slide. The owner's Dock
+  click: the focus +419 ms and the notice +423 ms after the mouse-down. So the notice
+  arranges too late to be seen, and the arrival is arranged **at the Dock click** (round
+  6U): a left mouse-down over the Dock's own window is hit-tested through public
+  Accessibility (`AXUIElementCopyElementAtPosition` on the Dock, an `AXDockItem` of
+  subrole `AXApplicationDockItem`, its `AXURL` the app); let go over the same item soon
+  (under 0.6 s, the Dock's menu comes on a held press) and without moving (6 pt) or a
+  modifier, it is a click. When macOS will switch Desktops for it ("When switching to an
+  application, switch to a Space with open windows for the application" on,
+  `com.apple.dock` `workspaces-auto-swoosh`, absent = on; the app running, with no window
+  on the Desktop shown, none unplaced, not hidden: on the safe side, no prediction when
+  unsure), the window macOS will show (the app's focused window when it waits on another
+  Desktop, else its frontmost there in the window server's order) has its Desktop arranged
+  at once, through the cached Accessibility elements of that Desktop's windows, and its
+  strip pane redrawn in its final order: the Desktop slides in arranged. No Space change
+  within 1 s of the click undoes it. ⌘Tab keeps the notice's arrangement for now: no
+  public notice names the app chosen before its activation; the switcher is drawn by the
+  Dock, and whether its Accessibility tree exposes the selected app while ⌘ is held (to
+  read at the ⌘ release) has not been looked at live. A wrong
   prediction (another Desktop recognized, the user acting on the Desktop shown, another
   known window or another app focused, a full-screen Space, no Space change within the
   hold, the window not on screen at the notice) gives the Desktop back

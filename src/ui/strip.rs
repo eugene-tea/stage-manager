@@ -1070,6 +1070,10 @@ impl Strip {
     // -- snapshots ------------------------------------------------------------------------
 
     fn present(&mut self, snapshot: StripSnapshot) {
+        if snapshot.away {
+            self.present_away(snapshot);
+            return;
+        }
         if snapshot.style != self.style {
             self.style = snapshot.style.clone();
             // The reveal's delays are no part of the geometry: a new `[reveal]` (the config
@@ -1166,6 +1170,35 @@ impl Strip {
         self.update_visibility();
         self.update_targets();
         self.publish_panel();
+    }
+
+    /// The cards of a Desktop not shown (`snapshot.away`): its pane, when it has one, is laid
+    /// out with them at once; the pane shown, its snapshot, layouts and published card frames
+    /// stay as they are.
+    fn present_away(&mut self, snapshot: StripSnapshot) {
+        let Some(i) = self.others.iter().position(|p| p.placed && p.space == snapshot.space) else {
+            tracing::debug!(space = snapshot.space, "strip: no pane on that Desktop yet; it is drawn on arrival");
+            return;
+        };
+        std::mem::swap(&mut self.pane, &mut self.others[i]);
+        let shown_snapshot = std::mem::replace(&mut self.snapshot, snapshot);
+        let layouts = std::mem::take(&mut self.layouts);
+        let logged = std::mem::take(&mut self.logged_order);
+        let card_drag = self.card_drag.take();
+        let hovered = self.hovered.take();
+        let drop_over = std::mem::replace(&mut self.drop_over, false);
+        self.instant = true;
+        self.layout_cards(false);
+        self.instant = false;
+        tracing::debug!(space = self.snapshot.space, order = ?self.logged_order, "strip: the arriving Desktop's pane arranged ahead");
+        self.drop_over = drop_over;
+        self.hovered = hovered;
+        self.card_drag = card_drag;
+        self.logged_order = logged;
+        self.layouts = layouts;
+        self.snapshot = shown_snapshot;
+        std::mem::swap(&mut self.pane, &mut self.others[i]);
+        self.publish_cards();
     }
 
     // -- panes ----------------------------------------------------------------------------

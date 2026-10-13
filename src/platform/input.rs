@@ -53,6 +53,8 @@ pub struct InputEvent {
     pub shift: bool,
     /// Command held.
     pub cmd: bool,
+    /// Option or Control held (a Dock click with either is no plain activation).
+    pub other_modifiers: bool,
     /// For a mouse event, macOS's click count: 2 for the second click of a double click
     /// (within the user's double-click interval, near the first), 1 for a single click; 0
     /// for a key.
@@ -117,6 +119,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
             at: point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)),
             shift: flags.contains(NSEventModifierFlags::Shift),
             cmd: flags.contains(NSEventModifierFlags::Command),
+            other_modifiers: flags.intersects(NSEventModifierFlags::Option | NSEventModifierFlags::Control),
             clicks,
             key,
         });
@@ -451,7 +454,7 @@ mod tests {
     }
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
-        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, clicks, key }
+        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, clicks, key }
     }
 
     #[test]

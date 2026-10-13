@@ -67,6 +67,10 @@ pub struct StripSnapshot {
     /// The incoming windows of this transition are in place, at these frames as read back
     /// from the windows (global, top-left): their snapshots land exactly there.
     pub arrived: Option<(u64, Vec<(u32, Rect)>)>,
+    /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
+    /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
+    /// in arranged; the strip shown is untouched.
+    pub away: bool,
 }
 
 /// A switch (or reveal, merge, drop, Cmd-M) about to happen, announced before any window

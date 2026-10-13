@@ -1,7 +1,8 @@
 //! Apple's Stage Manager settings (`com.apple.WindowManager`), the source of truth wherever
-//! they exist. Read with `CFPreferencesAppSynchronize` + `CFPreferencesCopyAppValue`,
-//! re-read every 2 s by the main thread, and exposed as raw `key → i64` values for the
-//! engine to interpret.
+//! they exist, and the one Dock setting that decides whether a Dock click changes Desktops
+//! (`com.apple.dock` `workspaces-auto-swoosh`). Read with `CFPreferencesAppSynchronize` +
+//! `CFPreferencesCopyAppValue` (never written), re-read every 2 s by the main thread, and
+//! exposed as raw `key → i64` values for the engine to interpret.
 
 use std::collections::BTreeMap;
 use std::sync::RwLock;
@@ -27,19 +28,32 @@ pub const KEYS: [&str; 7] = [
     "EnableStandardClickToShowDesktop",
 ];
 
+/// The Dock's domain, for [`DOCK_KEYS`].
+pub const DOCK_DOMAIN: &str = "com.apple.dock";
+
+/// Every key read from [`DOCK_DOMAIN`] ("When switching to an application, switch to a Space
+/// with open windows for the application").
+pub const DOCK_KEYS: [&str; 1] = [crate::engine::settings::SWITCH_TO_APP_SPACE];
+
 /// Raw values: key → integer (booleans as 0/1). A missing key means "macOS default".
 pub type RawSettings = BTreeMap<String, i64>;
 
 static CURRENT: RwLock<RawSettings> = RwLock::new(BTreeMap::new());
 
-/// Reads every key in [`KEYS`] fresh from disk.
+/// Reads every key in [`KEYS`] and [`DOCK_KEYS`] fresh from disk.
 pub fn read() -> RawSettings {
-    let domain = CFString::from_static_str(DOMAIN);
-    CFPreferencesAppSynchronize(&domain);
     let mut out = RawSettings::new();
-    for key in KEYS {
+    read_domain(DOMAIN, &KEYS, &mut out);
+    read_domain(DOCK_DOMAIN, &DOCK_KEYS, &mut out);
+    out
+}
+
+fn read_domain(domain: &'static str, keys: &[&'static str], out: &mut RawSettings) {
+    let cf_domain = CFString::from_static_str(domain);
+    CFPreferencesAppSynchronize(&cf_domain);
+    for &key in keys {
         let cf_key = CFString::from_static_str(key);
-        let Some(value) = CFPreferencesCopyAppValue(&cf_key, &domain) else { continue };
+        let Some(value) = CFPreferencesCopyAppValue(&cf_key, &cf_domain) else { continue };
         if let Some(b) = value.downcast_ref::<CFBoolean>() {
             out.insert(key.to_string(), i64::from(b.as_bool()));
         } else if let Some(n) = value.downcast_ref::<CFNumber>() {
@@ -47,10 +61,9 @@ pub fn read() -> RawSettings {
                 out.insert(key.to_string(), v);
             }
         } else {
-            tracing::debug!(key, "com.apple.WindowManager value has an unexpected type; ignored");
+            tracing::debug!(domain, key, "preference value has an unexpected type; ignored");
         }
     }
-    out
 }
 
 /// The last values read by [`refresh`].
@@ -81,6 +94,7 @@ pub fn apple_stage_manager_enabled(settings: &RawSettings) -> bool {
 pub fn describe_changes(old: &RawSettings, new: &RawSettings) -> Vec<String> {
     let show = |v: Option<&i64>| v.map_or_else(|| "unset".to_string(), |v| v.to_string());
     KEYS.iter()
+        .chain(DOCK_KEYS.iter())
         .filter(|k| old.get(**k) != new.get(**k))
         .map(|k| format!("{k}: {} → {}", show(old.get(*k)), show(new.get(*k))))
         .collect()
@@ -112,6 +126,6 @@ mod tests {
     #[test]
     fn reading_the_real_domain_returns_known_keys_only() {
         let raw = read();
-        assert!(raw.keys().all(|k| KEYS.contains(&k.as_str())));
+        assert!(raw.keys().all(|k| KEYS.contains(&k.as_str()) || DOCK_KEYS.contains(&k.as_str())));
     }
 }
