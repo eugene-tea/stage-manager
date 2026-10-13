@@ -273,7 +273,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `reveal.edge_tab` | `false` | true or false | Show a slim tab at the left edge while a window hides the strip (an extension). |
 | `reveal.launch_reveal` | `false` | true or false | Show a covered strip for a moment at launch (an extension). |
 | `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |
-| `drag.threshold` | `4.0` | number, 0 to 100 | A press that moves farther than this (points) drags the card; less is a click. |
+| `drag.threshold` | `5.0` | number, 0 to 100 | A press that moves farther than this (points, at least 5) drags the card; less is a click. |
 | `drag.grow_distance` | `260.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance. |
 | `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
 | `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip. |

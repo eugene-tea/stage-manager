@@ -10,7 +10,10 @@
 //! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen. `space` (any time) is the Space shown as the engine sees it.
+//! screen, `debug-strip` tells what the strip draws this frame (cards in slot order, each
+//! card's front thumbnail and icons where they are drawn, the lifted card) and
+//! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
+//! read back from a capture of our own overlay window. `space` (any time) is the Space shown as the engine sees it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -104,6 +107,14 @@ pub enum Command {
         /// In (true) or out (false).
         on: bool,
     },
+    /// What the strip draws this frame (needs `STAGE_MANAGER_TEST=1`).
+    DebugStrip,
+    /// Where the motion overlay draws, read back from its pixels, within a global region
+    /// when given (needs `STAGE_MANAGER_TEST=1`).
+    DebugOverlay {
+        /// The region, global top-left coordinates.
+        region: Option<Rect>,
+    },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -177,6 +188,12 @@ impl Command {
             ["debug-space", dir, rest @ ..] if rest.is_empty() || rest == ["numpad"] => {
                 let direction = Direction::parse(dir).ok_or_else(|| format!("expected left or right, got {dir:?}"))?;
                 Ok(Self::DebugSpace { direction, numpad: !rest.is_empty() })
+            }
+            ["debug-strip"] => Ok(Self::DebugStrip),
+            ["debug-overlay"] => Ok(Self::DebugOverlay { region: None }),
+            ["debug-overlay", x, y, w, h] => {
+                let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
+                Ok(Self::DebugOverlay { region: Some(Rect::new(n(x)?, n(y)?, n(w)?, n(h)?)) })
             }
             ["debug-fullscreen", id, on] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;

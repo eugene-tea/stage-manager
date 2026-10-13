@@ -7,16 +7,25 @@
 //! one container whose eye is the strip's eye, so a ghost turned like a card and placed on a
 //! card's thumbnail looks exactly like that thumbnail, and a flat ghost at a window's frame
 //! looks exactly like the window.
+//!
+//! **Coordinates.** Planes are given top-left (global minus [`Overlay::origin`]); the
+//! overlay's view is flipped ([`OverlayView`]), which is what keeps its root layer top-down.
+//! A plain `NSView` hosting a layer marked `geometryFlipped` does not: AppKit resets the flag
+//! to the view's own (unflipped) geometry, and every ghost was drawn mirrored about the
+//! display's middle (measured 10-12: a layer at the top-left of a plain view rendered at the
+//! bottom-left; with a flipped view at the top-left). Windows near the middle landed "close";
+//! a card's snapshot shrank into the mirrored slot; a dragged window's card moved opposite the
+//! pointer.
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::MainThreadOnly;
+use objc2::{MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSPanel, NSStatusWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{MainThreadMarker, NSNumber, NSPoint, NSRect, NSSize, NSString, NSValue};
+use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue};
 use objc2_quartz_core::{
     CALayer, CAMediaTiming, CASpringAnimation, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
     kCAGravityResize,
@@ -162,6 +171,33 @@ impl Ghost {
     }
 }
 
+define_class!(
+    // SAFETY: NSView has no subclassing requirements; OverlayView does not implement Drop.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SMOverlayView"]
+    pub struct OverlayView;
+
+    // SAFETY: NSObjectProtocol has no safety requirements.
+    unsafe impl NSObjectProtocol for OverlayView {}
+
+    impl OverlayView {
+        // SAFETY: the signature matches NSView's.
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+    }
+);
+
+impl OverlayView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: NSView's designated initializer on a fresh instance.
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 /// The overlay's panel: click-through, transparent, above every window.
 fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
@@ -191,7 +227,7 @@ fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
 /// The overlay panel and its perspective container.
 pub struct Overlay {
     panel: Retained<NSPanel>,
-    view: Retained<NSView>,
+    view: Retained<OverlayView>,
     root: Retained<CALayer>,
     space: Retained<CALayer>,
     /// The overlay's top-left corner, global coordinates.
@@ -204,7 +240,8 @@ impl Overlay {
     pub fn new(mtm: MainThreadMarker) -> Self {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0));
         let panel = make_panel(mtm, rect);
-        let view = NSView::initWithFrame(NSView::alloc(mtm), rect);
+        // Flipped, so its root layer stays top-down (see the module notes).
+        let view = OverlayView::new(mtm, rect);
         let root = CALayer::new();
         root.setGeometryFlipped(true);
         view.setLayer(Some(&root));
@@ -221,6 +258,8 @@ impl Overlay {
         if self.panel.frame() != frame {
             self.panel.setFrame_display(frame, false);
         }
+        // The frame the panel really has (AppKit may constrain a window's frame).
+        let frame = self.panel.frame();
         self.origin = Point::new(frame.origin.x, primary_height - (frame.origin.y + frame.size.height));
         let size = frame.size;
         let local_eye = Point::new(eye.x - self.origin.x, eye.y - self.origin.y);
@@ -250,6 +289,9 @@ impl Overlay {
         if !self.shown {
             self.shown = true;
             self.panel.orderFrontRegardless();
+            if !self.root.isGeometryFlipped() {
+                tracing::warn!("the motion overlay's layers are not top-down; ghosts would be mirrored");
+            }
         }
     }
 
@@ -307,6 +349,22 @@ impl Overlay {
         let mut g = Ghost { window, plane, image: img, target: at };
         g.set(at);
         g
+    }
+
+    /// True when the root layer is top-down (what every plane assumes); checked after
+    /// ordering in, since AppKit sets it from the view.
+    pub fn top_down(&self) -> bool {
+        self.root.isGeometryFlipped()
+    }
+
+    /// True while the overlay is ordered in.
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+
+    /// The overlay panel's window number (for a test's capture of what it draws).
+    pub fn window_number(&self) -> isize {
+        self.panel.windowNumber()
     }
 
     /// Makes sure what was just committed reaches the screen before the caller moves windows.

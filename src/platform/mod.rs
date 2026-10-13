@@ -19,6 +19,7 @@ pub mod observe;
 pub mod paths;
 pub mod permissions;
 pub mod safety;
+pub mod self_capture;
 pub mod space_keys;
 pub mod windows;
 pub mod wm_thread;

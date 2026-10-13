@@ -306,7 +306,8 @@ impl Demo {
         let Some(card) = s.cards.iter().find(|c| c.stage == stage).cloned() else { return };
         self.transitions += 1;
         let id = self.transitions;
-        let moving = |w: &CardWindow| MovingWindow { window: *w, stage: Some(stage) };
+        let slot = s.cards.iter().position(|c| c.stage == stage);
+        let moving = |w: &CardWindow| MovingWindow { window: *w, stage: Some(stage), slot };
         s.transition = Some(Transition {
             id,
             outgoing: s.active_windows.iter().rev().map(moving).collect(),

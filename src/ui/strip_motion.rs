@@ -37,7 +37,7 @@ use crate::platform::capture::{Capturer, Target};
 use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, time_to_progress};
 use crate::ui::overlay::{Ghost, Overlay};
 use crate::ui::strip_layout::CardLayout;
-use crate::ui::strip_model::{self, Cover, StripEvent, Transition};
+use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, StripEvent, Transition, TransitionReport};
 
 /// The interval used when `snapshot_interval_ms = 0` (captures only on demand).
 const ON_DEMAND: Duration = Duration::from_secs(24 * 3600);
@@ -158,6 +158,16 @@ fn after(seconds: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
 }
 
 impl Strip {
+    /// True when the motion overlay draws top-down (see `overlay`).
+    pub(super) fn motion_top_down(&self) -> bool {
+        self.motion.overlay.top_down()
+    }
+
+    /// The motion overlay's window number and its top-left corner (global), while it shows.
+    pub(super) fn motion_overlay(&self) -> Option<(isize, Point)> {
+        self.motion.overlay.shown().then(|| (self.motion.overlay.window_number(), self.motion.overlay.origin()))
+    }
+
     fn spring(&self) -> Spring {
         let a = &self.style.animation;
         Spring { stiffness: a.spring_stiffness, damping: a.spring_damping, mass: a.spring_mass }
@@ -189,16 +199,50 @@ impl Strip {
         Some(plane)
     }
 
-    /// Where window `id` of `stage` sits on a card in `layouts`: its own thumbnail, else the
-    /// card's front one; with the card's stage.
-    fn card_plane(&self, layouts: &[CardLayout], id: u32, stage: Option<u64>) -> Option<(Plane, u64)> {
-        for l in layouts {
-            if let Some(i) = l.thumbs.iter().position(|t| t.id == id) {
-                return self.thumb_plane(l, i).map(|p| (p, l.stage));
-            }
+    /// The card a moving window leaves into or arrives from in `layouts`: the engine's slot
+    /// for it ([`MovingWindow::slot`]) when the card there is its stage's, else the card
+    /// showing the window, else its stage's card (a disagreement is logged: it means the
+    /// strip draws another order than the engine decided). With the card's slot.
+    fn card_for<'a>(&self, layouts: &'a [CardLayout], w: &MovingWindow) -> Option<(usize, &'a CardLayout)> {
+        let cards: Vec<(usize, &CardLayout)> = layouts.iter().filter(|l| l.stage != super::DROP_STAGE).enumerate().collect();
+        if let Some(&(i, l)) = w.slot.and_then(|s| cards.get(s)).filter(|(_, l)| Some(l.stage) == w.stage) {
+            return Some((i, l));
         }
-        let l = layouts.iter().find(|l| Some(l.stage) == stage)?;
-        self.thumb_plane(l, 0).map(|p| (p, l.stage))
+        let found = cards
+            .iter()
+            .find(|(_, l)| l.thumbs.iter().any(|t| t.id == w.window.id))
+            .or_else(|| cards.iter().find(|(_, l)| Some(l.stage) == w.stage))
+            .copied();
+        if w.slot.is_some() || found.is_some() {
+            tracing::warn!(
+                window = w.window.id,
+                stage = ?w.stage,
+                engine_slot = ?w.slot,
+                strip_slot = ?found.map(|f| f.0),
+                order = ?cards.iter().map(|(_, l)| l.stage).collect::<Vec<_>>(),
+                "transition: the strip's card for a window is not in the engine's slot"
+            );
+        }
+        found
+    }
+
+    /// Where window `id` sits on `layout`: its own thumbnail, else the card's front one.
+    fn plane_on(&self, layout: &CardLayout, id: u32) -> Option<Plane> {
+        let i = layout.thumbs.iter().position(|t| t.id == id).unwrap_or(0);
+        self.thumb_plane(layout, i)
+    }
+
+    /// A plane's bounds on screen (global, top-left): a flat one exactly, a turned one as
+    /// projected from the strip's eye.
+    fn plane_rect(&self, p: &Plane) -> Rect {
+        let o = self.motion.overlay.origin();
+        let top = p.left_mid.y - p.size.h / 2.0;
+        if p.tilt == 0.0 {
+            return Rect::new(p.left_mid.x + o.x, top + o.y, p.size.w, p.size.h);
+        }
+        let g = self.geometry.global;
+        let b = self.m().projected_bounds(p.left_mid.x + o.x - g.x, top + o.y - g.y, p.size.w, p.size.h);
+        b.translate(g.x, g.y)
     }
 
     /// A card-sized plane for a window with no card in view: at the strip's cards' left edge,
@@ -212,9 +256,10 @@ impl Strip {
         Plane::thumb(g.x - o.x + m.card_x + self.hidden_dx(), middle - o.y - size.h / 2.0, size, m.tilt, self.style.cards.corner_radius * m.k)
     }
 
-    /// The planes incoming windows grow from: their cards as drawn now (before the
-    /// transition's snapshot replaces them), or the ghost of a card just dragged out.
-    pub(super) fn incoming_starts(&mut self, t: &Transition) -> HashMap<u32, Plane> {
+    /// The planes incoming windows grow from, with the slot of the card each grows from:
+    /// their cards as drawn now (before the transition's snapshot replaces them), or the
+    /// ghost of a card just dragged out.
+    pub(super) fn incoming_starts(&mut self, t: &Transition) -> HashMap<u32, (Plane, Option<usize>)> {
         self.place_overlay();
         let o = self.motion.overlay.origin();
         let landing = self.motion.landing.as_ref().map(|l| (l.window, l.rect));
@@ -222,20 +267,24 @@ impl Strip {
             .iter()
             .map(|w| {
                 let id = w.window.id;
-                let plane = match landing {
-                    Some((lw, rect)) if lw == id => Plane::window(rect, o, self.style.cards.corner_radius * self.m().k),
-                    _ => self
-                        .card_plane(&self.layouts, id, w.stage)
-                        .map_or_else(|| self.offscreen_plane(w.window.frame), |(p, _)| p),
+                let start = match landing {
+                    Some((lw, rect)) if lw == id => (Plane::window(rect, o, self.style.cards.corner_radius * self.m().k), None),
+                    _ => match self.card_for(&self.layouts, w) {
+                        Some((slot, l)) => match self.plane_on(l, id) {
+                            Some(p) => (p, Some(slot)),
+                            None => (self.offscreen_plane(w.window.frame), None),
+                        },
+                        None => (self.offscreen_plane(w.window.frame), None),
+                    },
                 };
-                (id, plane)
+                (id, start)
             })
             .collect()
     }
 
     /// Starts transition `t`: snapshots over the outgoing windows shrink into their cards,
     /// snapshots of the incoming ones grow from `starts`; tells the controller what is covered.
-    pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, Plane>) {
+    pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
         self.finish_transition();
         if !self.style.animation.enabled {
             strip_model::cover(t.id, Cover::default());
@@ -249,11 +298,12 @@ impl Strip {
         let mut ghosts = Vec::new();
         let mut waiting = Vec::new();
         let mut held = Vec::new();
+        let mut report = Vec::new();
         for w in &t.outgoing {
             let id = w.window.id;
-            let (end, card) = match self.card_plane(&self.layouts, id, w.stage) {
-                Some((p, stage)) => (p, Some(stage)),
-                None => (self.offscreen_plane(w.window.frame), None),
+            let (end, card, aimed) = match self.card_for(&self.layouts, w).and_then(|(slot, l)| self.plane_on(l, id).map(|p| (p, l.stage, slot))) {
+                Some((p, stage, slot)) => (p, Some(stage), Some(slot)),
+                None => (self.offscreen_plane(w.window.frame), None, None),
             };
             // A window dropped on the strip: its card under the pointer becomes the snapshot.
             let dragged = self.motion.window_card.take_if(|c| c.window == id);
@@ -268,6 +318,17 @@ impl Strip {
                 }
             };
             // It holds still over the window until the window has parked behind it.
+            let start = Plane::window(w.window.frame, o, style.corner_radius);
+            report.push(GhostReport {
+                window: id,
+                outgoing: true,
+                stage: w.stage,
+                slot: w.slot,
+                aimed_slot: aimed,
+                start: self.plane_rect(&start),
+                end: self.plane_rect(&end),
+                real: None,
+            });
             waiting.push((ghosts.len(), end));
             ghosts.push(ghost);
             cover.outgoing = true;
@@ -278,12 +339,23 @@ impl Strip {
         for w in &t.incoming {
             let id = w.window.id;
             let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
-            let (Some(image), Some(start)) = (image, starts.get(&id).copied()) else {
+            let (Some(image), Some((start, from))) = (image, starts.get(&id).copied()) else {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
             let mut ghost = self.motion.overlay.ghost(id, Some(&image), start, &style, 1.0);
-            ghost.spring_to(Plane::window(w.window.frame, o, style.corner_radius), spring);
+            let end = Plane::window(w.window.frame, o, style.corner_radius);
+            ghost.spring_to(end, spring);
+            report.push(GhostReport {
+                window: id,
+                outgoing: false,
+                stage: w.stage,
+                slot: w.slot,
+                aimed_slot: from,
+                start: self.plane_rect(&start),
+                end: self.plane_rect(&end),
+                real: None,
+            });
             ghosts.push(ghost);
             cover.incoming = true;
         }
@@ -293,10 +365,8 @@ impl Strip {
         }
         for stage in &held {
             if let Some(layers) = self.pane.cards.get(stage) {
-                for layer in [&layers.card, &layers.flat] {
-                    layer.removeAllAnimations();
-                    layer.setOpacity(0.0);
-                }
+                layers.card.removeAnimationForKey(&objc2_foundation::NSString::from_str("fade"));
+                layers.card.setOpacity(0.0);
             }
         }
         self.motion.overlay.show();
@@ -319,7 +389,53 @@ impl Strip {
             }));
         }
         tracing::debug!(id, ghosts = ghosts.len(), held = ?held, ?cover, "transition");
+        for g in &report {
+            tracing::debug!(
+                id,
+                window = g.window,
+                outgoing = g.outgoing,
+                stage = ?g.stage,
+                from_slot = ?if g.outgoing { None } else { g.aimed_slot },
+                to_slot = ?if g.outgoing { g.aimed_slot } else { None },
+                engine_slot = ?g.slot,
+                start = %g.start,
+                end = %g.end,
+                "transition ghost"
+            );
+        }
+        let order: Vec<u64> = self.snapshot.cards.iter().map(|c| c.stage).collect();
+        strip_model::publish_transition(TransitionReport { id, ghosts: report, order });
         self.motion.running = Some(Running { id, ghosts, waiting, held, timers });
+    }
+
+    /// The incoming windows of transition `id` are in place at `frames` (read back from the
+    /// windows): a snapshot still headed elsewhere goes the rest of the way there, so it
+    /// lands exactly on its window.
+    pub(super) fn incoming_arrived(&mut self, id: u64, frames: &[(u32, Rect)]) {
+        let spring = self.spring();
+        let o = self.motion.overlay.origin();
+        let corner = self.style.animation.corner_radius;
+        if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+            for (window, real) in frames {
+                let to = Plane::window(*real, o, corner);
+                for g in r.ghosts.iter_mut().filter(|g| g.window == *window && g.target.tilt == 0.0) {
+                    let t = g.target;
+                    let off = (t.left_mid.x - to.left_mid.x).abs().max((t.left_mid.y - to.left_mid.y).abs()).max((t.size.w - to.size.w).abs()).max((t.size.h - to.size.h).abs());
+                    tracing::debug!(id, window, real = %real, off, "transition: ghost end vs the window's real frame");
+                    if off > 0.25 {
+                        g.spring_to(to, spring);
+                    }
+                }
+            }
+        }
+        strip_model::update_transition(id, |r| {
+            for g in r.ghosts.iter_mut().filter(|g| !g.outgoing) {
+                if let Some((_, real)) = frames.iter().find(|(w, _)| *w == g.window) {
+                    g.real = Some(*real);
+                    g.end = *real;
+                }
+            }
+        });
     }
 
     /// The outgoing windows of transition `id` have parked: their snapshots shrink into their
@@ -358,7 +474,6 @@ impl Strip {
         for stage in &r.held {
             if let Some(layers) = self.pane.cards.get(stage) {
                 layers.card.setOpacity(1.0);
-                layers.flat.setOpacity(1.0);
             }
         }
         objc2_quartz_core::CATransaction::commit();

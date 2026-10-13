@@ -69,9 +69,8 @@ use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_wid
 use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
-use crate::ui::strip_model::{
-    self, CardSnapshot, CardWindow, MovingWindow, StripDrop, StripEvent, StripSnapshot, Transition,
-};
+use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEvent, StripSnapshot, Transition};
+use crate::ui::transition_plan;
 
 /// How long focus and activation events for windows and apps we just touched are ignored
 /// by default (`[windows] focus_echo_ms`).
@@ -254,13 +253,15 @@ pub struct Controller {
     announce: bool,
     /// After the last batch: the windows the model had parked and every window's stage, so
     /// a transition knows which windows arrive and from which card.
-    parked_before: HashSet<u32>,
-    homes_before: HashMap<u32, u64>,
+    before: transition_plan::Before,
     /// Incoming windows waiting behind their growing snapshots.
     pending: Option<Pending>,
     next_transition: u64,
     /// The transition whose outgoing windows just parked, for the next snapshot.
     parked_note: Option<u64>,
+    /// The transition whose incoming windows are in place, with their frames read back, for
+    /// the next snapshot.
+    arrived_note: Option<(u64, Vec<(u32, Rect)>)>,
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
@@ -345,11 +346,11 @@ impl Controller {
             press: None,
             drag: None,
             announce: false,
-            parked_before: HashSet::new(),
-            homes_before: HashMap::new(),
+            before: transition_plan::Before::default(),
             pending: None,
             next_transition: 0,
             parked_note: None,
+            arrived_note: None,
             unplaced: BTreeSet::new(),
             fullscreen: false,
             space_pending: false,
@@ -539,54 +540,32 @@ impl Controller {
         failed
     }
 
-    /// Notes which windows are parked and where every window lives, for the next transition.
+    /// Notes which windows are parked, where every window lives and the strip's slots, for
+    /// the next transition.
     fn remember(&mut self) {
         let Some(m) = &self.model else { return };
-        self.parked_before = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
-        self.homes_before = m
-            .windows()
-            .filter_map(|w| match w.home {
-                Home::Stage(s) => Some((w.meta.id.0, s.0)),
-                Home::Pinned => None,
-            })
-            .collect();
+        self.before = transition_plan::Before::of(m);
     }
 
-    /// The windows a batch moves on or off the screen, if any: parks of shown windows
-    /// (back to front, at their live frames, into their stage's card) and frames for parked
-    /// windows (back to front, at their arrival frames, from the card they were on).
+    /// The windows a batch moves on or off the screen, if any, with the card slot each one
+    /// leaves into or arrives from (the engine's, [`transition_plan::plan`]).
     fn transition_for(&mut self, ob: &Observer, actions: &[Action]) -> Option<Transition> {
         let m = self.model.as_ref()?;
-        let mut outgoing = Vec::new();
-        let mut incoming: Vec<MovingWindow> = Vec::new();
-        for a in actions {
-            match *a {
-                Action::Park { id, .. } if !self.parked_before.contains(&id.0) => {
-                    let Some(w) = m.window(id) else { continue };
-                    let frame = ob.window(id.0).map_or(w.meta.frame, |t| t.frame);
-                    outgoing.push(MovingWindow {
-                        window: CardWindow { id: id.0, pid: w.meta.pid, frame },
-                        stage: m.stage_of(id).map(|s| s.0),
-                    });
-                }
-                Action::SetFrame { id, frame } if self.parked_before.contains(&id.0) => {
-                    let Some(w) = m.window(id) else { continue };
-                    incoming.retain(|x| x.window.id != id.0);
-                    incoming.push(MovingWindow {
-                        window: CardWindow { id: id.0, pid: w.meta.pid, frame },
-                        stage: self.homes_before.get(&id.0).copied(),
-                    });
-                }
-                _ => {}
-            }
+        let t = transition_plan::plan(m, actions, &self.before, |id| ob.window(id).map(|t| t.frame), self.next_transition + 1)?;
+        self.next_transition = t.id;
+        for g in &t.outgoing {
+            tracing::debug!(id = t.id, window = g.window.id, stage = ?g.stage, to_slot = ?g.slot, from = %g.window.frame, "transition: outgoing");
         }
-        if outgoing.is_empty() && incoming.is_empty() {
-            return None;
+        for g in &t.incoming {
+            tracing::debug!(id = t.id, window = g.window.id, stage = ?g.stage, from_slot = ?g.slot, to = %g.window.frame, "transition: incoming");
         }
-        // Parks go front to back; draw back to front.
-        outgoing.reverse();
-        self.next_transition += 1;
-        Some(Transition { id: self.next_transition, outgoing, incoming })
+        tracing::debug!(
+            id = t.id,
+            before = ?transition_plan::order(&self.before.slots),
+            after = ?transition_plan::order(&transition_plan::slots_of(m)),
+            "transition: strip order"
+        );
+        Some(t)
     }
 
     /// Executes a batch the user caused, animated (`[animation]`): the strip first draws
@@ -652,7 +631,27 @@ impl Controller {
     fn flush_pending(&mut self, ob: &Observer) {
         if let Some(p) = self.pending.take() {
             tracing::trace!(id = p.id, held_ms = p.since.elapsed().as_millis() as u64, "incoming windows unveiled");
+            let asked: Vec<(u32, Rect)> = p
+                .actions
+                .iter()
+                .filter_map(|a| match *a {
+                    Action::SetFrame { id, frame } => Some((id.0, frame)),
+                    _ => None,
+                })
+                .collect();
             self.execute_batch(ob, p.actions, false);
+            // Where the windows really are now: their snapshots land exactly there.
+            let mut arrived = Vec::new();
+            for (id, frame) in asked {
+                let Some(real) = ob.window(id).and_then(|w| w.element.frame().ok()) else { continue };
+                let off = (real.x - frame.x).abs().max((real.y - frame.y).abs()).max((real.w - frame.w).abs()).max((real.h - frame.h).abs());
+                tracing::debug!(id = p.id, window = id, asked = %frame, real = %real, off, "transition: incoming window in place");
+                arrived.push((id, real));
+            }
+            if !arrived.is_empty() {
+                self.arrived_note = Some((p.id, arrived));
+                self.present();
+            }
         }
     }
 
@@ -729,6 +728,7 @@ impl Controller {
             active_windows,
             transition,
             parked: self.parked_note.take(),
+            arrived: self.arrived_note.take(),
             space: m.current_space(m.main_display().id).0,
             fullscreen: self.fullscreen,
         });
@@ -1785,6 +1785,8 @@ impl Controller {
             Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugDrag { .. }
+            | Command::DebugStrip
+            | Command::DebugOverlay { .. }
             | Command::DebugSpace { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }
@@ -1854,6 +1856,7 @@ impl Controller {
                 .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))
                 .collect::<Vec<_>>(),
             "strip_level": format!("{:?}", self.style.level),
+            "last_transition": strip_model::last_transition(),
             "strip_panel": strip_model::panel_status(),
             "strip_panels": strip_model::pane_statuses(),
             "display": { "frame": m.main_display().frame, "visible": m.main_display().visible },

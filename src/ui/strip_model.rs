@@ -61,6 +61,9 @@ pub struct StripSnapshot {
     /// The outgoing windows of this transition have parked behind their snapshots: the
     /// snapshots may start shrinking (before that a moving snapshot would uncover them).
     pub parked: Option<u64>,
+    /// The incoming windows of this transition are in place, at these frames as read back
+    /// from the windows (global, top-left): their snapshots land exactly there.
+    pub arrived: Option<(u64, Vec<(u32, Rect)>)>,
 }
 
 /// A switch (or reveal, merge, drop, Cmd-M) about to happen, announced before any window
@@ -84,6 +87,11 @@ pub struct MovingWindow {
     pub window: CardWindow,
     /// The stage whose card it leaves into or arrives from.
     pub stage: Option<u64>,
+    /// That card's slot (0 = top), decided by the engine: for an outgoing window the slot
+    /// its stage's card has after the change (this snapshot's `cards[slot]`), for an
+    /// incoming one the slot its card had before (the previous snapshot's). `None`: no
+    /// card (the stage is out of view).
+    pub slot: Option<usize>,
 }
 
 /// The strip's answer to a [`Transition`]: what it covered with snapshots.
@@ -287,6 +295,69 @@ pub fn publish_pane_statuses(panes: Vec<PaneStatus>) {
 /// Every pane's state last published, the active one first (any thread).
 pub fn pane_statuses() -> Vec<PaneStatus> {
     pane_status_slot().lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------------------
+// What the last transition drew (for `ctl state`, the logs and scripted tests)
+
+/// One snapshot of a transition: where it started and where it was sent, global top-left
+/// coordinates. A card's plane is given by its projected bounds (what shows on screen).
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct GhostReport {
+    /// The window it shows.
+    pub window: u32,
+    /// True for a window leaving into the strip, false for one arriving.
+    pub outgoing: bool,
+    /// The stage of the card it leaves into or arrives from.
+    pub stage: Option<u64>,
+    /// The engine's slot for that card ([`MovingWindow::slot`]).
+    pub slot: Option<usize>,
+    /// The slot of the card the strip aimed at (its drawn column, top = 0); equals `slot`
+    /// unless the strip disagreed with the engine.
+    pub aimed_slot: Option<usize>,
+    /// Its first frame.
+    pub start: Rect,
+    /// Its last frame.
+    pub end: Rect,
+    /// For an incoming window: its frame read back from the window once in place.
+    pub real: Option<Rect>,
+}
+
+/// The ghosts of the last transition the strip drew.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct TransitionReport {
+    /// The transition.
+    pub id: u64,
+    /// Its snapshots.
+    pub ghosts: Vec<GhostReport>,
+    /// The strip's cards (stage ids, top to bottom) after it.
+    pub order: Vec<u64>,
+}
+
+fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {
+    static S: OnceLock<Mutex<Option<TransitionReport>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+/// The strip publishes the transition it draws (main thread).
+pub fn publish_transition(report: TransitionReport) {
+    if let Ok(mut s) = transition_report_slot().lock() {
+        *s = Some(report);
+    }
+}
+
+/// Updates the last transition's report in place (main thread), when it is still `id`.
+pub fn update_transition(id: u64, f: impl FnOnce(&mut TransitionReport)) {
+    if let Ok(mut s) = transition_report_slot().lock()
+        && let Some(r) = s.as_mut().filter(|r| r.id == id)
+    {
+        f(r);
+    }
+}
+
+/// The last transition drawn (any thread).
+pub fn last_transition() -> Option<TransitionReport> {
+    transition_report_slot().lock().ok().and_then(|s| s.clone())
 }
 
 // ---------------------------------------------------------------------------------------
