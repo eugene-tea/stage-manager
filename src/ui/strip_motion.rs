@@ -315,7 +315,17 @@ impl Strip {
         self.place_overlay();
         // Under a window only while nothing of ours must stay above it: the strip raised (its
         // level above windows, or lifted) or a dragged window's card shown.
-        let under = t.under.filter(|_| self.pane.lifted != Some(true) && self.motion.window_card.is_none());
+        // Raised over windows (the edge revealing it, or its level above windows), the strip
+        // stays in front of the snapshots, which grow from and shrink into its cards from
+        // behind them: drawn over the cards and gone at the end, the cards popped back to the
+        // front (10-13, a laptop with windows over the strip). A dragged window's card keeps
+        // the overlay above everything.
+        let lifted = self.pane.lifted == Some(true) && self.motion.window_card.is_none();
+        let below = if lifted {
+            u32::try_from(self.pane.panel.windowNumber()).ok().map(|n| (n, objc2_app_kit::NSFloatingWindowLevel))
+        } else {
+            t.under.filter(|_| self.pane.lifted != Some(true) && self.motion.window_card.is_none()).map(|id| (id, objc2_app_kit::NSNormalWindowLevel))
+        };
         let style = self.style.animation.clone();
         let spring = self.spring();
         let o = self.motion.overlay.origin();
@@ -402,7 +412,7 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        self.motion.overlay.show_under(under);
+        self.motion.overlay.show_below(below);
         self.motion.overlay.flush();
         self.motion.landing = None;
         strip_model::cover(t.id, cover);

@@ -295,8 +295,14 @@ impl Overlay {
     /// snapshots pass behind a window already in place, as Apple's do behind a window just
     /// opened or activated; `None`: above every window.
     pub fn show_under(&mut self, under: Option<u32>) {
-        if let Some(id) = under {
-            self.panel.setLevel(NSNormalWindowLevel);
+        self.show_below(under.map(|id| (id, NSNormalWindowLevel)));
+    }
+
+    /// Shows the overlay just under window `below.0` at level `below.1` (the window's own:
+    /// ordering is per level); `None`: above every window.
+    pub fn show_below(&mut self, below: Option<(u32, isize)>) {
+        if let Some((id, level)) = below {
+            self.panel.setLevel(level);
             self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Below, id as isize);
             if self.panel.isVisible() {
                 self.shown = true;
