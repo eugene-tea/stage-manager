@@ -23,7 +23,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2_application_services::{AXObserver, AXUIElement};
@@ -80,27 +80,22 @@ fn arm_fast_tick() {
 /// App-observation retries run every this many ticks (about once a second).
 const RETRY_EVERY: u32 = 4;
 
-/// After quit's unpark, how long the window server may take to list the windows in place
-/// before one still in the park zone counts as stranded (it lists the old frames for a few
-/// milliseconds after the moves).
-const UNPARK_SETTLE: Duration = Duration::from_secs(1);
+/// After the launch's recovery scan, apps that did not answer it are scanned again for this
+/// long (an app busy after a display change answers `CannotComplete` for a while: 6X, Mail
+/// and Telegram stayed parked behind it) ...
+const RESCAN_FOR: Duration = Duration::from_secs(30);
 
-/// How often the window list is read again during [`UNPARK_SETTLE`].
-const UNPARK_POLL: Duration = Duration::from_millis(50);
+/// ... every this many ticks (about every 3 s) ...
+const RESCAN_EVERY: u32 = 12;
 
-/// Asks `probe` until it answers nothing or `max` has passed, sleeping `step` between asks;
-/// returns its last answer (what is still there after the settle).
-fn settled<T>(mut probe: impl FnMut() -> Vec<T>, max: Duration, step: Duration, mut sleep: impl FnMut(Duration)) -> Vec<T> {
-    let mut waited = Duration::ZERO;
-    loop {
-        let found = probe();
-        if found.is_empty() || waited >= max {
-            return found;
-        }
-        sleep(step);
-        waited += step;
-    }
-}
+/// ... at most this many apps a time (each one that does not answer holds the WM thread up
+/// to the 0.25 s messaging timeout).
+const RESCAN_APPS: usize = 2;
+
+/// After the main display changes, how long until every allowed app's windows are scanned
+/// for the park zone: macOS puts windows back where they were the last time that display
+/// arrangement was in use, parked ones included, a moment after the change (6X).
+const DISPLAY_SWEEP_AFTER: Duration = Duration::from_secs(3);
 
 /// Work for the WM thread.
 pub enum WmCommand {
@@ -216,6 +211,10 @@ struct WmState {
     /// The last displays and `com.apple.WindowManager` values, for a fresh controller.
     displays: Option<Vec<Display>>,
     settings: Option<RawSettings>,
+    /// Apps the launch's recovery scan could not read, scanned again until when.
+    rescan: Option<(Vec<i32>, Instant)>,
+    /// When the scan after a main display change is due.
+    display_sweep: Option<Instant>,
 }
 
 thread_local! {
@@ -314,9 +313,13 @@ impl WmState {
             WmCommand::Accessibility(trusted) => {
                 if trusted && !self.scanned {
                     self.scanned = true;
-                    let r = safety::recovery_scan("launch");
+                    let (r, unanswered) = safety::recovery_scan_with("launch", &safety::ScanScope::default());
                     if r.restored > 0 {
                         tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
+                    }
+                    if !unanswered.is_empty() {
+                        tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
+                        self.rescan = Some((unanswered, Instant::now() + RESCAN_FOR));
                     }
                 }
                 self.trusted = trusted;
@@ -344,6 +347,10 @@ impl WmState {
             }
             WmCommand::SpaceChanged if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
             WmCommand::Displays(displays) => {
+                let moved = self.displays.as_ref().and_then(|d| d.first()).map(|d| d.frame) != displays.first().map(|d| d.frame);
+                if moved && self.displays.is_some() {
+                    self.display_sweep = Some(Instant::now() + DISPLAY_SWEEP_AFTER);
+                }
                 self.displays = Some(displays.clone());
                 self.controller.set_displays(&mut self.observer, displays);
             }
@@ -371,15 +378,17 @@ impl WmState {
             }
             WmCommand::Shutdown(reply) => {
                 let failed = self.controller.unpark_all(&self.observer);
-                // A window still in a park zone on any Space (one AX could not reach there)
-                // leaves the exit unclean, so the guardian watches until it is back. Read
-                // after a settle: right after the moves the window server still lists the
-                // windows at their parked frames.
-                let stranded = settled(safety::stranded_allowed, UNPARK_SETTLE, UNPARK_POLL, std::thread::sleep);
-                if !stranded.is_empty() {
-                    tracing::warn!(windows = ?stranded.iter().map(|w| w.id).collect::<Vec<_>>(), "windows still parked after unparking (another Space?)");
+                // Every window of an allowed app still in a park zone on any Space comes back
+                // now, known to this run or not (6X); one that cannot (another Space's, an app
+                // that does not answer) leaves the exit unclean, so the guardian watches until
+                // it is back.
+                let back = safety::leftovers_back("quit");
+                // A restore that failed but went through late is seen back now.
+                let unrestored = self.controller.account_unrestored(&self.observer);
+                if failed > 0 {
+                    tracing::info!(failed, unrestored, "restores that failed at quit, after the leftovers check");
                 }
-                let ok = failed == 0 && safety::registry_len() == 0 && stranded.is_empty();
+                let ok = back && unrestored == 0 && safety::registry_len() == 0;
                 self.controller.save_now();
                 self.observer.stop();
                 let _ = self.observer.take_events();
@@ -459,8 +468,60 @@ impl WmState {
         if self.ticks.is_multiple_of(RETRY_EVERY) {
             self.observer.retry_pending(ax_callback);
         }
+        if self.ticks.is_multiple_of(RESCAN_EVERY) {
+            self.rescan_unanswered();
+        }
+        self.sweep_after_display_change();
         self.pump();
         self.controller.tick(&mut self.observer);
+    }
+
+    /// Scans the apps the launch's recovery scan could not read again ([`RESCAN_EVERY`],
+    /// [`RESCAN_APPS`] a time, for [`RESCAN_FOR`]); windows we park are left alone. An app the
+    /// observer reads by now needs no scan: the controller brings back a window it finds in
+    /// the park zone.
+    fn rescan_unanswered(&mut self) {
+        let Some((mut pids, until)) = self.rescan.take() else { return };
+        let observed: std::collections::HashSet<i32> = self.observer.windows().values().map(|w| w.pid).collect();
+        pids.retain(|p| !observed.contains(p));
+        let later = pids.split_off(pids.len().min(RESCAN_APPS));
+        if pids.is_empty() {
+            return;
+        }
+        let scope = safety::ScanScope { pids: Some(pids), skip: safety::registry_ids() };
+        let (r, mut unanswered) = safety::recovery_scan_with("launch, apps that did not answer", &scope);
+        if r.restored > 0 {
+            tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
+        }
+        // The apps not tried yet go first next time.
+        let mut next = later;
+        next.append(&mut unanswered);
+        if next.is_empty() {
+            return;
+        }
+        if Instant::now() < until {
+            self.rescan = Some((next, until));
+        } else {
+            tracing::warn!(apps = ?next, "apps still do not answer: their windows are not scanned for the park zone (the quit's check and the next launch are)");
+        }
+    }
+
+    /// After a main display change ([`DISPLAY_SWEEP_AFTER`]): every allowed app's window
+    /// macOS left in the park zone comes back, except those we park (the registry's).
+    fn sweep_after_display_change(&mut self) {
+        let Some(due) = self.display_sweep else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.display_sweep = None;
+        if !self.observer.observing() || !self.stand_down.admits(Work::Observe) {
+            return;
+        }
+        let scope = safety::ScanScope { pids: None, skip: safety::registry_ids() };
+        let (r, _) = safety::recovery_scan_with("display change", &scope);
+        if r.restored > 0 {
+            tracing::warn!(restored = r.restored, "windows macOS left in the park zone after the display change were brought back");
+        }
     }
 
     fn after_panic(&mut self) {
@@ -501,6 +562,8 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         stand_down: StandDown::default(),
         displays: None,
         settings: None,
+        rescan: None,
+        display_sweep: None,
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));
@@ -535,43 +598,4 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
     tracing::debug!("WM thread running");
     CFRunLoop::run();
     tracing::debug!("WM thread stopped");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn windows_listed_in_place_after_a_few_reads_are_not_stranded() {
-        // The window server lists the old frames for the first reads after the moves.
-        let mut reads = 0;
-        let mut slept = Duration::ZERO;
-        let left = settled(
-            || {
-                reads += 1;
-                if reads <= 3 { vec![4551, 4550] } else { Vec::new() }
-            },
-            UNPARK_SETTLE,
-            UNPARK_POLL,
-            |d| slept += d,
-        );
-        assert!(left.is_empty(), "no false warning");
-        assert_eq!(reads, 4);
-        assert_eq!(slept, UNPARK_POLL * 3);
-    }
-
-    #[test]
-    fn a_window_really_still_parked_is_reported_after_the_settle() {
-        let mut slept = Duration::ZERO;
-        let left = settled(|| vec![4600], UNPARK_SETTLE, UNPARK_POLL, |d| slept += d);
-        assert_eq!(left, [4600]);
-        assert!(slept >= UNPARK_SETTLE && slept < UNPARK_SETTLE + UNPARK_POLL, "waited about a second: {slept:?}");
-    }
-
-    #[test]
-    fn nothing_parked_answers_at_once() {
-        let mut slept = Duration::ZERO;
-        assert!(settled(Vec::<u32>::new, UNPARK_SETTLE, UNPARK_POLL, |d| slept += d).is_empty());
-        assert_eq!(slept, Duration::ZERO);
-    }
 }

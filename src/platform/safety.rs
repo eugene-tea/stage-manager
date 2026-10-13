@@ -19,7 +19,13 @@
 //! 7. **Clamping**: every restore frame is clamped onto the visible display first.
 //!
 //! Quit counts as clean only when, after unparking, the window server lists no window of an
-//! allowed app in the park zone on any Space ([`stranded_allowed`]).
+//! allowed app in the park zone on any Space ([`stranded_allowed`]). Every unpark path at
+//! quit (the WM thread's, the registry's fallback, the signal watcher's) ends with
+//! [`leftovers_back`]: each window still listed there is brought back, known to this run or
+//! not (its registry frame, its `state.json` frame, else centered); one that cannot be
+//! reached leaves the exit unclean, so the guardian waits for it (6X). A move the registry
+//! reports done is never taken for proof. Restores retry a busy app quickly
+//! ([`set_frame_retrying`]).
 //!
 //! **Hidden apps** (`[windows] hide_parked_apps`): every app we hid is recorded beside the
 //! registry ([`set_hidden`]) and in the parked file, and every path that unparks unhides it
@@ -36,9 +42,10 @@ use std::time::{Duration, Instant};
 
 use objc2_app_kit::NSRunningApplication;
 
-use super::ax::{AxElement, names};
+use super::ax::{AxElement, AxError, AxResult, names};
 use super::{desktop, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
+use crate::engine::leftovers::{self, LEFTOVER_BUDGET, RESTORE_RETRY, UNPARK_POLL, UNPARK_SETTLE};
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
 use crate::engine::recovery::{self, HiddenApp, LiveWindow, ParkedFile, Registered, ScanDisplays};
@@ -297,6 +304,25 @@ pub fn registry_len() -> usize {
     lock_registry().len()
 }
 
+/// The ids the registry holds.
+pub fn registry_ids() -> BTreeSet<u32> {
+    lock_registry().keys().copied().collect()
+}
+
+/// Drops the entries of windows seen back (quit's leftovers, [`leftovers_back`]).
+fn registry_forget(ids: &[u32]) {
+    if ids.is_empty() {
+        return;
+    }
+    lock_held().retain(|id, _| !ids.contains(id));
+    let listed = {
+        let mut guard = lock_registry();
+        guard.retain(|id, _| !ids.contains(id));
+        registered(&guard)
+    };
+    write_parked_file(&listed);
+}
+
 /// Remembers the main display's visible frame and park corner for the park test and
 /// clamping in scans, and writes them to the parked file for the guardian (when windows are
 /// registered). Corners add up over the run: windows of other Desktops may still sit at an
@@ -364,7 +390,7 @@ pub fn unpark_registry(wait: Duration) -> Option<Report> {
     let entries = std::mem::take(&mut *guard);
     for (id, entry) in entries {
         report.checked += 1;
-        match entry.element.set_frame(entry.restore) {
+        match set_frame_retrying(&entry.element, id, entry.restore) {
             Ok(()) => report.restored += 1,
             Err(e) => {
                 // Logged by the caller once it knows whether the recovery scan covered it.
@@ -435,7 +461,9 @@ fn stranded_ids() -> Vec<u32> {
 
 /// Windows of allowed apps (`STAGE_MANAGER_ONLY` honored, our own process and the system's
 /// excluded apps skipped) the window server lists in the main display's park zone, on any
-/// Space: windows on other Spaces are listed too, off screen, with their frames.
+/// Space: windows on other Spaces are listed too, off screen, with their frames. Only real
+/// candidates count: layer 0, not transparent, no helper's tiny window, the frame in a park
+/// zone ([`recovery::is_stranded`]).
 pub fn stranded_allowed() -> Vec<windows::CgWindow> {
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
@@ -443,7 +471,8 @@ pub fn stranded_allowed() -> Vec<windows::CgWindow> {
     let mut bundles: std::collections::HashMap<i32, Option<String>> = std::collections::HashMap::new();
     windows::list_windows()
         .into_iter()
-        .filter(|w| w.layer == 0 && recovery::is_stranded(w.bounds, &displays))
+        // A transparent window is no window we parked (helpers keep such windows anywhere).
+        .filter(|w| w.layer == 0 && w.alpha > 0.0 && recovery::is_stranded(w.bounds, &displays))
         .filter(|w| {
             let bundle = bundles.entry(w.pid).or_insert_with(|| bundle_id_of(w.pid));
             observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
@@ -592,33 +621,59 @@ pub(crate) fn scan_displays() -> ScanDisplays {
     ScanDisplays::new(main, visible, bounds, corners_used())
 }
 
+/// Which windows a recovery scan looks at.
+#[derive(Debug, Clone, Default)]
+pub struct ScanScope {
+    /// Only these apps' windows (`None`: every allowed app's).
+    pub pids: Option<Vec<i32>>,
+    /// Windows left alone: those we park on purpose (the registry's), while the app runs.
+    pub skip: BTreeSet<u32>,
+}
+
 /// The recovery scan: every window of every allowed app (`STAGE_MANAGER_ONLY` honored, our
 /// own process and the system's excluded apps skipped) that is stranded in the park zone
 /// goes back to its `state.json` frame, or is centered.
 pub fn recovery_scan(reason: &str) -> Report {
+    recovery_scan_with(reason, &ScanScope::default()).0
+}
+
+/// [`recovery_scan`] over `scope`; also returns the apps that did not answer (their windows
+/// could not be read: an app busy after a display change answers `CannotComplete`), so the
+/// caller can scan them again.
+pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
     let mut pids: Vec<i32> = windows::list_windows().iter().filter(|w| w.layer == 0).map(|w| w.pid).collect();
     pids.sort_unstable();
     pids.dedup();
-    let state = std::fs::read_to_string(paths::state_file()).ok().and_then(|t| match StateFile::from_json(&t) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            tracing::warn!("recovery scan: {e}");
-            None
-        }
-    });
+    if let Some(wanted) = &scope.pids {
+        pids.retain(|p| wanted.contains(p));
+    }
+    let state = read_state("recovery scan");
     let displays = scan_displays();
     let mut live = Vec::new();
     let mut elements = Vec::new();
+    let mut unanswered = Vec::new();
     for pid in pids {
         let bundle = bundle_id_of(pid);
         if !observe::app_allowed(only.as_ref(), own, pid, bundle.as_deref()) {
             continue;
         }
-        let Ok(list) = AxElement::application(pid).windows() else { continue };
+        let list = match AxElement::application(pid).windows() {
+            Ok(list) => list,
+            Err(e) => {
+                if e != AxError::NO_VALUE {
+                    tracing::debug!(reason, pid, bundle, "recovery scan: the app does not answer: {e}");
+                    unanswered.push(pid);
+                }
+                continue;
+            }
+        };
         for w in list {
             if w.role().ok().as_deref() != Some(names::ROLE_WINDOW) {
+                continue;
+            }
+            if !scope.skip.is_empty() && w.window_id().is_ok_and(|id| scope.skip.contains(&id)) {
                 continue;
             }
             let Ok(frame) = w.frame() else { continue };
@@ -642,8 +697,134 @@ pub fn recovery_scan(reason: &str) -> Report {
     if report.restored > 0 {
         counters::bump(Count::Recovery);
     }
-    tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, "recovery scan");
-    report
+    if unanswered.is_empty() {
+        tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, "recovery scan");
+    } else {
+        tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, unanswered = ?unanswered, "recovery scan (some apps did not answer)");
+    }
+    (report, unanswered)
+}
+
+/// `state.json`, when it can be read.
+fn read_state(what: &str) -> Option<StateFile> {
+    let text = std::fs::read_to_string(paths::state_file()).ok()?;
+    match StateFile::from_json(&text) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("{what}: {e}");
+            None
+        }
+    }
+}
+
+/// Window `id` of `pid` through Accessibility; the reason when it cannot be reached.
+pub(crate) fn ax_window(pid: i32, id: u32) -> Result<AxElement, String> {
+    let list = AxElement::application(pid).windows().map_err(|e| format!("its app does not answer ({e})"))?;
+    list.into_iter()
+        .find(|w| w.window_id().ok() == Some(id))
+        .ok_or_else(|| "its app does not list it through Accessibility (another Desktop's?)".to_string())
+}
+
+/// Moves window `id` (`element`) to `frame`; while its app is too busy to answer
+/// (`CannotComplete`), tries again quickly and counts the move done once the window server
+/// lists the window out of the park zone ([`leftovers::retry_quickly`], [`RESTORE_RETRY`]).
+/// For the restores of an unpark (quit, stand-down, the registry's fallback).
+pub fn set_frame_retrying(element: &AxElement, id: u32, frame: Rect) -> AxResult<()> {
+    let start = Instant::now();
+    let mut displays: Option<ScanDisplays> = None;
+    let r = leftovers::retry_quickly(
+        RESTORE_RETRY,
+        || element.set_frame(frame),
+        |e| *e == AxError::CANNOT_COMPLETE,
+        || {
+            let d = displays.get_or_insert_with(scan_displays);
+            windows::describe(&[id]).first().is_some_and(|w| !recovery::is_stranded(w.bounds, d))
+        },
+        || start.elapsed(),
+        std::thread::sleep,
+    );
+    let ms = start.elapsed().as_millis() as u64;
+    match &r.result {
+        Ok(()) if r.landed_late => tracing::info!(id, tries = r.tries, ms, "a restore the app was too busy to answer went through late"),
+        Ok(()) if r.tries > 1 => tracing::info!(id, tries = r.tries, ms, "a restore went through on a quick retry"),
+        Err(e) if r.tries > 1 => tracing::debug!(id, tries = r.tries, ms, "a restore failed on every quick retry: {e}"),
+        _ => {}
+    }
+    r.result
+}
+
+/// Every unpark path's last look (6X): reads the window server's list until no window of an
+/// allowed app is left in the park zone, or [`UNPARK_SETTLE`] has passed; brings back each
+/// one still there ([`bring_back_leftovers`]) and reads again. True when none is left; else
+/// each one is logged and the exit must not count as clean (the guardian waits for them).
+/// Bounded by [`leftovers::LEFTOVERS_MAX`].
+pub fn leftovers_back(reason: &str) -> bool {
+    let left = leftovers::settle(stranded_allowed, UNPARK_SETTLE, UNPARK_POLL, std::thread::sleep);
+    if left.is_empty() {
+        return true;
+    }
+    let seen: Vec<(u32, bool)> = left.iter().map(|w| (w.id, w.onscreen)).collect();
+    tracing::warn!(reason, windows = ?seen, "windows still parked after unparking (id, on screen); bringing each back");
+    let unreached = bring_back_leftovers(reason, &left, LEFTOVER_BUDGET);
+    let after = leftovers::settle(stranded_allowed, UNPARK_SETTLE, UNPARK_POLL, std::thread::sleep);
+    if after.is_empty() {
+        tracing::info!(reason, back = left.len(), "every window still parked after unparking is back");
+        return true;
+    }
+    let ids: Vec<u32> = after.iter().map(|w| w.id).collect();
+    tracing::error!(reason, windows = ?ids, unreached = ?unreached, "windows still parked: the guardian brings each back once its Desktop shows or its app answers");
+    false
+}
+
+/// Brings back every window in `left` (listed in the park zone after an unpark), within
+/// `budget`: to its registry frame, else its `state.json` frame, else centered
+/// ([`leftovers::leftover_frame`]), through the registry's element or the app's own list.
+/// Returns the ids it could not move (another Desktop's, an app that does not answer, no
+/// time left).
+pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], budget: Duration) -> Vec<u32> {
+    let start = Instant::now();
+    let displays = scan_displays();
+    let state = read_state("quit leftovers");
+    let mut back = Vec::new();
+    let mut unreached = Vec::new();
+    for w in left {
+        let bundle = bundle_id_of(w.pid);
+        if start.elapsed() >= budget {
+            tracing::warn!(reason, id = w.id, pid = w.pid, bundle, "a window still parked: no time left to bring it back");
+            unreached.push(w.id);
+            continue;
+        }
+        let entry = registry_entry(w.id);
+        let element = match &entry {
+            Some(e) => Ok(e.element.clone()),
+            None => ax_window(w.pid, w.id),
+        };
+        let element = match element {
+            Ok(e) => e,
+            Err(why) => {
+                tracing::warn!(reason, id = w.id, pid = w.pid, bundle, at = %w.bounds, onscreen = w.onscreen, "a window still parked cannot be reached: {why}");
+                unreached.push(w.id);
+                continue;
+            }
+        };
+        let live = LiveWindow { bundle_id: bundle.clone().unwrap_or_default(), title: element.title().unwrap_or_default(), frame: w.bounds };
+        let (frame, source) = leftovers::leftover_frame(entry.as_ref().map(|e| e.restore), &live, state.as_ref(), &displays);
+        match set_frame_retrying(&element, w.id, frame) {
+            Ok(()) => {
+                tracing::warn!(reason, id = w.id, pid = w.pid, bundle, from = %w.bounds, to = %frame, source = source.name(), "a window still parked after unparking is brought back");
+                back.push(w.id);
+            }
+            Err(e) => {
+                tracing::warn!(reason, id = w.id, pid = w.pid, bundle, at = %w.bounds, onscreen = w.onscreen, "a window still parked cannot be moved: {e}");
+                unreached.push(w.id);
+            }
+        }
+    }
+    if !back.is_empty() {
+        counters::bump(Count::Recovery);
+    }
+    registry_forget(&back);
+    unreached
 }
 
 #[cfg(test)]

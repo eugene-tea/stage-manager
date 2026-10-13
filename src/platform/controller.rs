@@ -77,7 +77,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
-use super::ax::AxElement;
+use super::ax::{AxElement, AxError};
 use super::ctl::Command;
 use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
@@ -428,12 +428,17 @@ enum UnrestoredStep {
 /// The step for an [`Unrestored`] window: `model_parked` is `None` when the model no longer
 /// has the window, `listed` is `None` when the window server lists it nowhere, else whether
 /// it is on screen and whether its frame lies in the park zone.
+///
+/// A window the model forgot (it left its Space, its element was reported destroyed) while
+/// the window server still lists it in the park zone is not done: the model forgetting a
+/// window does not bring it back (6X: such windows sat parked with no run tracking them).
 fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>) -> UnrestoredStep {
     match (model_parked, listed) {
-        (None | Some(true), _) | (_, None) => UnrestoredStep::Done,
-        (Some(false), Some((true, false))) => UnrestoredStep::Done,
-        (Some(false), Some((true, true))) => UnrestoredStep::Retry,
-        (Some(false), Some((false, _))) => UnrestoredStep::Wait,
+        (Some(true), _) | (_, None) => UnrestoredStep::Done,
+        (_, Some((true, false))) => UnrestoredStep::Done,
+        (_, Some((true, true))) => UnrestoredStep::Retry,
+        (Some(false), Some((false, _))) | (None, Some((false, true))) => UnrestoredStep::Wait,
+        (None, Some((false, false))) => UnrestoredStep::Done,
     }
 }
 
@@ -1169,6 +1174,7 @@ impl Controller {
                     .then(|| safety::registry_entry(id))
                     .flatten();
                 let result = match (action, &kept) {
+                    (Action::SetFrame { frame, .. }, Some(e)) if !interruptible => Some(safety::set_frame_retrying(&e.element, id, frame)),
                     (Action::SetFrame { frame, .. }, Some(e)) => Some(e.element.set_frame(frame)),
                     (Action::Park { frame, .. }, Some(e)) => Some(e.element.set_position(frame.origin())),
                     _ => None,
@@ -1192,6 +1198,8 @@ impl Controller {
             };
             self.echoes.touch_window(id, now);
             let result = match action {
+                // An unpark (quit, stand-down, arrivals) tries a busy app again quickly (6X).
+                Action::SetFrame { frame, .. } if !interruptible => safety::set_frame_retrying(&w.element, id, frame),
                 Action::SetFrame { frame, .. } => w.element.set_frame(frame),
                 Action::Park { frame, .. } => w.element.set_position(frame.origin()),
                 Action::Raise { .. } => w.element.raise(),
@@ -1285,7 +1293,8 @@ impl Controller {
             let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
             let parks = |f: Rect| self.model.as_ref().is_some_and(|m| m.main_display().parks(f));
             let listed = list.iter().find(|w| w.id == id).map(|w| (w.onscreen, parks(w.bounds)));
-            let step = if force && model_parked == Some(false) && listed.is_some() {
+            let forgotten_parked = model_parked.is_none() && listed.is_some_and(|(_, zone)| zone);
+            let step = if force && (model_parked == Some(false) || forgotten_parked) && listed.is_some() {
                 UnrestoredStep::Retry
             } else {
                 unrestored_step(model_parked, listed)
@@ -1300,7 +1309,19 @@ impl Controller {
                     let Some(u) = self.unrestored.get_mut(&id) else { continue };
                     u.tries += 1;
                     let element = ob.window(id).map(|w| w.element.clone()).unwrap_or_else(|| u.entry.element.clone());
-                    match element.set_frame(u.entry.restore) {
+                    let set = |e: &AxElement| if force { safety::set_frame_retrying(e, id, u.entry.restore) } else { e.set_frame(u.entry.restore) };
+                    let mut result = set(&element);
+                    if let Err(e) = &result
+                        && *e != AxError::CANNOT_COMPLETE
+                        && let Some(pid) = element.pid().ok()
+                        && let Ok(fresh) = safety::ax_window(pid, id)
+                    {
+                        // The element we kept went stale (a window reported destroyed while
+                        // ordered out): the app's own list has it again.
+                        result = set(&fresh);
+                        u.entry.element = fresh;
+                    }
+                    match result {
                         Ok(()) => {
                             tracing::info!(id, tries = u.tries, restore = %u.entry.restore, "a failed restore went through on a retry");
                             // A window moved: a click pressed before reads the frames again.
@@ -1318,6 +1339,54 @@ impl Controller {
         if self.unrestored.len() != before {
             safety::registry_replace(self.parked_entries(ob));
         }
+    }
+
+    /// The registry entries of those of `ids` the model counts as parked (taken before the
+    /// model forgets them: [`Self::watch_forgotten`]).
+    fn parked_entries_of(&self, ids: &[u32]) -> Vec<(u32, ParkedEntry)> {
+        let Some(m) = &self.model else { return Vec::new() };
+        ids.iter()
+            .filter(|&&id| m.window(WindowId(id)).is_some_and(|w| w.parked))
+            .filter_map(|&id| safety::registry_entry(id).map(|e| (id, e)))
+            .collect()
+    }
+
+    /// Windows the model just forgot while they were parked (`kept`: their registry entries):
+    /// each one the window server still lists in the park zone stays registered as an
+    /// unrestored window ([`Unrestored`]) until it is seen back or gone, so no run loses
+    /// track of a window it parked (6X).
+    fn watch_forgotten(&mut self, ob: &Observer, kept: Vec<(u32, ParkedEntry)>) {
+        if kept.is_empty() {
+            return;
+        }
+        let ids: Vec<u32> = kept.iter().map(|(id, _)| *id).collect();
+        let listed = windows::describe(&ids);
+        let mut added = false;
+        for (id, entry) in kept {
+            if self.unrestored.contains_key(&id) || self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some()) {
+                continue;
+            }
+            let Some(l) = listed.iter().find(|l| l.id == id) else { continue };
+            if !self.model.as_ref().is_some_and(|m| m.main_display().parks(l.bounds)) {
+                continue;
+            }
+            tracing::warn!(id, at = %l.bounds, onscreen = l.onscreen, restore = %entry.restore, "a parked window the model let go is still in the park zone: it stays registered until it is back");
+            self.unrestored.insert(id, Unrestored { entry, tries: 0 });
+            added = true;
+        }
+        if added {
+            safety::registry_replace(self.parked_entries(ob));
+        }
+    }
+
+    /// Quit, after its leftovers check: windows whose restore failed are checked against the
+    /// window server at once (no wait for the once-a-second check): those seen back out of the
+    /// park zone, or gone, are forgotten; one still in the zone on screen is tried once more.
+    /// Returns how many are left (another Space's, an app that does not answer).
+    pub fn account_unrestored(&mut self, ob: &Observer) -> usize {
+        self.unrestored_checked = Instant::now().checked_sub(UNRESTORED_RETRY).unwrap_or(self.unrestored_checked);
+        self.retry_unrestored(ob, false);
+        self.unrestored.len()
     }
 
     /// Notes which windows are parked, where every window lives and the strip's slots, for
@@ -1674,10 +1743,12 @@ impl Controller {
             WinEvent::Destroyed(id) => {
                 self.unplaced.remove(&id);
                 self.absent.remove(&id);
+                let kept = self.parked_entries_of(&[id]);
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.remove_window(WindowId(id));
                     self.execute(ob, actions);
                 }
+                self.watch_forgotten(ob, kept);
             }
             WinEvent::Moved(id) => {
                 self.maybe_start_drag(ob, id, now);
@@ -2626,8 +2697,12 @@ impl Controller {
             self.absent.remove(&id);
             let Some(m) = self.model.as_mut() else { return };
             tracing::info!(id, "window left this Space (not on screen, not minimized, app not hidden)");
+            let group = m.group_of(WindowId(id));
+            let kept = self.parked_entries_of(&group);
+            let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
+            self.watch_forgotten(ob, kept);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -2660,8 +2735,12 @@ impl Controller {
             self.elsewhere.remove(&id);
             let Some(m) = self.model.as_mut() else { return };
             tracing::info!(id, "window moved to another display; left alone there until it comes back");
+            let group = m.group_of(WindowId(id));
+            let kept = self.parked_entries_of(&group);
+            let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
+            self.watch_forgotten(ob, kept);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -3589,8 +3668,19 @@ mod tests {
         // Seen back out of the zone, closed, or parked again by the model: done.
         assert_eq!(unrestored_step(Some(false), Some((true, false))), Done);
         assert_eq!(unrestored_step(Some(false), None), Done);
-        assert_eq!(unrestored_step(None, Some((true, true))), Done);
         assert_eq!(unrestored_step(Some(true), Some((true, true))), Done);
+    }
+
+    /// 6X: a parked window the model forgot (it left its Space, its element was reported
+    /// destroyed) while the window server still lists it in the park zone stays registered.
+    #[test]
+    fn a_parked_window_the_model_forgot_stays_registered_until_it_is_back() {
+        use UnrestoredStep::*;
+        assert_eq!(unrestored_step(None, Some((true, true))), Retry, "on screen in the corner: moved back");
+        assert_eq!(unrestored_step(None, Some((false, true))), Wait, "another Space's corner: waits for it");
+        assert_eq!(unrestored_step(None, Some((true, false))), Done, "seen back");
+        assert_eq!(unrestored_step(None, Some((false, false))), Done, "out of the zone elsewhere");
+        assert_eq!(unrestored_step(None, None), Done, "closed");
     }
 
     #[test]

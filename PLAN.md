@@ -57,7 +57,11 @@ pinning, persistence, strip extensions. It never duplicates a macOS setting.
 Defence in depth, because a parked window that never returns is the worst bug:
 
 1. **Registry.** A global registry holds every parked window's AX element and restore frame.
-2. **Quit** (menu) unparks everything, then exits.
+2. **Quit** (menu) unparks everything, then reads the window server: every window of an allowed
+   app still in a park zone (known to this run or not) is brought back to its registry frame,
+   its `state.json` frame, or centered, before it exits; one it cannot reach leaves the exit
+   unclean for the guardian. A restore a busy app cannot answer (`CannotComplete`) is retried
+   quickly (three tries 75 ms apart, within 1.2 s).
 3. **Panic hook** unparks (uses `try_lock`; falls back to a scan, below).
 4. **SIGTERM/SIGINT/SIGHUP** go through a self-pipe to a watcher thread that unparks and exits.
 5. **Guardian process.** At launch the app spawns itself as `stage-manager --guardian <pid>`.
@@ -67,6 +71,9 @@ Defence in depth, because a parked window that never returns is the worst bug:
    once its Space shows.
 6. **Recovery scan** (launch and guardian): every window of every app whose frame lies in a
    park zone is moved back to its saved frame from `state.json`, or centered on the display.
+   Apps that do not answer at launch are scanned again for 30 s; after a main display change
+   the scan runs again (macOS puts windows back where they were the last time that
+   arrangement was in use, parked ones included), leaving the windows we park alone.
 7. **Restore frames are clamped** onto the visible display before being applied.
 
 Across Spaces: the registry keeps every Space's parked windows (AX elements taken while

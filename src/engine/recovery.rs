@@ -73,10 +73,16 @@ impl ScanDisplays {
     }
 }
 
+/// Windows smaller than this on either side are never stranded: no window we park is that
+/// small, and helper apps keep invisible ones (1×1 and the like) that would make
+/// every safety path wait for them (6X).
+pub const MIN_STRANDED_SIDE: f64 = 48.0;
+
 /// True when `frame` is in the main display's park zone and not meaningfully on any other
-/// display (it shows at most [`PARK_MARGIN`] points on both axes there).
+/// display (it shows at most [`PARK_MARGIN`] points on both axes there), and is no helper's
+/// tiny window ([`MIN_STRANDED_SIDE`]).
 pub fn is_stranded(frame: Rect, displays: &ScanDisplays) -> bool {
-    if !displays.parks(frame) {
+    if frame.w < MIN_STRANDED_SIDE || frame.h < MIN_STRANDED_SIDE || !displays.parks(frame) {
         return false;
     }
     !displays.others.iter().any(|d| {
@@ -86,12 +92,40 @@ pub fn is_stranded(frame: Rect, displays: &ScanDisplays) -> bool {
     })
 }
 
+/// Where a frame the scan moves a window to comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSource {
+    /// Its window's frame in `state.json` (or its pre-fit frame there).
+    Saved,
+    /// No saved window matched: centered on the visible frame.
+    Centered,
+}
+
+impl FrameSource {
+    /// A short name for the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Saved => "state.json",
+            Self::Centered => "centered",
+        }
+    }
+}
+
 /// For every stranded window in `windows`, its index and the frame to move it to.
 pub fn plan(
     windows: &[LiveWindow],
     state: Option<&StateFile>,
     displays: &ScanDisplays,
 ) -> Vec<(usize, Rect)> {
+    plan_sourced(windows, state, displays).into_iter().map(|(i, f, _)| (i, f)).collect()
+}
+
+/// [`plan`], with where each frame comes from.
+pub fn plan_sourced(
+    windows: &[LiveWindow],
+    state: Option<&StateFile>,
+    displays: &ScanDisplays,
+) -> Vec<(usize, Rect, FrameSource)> {
     let saved: Vec<(&str, &str, Rect, Option<Rect>)> = state
         .map(|s| {
             s.all_stages()
@@ -129,11 +163,12 @@ pub fn plan(
             }
         }
     }
-    let mut out: Vec<(usize, Rect)> = stranded
+    let mut out: Vec<(usize, Rect, FrameSource)> = stranded
         .iter()
         .zip(target)
         .map(|(&i, saved)| {
-            (i, safe_restore(saved.unwrap_or(windows[i].frame), displays))
+            let source = if saved.is_some() { FrameSource::Saved } else { FrameSource::Centered };
+            (i, safe_restore(saved.unwrap_or(windows[i].frame), displays), source)
         })
         .collect();
     for (i, w) in windows.iter().enumerate() {
@@ -146,7 +181,7 @@ pub fn plan(
         if let Some((k, (_, _, _, Some(o)))) = found {
             used[k] = true;
             let back = if displays.parks(*o) { clamp_to_visible(*o, displays.visible) } else { *o };
-            out.push((i, back));
+            out.push((i, back, FrameSource::Saved));
         }
     }
     out
@@ -364,12 +399,24 @@ mod tests {
         assert!(is_stranded(parked(400.0, 300.0), &displays()));
     }
 
+    /// 6X: a helper's tiny window in the corner is never stranded (no window we park is that
+    /// small); a real one there is.
+    #[test]
+    fn tiny_windows_are_never_stranded() {
+        let d = displays();
+        assert!(!is_stranded(Rect::new(1439.0, 899.0, 1.0, 1.0), &d));
+        assert!(!is_stranded(Rect::new(1439.0, 868.0, 40.0, 40.0), &d));
+        assert!(is_stranded(Rect::new(1439.0, 868.0, 300.0, 200.0), &d));
+        let p = plan(&[live("com.example.helper", "", Rect::new(1439.0, 899.0, 1.0, 1.0))], None, &d);
+        assert!(p.is_empty(), "the scan leaves it alone");
+    }
+
     /// The review's S1: a 76 pt Dock at the bottom; macOS keeps the parked window's title bar
     /// above it. The scan, the guardian and the clean-quit check must all see it parked.
     #[test]
     fn a_window_parked_above_a_bottom_dock_is_stranded() {
         let d = ScanDisplays::new(MAIN, Rect::new(0.0, 25.0, 1440.0, 799.0), vec![], []);
-        let at = Rect::new(1439.0, d.visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
+        let at = Rect::new(1380.0, d.visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
         assert!(!is_parked(at, MAIN), "the full frame alone misses it");
         assert!(is_stranded(at, &d));
         let p = plan(&[live("com.example.a", "Draft", at)], None, &d);

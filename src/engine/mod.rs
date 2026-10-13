@@ -11,6 +11,7 @@ pub mod fullscreen;
 pub mod geometry;
 pub mod guard_watch;
 pub mod hide;
+pub mod leftovers;
 pub mod model;
 pub mod overview;
 pub mod park;

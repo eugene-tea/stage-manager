@@ -426,6 +426,33 @@ mod tests {
         vec![at(1, frame, true), at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), true), at(9, RESTORE, false)]
     }
 
+    /// 6X, the owner's log: helper apps' invisible windows (1×1 at 1280,720 seen on the
+    /// built-in display, 64×64 ones) counted as parked; the guardian would have waited for
+    /// them. Only a real parked window of an allowed app joins.
+    #[test]
+    fn helper_windows_never_join_the_watch() {
+        let laptop = Rect::new(0.0, 0.0, 1800.0, 1169.0);
+        let d = ScanDisplays::new(laptop, Rect::new(0.0, 39.0, 1800.0, 1130.0), vec![], []);
+        let mut w = Watch::new(&[]);
+        let allowed = |id, bounds, onscreen| Listed { id, pid: 8, bounds, onscreen, allowed: true };
+        let listed = [
+            allowed(20, Rect::new(1280.0, 720.0, 1.0, 1.0), false),
+            allowed(21, Rect::new(1700.0, 1100.0, 64.0, 64.0), false),
+            allowed(22, Rect::new(1799.0, 1168.0, 1.0, 1.0), false),
+            allowed(23, Rect::new(1799.0, 1137.0, 1051.0, 906.0), false),
+            allowed(24, Rect::new(200.0, 100.0, 800.0, 600.0), true),
+        ];
+        let events = w.observe(Instant::now(), &listed, &d);
+        let joined: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Joined { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, vec![23], "only the real parked window");
+    }
+
     #[test]
     fn a_parked_window_on_a_desktop_not_shown_waits() {
         let t0 = Instant::now();

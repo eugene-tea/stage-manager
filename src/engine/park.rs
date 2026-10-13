@@ -259,11 +259,30 @@ pub fn is_parked(frame: Rect, display: Rect) -> bool {
     if frame.x <= center.x || frame.y <= center.y {
         return false;
     }
+    // "Mostly offscreen" needs the frame to reach past the right or bottom edge: a small
+    // window wholly on the display (a helper app's invisible 1×1, a 64×64 cursor window) is
+    // not parked, however little of it there is (6X: 24 such windows made every quit warn).
+    if frame.max_x() <= display.max_x() && frame.max_y() <= display.max_y() {
+        return false;
+    }
     match frame.intersect(&display) {
         None => frame.w > 0.0 && frame.h > 0.0,
-        Some(seen) => seen.w <= PARK_MARGIN && seen.h <= PARK_MARGIN,
+        Some(seen) => {
+            (seen.w <= PARK_MARGIN && seen.h <= PARK_MARGIN)
+                || (seen.w.min(seen.h) <= PARK_SLIVER && seen.w.max(seen.h) <= PARK_SLIVER_LENGTH)
+        }
     }
 }
+
+/// A parked window's sliver: at most this thick on one axis ...
+///
+/// (6X: after a display change macOS left a parked window at `2559,1374` of a 2560×1440
+/// display, one point wide and 66 tall on screen, two points above the corner's margin: no
+/// run counted it parked, so the next one adopted it in the corner.)
+pub const PARK_SLIVER: f64 = 8.0;
+
+/// ... and at most this long on the other.
+pub const PARK_SLIVER_LENGTH: f64 = 4.0 * PARK_MARGIN;
 
 /// True when `frame` sits in `display`'s park zone at `corner`: [`is_parked`] for the bottom
 /// corners (mirrored for the left one); for the top ones, its origin within [`PARK_MARGIN`]
@@ -529,8 +548,13 @@ mod tests {
         let d = Rect::new(0.0, 0.0, 2560.0, 1440.0);
         let visible = Rect::new(0.0, 30.0, 2560.0, 1334.0);
         let at = Rect::new(2559.0, visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
-        assert!(!is_parked(at, d), "the old test missed it");
         assert!(is_parked_in(at, d, visible));
+        // Since 6X the full frame's sliver rule sees it too (1 pt wide, 108 tall on screen);
+        // a wider one above the Dock still needs the visible frame.
+        assert!(is_parked(at, d));
+        let wider = Rect::new(2496.0, visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
+        assert!(!is_parked(wider, d), "the full frame alone misses it");
+        assert!(is_parked_in(wider, d, visible));
     }
 
     #[test]
@@ -639,6 +663,37 @@ mod tests {
         assert!(is_parked(f, DISPLAY));
         let beyond = Rect::new(2000.0, 1200.0, 100.0, 100.0);
         assert!(is_parked(beyond, DISPLAY));
+    }
+
+    /// 6X, the owner's log: helper apps' invisible windows (1×1 at the 5K's center seen on
+    /// the built-in display, a 64×64 cursor window) sat wholly on the display, right of and
+    /// below its center, and counted as parked: every quit warned about 24 of them.
+    #[test]
+    fn a_small_window_wholly_on_the_display_is_not_parked() {
+        let laptop = Rect::new(0.0, 0.0, 1800.0, 1169.0);
+        assert!(!is_parked(Rect::new(1280.0, 720.0, 1.0, 1.0), laptop));
+        assert!(!is_parked(Rect::new(1300.0, 900.0, 64.0, 64.0), laptop));
+        assert!(!is_parked(Rect::new(1736.0, 1100.0, 64.0, 64.0), laptop), "touching the corner, not past it");
+        // A parked one still is: past the edge, one point inside.
+        assert!(is_parked(Rect::new(1799.0, 1137.0, 1157.0, 1023.0), laptop));
+    }
+
+    /// 6X, the owner's log: after a display change macOS left a parked Telegram window at
+    /// `2559,1374 1157x1023` of a 2560×1440 display, a 1×66 sliver two points above the
+    /// corner's margin; no run counted it parked.
+    #[test]
+    fn a_thin_sliver_at_the_right_edge_is_parked() {
+        let five_k = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let visible = Rect::new(0.0, 30.0, 2560.0, 1410.0);
+        let telegram = Rect::new(2559.0, 1374.0, 1157.0, 1023.0);
+        assert!(is_parked(telegram, five_k));
+        assert!(is_parked_in(telegram, five_k, visible));
+        // A sliver at the bottom edge, the same.
+        assert!(is_parked(Rect::new(2400.0, 1436.0, 800.0, 600.0), five_k));
+        // A window dragged mostly off the right edge, half way down, is no sliver of ours.
+        assert!(!is_parked(Rect::new(2550.0, 700.0, 800.0, 600.0), five_k));
+        // Nor one showing 100 pt.
+        assert!(!is_parked(Rect::new(2460.0, 1300.0, 800.0, 600.0), five_k));
     }
 
     #[test]
