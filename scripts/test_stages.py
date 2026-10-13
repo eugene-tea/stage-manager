@@ -458,6 +458,8 @@ def phase_safety():
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
     clean = ["unparked every window", "guardian: clean exit"]
     drill("ctl quit", lambda pid: ctl("quit"), clean)
+    check("windows still parked after unparking" not in log_text(),
+          "ctl quit: no false \"still parked\" warning (the list is read after it settles)")
     drill("SIGTERM", lambda pid: os.kill(pid, signal.SIGTERM), ["signal received", *clean])
     drill("SIGINT", lambda pid: os.kill(pid, signal.SIGINT), ["signal received", *clean])
     drill("debug-panic", lambda pid: ctl("debug-panic"), ["debug-panic requested over ctl", "safety: registry unparked"])
@@ -976,14 +978,17 @@ def native_wallpaper():
     Finder is managed here (STAGE_MANAGER_ONLY gains com.apple.finder), so the sub-test runs
     only when Finder has no window of its own: the test opens one on a scratch folder in the
     test home, while the app runs, and closes it (through the app) at the end. It also needs
-    Apple's Stage Manager off and "Click wallpaper to reveal desktop" not set to Always
-    (macOS itself would move every window aside on the synthetic click)."""
+    Apple's Stage Manager off and "Click wallpaper to reveal desktop" set to Only in Stage
+    Manager (`EnableStandardClickToShowDesktop = 0`): with Always, also when the key is
+    absent (macOS's default), macOS itself moves every window aside on the synthetic click
+    and our reveal stays off."""
     say("-- wallpaper clicks with a Finder window (the test's own scratch folder)")
     if wm_default("GloballyEnabled") == "1":
         say("  skipped: Apple's Stage Manager is on; a real wallpaper click would act on every window")
         return
-    if wm_default("EnableStandardClickToShowDesktop") == "1":
-        say("  skipped: \"Click wallpaper to reveal desktop\" is Always; macOS would move every window aside")
+    if wm_default("EnableStandardClickToShowDesktop") != "0":
+        say("  skipped: \"Click wallpaper to reveal desktop\" is Always (set, or absent: macOS's default); "
+            "macOS would move every window aside and our reveal is off")
         return
     if finder_windows():
         say(f"  skipped: Finder has {len(finder_windows())} window(s) of the owner's open; managing Finder would move them")
@@ -1285,11 +1290,26 @@ def phase_motion():
     if check(bool(cards), "cards drawn"):
         c = cards[0]
         b = c["frame"]
+        key = next((st["key"] for st in s["stages"] if st["number"] == c["number"]), None)
         r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
         check(r.get("ok"), f"clicked a card ({r.get('error', 'ok')})")
+        # The keyboard goes to the new stage at once (Apple activates the app first): its
+        # key window is raised in front while it still sits parked behind its snapshot.
+        early = []
+        for _ in range(8):
+            p = probe()
+            mine = [w for w in p["windows"] if w["layer"] == 0 and w["onscreen"] and w["z"] is not None]
+            front = min(mine, key=lambda w: w["z"]) if mine else None
+            if front and front["id"] == key and is_parked(front["bounds"], p["display"]):
+                early.append(front["id"])
+                break
         check(any(w["layer"] == OVERLAY_LAYER for w in our_windows()), "snapshots move in the overlay")
         s = wait_state(lambda x: x["active"] == c["number"], "the click to switch")
         check(s is not None, "the click switched")
+        check("the keyboard goes to the new stage now" in log_text(),
+              "the new stage's key window is focused with the parks, before its window arrives")
+        if not early:
+            say("  note: no probe caught the key window raised while still parked (it may have arrived first)")
         time.sleep(1.0)
         check(not any(w["layer"] == OVERLAY_LAYER for w in our_windows()), "the overlay is gone once the motion ends")
         consistent("animated switch")

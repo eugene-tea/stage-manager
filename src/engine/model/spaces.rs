@@ -19,8 +19,10 @@
 //!   saved.
 //! - **Moves**: a known window on screen on a Space other than its own was moved there
 //!   (Mission Control, or dragged across with the pointer): it leaves its stage and joins
-//!   the shown Space's active stage. One that later shows on its old Space again is on
-//!   every Space (sticky): it is treated as pinned and no longer counted.
+//!   the shown Space's active stage. One that keeps showing on every Space the user goes to
+//!   ([`STICKY_HOPS`] arrivals in a row, the last back where it came from) is on every Space
+//!   (sticky): it is treated as pinned and no longer counted. Seen back where it came from
+//!   once is not enough: the user may simply have moved it there and straight back.
 //! - **Leaving** ([`Model::window_left_space`]): a window gone from the screen while its
 //!   app is not hidden and it is not minimized has left the Space; it leaves its stage and
 //!   comes back as a new arrival wherever it shows next.
@@ -34,6 +36,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{Action, DisplayId, Home, Model, Stage, StageId, WindowId, WindowMeta, WindowRole};
 use crate::engine::persist::{LaunchHints, SavedSpace, exact_matches, rematch};
+
+/// A window seen on screen on a Space other than its own at this many arrivals in a row,
+/// the last one back on the Space it came from, is on every Space (sticky). Two are not
+/// enough: moved to another Desktop and straight back (Mission Control, a quick user) looks
+/// the same for two arrivals; a third move in a row within seconds does not happen.
+pub const STICKY_HOPS: u32 = 3;
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
 /// `state.json`. Never Apple's own id.
@@ -263,6 +271,8 @@ impl Model {
         self.learn_moves(target, &known, &mut actions);
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
+        // A window not on screen here broke its run of hops: it is not on every Space.
+        self.hops.retain(|id, _| known.contains(id));
 
         let saved = self
             .leftovers
@@ -298,6 +308,7 @@ impl Model {
             }
         }
         self.moved_from.remove(&id);
+        self.hops.remove(&id);
         actions.extend(self.remove_window(id));
         (actions, group)
     }
@@ -344,14 +355,17 @@ impl Model {
     }
 
     /// Known standard windows on screen on `target` whose Space is another one: moved here,
-    /// or (seen again where they came from) on every Space.
+    /// or (seen on every Space gone to, [`STICKY_HOPS`] in a row, and now back where they
+    /// came from) on every Space.
     fn learn_moves(&mut self, target: SpaceId, known: &[WindowId], actions: &mut Vec<Action>) {
         for &id in known {
             let Some(w) = self.windows.get(&id) else { continue };
             if w.sticky || w.meta.role != WindowRole::Standard || w.space == target {
                 continue;
             }
-            if self.moved_from.get(&id) == Some(&target) {
+            let hops = self.hops.entry(id).or_insert(0);
+            *hops += 1;
+            if *hops >= STICKY_HOPS && self.moved_from.get(&id) == Some(&target) {
                 self.make_sticky(id, target, actions);
             } else {
                 self.move_here(id, target, actions);
@@ -425,6 +439,7 @@ impl Model {
             }
         }
         self.moved_from.remove(&id);
+        self.hops.remove(&id);
     }
 
     fn set_space(&mut self, ids: &[WindowId], space: SpaceId) {

@@ -613,8 +613,9 @@ mod app {
 
         let wm_input = wm.clone();
         let input_monitor = input::monitor(mtm, move |event| {
-            if event.kind == InputKind::KeyDown && event.cmd {
-                // ⌘Tab may switch stages: fresh snapshots for the animation.
+            if event.is_switcher_key() {
+                // ⌘Tab or ⌘` may switch stages: fresh snapshots for the animation (never on
+                // other ⌘ shortcuts, which would capture every shown window on each ⌘C).
                 strip::prefetch();
             }
             let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };

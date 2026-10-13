@@ -846,6 +846,27 @@ impl Model {
         }
     }
 
+    /// A parked window the user grabbed by its sliver and let go (the button is up again)
+    /// at `frame`. Apple's parked windows cannot be grabbed, so nothing switched while the
+    /// drag went on; now its stage comes as for any focus ([`Model::window_focused`]), with
+    /// this window as the stage's key window and, when it was dropped outside the park zone,
+    /// at the frame it was dropped at (its new restore frame), so it does not jump back.
+    pub fn parked_window_dropped(&mut self, id: WindowId, frame: Rect, obs: &Observation) -> Vec<Action> {
+        if let Some(standard) = self.resolve_standard(id)
+            && self.windows.get(&standard).is_some_and(|w| w.parked)
+        {
+            if standard == id {
+                self.record_frame(id, frame);
+            }
+            if let Some(stage) = self.stage_of(standard).and_then(|s| self.stage_mut(s))
+                && stage.windows.contains(&standard)
+            {
+                stage.key = Some(standard);
+            }
+        }
+        self.window_focused(id, obs)
+    }
+
     /// Click on the wallpaper. Parks the active stage (it enters the strip) and makes a fresh
     /// empty stage active, as Apple's reveal does. A second reveal, while that empty stage is
     /// still active and the revealed stage is still the most recent, brings the stage back.

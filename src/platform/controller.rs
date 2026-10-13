@@ -34,10 +34,13 @@
 //!   here; windows of this Space gone from the screen (app not hidden, not minimized) left
 //!   it. On a full-screen app's Space there is no strip and no stage changes; a Space change
 //!   during the full-screen animation waits for it to settle ([`crate::engine::fullscreen`]).
-//! - **Wallpaper clicks**: a click on the wallpaper reveals the desktop. macOS hands the
-//!   desktop to Finder, so Finder's activation and its main window's focus follow the click;
-//!   that echo never switches stages or unparks a window ([`DesktopEcho`]), as with Apple's.
-//!   A deliberate Finder activation (Dock click, ⌘Tab, its card) still brings its stage.
+//! - **Wallpaper clicks**: a click on the wallpaper reveals the desktop: ours with "Click
+//!   wallpaper to reveal desktop" set to Only in Stage Manager, macOS's own with Always (the
+//!   default, also when the key is unset), never both ([`wallpaper_click`]); a double click
+//!   is one click. macOS hands the desktop to Finder, so Finder's activation and its main
+//!   window's focus follow the click; that echo never switches stages or unparks a window
+//!   ([`DesktopEcho`]), as with Apple's. A deliberate Finder activation (Dock click, ⌘Tab,
+//!   its card) still brings its stage.
 //! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
 //!   current stage, and an activation (Dock click) of an app in another stage brings its
@@ -46,8 +49,12 @@
 //!   back is announced to the strip first ([`strip_model::Transition`]); once the strip has
 //!   drawn snapshots over them, outgoing windows park behind theirs, and incoming windows wait
 //!   (in the safety registry at their arrival frames) until the strip's growing snapshots
-//!   cover their frames ([`StripEvent::Unveil`]), or any other input arrives, or
-//!   [`PENDING_MAX`] passes.
+//!   cover their frames ([`StripEvent::Unveil`]), or a click or another event arrives, or
+//!   [`PENDING_MAX`] passes. The batch's focus does not wait: the keyboard goes to the new
+//!   stage at once, as Apple's does (`split_covered`).
+//! - **Space settle gate**: while a Space change waits out a full-screen animation, nothing
+//!   changes stages: window events, strip input, hotkeys, wallpaper clicks and ctl stage
+//!   commands are held off (`Controller::frozen`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -147,17 +154,31 @@ fn notify_ui(update: UiUpdate) {
     }
 }
 
+/// How long an app we made frontmost may take to report its activation and still have it
+/// count as ours ([`Echoes::is_app_echo`]): a busy app (Electron under load, an app answering
+/// Accessibility at the 0.25 s timeout) can report it well after [`ECHO_WINDOW`].
+pub const LATE_ACTIVATION_MAX: Duration = Duration::from_secs(5);
+
 /// Recently touched windows and apps, whose focus and activation events are our echoes.
+///
+/// An activation is ours when it comes within the echo window of our `AXFrontmost`, or when
+/// it is the first activation reported for an app we made frontmost and the user has not
+/// switched apps since (a mouse-down or ⌘ key press the global monitor saw, or an activation
+/// of another app that was not ours): a late echo after two quick switches must never pull
+/// the user back to the first stage. Card clicks and hotkeys are not seen by the monitor,
+/// so they keep a late echo ours.
 #[derive(Debug)]
 pub struct Echoes {
     windows: HashMap<u32, Instant>,
     apps: HashMap<i32, Instant>,
+    /// Apps we made frontmost whose activation has not been reported yet.
+    awaiting: HashMap<i32, Instant>,
     window: Duration,
 }
 
 impl Default for Echoes {
     fn default() -> Self {
-        Self { windows: HashMap::new(), apps: HashMap::new(), window: ECHO_WINDOW }
+        Self { windows: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), window: ECHO_WINDOW }
     }
 }
 
@@ -175,6 +196,7 @@ impl Echoes {
     /// We just made this app frontmost.
     pub fn touch_app(&mut self, pid: i32, now: Instant) {
         self.apps.insert(pid, now);
+        self.awaiting.insert(pid, now);
     }
 
     /// True when a focus event for `id` is probably our own.
@@ -182,15 +204,26 @@ impl Echoes {
         self.windows.get(&id).is_some_and(|t| now.duration_since(*t) < self.window)
     }
 
-    /// True when an activation of `pid` is probably our own.
-    pub fn is_app_echo(&self, pid: i32, now: Instant) -> bool {
-        self.apps.get(&pid).is_some_and(|t| now.duration_since(*t) < self.window)
+    /// True when an activation of `pid` is probably our own: within the echo window, or
+    /// the first activation reported since we made it frontmost with no user input between.
+    /// Call it once per reported activation: it consumes the awaited one.
+    pub fn is_app_echo(&mut self, pid: i32, now: Instant) -> bool {
+        let late = self.awaiting.remove(&pid).is_some_and(|t| now.saturating_duration_since(t) < LATE_ACTIVATION_MAX);
+        late || self.apps.get(&pid).is_some_and(|t| now.duration_since(*t) < self.window)
+    }
+
+    /// The user may have switched apps (a click, a ⌘ key press, another app activated on
+    /// purpose): an activation reported from now on beyond the echo window is theirs, not a
+    /// late echo.
+    pub fn user_switched(&mut self) {
+        self.awaiting.clear();
     }
 
     /// Forgets old entries.
     pub fn prune(&mut self, now: Instant) {
         self.windows.retain(|_, t| now.duration_since(*t) < self.window);
         self.apps.retain(|_, t| now.duration_since(*t) < self.window);
+        self.awaiting.retain(|_, t| now.saturating_duration_since(*t) < LATE_ACTIVATION_MAX);
     }
 }
 
@@ -201,17 +234,73 @@ pub fn native_settings(raw: &RawSettings) -> NativeSettings {
 }
 
 /// True when our wallpaper-click reveal should run: macOS's own "Click wallpaper to reveal
-/// desktop" set to Always (`EnableStandardClickToShowDesktop = 1`) already moves every
-/// window aside outside Apple's Stage Manager, and both at once would fight.
+/// desktop" set to Always (`EnableStandardClickToShowDesktop` 1 or absent, Apple's default)
+/// already moves every window aside outside Apple's Stage Manager, and both at once would
+/// fight. Only "Only in Stage Manager" leaves the click to us.
 pub fn wallpaper_reveal_enabled(s: &NativeSettings) -> bool {
     s.click_wallpaper_reveals_desktop && !s.macos_reveals_desktop_outside_stage_manager
 }
 
-/// The left button went down in another app: the restore frames of the windows shown then,
-/// so a window drag that follows knows where the window was before.
+/// What a click on the wallpaper does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallpaperClick {
+    /// Our reveal: the active stage goes to the strip, or the revealed stage comes back.
+    Toggle,
+    /// macOS reveals the desktop itself ("Always"): we move nothing.
+    LeftToMacOs,
+    /// The second click of a double click (or a later one): the first click already did
+    /// what the click does; toggling again would bring the stage straight back.
+    SameClick,
+}
+
+/// What a wallpaper click with macOS click count `clicks` does under settings `s`.
+pub fn wallpaper_click(s: &NativeSettings, clicks: i64) -> WallpaperClick {
+    if !wallpaper_reveal_enabled(s) {
+        WallpaperClick::LeftToMacOs
+    } else if clicks > 1 {
+        WallpaperClick::SameClick
+    } else {
+        WallpaperClick::Toggle
+    }
+}
+
+/// Splits a batch whose incoming windows wait behind their growing snapshots: what runs now
+/// and what runs when the strip unveils them. Parks, the other frames and the batch's focus
+/// run now: the keyboard goes to the new stage at once, as Apple's does (the app activates
+/// first; its window, still in the park zone behind its snapshot, arrives a moment later,
+/// as after a Dock click). The arriving frames, the raises and the focus again (after the
+/// raises, so the key window ends in front) wait.
+fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>, Vec<Action>) {
+    let focus: Vec<Action> = actions.iter().copied().filter(|a| matches!(a, Action::Focus { .. })).collect();
+    let (later, mut now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
+        Action::SetFrame { id, .. } => arriving.contains(&id.0),
+        Action::Raise { .. } | Action::Focus { .. } => true,
+        Action::Park { .. } | Action::StateChanged => false,
+    });
+    now.extend(focus);
+    (now, later)
+}
+
+/// True when a move of a shown window while the left button is down is the user dragging
+/// it: the press was on the window (`frame`, its frame at the press, with a margin for the
+/// resize edge) and the pointer has moved since. An app moving its own window while the
+/// user holds the button elsewhere is no drag.
+fn drag_plausible(press_at: Point, frame: Option<Rect>, pointer: Option<Point>) -> bool {
+    const EDGE: f64 = 8.0;
+    const MOVED: f64 = 2.0;
+    let on_window = frame.is_some_and(|f| Rect::new(f.x - EDGE, f.y - EDGE, f.w + 2.0 * EDGE, f.h + 2.0 * EDGE).contains(press_at));
+    let moved = pointer.is_none_or(|p| (p.x - press_at.x).hypot(p.y - press_at.y) >= MOVED);
+    on_window && moved
+}
+
+/// The left button went down in another app: where, and the restore and live frames of the
+/// windows shown then, so a window drag that follows knows where the window was before and
+/// whether the press was on it.
 #[derive(Debug, Default)]
 struct Press {
+    at: Point,
     frames: HashMap<u32, Rect>,
+    live: HashMap<u32, Rect>,
 }
 
 /// A managed window being dragged by the user.
@@ -299,6 +388,9 @@ pub struct Controller {
     /// `[strip] hide_while_desktop_shown`: a wallpaper click hid the strip, until the
     /// reveal ends or any window activation.
     strip_hidden_for_desktop: bool,
+    /// A parked window focused while the left button is down (grabbed by its sliver): its
+    /// stage comes once the button is up ([`Model::parked_window_dropped`]).
+    focus_after_press: Option<u32>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -381,6 +473,7 @@ impl Controller {
             seen_stages: None,
             desktop_echo: DesktopEcho::default(),
             strip_hidden_for_desktop: false,
+            focus_after_press: None,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -642,11 +735,10 @@ impl Controller {
             self.note_parked();
             return failed;
         }
-        let (later, now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
-            Action::SetFrame { id, .. } => arriving.contains(&id.0),
-            Action::Raise { .. } | Action::Focus { .. } => true,
-            Action::Park { .. } | Action::StateChanged => false,
-        });
+        let (now, later) = split_covered(actions, &arriving);
+        if let Some(Action::Focus { id: key }) = now.iter().rev().find(|a| matches!(a, Action::Focus { .. })) {
+            tracing::debug!(id, key = key.0, "the keyboard goes to the new stage now; its windows arrive behind their snapshots");
+        }
         let entries = later
             .iter()
             .filter_map(|a| match *a {
@@ -842,7 +934,13 @@ impl Controller {
 
     fn on_event(&mut self, ob: &mut Observer, event: WinEvent) {
         let now = Instant::now();
-        if !matches!(event, WinEvent::Moved(_) | WinEvent::Retitled(_)) {
+        // Any other event brings windows held behind a transition's snapshots in at once;
+        // moves, retitles and the echoes of our own focus (sent before the windows arrive,
+        // so the keyboard goes to the new stage at once) leave the animation alone.
+        if !matches!(
+            event,
+            WinEvent::Moved(_) | WinEvent::Retitled(_) | WinEvent::Focused(_) | WinEvent::AppActivated(_)
+        ) {
             self.flush_pending(ob);
         }
         match event {
@@ -894,8 +992,18 @@ impl Controller {
                     tracing::debug!(id, "Finder window focus after a wallpaper click: ignored (the desktop is Finder's)");
                     return;
                 }
+                self.flush_pending(ob);
                 self.show_strip_after_desktop("a window was focused");
                 if self.frozen() {
+                    return;
+                }
+                if self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked)
+                    && input::left_button_down()
+                {
+                    // Grabbed by its sliver: nothing moves under the user's drag; its stage
+                    // comes once the button is up (Apple's parked windows cannot be grabbed).
+                    tracing::debug!(id, "a parked window was grabbed; its stage comes when the button is up");
+                    self.focus_after_press = Some(id);
                     return;
                 }
                 let obs = self.observe(ob);
@@ -928,6 +1036,10 @@ impl Controller {
                     tracing::debug!(pid, "Finder activation after a wallpaper click: ignored (the desktop is Finder's)");
                     return;
                 }
+                // The user switched apps: a late echo of an earlier focus of ours is no
+                // longer one.
+                self.echoes.user_switched();
+                self.flush_pending(ob);
                 self.show_strip_after_desktop("an app was activated");
                 if self.frozen() {
                     return;
@@ -1034,6 +1146,10 @@ impl Controller {
         if !shown || w.meta.role != WindowRole::Standard || !input::left_button_down() {
             return;
         }
+        if !drag_plausible(press.at, press.live.get(&id).copied(), input::pointer()) {
+            tracing::trace!(id, "a move while the button is down elsewhere: the app moved its window, no drag");
+            return;
+        }
         let pre = press.frames.get(&id).copied().unwrap_or(w.restore);
         let Some(now_frame) = ob.window(id).map(|t| t.frame) else { return };
         let moving = (now_frame.w - pre.w).abs() < 1.0 && (now_frame.h - pre.h).abs() < 1.0;
@@ -1056,14 +1172,17 @@ impl Controller {
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
                 self.flush_pending(ob);
                 self.end_drag();
+                self.echoes.user_switched();
                 self.press = self.model.as_ref().map(|m| Press {
+                    at: event.at,
                     frames: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.restore)).collect(),
+                    live: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.meta.frame)).collect(),
                 });
                 let wallpaper = if for_arriving {
                     tracing::debug!("click during a transition, on an arriving window");
                     false
                 } else {
-                    self.mouse_down(ob, event.at)
+                    self.mouse_down(ob, event.at, event.clicks)
                 };
                 if !wallpaper && self.desktop_echo.user_acted() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
@@ -1071,6 +1190,7 @@ impl Controller {
             }
             InputKind::MouseUp => {
                 self.press = None;
+                self.focus_after_press_done(ob);
                 let Some(drag) = self.drag.take() else { return };
                 if let Some(slot) = drop.filter(|_| drag.moving) {
                     counters::bump(Count::Drop);
@@ -1086,12 +1206,33 @@ impl Controller {
                 self.present();
             }
             InputKind::KeyDown => {
-                self.flush_pending(ob);
+                // Typing never cuts a switch's animation short: the keyboard is already the
+                // new stage's (its focus ran before the windows arrived).
+                if event.cmd {
+                    self.echoes.user_switched();
+                }
                 if self.desktop_echo.user_acted() {
                     tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
                 }
             }
         }
+    }
+
+    /// The button is up after a parked window was grabbed by its sliver: its stage comes now,
+    /// the window where the user left it when that is outside the park zone.
+    fn focus_after_press_done(&mut self, ob: &mut Observer) {
+        let Some(id) = self.focus_after_press.take() else { return };
+        if self.frozen() {
+            return;
+        }
+        let Some(frame) = ob.refresh_frame(id) else { return };
+        let obs = self.observe(ob);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.parked_window_dropped(WindowId(id), frame, &obs);
+        if !actions.is_empty() {
+            tracing::info!(id, "a parked window was let go; switching to its stage");
+        }
+        self.execute_animated(ob, actions);
     }
 
     fn end_drag(&mut self) {
@@ -1194,6 +1335,17 @@ impl Controller {
         self.fullscreen || self.space_pending
     }
 
+    /// Why stage commands are refused now, if they are ([`Self::frozen`]).
+    fn frozen_reason(&self) -> Option<&'static str> {
+        if self.space_pending {
+            Some("a Space change is settling")
+        } else if self.fullscreen {
+            Some("a full-screen app's Space shows")
+        } else {
+            None
+        }
+    }
+
     /// What the window list shows on `display` ([`Seen`]): a full-screen app's Space when a
     /// big window on screen says it is in full screen (asked through Accessibility: the
     /// observer's element when we track it, else its app's window list); an animation when a
@@ -1236,8 +1388,9 @@ impl Controller {
     }
 
     /// Managed standard windows missing from the screen for no reason we can see: their app
-    /// is not hidden and they are not minimized (asked through AX). Evidence that the Space
-    /// they live on is not the one shown.
+    /// is not hidden, they are not minimized and not in full screen (asked through AX; a
+    /// window in full screen is on a Space of its own and still belongs to its Desktop).
+    /// Evidence that the Space they live on is not the one shown.
     fn absent_windows(&self, ob: &Observer, shown: &HashSet<u32>) -> Vec<WindowId> {
         let Some(m) = &self.model else { return Vec::new() };
         let mut hidden: HashMap<i32, bool> = HashMap::new();
@@ -1246,6 +1399,7 @@ impl Controller {
             .filter(|w| ob.window(w.meta.id.0).is_some())
             .filter(|w| !*hidden.entry(w.meta.pid).or_insert_with(|| ob.app_hidden_now(w.meta.pid)))
             .filter(|w| !ob.is_minimized_now(w.meta.id.0))
+            .filter(|w| !ob.is_fullscreen_now(w.meta.id.0))
             .map(|w| w.meta.id)
             .collect()
     }
@@ -1413,9 +1567,13 @@ impl Controller {
             .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
             .map(|w| (w.meta.id.0, w.meta.pid))
             .collect();
+        // In full screen, a window is on a Space of its own but still this Desktop's: it is
+        // not gone (it comes back here when it leaves full screen).
         let missing: Vec<u32> = missing
             .into_iter()
-            .filter(|&(id, pid)| ob.window(id).is_some() && !ob.app_hidden_now(pid) && !ob.is_minimized_now(id))
+            .filter(|&(id, pid)| {
+                ob.window(id).is_some() && !ob.app_hidden_now(pid) && !ob.is_minimized_now(id) && !ob.is_fullscreen_now(id)
+            })
             .map(|(id, _)| id)
             .collect();
         self.absent.retain(|id, _| missing.contains(id));
@@ -1553,11 +1711,13 @@ impl Controller {
         }
     }
 
-    /// A left mouse-down in another app at `p`: on the wallpaper it reveals the desktop.
-    /// True when it was a wallpaper click (Finder's activation and focus that follow are
-    /// its echo, [`DesktopEcho`]).
-    pub fn mouse_down(&mut self, ob: &mut Observer, p: Point) -> bool {
-        if self.model.is_none() || self.fullscreen || !wallpaper_reveal_enabled(&self.settings) {
+    /// A left mouse-down in another app at `p`, the `clicks`th click of a multiple click:
+    /// on the wallpaper it reveals the desktop ([`wallpaper_click`]: ours only with "Only in
+    /// Stage Manager"; a double click is one click). True when it was a wallpaper click,
+    /// whoever reveals: Finder's activation and focus that follow are its echo
+    /// ([`DesktopEcho`]) either way.
+    pub fn mouse_down(&mut self, ob: &mut Observer, p: Point, clicks: i64) -> bool {
+        if self.model.is_none() || self.frozen() {
             return false;
         }
         if self.model.as_ref().is_some_and(|m| !m.main_display().frame.contains(p)) {
@@ -1570,9 +1730,21 @@ impl Controller {
         if !desktop::is_wallpaper_click(&list, p) {
             return false;
         }
-        tracing::info!(x = p.x, y = p.y, "wallpaper click");
         self.desktop_echo.wallpaper_clicked(Instant::now());
-        self.reveal(ob, true);
+        match wallpaper_click(&self.settings, clicks) {
+            WallpaperClick::Toggle => {
+                tracing::info!(x = p.x, y = p.y, "wallpaper click");
+                self.reveal(ob, true);
+            }
+            WallpaperClick::LeftToMacOs => tracing::info!(
+                x = p.x,
+                y = p.y,
+                "wallpaper click: macOS reveals the desktop itself (Click wallpaper to reveal desktop: Always)"
+            ),
+            WallpaperClick::SameClick => {
+                tracing::info!(x = p.x, y = p.y, clicks, "wallpaper double click: one click, nothing toggles again")
+            }
+        }
         true
     }
 
@@ -1616,8 +1788,8 @@ impl Controller {
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
         self.flush_pending(ob);
-        if self.fullscreen && command != HotkeyCommand::ToggleStrip {
-            tracing::debug!("a full-screen app's Space shows; the hotkey does nothing");
+        if self.frozen() && command != HotkeyCommand::ToggleStrip {
+            tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
             return;
         }
         let _ = match command {
@@ -1650,7 +1822,8 @@ impl Controller {
             return;
         }
         self.flush_pending(ob);
-        if self.fullscreen {
+        if self.frozen() {
+            tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
             return;
         }
         if let StripEvent::CardMoved { stage, before } = event {
@@ -1793,6 +1966,10 @@ impl Controller {
             self.flush_pending(ob);
         }
         self.echoes.prune(now);
+        if self.focus_after_press.is_some() && !input::left_button_down() {
+            // The button came up without a mouse-up the monitor saw.
+            self.focus_after_press_done(ob);
+        }
         if let Some((first, last)) = self.dirty
             && (now.duration_since(last) >= SAVE_DEBOUNCE || now.duration_since(first) >= SAVE_MAX_DELAY)
         {
@@ -1827,6 +2004,13 @@ impl Controller {
             Err(e) => json!({ "ok": false, "error": e }),
         };
         self.flush_pending(ob);
+        let acts = matches!(
+            cmd,
+            Command::Switch(_) | Command::Send(..) | Command::New(_) | Command::Pin(_) | Command::Merge(_) | Command::Reveal
+        );
+        if acts && let Some(why) = self.frozen_reason() {
+            return json!({ "ok": false, "error": why });
+        }
         match cmd {
             Command::State => self.state_json(ob),
             Command::Space => match &self.model {
@@ -2141,10 +2325,135 @@ mod tests {
 
     #[test]
     fn wallpaper_reveal_honors_click_to_show_desktop() {
-        assert!(wallpaper_reveal_enabled(&NativeSettings::default()));
+        assert!(
+            !wallpaper_reveal_enabled(&NativeSettings::default()),
+            "absent = Always (Apple's default): macOS reveals on its own, ours never runs alongside"
+        );
+        let his: RawSettings = [("AppWindowGroupingBehavior".to_string(), 1), ("GloballyEnabled".to_string(), 0)].into();
+        assert!(!wallpaper_reveal_enabled(&native_settings(&his)), "his Mac: the key is absent");
         let always: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 1)].into();
         assert!(!wallpaper_reveal_enabled(&native_settings(&always)), "macOS reveals on its own");
         let only_sm: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 0)].into();
         assert!(wallpaper_reveal_enabled(&native_settings(&only_sm)));
+    }
+
+    #[test]
+    fn a_double_click_on_the_wallpaper_is_one_click() {
+        let only_sm: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 0)].into();
+        let ours = native_settings(&only_sm);
+        assert_eq!(wallpaper_click(&ours, 1), WallpaperClick::Toggle);
+        assert_eq!(wallpaper_click(&ours, 2), WallpaperClick::SameClick, "two clicks 40 ms apart: no second toggle");
+        assert_eq!(wallpaper_click(&ours, 3), WallpaperClick::SameClick);
+        assert_eq!(wallpaper_click(&ours, 0), WallpaperClick::Toggle, "count unknown: a click of its own");
+        let default = NativeSettings::default();
+        assert_eq!(wallpaper_click(&default, 1), WallpaperClick::LeftToMacOs);
+        assert_eq!(wallpaper_click(&default, 2), WallpaperClick::LeftToMacOs);
+    }
+
+    #[test]
+    fn a_double_click_reveals_and_stays_revealed() {
+        // The model and the controller's decision, wired as `mouse_down` wires them: his log
+        // of 10-12 had two clicks 40 ms apart reveal and bring the stage straight back.
+        use crate::engine::model::{ModelOptions, Observation};
+        use crate::engine::rules::{Decision, Placement, RuleAction};
+        use crate::engine::testkit::{meta, model_with};
+        let only_sm: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 0)].into();
+        let settings = native_settings(&only_sm);
+        let mut m = model_with(ModelOptions::default());
+        let window = meta(1, 10, "com.example.a");
+        let obs = Observation { frames: [(window.id, window.frame)].into(), z_order: vec![window.id], focused: Some(window.id) };
+        m.add_window(window.clone(), &Decision { action: RuleAction::New, placement: Placement::AsIs }, &obs);
+        for clicks in [1, 2] {
+            if wallpaper_click(&settings, clicks) == WallpaperClick::Toggle {
+                m.reveal_desktop(&obs);
+            }
+        }
+        assert!(m.desktop_revealed(), "the second click of the double click did not bring the stage back");
+        if wallpaper_click(&settings, 1) == WallpaperClick::Toggle {
+            m.reveal_desktop(&Observation::default());
+        }
+        assert!(!m.desktop_revealed(), "a later single click does");
+    }
+
+    fn ids(actions: &[Action]) -> Vec<String> {
+        actions
+            .iter()
+            .map(|a| match a {
+                Action::SetFrame { id, .. } => format!("frame {}", id.0),
+                Action::Park { id, .. } => format!("park {}", id.0),
+                Action::Raise { id } => format!("raise {}", id.0),
+                Action::Focus { id } => format!("focus {}", id.0),
+                Action::StateChanged => "state".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_covered_switch_focuses_the_new_stage_at_once() {
+        let r = Rect::new(100.0, 100.0, 400.0, 300.0);
+        let batch = vec![
+            Action::Park { id: WindowId(1), frame: r },
+            Action::Park { id: WindowId(2), frame: r },
+            Action::SetFrame { id: WindowId(4), frame: r },
+            Action::SetFrame { id: WindowId(3), frame: r },
+            Action::Raise { id: WindowId(4) },
+            Action::Raise { id: WindowId(3) },
+            Action::Focus { id: WindowId(3) },
+            Action::StateChanged,
+        ];
+        let arriving: HashSet<u32> = [3, 4].into();
+        let (now, later) = split_covered(batch, &arriving);
+        assert_eq!(ids(&now), ["park 1", "park 2", "state", "focus 3"], "the keyboard goes to the new stage with the parks");
+        assert_eq!(
+            ids(&later),
+            ["frame 4", "frame 3", "raise 4", "raise 3", "focus 3"],
+            "the windows arrive behind their snapshots, the key window in front last"
+        );
+        // A batch without a focus focuses nothing early.
+        let (now, later) = split_covered(vec![Action::SetFrame { id: WindowId(3), frame: r }], &arriving);
+        assert!(now.is_empty());
+        assert_eq!(ids(&later), ["frame 3"]);
+    }
+
+    #[test]
+    fn a_late_activation_after_a_second_quick_switch_is_still_ours() {
+        let (slack, mail) = (10, 20);
+        let mut e = Echoes::default();
+        let t0 = Instant::now();
+        e.touch_app(slack, t0);
+        e.touch_app(mail, t0 + Duration::from_millis(400));
+        assert!(e.is_app_echo(mail, t0 + Duration::from_millis(450)));
+        // Slack, busy, reports its activation 800 ms after our focus: past the echo window.
+        assert!(e.is_app_echo(slack, t0 + Duration::from_millis(800)), "late, but the one we asked for");
+        assert!(!e.is_app_echo(slack, t0 + Duration::from_millis(900)), "a second one is not");
+    }
+
+    #[test]
+    fn a_user_switch_ends_a_pending_late_echo() {
+        let slack = 10;
+        let mut e = Echoes::default();
+        let t0 = Instant::now();
+        e.touch_app(slack, t0);
+        e.user_switched();
+        assert!(!e.is_app_echo(slack, t0 + Duration::from_millis(900)), "a Dock click or ⌘Tab to it is the user's");
+        assert!(e.is_app_echo(slack, t0 + Duration::from_millis(100)), "still within the echo window");
+        // Never awaited forever: an app that was already frontmost never reports one.
+        e.touch_app(slack, t0);
+        e.prune(t0 + LATE_ACTIVATION_MAX);
+        assert!(!e.is_app_echo(slack, t0 + LATE_ACTIVATION_MAX));
+    }
+
+    #[test]
+    fn only_a_press_on_the_window_and_a_moving_pointer_start_a_drag() {
+        let frame = Some(Rect::new(100.0, 100.0, 400.0, 300.0));
+        let title_bar = Point::new(200.0, 110.0);
+        assert!(drag_plausible(title_bar, frame, Some(Point::new(230.0, 120.0))));
+        assert!(drag_plausible(Point::new(96.0, 200.0), frame, Some(Point::new(80.0, 200.0))), "the resize edge");
+        assert!(
+            !drag_plausible(Point::new(900.0, 700.0), frame, Some(Point::new(930.0, 720.0))),
+            "the button is down in another window: the app moved its own window"
+        );
+        assert!(!drag_plausible(title_bar, frame, Some(title_bar)), "the pointer has not moved");
+        assert!(!drag_plausible(title_bar, None, Some(Point::new(230.0, 120.0))), "not shown at the press");
     }
 }

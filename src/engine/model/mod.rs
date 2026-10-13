@@ -261,6 +261,9 @@ pub struct Model {
     /// Windows that moved to the current Space at a Space change, with the Space they came
     /// from: seen there again later, they are on every Space (sticky).
     pub(crate) moved_from: HashMap<WindowId, SpaceId>,
+    /// Windows seen on screen on a Space other than their own at consecutive arrivals: how
+    /// many in a row ([`spaces::STICKY_HOPS`] make a window sticky).
+    pub(crate) hops: HashMap<WindowId, u32>,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -291,6 +294,7 @@ impl Model {
             next_space: 1,
             leftovers: Vec::new(),
             moved_from: HashMap::new(),
+            hops: HashMap::new(),
             clock: 0,
             next_stage: 1,
             options,

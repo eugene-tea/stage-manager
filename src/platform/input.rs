@@ -52,6 +52,26 @@ pub struct InputEvent {
     pub shift: bool,
     /// Command held.
     pub cmd: bool,
+    /// For a mouse event, macOS's click count: 2 for the second click of a double click
+    /// (within the user's double-click interval, near the first), 1 for a single click; 0
+    /// for a key.
+    pub clicks: i64,
+    /// For a key-down, its virtual key code ([`KEY_TAB`], …); `None` for a mouse event.
+    pub key: Option<u16>,
+}
+
+/// The Tab key's virtual key code.
+pub const KEY_TAB: u16 = 48;
+/// The ` key's virtual key code (⌘` cycles an app's windows).
+pub const KEY_GRAVE: u16 = 50;
+
+impl InputEvent {
+    /// A key-down of an app or window switcher, ⌘Tab or ⌘`: the next activation may switch
+    /// stages, so fresh snapshots for its animation are worth taking. Other ⌘ shortcuts
+    /// (⌘C, ⌘S, ⌘→ held down) are not.
+    pub fn is_switcher_key(&self) -> bool {
+        self.kind == InputKind::KeyDown && self.cmd && matches!(self.key, Some(KEY_TAB | KEY_GRAVE))
+    }
 }
 
 /// Keeps the global monitor alive; dropping it removes the monitor.
@@ -79,11 +99,18 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
         };
         let flags = event.modifierFlags();
         let at = NSEvent::mouseLocation();
+        // clickCount and keyCode raise on the other kind of event: ask each only its own.
+        let (clicks, key) = match kind {
+            InputKind::KeyDown => (0, Some(event.keyCode())),
+            InputKind::MouseDown | InputKind::MouseUp => (event.clickCount() as i64, None),
+        };
         sink(InputEvent {
             kind,
             at: point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)),
             shift: flags.contains(NSEventModifierFlags::Shift),
             cmd: flags.contains(NSEventModifierFlags::Command),
+            clicks,
+            key,
         });
     });
     let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::KeyDown;
@@ -104,6 +131,11 @@ pub struct Modifiers {
 pub fn live_modifiers() -> Modifiers {
     let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
     Modifiers { shift: flags.contains(CGEventFlags::MaskShift), cmd: flags.contains(CGEventFlags::MaskCommand) }
+}
+
+/// Where the pointer is now, global top-left coordinates (any thread).
+pub fn pointer() -> Option<Point> {
+    pointer_now().map(|p| Point::new(p.x, p.y))
 }
 
 /// True while the left mouse button is down (any thread).
@@ -357,6 +389,20 @@ mod tests {
         // Long after, the live state decides alone.
         assert!(t.shift_here(t0 + Duration::from_secs(30), ACTIVATION_WINDOW, SHIFT));
         assert!(!t.shift_here(t0 + Duration::from_secs(30), ACTIVATION_WINDOW, CMD_SHIFT));
+    }
+
+    fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
+        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, clicks, key }
+    }
+
+    #[test]
+    fn only_the_switchers_count_as_switcher_keys() {
+        assert!(event(InputKind::KeyDown, true, 0, Some(KEY_TAB)).is_switcher_key(), "⌘Tab");
+        assert!(event(InputKind::KeyDown, true, 0, Some(KEY_GRAVE)).is_switcher_key(), "⌘`");
+        assert!(!event(InputKind::KeyDown, false, 0, Some(KEY_TAB)).is_switcher_key(), "Tab alone");
+        assert!(!event(InputKind::KeyDown, true, 0, Some(8)).is_switcher_key(), "⌘C");
+        assert!(!event(InputKind::KeyDown, true, 0, Some(124)).is_switcher_key(), "⌘→");
+        assert!(!event(InputKind::MouseDown, true, 1, None).is_switcher_key());
     }
 
     #[test]

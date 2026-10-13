@@ -5,13 +5,20 @@
 //! hands them over as a map; [`NativeSettings::from_values`] turns them into behavior. Missing
 //! keys take Apple's defaults. `config.toml` never repeats any of these.
 //!
+//! **Click wallpaper to reveal desktop** (System Settings → Desktop & Dock): Apple's guide
+//! ("Change Desktop & Dock settings on Mac", macOS 27) offers "Always" (clicking the
+//! wallpaper moves all windows out of the way) and "Only in Stage Manager". Since Sonoma the
+//! setting ships as "Always", and `EnableStandardClickToShowDesktop` is written only once the
+//! user picks a value (`false` = Only in Stage Manager), so an absent key means Always: macOS
+//! itself moves every window aside on a wallpaper click while Apple's Stage Manager is off.
+//!
 //! | Key | Raw values | Field |
 //! |---|---|---|
 //! | `AppWindowGroupingBehavior` | 1 = all at once (default), 0 = one at a time | [`NativeSettings::app_windows`] |
 //! | `AutoHide` | 1 = hide recent apps (strip auto-hides), 0 = show (default) | [`NativeSettings::hide_recent_apps`] |
 //! | `HideDesktop` | 1 = hide desktop items, 0 = show (default) | [`NativeSettings::hide_desktop_items`] |
 //! | `GloballyEnabled` | 1 = Apple's Stage Manager is on, 0 = off (default) | [`NativeSettings::stage_manager_enabled`] |
-//! | `EnableStandardClickToShowDesktop` | 1 = always, 0 or absent = only in Stage Manager | [`NativeSettings::click_wallpaper_reveals_desktop`], [`NativeSettings::macos_reveals_desktop_outside_stage_manager`] |
+//! | `EnableStandardClickToShowDesktop` | 1 or absent = Always (default), 0 = Only in Stage Manager | [`NativeSettings::click_wallpaper_reveals_desktop`], [`NativeSettings::macos_reveals_desktop_outside_stage_manager`] |
 //! | `StageManagerHideWidgets` | 1 = hide widgets in Stage Manager | [`NativeSettings::hide_widgets_in_stage_manager`] |
 //! | `StandardHideWidgets` | 1 = hide widgets on the desktop | [`NativeSettings::hide_widgets_standard`] |
 
@@ -77,8 +84,10 @@ pub struct NativeSettings {
     /// Click wallpaper to reveal desktop. Apple's choices are "Always" and "Only in Stage
     /// Manager"; this app is the stage manager, so both mean yes and this is always true.
     pub click_wallpaper_reveals_desktop: bool,
-    /// `EnableStandardClickToShowDesktop = 1` ("Always"): macOS itself also reveals the
-    /// desktop on a wallpaper click outside Stage Manager. The platform may need to know.
+    /// `EnableStandardClickToShowDesktop` 1 or absent ("Always", Apple's default): macOS
+    /// itself reveals the desktop on a wallpaper click outside Apple's Stage Manager, so our
+    /// own reveal must stay off (both at once would fight over the windows). Only with "Only
+    /// in Stage Manager" (0) is the wallpaper click ours to answer.
     pub macos_reveals_desktop_outside_stage_manager: bool,
     /// Apple's own Stage Manager is on (`GloballyEnabled = 1`); both cannot run, so warn.
     pub stage_manager_enabled: bool,
@@ -110,7 +119,9 @@ impl NativeSettings {
             hide_recent_apps: flag("AutoHide"),
             hide_desktop_items: flag("HideDesktop"),
             click_wallpaper_reveals_desktop: true,
-            macos_reveals_desktop_outside_stage_manager: flag("EnableStandardClickToShowDesktop"),
+            macos_reveals_desktop_outside_stage_manager: values
+                .get("EnableStandardClickToShowDesktop")
+                .is_none_or(|v| v.as_bool()),
             stage_manager_enabled: flag("GloballyEnabled"),
             hide_widgets_in_stage_manager: flag("StageManagerHideWidgets"),
             hide_widgets_standard: flag("StandardHideWidgets"),
@@ -133,7 +144,10 @@ mod tests {
         assert!(!s.hide_recent_apps);
         assert!(!s.hide_desktop_items);
         assert!(s.click_wallpaper_reveals_desktop);
-        assert!(!s.macos_reveals_desktop_outside_stage_manager);
+        assert!(
+            s.macos_reveals_desktop_outside_stage_manager,
+            "absent = Always (Apple's default since Sonoma): macOS reveals on its own"
+        );
         assert!(!s.stage_manager_enabled);
     }
 
@@ -151,6 +165,7 @@ mod tests {
         assert!(s.stage_manager_enabled);
         assert!(s.hide_widgets_in_stage_manager);
         assert!(!s.hide_widgets_standard);
+        assert!(s.macos_reveals_desktop_outside_stage_manager, "his key is absent: Always");
     }
 
     #[test]
@@ -169,12 +184,16 @@ mod tests {
     }
 
     #[test]
-    fn click_to_show_desktop_zero_still_reveals_for_us() {
+    fn only_in_stage_manager_leaves_the_wallpaper_click_to_us() {
         let s = NativeSettings::from_values(&values(&[(
             "EnableStandardClickToShowDesktop",
             PrefValue::Int(0),
         )]));
         assert!(s.click_wallpaper_reveals_desktop);
         assert!(!s.macos_reveals_desktop_outside_stage_manager);
+        let s = NativeSettings::from_values(&values(&[("EnableStandardClickToShowDesktop", PrefValue::Bool(false))]));
+        assert!(!s.macos_reveals_desktop_outside_stage_manager, "written as a boolean by System Settings");
+        let s = NativeSettings::from_values(&values(&[("EnableStandardClickToShowDesktop", PrefValue::Bool(true))]));
+        assert!(s.macos_reveals_desktop_outside_stage_manager);
     }
 }

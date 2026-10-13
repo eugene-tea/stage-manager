@@ -86,14 +86,15 @@ impl Mac {
     }
 
     /// What the platform reports on a Space change: the windows on screen, the managed ones
-    /// missing (windows on a Desktop numbered 9 stand for hidden apps' windows: off screen
-    /// for a visible reason), and the focused window first in z-order.
+    /// missing (windows on a Desktop numbered 9 stand for hidden apps' windows, on 8 for
+    /// windows in full screen, on a Space of their own: off screen for a visible reason),
+    /// and the focused window first in z-order.
     fn arrive(&mut self) -> Vec<Action> {
         let live = self.live();
         let absent: Vec<WindowId> = self
             .wins
             .iter()
-            .filter(|(id, (d, _, _))| !self.on_screen(**id) && *d != Some(9))
+            .filter(|(id, (d, _, _))| !self.on_screen(**id) && !matches!(*d, Some(FULL_SCREEN | HIDDEN)))
             .map(|(id, _)| w(*id))
             .filter(|id| self.m.window(*id).is_some())
             .collect();
@@ -155,6 +156,11 @@ impl Mac {
         self.m.stage(s).expect("stage").windows.iter().map(|x| x.0).collect()
     }
 }
+
+/// The fake Desktop of hidden apps' windows.
+const HIDDEN: usize = 9;
+/// The fake Desktop of windows in full screen (each on a Space of its own).
+const FULL_SCREEN: usize = 8;
 
 /// Desktop 1: an editor window and a browser; Desktop 2: another editor window and chat.
 fn two_desktops() -> Mac {
@@ -284,7 +290,9 @@ fn a_window_on_every_desktop_becomes_sticky() {
     mac.go(1);
     assert!(!mac.m.is_sticky(w(7)), "seen once elsewhere: a move, as far as we know");
     mac.go(0);
-    assert!(mac.m.is_sticky(w(7)), "seen again where it came from: on every Desktop");
+    assert!(!mac.m.is_sticky(w(7)), "seen back where it came from: maybe moved there and straight back");
+    mac.go(1);
+    assert!(mac.m.is_sticky(w(7)), "on every Desktop gone to, three times in a row: on every Desktop");
     assert_eq!(mac.m.window(w(7)).map(|x| x.home), Some(Home::Pinned));
     mac.go(1);
     mac.go(0);
@@ -316,7 +324,7 @@ fn an_arrival_guessed_wrong_is_corrected_by_the_windows_on_screen() {
     mac.go(1);
     let hidden = [1, 2];
     for id in hidden {
-        mac.wins.get_mut(&id).expect("window").0 = Some(9);
+        mac.wins.get_mut(&id).expect("window").0 = Some(HIDDEN);
     }
     mac.go(0);
     assert_ne!(mac.space(), d1, "no evidence: an empty Space for now");
@@ -445,4 +453,75 @@ fn saved_ids_never_collide_with_the_models_own() {
     assert_eq!(m.spaces().len(), 1);
     assert!(m.main_active_stage().is_some());
     let _ = rematch;
+}
+
+#[test]
+fn a_window_moved_to_another_desktop_and_straight_back_is_not_sticky() {
+    // Mission Control: Desktop 1's browser dragged to Desktop 2, Desktop 2 clicked; then,
+    // within a second or two (before the once-a-second checks forget it), dragged back
+    // to Desktop 1 and Desktop 1 clicked.
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    let d1 = mac.space();
+    mac.wins.get_mut(&2).expect("window").0 = Some(1);
+    mac.go(1);
+    assert_ne!(mac.space(), d1);
+    assert!(mac.active().contains(&2), "moved here: it joins Desktop 2's active stage");
+    mac.wins.get_mut(&2).expect("window").0 = Some(0);
+    mac.go(0);
+    assert_eq!(mac.space(), d1, "Desktop 1 still recognized");
+    assert!(!mac.m.is_sticky(w(2)), "moved back, not on every Desktop");
+    assert_eq!(mac.m.space_of(w(2)), Some(d1));
+    assert!(matches!(mac.m.window(w(2)).map(|x| x.home), Some(Home::Stage(_))), "it lives in a stage again");
+    assert!(!mac.parked(2));
+    // It can be pinned and unpinned, unlike a sticky window.
+    let obs = mac.obs();
+    assert!(!mac.m.toggle_pin(w(2), &obs).is_empty());
+    assert_eq!(mac.m.window(w(2)).map(|x| x.home), Some(Home::Pinned));
+    let obs = mac.obs();
+    assert!(!mac.m.toggle_pin(w(2), &obs).is_empty());
+    assert!(matches!(mac.m.window(w(2)).map(|x| x.home), Some(Home::Stage(_))));
+    // Desktop 2 and back: it stays Desktop 1's (its run of moves is over).
+    mac.go(1);
+    mac.go(0);
+    assert!(!mac.m.is_sticky(w(2)));
+    assert_eq!(mac.m.space_of(w(2)), Some(d1));
+}
+
+#[test]
+fn a_window_in_full_screen_still_belongs_to_its_desktop() {
+    // Desktop 1: the editor and the browser, two stages. The browser goes full screen (a
+    // Space of its own); the user goes to Desktop 2 and back to Desktop 1.
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    let d1 = mac.space();
+    let stages: Vec<StageId> = mac.m.stages_in(d1).map(|s| s.id).collect();
+    assert_eq!(stages.len(), 2);
+    mac.wins.get_mut(&2).expect("window").0 = Some(FULL_SCREEN);
+    mac.go(1);
+    let d2 = mac.space();
+
+    // Counted missing for no visible reason (the old platform), Desktop 1 is not recognized
+    // with two windows: score 1 − 1 = 0, a fresh Space, and its stages merge.
+    let mut naive = mac.m.clone();
+    let live = mac.wins.iter().filter(|(_, (d, _, _))| *d == Some(0)).map(|(_, x)| x.2.clone()).collect::<Vec<_>>();
+    naive.arrive(MAIN, &live, &[w(2)], &LaunchHints::default());
+    assert_ne!(naive.current_space(MAIN), d1, "the failure the platform now avoids");
+
+    mac.go(0);
+    assert_eq!(mac.space(), d1, "Desktop 1 keeps its id");
+    let now: Vec<StageId> = mac.m.stages_in(d1).map(|s| s.id).collect();
+    assert_eq!(now, stages, "its stages as they were");
+    assert_eq!(mac.m.space_of(w(2)), Some(d1), "the full-screen window is still Desktop 1's");
+    assert_ne!(mac.m.stage_of(w(1)), mac.m.stage_of(w(2)), "two stages, not merged");
+    assert!(mac.elsewhere.is_empty());
+
+    // Out of full screen, back on Desktop 1: the same Space, nothing re-placed.
+    mac.wins.get_mut(&2).expect("window").0 = Some(0);
+    mac.go(0);
+    assert_eq!(mac.space(), d1);
+    assert_eq!(mac.m.stages_in(d1).map(|s| s.id).collect::<Vec<_>>(), stages);
+    assert_ne!(mac.space(), d2);
 }
