@@ -5,6 +5,7 @@
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 strip native visible parity
+#                                          # motion capture
 #   scripts/test-stages.sh m3 safety       # some phases
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
@@ -13,7 +14,8 @@
 #   SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 #
 # Every app run uses STAGE_MANAGER_HOME=$TEST_HOME (default: a new /tmp/sm-test.* dir) and
-# STAGE_MANAGER_ONLY=<the fixtures>; only fixture windows ever move. The fixture app comes to
+# STAGE_MANAGER_ONLY=<the fixtures>; only fixture windows ever move. Window captures are off
+# (STAGE_MANAGER_NO_CAPTURE=1) in every run but the capture phase's one launch. The fixture app comes to
 # the front during switches; the app that was frontmost is activated again at the end.
 # No phase runs while the owner's installed app (~/Applications/Stage Manager.app) is up;
 # SM_SCREENSHOTS=<dir> is where the visible phase saves its strip screenshots; SM_SHOTS=<dir>
