@@ -10,7 +10,7 @@
 //! - `stage-manager config check [file] | --print-defaults | --explain <section.key> |
 //!   --reference` validates a file (errors with line numbers), prints the commented default
 //!   config, explains a key, or prints the guide's configuration table.
-//! - `stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate|apple [--dark|--light]
+//! - `stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate [--dark|--light]
 //!   [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
 //!   no Accessibility, no login item), or renders it to a PNG and exits.
 //! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate|apple> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
             );
             ExitCode::from(2)
         }
@@ -558,7 +558,9 @@ mod app {
             return ExitCode::FAILURE;
         };
 
-        if ctl::request("ping", Duration::from_millis(500)).is_ok() {
+        // A generous wait: a running app slow to answer must not get a second manager
+        // beside it (no app running answers "refused" at once).
+        if ctl::request("ping", Duration::from_secs(2)).is_ok() {
             // Opened again (`open -n`, a terminal): the running one shows its Settings, the
             // way back when the menu bar icon is hidden. (A Finder or Spotlight launch never
             // gets here: macOS hands it to the running app as a reopen.)
@@ -674,10 +676,10 @@ mod app {
         let hooks = shell::Hooks {
             set_menu_icon: |visible| with_app(|app| app.menu.set_visible(visible)),
             refresh_menu: || with_app(|app| app.refresh_menu()),
+            poll_now: || with_app(App::poll),
         };
         let raw = native_settings::current();
         shell::install(mtm, wm.clone(), hooks, permissions, raw);
-        shell::prompt_apple_at_launch();
 
         if permissions.accessibility {
             wm.send(WmCommand::Accessibility(true));

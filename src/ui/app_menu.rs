@@ -4,12 +4,18 @@
 //!   `open`) reaches `applicationShouldHandleReopen:hasVisibleWindows:`: the app shows its
 //!   Settings window, the way back when the menu bar icon is hidden.
 //! - **Terminate:** a quit from elsewhere (logout, `osascript … quit`) goes through the app's
-//!   own Quit, which brings every parked window back first.
+//!   own Quit, which brings every parked window back first and exits. A logout is never
+//!   cancelled: when the Quit cannot run at once (the app's state is busy, or a quit is
+//!   already under way) the answer is "later", the Quit is tried again every 200 ms, and
+//!   after 5 s the registry unparks and macOS is told to go on.
 //! - **Main menu:** an accessory app shows no menu bar, but its main menu's key equivalents
 //!   still work while one of its windows is key: ⌘, (Settings), ⌘Q (Quit, the safe one),
 //!   ⌘W and ⌘M, and the edit keys for text.
 
 use std::cell::RefCell;
+use std::time::Duration;
+
+use dispatch2::{DispatchQueue, DispatchTime};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -68,9 +74,12 @@ define_class!(
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
             tracing::info!("asked to quit by the system");
-            // The app's Quit unparks every window and exits; if it returns, nothing quits.
+            // The app's Quit unparks every window and exits; it returns only when it could
+            // not run now (or one is under way): answer later and keep trying.
             status_menu::dispatch(MenuAction::Quit);
-            NSApplicationTerminateReply::TerminateCancel
+            tracing::warn!("the quit could not run at once; trying again (the system waits)");
+            retry_quit(1);
+            NSApplicationTerminateReply::TerminateLater
         }
     }
 
@@ -92,6 +101,29 @@ define_class!(
         }
     }
 );
+
+/// How often and how long a deferred system quit is tried.
+const QUIT_RETRY: Duration = Duration::from_millis(200);
+const QUIT_ATTEMPTS: u32 = 25;
+
+/// Tries the app's Quit again after [`QUIT_RETRY`] (on the main queue, which runs while
+/// AppKit waits for the answer); after [`QUIT_ATTEMPTS`] the registry unparks and macOS goes
+/// on with the logout (the guardian scans after the exit).
+fn retry_quit(attempt: u32) {
+    let when = DispatchTime::try_from(QUIT_RETRY).unwrap_or(DispatchTime::NOW);
+    let _ = DispatchQueue::main().after(when, move || {
+        status_menu::dispatch(MenuAction::Quit);
+        if attempt < QUIT_ATTEMPTS {
+            retry_quit(attempt + 1);
+            return;
+        }
+        tracing::error!("the quit never ran; unparking from the registry and letting the system quit");
+        crate::platform::safety::emergency_unpark("terminate");
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).replyToApplicationShouldTerminate(true);
+        }
+    });
+}
 
 impl AppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {

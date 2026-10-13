@@ -24,8 +24,9 @@ nothing, until it is off.
 
 ## Not needed
 
-- **Input Monitoring.** Stage Manager does not read your typing; clicks and drags come from
-  a standard window-event monitor that needs no approval.
+- **Input Monitoring.** Stage Manager installs no keyboard tap. Its standard event monitor
+  sees clicks and drags (no approval needed) and, under Accessibility, key presses only to
+  notice ⌘Tab and ⌘\`; nothing you type is recorded.
 
 ## How the app asks
 

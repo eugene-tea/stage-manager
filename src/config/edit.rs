@@ -45,9 +45,13 @@ pub fn set(text: &str, path: &str, literal: &str) -> Result<String, EditError> {
 }
 
 /// Sets `path` in the file at `file` (creating it with the default file when missing) and
-/// writes it back atomically (a temporary file renamed over it, its permissions kept).
-/// Returns whether the file changed.
+/// writes it back atomically (a temporary file renamed over it, its permissions kept). A
+/// symlinked file (dotfiles) is written through to its target; the link stays. Returns
+/// whether the file changed.
 pub fn set_in_file(file: &Path, path: &str, literal: &str) -> Result<bool, EditError> {
+    let linked = std::fs::symlink_metadata(file).is_ok_and(|m| m.file_type().is_symlink());
+    let target = if linked { std::fs::canonicalize(file).ok() } else { None };
+    let file = target.as_deref().unwrap_or(file);
     let io = |e: std::io::Error| EditError(format!("{}: {e}", file.display()));
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
@@ -294,5 +298,19 @@ mod tests {
         assert!(!Config::parse(&text).expect("parses").config.app.show_menu_bar_icon);
         assert!(!set_in_file(&file, "app.show_menu_bar_icon", "false").expect("writes"), "no change, no write");
         assert!(!file.with_extension("toml.saving").exists());
+    }
+
+    /// R8 L1: a dotfiles symlink keeps pointing at the user's file, which takes the change.
+    #[test]
+    fn a_symlinked_file_is_written_through_and_the_link_stays() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("dotfiles-config.toml");
+        std::fs::write(&real, default_file()).expect("writes");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).expect("links");
+        assert!(set_in_file(&link, "strip.merge_on_drop", "false").expect("writes"));
+        assert!(std::fs::symlink_metadata(&link).expect("meta").file_type().is_symlink(), "still a link");
+        let text = std::fs::read_to_string(&real).expect("reads");
+        assert!(!Config::parse(&text).expect("parses").config.style.merge_on_drop, "the target took the change");
     }
 }

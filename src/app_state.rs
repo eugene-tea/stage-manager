@@ -28,13 +28,16 @@ impl AppState {
         std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
     }
 
-    /// Writes `path` (its directory created), logging a failure.
+    /// Writes `path` atomically (a temporary file renamed over it; its directory created),
+    /// logging a failure: a crash mid-write never leaves half a file.
     pub fn save(&self, path: &Path) {
+        let tmp = path.with_extension("json.tmp");
         let result = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|_| serde_json::to_string_pretty(self).map_err(std::io::Error::other))
-            .and_then(|text| std::fs::write(path, text + "\n"));
+            .and_then(|text| std::fs::write(&tmp, text + "\n"))
+            .and_then(|_| std::fs::rename(&tmp, path));
         if let Err(e) = result {
             tracing::warn!("cannot save {}: {e}", path.display());
         }
@@ -60,6 +63,7 @@ mod tests {
         let s = AppState { welcomed: true, login_item_set_up: true, last_update_check: Some(42), skipped_version: Some("1.2.0".into()) };
         s.save(&path);
         assert_eq!(AppState::load(&path), s);
+        assert!(!path.with_extension("json.tmp").exists(), "written through a temporary file");
         std::fs::write(&path, "{\"welcomed\": true}").expect("writes");
         assert_eq!(AppState::load(&path), AppState { welcomed: true, ..AppState::default() }, "missing fields default");
     }

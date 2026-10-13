@@ -100,18 +100,21 @@ desktop" is never written (Settings opens Desktop & Dock for it).
 
 Both cannot run. While `GloballyEnabled` is 1 (at launch, or turned on from Control Center
 while the app runs) the app **stands down**: every parked window comes back through the
-quit path (the controller's unpark, then the registry and a recovery scan; a window on
-another Space comes back when its Space shows), the strip hides on every Desktop,
-observation stops, and no click, drag, hotkey or Space change arranges anything. When
-Apple's turns off, the app starts afresh from the windows on screen, as a first start
-does: the stages saved before (`state.json`) are dropped, since Apple's arranged the
-windows meanwhile. The state machine is `engine::stand_down`; the WM thread carries it out.
+quit path (the controller's unpark, then the registry and a recovery scan), the stages
+saved before (`state.json`) are dropped at once (Apple's arranges the windows from now on,
+so a quit, crash or logout while standing down leaves nothing stale for the next launch),
+the strip hides on every Desktop, observation stops, and no click, drag, hotkey or Space
+change arranges anything. A window of another Space that Accessibility cannot reach stays
+on record (held in the safety registry and the guardian's parked file, beside whatever a
+later controller parks) and is tried again at every Space change, through the resume,
+until it is back. When Apple's turns off, the app starts afresh from the windows on
+screen, as a first start does, with the last displays and settings. The state machine and
+its release and resume plans are `engine::stand_down`; the WM thread carries them out.
 
-- **At launch while it is on:** the welcome window (when due) has a row for it; otherwise an
-  alert says "Stage Manager takes over from it — turn Apple's off to continue." with **Turn
-  Off Apple's Stage Manager** and **Not Now**.
+- **At launch while it is on:** the welcome window shows, with a row for it ("Stage Manager
+  takes over from it, so Apple's must be off.") and **Turn Off**.
 - **Turned on while the app runs:** no window pops up; the menu shows **Turn Off Apple's
-  Stage Manager…** at the top.
+  Stage Manager** at the top.
 - **Settings → Stage Manager** shows its state, with **Turn Off** while it is on.
 - **Turning it off** (only on one of those clicks) writes `GloballyEnabled = false` to
   `com.apple.WindowManager` with CFPreferences, synchronizes, and checks 2 s later that it
@@ -238,7 +241,9 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   follows the click never switches stages.
 - **Quit** (the menu, ⌘Q in Settings, or a quit from the system such as logging out) brings
   every parked window back first, and every window we narrowed or moved clear of the strip
-  back to its earlier frame.
+  back to its earlier frame. A logout is never cancelled: if the quit cannot run at that
+  instant the app answers "later" and tries again every 200 ms; after 5 s it unparks from
+  the registry and lets macOS go on.
 
 ## The menu bar icon and its menu
 
@@ -247,8 +252,9 @@ owner's word 10-13). Its menu, in Apple's menu-bar-app order:
 
 1. While something is missing: "Stage Manager needs Accessibility access" with "Allow
    Accessibility…", the same for Screen Recording (only while window pictures are on),
-   "Turn Off Apple's Stage Manager…" while Apple's is on, and the config file's error.
-2. **About Stage Manager**, **Check for Updates…**
+   "Turn Off Apple's Stage Manager" while Apple's is on, and the config file's error.
+2. **About Stage Manager**, **Check for Updates…** (while a check runs, a click waits for it
+   and shows its result)
 3. **Settings…** (⌘, shown; no action needs a shortcut)
 4. **Mark a Problem** while the log is verbose (the trial week)
 5. **Quit Stage Manager**
@@ -286,7 +292,7 @@ shows in the open window within a second.
   Agents**: a short prompt naming `docs/AGENTS.md` on GitHub, the config file's path and the
   `config check` command, ending "What I want: " for the user's ask.
 
-`stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate|apple
+`stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate
 [--dark|--light] [--png FILE]` opens one of these windows alone (no WM thread, no event
 monitor, no Accessibility, no login item, built-in defaults, nothing written), or draws it
 into a PNG in-process (`cacheDisplayInRect`, never a screen capture; an undisplayed window
@@ -308,6 +314,9 @@ The version is the tag (`vX.Y.Z`, the `v` stripped), compared as semver. No rele
 - A newer one: "A new version of Stage Manager is available" / "Stage Manager X is
   available — you have Y." with **Download** (opens the release's `Stage-Manager.dmg`, else
   its page), **Later** and **Skip This Version** (automatic checks stay quiet about it).
+  From an automatic check the alert comes up above other windows without activating the
+  app: the keyboard focus stays where the user is typing. From a manual check it comes to
+  the front.
 - Nothing newer (a manual check only): "You're up to date".
 - A failure: a plain alert for a manual check, one quiet log line for an automatic one.
 - Automatic checks (`[app] check_for_updates`, on by default): 30 s after launch, then
@@ -315,7 +324,7 @@ The version is the tag (`vX.Y.Z`, the `v` stripped), compared as semver. No rele
   (`app-state.json`). Never in test runs (`STAGE_MANAGER_NO_PROMPT` or `STAGE_MANAGER_HOME`).
 
 Alerts never block: they show as ordinary windows (`runModal` would stop the main run
-loop's timers while one waits).
+loop's timers while one waits). A check that gets no answer counts as failed after 25 s.
 
 The checks assume nothing about the signature: a Developer ID signed and notarized DMG and a
 locally signed build behave the same.

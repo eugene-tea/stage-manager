@@ -581,7 +581,12 @@ pub fn locate(text: &str, section: &str, key: &str) -> Option<usize> {
     let mut current = String::new();
     for (n, line) in text.lines().enumerate() {
         let t = line.trim();
-        if let Some(name) = t.strip_prefix('[').filter(|r| !r.starts_with('[')) {
+        if t.starts_with("[[") {
+            // An array of tables (`[[rule]]`): no section's keys from here on.
+            current = String::from("[[");
+            continue;
+        }
+        if let Some(name) = t.strip_prefix('[') {
             current = name.split(']').next().unwrap_or("").trim().to_string();
             continue;
         }
@@ -1173,6 +1178,16 @@ mod tests {
             readme.contains(&schema::markdown_reference()),
             "docs/GUIDE.md's configuration reference is out of date: paste `stage-manager config --reference`"
         );
+    }
+
+    /// R8 L2: a `[[rule]]` table ends the section before it.
+    #[test]
+    fn line_numbers_never_point_into_a_later_rule() {
+        let text = "[defaults]\nplacement = \"center\"\n\n[[rule]]\napp = \"x\"\naction = \"new\"\n";
+        assert_eq!(locate(text, "defaults", "placement"), Some(2));
+        assert_eq!(locate(text, "defaults", "action"), None, "the rule's action is not [defaults]'");
+        let err = Config::parse("[[rule]]\napp = \"x\"\naction = \"new\"\n\n[defaults]\naction = 3\n").expect_err("bad");
+        assert!(err.0.contains("line 6"), "{}", err.0);
     }
 
     #[test]

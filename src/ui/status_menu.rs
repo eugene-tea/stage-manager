@@ -207,7 +207,7 @@ fn all_items() -> Vec<Item> {
 }
 
 /// The menu item while Apple's Stage Manager is on.
-pub const APPLE_ITEM: &str = "Turn Off Apple's Stage Manager…";
+pub const APPLE_ITEM: &str = "Turn Off Apple's Stage Manager";
 
 /// The Mark a Problem item's title: when the last mark went in, if any.
 pub fn mark_title(last: Option<&str>) -> String {

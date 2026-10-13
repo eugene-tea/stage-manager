@@ -6,7 +6,7 @@
 //! Windows: `settings`, `settings-apple` (Apple's Stage Manager on, the login item awaiting
 //! approval, a config error), `welcome` (both approvals missing), `welcome-apple` (Apple's Stage
 //! Manager on too), `welcome-done` (all set), `about`, `update` (a newer release offered),
-//! `uptodate`, `apple` (the launch prompt while Apple's Stage Manager is on).
+//! `uptodate`.
 //!
 //! With `--png FILE` the window is drawn into FILE in-process (`cacheDisplayInRect`; never a
 //! screen capture) and the command exits without the window ever showing. Without it the
@@ -29,7 +29,7 @@ use crate::platform::native_settings::RawSettings;
 use crate::platform::permissions::PermissionState;
 use crate::updates;
 
-const WINDOWS: &str = "settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate|apple";
+const WINDOWS: &str = "settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate";
 
 thread_local! {
     static VALUES: RefCell<Option<settings_window::SettingsValues>> = const { RefCell::new(None) };
@@ -126,11 +126,10 @@ fn make(mtm: MainThreadMarker, which: &str, drawn: bool) -> Option<Retained<NSWi
             let (title, text) = updates::up_to_date_text(&current);
             alert::build(
                 mtm,
-                alert::AlertSpec { key: "update", title, text, buttons: vec!["OK".into()], cancel: Some(0), warning: false },
+                alert::AlertSpec { key: "update", title, text, buttons: vec!["OK".into()], cancel: Some(0), warning: false, activate: false },
                 |_| {},
             )
         }
-        "apple" => alert::build(mtm, shell::apple_prompt_spec(), |b| tracing::info!(b, "preview: apple button")),
         _ => return None,
     })
 }

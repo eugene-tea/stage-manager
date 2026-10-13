@@ -39,6 +39,9 @@ pub struct AlertSpec {
     pub cancel: Option<usize>,
     /// A warning (caution icon) instead of an informational alert.
     pub warning: bool,
+    /// Activate the app (the user asked); false shows it above other windows without taking
+    /// the keyboard focus (an automatic notice).
+    pub activate: bool,
 }
 
 /// Builds the alert and its laid-out window, without showing it.
@@ -77,9 +80,14 @@ pub fn build(mtm: MainThreadMarker, spec: AlertSpec, on_button: impl Fn(usize) +
 
 /// Shows an alert in front of every app; `on_button` gets the index of the button clicked.
 pub fn show(mtm: MainThreadMarker, spec: AlertSpec, on_button: impl Fn(usize) + 'static) {
+    let activate = spec.activate;
     let window = build(mtm, spec, on_button);
     window.center();
-    form::bring_to_front(mtm, &window);
+    if activate {
+        form::bring_to_front(mtm, &window);
+    } else {
+        window.orderFrontRegardless();
+    }
 }
 
 /// Closes the alert shown under `key`, if any.

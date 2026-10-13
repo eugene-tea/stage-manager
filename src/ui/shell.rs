@@ -3,7 +3,10 @@
 //! Stage Manager (stand down, offer to turn it off). Main thread only.
 //!
 //! The main thread's poll ([`poll`], every second) and config reloads ([`config_changed`])
-//! keep it current; menu clicks arrive through [`menu`]. Calls back into the app (the menu
+//! keep it current; menu clicks arrive through [`menu`]. Apple's settings have one source:
+//! only the app's poll calls `refresh()` in `native_settings` (it consumes a change); after a
+//! write the shell asks for a poll at once ([`Hooks::poll_now`]), so the app, the WM thread,
+//! the menu and this window all learn the new value from the same reading. Calls back into the app (the menu
 //! bar icon, the menu) go through plain function pointers dispatched after the current
 //! event, so they never run inside the app state's borrow.
 
@@ -50,6 +53,8 @@ pub struct Hooks {
     pub set_menu_icon: fn(bool),
     /// Redraw the status menu.
     pub refresh_menu: fn(),
+    /// Run the app's poll now (Apple's settings were written).
+    pub poll_now: fn(),
 }
 
 struct Shell {
@@ -62,7 +67,10 @@ struct Shell {
     permissions: PermissionState,
     raw: RawSettings,
     capture_refused: bool,
-    update_running: bool,
+    /// The update check in flight: its number, and whether a user asked for it (its result
+    /// shows then).
+    update: Option<(u64, bool)>,
+    update_serial: u64,
     _timers: Vec<Retained<NSTimer>>,
 }
 
@@ -169,7 +177,8 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
         permissions,
         raw,
         capture_refused: false,
-        update_running: false,
+        update: None,
+        update_serial: 0,
         _timers: Vec::new(),
     };
     SHELL.with(|s| *s.borrow_mut() = Some(shell));
@@ -287,6 +296,7 @@ impl Shell {
                         buttons: vec!["OK".into()],
                         cancel: Some(0),
                         warning: true,
+                        activate: true,
                     },
                     |_| {},
                 );
@@ -295,16 +305,14 @@ impl Shell {
         self.refresh_settings();
     }
 
-    /// Writes one of Apple's Stage Manager settings (the user's click in Settings).
+    /// Writes one of Apple's Stage Manager settings (the user's click in Settings), then
+    /// asks the app's poll to read it at once: the one reader (R8 V1).
     fn write_apple(&mut self, key: &str, value: i64) {
         if let Err(e) = native_settings::write(key, value) {
             tracing::warn!(key, "cannot change the macOS setting: {e}");
         }
-        if let Some(raw) = native_settings::refresh() {
-            self.raw = raw.clone();
-            self.wm.send(WmCommand::NativeSettings(raw));
-        }
-        self.refresh_settings();
+        let hooks = self.hooks;
+        later(move || (hooks.poll_now)());
     }
 
     fn on_change(&mut self, change: Change) {
@@ -399,9 +407,11 @@ pub fn allow(a: Approval) {
 pub fn poll(permissions: PermissionState, raw: &RawSettings, capture_refused: bool) {
     let Some((changed, apple_rows)) = with(|s| {
         let changed = s.permissions != permissions || s.raw != *raw || s.capture_refused != capture_refused;
-        s.permissions = permissions;
-        s.raw = raw.clone();
-        s.capture_refused = capture_refused;
+        if changed {
+            s.permissions = permissions;
+            s.raw = raw.clone();
+            s.capture_refused = capture_refused;
+        }
         (changed, welcome::has_apple_row())
     }) else {
         return;
@@ -455,27 +465,48 @@ fn auto_check() {
     }
 }
 
-/// Checks GitHub for a newer release; `manual` checks always answer.
+/// How long a check may stay unanswered before it counts as failed (NSURLSession's own
+/// timeout is 20 s; a completion that never comes must not wedge every later check).
+const CHECK_WATCHDOG: Duration = Duration::from_secs(25);
+
+/// Checks GitHub for a newer release; `manual` checks always answer. A manual check while
+/// one runs makes that one's result show.
 pub fn check(manual: bool) {
-    let busy = with(|s| std::mem::replace(&mut s.update_running, true)).unwrap_or(true);
-    if busy {
-        tracing::debug!("an update check is already running");
+    let started = with(|s| match s.update.as_mut() {
+        Some((_, asked)) => {
+            *asked |= manual;
+            None
+        }
+        None => {
+            s.update_serial += 1;
+            s.update = Some((s.update_serial, manual));
+            Some(s.update_serial)
+        }
+    })
+    .flatten();
+    let Some(serial) = started else {
+        tracing::debug!(manual, "an update check is already running; its result will show");
         return;
-    }
+    };
     tracing::info!(manual, "checking for updates");
-    update_check::check(move |outcome| {
-        later(move || on_checked(outcome, manual));
-    });
+    update_check::check(move |outcome| later(move || on_checked(serial, outcome)));
+    let when = dispatch2::DispatchTime::try_from(CHECK_WATCHDOG).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = dispatch2::DispatchQueue::main().after(when, move || on_checked(serial, Outcome::Failed("GitHub did not answer".into())));
 }
 
-fn on_checked(outcome: Outcome, manual: bool) {
-    let Some((mtm, skipped)) = with(|s| {
-        s.update_running = false;
+/// The check numbered `serial` ended (its answer, or the watchdog: whichever comes first).
+fn on_checked(serial: u64, outcome: Outcome) {
+    let Some(Some((mtm, skipped, manual))) = with(|s| {
+        let (running, manual) = s.update?;
+        if running != serial {
+            return None;
+        }
+        s.update = None;
         if !matches!(outcome, Outcome::Failed(_)) {
             s.state.last_update_check = Some(now_secs());
             s.save_state();
         }
-        (s.mtm, s.state.skipped_version.clone())
+        Some((s.mtm, s.state.skipped_version.clone(), manual))
     }) else {
         return;
     };
@@ -484,14 +515,14 @@ fn on_checked(outcome: Outcome, manual: bool) {
         Outcome::Available(release) => {
             tracing::info!(version = %release.version, manual, "an update is available");
             if manual || updates::worth_telling(&release, skipped.as_deref()) {
-                offer(mtm, release, &current);
+                offer(mtm, release, &current, manual);
             }
         }
         Outcome::UpToDate => {
             tracing::info!(manual, "up to date");
             if manual {
                 let (title, text) = updates::up_to_date_text(&current);
-                alert::show(mtm, AlertSpec { key: "update", title, text, buttons: vec!["OK".into()], cancel: Some(0), warning: false }, |_| {});
+                alert::show(mtm, AlertSpec { key: "update", title, text, buttons: vec!["OK".into()], cancel: Some(0), warning: false, activate: true }, |_| {});
             }
         }
         Outcome::Failed(e) => {
@@ -506,6 +537,7 @@ fn on_checked(outcome: Outcome, manual: bool) {
                         buttons: vec!["OK".into()],
                         cancel: Some(0),
                         warning: false,
+                        activate: true,
                     },
                     |_| {},
                 );
@@ -526,11 +558,16 @@ pub fn offer_spec(release: &Release, current: &updates::Version) -> AlertSpec {
         buttons: vec!["Download".into(), "Later".into(), "Skip This Version".into()],
         cancel: Some(1),
         warning: false,
+        activate: true,
     }
 }
 
-fn offer(mtm: MainThreadMarker, release: Release, current: &updates::Version) {
-    let spec = offer_spec(&release, current);
+/// Offers `release`. A user's check brings the alert to the front; an automatic one never
+/// takes the focus from what the user is doing (R8 V2): the alert comes up above other
+/// windows without activating the app, and keyboard focus stays where it was.
+fn offer(mtm: MainThreadMarker, release: Release, current: &updates::Version, manual: bool) {
+    let mut spec = offer_spec(&release, current);
+    spec.activate = manual;
     alert::show(mtm, spec, move |button| match button {
         0 => open_url(release.download_url()),
         2 => {
@@ -544,32 +581,6 @@ fn offer(mtm: MainThreadMarker, release: Release, current: &updates::Version) {
             });
         }
         _ => {}
-    });
-}
-
-/// The prompt at launch while Apple's Stage Manager is on (when the welcome is not due).
-pub fn apple_prompt_spec() -> AlertSpec {
-    AlertSpec {
-        key: "apple",
-        title: "Apple's Stage Manager is on".into(),
-        text: "Stage Manager takes over from it — turn Apple's off to continue.".into(),
-        buttons: vec!["Turn Off Apple's Stage Manager".into(), "Not Now".into()],
-        cancel: Some(1),
-        warning: false,
-    }
-}
-
-/// Launch while Apple's Stage Manager is on: the prompt, unless the welcome shows.
-pub fn prompt_apple_at_launch() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let on = with(|s| s.apple_on()).unwrap_or(false);
-    if !on || welcome::is_open() || !permissions::prompts_allowed() || paths::custom_home().is_some() {
-        return;
-    }
-    alert::show(mtm, apple_prompt_spec(), |button| {
-        if button == 0 {
-            later(turn_off_apple);
-        }
     });
 }
 
@@ -588,16 +599,9 @@ pub fn turn_off_apple() {
         let now = native_settings::window_manager_windows();
         let stopped = off && (now == 0 || now < before);
         tracing::info!(off, wm_windows_before = before, wm_windows_now = now, stopped, "turning Apple's Stage Manager off");
-        if let Some(fresh) = native_settings::refresh() {
-            with(|s| {
-                s.raw = fresh.clone();
-                s.wm.send(WmCommand::NativeSettings(fresh));
-                s.refresh_settings();
-            });
-            let hooks = with(|s| s.hooks);
-            if let Some(h) = hooks {
-                later(move || (h.refresh_menu)());
-            }
+        // The app's poll reads the change (the one reader): app, WM thread, menu, windows.
+        if let Some(h) = with(|s| s.hooks) {
+            later(move || (h.poll_now)());
         }
         if !stopped {
             open_url(DESKTOP_DOCK_URL);
@@ -611,6 +615,7 @@ pub fn turn_off_apple() {
                         buttons: vec!["OK".into()],
                         cancel: Some(0),
                         warning: false,
+                        activate: true,
                     },
                     |_| {},
                 );
@@ -650,16 +655,32 @@ mod tests {
         assert_eq!(display_path(Path::new("/tmp/x.toml")), "/tmp/x.toml");
     }
 
+    /// R8 V1: Apple's settings have one reader, the app's poll. A second caller of
+    /// `refresh()` consumes changes the poll then never sees, and stale copies flip
+    /// Settings' switches back.
+    #[test]
+    fn only_the_apps_poll_reads_apples_settings_for_changes() {
+        let needle = concat!("native_settings::", "refresh(");
+        for (name, text) in [
+            ("shell.rs", include_str!("shell.rs")),
+            ("settings_window.rs", include_str!("settings_window.rs")),
+            ("welcome.rs", include_str!("welcome.rs")),
+            ("preview.rs", include_str!("preview.rs")),
+            ("status_menu.rs", include_str!("status_menu.rs")),
+        ] {
+            assert!(!text.contains(needle), "{name} must not call refresh(); ask the app's poll (Hooks::poll_now)");
+        }
+        let main = include_str!("../main.rs");
+        assert_eq!(main.matches(needle).count(), 2, "the poll and the launch's first reading");
+    }
+
     #[test]
     fn the_prompts_say_what_the_owner_asked() {
-        let a = apple_prompt_spec();
-        assert_eq!(a.text, "Stage Manager takes over from it — turn Apple's off to continue.");
-        assert_eq!(a.buttons, vec!["Turn Off Apple's Stage Manager", "Not Now"]);
-        assert_eq!(a.cancel, Some(1));
         let r = updates::parse_release(r#"{"tag_name":"v1.1.0","html_url":"https://github.com/eugene-tea/stage-manager/releases/tag/v1.1.0"}"#).expect("parses");
         let o = offer_spec(&r, &updates::Version::parse("1.0.0").expect("version"));
         assert_eq!(o.buttons, vec!["Download", "Later", "Skip This Version"]);
         assert!(o.text.contains("Stage Manager 1.1.0 is available — you have 1.0.0"));
+        assert!(o.activate, "the spec activates; an automatic offer turns it off");
         assert_eq!(turn_off_wait(), Duration::from_secs(2));
     }
 }
