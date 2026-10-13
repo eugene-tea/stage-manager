@@ -10,16 +10,17 @@
 //!    corner ([`corner_zone`]) can hit a sliver. Everywhere else (nearly every press) the
 //!    answer is "pass" after a few rectangle tests, without asking the window server.
 //! 2. **Then exact** ([`topmost_at`]): the topmost on-screen window under the press, our own
-//!    windows (the strip's panels, the motion overlay) and transparent ones skipped. Only
-//!    when that window is one the model counts as parked is the press swallowed: a window of
-//!    the active stage over the corner, the Dock, a menu bar extra or the wallpaper keep
-//!    their presses.
+//!    windows (the strip's panels, the motion overlay), transparent ones and the Dock's
+//!    window away from its bar ([`DockBar`]) skipped. Only when that window is one the model
+//!    counts as parked is the press swallowed: a window of the active stage over the corner,
+//!    the Dock's bar, a menu bar extra or the wallpaper keep their presses.
 //! 3. **The whole gesture** ([`PressGate`]): a swallowed press swallows its drags and its
 //!    release too, button by button, so no app sees half a click.
 
 use std::collections::HashSet;
 
 use super::geometry::{Point, Rect};
+use super::overview::DOCK_LAYER;
 use super::park::{Corner, MACOS_KEEPS_TITLE, PARK_MARGIN};
 
 /// How far above the visible frame's bottom (or below its top, for a top corner) the zone
@@ -59,13 +60,13 @@ pub fn zones(displays: impl IntoIterator<Item = (Rect, Rect, Corner)>) -> Vec<Re
 /// `zone` and is not parked: while it is there, every press in the zone is its, so the tap
 /// passes them all; one that lets clicks through (an overlay) leaves the slivers under it
 /// pressable. Worth a note in the log.
-pub fn zone_owner(front_to_back: &[Listed], zone: Rect, own_pid: i32, parked: &HashSet<u32>) -> Option<Listed> {
+pub fn zone_owner(front_to_back: &[Listed], zone: Rect, own_pid: i32, shield: &Shield) -> Option<Listed> {
     front_to_back
         .iter()
         .copied()
-        .filter(|w| w.pid != own_pid && w.alpha > 0.0)
+        .filter(|w| w.pid != own_pid && w.alpha > 0.0 && !shield.dock.clear_over(w, |bar| bar.contains_rect(&zone)))
         .find(|w| w.bounds.intersect(&zone).is_some())
-        .filter(|w| !parked.contains(&w.id) && w.bounds.contains_rect(&zone))
+        .filter(|w| !shield.parked.contains(&w.id) && w.bounds.contains_rect(&zone))
 }
 
 /// A window on screen at a press, as the window server lists it (front to back).
@@ -79,12 +80,37 @@ pub struct Listed {
     pub bounds: Rect,
     /// Alpha (0: transparent, click-through in practice).
     pub alpha: f64,
+    /// Window layer; normal app windows are at 0, the Dock's at [`DOCK_LAYER`].
+    pub layer: i64,
+}
+
+/// The Dock as the hit test needs it. The Dock draws its bar in one window at
+/// [`DOCK_LAYER`] as large as its whole display (seen 10-13 on a laptop: 1800×1169), clear and
+/// click-through away from the bar, so the window list cannot tell the bar from the rest:
+/// the bar's own frames come from Accessibility, read on the WM thread.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DockBar {
+    /// The Dock's pid, when it runs.
+    pub pid: Option<i32>,
+    /// The bar's frames (the Dock's `AXList` children), top-left origin; empty when unknown.
+    pub bars: Vec<Rect>,
+}
+
+impl DockBar {
+    /// True when `w` is the Dock's window and clear where `on_bar` finds no bar: seen
+    /// through, as clicks go through it there.
+    fn clear_over(&self, w: &Listed, on_bar: impl Fn(Rect) -> bool) -> bool {
+        Some(w.pid) == self.pid && w.layer == DOCK_LAYER && !self.bars.iter().any(|b| on_bar(*b))
+    }
 }
 
 /// The topmost window of `front_to_back` under `at`, our own (`own_pid`) and transparent
-/// windows skipped.
-pub fn topmost_at(front_to_back: &[Listed], at: Point, own_pid: i32) -> Option<Listed> {
-    front_to_back.iter().copied().find(|w| w.pid != own_pid && w.alpha > 0.0 && contains(w.bounds, at))
+/// windows skipped, and the Dock's away from its bar.
+pub fn topmost_at(front_to_back: &[Listed], at: Point, own_pid: i32, dock: &DockBar) -> Option<Listed> {
+    front_to_back
+        .iter()
+        .copied()
+        .find(|w| w.pid != own_pid && w.alpha > 0.0 && contains(w.bounds, at) && !dock.clear_over(w, |b| contains(b, at)))
 }
 
 /// Half-open containment, as the window server hit-tests: the right and bottom edges are
@@ -103,6 +129,8 @@ pub struct Shield {
     pub zones: Vec<Rect>,
     /// Windows parked now (every Space: the shown one's are the ones on screen).
     pub parked: HashSet<u32>,
+    /// The Dock and its bar.
+    pub dock: DockBar,
 }
 
 impl Shield {
@@ -117,7 +145,7 @@ impl Shield {
         if !self.may_hit(at) {
             return None;
         }
-        topmost_at(front_to_back, at, own_pid).map(|w| w.id).filter(|id| self.parked.contains(id))
+        topmost_at(front_to_back, at, own_pid, &self.dock).map(|w| w.id).filter(|id| self.parked.contains(id))
     }
 }
 
@@ -188,12 +216,15 @@ mod tests {
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);
     const OWN: i32 = 1;
+    const DOCK: i32 = 40;
+    /// The Dock's bar, brought up at the bottom (its window spans the whole display).
+    const BAR: Rect = Rect::new(600.0, 1370.0, 1360.0, 70.0);
 
     /// Where macOS leaves a window parked bottom-right that keeps `kept` points of title
     /// (measured 10-13: Safari 52, Chrome 41, Telegram 66, most apps 32).
     fn sliver(id: u32, kept: f64) -> Listed {
         let asked = park_frame_at(Size::new(1200.0, 900.0), MAIN, Corner::BottomRight);
-        Listed { id, pid: 100 + id as i32, bounds: Rect::new(asked.x, VISIBLE.max_y() - kept, 1200.0, 900.0), alpha: 1.0 }
+        Listed { id, pid: 100 + id as i32, bounds: Rect::new(asked.x, VISIBLE.max_y() - kept, 1200.0, 900.0), alpha: 1.0, layer: 0 }
     }
 
     fn shield(parked: &[u32]) -> Shield {
@@ -201,6 +232,7 @@ mod tests {
             on: true,
             zones: vec![corner_zone(MAIN, VISIBLE, Corner::BottomRight)],
             parked: parked.iter().copied().collect(),
+            dock: DockBar { pid: Some(DOCK), bars: vec![BAR] },
         }
     }
 
@@ -228,25 +260,52 @@ mod tests {
 
     #[test]
     fn a_shown_window_over_the_corner_keeps_its_press() {
-        let shown = Listed { id: 3, pid: 50, bounds: Rect::new(1800.0, 900.0, 800.0, 600.0), alpha: 1.0 };
+        let shown = Listed { id: 3, pid: 50, bounds: Rect::new(1800.0, 900.0, 800.0, 600.0), alpha: 1.0, layer: 0 };
         let list = [shown, sliver(7, 52.0)];
         assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() - 20.0), OWN), None);
     }
 
     #[test]
     fn the_dock_and_menu_bar_extras_over_the_corner_keep_their_presses() {
-        // The Dock's bar (a layer above windows, listed first) under a press in the zone.
-        let dock = Listed { id: 2, pid: 40, bounds: Rect::new(0.0, VISIBLE.max_y(), 2560.0, 30.0), alpha: 1.0 };
+        // The Dock's window (its layer, listed first) spans the display; its bar reaching
+        // into the corner keeps a press there.
+        let dock = Listed { id: 2, pid: DOCK, bounds: MAIN, alpha: 1.0, layer: DOCK_LAYER };
         let list = [dock, sliver(7, 52.0)];
-        assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() + 5.0), OWN), None);
+        let wide = Shield { dock: DockBar { pid: Some(DOCK), bars: vec![Rect::new(0.0, 1370.0, 2560.0, 70.0)] }, ..shield(&[7]) };
+        assert_eq!(wide.hits(&list, Point::new(2559.5, VISIBLE.max_y() - 5.0), OWN), None);
         // A menu bar extra sits far from a bottom zone: the cheap test passes it.
         assert!(!shield(&[7]).may_hit(Point::new(2540.0, 10.0)));
     }
 
     #[test]
+    fn the_docks_window_away_from_its_bar_is_seen_through() {
+        // Seen 10-13 on a laptop: the auto-hiding Dock brought up lists one window as large
+        // as the display; a press on a sliver beside the bar went to the parked window.
+        let dock = Listed { id: 46, pid: DOCK, bounds: MAIN, alpha: 1.0, layer: DOCK_LAYER };
+        let list = [dock, sliver(7, 52.0)];
+        let at = Point::new(2559.5, VISIBLE.max_y() - 20.0);
+        assert_eq!(shield(&[7]).hits(&list, at, OWN), Some(7));
+        // Its bar unknown: still seen through (the bar rarely reaches the corner).
+        let blind = Shield { dock: DockBar { pid: Some(DOCK), bars: Vec::new() }, ..shield(&[7]) };
+        assert_eq!(blind.hits(&list, at, OWN), Some(7));
+        // Another app's window at the Dock's layer, or the Dock at another layer (Mission
+        // Control's, Launchpad's), is not.
+        let other = Listed { pid: 41, ..dock };
+        assert_eq!(shield(&[7]).hits(&[other, sliver(7, 52.0)], at, OWN), None);
+        let launchpad = Listed { layer: 27, ..dock };
+        assert_eq!(shield(&[7]).hits(&[launchpad, sliver(7, 52.0)], at, OWN), None);
+        // Mission Control: WindowManager's window under the Dock's takes the press.
+        let expose = Listed { id: 60, pid: 70, bounds: MAIN, alpha: 1.0, layer: 19 };
+        assert_eq!(shield(&[7]).hits(&[dock, expose, sliver(7, 52.0)], at, OWN), None);
+        // Nor does the Dock's window own the zone for the log's note.
+        let zone = corner_zone(MAIN, VISIBLE, Corner::BottomRight);
+        assert_eq!(zone_owner(&list, zone, OWN, &shield(&[7])), None);
+    }
+
+    #[test]
     fn our_own_and_transparent_windows_are_seen_through() {
-        let overlay = Listed { id: 90, pid: OWN, bounds: MAIN, alpha: 1.0 };
-        let clear = Listed { id: 91, pid: 60, bounds: MAIN, alpha: 0.0 };
+        let overlay = Listed { id: 90, pid: OWN, bounds: MAIN, alpha: 1.0, layer: 0 };
+        let clear = Listed { id: 91, pid: 60, bounds: MAIN, alpha: 0.0, layer: 0 };
         let list = [overlay, clear, sliver(7, 32.0)];
         assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() - 5.0), OWN), Some(7));
     }
@@ -301,7 +360,7 @@ mod tests {
         ]);
         assert_eq!(z.len(), 2, "{z:?}");
         assert!(z[1].x >= second.x && z[1].max_x() <= second.x + PARK_MARGIN, "the second display's own corner: {z:?}");
-        let s = Shield { on: true, zones: z, parked: [7].into() };
+        let s = Shield { on: true, zones: z, parked: [7].into(), dock: DockBar::default() };
         assert!(s.may_hit(Point::new(2560.5, 1075.0)), "a press in the second display's corner is judged");
         assert!(s.may_hit(Point::new(2559.5, 1430.0)));
     }
@@ -309,15 +368,15 @@ mod tests {
     #[test]
     fn a_window_over_the_whole_zone_owns_it() {
         let zone = corner_zone(MAIN, VISIBLE, Corner::BottomRight);
-        let parked: HashSet<u32> = [7].into();
-        let overlay = Listed { id: 3, pid: 50, bounds: MAIN, alpha: 1.0 };
+        let parked = shield(&[7]);
+        let overlay = Listed { id: 3, pid: 50, bounds: MAIN, alpha: 1.0, layer: 0 };
         assert_eq!(zone_owner(&[overlay, sliver(7, 52.0)], zone, OWN, &parked), Some(overlay));
         // Seen through: ours, transparent ones.
         let ours = Listed { pid: OWN, ..overlay };
         let clear = Listed { alpha: 0.0, ..overlay };
         assert_eq!(zone_owner(&[ours, clear, sliver(7, 52.0)], zone, OWN, &parked), None);
         // A window over part of it, or a sliver on top: nobody owns the zone.
-        let part = Listed { id: 4, pid: 51, bounds: Rect::new(2000.0, 1300.0, 560.0, 100.0), alpha: 1.0 };
+        let part = Listed { id: 4, pid: 51, bounds: Rect::new(2000.0, 1300.0, 560.0, 100.0), alpha: 1.0, layer: 0 };
         assert_eq!(zone_owner(&[part, overlay], zone, OWN, &parked), None);
         assert_eq!(zone_owner(&[sliver(7, 52.0), overlay], zone, OWN, &parked), None);
         assert_eq!(zone_owner(&[], zone, OWN, &parked), None);

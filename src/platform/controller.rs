@@ -124,6 +124,9 @@ const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
+/// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::dock_bar_now`]).
+const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
+
 /// Longest wait for the strip to draw a transition's snapshots before windows move anyway.
 const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 
@@ -484,6 +487,9 @@ pub struct Controller {
     dock_press: Option<super::dock::DockPress<arrival::Prediction>>,
     /// The Dock's pid, while it runs.
     dock_pid: Option<i32>,
+    /// The Dock and its bar as the inert-slivers tap last got them, and when they were read
+    /// ([`Self::publish_shield`]).
+    dock_bar: Option<(Instant, sliver::DockBar)>,
     /// The moves of an arrangement made at a Dock click, until the window server shows them.
     verify: Option<arrival::Verify>,
     /// The latest Dock press's prediction, until a Space change shows where it went.
@@ -612,6 +618,7 @@ impl Controller {
             ahead: None,
             dock_press: None,
             dock_pid: None,
+            dock_bar: None,
             verify: None,
             dock_seen: None,
             defer_present: false,
@@ -819,9 +826,10 @@ impl Controller {
     /// corner's zone of each display with a parked window (the main display's always) and
     /// which windows sit parked (with incoming windows still held in the corner behind a
     /// transition's snapshots).
-    fn publish_shield(&self) {
-        let Some(m) = &self.model else { return };
+    fn publish_shield(&mut self) {
         let on = self.store.config().windows.inert_slivers;
+        let dock = if on { self.dock_bar_now() } else { sliver::DockBar::default() };
+        let Some(m) = &self.model else { return };
         let mut parked: HashSet<u32> =
             if on { m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect() } else { HashSet::new() };
         if on && let Some(p) = &self.pending {
@@ -844,7 +852,26 @@ impl Controller {
         } else {
             Vec::new()
         };
-        super::sliver_tap::publish(sliver::Shield { on, zones, parked });
+        super::sliver_tap::publish(sliver::Shield { on, zones, parked, dock });
+    }
+
+    /// The Dock's pid and bar for the tap, read again (Accessibility, the Dock's bounded
+    /// timeout) when older than [`DOCK_BAR_FRESH`]: its size, side or display may change.
+    fn dock_bar_now(&mut self) -> sliver::DockBar {
+        let now = Instant::now();
+        if let Some((at, bar)) = &self.dock_bar
+            && now.duration_since(*at) < DOCK_BAR_FRESH
+        {
+            return bar.clone();
+        }
+        let pid = super::dock::dock_pid();
+        let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
+        let bar = sliver::DockBar { pid, bars };
+        if self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar) {
+            tracing::debug!(pid = ?bar.pid, bars = ?bar.bars, "inert slivers: the Dock's bar");
+        }
+        self.dock_bar = Some((now, bar.clone()));
+        bar
     }
 
     /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends

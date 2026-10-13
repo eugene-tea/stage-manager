@@ -128,6 +128,17 @@ pub fn item_at(dock: i32, p: Point) -> Result<(AxElement, DockItem), Miss> {
     Err(Miss { notable: dock_item_role(&role), found: format!("{role} / {subrole}") })
 }
 
+/// Where the Dock's bar is (`dock`: its pid): the frame around its lists (the Dock app's
+/// children), top-left origin; `None` when Accessibility gives none. The window list cannot
+/// tell it: the Dock's window spans its whole display ([`crate::engine::sliver::DockBar`]).
+pub fn bar_frame(dock: i32) -> Option<Rect> {
+    AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
+        let t = DOCK_AX_TIMEOUT_SECONDS;
+        let frames = app.children().ok()?.iter().filter_map(|list| list.bounded(t, AxElement::frame).ok()).collect::<Vec<_>>();
+        frames.into_iter().filter(|f| !f.is_degenerate()).reduce(|a, b| a.union(&b))
+    })
+}
+
 /// The Dock's application item for the app with bundle id `bundle` (any of the Dock's
 /// lists): where the test hook clicks.
 pub fn item_for_bundle(dock: i32, bundle: &str) -> Option<(AxElement, DockItem)> {

@@ -135,7 +135,7 @@ fn press_of(t: CGEventType) -> Option<Press> {
 
 /// The window server's on-screen windows, front to back, as the hit test needs them.
 fn listed() -> Vec<Listed> {
-    windows::on_screen().into_iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha }).collect()
+    windows::on_screen().into_iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect()
 }
 
 /// Whether a press at `at` lands on a sliver, and logs the exact test (zone hits only).
@@ -170,7 +170,7 @@ fn note_zone_owner(shield: &Shield, list: &[Listed], at: Point, own: i32) {
         .zones
         .iter()
         .filter(|z| at.x >= z.x && at.x < z.max_x() && at.y >= z.y && at.y < z.max_y())
-        .find_map(|z| zone_owner(list, *z, own, &shield.parked).map(|w| (*z, w)));
+        .find_map(|z| zone_owner(list, *z, own, shield).map(|w| (*z, w)));
     if let Some((zone, w)) = owner
         && !OWNER_NOTED.swap(true, Ordering::Relaxed)
     {
@@ -231,6 +231,7 @@ mod tests {
             on: true,
             zones: vec![corner_zone(main, visible, Corner::BottomRight)],
             parked: (1..40).collect(),
+            dock: Default::default(),
         };
         let n = 100_000;
         let started = Instant::now();

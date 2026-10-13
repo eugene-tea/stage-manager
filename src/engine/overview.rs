@@ -60,7 +60,7 @@ pub const OVERVIEW_EXIT_CARRY: Duration = Duration::from_millis(1500);
 pub const FOREIGN_SETTLE: Duration = Duration::from_secs(1);
 
 /// The Dock's window level (`kCGDockWindowLevel`): Mission Control's and App Exposé's backdrop.
-const DOCK_LAYER: i64 = 20;
+pub const DOCK_LAYER: i64 = 20;
 /// WindowManager's layer while Mission Control or App Exposé shows.
 const EXPOSE_LAYER: i64 = 19;
 /// WindowManager's layer while Show Desktop reveals the desktop.
