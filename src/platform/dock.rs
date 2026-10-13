@@ -60,19 +60,20 @@ pub struct DockPress<T> {
     pub prediction: T,
 }
 
-/// True when the topmost window on screen at `p` is the Dock's (`dock`: its pid) above the
-/// windows' layer: its bar ([`DOCK_LAYER`]), not its wallpaper (below every window).
+/// True when the topmost window on screen at `p` is the Dock's bar (`dock`: the Dock's pid;
+/// layer [`DOCK_LAYER`]): not its wallpaper, nor Mission Control, Launchpad or a folder's
+/// popup, which the Dock draws at other layers.
 pub fn dock_under(list: &[CgWindow], p: Point, dock: i32) -> bool {
     list.iter()
         .find(|w| w.onscreen && w.alpha > 0.0 && w.bounds.contains(p))
-        .is_some_and(|w| w.pid == dock && w.layer > 0)
+        .is_some_and(|w| w.pid == dock && w.layer == DOCK_LAYER)
 }
 
 /// True when app `pid` has a window on screen (layer 0) out of the park zone (`parks`), on
 /// any display: macOS activates it there and switches no Desktop, whatever the model knows
 /// (a window ignored by a rule, one not tracked, a placement not caught up yet).
 pub fn visible_window_of(list: &[CgWindow], pid: i32, parks: impl Fn(Rect) -> bool) -> bool {
-    list.iter().any(|w| w.pid == pid && w.layer == 0 && w.onscreen && !parks(w.bounds))
+    list.iter().any(|w| w.pid == pid && w.layer == 0 && w.onscreen && w.alpha > 0.0 && !parks(w.bounds))
 }
 
 /// True when a press on a Dock item let go at `up` (when `up_at`) is a click on it: over
@@ -92,26 +93,39 @@ pub fn dock_pid() -> Option<i32> {
         .map(|a| a.processIdentifier())
 }
 
+/// What the Dock's hit-test found at a point that is no application item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Miss {
+    /// The hit element's role and subrole (`"?"` when unknown), or why nothing was found.
+    pub found: String,
+    /// The hit element is a Dock item of some kind (a folder, the Trash, a minimized window)
+    /// or nothing at all: worth a line in the day's log.
+    pub notable: bool,
+}
+
+/// True when `role` is a Dock item's (`AXDockItem`, whatever its subrole).
+fn dock_item_role(role: &str) -> bool {
+    role == names::ROLE_DOCK_ITEM
+}
+
 /// The application item of the Dock (`dock`: its pid) at `p`, with its element; else what
-/// the hit-test found there (its role), for the log.
-pub fn item_at(dock: i32, p: Point) -> Result<(AxElement, DockItem), String> {
-    AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
-        let element = app.element_at(p).map_err(|e| format!("nothing ({e})"))?;
-        // The hit-test may answer a part of the item: its parents are looked at too.
-        let mut at = element.clone();
-        for _ in 0..3 {
-            if let Some(item) = application_item(&at) {
-                return Ok((at, item));
-            }
-            let Ok(parent) = at.parent() else { break };
-            at = parent;
+/// the hit-test found there. Every call runs at the Dock's bounded timeout.
+pub fn item_at(dock: i32, p: Point) -> Result<(AxElement, DockItem), Miss> {
+    let t = DOCK_AX_TIMEOUT_SECONDS;
+    let element = AxElement::application(dock)
+        .bounded(t, |app| app.element_at(p))
+        .map_err(|e| Miss { found: format!("nothing ({e})"), notable: true })?;
+    // The hit-test may answer a part of the item: its parents are looked at too.
+    let mut at = element.clone();
+    for _ in 0..3 {
+        if let Some(item) = at.bounded(t, application_item) {
+            return Ok((at, item));
         }
-        Err(format!(
-            "{} / {}",
-            element.role().unwrap_or_else(|_| "?".into()),
-            element.subrole().unwrap_or_else(|_| "?".into())
-        ))
-    })
+        let Ok(parent) = at.bounded(t, AxElement::parent) else { break };
+        at = parent;
+    }
+    let (role, subrole) = element.bounded(t, |e| (e.role().unwrap_or_else(|_| "?".into()), e.subrole().unwrap_or_else(|_| "?".into())));
+    Err(Miss { notable: dock_item_role(&role), found: format!("{role} / {subrole}") })
 }
 
 /// The Dock's application item for the app with bundle id `bundle` (any of the Dock's
@@ -119,8 +133,9 @@ pub fn item_at(dock: i32, p: Point) -> Result<(AxElement, DockItem), String> {
 pub fn item_for_bundle(dock: i32, bundle: &str) -> Option<(AxElement, DockItem)> {
     AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
         let lists = app.children().ok()?;
-        lists.iter().flat_map(|list| list.children().unwrap_or_default()).find_map(|e| {
-            application_item(&e).filter(|i| bundle_id_at(&i.path).as_deref() == Some(bundle)).map(|i| (e, i))
+        let t = DOCK_AX_TIMEOUT_SECONDS;
+        lists.iter().flat_map(|list| list.bounded(t, AxElement::children).unwrap_or_default()).find_map(|e| {
+            e.bounded(t, application_item).filter(|i| bundle_id_at(&i.path).as_deref() == Some(bundle)).map(|i| (e, i))
         })
     })
 }
@@ -155,6 +170,7 @@ mod tests {
         assert!(!dock_under(&[app.clone(), bar.clone()], p, 7), "a window above it");
         assert!(!dock_under(std::slice::from_ref(&bar), Point::new(100.0, 1130.0), 7), "off the bar");
         assert!(!dock_under(&[win(7, -2147483624, Rect::new(0.0, 0.0, 1800.0, 1169.0))], p, 7), "the Dock's wallpaper");
+        assert!(!dock_under(&[win(7, 27, Rect::new(0.0, 0.0, 1800.0, 1169.0))], p, 7), "Mission Control, Launchpad, a popup");
         let hidden = CgWindow { alpha: 0.0, ..bar };
         assert!(!dock_under(&[hidden, app], p, 7), "an auto-hidden bar's transparent window is not it");
     }
@@ -169,6 +185,8 @@ mod tests {
         assert!(!visible_window_of(&[parked], 9, parks), "a parked sliver: the model's gate decides");
         assert!(!visible_window_of(&[away], 9, parks), "a window of another Desktop");
         assert!(!visible_window_of(std::slice::from_ref(&shown), 8, parks), "another app's");
+        let clear = CgWindow { alpha: 0.0, ..shown.clone() };
+        assert!(!visible_window_of(&[clear], 9, parks), "a fully transparent window");
         let panel = CgWindow { layer: 3, ..shown };
         assert!(!visible_window_of(&[panel], 9, parks), "not a window's layer");
     }

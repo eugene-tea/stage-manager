@@ -1260,24 +1260,28 @@ mod arranged_ahead {
     #[test]
     fn a_dock_click_predicts_the_window_macos_will_show_on_another_desktop() {
         use crate::engine::model::AppFacts;
-        let mac = mail_parked_on_desktop_1();
+        let mut mac = mail_parked_on_desktop_1();
         let none = AppFacts::default();
-        assert_eq!(mac.m.dock_arrival(40, none, None, &[w(4), w(5)]), Ok(w(5)), "its frontmost window, in the server's order");
-        assert_eq!(mac.m.dock_arrival(40, none, Some(w(5)), &[]), Ok(w(5)), "its focused window");
-        assert!(mac.m.dock_arrival(40, none, None, &[]).is_err(), "no order known: no guess");
-        assert!(mac.m.dock_arrival(10, none, Some(w(1)), &[w(1)]).is_err(), "a window on the Desktop shown: macOS stays");
-        assert!(mac.m.dock_arrival(99, none, None, &[]).is_err(), "not managed (not running)");
-        assert!(mac.m.dock_arrival(40, AppFacts { hidden: true, unplaced: false }, Some(w(5)), &[w(5)]).is_err(), "hidden");
-        assert!(mac.m.dock_arrival(40, AppFacts { hidden: false, unplaced: true }, Some(w(5)), &[w(5)]).is_err(), "unplaced windows");
+        assert_eq!(mac.m.dock_arrival(40, none, Some(w(5))), Ok(w(5)), "its focused window");
+        assert_eq!(mac.m.dock_arrival(40, none, None), Ok(w(5)), "no answer: its stage's key window");
+        assert_eq!(mac.m.dock_arrival(40, none, Some(w(4))), Ok(w(5)), "an answer of another app's window: the key");
+        assert!(mac.m.dock_arrival(10, none, Some(w(1))).is_err(), "a window on the Desktop shown: macOS stays");
+        assert!(mac.m.dock_arrival(99, none, None).is_err(), "not managed (not running)");
+        assert!(mac.m.dock_arrival(40, AppFacts { hidden: true, unplaced: false }, Some(w(5))).is_err(), "hidden");
+        assert!(mac.m.dock_arrival(40, AppFacts { hidden: false, unplaced: true }, Some(w(5))).is_err(), "unplaced windows");
         let mut off = mac.m.clone();
         off.set_settings(crate::engine::settings::NativeSettings { switch_to_app_space: false, ..Default::default() });
-        assert!(off.dock_arrival(40, none, Some(w(5)), &[w(5)]).is_err(), "switching to the app's Space is off");
+        assert!(off.dock_arrival(40, none, Some(w(5))).is_err(), "switching to the app's Space is off");
+        // A mail window opens on the Desktop shown: macOS stays.
+        mac.put(1, 7, 40, "com.example.mail", "Drafts");
+        mac.go(1);
+        assert!(mac.m.dock_arrival(40, none, None).is_err(), "now it has a window on the Desktop shown");
     }
 
     #[test]
     fn a_dock_click_arranges_the_desktop_the_slide_shows_and_the_arrival_confirms_it() {
         let mut mac = mail_parked_on_desktop_1();
-        let window = mac.m.dock_arrival(40, Default::default(), Some(w(5)), &[]).expect("predicted");
+        let window = mac.m.dock_arrival(40, Default::default(), Some(w(5))).expect("predicted");
         let (ahead, actions) = mac.m.arrange_ahead(window, None).expect("arranged");
         mac.run(actions);
         assert!(!mac.parked(5) && mac.parked(2), "Desktop 1 arranged before it shows");

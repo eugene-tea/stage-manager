@@ -318,7 +318,9 @@ Ours:
   server's list, none unplaced, not hidden: on the safe side, no prediction when unsure;
   the model's gates and the list are looked at before the app is asked anything), the
   window macOS will show (the app's focused window when it waits on another
-  Desktop, else its frontmost there in the window server's order) has its Desktop arranged
+  Desktop, else, the app not answering, the key window of its most recently active stage
+  there; a focus of another window of that same stage then retargets the arrangement) has
+  its Desktop arranged
   at once, through the cached Accessibility elements of that Desktop's windows, and its
   strip pane redrawn in its final order: the Desktop slides in arranged. Its own moves
   make the window's late focus an echo; a focus of another known window of that app still

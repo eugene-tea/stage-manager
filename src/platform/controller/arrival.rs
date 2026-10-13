@@ -211,13 +211,36 @@ fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration,
     }
 }
 
-/// True when a focus (of a window of app `pid`, the standard window it is or follows
-/// `resolved`) that our own moves would make an echo is the user's word all the same: an
-/// arrangement stands for `window` of app `ahead_pid`, and the focus names another known
-/// window of that app (macOS shows another window than predicted). The predicted window's
-/// own focus, another app's, or an unknown window's stay echoes.
-fn focus_beats_echo(window: WindowId, ahead_pid: i32, pid: Option<i32>, resolved: Option<WindowId>) -> bool {
-    pid == Some(ahead_pid) && resolved.is_some_and(|r| r != window)
+/// What a focus within the echo window of an arrangement's own moves is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EchoVerdict {
+    /// An echo: the predicted window's own focus, another app's, an unknown window's.
+    Echo,
+    /// The user's word: another known window of the predicted app, in another stage (macOS
+    /// shows another window than predicted): it undoes the arrangement.
+    Beats,
+    /// Another window of the stage arranged: the arrangement is right, that window is the
+    /// one focused at the arrival.
+    Retarget(WindowId),
+}
+
+/// The verdict for a focus of a window of app `pid` (the standard window it is or follows
+/// `resolved`, in stage `stage`) while an arrangement stands for `window` (in `ahead_stage`)
+/// of app `ahead_pid`.
+fn echo_verdict(
+    window: WindowId,
+    ahead_stage: crate::engine::model::StageId,
+    ahead_pid: i32,
+    pid: Option<i32>,
+    resolved: Option<WindowId>,
+    stage: Option<crate::engine::model::StageId>,
+) -> EchoVerdict {
+    match resolved {
+        Some(r) if pid == Some(ahead_pid) && r != window => {
+            if stage == Some(ahead_stage) { EchoVerdict::Retarget(r) } else { EchoVerdict::Beats }
+        }
+        _ => EchoVerdict::Echo,
+    }
 }
 
 /// True when forgetting a held focus also undoes the arrangement: never while a Space change
@@ -250,17 +273,31 @@ impl Controller {
     }
 
     /// True when a focus of window `id`, within the echo window of an arrangement's own
-    /// moves, is still the user's word ([`focus_beats_echo`]): macOS focused another known
-    /// window of the predicted window's app (its key window changed since the click).
-    pub(super) fn focus_beats_echo(&self, ob: &Observer, id: u32) -> bool {
+    /// moves, is still the user's word ([`echo_verdict`]): macOS focused another known window
+    /// of the predicted app in another stage. One in the same stage retargets the
+    /// arrangement (that window is focused at the arrival) and stays an echo.
+    pub(super) fn focus_beats_echo(&mut self, ob: &Observer, id: u32, now: Instant) -> bool {
         let Some(sent) = &self.ahead else { return false };
+        let Some(m) = self.model.as_ref() else { return false };
         let pid = ob.window(id).map(|w| w.pid);
-        let resolved = self.model.as_ref().and_then(|m| m.resolve_standard(WindowId(id)));
-        let beats = focus_beats_echo(sent.ahead.window, sent.pid, pid, resolved);
-        if beats {
-            tracing::debug!(id, predicted = sent.ahead.window.0, "a focus of another window of the predicted app, not an echo");
+        let resolved = m.resolve_standard(WindowId(id));
+        let stage = resolved.and_then(|r| m.stage_of(r));
+        match echo_verdict(sent.ahead.window, sent.ahead.stage, sent.pid, pid, resolved, stage) {
+            EchoVerdict::Echo => false,
+            EchoVerdict::Beats => {
+                tracing::debug!(id, predicted = sent.ahead.window.0, "a focus of another stage's window of the predicted app, not an echo");
+                true
+            }
+            EchoVerdict::Retarget(window) => {
+                let pid = sent.pid;
+                tracing::debug!(id, predicted = sent.ahead.window.0, now_for = window.0, "a focus of another window of the stage arranged: it is the one focused at the arrival");
+                if let Some(sent) = self.ahead.as_mut() {
+                    sent.ahead.window = window;
+                }
+                self.focus_replay.hold(Wanted::Window { id: window, pid }, now);
+                false
+            }
         }
-        beats
     }
 
     /// True when a held window focus should survive an activation of app `pid` that changed
@@ -405,7 +442,10 @@ impl Controller {
         }
         match dock::item_at(dock, p) {
             Ok((_, item)) => self.press_item(ob, list, item, p, now),
-            Err(found) => tracing::info!(x = p.x, y = p.y, found, "dock: pressed, but the hit-test found no application item"),
+            Err(miss) if miss.notable => {
+                tracing::info!(x = p.x, y = p.y, found = miss.found, "dock: pressed, but the hit-test found no application item")
+            }
+            Err(miss) => tracing::debug!(x = p.x, y = p.y, found = miss.found, "dock: pressed on no item"),
         }
     }
 
@@ -452,8 +492,14 @@ impl Controller {
         let started = Instant::now();
         let why = match press.prediction {
             Ok((pid, window)) => {
+                let regated = self.model.as_ref().map_or(Err("not managing"), |m| m.dock_gates(pid));
+                let gone = self.model.as_ref().is_none_or(|m| m.window(window).is_none());
                 if self.frozen() {
                     "a Space change is settling"
+                } else if let Err(why) = regated {
+                    why
+                } else if gone {
+                    "the window predicted at the press is gone"
                 } else if let Some(sent) = &self.ahead {
                     if sent.ahead.window == window {
                         return Some(window);
@@ -509,10 +555,13 @@ impl Controller {
         if self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid)) {
             return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
         }
-        let hidden = AxElement::application(pid).bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()).unwrap_or(true);
-        let z: Vec<WindowId> = list.iter().filter(|w| w.pid == pid && w.layer == 0).map(|w| WindowId(w.id)).collect();
+        match AxElement::application(pid).bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()) {
+            Ok(false) => {}
+            Ok(true) => return Err("the app is hidden"),
+            Err(_) => return Err("the app did not answer in 50 ms (hidden or not)"),
+        }
         let focused = focused_window_of(pid);
-        let window = m.dock_arrival(pid, AppFacts { hidden, unplaced: false }, focused, &z)?;
+        let window = m.dock_arrival(pid, AppFacts { hidden: false, unplaced: false }, focused)?;
         tracing::debug!(bundle, pid, ax_focused = ?focused.map(|f| f.0), window = window.0, "dock: the window macOS will show");
         Ok((pid, window))
     }
@@ -645,18 +694,73 @@ impl Controller {
         let Some((_, listed)) = dock::item_for_bundle(dock, bundle) else {
             return json!({ "ok": false, "error": format!("no Dock item for {bundle}") });
         };
-        let at = crate::engine::geometry::Point::new(listed.frame.x + listed.frame.w / 2.0, listed.frame.y + listed.frame.h / 2.0);
-        let (element, item) = match dock::item_at(dock, at) {
+        let center = |r: Rect| crate::engine::geometry::Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let mut at = center(listed.frame);
+        let mut hit = dock::item_at(dock, at);
+        let main = self.model.as_ref().map(|m| m.main_display().frame);
+        let mut revealed = false;
+        if hit.is_err()
+            && let Some(edge) = main.and_then(|d| dock_edge(listed.frame, d))
+        {
+            // An auto-hidden Dock: the pointer to its edge shows it (a move, no click), then
+            // the item is looked up where it shows and hit-tested again.
+            revealed = crate::platform::input::reveal_edge(edge, Duration::from_millis(900)).is_ok();
+            if let Some((_, shown)) = dock::item_for_bundle(dock, bundle) {
+                at = center(shown.frame);
+                hit = dock::item_at(dock, at);
+            }
+        }
+        let mut result = self.debug_dock_press(ob, &list, bundle, &listed, at, hit);
+        if revealed {
+            crate::platform::input::pointer_back();
+        }
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("revealed_dock".into(), json!(revealed));
+        }
+        result
+    }
+
+    /// The rest of [`Self::debug_dock_click`]: the hit-test's answer `hit` at `at` goes
+    /// through the press and release path, then the item is pressed.
+    fn debug_dock_press(
+        &mut self,
+        ob: &Observer,
+        list: &[CgWindow],
+        bundle: &str,
+        listed: &DockItem,
+        at: crate::engine::geometry::Point,
+        hit: Result<(AxElement, DockItem), dock::Miss>,
+    ) -> serde_json::Value {
+        use serde_json::json;
+        let (element, item) = match hit {
             Ok(hit) if hit.1.path == listed.path => hit,
             Ok((_, other)) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
-            Err(found) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {found}") }),
+            Err(miss) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
         };
         let pressed_at = Instant::now();
-        self.press_item(ob, &list, item, at, pressed_at);
+        self.press_item(ob, list, item, at, pressed_at);
         let predicted = self.dock_released(ob, at, false, Instant::now());
         let pressed = element.bounded(QUERY_AX_TIMEOUT_SECONDS * 4.0, |e| e.perform_action(names::PRESS));
         tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
         json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })
+    }
+}
+
+/// Where the pointer shows an auto-hidden Dock whose item sits at `item` (off the display
+/// `display`): the middle of the display's edge the item is beyond, a point inside it.
+fn dock_edge(item: Rect, display: Rect) -> Option<crate::engine::geometry::Point> {
+    use crate::engine::geometry::Point;
+    let (cx, cy) = (item.x + item.w / 2.0, item.y + item.h / 2.0);
+    let x = cx.clamp(display.x + 1.0, display.x + display.w - 1.0);
+    let y = cy.clamp(display.y + 1.0, display.y + display.h - 1.0);
+    if cy >= display.y + display.h - 1.0 {
+        Some(Point::new(x, display.y + display.h - 1.0))
+    } else if cx <= display.x + 1.0 {
+        Some(Point::new(display.x, y))
+    } else if cx >= display.x + display.w - 1.0 {
+        Some(Point::new(display.x + display.w - 1.0, y))
+    } else {
+        None
     }
 }
 
@@ -770,12 +874,30 @@ mod tests {
     }
 
     #[test]
-    fn only_another_window_of_the_predicted_app_beats_the_echo() {
-        let b = WindowId(1);
-        assert!(focus_beats_echo(b, 10, Some(10), Some(WindowId(2))), "macOS shows window C, not B");
-        assert!(!focus_beats_echo(b, 10, Some(10), Some(b)), "B's own focus: an echo");
-        assert!(!focus_beats_echo(b, 10, Some(20), Some(WindowId(5))), "another app's window: an echo");
-        assert!(!focus_beats_echo(b, 10, Some(10), None), "an unknown window of the app");
+    fn another_window_of_the_predicted_app_beats_the_echo_or_retargets_it() {
+        use crate::engine::model::StageId;
+        let (b, x, y) = (WindowId(1), StageId(7), StageId(8));
+        assert_eq!(echo_verdict(b, x, 10, Some(10), Some(WindowId(2)), Some(y)), EchoVerdict::Beats, "window C of another stage");
+        assert_eq!(
+            echo_verdict(b, x, 10, Some(10), Some(WindowId(2)), Some(x)),
+            EchoVerdict::Retarget(WindowId(2)),
+            "window C of the stage arranged: kept, C focused at the arrival (R7 1)"
+        );
+        assert_eq!(echo_verdict(b, x, 10, Some(10), Some(b), Some(x)), EchoVerdict::Echo, "B's own focus");
+        assert_eq!(echo_verdict(b, x, 10, Some(20), Some(WindowId(5)), Some(y)), EchoVerdict::Echo, "another app's window");
+        assert_eq!(echo_verdict(b, x, 10, Some(10), None, None), EchoVerdict::Echo, "an unknown window of the app");
+    }
+
+    #[test]
+    fn an_auto_hidden_docks_edge_is_where_its_item_is_beyond_the_display() {
+        use crate::engine::geometry::Point;
+        let below = Rect::new(800.0, 1175.0, 60.0, 60.0);
+        assert_eq!(dock_edge(below, MAIN), Some(Point::new(830.0, 1168.0)), "the bottom edge");
+        let left = Rect::new(-70.0, 500.0, 60.0, 60.0);
+        assert_eq!(dock_edge(left, MAIN), Some(Point::new(0.0, 530.0)), "the left edge");
+        let right = Rect::new(1810.0, 500.0, 60.0, 60.0);
+        assert_eq!(dock_edge(right, MAIN), Some(Point::new(1799.0, 530.0)), "the right edge");
+        assert_eq!(dock_edge(Rect::new(800.0, 1100.0, 60.0, 60.0), MAIN), None, "on screen: nothing to reveal");
     }
 
     #[test]

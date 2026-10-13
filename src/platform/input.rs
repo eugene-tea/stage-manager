@@ -338,6 +338,27 @@ pub fn hover(p: Point, rest: Duration) -> Result<(), String> {
     Ok(())
 }
 
+/// A synthetic pointer move to `p` on a screen edge, no button (test only): it shows an
+/// auto-hidden Dock there. Moves only: nothing is clicked or dragged. [`pointer_back`] puts
+/// the pointer where it was.
+pub fn reveal_edge(p: Point, rest: Duration) -> Result<(), String> {
+    if let Ok(mut home) = HOVER_HOME.lock()
+        && home.is_none()
+    {
+        *home = pointer_now().map(|c| (c.x, c.y));
+    }
+    post_mouse(CGEventType::MouseMoved, p, false)?;
+    std::thread::sleep(rest);
+    Ok(())
+}
+
+/// Puts the pointer back where it was before [`reveal_edge`] or [`hover`] moved it.
+pub fn pointer_back() {
+    if let Some(home) = HOVER_HOME.lock().ok().and_then(|mut h| h.take()) {
+        let _ = post_mouse(CGEventType::MouseMoved, Point::new(home.0, home.1), false);
+    }
+}
+
 /// A synthetic click at `p`, only where the topmost window is ours or a fixture's. The
 /// pointer goes back where it was.
 pub fn click(p: Point, shift: bool) -> Result<(), String> {

@@ -99,18 +99,13 @@ impl Model {
     /// A Dock click on app `pid`: the window macOS will show on another Desktop, or why no
     /// prediction is made. macOS switches Desktops only with "When switching to an
     /// application, switch to a Space with open windows for the application" on, and only
-    /// when the app has no window on the Desktop shown; it shows the app's main window,
+    /// when the app has no window on the Desktop shown; it shows the app's main window:
     /// `ax_focused` (its focused window, asked now) when that waits on another Desktop, else
-    /// its frontmost window there in the window server's order (`z_order`, front to back,
-    /// every Desktop). On the safe side, no prediction for a hidden app or one with windows
-    /// the model does not place (`facts`).
-    pub fn dock_arrival(
-        &self,
-        pid: Pid,
-        facts: AppFacts,
-        ax_focused: Option<WindowId>,
-        z_order: &[WindowId],
-    ) -> Result<WindowId, &'static str> {
+    /// (no answer) the key window of the app's most recently active stage on a Desktop not
+    /// shown, the window it was last focused in there (the window server's order of windows
+    /// off screen is no front-to-back order). On the safe side, no prediction for a hidden
+    /// app or one with windows the model does not place (`facts`).
+    pub fn dock_arrival(&self, pid: Pid, facts: AppFacts, ax_focused: Option<WindowId>) -> Result<WindowId, &'static str> {
         self.dock_gates(pid)?;
         if facts.hidden {
             return Err("the app is hidden");
@@ -124,10 +119,17 @@ impl Model {
                 .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !self.is_shown_space(w.space))
                 .map(|w| w.meta.id)
         };
-        ax_focused
+        if let Some(w) = ax_focused.and_then(elsewhere) {
+            return Ok(w);
+        }
+        let mine = |id: &WindowId| self.windows.get(id).is_some_and(|w| w.meta.pid == pid);
+        self.stages
+            .iter()
+            .filter(|s| !self.is_shown_space(s.space) && s.windows.iter().any(mine))
+            .max_by_key(|s| s.last_active)
+            .and_then(|s| s.key.filter(mine).or_else(|| s.windows.iter().copied().find(mine)))
             .and_then(elsewhere)
-            .or_else(|| z_order.iter().find_map(|id| elsewhere(*id)))
-            .ok_or("none of the app's windows is in the window server's order")
+            .ok_or("the app did not say which window, and no stage of it is known elsewhere")
     }
 
     /// The part of [`Model::dock_arrival`] the model alone decides, asked before anything

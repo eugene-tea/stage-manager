@@ -1244,7 +1244,7 @@ impl Controller {
                 if self.unplaced.contains(&id) {
                     self.on_found(ob, id);
                 }
-                if self.echoes.is_window_echo(id, now) && !self.focus_beats_echo(ob, id) {
+                if self.echoes.is_window_echo(id, now) && !self.focus_beats_echo(ob, id, now) {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
@@ -1470,7 +1470,7 @@ impl Controller {
                 // One window list for the press: the Dock's bar and the wallpaper are looked
                 // up in it. A press on a Dock item: its click may take the user to another
                 // Desktop.
-                let list = windows::list_windows();
+                let list = if self.model.is_some() && !self.frozen() { windows::list_windows() } else { Vec::new() };
                 self.dock_pressed(ob, &list, event.at, now);
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
