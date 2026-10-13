@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Offline unit tests for the hands-free Spaces check's parsing and state
 (scripts/test_spaces.py): the screen-lock flag, the Desktop watcher's verdicts and the Space
-change rule, the guardian drill's verdict. Nothing is launched or switched.
+change rule, the guardian drill's verdict, the Mission Control check's pixels and pane
+behavior. Nothing is launched or switched.
 Run: python3 scripts/test_spaces_unit.py
 """
 
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -109,6 +111,59 @@ class Screenshots(unittest.TestCase):
             else:
                 os.environ["SM_SHOTS"] = old
         self.assertFalse(os.path.exists(os.path.join(t.ts.ROOT, "shots")))
+
+
+def bmp(pixels, top_down=True):
+    """A 32-bit BMP (BITMAPINFOHEADER) of rows of (b, g, r) pixels."""
+    h, w = len(pixels), len(pixels[0])
+    body = b"".join(bytes([*px, 255]) for row in (pixels if top_down else pixels[::-1]) for px in row)
+    info = struct.pack("<IiiHHIIiiII", 40, w, -h if top_down else h, 1, 32, 0, len(body), 2835, 2835, 0, 0)
+    return b"BM" + struct.pack("<IHHI", 14 + len(info) + len(body), 0, 0, 14 + len(info)) + info + body
+
+
+class ExposePixels(unittest.TestCase):
+    def write(self, name, data):
+        path = os.path.join(HOME, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def test_bmp_rows_come_top_down_either_way(self):
+        rows = [[(1, 2, 3), (4, 5, 6)], [(7, 8, 9), (10, 11, 12)]]
+        for top_down in (True, False):
+            w, h, out, bp = t.ts.read_bmp(self.write("x.bmp", bmp(rows, top_down)))
+            self.assertEqual((w, h, bp), (2, 2, 4))
+            self.assertEqual(out[0][:3], bytes([1, 2, 3]))
+            self.assertEqual(out[1][4:7], bytes([10, 11, 12]))
+
+    def test_only_the_cards_pixels_count(self):
+        # A 4x4 point region at 2x (8x8 pixels); one card covers its left half.
+        dark = [[(0, 0, 0)] * 8 for _ in range(8)]
+        right_lit = [[(0, 0, 0)] * 4 + [(255, 255, 255)] * 4 for _ in range(8)]
+        left_lit = [[(255, 255, 255)] * 4 + [(0, 0, 0)] * 4 for _ in range(8)]
+        grab = lambda rows: ((10, 20, 4, 4), t.ts.read_bmp(self.write("g.bmp", bmp(rows))))  # noqa: E731
+        card = [{"x": 10, "y": 20, "w": 2, "h": 4}]
+        self.assertEqual(t.ts.changed_fraction(grab(dark), grab(right_lit), card), 0.0)
+        self.assertEqual(t.ts.changed_fraction(grab(dark), grab(left_lit), card), 1.0)
+
+    def test_a_small_step_is_not_a_change(self):
+        a = [[(100, 100, 100)] * 4 for _ in range(4)]
+        b = [[(100 + t.ts.PIXEL_STEP, 100, 100)] * 4 for _ in range(4)]
+        grab = lambda rows: ((0, 0, 4, 4), t.ts.read_bmp(self.write("s.bmp", bmp(rows))))  # noqa: E731
+        self.assertEqual(t.ts.changed_fraction(grab(a), grab(b), [{"x": 0, "y": 0, "w": 4, "h": 4}]), 0.0)
+
+
+class ExposeBehavior(unittest.TestCase):
+    def test_transient_panes_on_one_desktop_pass(self):
+        ok, told = t.ts.panes_hide_in_expose({"strip_panels": [{"space": 1, "behavior": 8 | 64}, {"space": 2, "behavior": 8 | 64}]})
+        self.assertTrue(ok, told)
+        self.assertIn("transient", told)
+
+    def test_stationary_or_space_hopping_panes_fail(self):
+        for bits in (16 | 64, 8 | 16, 8 | 1, 8 | 2, 64):
+            ok, _ = t.ts.panes_hide_in_expose({"strip_panels": [{"space": 1, "behavior": bits}]})
+            self.assertFalse(ok, bits)
+        self.assertFalse(t.ts.panes_hide_in_expose({"strip_panels": []})[0])
 
 
 if __name__ == "__main__":
