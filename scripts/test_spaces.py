@@ -38,8 +38,8 @@ second, the guardian's log saying it brought it back) and only then ends; a full
 window's Space has no strip, entering and leaving full screen (twice) keeps the Desktop's id,
 its stages and windows, and the engine's view does not flap.
 
-Every app run's log is kept (stage-manager.run-NN.log in the test home; the guardian writes
-on into its run's file).
+Every app run's log is kept (stage-manager.run-NN.log in the test home, renamed from the
+day's YYYY-MM-DD.log; the guardian writes on into its run's file).
 """
 
 import json
@@ -956,7 +956,7 @@ def main():
 
 
 def report():
-    say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed (every app run's log: {ts.HOME}/stage-manager*.log)")
+    say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed (every app run's log: {ts.HOME}/stage-manager.run-*.log and today's {ts.HOME}/YYYY-MM-DD.log)")
     for f in ts.failed:
         say(f"  FAIL {f}")
     return 1 if ts.failed else 0

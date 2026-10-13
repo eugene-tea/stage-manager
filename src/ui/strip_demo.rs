@@ -345,6 +345,8 @@ impl Demo {
             apple_stage_manager_on: false,
             strip_visible: self.flags.user_visible,
             config_error: None,
+            mark_shown: false,
+            last_mark: None,
             capture_refused: false,
         }
     }
@@ -356,7 +358,7 @@ fn env_flag(name: &str) -> Option<bool> {
 
 /// Runs the demo until Quit (menu) or a signal.
 pub fn run() -> ExitCode {
-    logging::init();
+    logging::init(logging::Process::Tool { name: "demo", echo: true });
     tracing::info!(pid = std::process::id(), "strip demo starting");
     let Some(mtm) = MainThreadMarker::new() else {
         tracing::error!("not on the main thread");

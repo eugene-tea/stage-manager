@@ -58,7 +58,7 @@ use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::{desktop, paths, windows};
+use super::{desktop, logging, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::geometry::{Point, Rect};
@@ -69,6 +69,7 @@ use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_wid
 use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
+use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{
     self, CardSnapshot, CardWindow, MovingWindow, StripDrop, StripEvent, StripSnapshot, Transition,
 };
@@ -283,6 +284,11 @@ pub struct Controller {
     foreign: Vec<u32>,
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
+    /// The Space shown and its active stage at the last strip snapshot (the day's log
+    /// counts a switch when the stage changes on the same Space).
+    seen_active: Option<(u64, Option<u64>)>,
+    /// The stages at the last strip snapshot (`None` before the first).
+    seen_stages: Option<BTreeSet<u64>>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -361,7 +367,10 @@ impl Controller {
             space_checked: Instant::now(),
             foreign: Vec::new(),
             absent: HashMap::new(),
+            seen_active: None,
+            seen_stages: None,
         };
+        logging::apply_config(&this.store.config().log);
         this.notify_config();
         this
     }
@@ -677,8 +686,35 @@ impl Controller {
         self.present_with(None);
     }
 
+    /// Counts and logs what changed since the last strip snapshot: the active stage of the
+    /// Space shown (a switch, whatever caused it) and stages made.
+    fn note_changes(&mut self) {
+        let Some(m) = &self.model else { return };
+        let space = m.current_space(m.main_display().id).0;
+        let active = m.main_active_stage();
+        if let Some((s, before)) = self.seen_active
+            && s == space
+            && before != active.map(|a| a.0)
+            && let Some(to) = active
+        {
+            counters::bump(Count::Switch);
+            let from = before.and_then(|b| m.stage_number(StageId(b)));
+            tracing::info!(from, to = m.stage_number(to), stage = to.0, "stage switch");
+        }
+        self.seen_active = Some((space, active.map(|a| a.0)));
+        let stages: BTreeSet<u64> = m.stages().iter().map(|s| s.id.0).collect();
+        if let Some(seen) = &self.seen_stages {
+            for id in stages.difference(seen) {
+                counters::bump(Count::NewStage);
+                tracing::info!(stage = id, number = m.stage_number(StageId(*id)), "new stage");
+            }
+        }
+        self.seen_stages = Some(stages);
+    }
+
     fn present_with(&mut self, transition: Option<Transition>) {
         self.strip_dirty = false;
+        self.note_changes();
         let Some(m) = &self.model else { return };
         let active = m.main_active_stage();
         let cards = m
@@ -1010,6 +1046,7 @@ impl Controller {
                 self.press = None;
                 let Some(drag) = self.drag.take() else { return };
                 if let Some(slot) = drop.filter(|_| drag.moving) {
+                    counters::bump(Count::Drop);
                     tracing::info!(id = drag.id, before = ?slot.before, "window dropped on the strip: a stage of its own");
                     let obs = self.observe(ob);
                     if let Some(m) = self.model.as_mut() {
@@ -1194,6 +1231,8 @@ impl Controller {
         }
         let now = Instant::now();
         self.space_changes += 1;
+        counters::bump(Count::SpaceChange);
+        tracing::debug!(changes = self.space_changes, "Space change notified");
         self.space_changed_at = Some(now);
         self.space_checked = now;
         self.foreign.clear();
@@ -1221,6 +1260,7 @@ impl Controller {
             Verdict::FullScreen => {
                 self.space_pending = false;
                 if !self.fullscreen {
+                    counters::bump(Count::FullScreen);
                     tracing::info!("Space changed: a full-screen app's Space (no strip)");
                 }
                 self.fullscreen = true;
@@ -1442,6 +1482,7 @@ impl Controller {
             tracing::debug!(id, "rule: ignore");
             return;
         }
+        counters::bump(Count::NewWindow);
         tracing::info!(id, action = %decision.action, placement = %decision.placement, "new window");
         let obs = self.observe(ob);
         if let Some(m) = self.model.as_mut() {
@@ -1555,6 +1596,7 @@ impl Controller {
         }
         if let StripEvent::CardMoved { stage, before } = event {
             let Some(m) = self.model.as_mut() else { return };
+            counters::bump(Count::Reorder);
             tracing::info!(stage, ?before, "card moved to another slot");
             let actions = m.move_card(StageId(stage), before.map(StageId));
             self.execute(ob, actions);
@@ -1563,13 +1605,18 @@ impl Controller {
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
         let actions = match event {
-            StripEvent::CardClicked { stage, shift: true } => m.merge_into_active(StageId(stage), &obs),
-            StripEvent::CardClicked { stage, shift: false } => m.switch_to(StageId(stage), &obs),
+            StripEvent::CardClicked { stage, shift } => {
+                counters::bump(Count::CardClick);
+                tracing::info!(stage, number = m.stage_number(StageId(stage)), shift, "card clicked");
+                if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
+            }
             StripEvent::CardDropped { stage, x, y } => {
+                counters::bump(Count::Drop);
                 tracing::info!(stage, x, y, "card dropped in the main area: its windows join the current stage");
                 m.merge_into_active_at(StageId(stage), Point::new(x, y), &obs)
             }
             StripEvent::IconClicked { stage, pid } => {
+                counters::bump(Count::CardClick);
                 tracing::info!(stage, pid, "card icon clicked: the stage, with every window of the app");
                 m.show_app_everywhere(StageId(stage), pid, &obs)
             }
@@ -1657,6 +1704,7 @@ impl Controller {
                 tracing::info!("config reloaded");
                 self.config_error = None;
                 let config = self.store.config().clone();
+                logging::apply_config(&config.log);
                 if *self.style != config.style {
                     self.style = Arc::new(config.style.clone());
                 }
@@ -1785,7 +1833,7 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
+            Command::Ping | Command::Quit | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugDrag { .. }
             | Command::DebugSpace { .. } => {

@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod engine;
+pub mod logbook;
 #[cfg(target_os = "macos")]
 pub mod platform;
 #[cfg(target_os = "macos")]

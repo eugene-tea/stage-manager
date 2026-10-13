@@ -8,6 +8,9 @@
 //! Only the requested windows are captured; the caller replaces the request whenever the
 //! strip changes and an empty request stops captures (the strip is hidden).
 //!
+//! Each capture counts in the day's log (ok or failed); a window's captures starting to fail,
+//! and working again, are logged once each, not every round.
+//!
 //! Access: Screen Recording. When it is missing and prompts are allowed, the first capturer
 //! asks through `SCShareableContent` once captures are switched on (on recent macOS this is
 //! what lists the app in System Settings); rounds are skipped until the grant arrives.
@@ -24,7 +27,7 @@
 //!   after answering it, and for a process that has just exited it cannot resolve the app's
 //!   path, so it alerts as if the app were new (see README's Known limitations).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -45,6 +48,10 @@ use objc2_screen_capture_kit::{
 
 use super::capture_gate::{Change, Gate, Outcome, Permit};
 use super::permissions;
+use crate::logbook::counters::{self, Count};
+
+/// Windows whose last capture outcome is remembered; past this the memory starts over.
+const MAX_OUTCOMES: usize = 4096;
 
 /// One window to capture, at a pixel size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -331,6 +338,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
     let (lock, cv) = &*shared;
     let mut last_full: Option<Instant> = None;
     let mut round_no: u64 = 0;
+    let mut outcomes: HashMap<u32, bool> = HashMap::new();
     let mut asked = false;
     // After a probe that told nothing, the next one waits this long.
     let mut rest_until: Option<Instant> = None;
@@ -393,7 +401,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
             }
         };
         round_no += 1;
-        let result = autoreleasepool(|_| capture_round(round_no, &batch, deliver));
+        let result = autoreleasepool(|_| capture_round(round_no, &batch, deliver, &mut outcomes));
         let change = gate().finished(result.outcome, Instant::now());
         rest_until = (permit == Permit::Probe && result.outcome == Outcome::Inconclusive).then(|| Instant::now() + IDLE_CHECK);
         match change {
@@ -427,15 +435,19 @@ struct RoundResult {
 enum Msg {
     /// The shareable content arrived and `n` captures were issued.
     Issued { round: u64, n: usize },
-    /// One capture finished (`ok` = an image was delivered).
-    Captured { round: u64, id: u32, ok: bool },
+    /// One capture finished (`ok` = an image was delivered; else why not).
+    Captured { round: u64, id: u32, ok: bool, why: Option<String> },
+    /// A requested window is not in the shareable content.
+    Missing { round: u64, id: u32 },
     /// macOS refused a call as user-declined.
     Declined { round: u64 },
 }
 
 /// Captures `batch` once; returns the window ids that produced an image or were found
 /// missing (so they are not retried as "fresh" in a tight loop) and the outcome for the gate.
-fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult {
+/// Counts every outcome and logs the windows whose outcome changed since `outcomes` last saw
+/// them.
+fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut HashMap<u32, bool>) -> RoundResult {
     let (tx, rx) = mpsc::channel::<Msg>();
     let targets: Vec<Target> = batch.to_vec();
     let content_tx = tx.clone();
@@ -465,7 +477,8 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult 
         for t in &targets {
             // SAFETY: plain getter on a live SCWindow.
             let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == t.id) else {
-                tracing::debug!(window = t.id, "window not in shareable content");
+                tracing::trace!(window = t.id, "window not in shareable content");
+                let _ = content_tx.send(Msg::Missing { round, id: t.id });
                 continue;
             };
             // SAFETY: designated initializer with a live SCWindow; plain setters.
@@ -484,14 +497,14 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult 
             let flight = InFlight::issue();
             let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
                 let _answered = &flight;
-                let ok = match NonNull::new(image) {
+                let (ok, why) = match NonNull::new(image) {
                     Some(ptr) => {
                         // SAFETY: SCK hands a valid CGImage for the duration of the block;
                         // retaining keeps it alive for the main thread.
                         let image = unsafe { CFRetained::retain(ptr) };
                         IMAGES.fetch_add(1, Ordering::Relaxed);
                         DispatchQueue::main().exec_async(move || deliver(id, image));
-                        true
+                        (true, None)
                     }
                     None => {
                         // SAFETY: SCK passes a valid NSError or null.
@@ -500,11 +513,11 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult 
                             let _ = done_tx.send(Msg::Declined { round });
                         }
                         let why = error.map(|e| e.localizedDescription().to_string());
-                        tracing::debug!(window = id, ?why, "capture failed");
-                        false
+                        tracing::trace!(window = id, ?why, "capture failed");
+                        (false, why)
                     }
                 };
-                let _ = done_tx.send(Msg::Captured { round, id, ok });
+                let _ = done_tx.send(Msg::Captured { round, id, ok, why });
             });
             // SAFETY: filter, configuration and handler are valid; SCK copies the block.
             unsafe {
@@ -531,16 +544,22 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult 
     let mut finished = 0usize;
     let mut handled: Vec<u32> = Vec::new();
     let mut refused = false;
+    let mut failed: HashMap<u32, String> = HashMap::new();
     while expected.is_none_or(|n| finished < n) {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok(Msg::Issued { round: r, n }) if r == round => expected = Some(n),
             Ok(Msg::Declined { round: r }) if r == round => refused = true,
-            Ok(Msg::Captured { round: r, id, ok }) if r == round => {
+            Ok(Msg::Captured { round: r, id, ok, why }) if r == round => {
                 finished += 1;
                 if ok {
                     handled.push(id);
+                } else {
+                    failed.insert(id, why.unwrap_or_else(|| "no image".into()));
                 }
+            }
+            Ok(Msg::Missing { round: r, id }) if r == round => {
+                failed.insert(id, "not in the shareable content".into());
             }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {
@@ -557,6 +576,10 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult 
         all.extend(missing);
     }
     tracing::trace!(round, captured = handled.len(), requested = batch.len(), "capture round");
+    // A round cut short by quit is not a failure.
+    if expected.is_some() && !CLOSING.load(Ordering::SeqCst) {
+        note_outcomes(batch, &handled, &failed, outcomes);
+    }
     let outcome = if !handled.is_empty() {
         Outcome::Captured
     } else if refused {
@@ -565,4 +588,24 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver) -> RoundResult 
         Outcome::Inconclusive
     };
     RoundResult { done: all, outcome }
+}
+
+/// Counts a round's outcomes and logs each window whose captures start failing or work
+/// again (once per change, not every round).
+fn note_outcomes(batch: &[Target], handled: &[u32], failed: &HashMap<u32, String>, outcomes: &mut HashMap<u32, bool>) {
+    if outcomes.len() > MAX_OUTCOMES {
+        outcomes.clear();
+    }
+    for t in batch {
+        let ok = handled.contains(&t.id);
+        counters::bump(if ok { Count::CaptureOk } else { Count::CaptureFailed });
+        match (outcomes.insert(t.id, ok), ok) {
+            (Some(true) | None, false) => {
+                let why = failed.get(&t.id).map_or("no answer in time", String::as_str);
+                tracing::debug!(window = t.id, why, "capture failing");
+            }
+            (Some(false), true) => tracing::debug!(window = t.id, "capture works again"),
+            _ => {}
+        }
+    }
 }

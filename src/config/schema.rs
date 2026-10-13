@@ -151,6 +151,13 @@ pub const SECTIONS: &[SectionDef] = &[
     },
     SectionDef { name: "stages", doc: &[] },
     SectionDef { name: "defaults", doc: &["What a new window does when no [[rule]] matches."] },
+    SectionDef {
+        name: "log",
+        doc: &[
+            "The daily log: ~/Library/Logs/Stage Manager/YYYY-MM-DD.log, local times. It never",
+            "leaves this Mac; window titles may appear in it. RUST_LOG overrides `level`.",
+        ],
+    },
 ];
 
 /// Every key, grouped by section in [`SECTIONS`] order.
@@ -282,6 +289,13 @@ pub const KEYS: &[KeyDef] = &[
         "\"native\" is Apple's: a window joins its app's stage, a newly opened app gets its own."),
     k("defaults", "placement", Kind::Placement, "\"as-is\"",
         "Where it goes: \"as-is\", \"center\", or \"cascade\" (offset from the front window)."),
+    // [log]
+    k("log", "level", Kind::Choice(&["error", "warn", "info", "debug", "trace"]), "\"debug\"",
+        "How much the log keeps: \"debug\" (the trial default) records every decision, \"info\" only the main ones."),
+    k("log", "days", i(1, 365), "14", "Day files older than this many days are deleted."),
+    k("log", "max_mb_per_day", i(1, 10_000), "100",
+        "A day's file this big takes only warnings, errors, marks and counts from then on."),
+    k("log", "max_mb_total", i(1, 100_000), "500", "The log folder's cap: the oldest days go first, never today's."),
 ];
 
 /// The `[[rule]]` keys (an array of tables, documented by example in the file).
@@ -399,6 +413,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-2.toml"),
     include_str!("legacy/default-3.toml"),
     include_str!("legacy/default-4.toml"),
+    include_str!("legacy/default-5.toml"),
 ];
 
 #[cfg(test)]

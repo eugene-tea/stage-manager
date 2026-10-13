@@ -294,6 +294,7 @@ impl WmState {
     }
 
     fn after_panic(&mut self) {
+        crate::logbook::counters::bump(crate::logbook::counters::Count::Recovery);
         tracing::error!("recovering from a panic on the WM thread: resyncing the parked-window registry");
         let _ = self.observer.take_events();
         self.controller.resync_registry(&self.observer);

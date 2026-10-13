@@ -4,7 +4,8 @@
 //! `STAGE_MANAGER_HOME=<dir>` moves all of them into `<dir>` (test runs use a scratch
 //! directory, so they never touch the real config, state, socket or log). Without it:
 //! config and state in `~/.config/stage-manager`, the log in `~/Library/Logs/Stage Manager`,
-//! the socket in the per-user temporary directory.
+//! the socket in the per-user temporary directory. `STAGE_MANAGER_LOG_DIR=<dir>` moves only
+//! the log.
 
 use std::ffi::CStr;
 use std::hash::{Hash, Hasher};
@@ -62,14 +63,17 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// `$STAGE_MANAGER_HOME`, else `~/Library/Logs/Stage Manager`.
-pub fn log_dir() -> PathBuf {
-    custom_home().unwrap_or_else(|| home().join("Library/Logs/Stage Manager"))
-}
+/// The environment variable that moves the log directory alone.
+pub const LOG_DIR_ENV: &str = "STAGE_MANAGER_LOG_DIR";
 
-/// `stage-manager.log` in [`log_dir`].
-pub fn log_file() -> PathBuf {
-    log_dir().join("stage-manager.log")
+/// The daily logs' directory: `$STAGE_MANAGER_LOG_DIR`, else `$STAGE_MANAGER_HOME`, else
+/// `~/Library/Logs/Stage Manager`.
+pub fn log_dir() -> PathBuf {
+    std::env::var_os(LOG_DIR_ENV)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(custom_home)
+        .unwrap_or_else(|| home().join("Library/Logs/Stage Manager"))
 }
 
 /// The config and state directory (see [`config::config_dir`]).
@@ -127,7 +131,9 @@ mod tests {
 
     #[test]
     fn log_and_config_paths_are_named() {
-        assert!(log_file().ends_with("stage-manager.log"));
+        if std::env::var_os(LOG_DIR_ENV).is_none() && custom_home().is_none() {
+            assert!(log_dir().ends_with("Library/Logs/Stage Manager"));
+        }
         assert!(config_file().ends_with("config.toml"));
         assert!(state_file().ends_with("state.json"));
         assert!(clean_exit_marker(42).ends_with(".clean-exit-42"));

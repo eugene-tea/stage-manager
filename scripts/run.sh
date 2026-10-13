@@ -1,11 +1,11 @@
 #!/bin/bash
 # Launches the dev copy of the app (scripts/dev-app.sh) through LaunchServices (so TCC checks the bundle, not
-# the terminal) and streams its log. Ctrl-C quits the app: `ctl quit` first, SIGTERM as a
-# fallback.
+# the terminal) and streams today's log from its end (the day's file holds the whole day). Ctrl-C quits the
+# app: `ctl quit` first, SIGTERM as a fallback.
 #
-# Passed through to the app when set: RUST_LOG (default info,stage_manager=debug),
-# STAGE_MANAGER_NO_PROMPT, STAGE_MANAGER_ONLY, STAGE_MANAGER_HOME (config, state, socket and
-# log in that directory), STAGE_MANAGER_TEST (test-only ctl commands).
+# Passed through to the app when set: RUST_LOG (overrides [log] level), STAGE_MANAGER_NO_PROMPT,
+# STAGE_MANAGER_ONLY, STAGE_MANAGER_HOME (config, state, socket and log in that directory),
+# STAGE_MANAGER_LOG_DIR (the log alone), STAGE_MANAGER_TEST (test-only ctl commands).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,25 +15,28 @@ if [ -n "${STAGE_MANAGER_HOME:-}" ]; then
   mkdir -p "$STAGE_MANAGER_HOME"
   STAGE_MANAGER_HOME="$(cd "$STAGE_MANAGER_HOME" && pwd)"
   export STAGE_MANAGER_HOME
-  LOG="$STAGE_MANAGER_HOME/stage-manager.log"
+  LOG_DIR="$STAGE_MANAGER_HOME"
 else
-  LOG="$HOME/Library/Logs/Stage Manager/stage-manager.log"
+  LOG_DIR="$HOME/Library/Logs/Stage Manager"
 fi
+[ -n "${STAGE_MANAGER_LOG_DIR:-}" ] && LOG_DIR="$STAGE_MANAGER_LOG_DIR"
+LOG="$LOG_DIR/$(date +%Y-%m-%d).log"
 
 if "$BIN" ctl ping >/dev/null 2>&1; then
   echo "Stage Manager is already running; quit it first (\"$BIN\" ctl quit)." >&2
   exit 1
 fi
 
-mkdir -p "$(dirname "$LOG")"
-: > "$LOG"
+mkdir -p "$LOG_DIR"
+touch "$LOG"
 
-ENV_ARGS=(--env "RUST_LOG=${RUST_LOG:-info,stage_manager=debug}")
-for var in STAGE_MANAGER_NO_PROMPT STAGE_MANAGER_ONLY STAGE_MANAGER_HOME STAGE_MANAGER_TEST; do
+ENV_ARGS=()
+for var in RUST_LOG STAGE_MANAGER_NO_PROMPT STAGE_MANAGER_ONLY STAGE_MANAGER_HOME STAGE_MANAGER_LOG_DIR STAGE_MANAGER_TEST; do
   if [ -n "${!var+x}" ]; then ENV_ARGS+=(--env "$var=${!var}"); fi
 done
 
-open -n "$APP" "${ENV_ARGS[@]}" || exit 1
+START_LINES="$(wc -l < "$LOG" | tr -d ' ')"
+open -n "$APP" ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} || exit 1
 
 # The app's pid: from `ctl ping`, else from the process table.
 PID=""
@@ -46,12 +49,13 @@ for _ in $(seq 1 50); do
 done
 [ -n "$PID" ] || PID="$(pgrep -n -f "Stage Manager.app/Contents/MacOS/stage-manager$")"
 if [ -z "$PID" ]; then
-  echo "Stage Manager did not start; log follows." >&2
-  cat "$LOG" >&2
+  echo "Stage Manager did not start; the end of today's log ($LOG) follows." >&2
+  tail -n 40 "$LOG" >&2
   exit 1
 fi
 
-tail -n +1 -F "$LOG" &
+# From this run's first line on (the day's earlier lines stay in the file).
+tail -n +"$((START_LINES + 1))" -F "$LOG" &
 TAIL=$!
 
 quit_app() {

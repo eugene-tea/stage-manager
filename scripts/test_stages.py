@@ -71,7 +71,12 @@ HOME = os.environ.get("TEST_HOME") or tempfile.mkdtemp(prefix="sm-test.", dir="/
 os.makedirs(HOME, exist_ok=True)
 ONLY = ",".join(ALL_IDS)
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME, STAGE_MANAGER_ONLY=ONLY)
-LOG = os.path.join(HOME, "stage-manager.log")
+
+
+def log_path():
+    """Today's log in the test home (the app writes one file per local day)."""
+    return os.path.join(HOME, time.strftime("%Y-%m-%d") + ".log")
+
 
 passed, failed = [], []
 
@@ -195,12 +200,13 @@ def owner_app_running():
 def archive_log():
     """Keeps the last app run's log as stage-manager.run-NN.log (renamed, not removed: its
     guardian keeps writing into the same file), so a run leaves the whole story."""
-    if not os.path.exists(LOG):
+    log = log_path()
+    if not os.path.exists(log):
         return None
     n = 1 + max([int(f[len("stage-manager.run-"):-4]) for f in os.listdir(HOME)
                  if f.startswith("stage-manager.run-") and f.endswith(".log") and f[18:-4].isdigit()] or [0])
     path = os.path.join(HOME, f"stage-manager.run-{n:02d}.log")
-    os.rename(LOG, path)
+    os.rename(log, path)
     return path
 
 
@@ -253,7 +259,7 @@ def stop_app():
 
 def log_text():
     try:
-        with open(LOG, encoding="utf-8", errors="replace") as f:
+        with open(log_path(), encoding="utf-8", errors="replace") as f:
             return f.read()
     except FileNotFoundError:
         return ""
@@ -1320,8 +1326,8 @@ def phase_visible():
     start_extra("a", 3)
     start_extra("b", 2)
     start_extra("c", 2)
-    if os.path.exists(LOG):
-        os.remove(LOG)
+    if os.path.exists(log_path()):
+        os.remove(log_path())
     args = ["open", "-n", APP]
     for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": ONLY, "STAGE_MANAGER_NO_PROMPT": "1",
                  "STAGE_MANAGER_NO_CAPTURE": "1", "STAGE_MANAGER_TEST": "1",
@@ -1487,7 +1493,7 @@ def main():
     time.sleep(1.0)
     alerts = replayd_alerts(since)
     say(f"\nscreen-access alerts macOS showed during this run (any app): {'unknown' if alerts is None else alerts}")
-    say(f"{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager*.log)")
+    say(f"{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager.run-*.log and today's {HOME}/YYYY-MM-DD.log)")
     for f in failed:
         say(f"  FAIL {f}")
     return 1 if failed else 0
