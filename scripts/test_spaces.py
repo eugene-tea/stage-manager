@@ -369,8 +369,17 @@ def shots_dir():
     return d
 
 
+def shots_on():
+    """Screenshots only when $SM_SHOTS is set: in a hands-free run `screencapture` raises
+    macOS's screen-capture alert (naming the terminal's app) on the owner's Mac."""
+    return bool(os.environ.get("SM_SHOTS"))
+
+
 def shot(name, region=None):
-    """A screenshot now (the main display, or `region` x,y,w,h); returns its path or None."""
+    """A screenshot now (the main display, or `region` x,y,w,h); returns its path, or None
+    (failed, or screenshots off: see `shots_on`)."""
+    if not shots_on():
+        return None
     path = os.path.join(shots_dir(), f"spaces-auto-{time.strftime('%H%M%S')}-{name}.png")
     args = ["screencapture", "-x"] + (["-R", ",".join(f"{v:.0f}" for v in region)] if region else ["-m"]) + [path]
     r = subprocess.run(args, capture_output=True, text=True)
@@ -382,7 +391,7 @@ def shot(name, region=None):
 
 def by_eye(question, path):
     BY_EYE.append((question, path))
-    say(f"    by eye: {path or '(no screenshot)'} — {question}")
+    say(f"    by eye: {path or ('(no screenshot)' if shots_on() else '(screenshots off)')} — {question}")
 
 
 def space_now():
@@ -576,7 +585,7 @@ planned steps (hands-free):
   probe       on Desktop 2: ctl debug-frame <Fixture 1 (Desktop 1, shown in its stage)> +40 pt only (no raise,
               no focus), the window server's bounds read (all Desktops), then put back; says whether macOS
               carries out moves on a Desktop not shown (round 6T); no Desktop 1 window may show meanwhile
-  activation  on Desktop 2, twice, the window server sampled every 30 ms for 3 s each: (1) Alpha's Dock item
+  activation  on Desktop 2, the window server sampled every 30 ms for 3 s each: (1) $SM_DOCK_REPEATS (3) times Alpha's Dock item
               (ctl debug-dock-click: the Dock's hit-test at the item, as a real click, then AXPress), Alpha 1 parked in an
               inactive stage of Desktop 1: Desktop 1 comes up with Alpha 1's stage, the path is dock-click and
               Fixture 1-2 (the stage left) never show once Desktop 1 is on screen, not even during the slide;
@@ -592,6 +601,7 @@ planned steps (hands-free):
   full screen twice: ctl debug-fullscreen <a shown Fixture window> on, checks, off, checks
   cleanup     (also on Ctrl-C/SIGTERM) full screen off on every fixture window; back to the start Desktop
               (not when someone else changed the Desktop); quit the app; no window parked; quit the fixtures
+  screenshots none unless SM_SHOTS is set (by-eye lines say "(screenshots off)")
   watch       all along, the window server must show the expected Desktop's fixture windows; a change
               nobody asked for stops the run"""
 
@@ -936,8 +946,10 @@ def activation_to_desktop_1(d1, d2):
 
     Rounds 6T/6U, the owner's report of 10-13 (the Desktop slid in with its previous stage,
     then switched): every notice comes at the end of the slide, so the app arranges the
-    arriving Desktop at the Dock click. Hands-free it runs twice, the window server sampled
-    every 30 ms from the activation for 3 s each time:
+    arriving Desktop at the Dock click. Hands-free the Dock arrival runs $SM_DOCK_REPEATS
+    times (3; the window server once applied the moves only at the slide's end, 10-13), and
+    every one must be clean; then one by `open`. The window server is sampled every 30 ms
+    from the activation for 3 s each time:
 
     - **Dock click** (`ctl debug-dock-click`: Alpha's real Dock item, hit-tested at its
       center and handed through the press and release path as a real click is, then pressed
@@ -959,25 +971,43 @@ def activation_to_desktop_1(d1, d2):
     if not AUTO:
         arrive_on_desktop_1(d1, alpha, left, None)
         return
-    arrive_on_desktop_1(d1, alpha, left, "dock")
+    clean = []
+    for n in range(DOCK_REPEATS):
+        if n and not back_to_desktop_2(d2):
+            return
+        say(f"\n== Dock arrival {n + 1} of {DOCK_REPEATS} ==")
+        clean.append(arrive_on_desktop_1(d1, alpha, left, "dock"))
+    check(all(clean), f"every Dock arrival clean: {sum(1 for c in clean if c)} of {DOCK_REPEATS} "
+          "(the stage left never out of the park zone once Desktop 1 is on screen)")
     say("\n== again by `open` (no Dock click: the fallback at the Space change notice) ==")
+    if back_to_desktop_2(d2):
+        arrive_on_desktop_1(d1, alpha, left, "open")
+
+
+# How many Dock arrivals a hands-free run makes (the window server applied an arrangement made
+# ahead only when its Desktop showed in one run of three, 10-13).
+DOCK_REPEATS = int(os.environ.get("SM_DOCK_REPEATS") or 3)
+
+
+def back_to_desktop_2(d2):
+    """From Desktop 1 after an arrival: its Fixture stage active again (Alpha 1 parked),
+    then Desktop 2. False (with a failed check) when that does not happen."""
     x = state()
     fixture_stage = stage_holding(x, "Fixture 1")
-    if x.get("space") == d1 and fixture_stage:
+    if fixture_stage:
         ctl("switch", fixture_stage)
     x = ts.wait_state(lambda y: any(w["title"] == "Alpha 1" and w["parked"] for w in y["windows"]),
                       "Alpha 1 parked again", timeout=4)
     if not check(x is not None, "Desktop 1's Fixture stage is active again (Alpha 1 parked)"):
-        return
+        return False
     go("d2", "Switch to Desktop 2")
-    if not check(current_space() == d2, "back on Desktop 2 for the second arrival"):
-        return
-    arrive_on_desktop_1(d1, alpha, left, "open")
+    return check(current_space() == d2, "back on Desktop 2 for the next arrival")
 
 
 def arrive_on_desktop_1(d1, alpha, left, how):
     """One arrival on Desktop 1 for Alpha 1 from Desktop 2: `how` is "dock" (its Dock item,
-    `ctl debug-dock-click`), "open", or None (guided: the person clicks)."""
+    `ctl debug-dock-click`), "open", or None (guided: the person clicks). True when it was
+    clean (judged hands-free: see `judge_arrival`)."""
     s = state()
     check(any(w["id"] == alpha["id"] and w["parked"] for w in s["windows"]), "Alpha 1 waits parked in an inactive stage of Desktop 1")
     check(left and not any(w["parked"] for w in s["windows"] if w["id"] in left),
@@ -1025,10 +1055,10 @@ def arrive_on_desktop_1(d1, alpha, left, how):
         except Exception as e:  # noqa: BLE001 - a sampler that failed is reported, not fatal
             sampler.kill()
             check(False, f"the window server was sampled during the slide ({e})")
-            return
-        judge_arrival(t_open, samples, display, left, alpha["id"], set(WATCH.ids["d1"]), set(WATCH.ids["d2"]), how)
-    else:
-        say("    (the slide is sampled in the hands-free run only)")
+            return False
+        return judge_arrival(t_open, samples, display, left, alpha["id"], set(WATCH.ids["d1"]), set(WATCH.ids["d2"]), how)
+    say("    (the slide is sampled in the hands-free run only)")
+    return s is not None
 
 
 LOG_TIME = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) ([+-]\d\d:\d\d) ")
@@ -1055,7 +1085,9 @@ def first_after(events, text, since):
 def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how):
     """The arrival as the window server showed it, against the app's log (see
     `activation_to_desktop_1`); `how` "dock" is strict: arranged at the click, the stage left
-    never shows during the slide."""
+    never shows during the slide. Returns whether the arrival was clean: the stage left never
+    out of the park zone once Desktop 1 is on screen ("dock") or once the arrangement was
+    sent ("open"). The app's own check of its moves against the window server is printed."""
     events = log_events(t_open)
     rel = lambda t: "-" if t is None else f"+{(t - t_open) * 1000:.0f} ms"  # noqa: E731
     focus = first_after(events, "focus held until its Desktop is recognized", t_open)
@@ -1095,16 +1127,22 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
         check(ahead is not None, f"the focus came before the notice: arranged ahead (6T), not at the recognition ({path})")
     elif ahead is None:
         say(f"    (no focus before the notice in the log: {path})")
+    clean = sent is not None and slide_from is not None
     if sent is not None:
         late = [t for t in stale if t >= sent + 0.05]
+        clean = clean and not late
         check(not late, "once the arrangement was sent, the stage Desktop 1 was left with never shows "
               f"(Fixture 1-2 in the park zone at every look 50 ms after it){'' if not late else ': ' + str([rel(t) for t in late][:8])}")
     if how == "dock":
         check(trigger == "dock-click", f"arranged at the Dock click ({path})")
         during = [t for t in stale if slide_from is not None and t >= slide_from]
+        clean = clean and not during and trigger == "dock-click"
         check(not during, "the stage left never shows once Desktop 1 is on screen, not even during the slide"
               + ("" if not during else f": {[rel(t) for t in during][:8]}"))
     check(any(w["id"] == alpha_id and shown(w) for w in last), "Alpha 1 on screen out of the park zone at the last look")
+    for t, line in events:
+        if t <= t_open + 3.0 and "arrival: the window server" in line:
+            say(f"    app, {rel(t)}: {line.split(': ', 1)[-1][:300]}")
     window = [line for t, line in events if t <= t_open + 3.0]
     ghosts = [line for line in window if "transition: " in line or "transition covered" in line
               or "transition reached the strip" in line]
@@ -1113,6 +1151,8 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
     if switched is not None:
         check(any("instant=true" in line for t, line in window if "waits in a stage of this Space; switching" in line),
               "the arrival's own switch was instant (its log line says so)")
+    say(f"    this arrival: {'clean' if clean else 'NOT clean'}")
+    return clean
 
 
 def probe_moves_elsewhere(d1, left):
@@ -1283,7 +1323,7 @@ def main():
     if BY_EYE:
         say("\nby eye (not counted):")
         for q, path in BY_EYE:
-            say(f"  {path or '(no screenshot)'}: {q}")
+            say(f"  {path or ('(no screenshot)' if shots_on() else '(screenshots off; SM_SHOTS=<dir> takes them)')}: {q}")
     took = time.time() - STARTED
     say(f"\nthe run took {int(took // 60)} min {int(took % 60)} s")
     return report()

@@ -41,6 +41,11 @@ pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 /// Housekeeping period of the WM run loop (saves, config polling, strip refresh).
 const TICK_SECONDS: f64 = 0.25;
 
+/// The fast tick: work that must land within a Desktop slide (~0.25–0.45 s), such as
+/// checking an arrangement made ahead against the window server
+/// (`Controller::fast_tick`); a no-op otherwise.
+const FAST_TICK_SECONDS: f64 = 0.02;
+
 /// App-observation retries run every this many ticks (about once a second).
 const RETRY_EVERY: u32 = 4;
 
@@ -197,6 +202,14 @@ fn guarded_state(what: &str, f: impl FnOnce(&mut WmState)) {
     if safety::guarded(what, || with_state(f)).is_none() {
         let _ = safety::guarded("panic recovery", || with_state(WmState::after_panic));
     }
+}
+
+/// The fast tick (none once Quit is requested).
+fn fast_tick() {
+    if safety::quit_requested() {
+        return;
+    }
+    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&s.observer));
 }
 
 /// Handles every queued command (scheduled by `WmHandle::send`). Once Quit is requested,
@@ -363,6 +376,16 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         // SAFETY: the default-mode constant is a valid static.
         Some(t) => run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode }),
         None => tracing::error!("could not create the WM tick timer"),
+    }
+
+    let fast_block = RcBlock::new(|_timer: *mut CFRunLoopTimer| fast_tick());
+    let first_fast = CFAbsoluteTimeGetCurrent() + FAST_TICK_SECONDS;
+    // SAFETY: valid arguments; the block is copied by CoreFoundation.
+    let fast = unsafe { CFRunLoopTimer::with_handler(None, first_fast, FAST_TICK_SECONDS, 0, 0, Some(&fast_block)) };
+    match &fast {
+        // SAFETY: the default-mode constant is a valid static.
+        Some(t) => run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode }),
+        None => tracing::error!("could not create the WM fast tick timer"),
     }
 
     tracing::debug!("WM thread running");

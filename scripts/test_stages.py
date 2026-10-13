@@ -1801,7 +1801,16 @@ def edge_tab():
     return tabs[0] if tabs else None
 
 
+def captures_on():
+    """Screen captures (`screencapture`) only when $SM_SHOTS or $SM_SCREENSHOTS is set: a
+    run otherwise raises macOS's screen-capture alert on the owner's Mac."""
+    return bool(os.environ.get("SM_SHOTS") or os.environ.get("SM_SCREENSHOTS"))
+
+
 def screenshot(name, s):
+    if not captures_on():
+        say(f"  (screenshots off: {name} not taken; SM_SCREENSHOTS=<dir> takes it)")
+        return
     vis = s["display"]["visible"]
     path = os.path.join(SCRATCH, name)
     r = subprocess.run(["screencapture", "-x", "-R", f"{vis['x']:.0f},{vis['y']:.0f},260,{vis['h']:.0f}", path],
@@ -2179,8 +2188,11 @@ def read_bmp(path):
 
 
 def grab(region, name):
-    """The screen in `region` (global points, x y w h) as pixels; None when it fails. The
-    file goes to the test home (never the repo) and is removed once read."""
+    """The screen in `region` (global points, x y w h) as pixels; None when it fails or
+    captures are off (`captures_on`: the pixel checks are skipped then). The file goes to
+    the test home (never the repo) and is removed once read."""
+    if not captures_on():
+        return None
     path = os.path.join(HOME, f"expose-{name}.bmp")
     args = ["screencapture", "-x", "-t", "bmp", "-R", ",".join(f"{v:.0f}" for v in region), path]
     r = subprocess.run(args, capture_output=True, text=True)
@@ -2287,7 +2299,7 @@ def expose_round(which, label, shot=None):
     moved = changed_fraction(before, during, cards) if before and during else None
     say(f"  strip while it shows: listed on screen {listed is not None}"
         + (f" (alpha {listed.get('alpha')})" if listed else "")
-        + (f"; cards' pixels changed {moved:.0%} (still screen {base:.0%})" if moved is not None else "; no pixel check (no cards)"))
+        + (f"; cards' pixels changed {moved:.0%} (still screen {base:.0%})" if moved is not None else "; no pixel check (" + ("no cards" if captures_on() else "screen captures off; SM_SHOTS=<dir> turns them on") + ")"))
     hidden = listed is None or listed.get("alpha", 1.0) == 0
     check(hidden, f"{label}: the strip is not drawn while it shows (the window server "
           f"{'no longer lists it on screen' if listed is None else 'lists it on screen, alpha ' + str(listed.get('alpha'))})")

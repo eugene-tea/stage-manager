@@ -322,7 +322,14 @@ Ours:
   there; a focus of another window of that same stage then retargets the arrangement) has
   its Desktop arranged
   at once, through the cached Accessibility elements of that Desktop's windows, and its
-  strip pane redrawn in its final order: the Desktop slides in arranged. Its own moves
+  strip pane redrawn in its final order: the Desktop slides in arranged. The window server
+  does not always apply those moves at once (10-13: in one hands-free run of three the
+  stage left showed through the whole slide and was parked only when the Desktop became
+  the one shown; the Accessibility calls had all succeeded): so the moves are checked
+  against the window server's list every 20 ms for 0.6 s and the ones it does not show are
+  sent again (1 pt off, then exactly, since AppKit drops a move to where it thinks the
+  window is), and what it showed is logged ("arrival: the window server shows the
+  arrangement", or which moves it never showed). Its own moves
   make the window's late focus an echo; a focus of another known window of that app still
   counts (macOS showed another window than predicted: undone, arranged for that one at the
   notice). No Space change

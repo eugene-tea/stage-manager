@@ -465,6 +465,8 @@ pub struct Controller {
     dock_press: Option<super::dock::DockPress<arrival::Prediction>>,
     /// The Dock's pid, while it runs.
     dock_pid: Option<i32>,
+    /// The moves of an arrangement made at a Dock click, until the window server shows them.
+    verify: Option<arrival::Verify>,
     /// While set, a batch leaves the strip snapshot for later (`strip_dirty`): an arrival
     /// hands the strip one snapshot, in its final order.
     defer_present: bool,
@@ -583,6 +585,7 @@ impl Controller {
             ahead: None,
             dock_press: None,
             dock_pid: None,
+            verify: None,
             defer_present: false,
             absent: HashMap::new(),
             elsewhere: HashMap::new(),

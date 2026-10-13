@@ -93,6 +93,58 @@ impl Trigger {
     }
 }
 
+/// How long the moves of an arrangement made at a Dock click are checked against the window
+/// server and sent again: the slide (~0.25–0.45 s) and a margin.
+pub const VERIFY_FOR: Duration = Duration::from_millis(600);
+
+/// How often they are checked (the WM thread's fast tick).
+pub const VERIFY_EVERY: Duration = Duration::from_millis(20);
+
+/// One move of an arrangement made on a Desktop not shown, as the window server should show
+/// it: parked (in the park zone), or at a frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Expect {
+    id: u32,
+    frame: Rect,
+    park: bool,
+}
+
+/// The moves of an arrangement made on a Desktop not shown, until the window server shows
+/// them (measured 10-13: in one run of three it applied them only when that Desktop became
+/// the shown one, at the end of the slide; the stage left showed all through it).
+#[derive(Debug, Clone)]
+pub(super) struct Verify {
+    sent: Instant,
+    next: Instant,
+    tries: u32,
+    moves: Vec<Expect>,
+}
+
+/// True when the window server's `bounds` for a move are what it asked: in the park zone
+/// (`parks`) for a park, else within 2 pt of the frame.
+fn shows(e: &Expect, bounds: Rect, parks: impl Fn(Rect) -> bool) -> bool {
+    if e.park {
+        parks(bounds)
+    } else {
+        (bounds.x - e.frame.x).abs() <= 2.0
+            && (bounds.y - e.frame.y).abs() <= 2.0
+            && (bounds.w - e.frame.w).abs() <= 2.0
+            && (bounds.h - e.frame.h).abs() <= 2.0
+    }
+}
+
+/// The moves among `actions` to check against the window server.
+fn expects(actions: &[Action]) -> Vec<Expect> {
+    actions
+        .iter()
+        .filter_map(|a| match *a {
+            Action::Park { id, frame } => Some(Expect { id: id.0, frame, park: true }),
+            Action::SetFrame { id, frame } => Some(Expect { id: id.0, frame, park: false }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A Dock click's prediction: the app and the window macOS will show, or why none.
 pub(super) type Prediction = Result<(i32, WindowId), &'static str>;
 
@@ -404,6 +456,7 @@ impl Controller {
             return false;
         };
         let moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count();
+        let expected = if trigger.away() { expects(&actions) } else { Vec::new() };
         if trigger.away() {
             self.keep_registered(ob, &actions);
         }
@@ -424,7 +477,66 @@ impl Controller {
             "arrival: the Desktop arranged ahead for the window it is shown for"
         );
         self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at });
+        if !expected.is_empty() {
+            self.verify = Some(Verify { sent, next: sent, tries: 0, moves: expected });
+            self.check_arrangement(ob, Instant::now());
+        }
         true
+    }
+
+    /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
+    /// when due ([`Self::check_arrangement`]).
+    pub fn fast_tick(&mut self, ob: &Observer) {
+        let now = Instant::now();
+        if self.verify.as_ref().is_some_and(|v| now >= v.next) {
+            self.check_arrangement(ob, now);
+        }
+    }
+
+    /// Reads the window server's frames of an arrangement's moves: those it does not show
+    /// yet are sent again (once 1 pt off, then exactly: AppKit drops a move to where it
+    /// thinks the window already is), every [`VERIFY_EVERY`] for [`VERIFY_FOR`] or until it
+    /// shows them all; what it showed is logged. Dropped once the arrangement is settled.
+    fn check_arrangement(&mut self, ob: &Observer, now: Instant) {
+        let Some(v) = self.verify.as_mut() else { return };
+        let live = self.ahead.as_ref().is_some_and(|s| s.trigger == Trigger::DockClick);
+        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let list = windows::list_windows();
+        let (missing, shown): (Vec<Expect>, Vec<Expect>) = v.moves.iter().partition(|e| {
+            !list.iter().find(|w| w.id == e.id).is_some_and(|w| shows(e, w.bounds, |r| main.parks(r)))
+        });
+        let elapsed = ms(v.sent, now);
+        let bounds: Vec<String> = missing
+            .iter()
+            .map(|e| format!("{}: {}", e.id, list.iter().find(|w| w.id == e.id).map_or("unlisted".into(), |w| w.bounds.to_string())))
+            .collect();
+        if missing.is_empty() || !live || now.saturating_duration_since(v.sent) >= VERIFY_FOR {
+            if missing.is_empty() {
+                tracing::info!(moves = shown.len(), tries = v.tries, after_ms = elapsed, "arrival: the window server shows the arrangement");
+            } else {
+                tracing::info!(missing = ?bounds, shown = shown.len(), tries = v.tries, after_ms = elapsed, live, "arrival: the window server never showed some moves of the arrangement");
+            }
+            self.verify = None;
+            return;
+        }
+        if v.tries == 0 {
+            tracing::info!(missing = ?bounds, shown = shown.len(), after_ms = elapsed, "arrival: the window server does not show every move yet; sending them again");
+        }
+        v.tries += 1;
+        v.next = now + VERIFY_EVERY;
+        for e in &missing {
+            let Some(w) = ob.window(e.id) else { continue };
+            self.echoes.touch_window(e.id, now);
+            let nudged = Rect::new(e.frame.x + 1.0, e.frame.y, e.frame.w, e.frame.h);
+            let result = if e.park {
+                w.element.set_position(nudged.origin()).and_then(|_| w.element.set_position(e.frame.origin()))
+            } else {
+                w.element.set_frame(nudged).and_then(|_| w.element.set_frame(e.frame))
+            };
+            if let Err(err) = result {
+                tracing::debug!(id = e.id, "arrival: a move sent again failed: {err}");
+            }
+        }
     }
 
     /// A left mouse-down at `p` (`list`: the window list read for it): over the Dock's bar,
@@ -898,6 +1010,24 @@ mod tests {
         let right = Rect::new(1810.0, 500.0, 60.0, 60.0);
         assert_eq!(dock_edge(right, MAIN), Some(Point::new(1799.0, 530.0)), "the right edge");
         assert_eq!(dock_edge(Rect::new(800.0, 1100.0, 60.0, 60.0), MAIN), None, "on screen: nothing to reveal");
+    }
+
+    #[test]
+    fn a_move_is_shown_when_the_window_server_lists_it_there() {
+        let parks = |r: Rect| r.x >= 1700.0 && r.y >= 1100.0;
+        let park = Expect { id: 1, frame: Rect::new(1785.0, 1155.0, 600.0, 400.0), park: true };
+        assert!(shows(&park, Rect::new(1786.0, 1150.0, 600.0, 400.0), parks), "anywhere in the park zone");
+        assert!(!shows(&park, Rect::new(80.0, 78.0, 600.0, 400.0), parks), "still where it was");
+        let back = Expect { id: 2, frame: Rect::new(80.0, 78.0, 520.0, 392.0), park: false };
+        assert!(shows(&back, Rect::new(81.0, 78.0, 520.0, 392.0), parks));
+        assert!(!shows(&back, Rect::new(1785.0, 1155.0, 520.0, 392.0), parks), "still parked");
+        let actions = [
+            Action::Park { id: WindowId(1), frame: park.frame },
+            Action::SetFrame { id: WindowId(2), frame: back.frame },
+            Action::Raise { id: WindowId(2) },
+            Action::StateChanged,
+        ];
+        assert_eq!(expects(&actions), vec![park, back], "moves only");
     }
 
     #[test]
