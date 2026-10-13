@@ -207,7 +207,15 @@ mod app {
             let Some(mtm) = MainThreadMarker::new() else { return };
             let Some(main) = desktop::main_display(mtm) else { return };
             if self.display != Some(main) {
-                tracing::info!(frame = %main.frame, visible = %main.visible, "main display");
+                tracing::info!(frame = %main.frame, visible = %main.visible, corner = ?main.corner, "main display");
+                let choice = desktop::park_corner(main.frame, main.visible);
+                if choice.overlap > 0.0 {
+                    tracing::warn!(
+                        corner = ?choice.corner,
+                        overlap = choice.overlap.round(),
+                        "every corner of the main display has another display beyond it: parked windows may show there; this corner overlaps the least"
+                    );
+                }
                 self.display = Some(main);
                 self.wm.send(WmCommand::Displays(vec![main]));
             }

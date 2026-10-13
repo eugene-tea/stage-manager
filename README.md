@@ -105,7 +105,8 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   corner, 5 cards at 1130 pt of visible height and 6 at 1410 pt. Every number is a key in
   `[strip]`, `[cards]`, `[icons]`, `[motion]` and `[reveal]`.
 - **Stages.** Every window belongs to one stage (or is pinned). Only the active stage is
-  shown; the others are parked in the bottom-right corner (a sliver stays visible; macOS
+  shown; the others are parked in the bottom-right corner (another corner when a second
+  display sits beyond it, below "Display arrangement"; a sliver stays visible; macOS
   keeps part of every window onscreen: 32 pt of title bar above the Dock when the Dock sits
   at the bottom). Clicking a card, clicking a parked sliver, ⌘Tab or
   a Dock click on an app whose windows sit in another stage switches to that stage.
@@ -402,7 +403,19 @@ again untouched until then. Version 1 files (one Space) are read as one Space.
 "In the park zone" is one test everywhere (the model, the scan, the guardian, the quit
 check): the corner of the display's full frame or of its visible frame, because macOS keeps
 a parked window's title bar above a Dock at the bottom; it holds for a Dock at the bottom,
-left or right, auto-hidden, on any display. When the main display changes size, its parked
+left or right, auto-hidden, on any display.
+
+**Display arrangement.** A window parked against a side of the main display where another
+display sits would land, whole, on that display (macOS lets windows span displays). So the
+park corner follows Displays → Arrange: bottom-right when no display lies beyond it, else
+the first free one of bottom-left, top-right, top-left (top corners hide the body off the
+side; macOS keeps the title bar below the menu bar); when every corner has a display beyond
+it, the one overlapping least, with a warning in the log. The main display's line in the log
+names the corner. The model's park test uses the chosen corner; the safety paths (recovery
+scan, guardian, quit check) also accept bottom-right and every corner used since launch
+(the parked file lists them), so a window parked before the arrangement changed is never
+missed. When the corner changes, the shown Desktop's parked windows move to the new one at
+once, other Desktops' when they show. When the main display changes size, its parked
 windows are parked again at the new corner (those of other Desktops when their Desktop
 shows); when it changes identity (docking or undocking moves the menu bar), the stages, the
 active stage and the strip stay as they were.
@@ -574,9 +587,7 @@ screen-access alerts macOS showed meanwhile (from replayd's log, any app).
 - Apple's own Stage Manager must be off while this app runs (both move windows).
 - Main display only; other displays are left alone: a window that shows mostly on another
   display is not managed (a managed window moved there is let go after two checks, a
-  second apart, and comes back as a new window when moved back). Parking uses the main
-  display's bottom-right corner, so a display placed against that corner shows the
-  parked windows' bodies.
+  second apart, and comes back as a new window when moved back).
 - Moving windows are snapshots (Apple moves the live windows): a full-size snapshot of
   each shown window is refreshed every 2 s (`[animation] snapshot_interval_ms`) and when the
   pointer reaches a card, so content that changed since may jump when the motion ends. A
@@ -591,7 +602,9 @@ screen-access alerts macOS showed meanwhile (from replayd's log, any app).
   opened app's first window counts within 10 s of a Shift-held click or key press (unless
   another click or key press came after it), an activation within 2 s; or Shift held at the
   moment. A slow app launched with Shift may miss the 10 s window.
-- Parked windows leave a sliver in the bottom-right corner.
+- Parked windows leave a sliver in the park corner (bottom-right unless another display
+  sits beyond it). The other corners are unmeasured: that macOS keeps the asked-for `x` off
+  the left side as it does off the right is assumed, not seen.
 - ⌘M: the window is parked, then un-minimized there, so macOS may show a short restore
   animation toward the bottom-right corner (Apple's window shrinks into the strip).
 - Thumbnails are stills refreshed every 1.5 s (Apple's cards are live).

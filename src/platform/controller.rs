@@ -82,6 +82,7 @@ use super::{desktop, logging, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
+use crate::engine::park::choose_corner;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
@@ -1931,7 +1932,7 @@ impl Controller {
     pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>) {
         self.flush_pending(ob);
         let Some(main) = displays.first().copied() else { return };
-        safety::set_visible_frame(main.visible);
+        safety::set_main_display(main.visible, main.corner);
         self.displays = displays.clone();
         if let Some(m) = self.model.as_mut() {
             let actions = m.set_displays(displays);
@@ -2581,12 +2582,15 @@ pub fn focused_window() -> Option<u32> {
 
 /// The main display from CoreGraphics when AppKit has not reported one yet.
 fn fallback_displays() -> Vec<Display> {
-    let main = desktop::cg_display_bounds().first().copied().unwrap_or(Rect::new(0.0, 0.0, 1440.0, 900.0));
+    let mut bounds = desktop::cg_display_bounds();
+    let main = if bounds.is_empty() { Rect::new(0.0, 0.0, 1440.0, 900.0) } else { bounds.remove(0) };
     let menu = 30.0;
+    let visible = Rect::new(main.x, main.y + menu, main.w, main.h - menu);
     vec![Display {
         id: DisplayId(objc2_core_graphics::CGMainDisplayID()),
         frame: main,
-        visible: Rect::new(main.x, main.y + menu, main.w, main.h - menu),
+        visible,
+        corner: choose_corner(main, visible, &bounds).corner,
     }]
 }
 

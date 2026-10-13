@@ -1071,7 +1071,7 @@ impl Model {
         }
         let moved_frames: Vec<DisplayId> = displays
             .iter()
-            .filter(|d| before.iter().any(|o| o.id == d.id && (o.frame != d.frame || o.visible != d.visible)))
+            .filter(|d| before.iter().any(|o| o.id == d.id && (o.frame != d.frame || o.visible != d.visible || o.corner != d.corner)))
             .map(|d| d.id)
             .collect();
         self.displays = displays;

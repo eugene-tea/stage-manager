@@ -22,7 +22,7 @@
 //! allowed app in the park zone on any Space ([`stranded_allowed`]).
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
@@ -33,6 +33,7 @@ use objc2_app_kit::NSRunningApplication;
 use super::ax::{AxElement, names};
 use super::{desktop, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
+use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
 use crate::engine::recovery::{self, LiveWindow, ParkedFile, Registered, ScanDisplays};
 use crate::logbook::counters::{self, Count};
@@ -74,6 +75,14 @@ static REGISTRY: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new())
 
 /// The main display's visible frame as last reported (for scans in this process).
 static VISIBLE: Mutex<Option<Rect>> = Mutex::new(None);
+
+/// Every park corner used this run (the guardian's: those the app's parked file names), so a
+/// window parked at a corner the arrangement no longer picks still counts as parked.
+static CORNERS: Mutex<BTreeSet<Corner>> = Mutex::new(BTreeSet::new());
+
+fn corners_used() -> Vec<Corner> {
+    CORNERS.lock().map(|c| c.iter().copied().collect()).unwrap_or_default()
+}
 
 thread_local! {
     /// True inside a [`guarded`] section: a panic there is caught and recovered from.
@@ -123,7 +132,7 @@ static PARKED_WRITTEN: Mutex<Option<ParkedFile>> = Mutex::new(None);
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
 /// main display's visible frame, written atomically; removed when the registry is empty.
 fn write_parked_file(listed: &[Registered]) {
-    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec() };
+    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used() };
     let Ok(mut written) = PARKED_WRITTEN.lock() else { return };
     if written.as_ref() == Some(&file) {
         return;
@@ -174,14 +183,17 @@ pub fn registry_len() -> usize {
     lock_registry().len()
 }
 
-/// Remembers the main display's visible frame for the park test and clamping in scans, and
-/// writes it to the parked file for the guardian (when windows are registered).
-pub fn set_visible_frame(visible: Rect) {
+/// Remembers the main display's visible frame and park corner for the park test and
+/// clamping in scans, and writes them to the parked file for the guardian (when windows are
+/// registered). Corners add up over the run: windows of other Desktops may still sit at an
+/// earlier one.
+pub fn set_main_display(visible: Rect, corner: Corner) {
     let changed = match VISIBLE.lock() {
         Ok(mut v) => v.replace(visible) != Some(visible),
         Err(_) => false,
     };
-    if changed {
+    let new_corner = CORNERS.lock().is_ok_and(|mut c| c.insert(corner));
+    if changed || new_corner {
         let listed = registered(&lock_registry());
         write_parked_file(&listed);
     }
@@ -192,6 +204,14 @@ pub fn set_visible_frame(visible: Rect) {
 pub fn assume_visible_frame(visible: Rect) {
     if let Ok(mut v) = VISIBLE.lock() {
         *v = Some(visible);
+    }
+}
+
+/// Takes the park corners the app used without writing a parked file (the guardian, from
+/// the app's parked file).
+pub fn assume_corners(corners: &[Corner]) {
+    if let Ok(mut c) = CORNERS.lock() {
+        c.extend(corners.iter().copied());
     }
 }
 
@@ -450,7 +470,7 @@ pub(crate) fn scan_displays() -> ScanDisplays {
     let visible = visible_frame()
         .filter(|v| main.contains_rect(v))
         .unwrap_or_else(|| Rect::new(main.x, main.y + MENU_BAR_GUESS, main.w, main.h - MENU_BAR_GUESS));
-    ScanDisplays { main, visible, others: bounds }
+    ScanDisplays::new(main, visible, bounds, corners_used())
 }
 
 /// The recovery scan: every window of every allowed app (`STAGE_MANAGER_ONLY` honored, our

@@ -307,7 +307,7 @@ Ours:
 2. **Thumbnails are snapshots**, refreshed every 1–2 s through ScreenCaptureKit, not live
    window surfaces.
 3. **Parked windows leave a sliver** in the display's bottom-right corner (macOS keeps part
-   of every window onscreen). Apple moves them off by private means.
+   of every window onscreen; another corner when a second display sits beyond that one). Apple moves them off by private means.
 4. **Spaces are recognized, not named.** No public API names a Space, so Spaces are told
    apart by their windows: an empty Desktop is forgotten when left, and a Desktop whose
    windows are all hidden or minimized is taken for a new one until one of them shows. The

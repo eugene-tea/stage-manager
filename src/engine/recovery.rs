@@ -5,10 +5,11 @@
 //! panic hook when the registry is unavailable. It reads every window's frame through
 //! Accessibility; this module decides, without touching anything:
 //!
-//! - a window is **stranded** when it sits in the main display's park zone
-//!   ([`is_parked_in`]: the full frame's or the visible frame's, since macOS keeps a parked
-//!   window above a bottom Dock) and does not show on another display either (so a window on a second
-//!   display to the bottom-right of the main one is left alone);
+//! - a window is **stranded** when it sits in the main display's park zone at one of the
+//!   corners that count ([`ScanDisplays::corners`]; [`is_parked_in_at`]: the full frame's or
+//!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
+//!   show on another display either (so a window on a second display to the bottom-right of
+//!   the main one is left alone);
 //! - a stranded window goes back to its frame from `state.json` (any Space; exact bundle ID + title
 //!   first, then bundle ID only, each saved window used once), else it is centered; the
 //!   result is always clamped onto the visible frame and never in a park zone; a saved
@@ -24,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{PARK_MARGIN, clamp_to_visible, is_parked_in};
+use super::park::{Corner, PARK_MARGIN, choose_corner, clamp_to_visible, is_parked_in_at};
 use super::persist::{SavedRole, StateFile};
 use super::stage_area::same_frame;
 
@@ -48,13 +49,27 @@ pub struct ScanDisplays {
     pub visible: Rect,
     /// Frames of the other displays.
     pub others: Vec<Rect>,
+    /// The park corners that count: bottom-right (Apple's, the default), the arrangement's
+    /// choice now ([`choose_corner`]) and every corner the app used this run (its parked
+    /// file), sorted, no duplicates.
+    pub corners: Vec<Corner>,
 }
 
 impl ScanDisplays {
-    /// True when `frame` is in the main display's park zone ([`is_parked_in`]), whatever
-    /// shows on other displays.
+    /// The main display (`main`, `visible`), the `others`, and the corners the app used
+    /// (`used`), with bottom-right and the arrangement's corner always counted.
+    pub fn new(main: Rect, visible: Rect, others: Vec<Rect>, used: impl IntoIterator<Item = Corner>) -> Self {
+        let mut corners = vec![Corner::BottomRight, choose_corner(main, visible, &others).corner];
+        corners.extend(used);
+        corners.sort();
+        corners.dedup();
+        Self { main, visible, others, corners }
+    }
+
+    /// True when `frame` is in the main display's park zone at any corner that counts
+    /// ([`is_parked_in_at`]), whatever shows on other displays.
     pub fn parks(&self, frame: Rect) -> bool {
-        is_parked_in(frame, self.main, self.visible)
+        self.corners.iter().any(|c| is_parked_in_at(frame, self.main, self.visible, *c))
     }
 }
 
@@ -165,6 +180,10 @@ pub struct ParkedFile {
     pub visible: Option<Rect>,
     /// The registered windows.
     pub windows: Vec<Registered>,
+    /// Every park corner the app used this run ([`ScanDisplays::corners`]); empty in files
+    /// of earlier versions (bottom-right only).
+    #[serde(default)]
+    pub corners: Vec<Corner>,
 }
 
 impl ParkedFile {
@@ -178,7 +197,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows },
+            Any::List(windows) => Self { visible: None, windows, corners: Vec::new() },
         })
     }
 }
@@ -219,6 +238,7 @@ mod tests {
 
     fn displays() -> ScanDisplays {
         ScanDisplays {
+            corners: vec![Corner::BottomRight],
             main: MAIN,
             visible: VISIBLE,
             others: vec![],
@@ -335,7 +355,7 @@ mod tests {
     /// above it. The scan, the guardian and the clean-quit check must all see it parked.
     #[test]
     fn a_window_parked_above_a_bottom_dock_is_stranded() {
-        let d = ScanDisplays { main: MAIN, visible: Rect::new(0.0, 25.0, 1440.0, 799.0), others: vec![] };
+        let d = ScanDisplays::new(MAIN, Rect::new(0.0, 25.0, 1440.0, 799.0), vec![], []);
         let at = Rect::new(1439.0, d.visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
         assert!(!is_parked(at, MAIN), "the full frame alone misses it");
         assert!(is_stranded(at, &d));
@@ -343,7 +363,7 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert!(!d.parks(p[0].1) && d.visible.contains_rect(&p[0].1), "{:?}", p[0].1);
         // Same Dock on the right: macOS may or may not clamp x against it.
-        let right = ScanDisplays { main: MAIN, visible: Rect::new(0.0, 25.0, 1360.0, 875.0), others: vec![] };
+        let right = ScanDisplays::new(MAIN, Rect::new(0.0, 25.0, 1360.0, 875.0), vec![], []);
         for x in [1439.0, 1359.0] {
             assert!(is_stranded(Rect::new(x, 900.0 - MACOS_KEEPS_TITLE, 600.0, 392.0), &right));
         }
@@ -354,11 +374,16 @@ mod tests {
         let f = ParkedFile {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true }],
+            corners: vec![Corner::BottomLeft],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         let old = serde_json::to_vec(&f.windows).unwrap_or_default();
-        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, ..f }));
+        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], ..f.clone() }));
+        // A file of the version before corners: bottom-right only.
+        let before = br#"{"visible":null,"windows":[]}"#;
+        assert_eq!(ParkedFile::from_json(before).ok().map(|f| f.corners), Some(vec![]));
+        assert!(serde_json::to_string(&f).unwrap_or_default().contains(r#""corners":["bottom-left"]"#));
         assert!(ParkedFile::from_json(b"{").is_err());
     }
 

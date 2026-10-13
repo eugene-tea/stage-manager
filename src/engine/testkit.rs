@@ -36,6 +36,7 @@ pub fn display() -> Display {
         id: MAIN,
         frame: FRAME,
         visible: VISIBLE,
+        corner: Default::default(),
     }
 }
 
@@ -83,8 +84,9 @@ pub struct Desk {
     /// Front to back.
     pub z: Vec<WindowId>,
     pub focused: Option<WindowId>,
-    /// The visible frame macOS clamps against (`None`: the test display's [`VISIBLE`]).
-    pub visible: Option<Rect>,
+    /// The display now: macOS clamps against its visible frame, and its park corner says
+    /// which windows are parked (`None`: the test [`display`]).
+    pub display: Option<Display>,
 }
 
 impl Desk {
@@ -115,7 +117,7 @@ impl Desk {
             match *a {
                 Action::SetFrame { id, frame } | Action::Park { id, frame } => {
                     if let Some(f) = self.frames.get_mut(&id) {
-                        *f = macos_places_in(frame, self.visible.unwrap_or(VISIBLE));
+                        *f = macos_places_in(frame, self.display.unwrap_or_else(display).visible);
                     }
                 }
                 Action::Raise { id } => self.raise(id),
@@ -141,6 +143,6 @@ impl Desk {
     pub fn parked(&self, id: WindowId) -> bool {
         self.frames
             .get(&id)
-            .is_some_and(|f| parked_at(*f))
+            .is_some_and(|f| self.display.unwrap_or_else(display).parks(*f))
     }
 }
