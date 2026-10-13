@@ -3,6 +3,7 @@ name = "stage-manager"
 version = "1.0.0"
 edition = "2024"
 description = "A floating-window stage manager for macOS"
+license = "MIT"
 publish = false
 
 [[bin]]
