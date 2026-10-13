@@ -1833,9 +1833,17 @@ impl Controller {
         // notification was missed) or the screen shows nothing of ours for a moment (display
         // asleep, the login window); recognize it rather than forgetting them.
         if missed_space_change(here, here_shown, gone.len()) {
-            tracing::info!(missing = gone.len(), of = here, "most windows of this Space are gone from the screen; recognizing the Space again");
-            self.on_space_changed(ob);
-            return;
+            if pane_on_screen(&strip_model::panel_status(), space.0, &list) {
+                // This Desktop's own strip pane is still on screen, so this Desktop still
+                // shows: the windows were moved to another Desktop by hand (Mission Control),
+                // not left behind by a Space change (review R2 V7: a one-window Desktop kept
+                // its id).
+                tracing::info!(missing = gone.len(), of = here, "windows left this Desktop while its strip still shows: they moved to another Desktop");
+            } else {
+                tracing::info!(missing = gone.len(), of = here, "most windows of this Space are gone from the screen; recognizing the Space again");
+                self.on_space_changed(ob);
+                return;
+            }
         }
         // Forget only a window the window server still lists (on another Space): one not
         // listed at all is closing (its destroy notification follows) or the list is blind.
@@ -2549,6 +2557,13 @@ fn missed_space_change(here: usize, here_shown: usize, gone: usize) -> bool {
     gone > 0 && (here_shown == 0 || (gone >= 2 && gone * 2 >= here))
 }
 
+/// True when the strip's pane (`pane`, as the strip last published it) belongs to `space`
+/// and the window server lists it on screen in `list`: a pane lives on one Desktop, so that
+/// Desktop shows.
+fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::CgWindow]) -> bool {
+    pane.window != 0 && pane.space == space && list.iter().any(|w| w.id == pane.window && w.onscreen)
+}
+
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
 }
@@ -2668,6 +2683,29 @@ mod tests {
         assert_eq!(unrestored_step(Some(false), None), Done);
         assert_eq!(unrestored_step(None, Some((true, true))), Done);
         assert_eq!(unrestored_step(Some(true), Some((true, true))), Done);
+    }
+
+    #[test]
+    fn a_desktop_whose_own_strip_pane_shows_is_still_the_desktop_shown() {
+        let win = |id: u32, onscreen: bool| windows::CgWindow {
+            id,
+            pid: 1,
+            owner: String::new(),
+            name: None,
+            layer: 0,
+            bounds: Rect::new(0.0, 0.0, 200.0, 900.0),
+            onscreen,
+            alpha: 1.0,
+        };
+        let pane = strip_model::PanelStatus { space: 7, window: 40, ..Default::default() };
+        // R2 V7: the only window moved to another Desktop by hand; this Desktop's pane shows.
+        assert!(pane_on_screen(&pane, 7, &[win(40, true), win(41, false)]));
+        // A Space change: the pane stays on the Desktop left, off screen.
+        assert!(!pane_on_screen(&pane, 7, &[win(40, false)]));
+        // Another Space's pane, an unknown window, nothing listed (screen asleep).
+        assert!(!pane_on_screen(&pane, 8, &[win(40, true)]));
+        assert!(!pane_on_screen(&strip_model::PanelStatus { window: 0, ..pane }, 7, &[win(0, true)]));
+        assert!(!pane_on_screen(&pane, 7, &[]));
     }
 
     #[test]

@@ -2176,6 +2176,7 @@ impl Strip {
             on_active_space: self.pane.panel.isOnActiveSpace(),
             frame: self.geometry.global,
             space: self.snapshot.space,
+            window: u32::try_from(self.pane.panel.windowNumber()).unwrap_or(0),
         });
         let panes = std::iter::once(self.pane.status(true)).chain(self.others.iter().map(|p| p.status(false))).collect();
         strip_model::publish_pane_statuses(panes);
