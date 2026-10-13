@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{clamp_to_visible, is_parked_in, park_frame};
+use super::park::{Corner, clamp_to_visible, is_parked_in_at, park_frame_at};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -90,13 +90,17 @@ pub struct Display {
     pub frame: Rect,
     /// The usable frame (no menu bar, no Dock).
     pub visible: Rect,
+    /// Where its inactive stages park: the corner with no other display beyond it
+    /// ([`crate::engine::park::choose_corner`], chosen by the platform from the arrangement).
+    pub corner: Corner,
 }
 
 impl Display {
-    /// True when `frame` sits in this display's park zone, where macOS really leaves a parked
-    /// window (above a bottom Dock too): the one park test ([`is_parked_in`]).
+    /// True when `frame` sits in this display's park zone at its corner, where macOS really
+    /// leaves a parked window (above a bottom Dock too): the one park test
+    /// ([`is_parked_in_at`]).
     pub fn parks(&self, frame: Rect) -> bool {
-        is_parked_in(frame, self.frame, self.visible)
+        is_parked_in_at(frame, self.frame, self.visible, self.corner)
     }
 }
 
@@ -240,6 +244,7 @@ const FALLBACK_DISPLAY: Display = Display {
     id: DisplayId(0),
     frame: Rect::new(0.0, 0.0, 1440.0, 900.0),
     visible: Rect::new(0.0, 25.0, 1440.0, 875.0),
+    corner: Corner::BottomRight,
 };
 
 /// The stage model. See the module docs for the contract.
@@ -691,7 +696,8 @@ impl Model {
         if w.home == Home::Pinned {
             return;
         }
-        let frame = park_frame(w.restore.size(), self.display(w.meta.display).frame);
+        let d = self.display(w.meta.display);
+        let frame = park_frame_at(w.restore.size(), d.frame, d.corner);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = true;
         }

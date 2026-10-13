@@ -898,6 +898,12 @@ def expose_on_desktop_2(d1, d2):
     s = state()
     ok, told = ts.panes_hide_in_expose(s)
     check(ok, f"every strip pane is Transient, not Stationary, joining no other Space ({told})")
+    # The card click before this brought a window over the strip column (the strip auto-hides
+    # under it, Apple's rule): move it clear and wait for the strip, as the motion phase does,
+    # so the round starts from a shown strip and checks only Mission Control.
+    clear_of_strip(s)
+    shown = ts.wait_until(lambda: (state().get("strip_panel") or {}).get("shown"), 4, "the strip shown on Desktop 2")
+    say(f"  strip shown before Mission Control: {bool(shown)}")
     if AUTO:
         WATCH.pause()  # Mission Control draws other Desktops; the round checks the Desktop itself
     take = (lambda name: by_eye(f"{name}: no strip at the left edge (Apple's hides)", shot(f"expose-{name}"))) if AUTO else None

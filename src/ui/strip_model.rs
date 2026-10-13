@@ -269,6 +269,9 @@ pub struct PanelStatus {
     pub frame: Rect,
     /// The Space id of the snapshot it shows.
     pub space: u64,
+    /// The panel's window number (`CGWindowID`): the window server lists it on screen only
+    /// while its Desktop shows (0: unknown).
+    pub window: u32,
 }
 
 fn panel_status_slot() -> &'static Mutex<PanelStatus> {

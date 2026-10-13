@@ -207,7 +207,15 @@ mod app {
             let Some(mtm) = MainThreadMarker::new() else { return };
             let Some(main) = desktop::main_display(mtm) else { return };
             if self.display != Some(main) {
-                tracing::info!(frame = %main.frame, visible = %main.visible, "main display");
+                tracing::info!(frame = %main.frame, visible = %main.visible, corner = ?main.corner, "main display");
+                let choice = desktop::park_corner(main.frame, main.visible);
+                if choice.overlap > 0.0 {
+                    tracing::warn!(
+                        corner = ?choice.corner,
+                        overlap = choice.overlap.round(),
+                        "every corner of the main display has another display beyond it: parked windows may show there; this corner overlaps the least"
+                    );
+                }
                 self.display = Some(main);
                 self.wm.send(WmCommand::Displays(vec![main]));
             }
@@ -634,7 +642,7 @@ mod app {
         wm.send(WmCommand::NativeSettings(settings.clone()));
 
         let wm_input = wm.clone();
-        let input_monitor = input::monitor(mtm, move |event| {
+        let on_input = move |event: input::InputEvent| {
             if event.is_switcher_key() {
                 // ⌘Tab or ⌘` may switch stages: fresh snapshots for the animation (never on
                 // other ⌘ shortcuts, which would capture every shown window on each ⌘C).
@@ -642,7 +650,10 @@ mod app {
             }
             let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
             wm_input.send(WmCommand::Input(event, drop));
-        });
+        };
+        // Mouse moves go to the strip on this thread: off its cards the strip lets clicks
+        // through, so it learns where the pointer is from the global monitor there.
+        let input_monitor = input::monitor(mtm, on_input, strip::pointer_moved);
         if input_monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }

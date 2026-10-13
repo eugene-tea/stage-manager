@@ -124,8 +124,10 @@ pub fn run(args: &[String]) -> ExitCode {
         Some(v) => safety::assume_visible_frame(v),
         None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide parked windows from the scan)"),
     }
+    // Windows may sit at any corner the app parked them in this run.
+    safety::assume_corners(&file.corners);
     let registered = file.windows;
-    tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
+    tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, corners = ?file.corners, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
     let r = safety::recovery_scan("guardian");
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
     install_stop_handlers();

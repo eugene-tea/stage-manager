@@ -874,6 +874,7 @@ fn removed_display_moves_its_stages_to_main() {
         id: DisplayId(2),
         frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
+        corner: Default::default(),
     };
     let mut e = Env::new();
     let actions = e.m.set_displays(vec![display(), second]);
@@ -928,7 +929,7 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     // V1-A: same id, a bigger frame (scaling changed, or the panel became main).
     let mut e = three_stages();
     let active = e.m.main_active_stage();
-    let big = Display { id: MAIN, frame: BIG, visible: BIG_VISIBLE };
+    let big = Display { id: MAIN, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![big]);
     let mut parks = parks_in(&a);
     parks.sort_by_key(|p| p.0);
@@ -949,6 +950,32 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
 }
 
 #[test]
+fn a_new_park_corner_parks_the_parked_windows_again_there_and_nothing_else() {
+    // V1: a display placed beyond the bottom-right corner; the platform picks bottom-left.
+    use crate::engine::park::Corner;
+    let mut e = three_stages();
+    let active = e.m.main_active_stage();
+    let left = Display { corner: Corner::BottomLeft, ..display() };
+    let a = e.m.set_displays(vec![left]);
+    e.d.display = Some(left);
+    e.run(a.clone());
+    let mut parks = parks_in(&a);
+    parks.sort_by_key(|p| p.0);
+    assert_eq!(parks.iter().map(|p| p.0).collect::<Vec<_>>(), [w(1), w(3)], "{a:?}");
+    for (id, f) in parks {
+        assert!(left.parks(f) && !display().parks(f), "{id:?} at {f:?}");
+        assert!(f.max_x() <= left.frame.x + 1.0, "{id:?} hides off the left side: {f:?}");
+    }
+    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { .. } | Action::Focus { .. })));
+    assert_eq!(e.m.main_active_stage(), active);
+    // Switching parks at the new corner and brings windows back from it.
+    e.switch(1);
+    assert!(e.d.parked(w(2)) && left.parks(e.d.frames[&w(2)]));
+    assert!(!e.d.parked(w(1)) && e.d.frames[&w(1)].x >= 0.0, "{:?}", e.d.frames[&w(1)]);
+    check_invariants(&e, "after a switch at the bottom-left corner");
+}
+
+#[test]
 fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
     // V1-B: docking moves the menu bar to the 5K (a new main display id), undocking back.
     let mut e = three_stages();
@@ -956,7 +983,7 @@ fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
     let space = e.m.current_space(MAIN);
     let stages: Vec<StageId> = e.m.stages().iter().map(|s| s.id).collect();
     let slots = e.m.strip_slots(MAIN);
-    let ext = Display { id: DisplayId(7), frame: BIG, visible: BIG_VISIBLE };
+    let ext = Display { id: DisplayId(7), frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![ext]);
     assert_eq!(e.m.main_active_stage(), active, "the active stage stays active, never the oldest");
     assert_eq!(e.m.current_space(DisplayId(7)), space, "same Space");
@@ -1446,8 +1473,10 @@ fn check_invariants(e: &Env, step: &str) {
         } else {
             assert!(
                 parked_at(f) && w.parked,
-                "{step}: {:?} should be parked",
-                w.meta.id
+                "{step}: {:?} should be parked (at {f:?}, model parked {}, display {:?})",
+                w.meta.id,
+                w.parked,
+                m.main_display()
             );
         }
     }
@@ -1674,7 +1703,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                 18 => {
                     // The main display changes: resized (same id), docked or undocked (a new
                     // id, frames kept or not), back again.
-                    let d = match rng.below(4) {
+                    let d = match rng.below(5) {
                         0 => display(),
                         1 => Display {
                             frame: Rect::new(0.0, 0.0, 1680.0, 1050.0),
@@ -1682,11 +1711,15 @@ fn property_no_sequence_of_operations_loses_a_window() {
                             ..display()
                         },
                         2 => Display { id: DisplayId(9), ..display() },
-                        _ => Display {
+                        3 => Display {
                             id: DisplayId(9),
                             frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
                             visible: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+                            corner: Default::default(),
                         },
+                        // A display placed against the bottom-right corner: parking moves to
+                        // the bottom-left.
+                        _ => Display { corner: crate::engine::park::Corner::BottomLeft, ..display() },
                     };
                     log.push(format!("display {} {}", d.id.0, d.frame));
                     // macOS keeps every window reachable when a display changes: one that was
@@ -1698,7 +1731,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         }
                     }
                     let a = e.m.set_displays(vec![d]);
-                    e.d.visible = Some(d.visible);
+                    e.d.display = Some(d);
                     e.run(a);
                 }
                 19 => {
@@ -2235,6 +2268,56 @@ fn one_at_a_time_a_click_on_the_grouped_card_puts_the_leaving_stage_in_that_slot
     assert_eq!(after[k].stage, leaving, "the stage left behind lands where the user clicked: {after:?}");
     assert!(after.iter().any(|c| c.apps == [11]), "the app's card stays in view");
     assert_eq!(e.m.main_active_stage(), Some(target));
+}
+
+#[test]
+fn one_at_a_time_a_card_merge_takes_the_whole_group_and_lands_in_the_slot_dropped_on() {
+    // R2 V6: the grouped card carries the app's least recently shown stage while sitting in
+    // the group's first slot.
+    let one_at_a_time = || {
+        let mut options = ModelOptions::default();
+        options.settings.app_windows = AppWindows::OneAtATime;
+        let mut e = Env::with(options);
+        e.add(meta(1, 11, "com.example.b"), RuleAction::New);
+        e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+        e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        e.add(meta(5, 12, "com.example.c"), RuleAction::New);
+        e.add(meta(4, 10, "com.example.a"), RuleAction::New);
+        let space = e.m.current_space(MAIN);
+        if let Some(slots) = e.m.slots.get_mut(&space) {
+            slots.reverse();
+        }
+        e
+    };
+    // The app's grouped card dropped on C's card: every window of the app joins C.
+    let mut e = one_at_a_time();
+    let cards = e.m.strip();
+    let app = cards.iter().find(|c| c.apps == [11]).expect("the app's card").stage;
+    let c = cards.iter().find(|c| c.apps == [12]).expect("C's card").stage;
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(app, c, &obs);
+    e.run(a.clone());
+    assert_eq!(a, [Action::StateChanged], "nothing moves on screen");
+    let joined = &e.m.stage(c).expect("kept").windows;
+    assert!([1, 2, 3, 5].iter().all(|&i| joined.contains(&w(i))), "every window of the app joined: {joined:?}");
+    assert!(!e.m.strip().iter().any(|c| c.apps == [11]), "the app's card is gone: {:?}", e.m.strip());
+    check_invariants(&e, "after a grouped card merged");
+    // C's card dropped on the app's grouped card: C's window joins the stage whose slot the
+    // card sits in, and the merged card is there.
+    let mut e = one_at_a_time();
+    let cards = e.m.strip();
+    let k = cards.iter().position(|c| c.apps == [11]).expect("the app's card");
+    let slot_stage = e.m.strip_slots(MAIN)[k];
+    assert_ne!(cards[k].stage, slot_stage, "the card carries another stage than its slot's");
+    let c = cards.iter().find(|c| c.apps == [12]).expect("C's card").stage;
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(c, cards[k].stage, &obs);
+    e.run(a);
+    assert!(e.m.stage(slot_stage).expect("kept").windows.contains(&w(5)), "into the slot's stage");
+    let at = e.m.strip().iter().position(|card| card.windows.contains(&w(5))).expect("the merged card");
+    let slots = e.m.strip_slots(MAIN);
+    assert_eq!(slots.get(at), Some(&slot_stage), "the merged card is in the slot dropped on: {slots:?}");
+    check_invariants(&e, "after a card merged into a grouped card");
 }
 
 #[test]

@@ -13,6 +13,7 @@ use objc2_foundation::{MainThreadMarker, NSRect};
 use super::windows::CgWindow;
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
+use crate::engine::park::{CornerChoice, choose_corner};
 
 /// Converts an AppKit rectangle (bottom-left origin of the primary screen, `y` up) into
 /// global top-left coordinates, given the primary screen's height.
@@ -35,12 +36,16 @@ pub fn main_display(mtm: MainThreadMarker) -> Option<Display> {
     let screens = NSScreen::screens(mtm);
     let primary = screens.firstObject()?;
     let frame = rect(primary.frame());
-    let visible = rect(primary.visibleFrame());
-    Some(Display {
-        id: DisplayId(CGMainDisplayID()),
-        frame: to_top_left(frame, frame.h),
-        visible: to_top_left(visible, frame.h),
-    })
+    let visible = to_top_left(rect(primary.visibleFrame()), frame.h);
+    let frame = to_top_left(frame, frame.h);
+    Some(Display { id: DisplayId(CGMainDisplayID()), frame, visible, corner: park_corner(frame, visible).corner })
+}
+
+/// The park corner for the main display (`frame`, `visible`) among the other active
+/// displays ([`choose_corner`]: no display beyond it, else the least overlap).
+pub fn park_corner(frame: Rect, visible: Rect) -> CornerChoice {
+    let others: Vec<Rect> = cg_display_bounds().into_iter().skip(1).collect();
+    choose_corner(frame, visible, &others)
 }
 
 /// The primary screen's height (for converting AppKit coordinates); 0 without a screen.

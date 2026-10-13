@@ -393,7 +393,7 @@ mod tests {
     const OTHER: u32 = 50;
 
     fn displays() -> ScanDisplays {
-        ScanDisplays { main: MAIN, visible: VISIBLE, others: vec![] }
+        ScanDisplays::new(MAIN, VISIBLE, vec![], [])
     }
 
     fn parked() -> Rect {
@@ -613,7 +613,7 @@ mod tests {
     /// back" there.
     #[test]
     fn a_window_parked_above_a_bottom_dock_joins_and_waits() {
-        let d = ScanDisplays { main: MAIN, visible: Rect::new(0.0, 30.0, 2560.0, 1334.0), others: vec![] };
+        let d = ScanDisplays::new(MAIN, Rect::new(0.0, 30.0, 2560.0, 1334.0), vec![], []);
         let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
         let t0 = Instant::now();
         let mut w = Watch::new(&[]);

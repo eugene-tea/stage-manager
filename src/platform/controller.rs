@@ -16,7 +16,10 @@
 //!   parked keeps its registry entry (element and frame) while the observer has lost it
 //!   (Accessibility revoked, an element destroyed while ordered out): the registry and the
 //!   guardian's parked file never forget a parked window, and its actions go through that
-//!   element.
+//!   element. A restore (`SetFrame`) that fails (a hung app, Accessibility revoked) keeps
+//!   the window registered at the frame it was asked to take, and it is retried about once
+//!   a second until the window server lists it on screen out of the park zone (or it is
+//!   gone, or parked again); Quit retries it too.
 //! - **Stage area**: while the strip shows, placed windows are kept clear of it (moved
 //!   right, narrowed when too wide unless `[stages] fit_windows = false`); their pre-fit
 //!   frames come back on quit ([`FitOptions`]).
@@ -79,6 +82,7 @@ use super::{desktop, logging, paths, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
+use crate::engine::park::choose_corner;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
@@ -336,6 +340,48 @@ struct Pending {
     frames: Vec<Rect>,
 }
 
+/// A window whose restore (`SetFrame`) failed: the model counts it shown, but it may still sit
+/// in the park zone. It keeps its registry entry until the window server lists it on screen
+/// out of the park zone (the review's S1), and the restore is retried meanwhile.
+#[derive(Debug)]
+struct Unrestored {
+    /// The registry entry: element and the frame it was asked to take.
+    entry: ParkedEntry,
+    /// Retries so far (the first failure is logged at warn, later ones at debug).
+    tries: u32,
+}
+
+/// What to do with an [`Unrestored`] window at a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnrestoredStep {
+    /// Back on screen out of the park zone, gone, or parked again in the model's eyes (its
+    /// own registry entry covers it): forget it.
+    Done,
+    /// On screen and still in the park zone: move it again.
+    Retry,
+    /// Not on screen (another Space, its app hidden): keep it registered and wait.
+    Wait,
+}
+
+/// The step for an [`Unrestored`] window: `model_parked` is `None` when the model no longer
+/// has the window, `listed` is `None` when the window server lists it nowhere, else whether
+/// it is on screen and whether its frame lies in the park zone.
+fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>) -> UnrestoredStep {
+    match (model_parked, listed) {
+        (None | Some(true), _) | (_, None) => UnrestoredStep::Done,
+        (Some(false), Some((true, false))) => UnrestoredStep::Done,
+        (Some(false), Some((true, true))) => UnrestoredStep::Retry,
+        (Some(false), Some((false, _))) => UnrestoredStep::Wait,
+    }
+}
+
+/// After a wallpaper click left to macOS's reveal, how long a check finding every window on
+/// screen waits before the reveal counts as over (macOS slides them away over a moment).
+const MACOS_REVEAL_SETTLE: Duration = Duration::from_secs(3);
+
+/// How often unrestored windows are checked and retried.
+const UNRESTORED_RETRY: Duration = Duration::from_secs(1);
+
 /// The engine plus everything around it on the WM thread.
 pub struct Controller {
     model: Option<Model>,
@@ -404,6 +450,19 @@ pub struct Controller {
     /// A parked window focused while the left button is down (grabbed by its sliver): its
     /// stage comes once the button is up ([`Model::parked_window_dropped`]).
     focus_after_press: Option<u32>,
+    /// Windows whose restore failed, kept registered until seen back ([`Unrestored`]).
+    unrestored: BTreeMap<u32, Unrestored>,
+    /// When the unrestored windows were last checked.
+    unrestored_checked: Instant,
+    /// When a wallpaper click was left to macOS's own reveal (Show Desktop: every window slides
+    /// aside): until its windows are back, a check never counts them gone, so the reveal is
+    /// never read as a Space change (review R2 V8). Ends with a click off the wallpaper or a
+    /// Space change.
+    macos_reveal_at: Option<Instant>,
+    /// Shown windows (the active stage's, pinned ones) the window server did not show at the
+    /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
+    /// a change seen by the once-a-second check sends a new snapshot.
+    active_off_screen: BTreeSet<u32>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -488,6 +547,10 @@ impl Controller {
             desktop_echo: DesktopEcho::default(),
             strip_hidden_for_desktop: false,
             focus_after_press: None,
+            unrestored: BTreeMap::new(),
+            unrestored_checked: Instant::now(),
+            active_off_screen: BTreeSet::new(),
+            macos_reveal_at: None,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -599,6 +662,9 @@ impl Controller {
                 entries.entry(*id).or_insert_with(|| e.clone());
             }
         }
+        for (id, u) in &self.unrestored {
+            entries.entry(*id).or_insert_with(|| u.entry.clone());
+        }
         entries
     }
 
@@ -654,7 +720,7 @@ impl Controller {
                 let kept = matches!(action, Action::SetFrame { .. } | Action::Park { .. })
                     .then(|| safety::registry_entry(id))
                     .flatten();
-                let result = match (action, kept) {
+                let result = match (action, &kept) {
                     (Action::SetFrame { frame, .. }, Some(e)) => Some(e.element.set_frame(frame)),
                     (Action::Park { frame, .. }, Some(e)) => Some(e.element.set_position(frame.origin())),
                     _ => None,
@@ -664,6 +730,9 @@ impl Controller {
                     Some(Err(e)) => {
                         failed += 1;
                         tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
+                        if let (Action::SetFrame { frame, .. }, Some(kept)) = (action, kept) {
+                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: false, ..kept });
+                        }
                     }
                     None if matches!(action, Action::SetFrame { .. }) => {
                         failed += 1;
@@ -693,6 +762,10 @@ impl Controller {
             if let Err(e) = result {
                 failed += 1;
                 tracing::warn!(id, ?action, "action failed: {e}");
+                if let Action::SetFrame { frame, .. } = action {
+                    let child = w.kind == WindowKind::Child;
+                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false });
+                }
             } else {
                 tracing::trace!(id, ?action, "done");
             }
@@ -709,6 +782,85 @@ impl Controller {
             self.present();
         }
         failed
+    }
+
+    /// True when the shown windows the window server leaves out (`shown` is its on-screen
+    /// set) differ from those at the last strip snapshot.
+    fn active_shown_changed(&self, shown: &HashSet<u32>) -> bool {
+        let Some(m) = &self.model else { return false };
+        let Some(active) = m.main_active_stage() else { return !self.active_off_screen.is_empty() };
+        let space = m.current_space(m.main_display().id);
+        let off: BTreeSet<u32> = m
+            .windows()
+            .filter(|w| {
+                !w.parked
+                    && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || w.home == Home::Stage(active))
+            })
+            .map(|w| w.meta.id.0)
+            .filter(|id| !shown.contains(id))
+            .collect();
+        off != self.active_off_screen
+    }
+
+    /// Keeps a window whose `SetFrame` failed registered (with the frame it was asked to
+    /// take) until it is seen back out of the park zone; [`Self::retry_unrestored`] retries
+    /// it. Never lets the batch's registry replace drop a window whose restore failed (S1).
+    fn restore_failed(&mut self, id: u32, entry: ParkedEntry) {
+        tracing::warn!(id, restore = %entry.restore, "restore failed: the window stays registered and is retried until it is seen back");
+        self.unrestored.insert(id, Unrestored { entry, tries: 0 });
+    }
+
+    /// Checks windows whose restore failed against the window server, about once a second:
+    /// seen on screen out of the park zone, gone, or parked again in the model → forgotten;
+    /// still in the park zone → moved again; off screen → kept registered. With `force`
+    /// (quit) every one is retried at once, whatever the list says.
+    fn retry_unrestored(&mut self, ob: &Observer, force: bool) {
+        if self.unrestored.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        if !force && now.duration_since(self.unrestored_checked) < UNRESTORED_RETRY {
+            return;
+        }
+        self.unrestored_checked = now;
+        let list = windows::list_windows();
+        let before = self.unrestored.len();
+        let ids: Vec<u32> = self.unrestored.keys().copied().collect();
+        for id in ids {
+            let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
+            let parks = |f: Rect| self.model.as_ref().is_some_and(|m| m.main_display().parks(f));
+            let listed = list.iter().find(|w| w.id == id).map(|w| (w.onscreen, parks(w.bounds)));
+            let step = if force && model_parked == Some(false) && listed.is_some() {
+                UnrestoredStep::Retry
+            } else {
+                unrestored_step(model_parked, listed)
+            };
+            match step {
+                UnrestoredStep::Done => {
+                    tracing::info!(id, ?model_parked, ?listed, "a window whose restore failed is accounted for");
+                    self.unrestored.remove(&id);
+                }
+                UnrestoredStep::Wait => {}
+                UnrestoredStep::Retry => {
+                    let Some(u) = self.unrestored.get_mut(&id) else { continue };
+                    u.tries += 1;
+                    let element = ob.window(id).map(|w| w.element.clone()).unwrap_or_else(|| u.entry.element.clone());
+                    match element.set_frame(u.entry.restore) {
+                        Ok(()) => {
+                            tracing::info!(id, tries = u.tries, restore = %u.entry.restore, "a failed restore went through on a retry");
+                            if force {
+                                self.unrestored.remove(&id);
+                            }
+                        }
+                        Err(e) if u.tries == 1 || force => tracing::warn!(id, tries = u.tries, "a failed restore failed again: {e}"),
+                        Err(e) => tracing::debug!(id, tries = u.tries, "a failed restore failed again: {e}"),
+                    }
+                }
+            }
+        }
+        if self.unrestored.len() != before {
+            safety::registry_replace(self.parked_entries(ob));
+        }
     }
 
     /// Notes which windows are parked, where every window lives and the strip's slots, for
@@ -892,7 +1044,10 @@ impl Controller {
             .collect();
         let dragged = self.drag.filter(|d| d.moving);
         let space = m.current_space(m.main_display().id);
-        let active_frames = m
+        // Only windows the window server shows: a hidden app's (⌘H) or a minimized window
+        // never keeps the strip auto-hidden (R1-ui 2).
+        let on = on_screen(&windows::list_windows());
+        let (active_frames, off): (Vec<_>, Vec<_>) = m
             .windows()
             .filter(|w| {
                 !w.parked
@@ -900,8 +1055,9 @@ impl Controller {
                         || active.is_some_and(|a| w.home == Home::Stage(a)))
             })
             .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
-            .map(|w| w.meta.frame)
-            .collect();
+            .partition(|w| on.contains(&w.meta.id.0));
+        let active_frames = active_frames.into_iter().map(|w| w.meta.frame).collect();
+        self.active_off_screen = off.into_iter().map(|w| w.meta.id.0).collect();
         let active_windows = active
             .and_then(|a| m.stage(a))
             .map(|s| {
@@ -1227,6 +1383,7 @@ impl Controller {
         }
         match event.kind {
             InputKind::MouseDown => {
+                tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
@@ -1246,6 +1403,9 @@ impl Controller {
                 };
                 if !wallpaper && self.desktop_echo.user_acted() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
+                }
+                if !wallpaper {
+                    self.macos_reveal_at = None;
                 }
             }
             InputKind::MouseUp => {
@@ -1282,6 +1442,13 @@ impl Controller {
     /// the window where the user left it when that is outside the park zone.
     fn focus_after_press_done(&mut self, ob: &mut Observer) {
         let Some(id) = self.focus_after_press.take() else { return };
+        if self.space_pending {
+            // A Space change is settling: the grab waits for it (the tick tries again), or the
+            // window would sit on screen counted as parked until the next arrival parks it
+            // again (review R2 L1).
+            self.focus_after_press = Some(id);
+            return;
+        }
         if self.frozen() {
             return;
         }
@@ -1489,6 +1656,7 @@ impl Controller {
             return;
         }
         let now = Instant::now();
+        self.macos_reveal_at = None;
         self.space_changes += 1;
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
@@ -1529,6 +1697,11 @@ impl Controller {
                 self.space_pending = false;
                 self.fullscreen = false;
                 self.space_changed_at = Some(now);
+                // A sliver grab let go while the change settled runs first, so the arrival
+                // finds the window where the user dropped it, already unparked (R2 L1).
+                if self.focus_after_press.is_some() && !input::left_button_down() {
+                    self.focus_after_press_done(ob);
+                }
                 self.arrive_here(ob, &list, main);
             }
         }
@@ -1623,6 +1796,10 @@ impl Controller {
         }
         let shown = on_screen(&list);
         let shown_main = on_main_screen(&list, main.frame);
+        if self.active_shown_changed(&shown) {
+            tracing::debug!("a shown window was hidden or came back: the strip looks again");
+            self.strip_dirty = true;
+        }
         self.unplaced.retain(|id| ob.window(*id).is_some());
         let showing: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown_main.contains(id)).collect();
         for id in showing {
@@ -1667,6 +1844,17 @@ impl Controller {
             })
             .map(|(id, _)| id)
             .collect();
+        if let Some(at) = self.macos_reveal_at {
+            if !missing.is_empty() {
+                // macOS's own reveal slid the windows aside: they are not gone.
+                tracing::debug!(missing = missing.len(), "macOS reveals the desktop: its windows off screen are not counted");
+                self.absent.clear();
+                return;
+            }
+            if now.duration_since(at) >= MACOS_REVEAL_SETTLE {
+                self.macos_reveal_at = None;
+            }
+        }
         self.absent.retain(|id, _| missing.contains(id));
         let mut gone = Vec::new();
         for &id in &missing {
@@ -1683,9 +1871,17 @@ impl Controller {
         // notification was missed) or the screen shows nothing of ours for a moment (display
         // asleep, the login window); recognize it rather than forgetting them.
         if missed_space_change(here, here_shown, gone.len()) {
-            tracing::info!(missing = gone.len(), of = here, "most windows of this Space are gone from the screen; recognizing the Space again");
-            self.on_space_changed(ob);
-            return;
+            if pane_on_screen(&strip_model::panel_status(), space.0, &list) {
+                // This Desktop's own strip pane is still on screen, so this Desktop still
+                // shows: the windows were moved to another Desktop by hand (Mission Control),
+                // not left behind by a Space change (review R2 V7: a one-window Desktop kept
+                // its id).
+                tracing::info!(missing = gone.len(), of = here, "windows left this Desktop while its strip still shows: they moved to another Desktop");
+            } else {
+                tracing::info!(missing = gone.len(), of = here, "most windows of this Space are gone from the screen; recognizing the Space again");
+                self.on_space_changed(ob);
+                return;
+            }
         }
         // Forget only a window the window server still lists (on another Space): one not
         // listed at all is closing (its destroy notification follows) or the list is blind.
@@ -1813,7 +2009,7 @@ impl Controller {
     pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>) {
         self.flush_pending(ob);
         let Some(main) = displays.first().copied() else { return };
-        safety::set_visible_frame(main.visible);
+        safety::set_main_display(main.visible, main.corner);
         self.displays = displays.clone();
         if let Some(m) = self.model.as_mut() {
             let actions = m.set_displays(displays);
@@ -1862,11 +2058,14 @@ impl Controller {
                 tracing::info!(x = p.x, y = p.y, "wallpaper click");
                 self.reveal(ob, true);
             }
-            WallpaperClick::LeftToMacOs => tracing::info!(
-                x = p.x,
-                y = p.y,
-                "wallpaper click: macOS reveals the desktop itself (Click wallpaper to reveal desktop: Always)"
-            ),
+            WallpaperClick::LeftToMacOs => {
+                self.macos_reveal_at = Some(Instant::now());
+                tracing::info!(
+                    x = p.x,
+                    y = p.y,
+                    "wallpaper click: macOS reveals the desktop itself (Click wallpaper to reveal desktop: Always)"
+                )
+            }
             WallpaperClick::SameClick => {
                 tracing::info!(x = p.x, y = p.y, clicks, "wallpaper double click: one click, nothing toggles again")
             }
@@ -1948,8 +2147,14 @@ impl Controller {
             return;
         }
         self.flush_pending(ob);
+        // The strip shows a reorder or a merge before the engine has decided: when the engine
+        // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
+        let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
         if self.frozen() {
             tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
+            if local_edit {
+                self.present();
+            }
             return;
         }
         if let StripEvent::CardMoved { stage, before } = event {
@@ -1957,7 +2162,11 @@ impl Controller {
             counters::bump(Count::Reorder);
             tracing::info!(stage, ?before, "card moved to another slot");
             let actions = m.move_card(StageId(stage), before.map(StageId));
+            let changed = actions.contains(&Action::StateChanged);
             self.execute(ob, actions);
+            if !changed {
+                self.present();
+            }
             return;
         }
         let obs = self.observe(ob);
@@ -1991,7 +2200,12 @@ impl Controller {
             }
             StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } => Vec::new(),
         };
+        let changed = actions.contains(&Action::StateChanged);
         self.execute_animated(ob, actions);
+        if local_edit && !changed {
+            tracing::debug!("the engine did not take the strip's edit; the strip shows the engine's cards again");
+            self.present();
+        }
     }
 
     /// Runs a batch animated (user input) or at once (scripted ctl commands).
@@ -2053,12 +2267,16 @@ impl Controller {
     /// failed; the registry is empty afterwards when none did.
     pub fn unpark_all(&mut self, ob: &Observer) -> usize {
         self.flush_pending(ob);
-        let Some(m) = self.model.as_mut() else { return 0 };
+        // Windows whose restore failed earlier: the model counts them shown, so its unpark
+        // has nothing for them (S1).
+        self.retry_unrestored(ob, true);
+        let Some(m) = self.model.as_mut() else { return self.unrestored.len() };
         let actions = m.unpark_all();
         let n = actions.len();
         let failed = self.execute_batch(ob, actions, false);
-        tracing::info!(windows = n, failed, "unparked every window");
-        failed
+        safety::registry_replace(self.parked_entries(ob));
+        tracing::info!(windows = n, failed, unrestored = self.unrestored.len(), "unparked every window");
+        failed + self.unrestored.len()
     }
 
     /// Re-reads config.toml and applies it; a bad file keeps the last good config.
@@ -2103,6 +2321,9 @@ impl Controller {
             self.flush_pending(ob);
         }
         self.echoes.prune(now);
+        if !safety::quit_requested() {
+            self.retry_unrestored(ob, false);
+        }
         if self.focus_after_press.is_some() && !input::left_button_down() {
             // The button came up without a mouse-up the monitor saw.
             self.focus_after_press_done(ob);
@@ -2147,6 +2368,12 @@ impl Controller {
         );
         if acts && let Some(why) = self.frozen_reason() {
             return json!({ "ok": false, "error": why });
+        }
+        // Without Accessibility no window moves: a stage change now would leave the model out
+        // of step with the screen, its parked windows unregistered (review R2 L2), as the
+        // wm thread's gate does for the user's input.
+        if acts && self.managing() && !ob.observing() {
+            return json!({ "ok": false, "error": "Accessibility is off" });
         }
         match cmd {
             Command::State => self.state_json(ob),
@@ -2377,6 +2604,13 @@ fn missed_space_change(here: usize, here_shown: usize, gone: usize) -> bool {
     gone > 0 && (here_shown == 0 || (gone >= 2 && gone * 2 >= here))
 }
 
+/// True when the strip's pane (`pane`, as the strip last published it) belongs to `space`
+/// and the window server lists it on screen in `list`: a pane lives on one Desktop, so that
+/// Desktop shows.
+fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::CgWindow]) -> bool {
+    pane.window != 0 && pane.space == space && list.iter().any(|w| w.id == pane.window && w.onscreen)
+}
+
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
 }
@@ -2456,12 +2690,15 @@ pub fn focused_window() -> Option<u32> {
 
 /// The main display from CoreGraphics when AppKit has not reported one yet.
 fn fallback_displays() -> Vec<Display> {
-    let main = desktop::cg_display_bounds().first().copied().unwrap_or(Rect::new(0.0, 0.0, 1440.0, 900.0));
+    let mut bounds = desktop::cg_display_bounds();
+    let main = if bounds.is_empty() { Rect::new(0.0, 0.0, 1440.0, 900.0) } else { bounds.remove(0) };
     let menu = 30.0;
+    let visible = Rect::new(main.x, main.y + menu, main.w, main.h - menu);
     vec![Display {
         id: DisplayId(objc2_core_graphics::CGMainDisplayID()),
         frame: main,
-        visible: Rect::new(main.x, main.y + menu, main.w, main.h - menu),
+        visible,
+        corner: choose_corner(main, visible, &bounds).corner,
     }]
 }
 
@@ -2478,6 +2715,44 @@ mod tests {
         assert!(!runs_after_quit(&Action::Raise { id }));
         assert!(!runs_after_quit(&Action::Focus { id }));
         assert!(!runs_after_quit(&Action::StateChanged));
+    }
+
+    #[test]
+    fn a_failed_restore_stays_registered_until_the_window_is_seen_back() {
+        use UnrestoredStep::*;
+        // Still in the park zone on screen: moved again, never dropped.
+        assert_eq!(unrestored_step(Some(false), Some((true, true))), Retry);
+        // Off screen (another Space, app hidden): kept, waiting.
+        assert_eq!(unrestored_step(Some(false), Some((false, true))), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((false, false))), Wait);
+        // Seen back out of the zone, closed, or parked again by the model: done.
+        assert_eq!(unrestored_step(Some(false), Some((true, false))), Done);
+        assert_eq!(unrestored_step(Some(false), None), Done);
+        assert_eq!(unrestored_step(None, Some((true, true))), Done);
+        assert_eq!(unrestored_step(Some(true), Some((true, true))), Done);
+    }
+
+    #[test]
+    fn a_desktop_whose_own_strip_pane_shows_is_still_the_desktop_shown() {
+        let win = |id: u32, onscreen: bool| windows::CgWindow {
+            id,
+            pid: 1,
+            owner: String::new(),
+            name: None,
+            layer: 0,
+            bounds: Rect::new(0.0, 0.0, 200.0, 900.0),
+            onscreen,
+            alpha: 1.0,
+        };
+        let pane = strip_model::PanelStatus { space: 7, window: 40, ..Default::default() };
+        // R2 V7: the only window moved to another Desktop by hand; this Desktop's pane shows.
+        assert!(pane_on_screen(&pane, 7, &[win(40, true), win(41, false)]));
+        // A Space change: the pane stays on the Desktop left, off screen.
+        assert!(!pane_on_screen(&pane, 7, &[win(40, false)]));
+        // Another Space's pane, an unknown window, nothing listed (screen asleep).
+        assert!(!pane_on_screen(&pane, 8, &[win(40, true)]));
+        assert!(!pane_on_screen(&strip_model::PanelStatus { window: 0, ..pane }, 7, &[win(0, true)]));
+        assert!(!pane_on_screen(&pane, 7, &[]));
     }
 
     #[test]

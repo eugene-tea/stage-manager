@@ -28,6 +28,7 @@ use objc2_foundation::{MainThreadMarker, NSString};
 
 use super::desktop::{point_to_top_left, primary_height};
 use super::windows;
+use crate::ui::strip_model;
 use crate::engine::geometry::Point;
 
 /// What the user did.
@@ -86,11 +87,18 @@ impl Drop for InputMonitor {
     }
 }
 
-/// Calls `sink` (main thread) for every left mouse down/up and key down in another app.
-pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Option<InputMonitor> {
+/// Calls `sink` (main thread) for every left mouse down/up and key down in another app, and
+/// `moved` with the pointer (global, top-left) for every mouse move over another app's
+/// window or the desktop.
+pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
+        if event.r#type() == NSEventType::MouseMoved {
+            let at = NSEvent::mouseLocation();
+            moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
+            return;
+        }
         let kind = match event.r#type() {
             NSEventType::LeftMouseDown => InputKind::MouseDown,
             NSEventType::LeftMouseUp => InputKind::MouseUp,
@@ -113,7 +121,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
             key,
         });
     });
-    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::KeyDown;
+    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::KeyDown | NSEventMask::MouseMoved;
     let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)?;
     Some(InputMonitor { token })
 }
@@ -209,16 +217,21 @@ pub fn test_pids() -> Vec<i32> {
     pids
 }
 
-/// Checks that the topmost window at every point belongs to one of `pids`.
-pub fn path_is_safe(path: &[Point], pids: &[i32]) -> Result<(), String> {
+/// Checks that the topmost window at every point belongs to one of `pids` (for a `press`,
+/// the first point's strip pane counts only on a card).
+pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), String> {
     let list = windows::list_windows();
     let own = std::process::id() as i32;
-    for p in path {
+    let cards = strip_model::published_cards();
+    for (i, p) in path.iter().enumerate() {
         // Our own strip sits below normal windows (layer -1): it counts where nothing covers
-        // it. Our click-through windows above the floating level (card ghosts, the motion
-        // overlay) never take a click, so they never count.
+        // it, and for the press only on a card: off the cards its pane lets clicks through
+        // (R1-ui 8), so what lies below must be safe (a drag stays with the window it was
+        // pressed in). Our click-through windows above the floating level (card ghosts, the
+        // motion overlay) never take a click, so they never count.
+        let on_card = !press || i > 0 || cards.iter().any(|(_, r)| r.contains(*p));
         let top = list.iter().find(|w| {
-            let click_through = w.pid == own && w.layer > CLICKABLE_LEVEL;
+            let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || (w.bounds.w > TAB_MAX_WIDTH && !on_card));
             w.onscreen && !click_through && (w.layer >= 0 || pids.contains(&w.pid)) && w.alpha > 0.0 && w.bounds.contains(*p)
         });
         match top {
@@ -241,6 +254,19 @@ pub fn path_is_safe(path: &[Point], pids: &[i32]) -> Result<(), String> {
 
 /// The highest level of our own windows that take clicks (the strip lifted, the edge tab).
 const CLICKABLE_LEVEL: i64 = 3;
+
+/// Our windows at most this wide are the edge tab (it takes every click on it); wider ones
+/// are strip panes (they take clicks on a card only).
+const TAB_MAX_WIDTH: f64 = 12.0;
+
+/// Moves the pointer to `p` before a synthetic press: a person's pointer is on the card
+/// before the click, and the strip's pane takes the mouse only once the pointer is on a card
+/// (it follows the pointer's moves).
+fn move_first(p: Point, shift: bool) -> Result<(), String> {
+    post_mouse(CGEventType::MouseMoved, p, shift)?;
+    std::thread::sleep(Duration::from_millis(80));
+    Ok(())
+}
 
 /// Points from `a` to `b` at most `step` apart, both ends included.
 pub fn segment(a: Point, b: Point, step: f64) -> Vec<Point> {
@@ -293,7 +319,7 @@ fn pointer_home() -> Option<CGPoint> {
 /// resting there for `rest` (the strip's left-edge reveal). The pointer stays; the next
 /// synthetic click or drag puts it back where it was before.
 pub fn hover(p: Point, rest: Duration) -> Result<(), String> {
-    path_is_safe(&[p], &test_pids())?;
+    path_is_safe(&[p], &test_pids(), false)?;
     if let Ok(mut home) = HOVER_HOME.lock()
         && home.is_none()
     {
@@ -307,8 +333,9 @@ pub fn hover(p: Point, rest: Duration) -> Result<(), String> {
 /// A synthetic click at `p`, only where the topmost window is ours or a fixture's. The
 /// pointer goes back where it was.
 pub fn click(p: Point, shift: bool) -> Result<(), String> {
-    path_is_safe(&[p], &test_pids())?;
+    path_is_safe(&[p], &test_pids(), true)?;
     let back = pointer_home();
+    move_first(p, shift)?;
     for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
         post_mouse(kind, p, shift)?;
         std::thread::sleep(Duration::from_millis(60));
@@ -333,8 +360,9 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
     for pair in waypoints.windows(2) {
         path.extend(segment(pair[0], pair[1], 4.0).into_iter().skip(1));
     }
-    path_is_safe(&path, &test_pids())?;
+    path_is_safe(&path, &test_pids(), true)?;
     let back = pointer_home();
+    move_first(first, shift)?;
     post_mouse(CGEventType::LeftMouseDown, first, shift)?;
     std::thread::sleep(Duration::from_millis(120));
     for p in path.iter().skip(1) {

@@ -165,6 +165,12 @@ pub fn drop_slot(p: Point) -> Option<StripDrop> {
     with_strip(|s| (s.snapshot.user_visible && s.geometry.global.contains(p)).then(|| s.drop_slot_at(p))).flatten()
 }
 
+/// The pointer moved to `p` (global, top-left origin) over another app's window or the
+/// desktop (the global monitor). Main thread.
+pub fn pointer_moved(p: Point) {
+    with_strip(|s| s.pointer_moved(p));
+}
+
 /// What the strip draws now, for a scripted test (`ctl debug-strip`): the cards in slot
 /// order with each card's front thumbnail and app icons where they are drawn this frame
 /// (global, top-left, read back from Core Animation's presentation layers), each card's
@@ -808,6 +814,9 @@ struct Pane {
     shown: bool,
     /// The panel is above windows now (`None` before the first decision).
     lifted: Option<bool>,
+    /// The panel takes mouse events now (on a card, or a press or drag of one); else they
+    /// go through to what lies below (`None` before the first decision).
+    catches: Option<bool>,
     /// The edge tab shown while a window hides the strip (`[reveal] edge_tab`).
     tab: EdgeTab,
     /// The engine's id of the Space whose cards it showed last.
@@ -873,6 +882,7 @@ impl Pane {
             cards: HashMap::new(),
             shown: false,
             lifted: None,
+            catches: None,
             tab,
             space: 0,
             placed: false,
@@ -1038,7 +1048,9 @@ impl Strip {
             self.geometry = geometry;
         }
         let transition = snapshot.transition.clone();
-        // Where incoming windows grow from: their cards before this snapshot replaces them.
+        // Where incoming windows grow from: their cards before this snapshot replaces them
+        // (slid as the strip is now; moved to its new slide state below).
+        let dx_before = self.current_dx();
         let starts = transition.as_ref().map(|t| self.incoming_starts(t));
         // Another Space (or a full-screen one): the pane of the Desktop shown takes over (it
         // was left there with that Desktop's cards, or is new); the one left stays on its
@@ -1070,6 +1082,9 @@ impl Strip {
             // reveals (or hides) the strip lands its snapshots where the cards will be, not
             // where they were (review R1-ui 1).
             self.update_visibility();
+            // Incoming windows grow from where their cards will be too (review R2 V2): a
+            // start on a card follows the slide this snapshot decided.
+            let starts = slide_card_starts(starts, self.current_dx() - dx_before);
             self.begin_transition(t, starts);
         }
         if let Some(id) = self.snapshot.parked {
@@ -1079,6 +1094,8 @@ impl Strip {
             self.incoming_arrived(id, &frames);
         }
         self.after_snapshot();
+        // Cards moved under a resting pointer: the pane catches clicks where they are now.
+        self.update_pass_through(None);
         if rehome {
             self.has_snapshot = true;
             if !fullscreen {
@@ -1280,6 +1297,9 @@ impl Strip {
         let cards = &self.snapshot.cards;
         let own = cards.iter().position(|c| c.stage == stage).and_then(|i| cards.get(i + 1)).map(|c| c.stage);
         match self.spot_at(&self.resting_layouts(), p, Some(stage), band) {
+            // A card a transition is still landing in is not drawn yet: nothing to merge into
+            // (review R2 V5), as a press there is nothing.
+            Spot::Onto(into) if self.motion.holds(into) => (own, None),
             Spot::Onto(into) => (own, Some(into)),
             Spot::Before(before) if self.style.reorder => (before, None),
             Spot::Before(_) => (own, None),
@@ -1884,6 +1904,13 @@ impl Strip {
     }
 
     fn mouse_up(&mut self, p: Point, shift: bool) -> Option<StripEvent> {
+        let event = self.release(p, shift);
+        self.update_pass_through(Some(p));
+        event
+    }
+
+    /// The button came up at `p` (panel coordinates): the click, drop or merge it ends.
+    fn release(&mut self, p: Point, shift: bool) -> Option<StripEvent> {
         if let Some(drag) = self.card_drag.take()
             && drag.mode != DragMode::Pressed
         {
@@ -2018,6 +2045,39 @@ impl Strip {
     fn hover_at(&mut self, p: Option<Point>) {
         let card = if self.pane.shown { p.and_then(|p| self.card_at(p)) } else { None };
         self.set_hover(card);
+        self.update_pass_through(p);
+    }
+
+    /// The pointer moved over another app's window or the desktop to `p` (global): over the
+    /// strip column the pane lets clicks through, so its own tracking sees nothing there;
+    /// the cards hover from here and the pane catches clicks again once it is on one.
+    fn pointer_moved(&mut self, p: Point) {
+        let g = self.geometry.global;
+        if g.contains(p) {
+            self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
+        } else if self.hovered.is_some() || self.pane.catches == Some(true) {
+            self.hover_at(None);
+        }
+    }
+
+    /// Lets clicks through the pane except where they are its own (R1-ui 8): the strip's
+    /// empty column is the desktop's (a wallpaper click, Finder's icons) or the window's
+    /// under it; the pane takes the mouse only on a card (where it is drawn now) or while a
+    /// card is pressed or dragged. `local` is the pointer in panel coordinates (`None`: read
+    /// it now). AppKit decides per window, so the flag follows the pointer.
+    fn update_pass_through(&mut self, local: Option<Point>) {
+        let local = local.or_else(|| {
+            let g = self.geometry.global;
+            let p = self.pointer();
+            g.contains(p).then(|| Point::new(p.x - g.x, p.y - g.y))
+        });
+        let busy = self.pressed.is_some() || self.card_drag.is_some();
+        let catch = self.pane.shown && (busy || local.and_then(|p| self.card_at(p)).is_some());
+        if self.pane.catches != Some(catch) {
+            self.pane.catches = Some(catch);
+            self.pane.panel.setIgnoresMouseEvents(!catch);
+            tracing::trace!(catch, "strip pane: clicks caught on a card, else let through");
+        }
     }
 
     fn set_hover(&mut self, card: Option<u64>) {
@@ -2116,6 +2176,7 @@ impl Strip {
             on_active_space: self.pane.panel.isOnActiveSpace(),
             frame: self.geometry.global,
             space: self.snapshot.space,
+            window: u32::try_from(self.pane.panel.windowNumber()).unwrap_or(0),
         });
         let panes = std::iter::once(self.pane.status(true)).chain(self.others.iter().map(|p| p.status(false))).collect();
         strip_model::publish_pane_statuses(panes);
@@ -2189,7 +2250,7 @@ impl Strip {
         self.pane.shown = shown;
         self.publish_cards();
         self.publish_panel();
-        self.pane.panel.setIgnoresMouseEvents(!shown);
+        self.update_pass_through(None);
         if !shown {
             self.set_hover(None);
             self.pressed = None;
@@ -2229,4 +2290,20 @@ impl Strip {
             _ => {}
         }
     }
+}
+
+/// Where incoming windows grow from, by window: the plane and the card slot, if any.
+type Starts = HashMap<u32, (motion_math::Plane, Option<usize>)>;
+
+/// Moves the incoming windows' starts that sit on a card (those with a slot) by `dx`, the
+/// strip's slide since they were measured; window and off-screen starts stay.
+fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
+    if dx != 0.0 {
+        for (plane, slot) in starts.values_mut() {
+            if slot.is_some() {
+                plane.left_mid.x += dx;
+            }
+        }
+    }
+    starts
 }

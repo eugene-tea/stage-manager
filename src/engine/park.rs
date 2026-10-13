@@ -15,6 +15,20 @@
 //! test goes through [`is_parked_in`], which accepts the park zone of the full frame *and*
 //! of the visible frame: that covers a Dock at the bottom, on the left, on the right (whether
 //! macOS clamps `x` against the full or the visible frame) and auto-hidden, on any display.
+//!
+//! **Which corner.** A window parked against a side of the main display where another
+//! display sits lands, whole, on that display (macOS lets a window span displays), so the
+//! corner is chosen from the display arrangement ([`choose_corner`]): the first of
+//! bottom-right, bottom-left, top-right, top-left whose offscreen side has no display beyond
+//! it, else the one overlapping other displays least. The model's [`Display`] carries the
+//! choice and every park test of the model uses it ([`is_parked_in_at`]); the safety paths
+//! (recovery scan, guardian, quit check) accept every corner used this run plus
+//! bottom-right. Top corners hide sideways only: macOS keeps a title bar below the menu bar,
+//! so a window asked to sit at the display's top edge stays there, its body off the side.
+//!
+//! [`Display`]: super::model::Display
+
+use serde::{Deserialize, Serialize};
 
 use super::geometry::{Rect, Size};
 
@@ -34,12 +48,99 @@ pub const MACOS_KEEPS_TITLE: f64 = 32.0;
 /// Size used when a restore frame is degenerate and must be invented.
 pub const FALLBACK_SIZE: Size = Size::new(800.0, 600.0);
 
-/// The frame that parks a window of `size` in `display`'s bottom-right corner.
-///
-/// The origin is one point inside the corner; macOS clamps the window so a small remainder
-/// stays onscreen. The size is kept so the window is restored without a resize.
+/// A corner of a display where inactive stages park ([`choose_corner`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Corner {
+    /// The default, Apple's corner: no other display there.
+    #[default]
+    BottomRight,
+    /// Mirrors bottom-right: the body off the left side.
+    BottomLeft,
+    /// The body off the right side, at the top (macOS keeps it below the menu bar).
+    TopRight,
+    /// The body off the left side, at the top.
+    TopLeft,
+}
+
+impl Corner {
+    /// Every corner, in order of preference.
+    pub const ALL: [Corner; 4] = [Corner::BottomRight, Corner::BottomLeft, Corner::TopRight, Corner::TopLeft];
+
+    /// True when windows park off the display's right side.
+    pub fn right(self) -> bool {
+        matches!(self, Corner::BottomRight | Corner::TopRight)
+    }
+
+    /// True when windows park at the display's bottom.
+    pub fn bottom(self) -> bool {
+        matches!(self, Corner::BottomRight | Corner::BottomLeft)
+    }
+}
+
+/// The frame that parks a window of `size` in `display`'s bottom-right corner
+/// ([`park_frame_at`] with [`Corner::BottomRight`]).
 pub fn park_frame(size: Size, display: Rect) -> Rect {
-    Rect::new(display.max_x() - 1.0, display.max_y() - 1.0, size.w, size.h)
+    park_frame_at(size, display, Corner::BottomRight)
+}
+
+/// The frame that parks a window of `size` in `display`'s `corner`.
+///
+/// One point of the window stays inside the display's side; at the bottom the origin is one
+/// point above the bottom edge (macOS clamps the window so its title bar stays onscreen), at
+/// the top the window's top is the display's top edge (macOS keeps it below the menu bar).
+/// The size is kept so the window is restored without a resize.
+pub fn park_frame_at(size: Size, display: Rect, corner: Corner) -> Rect {
+    let x = if corner.right() { display.max_x() - 1.0 } else { display.x - size.w + 1.0 };
+    let y = if corner.bottom() { display.max_y() - 1.0 } else { display.y };
+    Rect::new(x, y, size.w, size.h)
+}
+
+/// `frame` mirrored left to right across `display`: a left corner's frame becomes the
+/// matching right corner's.
+fn mirror_x(frame: Rect, display: Rect) -> Rect {
+    Rect::new(display.x + display.max_x() - frame.max_x(), frame.y, frame.w, frame.h)
+}
+
+/// The corner chosen for a display arrangement, and how much of the chosen corner's reach
+/// lies on other displays (0 when no display is beyond it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CornerChoice {
+    /// The corner.
+    pub corner: Corner,
+    /// Area (pt²) of other displays a display-sized window parked there would cover.
+    pub overlap: f64,
+}
+
+/// Where a display-sized window parked in `corner` of the main display (`main` full frame,
+/// `visible` frame) could reach: beyond the side, from where macOS leaves its title bar
+/// (above a bottom Dock, below the menu bar) down.
+pub fn corner_reach(main: Rect, visible: Rect, corner: Corner) -> Rect {
+    let v = if visible.is_degenerate() { main } else { visible };
+    let x = if corner.right() { main.max_x() - 1.0 } else { main.x - main.w + 1.0 };
+    let (y, h) = if corner.bottom() { (v.max_y() - MACOS_KEEPS_TITLE, main.h) } else { (v.y, v.h) };
+    Rect::new(x, y, main.w, h)
+}
+
+/// The park corner for the main display (`main`, `visible`) among the `others`: the first of
+/// [`Corner::ALL`] that no other display lies beyond, else the one whose reach covers the
+/// least of them (ties in [`Corner::ALL`] order).
+pub fn choose_corner(main: Rect, visible: Rect, others: &[Rect]) -> CornerChoice {
+    let overlap = |c: Corner| {
+        let reach = corner_reach(main, visible, c);
+        others.iter().filter_map(|d| reach.intersect(d)).map(|r| r.w * r.h).sum::<f64>()
+    };
+    let mut best = CornerChoice { corner: Corner::BottomRight, overlap: f64::INFINITY };
+    for c in Corner::ALL {
+        let o = overlap(c);
+        if o <= 0.0 {
+            return CornerChoice { corner: c, overlap: 0.0 };
+        }
+        if o < best.overlap {
+            best = CornerChoice { corner: c, overlap: o };
+        }
+    }
+    best
 }
 
 /// True when `frame` sits in `display`'s park zone.
@@ -67,11 +168,39 @@ pub fn is_parked(frame: Rect, display: Rect) -> bool {
     }
 }
 
-/// True when `frame` sits in the park zone of a display whose full frame is `display` and
-/// whose visible frame (no menu bar, no Dock) is `visible`: the one park test every caller
-/// uses (module docs, "Where macOS leaves a parked window").
+/// True when `frame` sits in `display`'s park zone at `corner`: [`is_parked`] for the bottom
+/// corners (mirrored for the left one); for the top ones, its origin within [`PARK_MARGIN`]
+/// of the side's edge or beyond it, in the display's top half (or up to [`PARK_MARGIN`]
+/// above it).
+pub fn is_parked_at(frame: Rect, display: Rect, corner: Corner) -> bool {
+    if !(frame.x.is_finite() && frame.y.is_finite() && frame.w.is_finite()) {
+        return false;
+    }
+    let f = if corner.right() { frame } else { mirror_x(frame, display) };
+    if corner.bottom() {
+        is_parked(f, display)
+    } else {
+        f.x >= display.max_x() - PARK_MARGIN && f.y >= display.y - PARK_MARGIN && f.y <= display.center().y
+    }
+}
+
+/// True when `frame` sits in the bottom-right park zone of a display whose full frame is
+/// `display` and whose visible frame (no menu bar, no Dock) is `visible`
+/// ([`is_parked_in_at`] with [`Corner::BottomRight`]).
 pub fn is_parked_in(frame: Rect, display: Rect, visible: Rect) -> bool {
-    is_parked(frame, display) || (!visible.is_degenerate() && is_parked(frame, visible))
+    is_parked_in_at(frame, display, visible, Corner::BottomRight)
+}
+
+/// True when `frame` sits in the park zone at `corner` of a display whose full frame is
+/// `display` and whose visible frame (no menu bar, no Dock) is `visible`: the one park test
+/// every caller uses (module docs, "Where macOS leaves a parked window").
+pub fn is_parked_in_at(frame: Rect, display: Rect, visible: Rect, corner: Corner) -> bool {
+    is_parked_at(frame, display, corner) || (!visible.is_degenerate() && is_parked_at(frame, visible, corner))
+}
+
+/// True when `frame` sits in the park zone of any corner of `display`.
+pub fn is_parked_anywhere(frame: Rect, display: Rect) -> bool {
+    Corner::ALL.iter().any(|c| is_parked_at(frame, display, *c))
 }
 
 /// A restore frame that is fully reachable inside `visible` (the display minus menu bar and
@@ -80,7 +209,7 @@ pub fn is_parked_in(frame: Rect, display: Rect, visible: Rect) -> bool {
 /// - A degenerate frame (non-finite or non-positive size) becomes [`FALLBACK_SIZE`] (shrunk
 ///   to fit) centered in `visible`.
 /// - A frame larger than `visible` is shrunk to fit.
-/// - A frame in the park zone of `visible` is centered.
+/// - A frame in the park zone of any corner of `visible` is centered.
 /// - Otherwise the frame moves only as far as needed to keep its title bar (full width, top
 ///   [`TITLE_BAR_HEIGHT`] points) inside `visible`; its body may extend below the bottom.
 pub fn clamp_to_visible(frame: Rect, visible: Rect) -> Rect {
@@ -92,13 +221,15 @@ pub fn clamp_to_visible(frame: Rect, visible: Rect) -> Rect {
         return center_size(size, visible);
     }
     let size = Size::new(frame.w.min(visible.w), frame.h.min(visible.h));
-    if is_parked(frame, visible) {
+    if is_parked_anywhere(frame, visible) {
         return center_size(size, visible);
     }
     let title = TITLE_BAR_HEIGHT.min(size.h);
     let x = frame.x.clamp(visible.x, visible.max_x() - size.w);
     let y = frame.y.clamp(visible.y, visible.max_y() - title);
-    Rect::new(x, y, size.w, size.h)
+    let out = Rect::new(x, y, size.w, size.h);
+    // A small window slid against a side could still sit in a corner's zone.
+    if is_parked_anywhere(out, visible) { center_size(size, visible) } else { out }
 }
 
 fn center_size(size: Size, visible: Rect) -> Rect {
@@ -110,6 +241,7 @@ fn center_size(size: Size, visible: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::displays::on_other_display;
 
     const DISPLAY: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
     const VISIBLE: Rect = Rect::new(0.0, 25.0, 1440.0, 800.0);
@@ -162,6 +294,136 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Where macOS leaves a window asked to sit at `asked` parked in `corner` with no display
+    /// beyond it: at the bottom, `y` clamped so [`MACOS_KEEPS_TITLE`] points stay above the
+    /// visible frame's bottom; at the top, `y` kept below the menu bar; `x` kept.
+    fn macos_places_at(asked: Rect, visible: Rect, corner: Corner) -> Rect {
+        let y = if corner.bottom() { asked.y.min(visible.max_y() - MACOS_KEEPS_TITLE) } else { asked.y.max(visible.y) };
+        Rect::new(asked.x, y, asked.w, asked.h)
+    }
+
+    #[test]
+    fn every_corner_parks_for_every_dock_position() {
+        let displays = [
+            ("built-in", Rect::new(0.0, 0.0, 1512.0, 982.0), 37.0),
+            ("5K", Rect::new(0.0, 0.0, 2560.0, 1440.0), 30.0),
+            ("second, left of main, higher", Rect::new(-1440.0, -300.0, 1440.0, 900.0), 25.0),
+        ];
+        for corner in Corner::ALL {
+            for (name, d, menu) in displays {
+                for (dock, visible) in dock_layouts(d, menu) {
+                    for size in [Size::new(600.0, 392.0), Size::new(300.0, 120.0), Size::new(2400.0, 1300.0)] {
+                        let at = macos_places_at(park_frame_at(size, d, corner), visible, corner);
+                        assert!(is_parked_in_at(at, d, visible, corner), "{corner:?}, {name}, {dock}, {size:?}: {at:?} not parked");
+                        // Never parked on the other side's corners: the model's test is exact.
+                        for other in Corner::ALL.into_iter().filter(|c| c.right() != corner.right()) {
+                            assert!(!is_parked_in_at(at, d, visible, other), "{corner:?} at {at:?} also counts as {other:?}");
+                        }
+                        // Hidden but for a sliver: at most one point of it across the side.
+                        let seen = at.intersect(&d).map_or(0.0, |r| r.w);
+                        assert!(seen <= 1.0, "{corner:?}, {name}, {dock}: {seen} pt show");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_windows_are_parked_at_no_corner() {
+        let d = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        for (dock, visible) in dock_layouts(d, 30.0) {
+            for f in [
+                Rect::new(100.0, 100.0, 800.0, 600.0),
+                Rect::new(1600.0, 700.0, 800.0, 600.0),
+                Rect::new(1200.0, visible.max_y() - 300.0, 800.0, 600.0),
+                Rect::new(40.0, 40.0, 800.0, 600.0),
+                Rect::new(visible.max_x() - 820.0, visible.y, 800.0, 600.0),
+                Rect::new(-2000.0, -2000.0, 100.0, 100.0),
+            ] {
+                for corner in Corner::ALL {
+                    assert!(!is_parked_in_at(f, d, visible, corner), "{dock}, {corner:?}: {f:?}");
+                }
+            }
+        }
+    }
+
+    /// The main display of the arrangement tests: a 5K with its Dock at the bottom.
+    const MAIN_5K: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+    const MAIN_5K_VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1334.0);
+
+    /// Display arrangements (Displays → Arrange) and the corner each must park in.
+    fn arrangements() -> Vec<(&'static str, Vec<Rect>, Corner)> {
+        let laptop = Size::new(1512.0, 982.0);
+        let at = |x: f64, y: f64| Rect::new(x, y, laptop.w, laptop.h);
+        vec![
+            ("one display", vec![], Corner::BottomRight),
+            ("right, bottoms aligned", vec![at(2560.0, 1440.0 - 982.0)], Corner::BottomLeft),
+            ("right, tops aligned (clear of the bottom corner)", vec![at(2560.0, 0.0)], Corner::BottomRight),
+            ("below, under the right edge", vec![at(1400.0, 1440.0)], Corner::BottomLeft),
+            ("below, centered (clear of both corners)", vec![at(524.0, 1440.0)], Corner::BottomRight),
+            ("left, bottoms aligned", vec![at(-1512.0, 1440.0 - 982.0)], Corner::BottomRight),
+            ("above", vec![at(500.0, -982.0)], Corner::BottomRight),
+            ("diagonal, below right", vec![at(2560.0, 1440.0)], Corner::BottomLeft),
+            ("diagonal, below left", vec![at(-1512.0, 1440.0)], Corner::BottomRight),
+            (
+                "two externals: right and a wide one below",
+                vec![at(2560.0, 1440.0 - 982.0), Rect::new(-300.0, 1440.0, 3440.0, 1440.0)],
+                Corner::TopLeft,
+            ),
+            (
+                "two externals: diagonal below right, and left with bottoms aligned",
+                vec![at(2560.0, 1440.0), at(-1512.0, 1440.0 - 982.0)],
+                Corner::TopRight,
+            ),
+            (
+                "two externals: right and left, tops aligned",
+                vec![at(2560.0, 0.0), at(-1512.0, 0.0)],
+                Corner::BottomRight,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_park_corner_has_no_display_beyond_it() {
+        for (name, others, want) in arrangements() {
+            let choice = choose_corner(MAIN_5K, MAIN_5K_VISIBLE, &others);
+            assert_eq!(choice.corner, want, "{name}");
+            assert_eq!(choice.overlap, 0.0, "{name}");
+            for size in [Size::new(600.0, 392.0), Size::new(1800.0, 1200.0), Size::new(2560.0, 1334.0)] {
+                let at = macos_places_at(park_frame_at(size, MAIN_5K, want), MAIN_5K_VISIBLE, want);
+                assert!(is_parked_in_at(at, MAIN_5K, MAIN_5K_VISIBLE, want), "{name}: {at:?}");
+                assert!(!on_other_display(at, MAIN_5K, &others), "{name}: {at:?} lands on another display");
+                assert!(others.iter().all(|o| at.intersect(o).is_none()), "{name}: {at:?} shows on another display");
+            }
+        }
+    }
+
+    #[test]
+    fn the_bottom_right_corner_would_show_parked_windows_on_a_display_beyond_it() {
+        // The review's V1: a display right of the main one, bottoms aligned. Bottom-right
+        // parking puts the whole window there.
+        let right = Rect::new(2560.0, 458.0, 1512.0, 982.0);
+        let at = macos_places_at(park_frame(Size::new(600.0, 392.0), MAIN_5K), MAIN_5K_VISIBLE, Corner::BottomRight);
+        assert!(on_other_display(at, MAIN_5K, &[right]));
+        assert_eq!(choose_corner(MAIN_5K, MAIN_5K_VISIBLE, &[right]).corner, Corner::BottomLeft);
+    }
+
+    #[test]
+    fn with_a_display_beyond_every_corner_the_least_overlap_wins_and_says_so() {
+        // Full-height externals on both sides.
+        let left = Rect::new(-2560.0, 0.0, 2560.0, 1440.0);
+        let right = Rect::new(2560.0, 0.0, 2560.0, 1440.0);
+        let choice = choose_corner(MAIN_5K, MAIN_5K_VISIBLE, &[left, right]);
+        assert!(choice.overlap > 0.0);
+        assert_eq!(choice.corner, Corner::BottomRight, "the bottom corners reach least (only below the Dock's top), ties go right");
+        let worst = Corner::ALL
+            .into_iter()
+            .map(|c| corner_reach(MAIN_5K, MAIN_5K_VISIBLE, c))
+            .map(|r| [left, right].iter().filter_map(|d| r.intersect(d)).map(|i| i.w * i.h).sum::<f64>())
+            .fold(0.0, f64::max);
+        assert!(choice.overlap < worst);
     }
 
     #[test]
@@ -299,8 +561,9 @@ mod tests {
             let w = ((seed >> 40) % 2500) as f64;
             let h = ((seed >> 20) % 1800) as f64;
             let out = clamp_to_visible(Rect::new(a, b, w, h), VISIBLE);
-            assert!(!is_parked(out, VISIBLE), "{out:?}");
-            assert!(!is_parked(out, DISPLAY), "{out:?}");
+            for corner in Corner::ALL {
+                assert!(!is_parked_in_at(out, DISPLAY, VISIBLE, corner), "{corner:?}: {out:?}");
+            }
             assert!(VISIBLE.contains_rect(&Rect::new(
                 out.x,
                 out.y,
