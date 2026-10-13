@@ -1575,8 +1575,10 @@ def phase_slots():
                 got = g
         proc.communicate(timeout=20)
         b = got.get("bounds")
-        grab_y = 12 / f["h"]
-        ok = bool(b) and inside(target, b, 4) and abs(b["y"] + grab_y * b["h"] - target[1]) <= 8
+        # Under the pointer, held near its top (grabbed by the title bar). Below the display's
+        # middle the turned card's far corner rises toward the eye, so its box starts a little
+        # above the held edge: the top quarter, not an exact point.
+        ok = bool(b) and inside(target, b, 4) and 0 <= (target[1] - b["y"]) / b["h"] <= 0.25
         check(ok, f"{int(frac * 100)} % down: the dragged window's card is drawn under the pointer "
                   f"(pointer {target[0]:.0f},{target[1]:.0f}; card {b and fmt(b)}; {got.get('error', '')})")
         time.sleep(1.0)
