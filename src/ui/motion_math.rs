@@ -12,8 +12,9 @@
 //!   the strip's tilt and seen from the strip's eye. Moving between the two on one spring
 //!   (position of the left edge's middle, size, turn, corner radius) is the switch animation.
 //! - **Drop spot.** A card or a window released over the column goes into the gap between the
-//!   cards whose middles are above and below the pointer. A band around each card's middle can
-//!   later mean "onto this card" (a merge); it is zero for now.
+//!   cards whose middles are above and below the pointer. A band around each card's middle
+//!   (`[drag] merge_zone` of its height, for a card dragged with `[strip] merge_on_drop`)
+//!   means "onto this card": a merge. A window dropped on the strip has no band.
 
 use std::collections::HashMap;
 
@@ -132,7 +133,7 @@ impl Plane {
 pub enum DropSpot {
     /// Into the gap above card `n` (`n` = the count: below the last card).
     Gap(usize),
-    /// Onto card `n` (a later merge gesture; only with a merge band).
+    /// Onto card `n` (a merge; only with a merge band).
     OnCard(usize),
 }
 

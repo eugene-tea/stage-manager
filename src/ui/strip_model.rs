@@ -129,6 +129,23 @@ pub struct CardSnapshot {
     pub apps: Vec<i32>,
 }
 
+impl CardSnapshot {
+    /// This card after `dropped`'s stage merged into it (`[strip] merge_on_drop`), as the
+    /// engine's merge leaves it: its own windows in front, `dropped`'s behind them in their
+    /// order, and `dropped`'s apps after its own. The strip draws it while a card is held
+    /// over this one, and until the controller's next snapshot after the drop.
+    pub fn merged_with(&self, dropped: &CardSnapshot) -> CardSnapshot {
+        let mut card = self.clone();
+        card.windows.extend(dropped.windows.iter().copied().filter(|w| !self.windows.iter().any(|o| o.id == w.id)));
+        for pid in &dropped.apps {
+            if !card.apps.contains(pid) {
+                card.apps.push(*pid);
+            }
+        }
+        card
+    }
+}
+
 /// A window shown on a card.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CardWindow {
@@ -156,6 +173,9 @@ pub enum StripEvent {
     /// A card was dragged to another slot (`[strip] reorder`): right above `before`'s card,
     /// or below the last card when `before` is `None`.
     CardMoved { stage: u64, before: Option<u64> },
+    /// A card was dropped onto another card (`[strip] merge_on_drop`): `stage`'s windows join
+    /// `into`'s stage, which keeps its slot.
+    CardMerged { stage: u64, into: u64 },
     /// The incoming windows of transition `id` are covered by their growing snapshots: put
     /// them in place now.
     Unveil { id: u64 },
@@ -413,6 +433,17 @@ pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_merged_card_keeps_its_windows_in_front_and_adds_the_dropped_ones_behind() {
+        let win = |id: u32, pid: i32| CardWindow { id, pid, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
+        let target = CardSnapshot { stage: 2, number: 2, name: Some("Work".into()), windows: vec![win(5, 50), win(6, 60)], apps: vec![50, 60] };
+        let dropped = CardSnapshot { stage: 7, number: 3, name: None, windows: vec![win(9, 60), win(8, 80)], apps: vec![60, 80] };
+        let m = target.merged_with(&dropped);
+        assert_eq!((m.stage, m.number, m.name.as_deref()), (2, 2, Some("Work")), "the target's identity");
+        assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 6, 9, 8]);
+        assert_eq!(m.apps, [50, 60, 80]);
+    }
 
     #[test]
     fn a_cover_answer_is_matched_by_id_and_a_missing_one_times_out() {

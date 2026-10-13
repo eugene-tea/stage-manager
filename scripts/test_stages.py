@@ -26,7 +26,8 @@ no live values and registers no hotkey; Cmd-M sends a window to the strip; a cli
 card's app icon brings every window of that app), motion (the strip below windows and lifted
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
-across a relaunch; a card click animates and every frame is exact afterwards;
+across a relaunch; a card dropped in a gap reorders and one dropped on another card's middle
+merges the two stages (`[strip] merge_on_drop`, on by default); a card click animates and every frame is exact afterwards;
 `level = "above_windows"` keeps the strip on top), slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
@@ -1236,6 +1237,83 @@ def reveal_strip(what):
                  f"({r.get('error', 'ok')}, layer {panel and panel['layer']}, {len(cards)} cards)")
 
 
+def card_drag(start, end, what):
+    """Drags a card from `start` to `end` (holding there 600 ms), sampling `ctl debug-strip`
+    while it runs. Returns the reply and the samples."""
+    path = [start, (start[0], start[1] + 12), end]
+    words = [str(round(v, 1)) for p in path for v in p] + ["hold=600"]
+    say(f"  dragging {what}")
+    proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+    seen = sample_strip_during(proc)
+    out, _ = proc.communicate(timeout=20)
+    return out, seen
+
+
+def merge_sub_test(vis):
+    """`[strip] merge_on_drop` (on by default): a card dropped in a gap reorders as before; one
+    dropped on another card's middle merges the two stages, and nothing unparks."""
+    say("-- a card dropped in a gap reorders; one dropped on a card's middle merges the stages")
+    time.sleep(1.0)
+    reveal_strip("merge")
+    s = state()
+    cards = s.get("strip_cards", [])
+    if not check(len(cards) >= 3 and [c["number"] for c in cards] == s["strip"],
+                 f"three or more cards drawn in the engine's order ({[c['number'] for c in cards]} vs {s['strip']})"):
+        return
+    x = vis["x"] + 70
+    order0 = s["strip"]
+    # Into the gap between the second and third cards: the first card goes right above the third.
+    f1, f2 = cards[1]["frame"], cards[2]["frame"]
+    before_log = len(log_text())
+    out, seen = card_drag((x, center(cards[0]["frame"])[1]), (x, (f1["y"] + f1["h"] + f2["y"]) / 2),
+                          "the first card into the gap above the third")
+    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
+    want = [order0[1], order0[0]] + order0[2:]
+    s = wait_state(lambda x: x["strip"] == want, "the gap drop to reorder")
+    check(s is not None, f"a gap drop reorders as before ({order0} -> {state()['strip']}, wanted {want})")
+    check(not any(p.get("merge_onto") for p in seen[-3:]), "held in a gap, no card offered to merge")
+    text = log_text()[before_log:]
+    check("card moved to another slot" in text and "the stages merge" not in text, "logged as a reorder, not a merge")
+
+    time.sleep(1.0)
+    reveal_strip("merge, again")
+    s = state()
+    cards = s.get("strip_cards", [])
+    ids = ids_by_number(s)
+    if not check(len(cards) >= 3, f"cards drawn ({len(cards)})"):
+        return
+    src, dst = ids[cards[0]["number"]], ids[cards[2]["number"]]
+    members = {st["id"]: list(st["windows"]) for st in s["stages"]}
+    moving, staying = members[src], members[dst]
+    n0 = len(s["strip"])
+    before_log = len(log_text())
+    out, seen = card_drag((x, center(cards[0]["frame"])[1]), (x, center(cards[2]["frame"])[1]),
+                          "the first card onto the third card's middle")
+    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
+    offered = [p for p in seen if p.get("merge_onto") == dst]
+    check(bool(offered), f"held over the third card's middle, it is offered the merge ({len(offered)} of {len(seen)} samples)")
+    s = wait_state(lambda x: len(x["strip"]) == n0 - 1, "the merge (one card fewer)")
+    if not check(s is not None, f"one card fewer after the drop ({n0} -> {len(state()['strip'])})"):
+        return
+    time.sleep(1.0)
+    s = state()
+    after = {st["id"]: list(st["windows"]) for st in s["stages"]}
+    check(src not in after, f"the dropped card's stage is gone ({sorted(after)})")
+    check(after.get(dst) == staying + moving,
+          f"the target's stage holds both, its own in front ({after.get(dst)}, wanted {staying + moving})")
+    parked = {w["id"]: w["parked"] for w in s["windows"]}
+    check(all(parked.get(i) for i in staying + moving), "every window of both stays parked (nothing moved on screen)")
+    num = numbers_by_id(s)
+    check(num.get(dst) in s["strip"], f"the target keeps a card ({s['strip']}, target {num.get(dst)})")
+    # The strip may have slid away again (a window covers its column): ask it what it has.
+    p = strip_probe() or {}
+    drawn = [c["stage"] for c in p.get("cards", [])]
+    check(p.get("order") == [ids_by_number(s)[n] for n in s["strip"]] and drawn == p.get("order"),
+          f"the strip has one card fewer, the dropped one's layers gone (order {p.get('order')}, layers {drawn})")
+    check("card dropped on a card: the stages merge" in log_text()[before_log:], "logged as a merge")
+    consistent("card merge")
+
+
 def phase_motion():
     say("\n== motion: strip level, a window dropped into a slot, card reorder, switch animation ==")
     stop_app()
@@ -1303,6 +1381,8 @@ def phase_motion():
         stop_app()
         s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)
         check(s is not None and s["strip"] == order, f"the order survives a relaunch ({s and s['strip']} vs {order})")
+
+    merge_sub_test(vis)
 
     say("-- a card click animates; every window ends at its exact frame")
     time.sleep(1.5)
@@ -1553,7 +1633,8 @@ def phase_slots():
         a, b = s["strip_cards"][0]["frame"], s["strip_cards"][3]["frame"]
         dragged = ids_by_number(s)[s["strip"][0]]
         start = center(a)
-        path = [start, (start[0], start[1] + 12), (start[0], b["y"] + b["h"] * 0.75)]
+        # Below the fourth card's middle half (`[drag] merge_zone`): its gap, not a merge.
+        path = [start, (start[0], start[1] + 12), (start[0], b["y"] + b["h"] * 0.9)]
         words = [str(round(v, 1)) for p in path for v in p] + ["hold=600"]
         proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
         seen = sample_strip_during(proc)

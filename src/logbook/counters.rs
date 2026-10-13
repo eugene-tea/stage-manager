@@ -14,7 +14,7 @@ pub enum Count {
     Switch,
     /// A card or its icon was clicked.
     CardClick,
-    /// A card dropped in the main area, or a window dropped on the strip.
+    /// A card dropped in the main area or on another card, or a window dropped on the strip.
     Drop,
     /// A card dragged to another slot.
     Reorder,

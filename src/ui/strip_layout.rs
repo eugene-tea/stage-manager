@@ -409,6 +409,56 @@ mod tests {
     }
 
     #[test]
+    fn merge_zones_and_gaps_are_both_wide_on_his_displays() {
+        use crate::ui::motion_math::{DropSpot, drop_spot};
+        let band = StripStyle::default().drag.merge_zone;
+        // His usual cards: a full-height browser, a terminal, a small Finder window (the
+        // smallest card Apple draws), and a tall narrow window.
+        for (name, m, (w, h)) in [("laptop", laptop(), (1800.0, 1130.0)), ("5K", five_k(), (2560.0, 1410.0))] {
+            let cards = [
+                card(1, &[(1, 10, w, h)]),
+                card(2, &[(2, 20, 1280.0, 940.0)]),
+                card(3, &[(3, 30, 920.0, 436.0)]),
+                card(4, &[(4, 40, 1040.0, h)]),
+            ];
+            let bands: Vec<(f64, f64)> = layout_column(&cards, h, &m)
+                .iter()
+                .map(|l| {
+                    let b = l.bounds(&m);
+                    (b.y, b.max_y())
+                })
+                .collect();
+            // Walk the column a point at a time: every run of one answer is long enough to
+            // land in on purpose.
+            let (top, bottom) = (bands[0].0 - 40.0, bands[3].1 + 40.0);
+            let mut runs: Vec<(DropSpot, f64)> = Vec::new();
+            let mut y = top;
+            while y <= bottom {
+                let spot = drop_spot(&bands, y, band);
+                match runs.last_mut() {
+                    Some((s, len)) if *s == spot => *len += 1.0,
+                    _ => runs.push((spot, 1.0)),
+                }
+                y += 1.0;
+            }
+            let kinds: Vec<DropSpot> = runs.iter().map(|r| r.0).collect();
+            assert_eq!(
+                kinds,
+                [
+                    DropSpot::Gap(0), DropSpot::OnCard(0), DropSpot::Gap(1), DropSpot::OnCard(1),
+                    DropSpot::Gap(2), DropSpot::OnCard(2), DropSpot::Gap(3), DropSpot::OnCard(3),
+                    DropSpot::Gap(4),
+                ],
+                "{name}: gaps and cards alternate"
+            );
+            for (spot, len) in &runs[1..runs.len() - 1] {
+                let least = if matches!(spot, DropSpot::OnCard(_)) { 45.0 } else { 70.0 };
+                assert!(*len >= least, "{name}: {spot:?} only {len} pt tall");
+            }
+        }
+    }
+
+    #[test]
     fn small_windows_are_drawn_at_least_min_height_and_wide_ones_capped() {
         let m = laptop();
         // Apple drew a 920 × 436 Finder window 97 pt tall on the laptop (and a 1102 × 643 one

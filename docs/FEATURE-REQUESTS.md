@@ -100,7 +100,7 @@ own `NSPanel` strip.
 2. **Card context menu (R4).** Bring Here, New Stage, Keep on Every Stage, Name…, Close Window, Quit App. One easy item that also covers parts of R3, R7, R9 and pinning, without a single shortcut.
 3. **Stage names (R7).** Set from the menu, shown on hover, persisted.
 4. **Strip overflow and reorder (R5).** Scroll over the strip to reach older stages, with a "+N" mark; drag a card to reorder.
-5. **Merge by dragging a card onto a card (R3c).** Easy, and needs no change to the scope rule for windows.
+5. **Merge by dragging a card onto a card (R3c).** Easy, and needs no change to the scope rule for windows. *(Built 10-12, on by default: `[strip] merge_on_drop`.)*
 6. **Quiet activations (R6).** No stage switch without recent user input; the card glows instead.
 7. **Stage list in the menu-bar menu, plus scroll over the strip (R2).** Switching without keys.
 8. *(Parity, before any sugar.)* Live checks of the gaps found in §1: One at a Time re-click cycling, ⌘M to the strip, clicking a card's app icon, Shift-click on a card with several apps, Option-click, and the strip count on a shorter display.

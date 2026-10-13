@@ -683,6 +683,63 @@ impl Model {
         self.merge_into_active(stage, obs)
     }
 
+    /// A card dropped onto another card (`[strip] merge_on_drop`, an extension: Apple's strip
+    /// does not merge): every window of `stage` joins `into`, behind `into`'s own windows and
+    /// in its own order, each child with its parent. Both stages are inactive, so nothing
+    /// moves on screen: the windows stay parked with their saved frames. `into` keeps its
+    /// slot, name and key window (an empty one takes `stage`'s) and the more recent of the
+    /// two recencies; `stage`'s slot frees by the slot rule (the cards below close up, and a
+    /// free slot takes the most recent stage out of view). The emptied stage goes away
+    /// unless it is declared in config. Into the active stage (a card of it shows only in
+    /// fixed order with `show_active`) it is [`Model::merge_into_active`]. A no-op for one
+    /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
+    /// Spaces, or a Space not shown now.
+    pub fn merge_stages(&mut self, stage: StageId, into: StageId, obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let (Some(src), Some(dest)) = (self.stage(stage), self.stage(into)) else {
+            return actions;
+        };
+        if stage == into || src.space != dest.space || !self.is_shown_space(src.space) || self.is_active(stage) {
+            return actions;
+        }
+        if self.is_active(into) {
+            return self.merge_into_active(stage, obs);
+        }
+        let display = dest.display;
+        let members = src.windows.clone();
+        let src_key = src.key.filter(|k| members.contains(k));
+        let recency = src.last_active.max(dest.last_active);
+        let orphans: Vec<WindowId> = self
+            .children_in(Home::Stage(stage))
+            .into_iter()
+            .filter(|&c| self.resolve_standard(c).is_none())
+            .collect();
+        if let Some(s) = self.stage_mut(stage) {
+            s.windows.clear();
+            s.key = None;
+        }
+        for &id in &members {
+            self.set_home(id, Home::Stage(into), display);
+        }
+        for &c in &orphans {
+            if let Some(w) = self.windows.get_mut(&c) {
+                w.home = Home::Stage(into);
+                w.meta.display = display;
+            }
+        }
+        if let Some(d) = self.stage_mut(into) {
+            d.windows.extend(members.iter().copied());
+            if d.key.is_none_or(|k| !d.windows.contains(&k)) {
+                d.key = src_key.or(d.windows.first().copied());
+            }
+            d.last_active = recency;
+        }
+        self.drop_if_dead(stage, &mut actions);
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
+    }
+
     /// A window dragged by its title bar and dropped on the strip: it goes to a new stage of
     /// its own (parked, its card in the strip), and its restore frame is `pre_drag`, the
     /// frame it had before the drag, not where it was dropped. Its children move back by the

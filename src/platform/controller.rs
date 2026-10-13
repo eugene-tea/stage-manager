@@ -28,7 +28,8 @@
 //!   down (AX move events between a global mouse-down and mouse-up) is announced to the strip,
 //!   which shows a drop target; released over the strip, it gets a stage of its own and keeps
 //!   its pre-drag frame. A card dragged out of the strip arrives as
-//!   [`StripEvent::CardDropped`].
+//!   [`StripEvent::CardDropped`], one dropped onto another card as
+//!   [`StripEvent::CardMerged`] (`[strip] merge_on_drop`).
 //! - **Spaces**: every Space (Desktop) has its own stages and strip, as Apple's does. A
 //!   window is given to the engine only once the window server lists it on screen (so its
 //!   Space is the shown one); until then it waits in `unplaced` (another Space, minimized,
@@ -1976,6 +1977,17 @@ impl Controller {
                 counters::bump(Count::CardClick);
                 tracing::info!(stage, pid, "card icon clicked: the stage, with every window of the app");
                 m.show_app_everywhere(StageId(stage), pid, &obs)
+            }
+            StripEvent::CardMerged { stage, into } => {
+                counters::bump(Count::Drop);
+                tracing::info!(
+                    stage,
+                    into,
+                    number = m.stage_number(StageId(stage)),
+                    into_number = m.stage_number(StageId(into)),
+                    "card dropped on a card: the stages merge"
+                );
+                m.merge_stages(StageId(stage), StageId(into), &obs)
             }
             StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } => Vec::new(),
         };

@@ -169,6 +169,8 @@ pub const KEYS: &[KeyDef] = &[
         "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
     k("strip", "reorder", Kind::Bool, "true",
         "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
+    k("strip", "merge_on_drop", Kind::Bool, "true",
+        "Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used)."),
     k("strip", "show_active", Kind::Bool, "false", "Also show the active stage as a card (fixed order only; Apple never does)."),
     k("strip", "hide_while_desktop_shown", Kind::Bool, "false",
         "Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown."),
@@ -242,6 +244,8 @@ pub const KEYS: &[KeyDef] = &[
     k("reveal", "launch_reveal_ms", i(0, 60_000), "3000", "How long that launch showing lasts."),
     // [drag]
     k("drag", "threshold", f(0.0, 100.0), "5.0", "A press that moves farther than this (points, at least 5) drags the card; less is a click."),
+    k("drag", "merge_zone", f(0.0, 1.0), "0.5",
+        "With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards."),
     k("drag", "grow_distance", f(1.0, 3000.0), "260.0", "Past the strip, the dragged card grows to its window's size over this distance."),
     k("drag", "lifted_opacity", f(0.0, 1.0), "0.3", "Opacity of a card in the strip while it is dragged out."),
     k("drag", "ghost_opacity", f(0.0, 1.0), "0.92", "Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip."),
@@ -416,6 +420,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-3.toml"),
     include_str!("legacy/default-4.toml"),
     include_str!("legacy/default-5.toml"),
+    include_str!("legacy/default-6.toml"),
 ];
 
 #[cfg(test)]
