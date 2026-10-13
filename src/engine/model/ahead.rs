@@ -151,7 +151,10 @@ impl Model {
             };
             return key_of_recent(Some(space)).ok_or("the active app has no stage on the other Desktop");
         }
-        if facts.visible_here || self.windows.values().any(|w| w.meta.pid == pid && (w.sticky || self.is_shown_space(w.space))) {
+        if self.windows.values().any(|w| w.meta.pid == pid && w.sticky) {
+            return Err("the inactive app has a window on every Desktop: macOS activates it here");
+        }
+        if facts.visible_here || self.windows.values().any(|w| w.meta.pid == pid && self.is_shown_space(w.space)) {
             return Err("the inactive app has a window on the Desktop shown: macOS activates it here");
         }
         if let Some(answer) = ax_window.and_then(|id| self.resolve_standard(id)).filter(|id| mine(id)) {

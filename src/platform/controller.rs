@@ -1908,7 +1908,7 @@ impl Controller {
         tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
-        let (more, predicted) = self.settle_ahead(ob, after, Instant::now());
+        let (more, predicted) = self.settle_ahead(ob, list, after, Instant::now());
         actions.extend(more);
         // One batch and one strip snapshot for the arrival: the strip of the Desktop shown
         // takes over in its final order, never first with the stage left active.
