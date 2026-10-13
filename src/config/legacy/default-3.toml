@@ -1,0 +1,78 @@
+# Stage Manager configuration.
+#
+# macOS settings come first: "Show recent apps", "Show windows from an application",
+# "Click wallpaper to reveal desktop" and the rest are read live from
+# System Settings → Desktop & Dock. This file only adds what macOS lacks.
+# Changes are picked up automatically.
+
+[strip]
+# "native": Apple's slot-stable order (the stage you leave takes the clicked card's slot).
+# "fixed": creation order, matching the hotkey numbers.
+order = "native"
+# Also show the active stage as a card (fixed order only; Apple never shows it).
+show_active = false
+# Show each card's hotkey number.
+show_numbers = true
+# How often thumbnails refresh, in milliseconds (minimum 250).
+thumbnail_interval_ms = 1500
+
+[defaults]
+# What a new window does when no rule matches:
+#   "native"        Apple's Stage Manager: a window of an app already on the current stage
+#                   joins it; a window of an app that sits in another stage joins that stage
+#                   and brings it forward; a newly opened app gets a stage of its own
+#   "current"       join the active stage
+#   "new"           open a new stage and switch to it
+#   "stage:<name>"  join the named stage (created if missing)
+#   "float"         pin it: visible on every stage
+#   "ignore"        leave it unmanaged
+action = "native"
+# Where it goes: "as-is", "center", or "cascade" (offset from the front window).
+placement = "as-is"
+
+# Rules for new windows, checked in order; the first match wins. `app` is a bundle ID
+# (exact) or "*"; `title` is an optional regular expression. Leave out `action` or
+# `placement` to use the defaults above.
+#
+# [[rule]]
+# app = "com.example.chat"
+# action = "stage:Chat"
+#
+# [[rule]]
+# app = "com.example.terminal"
+# title = "^Scratch"
+# action = "float"
+# placement = "center"
+#
+# [[rule]]
+# app = "*"
+# placement = "cascade"
+
+[sugar]
+# Hold Shift to bring things here instead of going there: Shift while opening an app (Dock,
+# Finder, Spotlight Shift-Return, Launchpad) opens its window in the current stage; Shift on
+# a Dock click of an app in another stage brings its windows here; Shift-click on a card
+# brings the card's windows here. The app switcher (Cmd-Tab, Cmd-Shift-Tab) always switches.
+shift_brings_here = true
+
+[hotkeys]
+# Optional: everything works by mouse, Dock and Cmd-Tab; these are extras.
+# Modifiers: ctrl, alt (option), shift, cmd. "{n}" stands for the digits 1-9.
+# An empty string disables a hotkey.
+switch = "ctrl+alt+{n}"
+send = "ctrl+alt+shift+{n}"
+new_stage = "ctrl+alt+n"
+toggle_pin = "ctrl+alt+p"
+toggle_strip = "ctrl+alt+s"
+
+[stages]
+# Named stages created at launch, in this order (they take hotkey numbers 1, 2, ...)
+# and stay even when empty. For example:
+# names = ["Work", "Chat"]
+names = []
+# Windows are kept clear of the strip, as Apple's Stage Manager does: when a stage is
+# shown or a window opens over the strip, the window moves right just enough. A window
+# too wide for the room beside the strip is also made narrower (its height stays); quit
+# gives every window back its exact earlier size. false only moves windows, never
+# resizes them (a too-wide window then stays where it is and the strip hides behind it).
+fit_windows = true

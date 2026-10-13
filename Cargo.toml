@@ -1,0 +1,59 @@
+[package]
+name = "stage-manager"
+version = "1.0.0"
+edition = "2024"
+description = "A floating-window stage manager for macOS"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "stage-manager"
+path = "src/main.rs"
+
+[lib]
+name = "stage_manager"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+# Settings writes keep the file's comments and layout.
+toml_edit = "0.25"
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-application-services = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-quartz-core = "0.3"
+# The wallpaper corner patch: the desktop picture's frames and metadata, read from its file.
+objc2-image-io = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
+# SMAppService: launch at login.
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+libc = "0.2"
+# Only with the `debug-render` feature: renders the strip offscreen (no screen access needed).
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
+    "std", "MTLDevice", "MTLTexture", "MTLResource", "MTLPixelFormat", "MTLTypes", "MTLAllocation",
+] }
+
+[features]
+# `strip-demo` with STAGE_MANAGER_DEMO_RENDER=<file> draws the strip into <file> (raw BGRA)
+# with Core Animation's offscreen renderer and quits: a visual check that works while the
+# screen is locked or without Screen Recording.
+debug-render = ["dep:objc2-metal", "objc2-quartz-core/CARenderer", "objc2-quartz-core/objc2-metal"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+debug = 1

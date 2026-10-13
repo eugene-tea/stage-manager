@@ -1,0 +1,733 @@
+//! The guardian's watch, decided without touching anything: which windows it still waits for
+//! after its recovery scan, and when each one may be let go.
+//!
+//! The guardian waits for the windows the crashed app had registered ([`Registered`]: parked,
+//! or fitted clear of the strip) and for any allowed app's window it finds in the park zone,
+//! on any Space. A waiting window is let go only once the guardian has **seen it back** or
+//! seen it **gone** ([`Release`]):
+//!
+//! - read through Accessibility at a frame outside the park zone (the app's own frame; the
+//!   platform reads it, after moving the window back when it had to);
+//! - or listed by the window server **on screen** outside the park zone in settled passes at
+//!   least [`SEEN_APART`] apart, with no other sighting in between;
+//! - or not listed at all (on any Space: closed, or its app quit) in every pass for
+//!   [`GONE_AFTER`].
+//!
+//! A pass whose listing shows no window on screen at all (the window server answered nothing,
+//! or the session is not the console's: fast user switching, the login window, a sleeping
+//! display) is **blind**: it is no observation, so nothing is let go and every streak starts
+//! again after it. `GONE_AFTER` counts only passes that listed something.
+//!
+//! The window server's list alone is never final. While a Space slides in it may list a
+//! window at an in-between frame, or not at all, for a pass (hands-free Desktop run 2, 10-12:
+//! the guardian took one such listing of a window still parked on Desktop 2 for "back" and
+//! ended; only the next launch brought it back). So the list counts as settled only
+//! [`LIST_SETTLE`] after the last change in the set of windows on screen (the controller's
+//! rule after a Space change), and an outside-the-park-zone sighting off screen (a Desktop
+//! not shown) never counts.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::time::{Duration, Instant};
+
+use super::geometry::Rect;
+use super::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded, safe_restore};
+use super::stage_area::same_frame;
+
+/// The window list counts as settled this long after the set of windows on screen changed.
+pub const LIST_SETTLE: Duration = Duration::from_secs(1);
+
+/// Two settled on-screen sightings outside the park zone at least this far apart see a
+/// window back.
+pub const SEEN_APART: Duration = Duration::from_secs(1);
+
+/// A window not listed on any Space in every pass for this long is gone.
+pub const GONE_AFTER: Duration = Duration::from_secs(3);
+
+/// How a waiting window looked in the latest pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Look {
+    /// Listed in the park zone; `shown` when on screen (its Desktop shows).
+    Parked {
+        /// On screen.
+        shown: bool,
+        /// The listed frame.
+        frame: Rect,
+    },
+    /// Listed on screen outside the park zone while the list has not settled (a Space may be
+    /// sliding in): not trusted.
+    OutUnsettled {
+        /// The listed frame.
+        frame: Rect,
+    },
+    /// Listed on screen outside the park zone, settled: seen back once that holds for
+    /// [`SEEN_APART`].
+    OutShown {
+        /// The listed frame.
+        frame: Rect,
+    },
+    /// Listed outside the park zone on a Desktop not shown: not trusted, waits for its
+    /// Desktop.
+    OutAway {
+        /// The listed frame.
+        frame: Rect,
+    },
+    /// Not listed on any Space.
+    Missing,
+}
+
+impl Look {
+    /// On screen now (Accessibility can reach it).
+    pub fn shown(&self) -> bool {
+        match self {
+            Self::Parked { shown, .. } => *shown,
+            Self::OutUnsettled { .. } | Self::OutShown { .. } => true,
+            Self::OutAway { .. } | Self::Missing => false,
+        }
+    }
+
+    /// The same kind of look (frames aside): a change is logged.
+    fn same_kind(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Parked { shown: a, .. }, Self::Parked { shown: b, .. }) => a == b,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+}
+
+impl fmt::Display for Look {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parked { shown: false, frame } => write!(f, "parked at {frame} on a Desktop not shown"),
+            Self::Parked { shown: true, frame } => write!(f, "parked at {frame}, its Desktop shows"),
+            Self::OutUnsettled { frame } => {
+                write!(f, "listed on screen at {frame} while the windows on screen change (not trusted yet)")
+            }
+            Self::OutShown { frame } => write!(f, "listed on screen at {frame}, outside the park zone (checking it holds)"),
+            Self::OutAway { frame } => write!(f, "listed at {frame} on a Desktop not shown (not trusted)"),
+            Self::Missing => write!(f, "not listed on any Desktop"),
+        }
+    }
+}
+
+/// Why a window was let go.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Release {
+    /// The guardian moved it back and read it back through Accessibility at `frame`.
+    BroughtBack {
+        /// The frame read back.
+        frame: Rect,
+    },
+    /// Read through Accessibility outside the park zone (already back).
+    ReadBack {
+        /// The frame read.
+        frame: Rect,
+    },
+    /// Listed on screen outside the park zone in settled passes `apart` apart.
+    SeenBack {
+        /// The latest frame listed.
+        frame: Rect,
+        /// Time between the first and the latest sighting.
+        apart: Duration,
+    },
+    /// Not listed on any Space for `missing`.
+    Gone {
+        /// How long it was missing.
+        missing: Duration,
+    },
+}
+
+impl fmt::Display for Release {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BroughtBack { frame } => write!(f, "brought back; read back through Accessibility at {frame}"),
+            Self::ReadBack { frame } => write!(f, "read through Accessibility at {frame}, outside the park zone"),
+            Self::SeenBack { frame, apart } => write!(
+                f,
+                "seen on screen outside the park zone (at {frame}) in settled passes {:.1} s apart",
+                apart.as_secs_f64()
+            ),
+            Self::Gone { missing } => write!(
+                f,
+                "gone from the window list on every Desktop for {:.1} s (closed, or its app quit)",
+                missing.as_secs_f64()
+            ),
+        }
+    }
+}
+
+/// What a pass changed, for the log.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Event {
+    /// The set of windows on screen changed (a Space change, a window opened or closed):
+    /// listings are not trusted for [`LIST_SETTLE`].
+    ScreenChanged {
+        /// Windows on screen now.
+        on_screen: usize,
+    },
+    /// A window joined the watch.
+    Joined {
+        /// `CGWindowID`.
+        id: u32,
+        /// The owning process.
+        pid: i32,
+        /// Registered by the app (else found in the park zone).
+        registered: bool,
+    },
+    /// A waiting window looks different.
+    Looks {
+        /// `CGWindowID`.
+        id: u32,
+        /// The owning process.
+        pid: i32,
+        /// How it looks now.
+        look: Look,
+    },
+    /// The listing showed no window on screen (or nothing at all): the pass observed nothing.
+    /// Sent once per blind stretch.
+    Blind {
+        /// Windows listed (on any Space).
+        listed: usize,
+    },
+    /// A window was let go.
+    LetGo {
+        /// `CGWindowID`.
+        id: u32,
+        /// The owning process.
+        pid: i32,
+        /// Why.
+        why: Release,
+    },
+}
+
+/// A window the guardian waits for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Waiting {
+    /// `CGWindowID`.
+    pub id: u32,
+    /// The owning process.
+    pub pid: i32,
+    /// The registered restore frame (as written; [`Watch::restore_frame`] makes it safe);
+    /// `None` for a window found in the park zone (the recovery scan decides).
+    pub registered: Option<Rect>,
+    /// A window we had fitted clear of the strip ([`Registered::fitted`]): back only at its
+    /// registered pre-fit frame, or once the guardian has moved it there (L3).
+    pub fitted: bool,
+    /// How it looked in the latest pass (`None` before the first).
+    pub look: Option<Look>,
+    /// The first settled on-screen sighting outside the park zone of the current streak.
+    out_since: Option<Instant>,
+    /// The first pass of the current streak it was not listed in.
+    missing_since: Option<Instant>,
+}
+
+/// The watch: every waiting window and the window list's settle state.
+#[derive(Debug, Clone, Default)]
+pub struct Watch {
+    registered: Vec<Registered>,
+    waiting: BTreeMap<u32, Waiting>,
+    on_screen: Option<BTreeSet<u32>>,
+    changed_at: Option<Instant>,
+    blind: bool,
+}
+
+impl Watch {
+    /// A watch over the app's registered windows; others join when found in the park zone.
+    pub fn new(registered: &[Registered]) -> Self {
+        let mut w = Self { registered: registered.to_vec(), ..Self::default() };
+        for r in registered {
+            w.waiting.insert(r.id, Waiting { fitted: r.fitted, ..waiting(r.id, r.pid, Some(r.restore)) });
+        }
+        w
+    }
+
+    /// True when no window waits.
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty()
+    }
+
+    /// Every waiting window, by id.
+    pub fn waiting(&self) -> impl Iterator<Item = &Waiting> {
+        self.waiting.values()
+    }
+
+    /// Waiting windows on screen in the latest pass (Accessibility can reach them).
+    pub fn shown(&self) -> Vec<Waiting> {
+        self.waiting.values().filter(|w| w.look.is_some_and(|l| l.shown())).cloned().collect()
+    }
+
+    /// Where a waiting window goes back: its registered frame made safe; `None` for one found
+    /// in the park zone.
+    pub fn restore_frame(w: &Waiting, displays: &ScanDisplays) -> Option<Rect> {
+        w.registered.map(|r| safe_restore(r, displays))
+    }
+
+    /// True when the window list counts as settled at `now`.
+    pub fn settled(&self, now: Instant) -> bool {
+        self.changed_at.is_none_or(|t| now.duration_since(t) >= LIST_SETTLE)
+    }
+
+    /// One look at the window server's list (layer-0 windows on every Space) at `now`.
+    pub fn observe(&mut self, now: Instant, listed: &[Listed], displays: &ScanDisplays) -> Vec<Event> {
+        let mut events = Vec::new();
+        let on_screen: BTreeSet<u32> = listed.iter().filter(|l| l.onscreen).map(|l| l.id).collect();
+        if on_screen.is_empty() {
+            // No observation: no streak may run on through it, and whatever is listed next
+            // counts as a change (it settles first).
+            if !self.blind {
+                events.push(Event::Blind { listed: listed.len() });
+            }
+            self.blind = true;
+            self.on_screen = None;
+            for w in self.waiting.values_mut() {
+                w.missing_since = None;
+                w.out_since = None;
+            }
+            return events;
+        }
+        self.blind = false;
+        if self.on_screen.as_ref() != Some(&on_screen) {
+            // The first pass counts as a change too: nothing is known about what came before.
+            self.changed_at = Some(now);
+            events.push(Event::ScreenChanged { on_screen: on_screen.len() });
+            self.on_screen = Some(on_screen);
+        }
+        let settled = self.settled(now);
+        for l in listed {
+            if self.waiting.contains_key(&l.id) {
+                continue;
+            }
+            let reg = self.registered.iter().find(|r| r.id == l.id);
+            // A window the app registered is its own, however small, sliver or not (L4).
+            let known = if reg.is_some() { Known::Registered } else { Known::Unknown };
+            if !is_stranded(l.bounds, displays, known) {
+                continue;
+            }
+            if reg.is_some() || l.allowed {
+                let fitted = reg.is_some_and(|r| r.fitted);
+                self.waiting.insert(l.id, Waiting { fitted, ..waiting(l.id, l.pid, reg.map(|r| r.restore)) });
+                events.push(Event::Joined { id: l.id, pid: l.pid, registered: reg.is_some() });
+            }
+        }
+        let mut done = Vec::new();
+        for w in self.waiting.values_mut() {
+            let look = match listed.iter().find(|l| l.id == w.id) {
+                None => {
+                    w.out_since = None;
+                    let since = *w.missing_since.get_or_insert(now);
+                    let missing = now.duration_since(since);
+                    if missing >= GONE_AFTER {
+                        done.push((w.id, w.pid, Release::Gone { missing }));
+                    }
+                    Look::Missing
+                }
+                Some(l) => {
+                    w.missing_since = None;
+                    if is_stranded(l.bounds, displays, w.known()) {
+                        w.out_since = None;
+                        Look::Parked { shown: l.onscreen, frame: l.bounds }
+                    } else if !l.onscreen {
+                        w.out_since = None;
+                        Look::OutAway { frame: l.bounds }
+                    } else if !settled {
+                        w.out_since = None;
+                        Look::OutUnsettled { frame: l.bounds }
+                    } else if w.fitted && !at_pre_fit(w, l.bounds, displays) {
+                        // Shown, but still at the fitted frame: the guardian moves it back.
+                        w.out_since = None;
+                        Look::OutShown { frame: l.bounds }
+                    } else {
+                        let since = *w.out_since.get_or_insert(now);
+                        let apart = now.duration_since(since);
+                        if apart >= SEEN_APART {
+                            done.push((w.id, w.pid, Release::SeenBack { frame: l.bounds, apart }));
+                        }
+                        Look::OutShown { frame: l.bounds }
+                    }
+                }
+            };
+            if !w.look.is_some_and(|old| old.same_kind(&look)) {
+                events.push(Event::Looks { id: w.id, pid: w.pid, look });
+            }
+            w.look = Some(look);
+        }
+        for (id, pid, why) in done {
+            self.waiting.remove(&id);
+            events.push(Event::LetGo { id, pid, why });
+        }
+        events
+    }
+
+    /// Window `id`'s frame read through Accessibility (after moving it, when `moved`): let go
+    /// when outside the park zone. A frame in the park zone changes nothing.
+    /// A fitted window read away from its pre-fit frame is let go only after the guardian
+    /// moved it (`moved`): never a fight with the user over a frame macOS adjusted.
+    pub fn read_through_ax(&mut self, id: u32, frame: Rect, moved: bool, displays: &ScanDisplays) -> Option<Event> {
+        let known = self.waiting.get(&id).map_or(Known::Unknown, Waiting::known);
+        if is_stranded(frame, displays, known) {
+            return None;
+        }
+        if !moved && self.waiting.get(&id).is_some_and(|w| w.fitted && !at_pre_fit(w, frame, displays)) {
+            return None;
+        }
+        let w = self.waiting.remove(&id)?;
+        let why = if moved { Release::BroughtBack { frame } } else { Release::ReadBack { frame } };
+        Some(Event::LetGo { id, pid: w.pid, why })
+    }
+}
+
+impl Waiting {
+    /// What the park test knows of it: a window the app registered is its own (any size,
+    /// slivers count), one found in the park zone is any app's.
+    pub fn known(&self) -> Known {
+        if self.registered.is_some() { Known::Registered } else { Known::Unknown }
+    }
+}
+
+fn waiting(id: u32, pid: i32, registered: Option<Rect>) -> Waiting {
+    Waiting { id, pid, registered, fitted: false, look: None, out_since: None, missing_since: None }
+}
+
+/// True when a waiting window sits at its registered frame (as registered, or as the
+/// guardian would put it back).
+fn at_pre_fit(w: &Waiting, frame: Rect, displays: &ScanDisplays) -> bool {
+    w.registered.is_some_and(|r| same_frame(frame, r) || same_frame(frame, safe_restore(r, displays)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::geometry::Size;
+    use crate::engine::park::park_frame;
+
+    const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+    const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);
+    const RESTORE: Rect = Rect::new(300.0, 218.0, 600.0, 392.0);
+    /// Another window on Desktop 2 (never parked): its arrival on screen is the Space change.
+    const OTHER: u32 = 50;
+
+    fn displays() -> ScanDisplays {
+        ScanDisplays::new(MAIN, VISIBLE, vec![], [])
+    }
+
+    fn parked() -> Rect {
+        park_frame(Size::new(600.0, 392.0), MAIN)
+    }
+
+    fn reg() -> Vec<Registered> {
+        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false }]
+    }
+
+    fn at(id: u32, bounds: Rect, onscreen: bool) -> Listed {
+        Listed { id, pid: 7, bounds, onscreen, allowed: false }
+    }
+
+    /// A pass at `t0 + ms`, returning whether window 1 was let go and why.
+    fn pass(w: &mut Watch, t0: Instant, ms: u64, listed: &[Listed]) -> Option<Release> {
+        w.observe(t0 + Duration::from_millis(ms), listed, &displays()).into_iter().find_map(|e| match e {
+            Event::LetGo { id: 1, why, .. } => Some(why),
+            _ => None,
+        })
+    }
+
+    /// Desktop 1 shows: window 1 parked on Desktop 2 (off screen), window 9 on screen.
+    fn on_desktop_1() -> Vec<Listed> {
+        vec![at(1, parked(), false), at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), false), at(9, RESTORE, true)]
+    }
+
+    /// Desktop 2 shows, window 1 at `frame` on screen.
+    fn on_desktop_2(frame: Rect) -> Vec<Listed> {
+        vec![at(1, frame, true), at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), true), at(9, RESTORE, false)]
+    }
+
+    /// 6X, the owner's log: helper apps' invisible windows (1×1 at 1280,720 seen on the
+    /// built-in display, 64×64 ones) counted as parked; the guardian would have waited for
+    /// them. Only a real parked window of an allowed app joins.
+    #[test]
+    fn helper_windows_never_join_the_watch() {
+        let laptop = Rect::new(0.0, 0.0, 1800.0, 1169.0);
+        let d = ScanDisplays::new(laptop, Rect::new(0.0, 39.0, 1800.0, 1130.0), vec![], []);
+        let mut w = Watch::new(&[]);
+        let allowed = |id, bounds, onscreen| Listed { id, pid: 8, bounds, onscreen, allowed: true };
+        let listed = [
+            allowed(20, Rect::new(1280.0, 720.0, 1.0, 1.0), false),
+            allowed(21, Rect::new(1700.0, 1100.0, 64.0, 64.0), false),
+            allowed(22, Rect::new(1799.0, 1168.0, 1.0, 1.0), false),
+            allowed(23, Rect::new(1799.0, 1137.0, 1051.0, 906.0), false),
+            allowed(24, Rect::new(200.0, 100.0, 800.0, 600.0), true),
+        ];
+        let events = w.observe(Instant::now(), &listed, &d);
+        let joined: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Joined { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, vec![23], "only the real parked window");
+    }
+
+    /// The review of 6X, L4: a small window the app registered (a 40 pt palette it parked)
+    /// joins and waits like any other, while another app's window that small never joins.
+    #[test]
+    fn a_small_registered_window_is_never_lost() {
+        let d = displays();
+        let small = Rect::new(2559.0, 1408.0, 40.0, 30.0);
+        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false };
+        let mut w = Watch::new(&[reg]);
+        let listed = [
+            Listed { id: 7, pid: 8, bounds: small, onscreen: false, allowed: true },
+            Listed { id: 9, pid: 8, bounds: small, onscreen: false, allowed: true },
+            at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), true),
+        ];
+        let t0 = Instant::now();
+        w.observe(t0, &listed, &d);
+        let ids: Vec<u32> = w.waiting().map(|w| w.id).collect();
+        assert_eq!(ids, vec![7], "the registered one waits, the stranger's does not join");
+        assert_eq!(w.waiting().next().and_then(|w| w.look), Some(Look::Parked { shown: false, frame: small }));
+        // Read through Accessibility still in the corner: not let go.
+        assert_eq!(w.read_through_ax(7, small, true, &d), None);
+        assert!(w.read_through_ax(7, Rect::new(300.0, 300.0, 40.0, 30.0), true, &d).is_some());
+    }
+
+    #[test]
+    fn a_parked_window_on_a_desktop_not_shown_waits() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        for ms in (0..20_000).step_by(500) {
+            assert_eq!(pass(&mut w, t0, ms, &on_desktop_1()), None);
+        }
+        assert!(!w.is_empty());
+        assert!(w.shown().is_empty(), "not reachable while its Desktop is not shown");
+    }
+
+    #[test]
+    fn the_in_between_frame_of_a_slide_never_ends_the_watch() {
+        // The 10-12 run: Desktop 2 slides in; one listing has the parked window at an
+        // in-between frame outside the park zone, then it is listed parked again.
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        assert_eq!(pass(&mut w, t0, 0, &on_desktop_1()), None);
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_1()), None);
+        let sliding = Rect::new(1279.0, 1408.0, 600.0, 392.0);
+        assert_eq!(pass(&mut w, t0, 2000, &on_desktop_2(sliding)), None, "the in-between frame is not trusted");
+        assert!(matches!(w.waiting().next().and_then(|x| x.look), Some(Look::OutUnsettled { .. })));
+        assert_eq!(w.shown().len(), 1, "but the guardian may reach it now");
+        assert_eq!(pass(&mut w, t0, 2500, &on_desktop_2(parked())), None);
+        for ms in (3000..10_000).step_by(500) {
+            assert_eq!(pass(&mut w, t0, ms, &on_desktop_2(parked())), None, "still parked at {ms} ms");
+        }
+    }
+
+    #[test]
+    fn an_in_between_frame_held_through_a_slide_is_not_seen_back_before_the_list_settles() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        pass(&mut w, t0, 0, &on_desktop_1());
+        pass(&mut w, t0, 1500, &on_desktop_1());
+        let sliding = Rect::new(1279.0, 1408.0, 600.0, 392.0);
+        // Listed outside the park zone for 0.9 s right after the change: still unsettled.
+        assert_eq!(pass(&mut w, t0, 2000, &on_desktop_2(sliding)), None);
+        assert_eq!(pass(&mut w, t0, 2500, &on_desktop_2(sliding)), None);
+        assert_eq!(pass(&mut w, t0, 2900, &on_desktop_2(sliding)), None);
+    }
+
+    #[test]
+    fn missing_for_one_pass_never_ends_the_watch() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        pass(&mut w, t0, 0, &on_desktop_1());
+        let gone_for_a_pass: Vec<Listed> = on_desktop_2(parked()).into_iter().filter(|l| l.id != 1).collect();
+        assert_eq!(pass(&mut w, t0, 1500, &gone_for_a_pass), None);
+        assert!(matches!(w.waiting().next().and_then(|x| x.look), Some(Look::Missing)));
+        assert_eq!(pass(&mut w, t0, 2000, &on_desktop_2(parked())), None);
+        // Missing again later: the count starts over.
+        assert_eq!(pass(&mut w, t0, 2500, &gone_for_a_pass), None);
+        assert_eq!(pass(&mut w, t0, 5000, &on_desktop_2(parked())), None);
+        assert_eq!(pass(&mut w, t0, 5500, &gone_for_a_pass), None);
+        assert!(!w.is_empty());
+    }
+
+    #[test]
+    fn missing_in_every_pass_for_three_seconds_is_gone() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        let none: Vec<Listed> = on_desktop_1().into_iter().filter(|l| l.id != 1).collect();
+        for ms in (0..3000).step_by(500) {
+            assert_eq!(pass(&mut w, t0, ms, &none), None, "{ms} ms");
+        }
+        assert!(matches!(pass(&mut w, t0, 3000, &none), Some(Release::Gone { .. })));
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn seen_back_takes_two_settled_passes_a_second_apart() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        pass(&mut w, t0, 0, &on_desktop_1());
+        pass(&mut w, t0, 1500, &on_desktop_1());
+        // Desktop 2 shows, the window already back (someone moved it): the list settles 1 s
+        // after the change, then the sighting must hold for 1 s.
+        assert_eq!(pass(&mut w, t0, 2000, &on_desktop_2(RESTORE)), None);
+        assert_eq!(pass(&mut w, t0, 2500, &on_desktop_2(RESTORE)), None);
+        assert_eq!(pass(&mut w, t0, 3000, &on_desktop_2(RESTORE)), None, "settled: the first sighting");
+        assert_eq!(pass(&mut w, t0, 3500, &on_desktop_2(RESTORE)), None);
+        assert!(matches!(pass(&mut w, t0, 4000, &on_desktop_2(RESTORE)), Some(Release::SeenBack { .. })));
+    }
+
+    #[test]
+    fn a_parked_sighting_between_starts_the_count_over() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        pass(&mut w, t0, 0, &on_desktop_2(RESTORE));
+        assert_eq!(pass(&mut w, t0, 1000, &on_desktop_2(RESTORE)), None);
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_2(parked())), None);
+        assert_eq!(pass(&mut w, t0, 2000, &on_desktop_2(RESTORE)), None);
+        assert_eq!(pass(&mut w, t0, 2500, &on_desktop_2(RESTORE)), None);
+        assert!(pass(&mut w, t0, 3000, &on_desktop_2(RESTORE)).is_some());
+    }
+
+    #[test]
+    fn a_change_on_screen_starts_the_count_over() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        pass(&mut w, t0, 0, &on_desktop_2(RESTORE));
+        assert_eq!(pass(&mut w, t0, 1000, &on_desktop_2(RESTORE)), None);
+        let mut more = on_desktop_2(RESTORE);
+        more.push(at(77, Rect::new(10.0, 40.0, 100.0, 100.0), true));
+        assert_eq!(pass(&mut w, t0, 1500, &more), None, "a window opened: the list is not settled");
+        assert_eq!(pass(&mut w, t0, 2500, &more), None, "settled again: a new first sighting");
+        assert!(pass(&mut w, t0, 3500, &more).is_some());
+    }
+
+    #[test]
+    fn outside_the_park_zone_on_a_desktop_not_shown_never_counts() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        let away = vec![at(1, RESTORE, false), at(9, Rect::new(0.0, 40.0, 100.0, 100.0), true)];
+        for ms in (0..10_000).step_by(500) {
+            assert_eq!(pass(&mut w, t0, ms, &away), None);
+        }
+        assert!(matches!(w.waiting().next().and_then(|x| x.look), Some(Look::OutAway { .. })));
+    }
+
+    #[test]
+    fn accessibility_outside_the_park_zone_lets_go_at_once() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        pass(&mut w, t0, 0, &on_desktop_2(parked()));
+        assert_eq!(w.read_through_ax(1, parked(), false, &displays()), None, "still parked");
+        assert!(!w.is_empty());
+        let e = w.read_through_ax(1, RESTORE, true, &displays());
+        assert_eq!(e, Some(Event::LetGo { id: 1, pid: 7, why: Release::BroughtBack { frame: RESTORE } }));
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn unregistered_park_zone_windows_follow_the_same_rule() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&[]);
+        let mut allowed = at(2, parked(), false);
+        allowed.allowed = true;
+        let not_allowed = at(3, parked(), false);
+        let ev = w.observe(t0, &[allowed, not_allowed, at(9, RESTORE, true)], &displays());
+        assert!(ev.contains(&Event::Joined { id: 2, pid: 7, registered: false }));
+        assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())), None);
+        // Its Desktop slides in at an in-between frame: not let go.
+        let sliding = Listed { bounds: Rect::new(1279.0, 1408.0, 600.0, 392.0), onscreen: true, ..allowed };
+        let ev = w.observe(t0 + Duration::from_millis(500), &[sliding], &displays());
+        assert!(!ev.iter().any(|e| matches!(e, Event::LetGo { .. })));
+        let back = Listed { bounds: RESTORE, ..sliding };
+        for ms in [1500, 2000] {
+            let ev = w.observe(t0 + Duration::from_millis(ms), &[back], &displays());
+            assert!(!ev.iter().any(|e| matches!(e, Event::LetGo { .. })), "{ms} ms");
+        }
+        let ev = w.observe(t0 + Duration::from_millis(2500), &[back], &displays());
+        assert!(ev.iter().any(|e| matches!(e, Event::LetGo { id: 2, why: Release::SeenBack { .. }, .. })));
+    }
+
+    /// The review's S3: three (or thirty) empty listings in a row (another user's session, the
+    /// login window) are no observation; a window is gone only after `GONE_AFTER` of passes
+    /// that listed something.
+    #[test]
+    fn empty_listings_never_let_a_window_go() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        assert_eq!(pass(&mut w, t0, 0, &on_desktop_1()), None);
+        let mut blind = 0;
+        for ms in (500..20_000).step_by(500) {
+            let ev = w.observe(t0 + Duration::from_millis(ms), &[], &displays());
+            blind += ev.iter().filter(|e| matches!(e, Event::Blind { .. })).count();
+            assert!(!ev.iter().any(|e| matches!(e, Event::LetGo { .. })), "{ms} ms");
+        }
+        assert_eq!(blind, 1, "reported once per blind stretch");
+        // Windows listed, none on screen (the login window): blind too.
+        let off: Vec<Listed> = on_desktop_1().into_iter().map(|l| Listed { onscreen: false, ..l }).collect();
+        assert_eq!(pass(&mut w, t0, 20_000, &off), None);
+        // Back, and window 1 really is gone now: only after GONE_AFTER of real passes.
+        let without = vec![at(9, RESTORE, true)];
+        assert_eq!(pass(&mut w, t0, 20_500, &without), None, "the blind stretch does not count");
+        assert_eq!(pass(&mut w, t0, 22_500, &without), None);
+        assert!(matches!(pass(&mut w, t0, 23_500, &without), Some(Release::Gone { .. })));
+    }
+
+    /// The review's S1 for the guardian: with a Dock at the bottom macOS keeps the parked
+    /// window above it; an allowed app's window there joins the watch and is never "seen
+    /// back" there.
+    #[test]
+    fn a_window_parked_above_a_bottom_dock_joins_and_waits() {
+        let d = ScanDisplays::new(MAIN, Rect::new(0.0, 30.0, 2560.0, 1334.0), vec![], []);
+        let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
+        let t0 = Instant::now();
+        let mut w = Watch::new(&[]);
+        let list = [Listed { allowed: true, ..at(2, above_dock, true) }, at(9, RESTORE, true)];
+        for ms in (0..10_000).step_by(500) {
+            let ev = w.observe(t0 + Duration::from_millis(ms), &list, &d);
+            assert!(!ev.iter().any(|e| matches!(e, Event::LetGo { .. })), "{ms} ms");
+        }
+        assert!(matches!(w.waiting().next().and_then(|x| x.look), Some(Look::Parked { shown: true, .. })));
+    }
+
+    /// L3: a window we had fitted clear of the strip, on a Desktop not shown at the crash, is
+    /// back only at its pre-fit frame, or once the guardian has moved it there.
+    #[test]
+    fn a_fitted_window_waits_for_its_pre_fit_frame() {
+        let fitted_at = Rect::new(216.0, 218.0, 600.0, 392.0);
+        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true }];
+        let t0 = Instant::now();
+        let mut w = Watch::new(&r);
+        pass(&mut w, t0, 0, &on_desktop_1());
+        for ms in (1500..8000).step_by(500) {
+            assert_eq!(pass(&mut w, t0, ms, &on_desktop_2(fitted_at)), None, "{ms} ms: still fitted");
+        }
+        assert_eq!(w.shown().len(), 1, "the guardian reaches it");
+        assert_eq!(w.read_through_ax(1, fitted_at, false, &displays()), None, "read at the fitted frame");
+        let e = w.read_through_ax(1, Rect::new(301.0, 218.0, 600.0, 390.0), true, &displays());
+        assert!(matches!(e, Some(Event::LetGo { why: Release::BroughtBack { .. }, .. })), "moved once: let go, macOS's adjustment accepted");
+        // Seen at its pre-fit frame (the user put it back): let go too.
+        let mut w = Watch::new(&r);
+        pass(&mut w, t0, 0, &on_desktop_1());
+        pass(&mut w, t0, 1500, &on_desktop_2(RESTORE));
+        pass(&mut w, t0, 2500, &on_desktop_2(RESTORE));
+        assert!(matches!(pass(&mut w, t0, 3500, &on_desktop_2(RESTORE)), Some(Release::SeenBack { .. })));
+    }
+
+    #[test]
+    fn registered_restore_frames_are_made_safe() {
+        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false }];
+        let w = Watch::new(&r);
+        let f = w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())).unwrap_or_default();
+        assert!(!is_stranded(f, &displays(), Known::Registered) && VISIBLE.contains_rect(&f), "{f:?}");
+    }
+
+    #[test]
+    fn every_change_of_look_is_reported_once() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        let looks = |ev: Vec<Event>| ev.into_iter().filter(|e| matches!(e, Event::Looks { .. })).count();
+        assert_eq!(looks(w.observe(t0, &on_desktop_1(), &displays())), 1);
+        assert_eq!(looks(w.observe(t0 + Duration::from_millis(500), &on_desktop_1(), &displays())), 0);
+        assert_eq!(looks(w.observe(t0 + Duration::from_millis(1000), &on_desktop_2(parked()), &displays())), 1);
+    }
+}

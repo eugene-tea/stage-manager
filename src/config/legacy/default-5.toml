@@ -1,0 +1,340 @@
+# Stage Manager configuration.
+#
+# Out of the box Stage Manager looks and behaves like Apple's Stage Manager. Every key below
+# is commented out and shows its built-in default; uncomment a line to change it. Settings
+# macOS already has ("Show recent apps", "Show windows from an application", "Click
+# wallpaper to reveal desktop") are read live from System Settings > Desktop & Dock and are
+# not repeated here. Saved changes apply within a second.
+#
+# `stage-manager config --explain <section.key>` explains one key;
+# `stage-manager config --print-defaults` prints this file.
+
+[strip]
+# The strip of recent stages on the left. Lengths are points.
+#
+# Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order.
+# order = "native"
+#
+# Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows.
+# level = "below_windows"
+#
+# Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used).
+# reorder = true
+#
+# Also show the active stage as a card (fixed order only; Apple never does).
+# show_active = false
+#
+# Draw each card's stage number (for the hotkeys). Apple shows none.
+# show_numbers = false
+#
+# Draw stage names under cards. Apple shows none.
+# show_names = false
+#
+# Width of the strip column: the panel, and the area a window must cover to hide the strip.
+# width = 200.0
+#
+# Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt).
+# capacity = 0
+#
+# With capacity = 0: room per card, in points of visible height.
+# capacity_pitch = 190.0
+#
+# With capacity = 0: visible height kept free above and below the cards.
+# capacity_margin = 60.0
+#
+# With capacity = 0: never fewer cards than this.
+# capacity_min = 3
+#
+# With capacity = 0: never more cards than this.
+# capacity_max = 9
+#
+# Multiplies every strip length (cards, gaps, icons, width). Apple: 1.
+# scale = 1.0
+#
+# Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not.
+# scale_to_display = false
+#
+# How often thumbnails are refreshed, in milliseconds.
+# thumbnail_interval_ms = 1500
+#
+# Thumbnails are captured at this multiple of their drawn size.
+# thumbnail_resolution = 2.0
+
+[cards]
+# Each card is its stage's windows drawn small and turned in perspective, as Apple does:
+# every window is scaled by one factor (`full_height` over the screen's visible height),
+# turned about its left edge, and seen from a point at the screen's vertical middle.
+#
+# Left edge of every card, from the screen's left edge.
+# x = 15.0
+#
+# A window as tall as the visible screen becomes a card this tall; every window gets the same scale.
+# full_height = 161.0
+#
+# Small windows are drawn at least this tall.
+# min_height = 97.0
+#
+# Widest card before the turn; 0 = as wide as a card of the whole screen.
+# max_width = 0.0
+#
+# Space between cards. The column is centered on the visible screen.
+# gap = 29.5
+#
+# Turn of each card in degrees; "auto" is Apple's for the screen (44.2 at 1800 pt wide, 47.9 at 2560).
+# tilt = "auto"
+#
+# Eye distance in points; "auto" is Apple's for the screen (1346 at 1800 pt wide, 2260 at 2560).
+# perspective = "auto"
+#
+# The eye's horizontal position, from the screen's left edge.
+# perspective_x = 15.0
+#
+# The eye's height, from the screen's vertical middle (down is positive).
+# perspective_y = 0.0
+#
+# Corner radius of each window's thumbnail.
+# corner_radius = 4.0
+#
+# Width of the thin edge around each thumbnail.
+# border_width = 0.5
+#
+# Color of that edge.
+# border_color = "#ffffff2e"
+#
+# Blur radius of each thumbnail's shadow.
+# shadow_radius = 4.0
+#
+# Opacity of that shadow.
+# shadow_opacity = 0.4
+#
+# Horizontal offset of that shadow.
+# shadow_offset_x = 0.0
+#
+# Vertical offset of that shadow (down is positive).
+# shadow_offset_y = 2.0
+#
+# Color of that shadow.
+# shadow_color = "#000000"
+#
+# Most windows drawn on one card.
+# max_windows = 3
+#
+# Windows of one app step this far right toward the front one (the one behind peeks out on the left).
+# stack_dx = 17.0
+#
+# Each window behind another of the same app is drawn this much smaller.
+# behind_scale = 1.0
+#
+# A second app's window sits this far right of the first.
+# second_app_dx = 68.0
+#
+# ...and this far up.
+# second_app_dy = 14.0
+#
+# The card under the pointer grows by this factor, about its center.
+# hover_scale = 1.06
+#
+# How long the hover growth takes, in milliseconds.
+# hover_ms = 200
+#
+# How long a new card takes to fade in, in milliseconds.
+# fade_ms = 200
+
+[icons]
+# The app icon over each card's bottom-left corner.
+#
+# Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons.
+# size = 38.0
+#
+# The icon's center, right of the card's bottom-left corner (its leftmost window's).
+# center_dx = 10.5
+#
+# The icon's center, below the card's bottom-left corner (up is negative).
+# center_dy = -10.5
+#
+# A second app's icon sits this far right of the first.
+# step = 36.0
+#
+# Most icons on one card.
+# max = 3
+#
+# Blur radius of the icon's shadow.
+# shadow_radius = 4.0
+#
+# Opacity of the icon's shadow.
+# shadow_opacity = 0.3
+#
+# Vertical offset of the icon's shadow (down is positive).
+# shadow_offset_y = 2.0
+
+[motion]
+# Cards and the strip move on one spring (Apple's, measured).
+#
+# Spring stiffness for cards moving and the strip sliding.
+# spring_stiffness = 240.0
+#
+# Spring damping (31 with stiffness 240 and mass 1: no overshoot).
+# spring_damping = 31.0
+#
+# Spring mass.
+# spring_mass = 1.0
+#
+# How far left the cards slide when the strip hides.
+# slide_distance = 286.0
+
+[reveal]
+# When the strip hides and comes back.
+#
+# The pointer within this many points of the left edge counts as at the edge.
+# edge_width = 2.0
+#
+# Resting at the left edge this long brings a hidden strip back.
+# delay_ms = 250
+#
+# A strip brought back hides again this long after the pointer leaves it.
+# hide_delay_ms = 500
+#
+# How often the pointer is checked while the strip is hidden.
+# poll_ms = 60
+#
+# Show a slim tab at the left edge while a window hides the strip (an extension).
+# edge_tab = false
+#
+# Show a covered strip for a moment at launch (an extension).
+# launch_reveal = false
+#
+# How long that launch showing lasts.
+# launch_reveal_ms = 3000
+
+[drag]
+# Dragging a card out of the strip or within it, and dragging a window onto the strip.
+#
+# A press that moves farther than this (points) drags the card; less is a click.
+# threshold = 4.0
+#
+# Past the strip, the dragged card grows to its window's size over this distance.
+# grow_distance = 260.0
+#
+# Opacity of a card in the strip while it is dragged out.
+# lifted_opacity = 0.3
+#
+# Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip.
+# ghost_opacity = 0.92
+
+[animation]
+# Stage switches move as Apple's do: incoming windows grow from their card, outgoing ones
+# shrink into their slot. Live windows cannot be scaled, so snapshots move in a
+# click-through layer above everything while the real windows jump behind them.
+#
+# Animate switches, the desktop reveal, Cmd-M and drops as Apple does. false: windows jump.
+# enabled = true
+#
+# Spring stiffness of the windows' motion (Apple's: 99 % by about 430 ms).
+# spring_stiffness = 240.0
+#
+# Spring damping (31 with stiffness 240 and mass 1: critically damped, no overshoot).
+# spring_damping = 31.0
+#
+# Spring mass.
+# spring_mass = 1.0
+#
+# An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 430 ms).
+# unpark_at = 0.99
+#
+# Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first.
+# cover_ms = 20
+#
+# Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius).
+# corner_radius = 0.0
+#
+# Blur radius of a moving snapshot's shadow.
+# shadow_radius = 24.0
+#
+# Opacity of that shadow.
+# shadow_opacity = 0.35
+#
+# Vertical offset of that shadow (down is positive).
+# shadow_offset_y = 10.0
+#
+# How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip.
+# snapshot_interval_ms = 2000
+#
+# Most memory kept for full-size window snapshots; the oldest go first.
+# snapshot_cache_mb = 512
+
+[windows]
+# How windows are treated.
+#
+# Keep placed windows clear of the strip: "move" right just enough, "narrow" also too-wide ones. Apple: "off".
+# fit = "off"
+#
+# With fit: room kept between the strip column and the windows.
+# fit_margin = 16.0
+#
+# Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock.
+# minimize_to_strip = true
+#
+# Focus changes this soon after we moved a window are taken as our own and never switch stages.
+# focus_echo_ms = 700
+
+[sugar]
+# Extras that ride on gestures you already make; invisible until used.
+#
+# Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here.
+# shift_brings_here = true
+#
+# A newly opened app's first window counts a Shift held this long before.
+# launch_window_ms = 10000
+#
+# An activation counts a Shift held this long before.
+# activation_window_ms = 2000
+
+[hotkeys]
+# Global hotkeys (an extension; Apple's Stage Manager has none). Off by default because
+# they take key combinations other apps may use. Modifiers: ctrl, alt (option), shift, cmd.
+#
+# Register the hotkeys below.
+# enabled = false
+#
+# Switch to stage N.
+# switch = "ctrl+alt+{n}"
+#
+# Send the focused window to stage N (N = count + 1 makes a stage).
+# send = "ctrl+alt+shift+{n}"
+#
+# Send the focused window to a new stage.
+# new_stage = "ctrl+alt+n"
+#
+# Pin or unpin the focused window (shown on every stage).
+# toggle_pin = "ctrl+alt+p"
+#
+# Show or hide the strip.
+# toggle_strip = "ctrl+alt+s"
+
+[stages]
+#
+# Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty.
+# names = []
+
+[defaults]
+# What a new window does when no [[rule]] matches.
+#
+# "native" is Apple's: a window joins its app's stage, a newly opened app gets its own.
+# action = "native"
+#
+# Where it goes: "as-is", "center", or "cascade" (offset from the front window).
+# placement = "as-is"
+
+# Rules for new windows, checked in order; the first match wins. `app` is a bundle ID
+# (exact) or "*"; `title` is an optional regular expression. Leave out `action` or
+# `placement` to use [defaults].
+#
+# [[rule]]
+# app = "com.example.chat"
+# action = "stage:Chat"
+#
+# [[rule]]
+# app = "com.example.terminal"
+# title = "^Scratch"
+# action = "float"
+# placement = "center"

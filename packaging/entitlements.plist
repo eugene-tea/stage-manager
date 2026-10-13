@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the Developer ID build (scripts/release.sh). None are
+  needed: Accessibility and Screen Recording are user approvals (TCC), not entitlements; the
+  global mouse monitors and posted events ride on Accessibility; the login item
+  (SMAppService.mainApp) and the update check (outgoing HTTPS, not sandboxed) need none; the
+  app loads only Apple's frameworks, so library validation stays on; it sends no Apple Events
+  (`open -t` goes through LaunchServices). Dev builds already run under the hardened runtime
+  (scripts/sign.sh) with no entitlements. Add a key here only with the reason beside it.
+-->
+<plist version="1.0">
+<dict/>
+</plist>
