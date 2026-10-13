@@ -973,15 +973,26 @@ impl Model {
             .is_some_and(|w| !w.sticky && !self.is_shown_space(w.space))
     }
 
+    /// True when `held` is a window focus that can act now with no Space change: its window
+    /// is known and on a Space shown now (the "a wait ended" replay; one of a Desktop not
+    /// shown stays held for its arrival, an unknown one until it is found).
+    pub fn held_focus_acts_now(&self, held: Option<crate::engine::focus_replay::Wanted>) -> bool {
+        matches!(held, Some(crate::engine::focus_replay::Wanted::Window { id, .. })
+            if self.window(id).is_some() && !self.waits_on_another_space(id))
+    }
+
     /// A Desktop was just recognized (or a wait ended): show the stage of the window the user
     /// went there for, as Apple's Stage Manager does when a Dock click, ⌘Tab or an activation
     /// lands on a window of another Desktop. `focused` is the frontmost app's focused window
-    /// asked now; when it is a managed window of a Space shown now it decides (its stage
-    /// comes if inactive; nothing happens if it is already shown), whatever order the events
-    /// came in. Otherwise `held`, the focus or activation that came while the Space was
-    /// changing ([`crate::engine::focus_replay::FocusReplay`]), decides the same way: a window
-    /// of a shown Space brings its stage; an app is [`Model::app_activated`] again. A window
-    /// or app with nothing on a shown Space changes nothing.
+    /// asked now; when it is a managed window of a Space shown now in an inactive stage, its
+    /// stage comes, whatever order the events came in. When it is already shown, AX may be
+    /// stale (the activation not complete: the previous frontmost app's window): a held
+    /// window of **another app** than AX's, on a Space shown now, still brings its stage; a
+    /// held window of AX's own app, or a held activation, changes nothing. When AX names no
+    /// window here, `held`, the focus or activation that came while the Space was changing
+    /// ([`crate::engine::focus_replay::FocusReplay`]), decides: a window of a shown Space
+    /// brings its stage; an app is [`Model::app_activated`] again. A window or app with
+    /// nothing on a shown Space changes nothing.
     pub fn bring_focus_forward(
         &mut self,
         focused: Option<WindowId>,
@@ -991,7 +1002,15 @@ impl Model {
         use crate::engine::focus_replay::Wanted;
         let here = |m: &Self, id: WindowId| m.resolve_standard(id).is_some() && !m.waits_on_another_space(id);
         if let Some(f) = focused.filter(|f| here(self, *f)) {
-            return self.window_focused(f, obs);
+            let actions = self.window_focused(f, obs);
+            if !actions.is_empty() {
+                return actions;
+            }
+            let ax_pid = self.resolve_standard(f).and_then(|w| self.windows.get(&w)).map(|w| w.meta.pid);
+            return match held {
+                Some(Wanted::Window { id, pid }) if Some(pid) != ax_pid && here(self, id) => self.window_focused(id, obs),
+                _ => Vec::new(),
+            };
         }
         match held {
             Some(Wanted::Window { id, .. }) if here(self, id) => self.window_focused(id, obs),

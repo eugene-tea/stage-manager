@@ -2027,16 +2027,28 @@ impl Strip {
         }
         // The card stays pressed until its transition takes it (the incoming snapshots grow
         // from it as drawn); if none comes, it lets go.
+        Self::release_squeeze_later(pressed);
+        Some(self.click_event(pressed, p, shift))
+    }
+
+    /// In [`SQUEEZE_MAX`]: a released card still drawn pressed lets go, unless a transition
+    /// holds it (then it is looked at again after as long, so one that a later transition
+    /// took never stays pressed: R3 6). A new press of any card ends the watch.
+    fn release_squeeze_later(stage: u64) {
         let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
             with_strip(|s| {
-                if s.squeezed == Some(pressed) && !s.motion.holds(pressed) {
+                if s.squeezed != Some(stage) || s.pressed.is_some() {
+                    return;
+                }
+                if s.motion.holds(stage) {
+                    Self::release_squeeze_later(stage);
+                } else {
                     s.squeeze(None);
                 }
             });
         });
         // SAFETY: the block runs once on the main run loop.
         let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(SQUEEZE_MAX, false, &block) };
-        Some(self.click_event(pressed, p, shift))
     }
 
     /// Draws `stage`'s card pressed (`None`: no card), easing the card that was and the one
@@ -2106,8 +2118,11 @@ impl Strip {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         layers.card.setOpacity(0.0);
-        let fade = ease("opacity", &NSNumber::new_f32(1.0), &NSNumber::new_f32(0.0), seconds);
-        layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
+        // At speed 0 no fade: a zero duration would mean Core Animation's default (R3 5).
+        if seconds > 0.0 {
+            let fade = ease("opacity", &NSNumber::new_f32(1.0), &NSNumber::new_f32(0.0), seconds);
+            layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
+        }
         if let Some(c) = toward {
             ease_transform(&layers.card, scale_about(MERGE_SHRINK, c, m.eye), seconds);
         }

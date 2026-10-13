@@ -654,6 +654,11 @@ impl Config {
             }
         }
 
+        let speed = v.num("animation.speed");
+        if speed > 0.0 && speed < MIN_SPEED {
+            warnings.push(format!("animation.speed = {speed} is outside {MIN_SPEED}..4 (0 = none); using {MIN_SPEED}"));
+        }
+
         let config = Config {
             strip: StripConfig {
                 order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
@@ -1047,8 +1052,12 @@ mod tests {
         assert_eq!((a.speed(), a.seconds(100)), (0.5, 0.2));
         let a = speed("[animation]\nspeed = 0\n");
         assert!(!a.animates() && a.seconds(210) == 0.0, "0 is no animation");
-        let a = speed("[animation]\nspeed = 0.1\n");
-        assert_eq!(a.speed(), MIN_SPEED, "the slowest other than none");
+        let p = parse("[animation]\nspeed = 0.1\n");
+        assert_eq!(p.config.style.animation.speed(), MIN_SPEED, "the slowest other than none");
+        assert_eq!(p.warnings.len(), 1, "raised with a warning: {:?}", p.warnings);
+        assert!(p.warnings[0].contains("animation.speed = 0.1") && p.warnings[0].contains("using 0.25"), "{:?}", p.warnings);
+        assert!(parse("[animation]\nspeed = 0.25\n").warnings.is_empty(), "the slowest itself is fine");
+        assert!(parse("[animation]\nspeed = 0\n").warnings.is_empty(), "0 (none) is fine");
         let p = parse("[animation]\nspeed = 9\n");
         assert_eq!(p.config.style.animation.speed(), 4.0);
         assert_eq!(p.warnings.len(), 1, "clamped with a warning: {:?}", p.warnings);

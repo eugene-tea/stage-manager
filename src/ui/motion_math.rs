@@ -10,7 +10,8 @@
 //!   reached (the moment an incoming window may take its place behind its growing snapshot,
 //!   `[animation] unpark_at`). `[animation] speed` scales every spring ([`Spring::at_speed`]:
 //!   the same curve, ω times the speed) and duration; [`switch_spring`], [`glide_spring`] and
-//!   [`slide_spring`] are the style's springs with it applied.
+//!   [`slide_spring`] are the style's springs with it applied. [`unveil_backstop`] is how long
+//!   the controller holds incoming windows for the strip's unveil at that speed.
 //! - **Planes.** A snapshot is a plane turned about its left edge, like a strip card: at a
 //!   window's frame it is flat and full size; on a card it is the card's thumbnail, turned by
 //!   the strip's tilt and seen from the strip's eye. Moving between the two on one spring
@@ -53,6 +54,27 @@ impl Spring {
 pub fn switch_spring(style: &StripStyle) -> Spring {
     let a = &style.animation;
     Spring { stiffness: a.spring_stiffness, damping: a.spring_damping, mass: a.spring_mass }.at_speed(a.speed())
+}
+
+/// When the strip unveils a switch's incoming windows: the switch spring's time to
+/// `[animation] unpark_at`, at the style's speed (seconds).
+pub fn unveil_time(style: &StripStyle) -> f64 {
+    time_to_progress(switch_spring(style), style.animation.unpark_at)
+}
+
+/// The shortest backstop for incoming windows the strip never unveils.
+pub const UNVEIL_BACKSTOP_MIN: std::time::Duration = std::time::Duration::from_millis(1500);
+/// The longest: a slow spring (a low speed, a soft spring) never holds windows longer.
+pub const UNVEIL_BACKSTOP_MAX: std::time::Duration = std::time::Duration::from_millis(3000);
+/// How long after the expected unveil the backstop waits.
+const UNVEIL_MARGIN: f64 = 0.5;
+
+/// How long incoming windows may wait for the strip's unveil before they come back anyway:
+/// the expected unveil ([`unveil_time`]) plus a margin, kept within
+/// [`UNVEIL_BACKSTOP_MIN`]..[`UNVEIL_BACKSTOP_MAX`].
+pub fn unveil_backstop(style: &StripStyle) -> std::time::Duration {
+    let at = std::time::Duration::from_secs_f64((unveil_time(style) + UNVEIL_MARGIN).clamp(0.0, HORIZON));
+    at.clamp(UNVEIL_BACKSTOP_MIN, UNVEIL_BACKSTOP_MAX)
 }
 
 /// The cards' glide to new slots (`[motion] spring_*`), at the style's speed.
@@ -311,6 +333,27 @@ mod tests {
         style.animation.speed = 1.0;
         style.animation.enabled = false;
         assert!(!style.animation.animates() && style.animation.seconds(210) == 0.0, "enabled = false is no animation");
+    }
+
+    #[test]
+    fn the_unveil_backstop_comes_after_the_unveil_at_every_speed() {
+        let mut style = StripStyle::default();
+        for speed in [crate::config::MIN_SPEED, 0.26, 0.3, 0.5, 1.0, 2.0, 4.0] {
+            style.animation.speed = speed;
+            let unveil = unveil_time(&style);
+            let backstop = unveil_backstop(&style).as_secs_f64();
+            assert!(backstop >= unveil + 0.3, "speed {speed}: unveil at {unveil:.3} s, backstop at {backstop:.3} s");
+            assert!(backstop >= UNVEIL_BACKSTOP_MIN.as_secs_f64() && backstop <= UNVEIL_BACKSTOP_MAX.as_secs_f64());
+        }
+        // The slowest speed unveils after 1.5 s (the constant cap before R3 fired first).
+        style.animation.speed = crate::config::MIN_SPEED;
+        assert!(unveil_time(&style) > 1.5, "{}", unveil_time(&style));
+        // A spring that never gets there is still bounded.
+        style.animation.speed = 1.0;
+        style.animation.spring_stiffness = 0.5;
+        assert_eq!(unveil_backstop(&style), UNVEIL_BACKSTOP_MAX);
+        style.animation.spring_stiffness = 1e6;
+        assert_eq!(unveil_backstop(&style), UNVEIL_BACKSTOP_MIN);
     }
 
     #[test]
