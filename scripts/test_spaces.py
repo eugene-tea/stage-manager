@@ -1270,7 +1270,7 @@ def dry_run():
     """Prints the preflight and the plan; acts on nothing."""
     say("dry run: nothing is launched, switched or moved")
     say(f"home (scratch): {ts.HOME}")
-    say(f"screenshots would go to: {shots_dir()}")
+    say(f"screenshots would go to: {shots_dir()}" if shots_on() else "screenshots: off (SM_SHOTS=<dir> turns them on)")
     say(f"app binary for the probes: {ts.BIN}")
     say(f"Move left/right a space (79/81) on: {switch_shortcuts()}")
     problems = preflight()
