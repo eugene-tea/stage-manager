@@ -4,6 +4,7 @@
 pub mod about;
 pub mod alert;
 pub mod app_menu;
+pub mod corner_patch;
 pub mod form;
 pub mod glyph;
 pub mod motion_math;

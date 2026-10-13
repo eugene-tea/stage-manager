@@ -3,12 +3,14 @@
 //! The engine compiles and tests on any OS. The platform layer feeds it observations and
 //! executes the [`model::Action`]s it returns.
 
+pub mod corner_patch;
 pub mod desktop_echo;
 pub mod displays;
 pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
 pub mod guard_watch;
+pub mod hide;
 pub mod model;
 pub mod overview;
 pub mod park;
@@ -17,6 +19,7 @@ pub mod placement;
 pub mod recovery;
 pub mod rules;
 pub mod settings;
+pub mod sliver;
 pub mod stage_area;
 pub mod stand_down;
 #[cfg(test)]

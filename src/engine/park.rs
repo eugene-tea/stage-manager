@@ -26,6 +26,16 @@
 //! bottom-right. Top corners hide sideways only: macOS keeps a title bar below the menu bar,
 //! so a window asked to sit at the display's top edge stays there, its body off the side.
 //!
+//! **How the park frame is asked** ([`ParkRequest`], `[windows] park_inside` and
+//! `park_drop`): by default one point of the window inside the corner's side and its top one
+//! point above the display's bottom edge, as since the first version. Nobody had measured
+//! whether macOS accepts less (no point inside, or the window asked further out) or keeps a
+//! different title strip when asked further below; `stage-manager probe-park` (driven by
+//! `scripts/probe_park.py`, fixture windows only) asks a grid of requests and
+//! [`best_request`] picks the one that leaves least on screen while the window stays listed
+//! on screen (Desktops are recognized by the windows on screen, parked ones included) and in
+//! the park zone.
+//!
 //! [`Display`]: super::model::Display
 
 use serde::{Deserialize, Serialize};
@@ -84,16 +94,103 @@ pub fn park_frame(size: Size, display: Rect) -> Rect {
     park_frame_at(size, display, Corner::BottomRight)
 }
 
-/// The frame that parks a window of `size` in `display`'s `corner`.
+/// How a park frame is asked of macOS (`[windows] park_inside`, `park_drop`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParkRequest {
+    /// Points of the window asked to stay inside the corner's side (0: none; negative: the
+    /// window asked that far beyond the side).
+    pub inside: f64,
+    /// At a bottom corner, how far below the display's bottom edge the window's top is asked
+    /// (-1: one point above it, the first version's request).
+    pub drop: f64,
+}
+
+impl ParkRequest {
+    /// The first version's request: one point inside, the top one point above the bottom.
+    pub const FIRST: ParkRequest = ParkRequest { inside: 1.0, drop: -1.0 };
+
+    /// The request clamped to what still parks: at most [`PARK_MARGIN`] inside, never above
+    /// the bottom by more than that, never beyond a display's width or height out.
+    pub fn clamped(self) -> ParkRequest {
+        let finite = |v: f64, d: f64| if v.is_finite() { v } else { d };
+        ParkRequest {
+            inside: finite(self.inside, 1.0).clamp(-10_000.0, PARK_MARGIN / 2.0),
+            drop: finite(self.drop, -1.0).clamp(-PARK_MARGIN / 2.0, 10_000.0),
+        }
+    }
+}
+
+impl Default for ParkRequest {
+    fn default() -> Self {
+        Self::FIRST
+    }
+}
+
+/// The frame that parks a window of `size` in `display`'s `corner`
+/// ([`park_frame_asked`] with [`ParkRequest::FIRST`]).
 ///
 /// One point of the window stays inside the display's side; at the bottom the origin is one
 /// point above the bottom edge (macOS clamps the window so its title bar stays onscreen), at
 /// the top the window's top is the display's top edge (macOS keeps it below the menu bar).
 /// The size is kept so the window is restored without a resize.
 pub fn park_frame_at(size: Size, display: Rect, corner: Corner) -> Rect {
-    let x = if corner.right() { display.max_x() - 1.0 } else { display.x - size.w + 1.0 };
-    let y = if corner.bottom() { display.max_y() - 1.0 } else { display.y };
+    park_frame_asked(size, display, corner, ParkRequest::FIRST)
+}
+
+/// The frame that parks a window of `size` in `display`'s `corner`, asked as `req` says
+/// (clamped: [`ParkRequest::clamped`]).
+pub fn park_frame_asked(size: Size, display: Rect, corner: Corner, req: ParkRequest) -> Rect {
+    let req = req.clamped();
+    let x = if corner.right() { display.max_x() - req.inside } else { display.x - size.w + req.inside };
+    let y = if corner.bottom() { display.max_y() + req.drop } else { display.y };
     Rect::new(x, y, size.w, size.h)
+}
+
+/// One request of the park probe and where macOS left one window for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProbeSample {
+    /// The request.
+    pub req: ParkRequest,
+    /// Where macOS left the window (the window server's bounds).
+    pub landed: Rect,
+    /// The window server still lists it on screen.
+    pub onscreen: bool,
+}
+
+/// The area (pt²) of `landed` that shows on `display`.
+pub fn shown_area(landed: Rect, display: Rect) -> f64 {
+    landed.intersect(&display).map_or(0.0, |r| r.w * r.h)
+}
+
+/// The request that leaves least on screen across every probed window (`samples`: each
+/// window's samples, any order), among those where every window stayed listed on screen and
+/// in the park zone of `display` (`visible`, `corner`); the worst window counts. Ties go to
+/// the request closest to [`ParkRequest::FIRST`]. `None` when no request qualifies.
+pub fn best_request(samples: &[Vec<ProbeSample>], display: Rect, visible: Rect, corner: Corner) -> Option<(ParkRequest, f64)> {
+    let mut reqs: Vec<ParkRequest> = samples.iter().flatten().map(|s| s.req).collect();
+    reqs.dedup_by(|a, b| a == b);
+    let mut unique: Vec<ParkRequest> = Vec::new();
+    for r in reqs {
+        if !unique.contains(&r) {
+            unique.push(r);
+        }
+    }
+    let worst = |r: ParkRequest| -> Option<f64> {
+        let mut worst = 0.0f64;
+        for window in samples {
+            let s = window.iter().find(|s| s.req == r)?;
+            if !s.onscreen || !is_parked_in_at(s.landed, display, visible, corner) {
+                return None;
+            }
+            worst = worst.max(shown_area(s.landed, display));
+        }
+        Some(worst)
+    };
+    let distance = |r: ParkRequest| (r.inside - ParkRequest::FIRST.inside).abs() + (r.drop - ParkRequest::FIRST.drop).abs();
+    unique
+        .into_iter()
+        .filter_map(|r| worst(r).map(|w| (r, w)))
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(distance(a.0).total_cmp(&distance(b.0))))
 }
 
 /// `frame` mirrored left to right across `display`: a left corner's frame becomes the
@@ -459,6 +556,58 @@ mod tests {
         let at = park_frame(Size::new(400.0, 300.0), DISPLAY);
         assert!(is_parked_in(at, DISPLAY, Rect::default()));
         assert!(!is_parked_in(Rect::new(10.0, 10.0, 400.0, 300.0), DISPLAY, Rect::default()));
+    }
+
+    #[test]
+    fn the_first_request_is_the_old_park_frame() {
+        let size = Size::new(600.0, 400.0);
+        for corner in Corner::ALL {
+            assert_eq!(park_frame_asked(size, DISPLAY, corner, ParkRequest::default()), park_frame_at(size, DISPLAY, corner));
+        }
+        assert_eq!(park_frame(size, DISPLAY), Rect::new(1439.0, 899.0, 600.0, 400.0));
+    }
+
+    #[test]
+    fn every_request_in_range_still_parks_for_every_dock() {
+        for inside in [1.0, 0.0, -1.0, -50.0, -600.0, 500.0] {
+            for drop in [-1.0, 0.0, 50.0, 2000.0, -500.0] {
+                let req = ParkRequest { inside, drop };
+                for corner in Corner::ALL {
+                    for (dock, visible) in dock_layouts(DISPLAY, 25.0) {
+                        let at = macos_places_at(park_frame_asked(Size::new(600.0, 400.0), DISPLAY, corner, req), visible, corner);
+                        assert!(is_parked_in_at(at, DISPLAY, visible, corner), "{req:?} {corner:?} {dock}: {at:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_best_request_shows_least_and_stays_listed() {
+        let visible = Rect::new(0.0, 25.0, 1440.0, 875.0);
+        let first = ParkRequest::FIRST;
+        let zero = ParkRequest { inside: 0.0, drop: -1.0 };
+        let out = ParkRequest { inside: -50.0, drop: -1.0 };
+        let sample = |req: ParkRequest, x: f64, kept: f64, onscreen: bool| ProbeSample {
+            req,
+            landed: Rect::new(x, visible.max_y() - kept, 600.0, 400.0),
+            onscreen,
+        };
+        // Two windows: macOS clamps x back to 1439 for the plain one at 0 inside, accepts it
+        // for the other; 50 beyond takes both off the list.
+        let a = vec![sample(first, 1439.0, 32.0, true), sample(zero, 1439.0, 32.0, true), sample(out, 1490.0, 32.0, false)];
+        let b = vec![sample(first, 1439.0, 52.0, true), sample(zero, 1440.0, 52.0, true), sample(out, 1490.0, 52.0, false)];
+        let (best, worst) = best_request(&[a.clone(), b.clone()], DISPLAY, visible, Corner::BottomRight).expect("one qualifies");
+        // The worst window shows 32 pt at 0 inside (a) against 52 at the first request (b).
+        assert_eq!(best, zero);
+        assert_eq!(worst, 32.0);
+        // When nothing is gained, the first request stays.
+        let a2 = vec![sample(first, 1439.0, 32.0, true), sample(zero, 1439.0, 32.0, true)];
+        assert_eq!(best_request(&[a2], DISPLAY, visible, Corner::BottomRight).map(|b| b.0), Some(first));
+        // A window probed without some request rules that request out.
+        let partial = vec![sample(first, 1439.0, 32.0, true)];
+        assert_eq!(best_request(&[a, partial], DISPLAY, visible, Corner::BottomRight).map(|b| b.0), Some(first));
+        assert_eq!(best_request(&[], DISPLAY, visible, Corner::BottomRight), None);
     }
 
     #[test]

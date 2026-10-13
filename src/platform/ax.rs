@@ -24,6 +24,7 @@ pub mod names {
     pub const SIZE: &str = "AXSize";
     pub const WINDOWS: &str = "AXWindows";
     pub const FOCUSED_WINDOW: &str = "AXFocusedWindow";
+    pub const MAIN_WINDOW: &str = "AXMainWindow";
     pub const MAIN: &str = "AXMain";
     pub const MINIMIZED: &str = "AXMinimized";
     pub const FULLSCREEN: &str = "AXFullScreen";
@@ -304,6 +305,16 @@ impl AxElement {
         self.element_attr(names::FOCUSED_WINDOW)
     }
 
+    /// `AXMainWindow` of an application element.
+    pub fn main_window(&self) -> AxResult<AxElement> {
+        self.element_attr(names::MAIN_WINDOW)
+    }
+
+    /// `AXFrontmost` of an application element: the app is the active one.
+    pub fn is_frontmost(&self) -> AxResult<bool> {
+        self.bool_attr(names::FRONTMOST)
+    }
+
     /// `AXFocusedApplication` of the system-wide element: the frontmost app.
     pub fn focused_application(&self) -> AxResult<AxElement> {
         self.element_attr(names::FOCUSED_APPLICATION)
@@ -428,6 +439,13 @@ impl AxElement {
         let v = self.attribute(names::URL)?;
         let url = v.downcast_ref::<CFURL>().ok_or(AxError::WrongType(names::URL))?;
         url.file_system_path(CFURLPathStyle::CFURLPOSIXPathStyle).map(|s| s.to_string()).ok_or(AxError::Value)
+    }
+
+    /// [`Self::window_id`] with this element's messaging timeout set to `seconds` first (a
+    /// window element just asked of an app is on the global timeout, seconds long), put back
+    /// after ([`Self::bounded`]).
+    pub fn window_id_within(&self, seconds: f32) -> AxResult<u32> {
+        self.bounded(seconds, AxElement::window_id)
     }
 
     /// The `CGWindowID` of a window element (via `_AXUIElementGetWindow`).

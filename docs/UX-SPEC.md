@@ -313,18 +313,35 @@ Ours:
   logged with what was found), and the click's prediction is worked out then, at the
   press, so the release only arranges; let go over the same item soon
   (under 0.6 s, the Dock's menu comes on a held press) and without moving (6 pt) or a
-  modifier, it is a click. When macOS will switch Desktops for it ("When switching to an
-  application, switch to a Space with open windows for the application" on,
-  `com.apple.dock` `workspaces-auto-swoosh`, absent = on; the app running, with no window
-  on the Desktop shown in the model nor any on screen out of the park zone in the window
-  server's list, none unplaced, not hidden: on the safe side, no prediction when unsure;
-  the model's gates and the list are looked at before the app is asked anything), the
-  window macOS will show (the app's focused window when it waits on another
-  Desktop, else, the app not answering, the key window of its most recently active stage
-  there; a focus of another window of that same stage then retargets the arrangement) has
-  its Desktop arranged
+  modifier, it is a click. Where macOS goes (the owner's log of 10-13 put the first rule
+  right: VS Code with a window on each Desktop, every click switched Desktops though the
+  app had a window on the one shown), with "When switching to an application, switch to a
+  Space with open windows for the application" on (`com.apple.dock`
+  `workspaces-auto-swoosh`, absent = on), the app running with a window on another
+  Desktop, not hidden, asked at the press (focused window, else main window, active or
+  not; one bounded round): the app **active** goes to its other Desktop (predicted only
+  when exactly one other Desktop holds its windows and none is unplaced; seen 10-13 for
+  VS Code and Mail); else the app's **focused (or main) window** decides: on another
+  Desktop, that Desktop, even with windows here; here, no switch; with **no answer**, on
+  the safe side no prediction when the app has a window on the Desktop shown (the model,
+  or the window server's list) or unplaced windows, else the key window of its most
+  recent stage elsewhere. Each press logs what the app said (active, its focused and main
+  windows and their Desktops) and each Space change after a press logs the Desktop that
+  came against the prediction ("dock: the Desktop a Dock click went to", `right=`), so a
+  day's log confirms the rule. The window macOS will show (a focus of another window of
+  the same stage then retargets the arrangement) has its Desktop arranged
   at once, through the cached Accessibility elements of that Desktop's windows, and its
-  strip pane redrawn in its final order: the Desktop slides in arranged. Its own moves
+  strip pane redrawn in its final order: the Desktop slides in arranged. The window server
+  does not always apply those moves at once (10-13: in one hands-free run of three the
+  stage left showed through the whole slide and was parked only when the Desktop became
+  the one shown; the Accessibility calls had all succeeded): so the moves are checked
+  against the window server's list every 20 ms (the first look 20 ms after them) for up to
+  0.6 s, while the Desktop is not arriving yet, and the ones it does not show (a park in the
+  park zone; a restore at its position, the size being the app's) are sent again, at most
+  three times each, each send bounded at 50 ms (1 pt off, then exactly, since AppKit drops
+  a move to where it thinks the window is; a failure gives that move up), and what it
+  showed is logged ("arrival: the window server shows the
+  arrangement", or which moves it never showed). Its own moves
   make the window's late focus an echo; a focus of another known window of that app still
   counts (macOS showed another window than predicted: undone, arranged for that one at the
   notice). No Space change

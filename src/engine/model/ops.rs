@@ -969,6 +969,40 @@ impl Model {
         }
     }
 
+    /// Whether [`Self::app_activated`]'s answer for app `pid` depends on the focused window
+    /// (`obs.focused`). It does only when the focus could pick among stages: the app's windows
+    /// sit in more than one inactive stage of the shown Space, or, showing one app's windows
+    /// at a time, it has a window here and one in an inactive stage. Otherwise the answer is
+    /// the same whatever the focus, so the platform need not ask the app (busy activating)
+    /// for it. The display is [`Self::app_activated`]'s own ([`Self::current_display`]):
+    /// without a focus that is the main display, so an app with a window on another display
+    /// (whose focus would move the answer there) needs the focus too.
+    pub fn activation_needs_focus(&self, pid: Pid) -> bool {
+        let display = self.current_display(&Observation::default());
+        if self.windows.values().any(|w| w.meta.pid == pid && self.known_display(w.meta.display) != display) {
+            return true;
+        }
+        let space = self.current_space(display);
+        let Some(&active) = self.active.get(&space) else { return true };
+        let present = self.windows.values().any(|w| {
+            w.meta.pid == pid
+                && w.meta.role == WindowRole::Standard
+                && (w.home == Home::Stage(active) || (w.home == Home::Pinned && (w.space == space || w.sticky)))
+        });
+        let candidates = self
+            .stages
+            .iter()
+            .filter(|s| s.space == space && !self.is_active(s.id))
+            .filter(|s| s.windows.iter().any(|w| self.windows.get(w).is_some_and(|w| w.meta.pid == pid)))
+            .count();
+        match self.options.settings.app_windows {
+            AppWindows::AllAtOnce if present => false,
+            AppWindows::AllAtOnce => candidates > 1,
+            AppWindows::OneAtATime if present => candidates >= 1,
+            AppWindows::OneAtATime => candidates > 1,
+        }
+    }
+
     /// A window got focus (for example through ⌘` or a click on a sliver). If it sits in an
     /// inactive stage of a Space shown now, switch to that stage so the focused window is
     /// never left parked. Focus on another Space's window is left to the Space change.

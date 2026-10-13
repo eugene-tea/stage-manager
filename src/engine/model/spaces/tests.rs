@@ -1265,17 +1265,76 @@ mod arranged_ahead {
         assert_eq!(mac.m.dock_arrival(40, none, Some(w(5))), Ok(w(5)), "its focused window");
         assert_eq!(mac.m.dock_arrival(40, none, None), Ok(w(5)), "no answer: its stage's key window");
         assert_eq!(mac.m.dock_arrival(40, none, Some(w(4))), Ok(w(5)), "an answer of another app's window: the key");
-        assert!(mac.m.dock_arrival(10, none, Some(w(1))).is_err(), "a window on the Desktop shown: macOS stays");
         assert!(mac.m.dock_arrival(99, none, None).is_err(), "not managed (not running)");
-        assert!(mac.m.dock_arrival(40, AppFacts { hidden: true, unplaced: false }, Some(w(5))).is_err(), "hidden");
-        assert!(mac.m.dock_arrival(40, AppFacts { hidden: false, unplaced: true }, Some(w(5))).is_err(), "unplaced windows");
+        assert!(mac.m.dock_arrival(40, AppFacts { hidden: true, ..none }, Some(w(5))).is_err(), "hidden");
+        assert!(mac.m.dock_arrival(40, AppFacts { unplaced: true, ..none }, None).is_err(), "no answer, unplaced windows");
+        assert!(mac.m.dock_arrival(40, AppFacts { visible_here: true, ..none }, None).is_err(), "no answer, a window on screen here");
         let mut off = mac.m.clone();
         off.set_settings(crate::engine::settings::NativeSettings { switch_to_app_space: false, ..Default::default() });
         assert!(off.dock_arrival(40, none, Some(w(5))).is_err(), "switching to the app's Space is off");
-        // A mail window opens on the Desktop shown: macOS stays.
+        let mut everywhere = mail_parked_on_desktop_1();
+        everywhere.put(0, 6, 40, "com.example.mail", "Sent");
+        everywhere.go(0);
+        everywhere.go(1);
+        if let Some(s) = everywhere.m.windows.get_mut(&w(6)) {
+            s.sticky = true;
+        }
+        assert_eq!(
+            everywhere.m.dock_arrival(40, none, Some(w(5))),
+            Err("the inactive app has a window on every Desktop: macOS activates it here"),
+            "a window on every Desktop says so, not \"on the Desktop shown\""
+        );
+        // A mail window opens on the Desktop shown: with no answer, macOS stays.
         mac.put(1, 7, 40, "com.example.mail", "Drafts");
         mac.go(1);
-        assert!(mac.m.dock_arrival(40, none, None).is_err(), "now it has a window on the Desktop shown");
+        assert!(mac.m.dock_arrival(40, none, None).is_err(), "no answer and a window on the Desktop shown");
+        assert!(
+            mac.m.dock_arrival(40, none, Some(w(5))).is_err(),
+            "inactive with a window here: macOS activates it here, whatever its answer (run go10)"
+        );
+        assert!(mac.m.dock_arrival(40, none, Some(w(7))).is_err(), "its answer names the window here");
+    }
+
+    #[test]
+    fn the_owners_case_an_app_with_a_window_on_each_desktop() {
+        use crate::engine::model::AppFacts;
+        // The editor (pid 10): window 1 parked on Desktop 1, window 3 shown on Desktop 2.
+        let (mac, _, _) = editor_on_both();
+        let none = AppFacts::default();
+        assert!(
+            mac.m.dock_arrival(10, none, Some(w(1))).is_err(),
+            "another app active, the editor's focused window on Desktop 1: macOS stays here (his log 09:55:50, run go10)"
+        );
+        assert!(mac.m.dock_arrival(10, none, Some(w(3))).is_err(), "its focused window here: macOS stays");
+        assert!(mac.m.dock_arrival(10, none, None).is_err(), "no answer, a window here: on the safe side, none");
+        let active = AppFacts { active: true, ..none };
+        assert_eq!(
+            mac.m.dock_arrival(10, active, Some(w(3))),
+            Ok(w(1)),
+            "the editor active (its focused window here): the click goes to its other Desktop (10-13)"
+        );
+        assert!(mac.m.dock_arrival(10, AppFacts { unplaced: true, ..active }, Some(w(3))).is_err(), "active, windows unplaced");
+        assert!(mac.m.dock_arrival(30, active, None).is_err(), "chat lives only here: nothing elsewhere");
+    }
+
+    #[test]
+    fn an_active_app_on_several_other_desktops_gets_no_prediction() {
+        use crate::engine::model::AppFacts;
+        let mut mac = two_desktops();
+        mac.put(2, 8, 10, "com.example.editor", "Other notes");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        mac.focused = Some(w(8));
+        mac.go(2);
+        mac.focused = Some(w(3));
+        mac.go(1);
+        let active = AppFacts { active: true, ..AppFacts::default() };
+        assert!(mac.m.dock_arrival(10, active, Some(w(3))).is_err(), "Desktops 1 and 3: which is next is not known");
+        assert_eq!(
+            mac.m.dock_arrival(10, AppFacts::default(), Some(w(8))),
+            Err("the inactive app has a window on the Desktop shown: macOS activates it here"),
+            "not active with window 3 here: macOS activates it here, whatever its answer (run go10)"
+        );
     }
 
     #[test]

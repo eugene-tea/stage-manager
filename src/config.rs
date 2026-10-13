@@ -217,6 +217,10 @@ pub struct AnimationStyle {
     pub shadow_offset_y: f64,
     pub snapshot_interval_ms: u64,
     pub snapshot_cache_mb: u64,
+    /// An activation of an app in another stage (Cmd-Tab, Dock, a click on its sliver) grows
+    /// its windows from their card like a card click; off (the default), they come to their
+    /// frames at once, since macOS has already raised them in the park corner.
+    pub activation_grows: bool,
 }
 
 /// `[strip] level`: where the strip sits among windows.
@@ -305,6 +309,22 @@ pub struct WindowsConfig {
     pub fit_margin: f64,
     pub minimize_to_strip: bool,
     pub focus_echo_ms: u64,
+    /// A press on a parked window's sliver does nothing (Apple's parked windows cannot be
+    /// grabbed); off, it reaches the app and its stage comes on release.
+    pub inert_slivers: bool,
+    /// Points of a parked window asked to stay inside the corner's side.
+    pub park_inside: f64,
+    /// How far below the display's bottom a parked window's top is asked.
+    pub park_drop: f64,
+    /// Apps whose every window sits in inactive stages are hidden instead of parked in view
+    /// (a prototype).
+    pub hide_parked_apps: bool,
+    /// A live picture of the desktop over the parked windows' slivers (a prototype).
+    pub corner_patch: bool,
+    /// How far past a sliver the patch reaches (its shadow).
+    pub corner_patch_reach: f64,
+    /// Most frames a second of the patch's live picture.
+    pub corner_patch_fps: u32,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -824,6 +844,7 @@ impl Config {
                     shadow_offset_y: v.num("animation.shadow_offset_y"),
                     snapshot_interval_ms: v.uint("animation.snapshot_interval_ms"),
                     snapshot_cache_mb: v.uint("animation.snapshot_cache_mb"),
+                    activation_grows: v.flag("animation.activation_grows"),
                 },
             },
             windows: WindowsConfig {
@@ -835,6 +856,13 @@ impl Config {
                 fit_margin: v.num("windows.fit_margin"),
                 minimize_to_strip: v.flag("windows.minimize_to_strip"),
                 focus_echo_ms: v.uint("windows.focus_echo_ms"),
+                inert_slivers: v.flag("windows.inert_slivers"),
+                park_inside: v.num("windows.park_inside"),
+                park_drop: v.num("windows.park_drop"),
+                hide_parked_apps: v.flag("windows.hide_parked_apps"),
+                corner_patch: v.flag("windows.corner_patch"),
+                corner_patch_reach: v.num("windows.corner_patch_reach"),
+                corner_patch_fps: v.uint("windows.corner_patch_fps") as u32,
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
@@ -861,6 +889,7 @@ impl Config {
             strip: self.strip_options(capacity),
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
+            park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
         }
     }
 }

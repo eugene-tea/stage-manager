@@ -10,6 +10,13 @@
 //   --frames F   | FIXTURE_FRAMES=F    frames of the first windows, "x,y,w,h;x,y,w,h;..." in
 //                                      points from the visible frame's top-left corner (y
 //                                      down); a width <= 0 is the visible width plus it
+//   --styles S   | FIXTURE_STYLES=S    window chrome per window, comma-separated, cycled:
+//                                      plain (title bar only, the default), toolbar (unified
+//                                      toolbar), compact (unified compact), expanded (toolbar
+//                                      under the title), fullsize (content under a transparent
+//                                      title bar, as Chrome and Telegram draw), titleless
+//                                      (toolbar, title hidden); scripts/probe_park.py measures
+//                                      what macOS keeps on screen of each when parked
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -25,6 +32,7 @@ struct Options {
     var background = false
     var title = "Fixture"
     var frames: [[Double]] = []
+    var styles: [String] = []
 
     static func parseFrames(_ text: String) -> [[Double]] {
         text.split(separator: ";").compactMap { part in
@@ -41,6 +49,7 @@ struct Options {
         if env["FIXTURE_BACKGROUND"] == "1" { o.background = true }
         if let t = env["FIXTURE_TITLE"], !t.isEmpty { o.title = t }
         if let f = env["FIXTURE_FRAMES"] { o.frames = parseFrames(f) }
+        if let s = env["FIXTURE_STYLES"] { o.styles = s.split(separator: ",").map(String.init) }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -49,6 +58,7 @@ struct Options {
             case "--background": o.background = true
             case "--title": if let t = args.next() { o.title = t }
             case "--frames": if let f = args.next() { o.frames = parseFrames(f) }
+            case "--styles": if let s = args.next() { o.styles = s.split(separator: ",").map(String.init) }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -149,9 +159,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = title
         window.isReleasedWhenClosed = false
         window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: title)
+        if !options.styles.isEmpty {
+            applyStyle(options.styles[i % options.styles.count], to: window)
+        }
         windows.append(window)
         opened = max(opened, i + 1)
         return window
+    }
+
+    /// Window chrome by name (`--styles`).
+    func applyStyle(_ style: String, to window: NSWindow) {
+        func toolbar() {
+            let t = NSToolbar(identifier: "fixture.\(style)")
+            t.displayMode = .iconOnly
+            window.toolbar = t
+        }
+        switch style {
+        case "toolbar":
+            toolbar()
+            window.toolbarStyle = .unified
+        case "compact":
+            toolbar()
+            window.toolbarStyle = .unifiedCompact
+        case "expanded":
+            toolbar()
+            window.toolbarStyle = .expanded
+        case "fullsize":
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+        case "titleless":
+            toolbar()
+            window.toolbarStyle = .unified
+            window.titleVisibility = .hidden
+        default:
+            break
+        }
+        window.title = "\(window.title) \(style)"
     }
 
     /// SIGUSR1: one more window, ordered front without activating the app.

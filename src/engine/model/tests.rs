@@ -716,6 +716,95 @@ fn one_at_a_time_follows_the_focused_window_even_when_present() {
     assert!(a.iter().all(|x| *x == Action::StateChanged) || a.is_empty());
 }
 
+/// The stage an activation of `pid` switches to with `focused` (None: no switch).
+fn activation_answer(e: &Env, pid: Pid, focused: Option<WindowId>) -> Option<StageId> {
+    let mut m = e.m.clone();
+    let obs = Observation { focused, ..e.d.obs() };
+    let a = m.app_activated(pid, &obs);
+    (!a.is_empty()).then(|| m.main_active_stage()).flatten()
+}
+
+#[test]
+fn an_activation_asks_the_focus_only_when_the_answer_depends_on_it() {
+    // (setup, pid, whether the focus can change the answer)
+    type Setup = fn(&mut Env);
+    let setups: [(&str, Setup, Pid, bool); 6] = [
+        ("one stage elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 10, false),
+        ("two stages elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::New);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 10, true),
+        ("present here, one elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::New);
+        }, 10, false),
+        ("present here only", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 11, false),
+        ("pinned here, one elsewhere", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+            e.add(meta(2, 10, "com.example.a"), RuleAction::Float);
+            e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+        }, 10, false),
+        ("unknown app", |e| {
+            e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+        }, 99, false),
+    ];
+    for one_at_a_time in [false, true] {
+        for (name, setup, pid, depends) in setups {
+            let mut options = ModelOptions::default();
+            if one_at_a_time {
+                options.settings.app_windows = AppWindows::OneAtATime;
+            }
+            let mut e = Env::with(options);
+            setup(&mut e);
+            let needs = e.m.activation_needs_focus(pid);
+            let ids: Vec<WindowId> = e.m.windows().map(|x| x.meta.id).collect();
+            let answers: Vec<Option<StageId>> = std::iter::once(None)
+                .chain(ids.iter().map(|&id| Some(id)))
+                .map(|f| activation_answer(&e, pid, f))
+                .collect();
+            let varies = answers.iter().any(|a| *a != answers[0]);
+            // Never skip the focus when it matters; ask it only where expected.
+            assert!(needs || !varies, "{name}, one at a time {one_at_a_time}: the focus changes the answer {answers:?}");
+            if !one_at_a_time {
+                assert_eq!(needs, depends, "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_activation_asks_the_focus_when_it_could_pick_another_display() {
+    let second = Display {
+        id: DisplayId(2),
+        frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
+        visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
+        corner: Default::default(),
+    };
+    let mut e = Env::new();
+    let actions = e.m.set_displays(vec![display(), second]);
+    e.run(actions);
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
+    e.add(meta(3, 10, "com.example.a"), RuleAction::New);
+    // One stage of app 10 elsewhere on main: the answer is that stage whatever the focus.
+    assert!(!e.m.activation_needs_focus(10));
+    // A window of it on the second display: its focus picks app_activated's display.
+    let mut m5 = meta(5, 10, "com.example.a");
+    m5.display = DisplayId(2);
+    m5.frame = Rect::new(1600.0, 100.0, 500.0, 400.0);
+    e.add(m5, RuleAction::Current);
+    assert!(e.m.activation_needs_focus(10));
+    assert!(!e.m.activation_needs_focus(11), "another app on main only");
+}
+
 #[test]
 fn an_app_with_a_pinned_window_does_not_pull_a_switch() {
     let mut e = Env::new();
@@ -2345,4 +2434,35 @@ fn one_at_a_time_shows_an_app_once_and_its_card_cycles_through_its_windows() {
     }
     seen.sort_unstable();
     assert_eq!(seen, [1, 2, 3], "clicks cycle through every window");
+}
+
+// ----- hide_parked_apps ------------------------------------------------------------------
+
+#[test]
+fn an_app_wholly_in_inactive_stages_keeps_its_most_recent_stage_in_place() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 10, "com.example.a"), RuleAction::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+    // Stage 3 (pid 11) is active; pid 10's stages 1 and 2 are parked, 2 the more recent.
+    let p = e.m.app_park(10);
+    assert_eq!((p.windows, p.shown), (2, 0));
+    assert_eq!(p.keep.iter().map(|k| k.0).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(p.keep[0].1, e.m.window(w(2)).map(|x| x.restore).unwrap_or_default());
+    assert!(p.stage_here);
+    // The active app shows; an app split across the active stage shows.
+    assert_eq!(e.m.app_park(11).shown, 1);
+    e.add(meta(4, 10, "com.example.a"), RuleAction::Current);
+    assert_eq!(e.m.app_park(10).shown, 1);
+}
+
+#[test]
+fn a_pinned_window_keeps_its_app_shown_and_an_empty_stage_says_so() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Float);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert_eq!(e.m.app_park(10).shown, 1, "pinned");
+    // The desktop revealed: the active stage is empty.
+    e.reveal();
+    assert!(!e.m.app_park(11).stage_here);
 }

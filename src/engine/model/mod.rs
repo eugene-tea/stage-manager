@@ -17,6 +17,7 @@
 //! only, undone when another Desktop comes) touch windows of a Space not shown.
 
 mod ahead;
+mod hide;
 mod ops;
 mod spaces;
 mod strip;
@@ -28,11 +29,11 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{Corner, clamp_to_visible, is_parked_in_at, park_frame_at};
+use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
-pub use ahead::{Ahead, AppFacts};
+pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use spaces::{Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 
@@ -232,6 +233,8 @@ pub struct ModelOptions {
     pub named_stages: Vec<String>,
     /// Keeping placed windows clear of the strip (off by default; the platform sets it).
     pub fit: FitOptions,
+    /// How park frames are asked (`[windows] park_inside`, `park_drop`).
+    pub park: ParkRequest,
 }
 
 /// State of a desktop reveal, so a second reveal brings the stage back.
@@ -439,6 +442,11 @@ impl Model {
     /// Sets how placed windows are kept clear of the strip.
     pub fn set_fit(&mut self, fit: FitOptions) {
         self.options.fit = fit;
+    }
+
+    /// How park frames are asked from now on (windows parked already stay where they are).
+    pub fn set_park_request(&mut self, req: ParkRequest) {
+        self.options.park = req;
     }
 
     /// Every parked window with its restore frame.
@@ -700,12 +708,26 @@ impl Model {
         if w.home == Home::Pinned {
             return;
         }
-        let d = self.display(w.meta.display);
-        let frame = park_frame_at(w.restore.size(), d.frame, d.corner);
+        let frame = self.park_frame_for(w);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = true;
         }
         actions.push(Action::Park { id, frame });
+    }
+
+    /// The frame that parks window `w`: its restore size in its display's park corner.
+    fn park_frame_for(&self, w: &WindowState) -> Rect {
+        let d = self.display(w.meta.display);
+        park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park)
+    }
+
+    /// Where the model left window `id`: its park frame while parked (where bringing it back
+    /// starts from), else its last frame. `meta.frame` alone does not say it for a parked
+    /// window: its frames are ignored while parked ([`Model::window_frame_changed`]), so it
+    /// keeps the frame the window had before it was parked.
+    pub fn frame_left(&self, id: WindowId) -> Option<Rect> {
+        let w = self.windows.get(&id)?;
+        Some(if w.parked { self.park_frame_for(w) } else { w.meta.frame })
     }
 
     /// Brings one window to its clamped restore frame, fitted into the stage area first.

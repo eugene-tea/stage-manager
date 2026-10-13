@@ -50,6 +50,33 @@ pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 /// Housekeeping period of the WM run loop (saves, config polling, strip refresh).
 const TICK_SECONDS: f64 = 0.25;
 
+/// The fast tick: work that must land within a Desktop slide (~0.25–0.45 s), such as
+/// checking an arrangement made ahead against the window server
+/// (`Controller::fast_tick`). Armed only while the controller wants it
+/// (`Controller::wants_fast_tick`); otherwise its timer waits far in the future.
+const FAST_TICK_SECONDS: f64 = 0.02;
+
+thread_local! {
+    /// The fast tick's timer, armed and disarmed by [`arm_fast_tick`].
+    static FAST_TIMER: RefCell<Option<CFRetained<CFRunLoopTimer>>> = const { RefCell::new(None) };
+}
+
+/// Arms the fast tick while the controller wants it, else parks its timer far in the future
+/// (no wake-ups while nothing needs it).
+fn arm_fast_tick() {
+    let wanted = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.controller.wants_fast_tick()));
+    FAST_TIMER.with(|t| {
+        let Some(timer) = t.borrow().as_ref().cloned() else { return };
+        let now = CFAbsoluteTimeGetCurrent();
+        let next = timer.next_fire_date();
+        if wanted && next > now + FAST_TICK_SECONDS {
+            timer.set_next_fire_date(now + FAST_TICK_SECONDS);
+        } else if !wanted && next < now + 3600.0 {
+            timer.set_next_fire_date(now + 1.0e9);
+        }
+    });
+}
+
 /// App-observation retries run every this many ticks (about once a second).
 const RETRY_EVERY: u32 = 4;
 
@@ -215,6 +242,15 @@ fn guarded_state(what: &str, f: impl FnOnce(&mut WmState)) {
     }
 }
 
+/// The fast tick (none once Quit is requested).
+fn fast_tick() {
+    if safety::quit_requested() {
+        return;
+    }
+    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&s.observer));
+    arm_fast_tick();
+}
+
 /// Handles every queued command (scheduled by `WmHandle::send`). Once Quit is requested,
 /// every command but `Shutdown` is dropped, so Quit never waits behind queued work (a
 /// dropped ctl request gets no reply; its caller times out).
@@ -228,6 +264,7 @@ fn drain() {
         }
         guarded_state("a WM command", |s| s.handle(cmd));
     }
+    arm_fast_tick();
 }
 
 /// Periodic housekeeping (none once Quit is requested).
@@ -478,6 +515,21 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         // SAFETY: the default-mode constant is a valid static.
         Some(t) => run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode }),
         None => tracing::error!("could not create the WM tick timer"),
+    }
+
+    let fast_block = RcBlock::new(|_timer: *mut CFRunLoopTimer| fast_tick());
+    let first_fast = CFAbsoluteTimeGetCurrent() + 1.0e9;
+    // SAFETY: valid arguments; the block is copied by CoreFoundation.
+    let fast = unsafe { CFRunLoopTimer::with_handler(None, first_fast, FAST_TICK_SECONDS, 0, 0, Some(&fast_block)) };
+    match &fast {
+        Some(t) => {
+            // SAFETY: a valid timer; a small tolerance lets the system coalesce its wake-ups.
+            unsafe { t.set_tolerance(0.005) };
+            // SAFETY: the default-mode constant is a valid static.
+            run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode });
+            FAST_TIMER.with(|f| *f.borrow_mut() = Some(t.clone()));
+        }
+        None => tracing::error!("could not create the WM fast tick timer"),
     }
 
     tracing::debug!("WM thread running");

@@ -494,10 +494,18 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `animation.shadow_offset_y` | `10.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
 | `animation.snapshot_interval_ms` | `2000` | whole number, 0 to 60000 | How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip. |
 | `animation.snapshot_cache_mb` | `512` | whole number, 16 to 8192 | Most memory kept for full-size window snapshots; the oldest go first. |
+| `animation.activation_grows` | `false` | true or false | Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click; false brings them to their frames at once (macOS has already raised them in the park corner, so waiting shows them there). |
 | `windows.fit` | `"off"` | "off", "move", "narrow" | Keep placed windows clear of the strip: "move" right just enough, "narrow" also too-wide ones. Apple: "off". |
 | `windows.fit_margin` | `16.0` | number, 0 to 500 | With fit: room kept between the strip column and the windows. |
 | `windows.minimize_to_strip` | `true` | true or false | Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock. |
 | `windows.focus_echo_ms` | `700` | whole number, 0 to 10000 | Focus changes this soon after we moved a window are taken as our own and never switch stages. |
+| `windows.park_inside` | `1.0` | number, -10000 to 32 | Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it. |
+| `windows.park_drop` | `-1.0` | number, -32 to 10000 | How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it. |
+| `windows.hide_parked_apps` | `false` | true or false | An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default. |
+| `windows.corner_patch` | `false` | true or false | Cover the parked windows' slivers with a live picture of the desktop under them (wallpaper, desktop icons, widgets; Screen Recording). A prototype: off by default. |
+| `windows.corner_patch_reach` | `60.0` | number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow. |
+| `windows.corner_patch_fps` | `10` | whole number, 1 to 60 | Most frames a second of the corner patch's live picture (a still wallpaper sends none). |
+| `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
 | `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
 | `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |

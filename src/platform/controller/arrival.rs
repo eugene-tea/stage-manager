@@ -39,18 +39,18 @@
 //! own switch, when nothing was arranged ahead, is part of the arrival's batch and never
 //! animated: the Desktop's slide is the motion (Apple's).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::{Controller, Unrestored, cards_in, on_main_screen};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Action, Ahead, AppFacts, Observation, SpaceId, WindowId};
-use crate::platform::ax::{AxElement, names};
+use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Model, Observation, SpaceId, StageId, WindowId};
+use crate::platform::ax::{AxElement, AxError, AxResult, names};
 use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::observe::{Observer, WindowKind};
-use crate::platform::safety::ParkedEntry;
+use crate::platform::safety::{self, ParkedEntry};
 use crate::platform::windows::{self, CgWindow};
 use crate::ui::strip_model::{self, StripSnapshot};
 
@@ -92,6 +92,455 @@ impl Trigger {
         self == Trigger::DockClick
     }
 }
+
+/// How long the moves of an arrangement made at a Dock click are checked against the window
+/// server and sent again: the slide (~0.25–0.45 s) and a margin. What is still not taken
+/// then is checked once more when the Desktop arrives ([`Controller::settle_ahead`]).
+pub const VERIFY_FOR: Duration = Duration::from_millis(600);
+
+/// How often they are checked (the WM thread's fast tick).
+pub const VERIFY_EVERY: Duration = Duration::from_millis(20);
+
+/// A move is sent again no sooner than this after its last resend, unless the window
+/// server's listing of the window changed since: the budget lasts to the slide's end.
+pub const RESEND_SPACING: Duration = Duration::from_millis(100);
+
+/// One round's resends are held to this together (the WM thread's other work waits on
+/// them): what is left goes in the next round.
+pub const RESEND_ROUND_CAP: Duration = Duration::from_millis(100);
+
+/// A move is sent only with this much of its round left: about the full timeout of its two
+/// calls (the nudge and the exact move, 2 × 50 ms), less a slack so the round's first move
+/// always goes. One with less left waits for the next round, not counted (R13 2).
+pub const MOVE_NEEDS: Duration = Duration::from_millis(90);
+
+/// After the predicted Desktop's arrival, its moves are looked at this much longer while
+/// the list still shows the slide (the arrival reads it ~60 ms after the notice, maybe
+/// mid-slide) or a move's window is not listed; then what is not taken goes once more.
+pub const ARRIVAL_CHECK_FOR: Duration = Duration::from_millis(400);
+
+/// When [`ARRIVAL_CHECK_FOR`] is up, the arrival's check goes on one round a tick while moves
+/// the round's cap deferred or cut, or moves owed their exact frame, are left: for at most
+/// this many ticks more…
+pub const TAIL_OVER_TICKS: u32 = 10;
+
+/// …and at most this long (room for every counted tick of a slow app: the round's cap plus a
+/// tick each); then what stayed unsent is logged at warn (R15 1).
+pub const TAIL_OVER_FOR: Duration = Duration::from_millis(1300);
+
+/// One move of an arrangement made on a Desktop not shown, as the window server should show
+/// it: parked (in the park zone), or at a frame; with how often it was sent again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Expect {
+    id: u32,
+    frame: Rect,
+    /// The window's frame before the move (the model's), where a park not taken leaves it.
+    before: Option<Rect>,
+    park: bool,
+    /// Times sent again (at most [`RESEND_MAX`]).
+    tries: u32,
+    /// A resend timed out or failed: not sent again while the slide runs.
+    gave_up: bool,
+    /// The 1 pt nudge went through, the exact move did not: the exact one is owed.
+    nudged_only: bool,
+    /// When it was last sent again, with the window server's bounds for it then.
+    last: Option<(Instant, Option<Rect>)>,
+    /// Sent again by the arrival's check (once), by a call the round's cap did not cut.
+    final_sent: bool,
+    /// Given its one exact move at the arrival's time-up ([`owed_exact`], R15 2).
+    exact_last: bool,
+    /// The window's stage as the arrangement left it (`None`: pinned, or not known): a move
+    /// is checked only while the model still has the window there, parked as `park` says
+    /// ([`Model::move_holds`]).
+    stage: Option<StageId>,
+}
+
+impl Expect {
+    fn new(id: u32, frame: Rect, before: Option<Rect>, park: bool) -> Self {
+        Expect { id, frame, before, park, tries: 0, gave_up: false, nudged_only: false, last: None, final_sent: false, exact_last: false, stage: None }
+    }
+}
+
+/// A move is sent again at most this many times while the slide runs (the measured case
+/// needed one, when the Desktop showed); the arrival's final check is on top.
+pub const RESEND_MAX: u32 = 3;
+
+/// The moves of an arrangement made on a Desktop not shown, until the window server shows
+/// them (measured 10-13: in one run of three it applied them only when that Desktop became
+/// the shown one, at the end of the slide; the stage left showed all through it). Checked
+/// on the fast tick while `polling`; kept after for the arrival's final check.
+#[derive(Debug, Clone)]
+pub(super) struct Verify {
+    sent: Instant,
+    next: Instant,
+    rounds: u32,
+    /// Rounds skipped because the list showed the Desktop sliding.
+    slid: u32,
+    /// The fast tick still checks them.
+    polling: bool,
+    /// A round found moves not taken and said so at info (the next ones at debug).
+    told: bool,
+    /// When the predicted Desktop arrived, and until when the arrival's check looks
+    /// ([`ARRIVAL_CHECK_FOR`], [`Controller::arrival_round`]).
+    tail: Option<(Instant, Instant)>,
+    /// The arrival's check's ticks since its time was up, this one counted
+    /// ([`tail_past_ceiling`], R15 1).
+    over_ticks: u32,
+    /// The stage arranged on its Desktop: the check ends once it is not the active one there
+    /// or a switch touched it ([`Model::ahead_holds`], R13 1).
+    mark: AheadMark,
+    moves: Vec<Expect>,
+}
+
+/// What the window server's listing says of one move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// Not where it was before the move: taken (a restore out of the park zone, the size the
+    /// app's; a park away from its old frame).
+    Taken,
+    /// Still as before the move: a restore in the park zone, a park at its old frame, or
+    /// the window not listed.
+    Missing,
+    /// A park listed neither near its frame before the move nor in the park zone (macOS
+    /// clamped it short, or the list is stale): sent once more ([`owed`]), not counted taken.
+    Unsure,
+    /// The Desktop slides: the list shows its windows shifted by up to the display's width
+    /// (live 10-13: x 2740, 2457, 1746, 1203); nothing can be judged.
+    Sliding,
+}
+
+/// True when `bounds` is `reference` moved sideways only, by more than 2 pt and at most
+/// about the display's width (`width`): a Desktop slide's offset.
+pub(crate) fn slid_from(bounds: Rect, reference: Rect, width: f64) -> bool {
+    let dx = (bounds.x - reference.x).abs();
+    (bounds.y - reference.y).abs() <= 2.0 && dx > 2.0 && dx <= width * 1.05
+}
+
+/// What the window server's `bounds` for move `e` say, read on a list not shifted by a
+/// slide: a restore is taken out of the park zone (where exactly, and the size, are the
+/// app's: a terminal's grid, a fixed-size window); a park in the park zone, missing near its
+/// frame before the move (or anywhere out of the zone when that frame is not known), unsure
+/// elsewhere. A move owed its exact frame after a nudge is missing.
+fn state(e: &Expect, bounds: Rect, parks: impl Fn(Rect) -> bool) -> Seen {
+    let near = |r: Rect| (bounds.x - r.x).abs() <= 2.0 && (bounds.y - r.y).abs() <= 2.0;
+    let taken = |yes: bool| if yes { Seen::Taken } else { Seen::Missing };
+    if e.nudged_only {
+        Seen::Missing
+    } else if !e.park {
+        taken(!parks(bounds))
+    } else if parks(bounds) {
+        Seen::Taken
+    } else {
+        match e.before {
+            Some(before) if !near(before) => Seen::Unsure,
+            _ => Seen::Missing,
+        }
+    }
+}
+
+/// True when move `e`, judged `seen`, is still to be sent: missing, or unsure and not sent
+/// again yet (once).
+fn owed(e: &Expect, seen: Seen) -> bool {
+    match seen {
+        Seen::Missing => true,
+        Seen::Unsure => e.tries == 0,
+        Seen::Taken | Seen::Sliding => false,
+    }
+}
+
+/// The window server's word on move `e` (`listed`: its window in the list, if any; `display`:
+/// the main display's frame). A window listed on screen off the display, or shifted sideways
+/// from where the move put it or from where it was, is caught mid-slide.
+fn judge(e: &Expect, listed: Option<&CgWindow>, display: Rect, parks: impl Fn(Rect) -> bool) -> Seen {
+    let Some(w) = listed else { return Seen::Missing };
+    let b = w.bounds;
+    let off_display = w.onscreen && w.layer == 0 && display.intersect(&b).is_none();
+    if off_display || slid_from(b, e.frame, display.w) || e.before.is_some_and(|r| slid_from(b, r, display.w)) {
+        Seen::Sliding
+    } else {
+        state(e, b, parks)
+    }
+}
+
+/// What the arrival's check does with a listing ([`tail_step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TailStep {
+    /// The list still shows the slide, or a move's window is not listed: look again.
+    Wait,
+    /// Send these moves again (the list settled, or the check's time is up; none: done).
+    Send(Vec<usize>),
+}
+
+/// The arrival's check of `moves` on a listing (`seen`: each one judged, `None` when its
+/// window is not listed); `over`: [`ARRIVAL_CHECK_FOR`] has run out. While the list shows
+/// the slide or a window is missing it waits; then every move not taken and not sent by this
+/// check yet goes (an unsure one only if never sent again; an unlisted one not: gone).
+fn tail_step(moves: &[Expect], seen: &[Option<Seen>], over: bool) -> TailStep {
+    if !over && seen.iter().any(|s| matches!(s, None | Some(Seen::Sliding))) {
+        return TailStep::Wait;
+    }
+    let due = |i: usize| match seen[i] {
+        None | Some(Seen::Taken) => false,
+        Some(Seen::Missing | Seen::Sliding) => true,
+        Some(Seen::Unsure) => moves[i].tries == 0,
+    };
+    TailStep::Send((0..moves.len()).filter(|&i| !moves[i].final_sent && due(i)).collect())
+}
+
+/// Sends the moves `due` in order (`send`: false when the round's time is up and nothing was
+/// sent); returns the ones left for the next round.
+fn send_round(due: &[usize], mut send: impl FnMut(usize) -> bool) -> Vec<usize> {
+    for (k, &i) in due.iter().enumerate() {
+        if !send(i) {
+            return due[k..].to_vec();
+        }
+    }
+    Vec::new()
+}
+
+/// True when the arrival's check, its time up, may not go on: past its `over_ticks`-th tick
+/// since (the first counted 1, then [`TAIL_OVER_TICKS`] more) or [`TAIL_OVER_FOR`] past it.
+fn tail_past_ceiling(over_ticks: u32, past: Duration) -> bool {
+    // The time-up round itself always goes; a slow app's rounds take their cap plus a tick
+    // each, so the time ceiling leaves room for every counted tick (R15 review).
+    over_ticks > 1 && (over_ticks > TAIL_OVER_TICKS + 1 || past >= TAIL_OVER_FOR)
+}
+
+/// How a tick of the arrival's check ends ([`tail_round`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TailEnd {
+    /// Moves left: deferred or cut by the round's cap, or owed their exact frame at time-up.
+    NextTick,
+    /// Nothing left: the check ends.
+    Done,
+    /// Its ceiling reached with these moves still to send: the check ends (logged at warn).
+    Ceiling(Vec<usize>),
+}
+
+/// What a tick of the arrival's check did ([`tail_round`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TailRound {
+    /// The moves due the round's cap deferred (not sent).
+    left: Vec<usize>,
+    /// The moves due whose exact move the cap cut (sent again next tick).
+    cut: usize,
+    /// The move given its owed exact frame this tick, at time-up.
+    exact: Option<usize>,
+    end: TailEnd,
+}
+
+/// One tick of the arrival's check on `moves` (`due`: [`tail_step`]'s; `seen`: each judged;
+/// `over`: [`ARRIVAL_CHECK_FOR`] is up; `ceiling`: [`tail_past_ceiling`]). `resend` sends a
+/// move within the tick's round ([`Controller::resend`]). The due moves go first, as many as
+/// the round's cap lets ([`send_round`]); those it deferred or cut go next tick, the time up
+/// or not (R15 1). Before the time is up the check then ends; once it is, a move still owed
+/// its exact frame ([`owed_exact`]) gets one exact move on its full timeout, on a tick with
+/// nothing else to send and one a tick (R15 2). Past the ceiling nothing is sent: what is
+/// left ends it.
+fn tail_round(moves: &mut [Expect], due: &[usize], seen: &[Option<Seen>], over: bool, ceiling: bool, mut resend: impl FnMut(&mut Expect) -> Resent) -> TailRound {
+    let pending_exact = |moves: &[Expect]| -> Vec<usize> { owed_exact(moves, seen).into_iter().filter(|&i| !moves[i].exact_last).collect() };
+    if over && ceiling {
+        let mut unsent = due.to_vec();
+        unsent.extend(pending_exact(moves).into_iter().filter(|i| !due.contains(i)));
+        let end = if unsent.is_empty() { TailEnd::Done } else { TailEnd::Ceiling(unsent) };
+        return TailRound { left: Vec::new(), cut: 0, exact: None, end };
+    }
+    let left = send_round(due, |i| {
+        let e = &mut moves[i];
+        e.gave_up = false;
+        let resent = resend(e);
+        // Only a send the round's cap did not cut is the final one (R13 2).
+        e.final_sent |= resent == Resent::Full;
+        resent != Resent::Deferred
+    });
+    let cut = due.iter().filter(|&&i| !moves[i].final_sent).count() - left.len();
+    let round = |end| TailRound { left: left.clone(), cut, exact: None, end };
+    if cut > 0 || !left.is_empty() {
+        return round(TailEnd::NextTick);
+    }
+    if !over {
+        return round(TailEnd::Done);
+    }
+    let owed = pending_exact(moves);
+    let Some(&i) = owed.first() else { return round(TailEnd::Done) };
+    if !due.is_empty() {
+        // This tick's round sent moves: the exact one waits for a round of its own.
+        return round(TailEnd::NextTick);
+    }
+    let e = &mut moves[i];
+    let resent = resend(e);
+    e.exact_last = resent != Resent::Deferred;
+    e.final_sent |= resent == Resent::Full;
+    let end = if owed.len() > 1 { TailEnd::NextTick } else { TailEnd::Done };
+    TailRound { left: Vec::new(), cut: 0, exact: Some(i), end }
+}
+
+/// Forgets the move of window `id` (the user acted on it: nothing sends it again under
+/// them). True when there was one.
+fn drop_move(moves: &mut Vec<Expect>, id: u32) -> bool {
+    let n = moves.len();
+    moves.retain(|e| e.id != id);
+    moves.len() < n
+}
+
+/// What is left of an arrangement's moves to check against the model (R13 1): none once the
+/// stage arranged is no longer the active one of its Desktop or a switch touched it (`Err`:
+/// why the check ends); else each move whose window the model no longer has as the move
+/// left it (closed, parked or shown since, gone to another stage) is dropped (`Ok`: their
+/// ids), and with none left the check ends too.
+fn screen(m: &Model, mark: &AheadMark, moves: &mut Vec<Expect>) -> Result<Vec<u32>, &'static str> {
+    if !m.ahead_holds(mark) {
+        return Err("the stage arranged is no longer the one active on its Desktop (a switch, an undo)");
+    }
+    let mut dropped = Vec::new();
+    moves.retain(|e| {
+        let holds = m.move_holds(WindowId(e.id), e.park, e.stage);
+        if !holds {
+            dropped.push(e.id);
+        }
+        holds
+    });
+    if moves.is_empty() {
+        return Err("no move made ahead is as the model has it any more");
+    }
+    Ok(dropped)
+}
+
+/// Whether the arrival's check runs when the predicted Desktop arrives (`hit`): only when the
+/// stage arranged is still the window's (`present`). Without its window the arrival's batch
+/// brings back the stage that was there: the moves made ahead are its to undo, never sent
+/// again (R13 1). `Err`: why the check ends.
+fn arrival_check(hit: bool, present: bool) -> Result<(), &'static str> {
+    match (hit, present) {
+        (true, true) => Ok(()),
+        (true, false) => Err("the Desktop arranged ahead came without its window; the stage that was there comes back"),
+        (false, _) => Err("another Desktop came"),
+    }
+}
+
+/// Where the model left each managed window before an arrangement (a parked window's park
+/// frame, [`Model::frame_left`]; never its home frame, which a parked window's `meta.frame`
+/// still holds), read before the model arranges it.
+fn frames_left(m: &Model) -> HashMap<u32, Rect> {
+    m.windows().filter_map(|w| m.frame_left(w.meta.id).map(|r| (w.meta.id.0, r))).collect()
+}
+
+/// Every window's frame before an arrangement's moves, read before they go out: the window
+/// server's bounds where `listed` (the windows the moves touch, described) has it, else
+/// where the model left it (`left`, [`frames_left`]).
+fn frames_before(left: &HashMap<u32, Rect>, listed: &[CgWindow]) -> HashMap<u32, Rect> {
+    let mut before = left.clone();
+    before.extend(listed.iter().map(|c| (c.id, c.bounds)));
+    before
+}
+
+/// The windows `actions` move (park or put at a frame).
+fn moved_ids(actions: &[Action]) -> Vec<u32> {
+    actions
+        .iter()
+        .filter_map(|a| match *a {
+            Action::Park { id, .. } | Action::SetFrame { id, .. } => Some(id.0),
+            _ => None,
+        })
+        .collect()
+}
+
+/// True when move `e`, not taken, may be sent again now (`bounds`: the window server's for it
+/// now): its budget not spent, and its listing changed since its last resend or that was
+/// [`RESEND_SPACING`] ago.
+fn resend_due(e: &Expect, bounds: Option<Rect>, now: Instant) -> bool {
+    if e.gave_up || e.tries >= RESEND_MAX {
+        return false;
+    }
+    match e.last {
+        None => true,
+        Some((at, seen)) => seen != bounds || now.saturating_duration_since(at) >= RESEND_SPACING,
+    }
+}
+
+/// The moves among `actions` to check against the window server, with each window's frame
+/// before them (`before`) and its stage after them (`stage`).
+fn expects(actions: &[Action], before: impl Fn(u32) -> Option<Rect>, stage: impl Fn(u32) -> Option<StageId>) -> Vec<Expect> {
+    actions
+        .iter()
+        .filter_map(|a| match *a {
+            Action::Park { id, frame } => Some(Expect { stage: stage(id.0), ..Expect::new(id.0, frame, before(id.0), true) }),
+            Action::SetFrame { id, frame } => Some(Expect { stage: stage(id.0), ..Expect::new(id.0, frame, before(id.0), false) }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What one resend did ([`Controller::resend`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resent {
+    /// Nothing sent: less than [`MOVE_NEEDS`] was left of the round (not counted).
+    Deferred,
+    /// Sent, every call with its full timeout (or answered): its outcome is the app's.
+    Full,
+    /// The nudge went through, the exact move was cut by the round's cap (not asked, or
+    /// timed out on less than its full timeout): the exact move is owed, sent again.
+    Cut,
+}
+
+/// True when a move may go `elapsed` into its round: [`MOVE_NEEDS`] is left of
+/// [`RESEND_ROUND_CAP`].
+fn move_fits(elapsed: Duration) -> bool {
+    RESEND_ROUND_CAP.saturating_sub(elapsed) >= MOVE_NEEDS
+}
+
+/// Records what a resend of `e` did (`nudge`, `exact`: the calls' answers; `exact_full`: the
+/// exact move had its full timeout): both through, nothing owed; the nudge only, the exact
+/// move owed (cut by the cap: [`Resent::Cut`]); the nudge failed (always on its full
+/// timeout), given up until the arrival's check.
+fn record_resend(e: &mut Expect, nudge: AxResult<()>, exact: AxResult<()>, exact_full: bool) -> Resent {
+    match (nudge, exact) {
+        (Ok(()), Ok(())) => {
+            e.nudged_only = false;
+            Resent::Full
+        }
+        (Ok(()), Err(err)) => {
+            e.nudged_only = true;
+            if exact_full {
+                tracing::debug!(id = e.id, "arrival: the exact move sent again failed; owed: {err}");
+                Resent::Full
+            } else {
+                tracing::debug!(id = e.id, "arrival: the round's cap cut the exact move; sent again: {err}");
+                Resent::Cut
+            }
+        }
+        (Err(err), _) => {
+            tracing::debug!(id = e.id, "arrival: a move sent again failed; given up: {err}");
+            e.gave_up = true;
+            Resent::Full
+        }
+    }
+}
+
+/// The moves of the arrival's check still owed their exact frame when its time is up (the
+/// nudge through, the exact move not; their windows listed in `seen`): each gets one more
+/// exact move on its full timeout.
+fn owed_exact(moves: &[Expect], seen: &[Option<Seen>]) -> Vec<usize> {
+    (0..moves.len()).filter(|&i| moves[i].nudged_only && !moves[i].gave_up && seen[i].is_some()).collect()
+}
+
+/// A short form of where the window server lists window `id` (`unlisted`: not at all).
+fn listed_at(list: &[CgWindow], id: u32) -> String {
+    format!("{id}: {}", list.iter().find(|w| w.id == id).map_or("unlisted".into(), |w| w.bounds.to_string()))
+}
+
+/// A Dock press's prediction and what the app said, until the next Space change shows
+/// which Desktop the click went to (logged).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DockSeen {
+    at: Instant,
+    pid: i32,
+    active: bool,
+    predicted: Option<u64>,
+}
+
+/// A Space change this long after a Dock press counts as its click's.
+const DOCK_SEEN_FOR: Duration = Duration::from_millis(2000);
 
 /// A Dock click's prediction: the app and the window macOS will show, or why none.
 pub(super) type Prediction = Result<(i32, WindowId), &'static str>;
@@ -249,6 +698,73 @@ fn forget_undoes(pending: bool) -> bool {
     !pending
 }
 
+/// The press's whole round with the app is held to this ([`press_round`]): a mouse-down on
+/// the WM thread, before the click's prediction.
+const PRESS_ROUND_CAP: Duration = Duration::from_millis(100);
+
+/// The timeout for a round's next question, `elapsed` into a round held to `cap`
+/// ([`PRESS_ROUND_CAP`], [`RESEND_ROUND_CAP`]): at most [`QUERY_AX_TIMEOUT_SECONDS`], at most
+/// what is left; `None` once less than 5 ms is left (the round stops).
+fn round_timeout(cap: Duration, elapsed: Duration) -> Option<f32> {
+    let left = cap.saturating_sub(elapsed);
+    (left >= Duration::from_millis(5)).then(|| left.as_secs_f32().min(QUERY_AX_TIMEOUT_SECONDS))
+}
+
+/// A window element's `CGWindowID` asked within `seconds` on that element too (its app's
+/// bounded timeout does not reach it); `None`: the round's time is up, not asked.
+fn window_id_within(w: &AxElement, seconds: Option<f32>) -> AxResult<u32> {
+    match seconds {
+        Some(seconds) => w.window_id_within(seconds),
+        None => Err(AxError::CANNOT_COMPLETE),
+    }
+}
+
+/// What the app said at a Dock press (`None`: not asked, or no answer).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PressAnswer {
+    hidden: Option<bool>,
+    active: Option<bool>,
+    focused: Option<u32>,
+    main: Option<u32>,
+}
+
+/// The press's round with the app, in order: hidden, active, its focused window, its main
+/// window only when it has no focused one (no value). It stops at the first failure (a
+/// timeout: the app is busy) and when `over` says the round's time is up (`over` is asked
+/// before every question after the first and sets the next one's timeout).
+fn press_round(
+    hidden: impl FnOnce() -> AxResult<bool>,
+    active: impl FnOnce() -> AxResult<bool>,
+    focused: impl FnOnce() -> AxResult<u32>,
+    main: impl FnOnce() -> AxResult<u32>,
+    mut over: impl FnMut() -> bool,
+) -> PressAnswer {
+    let mut a = PressAnswer::default();
+    let Ok(h) = hidden() else { return a };
+    a.hidden = Some(h);
+    if over() {
+        return a;
+    }
+    let Ok(act) = active() else { return a };
+    a.active = Some(act);
+    if over() {
+        return a;
+    }
+    match focused() {
+        Ok(id) => {
+            a.focused = Some(id);
+            return a;
+        }
+        Err(e) if e == AxError::NO_VALUE || e == AxError::ATTRIBUTE_UNSUPPORTED => {}
+        Err(_) => return a,
+    }
+    if over() {
+        return a;
+    }
+    a.main = main().ok();
+    a
+}
+
 impl Controller {
     /// Milliseconds since the user's latest input, when it is recent (a Dock click, a key).
     pub(super) fn since_input_ms(&self, now: Instant) -> Option<u64> {
@@ -399,11 +915,26 @@ impl Controller {
         let changes_at = self.space_changes;
         let Some(m) = self.model.as_mut() else { return false };
         let pid = m.window(id).map(|w| w.meta.pid).unwrap_or_default();
+        // Where the model left each window, read before it arranges them.
+        let left = if trigger.away() { frames_left(m) } else { HashMap::new() };
         let Some((ahead, actions)) = m.arrange_ahead(id, obs.as_ref()) else {
             tracing::debug!(id = id.0, trigger = trigger.name(), "nothing to arrange ahead for the window");
             return false;
         };
+        let mark = m.ahead_mark(&ahead);
         let moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count();
+        // Each moved window's frame before the moves, read before they go out: where a park
+        // not taken leaves it, where a restore starts from (a parked window's park frame, or
+        // where the window server lists it; R11 1). Only the windows moved are asked (R13 3).
+        let (expected, before_us) = if trigger.away() {
+            let asked = Instant::now();
+            let listed = windows::describe(&moved_ids(&actions));
+            let before_us = asked.elapsed().as_micros() as u64;
+            let before = frames_before(&left, &listed);
+            (expects(&actions, |w| before.get(&w).copied(), |w| m.stage_of(WindowId(w))), Some(before_us))
+        } else {
+            (Vec::new(), None)
+        };
         if trigger.away() {
             self.keep_registered(ob, &actions);
         }
@@ -419,12 +950,337 @@ impl Controller {
             left = ahead.previous.0,
             trigger = trigger.name(),
             moves,
+            before_us,
             since_focus_ms = ms(focus_at, sent),
             since_input_ms = self.since_input_ms(sent),
             "arrival: the Desktop arranged ahead for the window it is shown for"
         );
         self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at });
+        // A previous arrival's check still looking ends here (its tally logged).
+        self.finish_verify("a new arrangement went out");
+        // The first look a fast tick later: right after the calls the window server's list
+        // may not show them yet even when they took (R9 1).
+        self.verify = (!expected.is_empty()).then(|| Verify {
+            sent,
+            next: sent + VERIFY_EVERY,
+            rounds: 0,
+            slid: 0,
+            polling: true,
+            told: false,
+            tail: None,
+            over_ticks: 0,
+            mark,
+            moves: expected,
+        });
         true
+    }
+
+    /// True while the WM thread's fast tick has work: an arrangement's moves to check.
+    pub fn wants_fast_tick(&self) -> bool {
+        self.verify.as_ref().is_some_and(|v| v.polling)
+    }
+
+    /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
+    /// when due ([`Self::check_arrangement`]; after its Desktop's arrival,
+    /// [`Self::arrival_round`]).
+    pub fn fast_tick(&mut self, ob: &Observer) {
+        let now = Instant::now();
+        if self.model.is_none() {
+            self.verify = None;
+        } else if let Some(v) = self.verify.as_ref().filter(|v| v.polling && now >= v.next) {
+            if v.tail.is_some() {
+                self.arrival_round(ob, &windows::list_windows(), now);
+            } else {
+                self.check_arrangement(ob, now);
+            }
+        }
+    }
+
+    /// The user acted on window `id` (`how`: grabbed its sliver, dragged it, clicked it): its
+    /// move made ahead is no longer checked or sent again, so nothing parks it again (or puts
+    /// it back) under them (R11 3).
+    pub(super) fn user_took(&mut self, id: u32, how: &str) {
+        let Some(v) = self.verify.as_mut() else { return };
+        if drop_move(&mut v.moves, id) {
+            tracing::debug!(id, how, "arrival: the user acted on a window moved ahead; its move is no longer checked");
+        }
+    }
+
+    /// Ends the check of an arrangement's moves (`why`: it was undone, another Desktop
+    /// came), logging what was sent again by then.
+    pub(super) fn finish_verify(&mut self, why: &str) {
+        let Some(v) = self.verify.take() else { return };
+        let resent: u32 = v.moves.iter().map(|e| e.tries).sum();
+        tracing::info!(
+            why,
+            rounds = v.rounds,
+            slid = v.slid,
+            resent,
+            after_ms = ms(v.sent, Instant::now()),
+            "arrival: the check of the arrangement's moves ends"
+        );
+    }
+
+    /// Screens the check's moves against the model before a round ([`screen`]): the whole
+    /// check ends (true: it goes on) once the stage arranged is no longer the one active on
+    /// its Desktop or a switch touched it; a move whose window the model has otherwise now is
+    /// dropped. Nothing parks or brings back a window the model has moved on from (R13 1).
+    fn verify_stands(&mut self) -> bool {
+        let (Some(m), Some(v)) = (self.model.as_ref(), self.verify.as_mut()) else { return false };
+        match screen(m, &v.mark, &mut v.moves) {
+            Ok(dropped) => {
+                if !dropped.is_empty() {
+                    tracing::debug!(?dropped, "arrival: moves made ahead the model has moved on from; no longer checked");
+                }
+                true
+            }
+            Err(why) => {
+                self.finish_verify(why);
+                false
+            }
+        }
+    }
+
+    /// Stops the fast tick's checks (`what`: the tally said at info); the moves stay for the
+    /// arrival's final check ([`Self::final_check`]).
+    fn stop_polling(&mut self, what: &str, missing: &[String], now: Instant) {
+        let Some(v) = self.verify.as_mut() else { return };
+        v.polling = false;
+        let resent: u32 = v.moves.iter().map(|e| e.tries).sum();
+        tracing::info!(
+            moves = v.moves.len(),
+            ?missing,
+            rounds = v.rounds,
+            slid = v.slid,
+            resent,
+            after_ms = ms(v.sent, now),
+            "arrival: {what}"
+        );
+    }
+
+    /// Reads the window server's frames of an arrangement's moves ([`judge`]): those it does
+    /// not show taken are sent again when due ([`resend_due`], [`Self::resend`]), every
+    /// [`VERIFY_EVERY`] for [`VERIFY_FOR`] or until it shows them all; a round that finds the
+    /// Desktop sliding is skipped. The first round with moves not taken and the last tally
+    /// are logged at info, the rounds between at debug. Stops once its Desktop is arriving
+    /// (a Space change settling: the user may hold its windows); the arrival checks the
+    /// moves once more.
+    fn check_arrangement(&mut self, ob: &Observer, now: Instant) {
+        let live = self.ahead.as_ref().is_some_and(|s| s.trigger == Trigger::DockClick);
+        if !live {
+            self.finish_verify("the arrangement is settled");
+            return;
+        }
+        if self.space_pending {
+            self.stop_polling("its Desktop is arriving; the arrival checks the moves", &[], now);
+            return;
+        }
+        if !self.verify_stands() {
+            return;
+        }
+        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let Some(v) = self.verify.as_mut() else { return };
+        let list = windows::list_windows();
+        let listed = |id: u32| list.iter().find(|w| w.id == id);
+        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), main.frame, |r| main.parks(r))).collect();
+        let elapsed = ms(v.sent, now);
+        let over = now.saturating_duration_since(v.sent) >= VERIFY_FOR;
+        if seen.contains(&Seen::Sliding) {
+            v.slid += 1;
+            v.next = now + VERIFY_EVERY;
+            tracing::debug!(after_ms = elapsed, "arrival: the Desktop slides; the moves are judged when it stops");
+            if over {
+                self.stop_polling("the Desktop still slides; the arrival checks the moves", &[], now);
+            }
+            return;
+        }
+        let missing: Vec<usize> = (0..v.moves.len()).filter(|&i| owed(&v.moves[i], seen[i])).collect();
+        let bounds: Vec<String> = missing.iter().map(|&i| listed_at(&list, v.moves[i].id)).collect();
+        let spent = missing.iter().all(|&i| v.moves[i].gave_up || v.moves[i].tries >= RESEND_MAX);
+        if missing.is_empty() {
+            self.stop_polling("the window server shows the arrangement", &[], now);
+            return;
+        }
+        if spent || over {
+            self.stop_polling("the window server does not show some moves yet; the arrival checks them", &bounds, now);
+            return;
+        }
+        let due: Vec<usize> = missing.iter().copied().filter(|&i| resend_due(&v.moves[i], listed(v.moves[i].id).map(|w| w.bounds), now)).collect();
+        v.rounds += 1;
+        v.next = now + VERIFY_EVERY;
+        if due.is_empty() {
+            tracing::debug!(missing = ?bounds, round = v.rounds, after_ms = elapsed, "arrival: moves not shown yet; none due to be sent again");
+            return;
+        }
+        if std::mem::replace(&mut v.told, true) {
+            tracing::debug!(missing = ?bounds, round = v.rounds, after_ms = elapsed, "arrival: moves not shown yet; sending the due ones again");
+        } else {
+            tracing::info!(missing = ?bounds, round = v.rounds, after_ms = elapsed, "arrival: the window server does not show every move yet; sending them again");
+        }
+        let mut moves = std::mem::take(&mut v.moves);
+        let round = Instant::now();
+        let left = send_round(&due, |i| {
+            let e = &mut moves[i];
+            let bounds = listed(e.id).map(|w| w.bounds);
+            let sent = self.resend(ob, e, now, round) != Resent::Deferred;
+            if sent {
+                e.last = Some((now, bounds));
+            }
+            sent
+        });
+        if !left.is_empty() {
+            tracing::debug!(left = left.len(), took_ms = ms(round, Instant::now()), "arrival: the round's time is up; the rest go next round");
+        }
+        if let Some(v) = self.verify.as_mut() {
+            v.moves = moves;
+        }
+    }
+
+    /// The predicted Desktop arrived (`list`: the window server's list read for the arrival,
+    /// maybe still mid-slide: it is read ~60 ms after the notice). The fast tick goes on
+    /// looking for [`ARRIVAL_CHECK_FOR`] more, whatever Space change settles meanwhile
+    /// ([`Self::arrival_round`]), this list first.
+    fn final_check(&mut self, ob: &Observer, list: &[CgWindow], now: Instant) {
+        let Some(v) = self.verify.as_mut() else { return };
+        v.tail = Some((now, now + ARRIVAL_CHECK_FOR));
+        v.polling = true;
+        self.arrival_round(ob, list, now);
+    }
+
+    /// One look of the arrival's check ([`tail_step`], [`tail_round`]): the moves the model
+    /// has moved on from dropped first, the whole check ended by any switch of the stage
+    /// arranged ([`Self::verify_stands`]); every move judged on `list`; while it shows the
+    /// slide, or a move's window is not listed, the next fast tick looks again (until
+    /// [`ARRIVAL_CHECK_FOR`] runs out); then every move not taken, or owed its exact frame
+    /// after a nudge, is sent once more whatever the slide's budget left (an unsure park only
+    /// when never sent again), held to [`RESEND_ROUND_CAP`] a round: one the cap deferred or
+    /// cut goes next tick, the time up or not. Once the time is up, a move still owed its
+    /// exact frame gets one more exact move on its full timeout, one a tick. Past the time by
+    /// [`TAIL_OVER_TICKS`] ticks or [`TAIL_OVER_FOR`] the check ends with what is left logged
+    /// at warn (R15 1, 2). The outcome is logged at info.
+    fn arrival_round(&mut self, ob: &Observer, list: &[CgWindow], now: Instant) {
+        if !self.verify_stands() {
+            return;
+        }
+        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let Some(v) = self.verify.as_mut() else { return };
+        let Some((arrived, until)) = v.tail else { return };
+        let over = now >= until;
+        if over {
+            v.over_ticks += 1;
+        }
+        let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(until));
+        let listed = |id: u32| list.iter().find(|w| w.id == id);
+        let seen: Vec<Option<Seen>> =
+            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), main.frame, |r| main.parks(r)))).collect();
+        v.rounds += 1;
+        v.next = now + VERIFY_EVERY;
+        let due = match tail_step(&v.moves, &seen, over) {
+            TailStep::Wait => {
+                v.slid += 1;
+                tracing::debug!(since_arrival_ms = ms(arrived, now), "arrival: the list still shows the slide (or a window unlisted); looking again");
+                return;
+            }
+            TailStep::Send(due) => due,
+        };
+        let resent: Vec<String> = due.iter().map(|&i| listed_at(list, v.moves[i].id)).collect();
+        let sliding = due.iter().filter(|&&i| seen[i] == Some(Seen::Sliding)).count();
+        let mut moves = std::mem::take(&mut v.moves);
+        let round = Instant::now();
+        let out = tail_round(&mut moves, &due, &seen, over, ceiling, |e| self.resend(ob, e, now, round));
+        let Some(v) = self.verify.as_mut() else { return };
+        v.moves = moves;
+        let unsent = match &out.end {
+            TailEnd::NextTick => {
+                tracing::debug!(
+                    left = out.left.len(),
+                    cut = out.cut,
+                    exact = ?out.exact.map(|i| v.moves[i].id),
+                    over,
+                    "arrival: the final check's round time is up; the rest go next tick"
+                );
+                return;
+            }
+            TailEnd::Done => Vec::new(),
+            TailEnd::Ceiling(left) => left.iter().map(|&i| v.moves[i].id).collect(),
+        };
+        let owed_still: Vec<u32> = v.moves.iter().filter(|e| e.nudged_only || e.gave_up).map(|e| e.id).collect();
+        let unlisted = seen.iter().filter(|s| s.is_none()).count();
+        let tries = v.moves.iter().map(|e| e.tries).sum::<u32>();
+        let (after_ms, since_arrival_ms) = (ms(v.sent, now), ms(arrived, now));
+        if unsent.is_empty() {
+            tracing::info!(
+                moves = v.moves.len(),
+                ?resent,
+                sliding,
+                unlisted,
+                ?owed_still,
+                rounds = v.rounds,
+                slid = v.slid,
+                tries,
+                after_ms,
+                since_arrival_ms,
+                "arrival: the final check of the arrangement's moves, {}",
+                if over { "its time out" } else { "the Desktop settled" }
+            );
+        } else {
+            tracing::warn!(
+                moves = v.moves.len(),
+                ?unsent,
+                ?owed_still,
+                over_ticks = v.over_ticks,
+                rounds = v.rounds,
+                tries,
+                after_ms,
+                since_arrival_ms,
+                "arrival: the final check of the arrangement's moves ran past its time; these stay unsent"
+            );
+        }
+        self.verify = None;
+    }
+
+    /// Sends move `e` again, bounded: once 1 pt off, then exactly (AppKit drops a move to
+    /// where it thinks the window already is), or only exactly when the nudge went through
+    /// last time and the exact move did not. Through the registry's element when the
+    /// observer lost the window. A failure or a timeout gives the move up (until the final
+    /// check); a nudge through with its exact move failed leaves the exact one owed.
+    ///
+    /// The round that started at `round` is held to [`RESEND_ROUND_CAP`]: a move goes only
+    /// with [`MOVE_NEEDS`] of it left ([`Resent::Deferred`]: nothing sent, not counted), each
+    /// call's timeout what is left; an exact move the cap cut is [`Resent::Cut`] (R13 2).
+    fn resend(&mut self, ob: &Observer, e: &mut Expect, now: Instant, round: Instant) -> Resent {
+        let Some(first) = round_timeout(RESEND_ROUND_CAP, round.elapsed()).filter(|_| move_fits(round.elapsed())) else {
+            return Resent::Deferred;
+        };
+        let element = ob.window(e.id).map(|w| w.element.clone()).or_else(|| safety::registry_entry(e.id).map(|r| r.element));
+        let Some(element) = element else {
+            tracing::debug!(id = e.id, "arrival: a move to send again has no element; given up");
+            e.gave_up = true;
+            return Resent::Full;
+        };
+        e.tries += 1;
+        self.echoes.touch_window(e.id, now);
+        let (frame, park) = (e.frame, e.park);
+        let nudged = Rect::new(frame.x + 1.0, frame.y, frame.w, frame.h);
+        let send = |el: &AxElement, r: Rect| if park { el.set_position(r.origin()) } else { el.set_frame(r) };
+        let skip_nudge = e.nudged_only;
+        let full = |seconds: f32| seconds >= QUERY_AX_TIMEOUT_SECONDS - 1e-4;
+        let (nudge, exact, exact_full) = element.bounded(first, |el| {
+            if skip_nudge {
+                return (Ok(()), send(el, frame), full(first));
+            }
+            let nudge = send(el, nudged);
+            match (&nudge, round_timeout(RESEND_ROUND_CAP, round.elapsed())) {
+                (Err(_), _) => (nudge, Ok(()), true),
+                (Ok(()), Some(seconds)) => {
+                    let _ = el.set_messaging_timeout(seconds);
+                    (nudge, send(el, frame), full(seconds))
+                }
+                // The round's time ran out after the nudge: the exact move is owed.
+                (Ok(()), None) => (nudge, Err(AxError::CANNOT_COMPLETE), false),
+            }
+        });
+        record_resend(e, nudge, exact, exact_full)
     }
 
     /// A left mouse-down at `p` (`list`: the window list read for it): over the Dock's bar,
@@ -539,7 +1395,7 @@ impl Controller {
     /// The app a Dock item is for and the window macOS will show for it on another
     /// Desktop, or why there is no prediction: the model's gates and the window list
     /// (`list`) first, the app asked (bounded) only when they pass.
-    fn dock_prediction(&self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
+    fn dock_prediction(&mut self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
         let m = self.model.as_ref().ok_or("not managing")?;
         let bundle = dock::bundle_id_at(&item.path).ok_or("the item's bundle has no id")?;
         let pid = match ob.pids_with_bundle(&bundle)[..] {
@@ -549,21 +1405,81 @@ impl Controller {
         };
         m.dock_gates(pid)?;
         let main = *m.main_display();
-        if dock::visible_window_of(list, pid, |r| main.parks(r)) {
-            return Err("the app has a window on screen here (the window server's list)");
-        }
-        if self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid)) {
-            return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
-        }
-        match AxElement::application(pid).bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()) {
-            Ok(false) => {}
-            Ok(true) => return Err("the app is hidden"),
-            Err(_) => return Err("the app did not answer in 50 ms (hidden or not)"),
-        }
-        let focused = focused_window_of(pid);
-        let window = m.dock_arrival(pid, AppFacts { hidden: false, unplaced: false }, focused)?;
-        tracing::debug!(bundle, pid, ax_focused = ?focused.map(|f| f.0), window = window.0, "dock: the window macOS will show");
+        let visible_here = dock::visible_window_of(list, pid, |r| main.parks(r));
+        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
+        // One bounded round with the app (`press_round`): hidden, active, its focused (else
+        // main) window; it stops at the first failure and within PRESS_ROUND_CAP.
+        let app = AxElement::application(pid);
+        let started = Instant::now();
+        let answer = app.bounded(QUERY_AX_TIMEOUT_SECONDS, |a| {
+            press_round(
+                || a.is_hidden(),
+                || a.is_frontmost(),
+                // The window element is on the global timeout: bounded too (R11 4).
+                || a.focused_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, started.elapsed()))),
+                || a.main_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, started.elapsed()))),
+                || match round_timeout(PRESS_ROUND_CAP, started.elapsed()) {
+                    Some(seconds) => {
+                        let _ = a.set_messaging_timeout(seconds);
+                        false
+                    }
+                    None => true,
+                },
+            )
+        });
+        let took_ms = ms(started, Instant::now());
+        let PressAnswer { hidden, active, focused, main: main_window } = answer;
+        let Some(hidden) = hidden else {
+            tracing::info!(bundle, pid, took_ms, "dock: the app did not say whether it is hidden");
+            return Err("the app did not answer in 50 ms (hidden or not)");
+        };
+        let Some(active) = active else {
+            tracing::info!(bundle, pid, took_ms, "dock: the app did not say whether it is active");
+            return Err("the app did not say whether it is active");
+        };
+        let space_of = |id: Option<u32>| id.and_then(|id| m.space_of(WindowId(id))).map(|s| s.0);
+        tracing::info!(
+            bundle,
+            pid,
+            active,
+            hidden,
+            ax_focused = ?focused,
+            ax_focused_desktop = ?space_of(focused),
+            ax_main = ?main_window,
+            ax_main_desktop = ?space_of(main_window),
+            desktop_shown = m.current_space(main.id).0,
+            visible_here,
+            unplaced,
+            took_ms,
+            "dock: the app at the press"
+        );
+        let ax_window = focused.or(main_window).map(WindowId);
+        let facts = AppFacts { hidden, unplaced, active, visible_here };
+        let result = m.dock_arrival(pid, facts, ax_window);
+        let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
+        self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted });
+        let window = result?;
+        tracing::debug!(bundle, pid, window = window.0, "dock: the window macOS will show");
         Ok((pid, window))
+    }
+
+    /// A Space change after a Dock press: which Desktop came, against the prediction (the
+    /// day's log tells whether the rule holds).
+    pub(super) fn note_dock_arrival(&mut self, arrived: SpaceId, from: SpaceId) {
+        let Some(seen) = self.dock_seen.take() else { return };
+        if seen.at.elapsed() > DOCK_SEEN_FOR {
+            return;
+        }
+        tracing::info!(
+            pid = seen.pid,
+            active = seen.active,
+            predicted = ?seen.predicted,
+            from = from.0,
+            arrived = arrived.0,
+            right = seen.predicted == Some(arrived.0),
+            since_press_ms = ms(seen.at, Instant::now()),
+            "dock: the Desktop a Dock click went to"
+        );
     }
 
     /// Redraws the pane of `space`, a Desktop not shown (arranged ahead at a Dock click, or
@@ -587,12 +1503,28 @@ impl Controller {
     /// windows raised, the window focused; the stage that was there back if the window is
     /// gone) or undone. The actions are for the arrival's batch, with the window the arrival
     /// counts as focused (the predicted one, on a hit: AX may still name the previous
-    /// app's); an undo's restores (a Desktop not shown) stay registered until seen.
-    pub(super) fn settle_ahead(&mut self, ob: &Observer, arrived: SpaceId, now: Instant) -> (Vec<Action>, Option<WindowId>) {
+    /// app's); an undo's restores (a Desktop not shown) stay registered until seen. On a hit
+    /// with the window still in its stage the moves made at a Dock click get their final
+    /// check against `list`, the window server's list read for the arrival
+    /// ([`Self::final_check`]); otherwise their check ends ([`arrival_check`]).
+    pub(super) fn settle_ahead(
+        &mut self,
+        ob: &Observer,
+        list: &[CgWindow],
+        arrived: SpaceId,
+        now: Instant,
+    ) -> (Vec<Action>, Option<WindowId>) {
         let Some(sent) = self.ahead.take() else { return (Vec::new(), None) };
-        let Some(m) = self.model.as_mut() else { return (Vec::new(), None) };
         let hit = sent.ahead.space == arrived;
-        let present = m.stage_of(sent.ahead.window) == Some(sent.ahead.stage);
+        let present = self.model.as_ref().is_some_and(|m| m.stage_of(sent.ahead.window) == Some(sent.ahead.stage));
+        match arrival_check(hit, present) {
+            // The list is the settled Desktop's: a move it does not show taken goes again.
+            Ok(()) => self.final_check(ob, list, now),
+            // The batch brings back the stage that was there (or another Desktop came): the
+            // moves made ahead are never sent again over it (R13 1).
+            Err(why) => self.finish_verify(why),
+        }
+        let Some(m) = self.model.as_mut() else { return (Vec::new(), None) };
         let actions = if hit { m.finish_ahead(&sent.ahead) } else { m.undo_ahead(&sent.ahead) };
         tracing::info!(
             predicted = sent.ahead.space.0,
@@ -622,6 +1554,7 @@ impl Controller {
     /// Undoes an arrangement made ahead (`why`): the prediction no longer holds.
     pub(super) fn undo_ahead(&mut self, ob: &Observer, why: &str) {
         let Some(sent) = self.ahead.take() else { return };
+        self.finish_verify("the arrangement is undone");
         let Some(m) = self.model.as_mut() else { return };
         let actions = m.undo_ahead(&sent.ahead);
         tracing::info!(
@@ -766,9 +1699,9 @@ fn dock_edge(item: Rect, display: Rect) -> Option<crate::engine::geometry::Point
 
 /// App `pid`'s focused window, asked with a bounded timeout (the app goes back to the global
 /// one after).
-fn focused_window_of(pid: i32) -> Option<WindowId> {
+pub(super) fn focused_window_of(pid: i32) -> Option<WindowId> {
     AxElement::application(pid)
-        .bounded(QUERY_AX_TIMEOUT_SECONDS, |app| app.focused_window().ok().and_then(|w| w.window_id().ok()))
+        .bounded(QUERY_AX_TIMEOUT_SECONDS, |app| app.focused_window().ok().and_then(|w| w.window_id_within(QUERY_AX_TIMEOUT_SECONDS).ok()))
         .map(WindowId)
 }
 
@@ -900,6 +1833,243 @@ mod tests {
         assert_eq!(dock_edge(Rect::new(800.0, 1100.0, 60.0, 60.0), MAIN), None, "on screen: nothing to reveal");
     }
 
+    /// The park zone of the tests: the bottom-right corner of [`MAIN`].
+    fn parks(r: Rect) -> bool {
+        r.x >= 1700.0 && r.y >= 1100.0
+    }
+
+    #[test]
+    fn a_restore_is_missing_only_while_parked_and_unjudged_while_the_desktop_slides() {
+        let parked = Rect::new(1785.0, 1155.0, 520.0, 392.0);
+        let back = Expect::new(2, Rect::new(80.0, 78.0, 520.0, 392.0), Some(parked), false);
+        let at = |r: Rect, onscreen| win(2, 20, 0, onscreen, r);
+        let judge_at = |r: Rect, onscreen| judge(&back, Some(&at(r, onscreen)), MAIN, parks);
+        assert_eq!(judge_at(parked, false), Seen::Missing, "still parked");
+        assert_eq!(judge_at(Rect::new(1786.0, 1150.0, 520.0, 392.0), false), Seen::Missing, "anywhere in the park zone");
+        assert_eq!(judge_at(Rect::new(81.0, 78.0, 520.0, 392.0), false), Seen::Taken);
+        assert_eq!(judge_at(Rect::new(80.0, 78.0, 507.0, 388.0), false), Seen::Taken, "a size the app chose (a terminal's grid) (R9 3)");
+        assert_eq!(judge_at(Rect::new(300.0, 240.0, 520.0, 392.0), false), Seen::Taken, "anywhere out of the park zone (R10 1)");
+        // The live run of 10-13: the arriving Desktop's windows listed shifted, shrinking to 0.
+        for x in [1880.0, 1597.0, 886.0, 343.0] {
+            assert_eq!(judge_at(Rect::new(x, 78.0, 520.0, 392.0), true), Seen::Sliding, "slid by {} from its frame", x - 80.0);
+        }
+        assert_eq!(judge_at(Rect::new(-1500.0, 78.0, 520.0, 392.0), true), Seen::Sliding, "sliding in from the left");
+        assert_eq!(judge_at(Rect::new(985.0, 1155.0, 520.0, 392.0), true), Seen::Sliding, "still parked, slid from the park");
+        assert_eq!(judge_at(Rect::new(2400.0, 400.0, 520.0, 392.0), true), Seen::Sliding, "on screen, off the display");
+        assert_eq!(judge(&back, None, MAIN, parks), Seen::Missing, "not listed");
+        let owed = Expect { nudged_only: true, ..back };
+        assert_eq!(judge(&owed, Some(&at(Rect::new(81.0, 78.0, 520.0, 392.0), false)), MAIN, parks), Seen::Missing, "1 pt off: the exact move is owed");
+    }
+
+    #[test]
+    fn a_park_is_missing_only_while_at_its_frame_before_the_move() {
+        let was = Rect::new(80.0, 78.0, 600.0, 400.0);
+        let park = Expect::new(1, Rect::new(1785.0, 1155.0, 600.0, 400.0), Some(was), true);
+        let judge_at = |r: Rect| judge(&park, Some(&win(1, 10, 0, false, r)), MAIN, parks);
+        assert_eq!(judge_at(was), Seen::Missing, "still where it was");
+        assert_eq!(judge_at(Rect::new(81.0, 79.0, 600.0, 400.0)), Seen::Missing, "within 2 pt of it");
+        assert_eq!(judge_at(Rect::new(1786.0, 1150.0, 600.0, 400.0)), Seen::Taken, "in the park zone");
+        assert_eq!(judge_at(Rect::new(1200.0, 78.0, 600.0, 400.0)), Seen::Sliding, "its old frame slid sideways");
+        let unknown = Expect { before: None, ..park };
+        assert_eq!(state(&unknown, was, parks), Seen::Missing, "no frame before: out of the park zone is not taken");
+        assert_eq!(state(&unknown, Rect::new(1786.0, 1150.0, 600.0, 400.0), parks), Seen::Taken);
+    }
+
+    #[test]
+    fn a_park_neither_near_its_frame_before_nor_in_the_zone_is_sent_once_more() {
+        // R11 5: macOS clamped it short of the zone, or the list is stale: not counted taken.
+        let was = Rect::new(80.0, 78.0, 600.0, 400.0);
+        let park = Expect::new(1, Rect::new(1785.0, 1155.0, 600.0, 400.0), Some(was), true);
+        let short = Rect::new(1600.0, 1000.0, 600.0, 400.0);
+        let seen = judge(&park, Some(&win(1, 10, 0, false, short)), MAIN, parks);
+        assert_eq!(seen, Seen::Unsure);
+        assert!(owed(&park, seen), "never sent again: once more");
+        let sent = Expect { tries: 1, ..park };
+        assert!(!owed(&sent, seen), "sent once: left as it is");
+        assert!(owed(&sent, Seen::Missing), "still at its frame before: owed as ever");
+        assert!(!owed(&park, Seen::Taken) && !owed(&park, Seen::Sliding));
+        // The arrival's check: an unsure park goes once, only if never sent again.
+        assert_eq!(tail_step(&[park], &[Some(Seen::Unsure)], false), TailStep::Send(vec![0]));
+        assert_eq!(tail_step(&[sent], &[Some(Seen::Unsure)], false), TailStep::Send(vec![]));
+    }
+
+    #[test]
+    fn a_parked_windows_restore_starts_from_its_park_frame_as_production_reads_it() {
+        use crate::engine::rules::{Decision, Placement, RuleAction};
+        use crate::engine::testkit::{display, macos_places, meta, model};
+        // R11 1: window 1 parked in its stage, window 2's stage active; going back to 1's.
+        let mut m = model();
+        let obs = Observation::default();
+        let new = Decision { action: RuleAction::New, placement: Placement::AsIs };
+        m.add_window(meta(1, 10, "com.example.a"), &new, &obs);
+        m.add_window(meta(2, 11, "com.example.b"), &new, &obs);
+        let d = display();
+        let home = m.window(WindowId(1)).expect("managed").meta.frame;
+        assert!(m.window(WindowId(1)).is_some_and(|w| w.parked) && !d.parks(home), "its meta frame is still its home frame");
+        let park = m.frame_left(WindowId(1)).expect("managed");
+        assert!(d.parks(park), "the model's park frame: {park}");
+        // Where macOS left it (its title bar above the Dock), as the window server lists it.
+        let placed = macos_places(park);
+        // As `Controller::arrange_ahead` does: the frames before read first, the moves after.
+        let left = frames_left(&m);
+        let unlisted = frames_before(&left, &[]);
+        let before = frames_before(&left, &[win(1, 10, 0, false, placed), win(2, 11, 0, true, home)]);
+        let stage = m.stage_of(WindowId(1)).expect("staged");
+        let actions = m.switch_to(stage, &obs);
+        assert_eq!(unlisted.get(&1), Some(&park), "not listed: the model's park frame");
+        let expected = expects(&actions, |w| before.get(&w).copied(), |_| None);
+        let restore = *expected.iter().find(|e| e.id == 1 && !e.park).expect("window 1 brought back");
+        assert_eq!(restore.before, Some(placed), "listed: the window server's bounds at send time");
+        let judge_at = |e: &Expect, r: Rect, onscreen| judge(e, Some(&win(1, 10, 0, onscreen, r)), d.frame, |r| d.parks(r));
+        // Mid-slide: listed at (x - dx, y), partly on the display, out of the park zone.
+        let mid = Rect::new(placed.x - 700.0, placed.y, placed.w, placed.h);
+        assert!(d.frame.intersect(&mid).is_some() && !d.parks(mid));
+        assert_eq!(judge_at(&restore, mid, true), Seen::Sliding, "slid from where it was parked, not taken");
+        let as_before_r11 = Expect { before: Some(home), ..restore };
+        assert_eq!(judge_at(&as_before_r11, mid, true), Seen::Taken, "the home frame as `before`: a false taken");
+        assert_eq!(judge_at(&restore, placed, false), Seen::Missing, "still parked");
+        assert_eq!(judge_at(&restore, restore.frame, true), Seen::Taken);
+    }
+
+    #[test]
+    fn the_arrivals_check_waits_out_the_slide_and_then_sends_what_is_not_taken() {
+        // R11 2: the arrival's list may be mid-slide.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let moves = [Expect::new(1, r, None, false), Expect::new(2, r, None, true), Expect::new(3, r, None, false)];
+        let (t, m, sl) = (Some(Seen::Taken), Some(Seen::Missing), Some(Seen::Sliding));
+        assert_eq!(tail_step(&moves, &[t, m, sl], false), TailStep::Wait, "the list shows the slide: look again");
+        assert_eq!(tail_step(&moves, &[t, m, None], false), TailStep::Wait, "a window not listed: look again");
+        assert_eq!(tail_step(&moves, &[t, m, t], false), TailStep::Send(vec![1]), "settled: what is not taken");
+        assert_eq!(tail_step(&moves, &[m, m, sl], true), TailStep::Send(vec![0, 1, 2]), "time out: sliding ones go too");
+        assert_eq!(tail_step(&moves, &[m, None, t], true), TailStep::Send(vec![0]), "time out: an unlisted window is gone");
+        let mut sent = moves;
+        sent[1].final_sent = true;
+        assert_eq!(tail_step(&sent, &[m, m, t], false), TailStep::Send(vec![0]), "once each");
+        assert_eq!(tail_step(&moves, &[t, t, t], false), TailStep::Send(vec![]), "all taken: done");
+        assert!(ARRIVAL_CHECK_FOR <= Duration::from_millis(400));
+    }
+
+    #[test]
+    fn a_window_the_user_acted_on_is_no_longer_checked() {
+        // R11 3: a sliver grab unparks it; nothing parks it again.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let mut moves = vec![Expect::new(1, r, None, true), Expect::new(2, r, None, false)];
+        assert!(drop_move(&mut moves, 1));
+        assert_eq!(moves.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2]);
+        assert!(!drop_move(&mut moves, 1), "only once");
+        assert_eq!(tail_step(&moves, &[Some(Seen::Missing)], false), TailStep::Send(vec![0]), "window 2 only");
+    }
+
+    #[test]
+    fn a_rounds_resends_share_100_ms_and_the_rest_wait() {
+        // R11 4: each send is false once the round's time is up.
+        let ms = Duration::from_millis;
+        let mut clock = ms(0);
+        let mut sent = Vec::new();
+        let left = send_round(&[0, 1, 2, 3], |i| {
+            let Some(_) = round_timeout(RESEND_ROUND_CAP, clock) else { return false };
+            sent.push(i);
+            clock += ms(45);
+            true
+        });
+        assert_eq!(sent, vec![0, 1, 2], "0, 45 and 90 ms: under the cap");
+        assert_eq!(left, vec![3], "135 ms: next round");
+        assert_eq!(send_round(&[4, 5], |_| true), Vec::<usize>::new());
+        let at90 = round_timeout(RESEND_ROUND_CAP, ms(90)).expect("10 ms left");
+        assert!((at90 - 0.01).abs() < 1e-4, "the last send has what is left: {at90}");
+    }
+
+    #[test]
+    fn a_window_element_is_not_asked_once_the_round_is_over() {
+        // R11 4: the window element gets the round's timeout; with none left it is not asked.
+        let app = AxElement::application(std::process::id() as i32);
+        assert_eq!(window_id_within(&app, None), Err(AxError::CANNOT_COMPLETE));
+    }
+
+    #[test]
+    fn a_resend_counts_when_the_listing_changed_or_after_its_spacing() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let here = Some(Rect::new(1785.0, 1155.0, 520.0, 392.0));
+        let fresh = Expect::new(2, Rect::new(80.0, 78.0, 520.0, 392.0), None, false);
+        assert!(resend_due(&fresh, here, t0), "never sent again");
+        let sent = Expect { tries: 1, last: Some((t0, here)), ..fresh };
+        assert!(!resend_due(&sent, here, at(20)), "the same listing a tick later: not again");
+        assert!(!resend_due(&sent, here, at(99)));
+        assert!(resend_due(&sent, here, at(100)), "spaced 100 ms");
+        assert!(resend_due(&sent, Some(Rect::new(1790.0, 1155.0, 520.0, 392.0)), at(20)), "the listing changed");
+        assert!(!resend_due(&Expect { tries: RESEND_MAX, ..sent }, here, at(500)), "the budget spent");
+        assert!(!resend_due(&Expect { gave_up: true, ..sent }, here, at(500)), "given up");
+        // The slide's ~0.45 s: four 20 ms rounds of an unchanged listing spend one try, not four.
+        let mut e = fresh;
+        for round in 0..23u64 {
+            let now = at(20 * round);
+            if resend_due(&e, here, now) {
+                e.tries += 1;
+                e.last = Some((now, here));
+            }
+        }
+        assert_eq!(e.tries, RESEND_MAX, "spread over the slide: 0, 100 and 200 ms");
+        assert_eq!(e.last.map(|(t, _)| t), Some(at(200)));
+    }
+
+    #[test]
+    fn the_moves_carry_their_frames_before() {
+        let park = Rect::new(1785.0, 1155.0, 600.0, 400.0);
+        let back = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let actions = [
+            Action::Park { id: WindowId(1), frame: park },
+            Action::SetFrame { id: WindowId(2), frame: back },
+            Action::Raise { id: WindowId(2) },
+            Action::StateChanged,
+        ];
+        let before = |id: u32| (id == 1).then_some(back);
+        assert_eq!(expects(&actions, before, |_| None), vec![Expect::new(1, park, Some(back), true), Expect::new(2, back, None, false)], "moves only");
+        assert_eq!(moved_ids(&actions), vec![1, 2], "the windows asked of the window server before the moves (R13 3)");
+    }
+
+    #[test]
+    fn the_press_round_stops_at_the_first_failure_and_skips_main_when_focused_answers() {
+        use std::cell::Cell;
+        let timeout: AxResult<bool> = Err(AxError::CANNOT_COMPLETE);
+        let asked = Cell::new(0);
+        let ask = |v: AxResult<u32>| {
+            asked.set(asked.get() + 1);
+            v
+        };
+        let never = || false;
+        let a = press_round(|| timeout, || panic!("asked after a failure"), || panic!(), || panic!(), never);
+        assert_eq!(a, PressAnswer::default(), "hidden failed: nothing more (no prediction)");
+        let a = press_round(|| Ok(false), || Err(AxError::CANNOT_COMPLETE), || panic!(), || panic!(), never);
+        assert_eq!(a, PressAnswer { hidden: Some(false), ..Default::default() }, "active failed: stop");
+        let a = press_round(|| Ok(false), || Ok(true), || ask(Ok(7)), || ask(Ok(8)), never);
+        assert_eq!(a, PressAnswer { hidden: Some(false), active: Some(true), focused: Some(7), main: None });
+        assert_eq!(asked.get(), 1, "the main window not asked when the focused one answered");
+        let a = press_round(|| Ok(false), || Ok(false), || ask(Err(AxError::NO_VALUE)), || ask(Ok(8)), never);
+        assert_eq!(a.main, Some(8), "no focused window: the main one");
+        let a = press_round(|| Ok(false), || Ok(false), || Err(AxError::CANNOT_COMPLETE), || panic!("asked after a timeout"), never);
+        assert_eq!((a.focused, a.main), (None, None), "the focused window timed out: stop");
+        let calls = Cell::new(0);
+        let up_after_one = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        };
+        let a = press_round(|| Ok(true), || Ok(false), || panic!("over the round's cap"), || panic!(), up_after_one);
+        assert_eq!(a, PressAnswer { hidden: Some(true), active: Some(false), ..Default::default() }, "the cap reached");
+    }
+
+    #[test]
+    fn the_press_rounds_questions_share_100_ms() {
+        let ms = Duration::from_millis;
+        let press = |t| round_timeout(PRESS_ROUND_CAP, t);
+        assert_eq!(press(ms(0)), Some(QUERY_AX_TIMEOUT_SECONDS));
+        assert_eq!(press(ms(30)), Some(QUERY_AX_TIMEOUT_SECONDS));
+        let left = press(ms(70)).expect("30 ms left");
+        assert!((left - 0.03).abs() < 1e-4, "what is left: {left}");
+        assert_eq!(press(ms(96)), None, "under 5 ms left: the round stops");
+        assert_eq!(press(ms(250)), None);
+    }
+
     #[test]
     fn the_stage_left_is_saved_in_the_window_lists_order() {
         let r = Rect::new(100.0, 100.0, 600.0, 400.0);
@@ -908,5 +2078,236 @@ mod tests {
         assert_eq!(obs.z_order, vec![WindowId(6), WindowId(2)], "managed windows on screen, front to back");
         assert_eq!(obs.focused, None, "the front window becomes the key");
         assert!(obs.frames.is_empty());
+    }
+
+    /// Desktop 1: an editor's window (1) in its stage, parked; a browser's (2) in the stage
+    /// active there. Desktop 2 shown (windows 3 and 4). The editor's stage is arranged ahead
+    /// on Desktop 1 (a Dock click on the editor): the model, the arrangement, its moves to
+    /// check and its mark.
+    fn arranged() -> (Model, Ahead, Vec<Expect>, AheadMark) {
+        use crate::engine::persist::LaunchHints;
+        use crate::engine::testkit::{MAIN, meta, model};
+        let hints = |z: &[u32], pid| LaunchHints { z_order: z.iter().map(|&i| WindowId(i)).collect(), frontmost: Some(pid) };
+        let mut m = model();
+        m.arrive(MAIN, &[meta(1, 10, "com.example.editor"), meta(2, 20, "com.example.browser")], &[], &hints(&[1, 2], 10));
+        let browser = m.stage_of(WindowId(2)).expect("browser stage");
+        m.switch_to(browser, &Observation::default());
+        let d2 = [meta(3, 10, "com.example.editor"), meta(4, 30, "com.example.chat")];
+        m.arrive(MAIN, &d2, &[WindowId(1), WindowId(2)], &hints(&[3, 4], 10));
+        assert!(m.waits_on_another_space(WindowId(1)));
+        let (ahead, actions) = m.arrange_ahead(WindowId(1), None).expect("arranged");
+        let moves = expects(&actions, |_| None, |w| m.stage_of(WindowId(w)));
+        let mark = m.ahead_mark(&ahead);
+        assert_eq!(moves.iter().map(|e| (e.id, e.park)).collect::<Vec<_>>(), vec![(2, true), (1, false)]);
+        (m, ahead, moves, mark)
+    }
+
+    /// The arrival on Desktop 1 (`live`: its windows on screen), as the controller runs it:
+    /// recognized, then the arrangement confirmed.
+    fn arrive_on_desktop_1(m: &mut Model, ahead: &Ahead, live: &[u32]) -> Vec<Action> {
+        use crate::engine::persist::LaunchHints;
+        use crate::engine::testkit::{MAIN, meta};
+        let bundle = |id: u32| if id == 1 { (10, "com.example.editor") } else { (20, "com.example.browser") };
+        let live: Vec<_> = live.iter().map(|&id| meta(id, bundle(id).0, bundle(id).1)).collect();
+        let hints = LaunchHints { z_order: live.iter().map(|w| w.id).collect(), frontmost: Some(10) };
+        let mut actions = m.arrive(MAIN, &live, &[WindowId(3), WindowId(4)], &hints);
+        assert_eq!(m.space_of(WindowId(2)), Some(ahead.space));
+        assert!(!m.waits_on_another_space(WindowId(2)), "Desktop 1 is the one shown");
+        actions.extend(m.finish_ahead(ahead));
+        actions
+    }
+
+    #[test]
+    fn the_desktop_arranged_ahead_arriving_without_its_window_sends_no_move_again() {
+        // R13 1: the arrival's batch brings back the stage that was there; the tail must not
+        // park it and bring back the stage arranged over it.
+        assert_eq!(arrival_check(true, true), Ok(()));
+        assert!(arrival_check(true, false).is_err(), "hit, the window gone from its stage: no tail");
+        assert!(arrival_check(false, true).is_err() && arrival_check(false, false).is_err(), "another Desktop");
+        let (mut m, ahead, mut moves, mark) = arranged();
+        assert_eq!(screen(&m, &mark, &mut moves.clone()), Ok(vec![]), "as arranged: every move checked");
+        // The editor's window closes during the slide.
+        m.remove_window(WindowId(1));
+        let present = m.stage_of(ahead.window) == Some(ahead.stage);
+        let batch = arrive_on_desktop_1(&mut m, &ahead, &[2]);
+        assert!(!present && arrival_check(true, present).is_err());
+        assert!(batch.iter().any(|a| matches!(a, Action::SetFrame { id, .. } if id.0 == 2)), "the browser's stage comes back: {batch:?}");
+        // Even a tail left running sends nothing: the stage arranged is not active any more,
+        // and no move is as the model has it.
+        assert!(screen(&m, &mark, &mut moves).is_err());
+        let (_, _, again, _) = arranged();
+        assert!(again.iter().all(|e| !m.move_holds(WindowId(e.id), e.park, e.stage)), "the browser's park and the editor's restore both moved on");
+    }
+
+    #[test]
+    fn a_switch_during_the_arrivals_check_ends_it_without_touching_the_stages_windows() {
+        // R13 1: a card click, a sliver grab or an activation within the tail switches the
+        // stage: the check ends, whichever window was clicked.
+        let (mut m, ahead, moves, mark) = arranged();
+        arrive_on_desktop_1(&mut m, &ahead, &[1, 2]);
+        assert_eq!(m.active_stage_in(ahead.space), Some(ahead.stage));
+        assert_eq!(screen(&m, &mark, &mut moves.clone()), Ok(vec![]), "the arrival confirmed it: the tail checks every move");
+        let mut switched = m.clone();
+        switched.switch_to(ahead.previous, &Observation::default());
+        assert!(screen(&switched, &mark, &mut moves.clone()).is_err(), "the browser's stage switched to");
+        // Away and back within one tick: the stage arranged is active again, but switched.
+        switched.switch_to(ahead.stage, &Observation::default());
+        assert_eq!(switched.active_stage_in(ahead.space), Some(ahead.stage));
+        assert!(screen(&switched, &mark, &mut moves.clone()).is_err(), "a switch touched it: its windows are the switch's");
+        // An undo (the stage that was there back) ends it too.
+        let mut undone = m.clone();
+        undone.switch_to(ahead.previous, &Observation::default());
+        assert!(screen(&undone, &mark, &mut moves.clone()).is_err());
+    }
+
+    #[test]
+    fn a_move_whose_window_the_model_moved_on_from_is_dropped_from_the_check() {
+        let (mut m, ahead, mut moves, mark) = arranged();
+        arrive_on_desktop_1(&mut m, &ahead, &[1, 2]);
+        // The browser's window (parked ahead) closes: its park is no longer checked.
+        m.remove_window(WindowId(2));
+        assert_eq!(screen(&m, &mark, &mut moves), Ok(vec![2]));
+        assert_eq!(moves.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1], "the editor's restore only");
+        assert!(!m.move_holds(WindowId(1), true, moves[0].stage), "parked or shown as the move left it");
+        assert!(!m.move_holds(WindowId(1), false, None), "in the stage the move left it in");
+        assert!(m.move_holds(WindowId(1), false, moves[0].stage));
+    }
+
+    #[test]
+    fn a_move_the_rounds_cap_would_cut_waits_for_the_next_round() {
+        // R13 2: a move goes only with ~2 × 50 ms of the round left; the first always does.
+        let ms = Duration::from_millis;
+        assert!(move_fits(ms(0)) && move_fits(ms(10)));
+        assert!(!move_fits(ms(11)) && !move_fits(ms(100)));
+        let mut clock = ms(0);
+        let mut sent = Vec::new();
+        let left = send_round(&[0, 1, 2], |i| {
+            if !move_fits(clock) {
+                return false;
+            }
+            sent.push(i);
+            clock += if i == 0 { ms(4) } else { ms(30) };
+            true
+        });
+        assert_eq!((sent, left), (vec![0, 1], vec![2]), "34 ms in, 66 left: the third is not sent, not counted");
+    }
+
+    #[test]
+    fn an_exact_move_the_cap_cut_is_sent_again_by_the_arrivals_check() {
+        // R13 2: the nudge through, the exact move cut by the round's cap: owed, not final.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let mut e = Expect::new(1, r, None, false);
+        let cut = Err(AxError::CANNOT_COMPLETE);
+        assert_eq!(record_resend(&mut e, Ok(()), cut, false), Resent::Cut);
+        assert!(e.nudged_only && !e.gave_up && !e.final_sent, "owed, and not the final send");
+        let nudged = win(1, 10, 0, false, Rect::new(81.0, 78.0, 520.0, 392.0));
+        let seen = judge(&e, Some(&nudged), MAIN, parks);
+        assert_eq!(seen, Seen::Missing, "1 pt off: the exact move owed");
+        assert_eq!(tail_step(&[e], &[Some(seen)], false), TailStep::Send(vec![0]), "sent again next tick");
+        assert_eq!(owed_exact(&[e], &[Some(seen)]), vec![0], "and once more on its full timeout when the time is up");
+        assert_eq!(owed_exact(&[e], &[None]), Vec::<usize>::new(), "not a window gone");
+        // On its full timeout, a failure is the app's: final, still owed for the time-up send.
+        let mut busy = Expect::new(2, r, None, false);
+        assert_eq!(record_resend(&mut busy, Ok(()), Err(AxError::CANNOT_COMPLETE), true), Resent::Full);
+        assert!(busy.nudged_only);
+        let mut ok = Expect { nudged_only: true, ..Expect::new(3, r, None, false) };
+        assert_eq!(record_resend(&mut ok, Ok(()), Ok(()), false), Resent::Full);
+        assert!(!ok.nudged_only, "through: nothing owed");
+        let mut failed = Expect::new(4, r, None, true);
+        assert_eq!(record_resend(&mut failed, Err(AxError::CANNOT_COMPLETE), Ok(()), true), Resent::Full);
+        assert!(failed.gave_up && owed_exact(&[failed], &[Some(Seen::Missing)]).is_empty());
+    }
+
+    /// Drives the arrival's check from its time-up as the controller does: each tick's due
+    /// moves from [`tail_step`], one [`tail_round`] with `send` as the round's resend (`k`:
+    /// the move's place in the tick's round), the ceiling counted. Returns each tick's sends
+    /// (ids) and the last tick's outcome.
+    fn run_tail(moves: &mut [Expect], seen: &[Option<Seen>], mut send: impl FnMut(&mut Expect, usize) -> Resent) -> (Vec<Vec<u32>>, TailRound) {
+        let mut ticks = Vec::new();
+        for over_ticks in 1u32.. {
+            let TailStep::Send(due) = tail_step(moves, seen, true) else { panic!("the time is up: no wait") };
+            let ceiling = tail_past_ceiling(over_ticks, (RESEND_ROUND_CAP + VERIFY_EVERY) * (over_ticks - 1));
+            let mut sent = Vec::new();
+            let out = tail_round(moves, &due, seen, true, ceiling, |e| {
+                let r = send(e, sent.len());
+                if r != Resent::Deferred {
+                    sent.push(e.id);
+                }
+                r
+            });
+            ticks.push(sent);
+            if out.end != TailEnd::NextTick {
+                return (ticks, out);
+            }
+        }
+        unreachable!()
+    }
+
+    #[test]
+    fn moves_the_rounds_cap_deferred_at_time_up_go_over_the_next_ticks() {
+        // R15 1: three moves due at time-up, each ~100 ms: the cap lets one a round; the
+        // rest go on the following ticks, not dropped as unsent.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let mut moves: Vec<Expect> = (1..=3).map(|id| Expect::new(id, r, None, false)).collect();
+        let seen = vec![Some(Seen::Missing); 3];
+        let (ticks, out) = run_tail(&mut moves, &seen, |_, k| if k == 0 { Resent::Full } else { Resent::Deferred });
+        assert_eq!(ticks, vec![vec![1], vec![2], vec![3]], "one a tick");
+        assert_eq!(out.end, TailEnd::Done);
+        assert!(moves.iter().all(|e| e.final_sent), "every move sent once more");
+        // Before the time is up the same: the deferred ones go next tick.
+        let mut fresh: Vec<Expect> = (1..=2).map(|id| Expect::new(id, r, None, false)).collect();
+        let out = tail_round(&mut fresh, &[0, 1], &seen[..2], false, false, |e| if e.id == 1 { Resent::Full } else { Resent::Deferred });
+        assert_eq!((out.left, out.end), (vec![1], TailEnd::NextTick));
+    }
+
+    #[test]
+    fn the_owed_exact_moves_at_time_up_go_one_a_tick() {
+        // R15 2: each owed exact move takes its full 50 ms: one a tick, after the round's
+        // sends, never stacked on top of a round.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let owed = |id| Expect { nudged_only: true, final_sent: true, tries: 1, ..Expect::new(id, r, None, false) };
+        let mut moves = vec![owed(1), owed(2), Expect::new(3, r, None, false)];
+        let seen = vec![Some(Seen::Missing); 3];
+        // Move 3 is due this tick; the owed exacts of 1 and 2 wait for ticks of their own.
+        // Each exact move fails on its full timeout: given once, never again.
+        let (ticks, out) = run_tail(&mut moves, &seen, |e, _| {
+            if e.nudged_only {
+                assert!(!e.exact_last, "one exact move each");
+            }
+            Resent::Full
+        });
+        assert_eq!(ticks, vec![vec![3], vec![1], vec![2]], "the round, then one owed exact a tick");
+        assert_eq!(out.end, TailEnd::Done);
+        assert!(moves[..2].iter().all(|e| e.exact_last && e.nudged_only), "still owed (the app's), not sent again");
+        let mut once = vec![owed(1), owed(2)];
+        let out = tail_round(&mut once, &[], &seen[..2], true, false, |_| Resent::Full);
+        assert_eq!((out.exact, out.end), (Some(0), TailEnd::NextTick));
+        let out = tail_round(&mut once, &[], &seen[..2], true, false, |_| Resent::Full);
+        assert_eq!((out.exact, out.end), (Some(1), TailEnd::Done));
+        let out = tail_round(&mut once, &[], &seen[..2], false, false, |_| panic!("before the time-up: no exact pass"));
+        assert_eq!(out.end, TailEnd::Done);
+    }
+
+    #[test]
+    fn the_arrivals_check_past_its_ceiling_ends_with_what_stayed_unsent() {
+        // R15 1: an app whose exact move the cap always cuts: the check goes on 10 ticks past
+        // its time, then ends, the move unsent (logged at warn).
+        assert!(!tail_past_ceiling(1, Duration::ZERO) && !tail_past_ceiling(11, Duration::from_millis(200)));
+        assert!(tail_past_ceiling(12, Duration::ZERO) && tail_past_ceiling(2, TAIL_OVER_FOR));
+        assert!(!tail_past_ceiling(1, Duration::from_secs(5)), "the time-up round always goes");
+        assert!(
+            !tail_past_ceiling(TAIL_OVER_TICKS + 1, (RESEND_ROUND_CAP + VERIFY_EVERY) * TAIL_OVER_TICKS),
+            "a slow app's rounds (cap plus a tick each) get every counted tick"
+        );
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let mut moves = vec![Expect::new(1, r, None, false), Expect { nudged_only: true, final_sent: true, ..Expect::new(2, r, None, false) }];
+        let seen = vec![Some(Seen::Missing); 2];
+        let (ticks, out) = run_tail(&mut moves, &seen, |e, _| if e.id == 1 { Resent::Cut } else { Resent::Full });
+        assert_eq!(ticks.len(), 12, "the time-up tick, 10 more, and the one that ends it");
+        assert!(ticks[..11].iter().all(|t| t == &vec![1]) && ticks[11].is_empty(), "nothing sent past the ceiling: {ticks:?}");
+        assert_eq!(out.end, TailEnd::Ceiling(vec![0, 1]), "the cut move and the exact one never reached");
+        assert!(!moves[1].exact_last);
+        let mut done = vec![Expect { final_sent: true, ..Expect::new(1, r, None, false) }];
+        assert_eq!(tail_round(&mut done, &[], &seen[..1], true, true, |_| panic!()).end, TailEnd::Done, "nothing left: no warn");
     }
 }

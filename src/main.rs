@@ -51,6 +51,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-screen") => app::probe_screen(),
         #[cfg(target_os = "macos")]
+        Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
             println!("stage-manager {}", env!("CARGO_PKG_VERSION"));
@@ -60,7 +62,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }
@@ -249,6 +251,12 @@ mod app {
                     }
                 }
                 UiUpdate::StripVisible(v) => self.strip_visible = v,
+                UiUpdate::CornerPatch(plan) => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        stage_manager::ui::corner_patch::apply(mtm, plan);
+                    }
+                    return;
+                }
             }
             self.refresh_menu();
         }

@@ -20,6 +20,12 @@
 //!
 //! Quit counts as clean only when, after unparking, the window server lists no window of an
 //! allowed app in the park zone on any Space ([`stranded_allowed`]).
+//!
+//! **Hidden apps** (`[windows] hide_parked_apps`): every app we hid is recorded beside the
+//! registry ([`set_hidden`]) and in the parked file, and every path that unparks unhides it
+//! too ([`unhide_ours`]): quit, the panic hook, the signals and, from the parked file, the
+//! guardian. An app is unhidden only while its pid still runs the same bundle id; an app the
+//! user hid is never recorded, so never unhidden.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +41,7 @@ use super::{desktop, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
-use crate::engine::recovery::{self, LiveWindow, ParkedFile, Registered, ScanDisplays};
+use crate::engine::recovery::{self, HiddenApp, LiveWindow, ParkedFile, Registered, ScanDisplays};
 use crate::logbook::counters::{self, Count};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
@@ -80,6 +86,55 @@ static HELD: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new());
 
 fn lock_held() -> MutexGuard<'static, BTreeMap<u32, ParkedEntry>> {
     HELD.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Apps we hid, by pid, with their bundle ids.
+static HIDDEN: Mutex<BTreeMap<i32, String>> = Mutex::new(BTreeMap::new());
+
+fn hidden_now() -> Vec<HiddenApp> {
+    HIDDEN.lock().map(|h| h.iter().map(|(&pid, b)| HiddenApp { pid, bundle: b.clone() }).collect()).unwrap_or_default()
+}
+
+/// Records exactly the apps we hid now (pid, bundle id), for every unpark path and the
+/// guardian.
+pub fn set_hidden(apps: BTreeMap<i32, String>) {
+    let changed = HIDDEN.lock().map(|mut h| std::mem::replace(&mut *h, apps) != *h).unwrap_or(false);
+    if changed {
+        let listed = registered(&lock_registry());
+        write_parked_file(&listed);
+    }
+}
+
+/// Unhides every app we hid that still runs under the same bundle id, and forgets them;
+/// returns how many were asked. Never waits on the lock longer than a try.
+pub fn unhide_ours(reason: &str) -> usize {
+    let apps = match HIDDEN.try_lock() {
+        Ok(mut h) => std::mem::take(&mut *h),
+        Err(_) => return 0,
+    };
+    let n = unhide_apps(reason, apps.into_iter().map(|(pid, bundle)| HiddenApp { pid, bundle }));
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
+    n
+}
+
+/// Unhides each app still running under its recorded bundle id (the guardian's, from the
+/// parked file, too); returns how many were asked.
+pub fn unhide_apps(reason: &str, apps: impl IntoIterator<Item = HiddenApp>) -> usize {
+    let mut n = 0;
+    for app in apps {
+        let running = NSRunningApplication::runningApplicationWithProcessIdentifier(app.pid);
+        let same = running.as_ref().and_then(|r| r.bundleIdentifier()).is_some_and(|b| b.to_string() == app.bundle);
+        match running {
+            Some(r) if same => {
+                let ok = r.unhide();
+                n += 1;
+                tracing::info!(reason, pid = app.pid, bundle = app.bundle, ok, "safety: an app we hid is unhidden");
+            }
+            _ => tracing::debug!(reason, pid = app.pid, bundle = app.bundle, "safety: an app we hid is gone (or its pid is another app's)"),
+        }
+    }
+    n
 }
 
 /// The main display's visible frame as last reported (for scans in this process).
@@ -189,13 +244,15 @@ static PARKED_WRITTEN: Mutex<Option<ParkedFile>> = Mutex::new(None);
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
 /// main display's visible frame, written atomically; removed when the registry is empty.
 fn write_parked_file(listed: &[Registered]) {
-    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used() };
+    let hidden = hidden_now();
+    let empty = listed.is_empty() && hidden.is_empty();
+    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), hidden };
     let Ok(mut written) = PARKED_WRITTEN.lock() else { return };
     if written.as_ref() == Some(&file) {
         return;
     }
     let path = paths::parked_file(std::process::id());
-    let result = if listed.is_empty() {
+    let result = if empty {
         match std::fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -334,6 +391,7 @@ pub fn unpark_registry(wait: Duration) -> Option<Report> {
 /// A registry entry that could not be moved (a fixed-size dialog, say) is not a failure when
 /// the recovery scan leaves no window stranded: it is logged at debug only.
 pub fn emergency_unpark(reason: &str) -> bool {
+    unhide_ours(reason);
     match unpark_registry(Duration::from_millis(200)) {
         Some(r) if r.failed == 0 => {
             if r.restored > 0 {

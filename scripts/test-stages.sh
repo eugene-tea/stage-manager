@@ -18,8 +18,10 @@
 # (STAGE_MANAGER_NO_CAPTURE=1) in every run but the capture phase's one launch. The fixture app comes to
 # the front during switches; the app that was frontmost is activated again at the end.
 # No phase runs while the owner's installed app (~/Applications/Stage Manager.app) is up;
-# SM_SCREENSHOTS=<dir> is where the visible phase saves its strip screenshots; SM_SHOTS=<dir>
-# is where `spaces --auto` saves its by-eye screenshots (default the test home, never the repo).
+# No screen is captured unless asked (`screencapture` raises macOS's screen-capture alert):
+# SM_SCREENSHOTS=<dir> turns on the visible phase's strip screenshots; SM_SHOTS=<dir> turns on
+# `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks (never the repo).
+# SM_DOCK_REPEATS=<n> sets how many Dock arrivals `spaces --auto` makes (default 3).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
