@@ -482,15 +482,18 @@ impl Controller {
         let mut entries: BTreeMap<u32, ParkedEntry> = m
             .safety_targets()
             .into_iter()
-            .filter_map(|(id, restore)| match ob.window(id.0) {
-                Some(w) => {
-                    let child = w.kind == WindowKind::Child;
-                    Some((id.0, ParkedEntry { element: w.element.clone(), restore, child }))
-                }
-                None => {
-                    let kept = safety::registry_entry(id.0)?;
-                    tracing::debug!(id = id.0, "not tracked now; its registry entry is kept");
-                    Some((id.0, ParkedEntry { restore, ..kept }))
+            .filter_map(|(id, restore)| {
+                let fitted = m.window(id).is_some_and(|w| !w.parked && w.original.is_some());
+                match ob.window(id.0) {
+                    Some(w) => {
+                        let child = w.kind == WindowKind::Child;
+                        Some((id.0, ParkedEntry { element: w.element.clone(), restore, child, fitted }))
+                    }
+                    None => {
+                        let kept = safety::registry_entry(id.0)?;
+                        tracing::debug!(id = id.0, "not tracked now; its registry entry is kept");
+                        Some((id.0, ParkedEntry { restore, fitted, ..kept }))
+                    }
                 }
             })
             .collect();
@@ -538,7 +541,7 @@ impl Controller {
                 changed = true;
                 interrupted = true;
             }
-            if interrupted && !matches!(action, Action::SetFrame { .. }) {
+            if interrupted && !runs_after_quit(&action) {
                 continue;
             }
             let id = match action {
@@ -701,7 +704,7 @@ impl Controller {
                 Action::SetFrame { id, frame } => {
                     let w = ob.window(id.0)?;
                     let child = w.kind == WindowKind::Child;
-                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child }))
+                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false }))
                 }
                 _ => None,
             })
@@ -2138,6 +2141,13 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 
 /// Ids of the layer-0 windows the window server lists on screen: the shown Space's (parked
 /// ones included), never another Space's.
+/// True for an action a batch still runs once Quit is requested: a `SetFrame` (the model
+/// already counts its window as shown, so no unpark would bring it back; S2). Parks, raises
+/// and focus are skipped: unpark-all covers every window the model counts as parked.
+fn runs_after_quit(action: &Action) -> bool {
+    matches!(action, Action::SetFrame { .. })
+}
+
 /// True when this Space's windows missing from the screen mean another Space shows (a Space
 /// change the notification missed) rather than single windows leaving: none of its windows
 /// is on screen any more (a one-window Desktop too, the review's S5), or at least two and at
@@ -2238,6 +2248,17 @@ fn fallback_displays() -> Vec<Display> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quit_mid_batch_still_brings_back_what_the_model_shows() {
+        let id = WindowId(3);
+        let frame = Rect::new(10.0, 40.0, 300.0, 200.0);
+        assert!(runs_after_quit(&Action::SetFrame { id, frame }));
+        assert!(!runs_after_quit(&Action::Park { id, frame }));
+        assert!(!runs_after_quit(&Action::Raise { id }));
+        assert!(!runs_after_quit(&Action::Focus { id }));
+        assert!(!runs_after_quit(&Action::StateChanged));
+    }
 
     #[test]
     fn a_desktop_with_nothing_left_on_screen_is_recognized_again_not_forgotten() {

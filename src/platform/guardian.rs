@@ -234,8 +234,10 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
             Ok(f) if !is_stranded(f, displays) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
                     log_event(&e);
+                    continue;
                 }
-                continue;
+                // A fitted window still at its fitted frame: moved to its pre-fit frame below.
+                tracing::debug!(id = x.id, at = %f, "guardian: a fitted window; putting back its pre-fit frame");
             }
             Ok(_) => {}
             Err(e) => tracing::debug!(id = x.id, "guardian: cannot read its frame ({e})"),

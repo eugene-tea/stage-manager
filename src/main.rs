@@ -695,7 +695,13 @@ mod app {
                 })
             })
             .collect();
-        let display = desktop::cg_display_bounds().first().copied();
+        // The main display, with its visible frame (the park zone sits above a bottom Dock).
+        let mut display = json!(desktop::cg_display_bounds().first().copied());
+        if let (Some(mtm), Some(obj)) = (MainThreadMarker::new(), display.as_object_mut())
+            && let Some(main) = desktop::main_display(mtm)
+        {
+            obj.insert("visible".into(), json!(main.visible));
+        }
         println!("{}", json!({ "ok": true, "pids": pids, "display": display, "windows": out }));
         ExitCode::SUCCESS
     }

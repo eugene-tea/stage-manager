@@ -149,6 +149,10 @@ pub struct Registered {
     pub restore: Rect,
     /// A child window (dialog, sheet, panel).
     pub child: bool,
+    /// A shown window we fitted clear of the strip: `restore` is its exact pre-fit frame, and
+    /// it is back only once there (or once the guardian has moved it there).
+    #[serde(default)]
+    pub fitted: bool,
 }
 
 /// The parked file the app keeps for its guardian: the registered windows and the main
@@ -349,7 +353,7 @@ mod tests {
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
-            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false }],
+            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true }],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));

@@ -106,7 +106,8 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   `[strip]`, `[cards]`, `[icons]`, `[motion]` and `[reveal]`.
 - **Stages.** Every window belongs to one stage (or is pinned). Only the active stage is
   shown; the others are parked in the bottom-right corner (a sliver stays visible; macOS
-  keeps part of every window onscreen). Clicking a card, clicking a parked sliver, ⌘Tab or
+  keeps part of every window onscreen: 32 pt of title bar above the Dock when the Dock sits
+  at the bottom). Clicking a card, clicking a parked sliver, ⌘Tab or
   a Dock click on an app whose windows sit in another stage switches to that stage.
 - **New windows** follow Apple by default (`action = "native"`): a window of an app already
   on the current stage joins it; a window of an app that sits in another stage joins that
@@ -355,26 +356,41 @@ again untouched until then. Version 1 files (one Space) are read as one Space.
 ## Safety: no window stays parked
 
 1. A **registry** of every parked window (AX element + clamped restore frame), synced around
-   every batch of window moves.
+   every batch of window moves. A parked window keeps its entry while Accessibility has
+   lost it (revoked, say); while Accessibility is off, clicks and hotkeys wait, and when it
+   comes back the Space is recognized again and every window is checked against the model.
 2. **Quit** (menu, `ctl quit`) unparks through the WM thread, then the registry, then a scan.
+   A batch of moves under way when Quit comes skips its parks, raises and focus but still
+   brings back every window it was showing.
 3. A **panic hook** unparks from the registry (a scan if it is busy) and exits; panics on the
    WM thread are caught and the registry resynced instead.
 4. **SIGTERM / SIGINT / SIGHUP** go through a self-pipe to a watcher that quits cleanly
    (forcing the unpark itself if the main thread hangs); SIGABRT gets a best-effort unpark.
 5. A **guardian** process (`stage-manager --guardian <pid>`) waits for the app with kqueue
    and runs the recovery scan unless the app wrote its clean-exit marker (`kill -9`, crash).
-   It knows the parked windows from the registry's copy on disk (`.parked-<pid>.json` in the
-   config directory). While a window stays stranded on another Space (Accessibility reaches
+   It knows the parked windows and the main display's visible frame from the registry's
+   copy on disk (`.parked-<pid>.json` in the config directory). While a window stays stranded on another Space (Accessibility reaches
    most apps' windows only on the Space shown), it watches the window list every 0.5 s and
    moves the window back as soon as it shows (you went to its Space), retrying while it
    stays shown. A window is done only once the guardian has seen it back (read through
    Accessibility outside the park zone, or listed on screen outside it in settled passes a
    second apart; a Space sliding in can list a window at an in-between frame) or gone (not
-   listed on any Space for 3 s); it never exits while one waits, unless Stage Manager runs
-   again. Its log says what it waits for, every change, and why each window was let go.
+   listed on any Space for 3 s of passes that listed something: a listing with no window on
+   screen, as during another user's session or at the login window, counts for nothing); it
+   never exits while one waits, unless Stage Manager runs again. A window we had fitted
+   clear of the strip is back only at its pre-fit frame. Its log says what it waits for,
+   every change, and why each window was let go.
 6. The **recovery scan** at launch and in the guardian: every window of every managed app
    stranded in the park zone goes back to its `state.json` frame, or is centered.
 7. Every restore frame is **clamped** onto the visible screen.
+
+"In the park zone" is one test everywhere (the model, the scan, the guardian, the quit
+check): the corner of the display's full frame or of its visible frame, because macOS keeps
+a parked window's title bar above a Dock at the bottom; it holds for a Dock at the bottom,
+left or right, auto-hidden, on any display. When the main display changes size, its parked
+windows are parked again at the new corner (those of other Desktops when their Desktop
+shows); when it changes identity (docking or undocking moves the menu bar), the stages, the
+active stage and the strip stay as they were.
 
 Every Space counts: the registry holds parked windows of every Space (their AX elements
 were taken while their Space showed), and Quit is clean only when the window server lists
@@ -539,7 +555,11 @@ screen-access alerts macOS showed meanwhile (from replayd's log, any app).
 ## Known limitations
 
 - Apple's own Stage Manager must be off while this app runs (both move windows).
-- Main display only; other displays are left alone.
+- Main display only; other displays are left alone: a window that shows mostly on another
+  display is not managed (a managed window moved there is let go after two checks, a
+  second apart, and comes back as a new window when moved back). Parking uses the main
+  display's bottom-right corner, so a display placed against that corner shows the
+  parked windows' bodies.
 - Moving windows are snapshots (Apple moves the live windows): a full-size snapshot of
   each shown window is refreshed every 2 s (`[animation] snapshot_interval_ms`) and when the
   pointer reaches a card, so content that changed since may jump when the motion ends. A
