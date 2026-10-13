@@ -73,8 +73,10 @@ Across Spaces: the registry keeps every Space's parked windows (AX elements take
 their Space showed). Quit is clean only when the window server lists no managed window in
 the park zone on any Space; otherwise the guardian keeps watching after its scan and scans
 again whenever such a window shows (its Space was visited), retrying while it stays shown,
-since AX lists most apps' windows only on the shown Space. It never exits while one is left
-unless Stage Manager runs again.
+since AX lists most apps' windows only on the shown Space. A window is done only when seen
+back (AX reads it outside the park zone, or the window server lists it on screen outside it
+in settled passes a second apart: a sliding Space can list in-between frames) or gone (not
+listed on any Space for 3 s). It never exits while one waits unless Stage Manager runs again.
 
 ## Testing hooks
 
