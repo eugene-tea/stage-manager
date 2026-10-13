@@ -20,6 +20,10 @@
 //!   check's look at a Desktop slide.
 //! - `stage-manager probe-screen` prints the on-screen windows that cover the main display
 //!   (a full-screen app's Space), one JSON line, for test scripts.
+//! - `stage-manager probe-patch [--out FILE.png] [--rect X,Y,W,H] [--reach PT] [--placement P]` renders what
+//!   the wallpaper corner patch would show over the main display's corner right now (the
+//!   patch's own code path, from the wallpaper's file; no screen capture) to a PNG (default
+//!   `/tmp/stage-manager-patch.png`) and prints what it drew, one JSON line.
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
 //!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
 //!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.
@@ -51,6 +55,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-screen") => app::probe_screen(),
         #[cfg(target_os = "macos")]
+        Some("probe-patch") => stage_manager::ui::patch_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
@@ -62,7 +68,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }
@@ -214,6 +220,9 @@ mod app {
             }
             self.send_display_if_changed();
             shell::poll(self.permissions, &self.settings, self.capture_refused);
+            if let Some(mtm) = MainThreadMarker::new() {
+                stage_manager::ui::corner_patch::poll(mtm);
+            }
         }
 
         fn send_display_if_changed(&mut self) {
@@ -231,6 +240,7 @@ mod app {
                 }
                 self.display = Some(main);
                 self.wm.send(WmCommand::Displays(vec![main]));
+                stage_manager::ui::corner_patch::display_changed(mtm);
             }
         }
 

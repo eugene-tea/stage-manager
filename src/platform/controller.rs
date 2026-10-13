@@ -127,6 +127,10 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 /// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 
+/// How long Finder's desktop icons as read for the corner patch are trusted (a new
+/// rectangle reads them at once).
+const PATCH_ITEMS_FRESH: Duration = Duration::from_secs(5);
+
 /// Longest wait for the strip to draw a transition's snapshots before windows move anyway.
 const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 
@@ -448,6 +452,11 @@ pub struct Controller {
     patch_ordered: Option<bool>,
     /// The patch was once found ordered right (logged once).
     patch_honoured: bool,
+    /// Finder's desktop icons (grown by their labels) as last read for the patch, when, and
+    /// for which rectangle ([`PATCH_ITEMS_FRESH`]).
+    patch_items: (Vec<Rect>, Option<(Instant, Rect)>),
+    /// Widgets shown on the desktop were logged as possibly under the patch.
+    patch_widgets_logged: bool,
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
@@ -603,6 +612,8 @@ impl Controller {
             patch_rect: None,
             patch_ordered: None,
             patch_honoured: false,
+            patch_items: (Vec::new(), None),
+            patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
             fullscreen: false,
             space_pending: false,
@@ -882,6 +893,35 @@ impl Controller {
         }
     }
 
+    /// Finder's desktop icons for the patch at `rect`, read again (Accessibility, Finder's
+    /// short timeout) for a new rectangle or once the last read is [`PATCH_ITEMS_FRESH`] old.
+    fn patch_items(&mut self, rect: Option<Rect>, now: Instant) -> Vec<Rect> {
+        let Some(rect) = rect else {
+            self.patch_items = (Vec::new(), None);
+            return Vec::new();
+        };
+        let fresh = self.patch_items.1.is_some_and(|(at, r)| r == rect && now.duration_since(at) < PATCH_ITEMS_FRESH);
+        if !fresh {
+            let icons = super::desktop_items::finder_icons();
+            if icons.is_none() {
+                tracing::debug!("corner patch: Finder's desktop icons unreadable");
+            }
+            let items: Vec<Rect> = icons.unwrap_or_default().into_iter().map(crate::engine::corner_patch::item_reach).collect();
+            let under = items.iter().filter(|i| i.intersect(&rect).is_some()).count();
+            if under > 0 && self.patch_items.0.iter().all(|i| i.intersect(&rect).is_none()) {
+                tracing::info!(under, "corner patch: a desktop icon lies under the corner; the patch stays off while it does");
+            }
+            self.patch_items = (items, Some((now, rect)));
+        }
+        if !self.settings.hide_widgets_standard && !self.patch_widgets_logged {
+            self.patch_widgets_logged = true;
+            tracing::info!(
+                "corner patch: widgets may show on the desktop (StandardHideWidgets off); their places are not public, so one in the corner would be covered"
+            );
+        }
+        self.patch_items.0.clone()
+    }
+
     /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
     /// it to the main thread when it changed. Reads the window server's on-screen list only
     /// while `[windows] corner_patch` is on; checks the patch's order in it every time (an
@@ -891,7 +931,7 @@ impl Controller {
         use crate::engine::corner_patch::{Listed, PatchFacts, ordered_right, patch_rect, steady_rect, visibility};
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
-        let (on, reach, fps) = (config.windows.corner_patch, config.windows.corner_patch_reach, config.windows.corner_patch_fps);
+        let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
         let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
         let plan = match &self.model {
             Some(m) if on => {
@@ -923,6 +963,7 @@ impl Controller {
                 }
                 self.patch_ordered = ordered;
                 let now = Instant::now();
+                let items = self.patch_items(rect, now);
                 let facts = PatchFacts {
                     on,
                     rect,
@@ -936,17 +977,19 @@ impl Controller {
                         .collect(),
                     dragging: input::left_button_down() || self.drag.is_some(),
                     transition: self.pending.is_some(),
+                    items,
                 };
                 let show = visibility(&facts).ok();
                 let above = show.and_then(|r| {
                     list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
                 });
-                PatchPlan { show, above, reorder, fps }
+                PatchPlan { show, above, reorder, space }
             }
             _ => {
                 self.patch_rect = None;
                 self.patch_ordered = None;
-                PatchPlan { show: None, above: None, reorder, fps }
+                self.patch_items = (Vec::new(), None);
+                PatchPlan { show: None, above: None, reorder, space }
             }
         };
         if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none()) {

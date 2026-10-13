@@ -22,6 +22,7 @@ pub mod settings;
 pub mod sliver;
 pub mod stage_area;
 pub mod stand_down;
+pub mod wallpaper;
 #[cfg(test)]
 pub(crate) mod testkit;
 

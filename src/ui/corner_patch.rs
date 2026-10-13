@@ -1,53 +1,50 @@
-//! The wallpaper corner patch's panel and live capture (`[windows] corner_patch`, a
-//! prototype, off by default; the geometry and the rules are
-//! [`crate::engine::corner_patch`]).
+//! The wallpaper corner patch's panel and picture (`[windows] corner_patch`, a prototype,
+//! off by default; the geometry and the rules are [`crate::engine::corner_patch`]).
 //!
 //! - **Panel**: borderless, non-activating, click-through, no shadow, opaque, at the normal
 //!   window level, never key or main; collection behavior [`panels::corner_patch`]
 //!   (`Transient`: hidden by Mission Control, App Exposé and Show Desktop; `IgnoresCycle`:
 //!   out of ⌘`). Its sharing type is left at the default, so screenshots show it as the
 //!   wallpaper it shows.
-//! - **Picture**: a ScreenCaptureKit stream of the main display with a filter that includes
-//!   only the windows below the normal level (the desktop picture, Finder's desktop icons,
-//!   desktop widgets), cropped to the patch's rectangle (`sourceRect`), at most
-//!   `[windows] corner_patch_fps` frames a second (a still wallpaper sends none: ScreenCaptureKit
-//!   sends frames only when the content changes, so dynamic, light/dark, Aerial and rotating
-//!   wallpapers follow on their own). Each frame's IOSurface becomes the layer's contents.
-//!   The windows are looked up again on a Space change and at each new rectangle.
+//! - **Picture**: the desktop picture drawn from its file, never captured
+//!   ([`crate::platform::wallpaper`], decided by [`crate::engine::wallpaper`]): no Screen
+//!   Recording, no menu bar recording indicator. A block of the corner is rendered once on
+//!   a render thread ([`picture_for`]); the patch shows a whole-pixel crop of it
+//!   ([`crop_for`]), so a new rectangle inside the block needs no new render. Until the
+//!   picture for the current wallpaper is ready, and whenever it cannot be drawn exactly,
+//!   the patch stays hidden: the sliver is better than a wrong picture.
+//! - **Redraws**: the wallpaper is read again (main thread) when the patch is first wanted,
+//!   on a Space change (each Desktop may have its own picture), on a display change, every
+//!   [`READ_EVERY`] while the patch is wanted (NSWorkspace's URL and options, the settings
+//!   file's modification time, the picture's: cheap), at a time-of-day or solar frame's
+//!   boundary, and at once when the appearance changes (checked every poll, each second).
+//!   A read naming a different picture hides the patch until the new one is rendered.
 //! - **Ordering**: just above the topmost parked window under it
 //!   (`orderWindow:relativeTo:` with that window's number); the WM thread checks the order
 //!   in the window server's list at every plan (the panel's number: [`window_number`]) and
 //!   shows the patch only where it may, sending the plan again to order it anew when it
 //!   was right and is not any more.
-//! - Hidden at once when the plan says so (no sliver, an overview, a full-screen Space, the
-//!   fallback's moving windows), and the stream stops. The stream restarts only for a new
-//!   rectangle (the WM thread keeps one that barely changed).
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
-use block2::RcBlock;
-use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::AnyObject;
+use objc2::MainThreadOnly;
 use objc2_app_kit::{NSBackingStoreType, NSColor, NSNormalWindowLevel, NSPanel, NSWindowOrderingMode, NSWindowStyleMask};
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGMainDisplayID, CGPreflightScreenCaptureAccess};
-use objc2_core_media::{CMSampleBuffer, CMTime};
-use objc2_core_video::CVPixelBufferGetIOSurface;
-use objc2_foundation::{MainThreadMarker, NSArray, NSError, NSPoint, NSRect, NSSize};
-use objc2_io_surface::IOSurfaceRef;
-use objc2_quartz_core::CALayer;
-use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput, SCStreamOutputType, SCWindow,
-};
+use objc2_core_foundation::CFRetained;
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_quartz_core::{CALayer, CATransaction};
 
 use super::panels;
-use crate::engine::geometry::Rect;
-use crate::platform::{capture, desktop};
+use crate::engine::geometry::{Rect, Size};
+use crate::engine::wallpaper as wp;
+use crate::platform::desktop;
+use crate::platform::wallpaper::{self, Job, Reader, Wall};
 
 /// What the WM thread asks of the patch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PatchPlan {
     /// Show it, at this rectangle (global, top-left); `None` hides it.
     pub show: Option<Rect>,
@@ -56,9 +53,12 @@ pub struct PatchPlan {
     /// Bumped to order the patch again with an otherwise equal plan (it was ordered right
     /// and is not any more).
     pub reorder: u32,
-    /// Most frames a second.
-    pub fps: u32,
+    /// The WM thread's count of Space changes: a new one reads the wallpaper again.
+    pub space: u64,
 }
+
+/// How often the wallpaper is read again while the patch is wanted.
+pub const READ_EVERY: Duration = Duration::from_secs(2);
 
 /// The patch panel's window number once it exists (0 before).
 static NUMBER: AtomicU32 = AtomicU32::new(0);
@@ -72,58 +72,43 @@ pub fn window_number() -> Option<u32> {
     }
 }
 
-/// A frame's surface, handed from the stream's queue to the main thread.
-struct Surface(CFRetained<IOSurfaceRef>);
-// SAFETY: an IOSurface is a thread-safe CF object; it is only read (as layer contents) on
-// the main thread.
-unsafe impl Send for Surface {}
-
-define_class!(
-    // SAFETY: NSObject has no subclassing requirements; the class has no ivars and no Drop.
-    #[unsafe(super = NSObject)]
-    #[name = "SMCornerPatchOutput"]
-    struct PatchOutput;
-
-    // SAFETY: NSObjectProtocol has no safety requirements.
-    unsafe impl NSObjectProtocol for PatchOutput {}
-
-    // SAFETY: the method signature matches SCStreamOutput's.
-    unsafe impl SCStreamOutput for PatchOutput {
-        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
-        fn did_output(&self, _stream: &SCStream, sample: &CMSampleBuffer, kind: SCStreamOutputType) {
-            if kind != SCStreamOutputType::Screen {
-                return;
-            }
-            // SAFETY: a live sample buffer for the call; an idle frame has no image buffer.
-            let Some(image) = (unsafe { sample.image_buffer() }) else { return };
-            let Some(surface) = CVPixelBufferGetIOSurface(Some(&image)) else { return };
-            let surface = Surface(surface);
-            DispatchQueue::main().exec_async(move || {
-                let surface = surface;
-                PATCH.with(|p| {
-                    if let Some(p) = p.borrow().as_ref() {
-                        p.show_surface(&surface.0);
-                    }
-                });
-            });
-        }
-    }
-);
-
-impl PatchOutput {
-    fn new() -> Retained<Self> {
-        let this = Self::alloc().set_ivars(());
-        // SAFETY: NSObject's designated initializer on a fresh instance.
-        unsafe { msg_send![super(this), init] }
-    }
+/// A rendered block of the corner.
+struct Picture {
+    key: String,
+    region: Rect,
+    scale: f64,
+    image: CFRetained<CGImage>,
 }
 
-/// The patch's panel, its layer and its stream (main thread).
+/// The screen-local region to render for a patch at `rect` (global) under `job` on the
+/// screen at `screen` (global), and its render: the same path for the patch and the probe.
+pub fn picture_for(job: &Job, screen: Rect, rect: Rect) -> Result<(Rect, CFRetained<CGImage>), String> {
+    let region = wp::region(Size::new(screen.w, screen.h), wp::local(rect, screen));
+    wallpaper::render(job, region).map(|image| (region, image))
+}
+
+/// The patch's pixels for `rect` (global) out of a render of `region` (screen-local) of the
+/// screen at `screen` (global); `None` unless the region holds it.
+pub fn crop_for(picture: &CGImage, region: Rect, scale: f64, screen: Rect, rect: Rect) -> Option<CFRetained<CGImage>> {
+    let px = wp::crop_px(region, wp::local(rect, screen), scale)?;
+    wallpaper::crop(picture, px)
+}
+
+/// The patch's panel, its layer and its picture (main thread).
 struct Patch {
     panel: Retained<NSPanel>,
     layer: Retained<CALayer>,
-    stream: Option<(Retained<SCStream>, Retained<PatchOutput>, Rect)>,
+    plan: PatchPlan,
     shown: Option<Rect>,
+    /// What the panel shows now (picture key and the plan), to skip a redundant show.
+    showing: Option<(String, PatchPlan)>,
+    reader: Reader,
+    wall: Option<(Instant, Wall)>,
+    picture: Option<Picture>,
+    /// The key and region of the render in flight.
+    rendering: Option<(String, Rect)>,
+    /// What the log last said (a reason it is off, or what it draws).
+    said: Option<String>,
 }
 
 thread_local! {
@@ -135,7 +120,47 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
     PATCH.with(|p| {
         let mut p = p.borrow_mut();
         let patch = p.get_or_insert_with(|| Patch::new(mtm));
-        patch.apply(mtm, plan);
+        let fresh = plan.show.is_some() && (patch.plan.show.is_none() || plan.space != patch.plan.space);
+        patch.plan = plan;
+        if fresh {
+            patch.wall = None;
+        }
+        patch.reconcile(mtm);
+    });
+}
+
+/// The app's poll (each second, main thread): reads the wallpaper again while the patch is
+/// wanted and the last read is [`READ_EVERY`] old, a frame boundary passed, or the
+/// appearance changed.
+pub fn poll(mtm: MainThreadMarker) {
+    PATCH.with(|p| {
+        let Ok(mut p) = p.try_borrow_mut() else { return };
+        let Some(patch) = p.as_mut() else { return };
+        if patch.plan.show.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let stale = patch.wall.as_ref().is_none_or(|(at, w)| {
+            now.duration_since(*at) >= READ_EVERY
+                || w.recheck_at.is_some_and(|r| now >= r)
+                || w.dark != wallpaper::dark_appearance(mtm)
+        });
+        if stale {
+            patch.wall = None;
+            patch.reconcile(mtm);
+        }
+    });
+}
+
+/// The main display changed (size, scale, color space): read the wallpaper again.
+pub fn display_changed(mtm: MainThreadMarker) {
+    PATCH.with(|p| {
+        if let Ok(mut p) = p.try_borrow_mut()
+            && let Some(patch) = p.as_mut()
+        {
+            patch.wall = None;
+            patch.reconcile(mtm);
+        }
     });
 }
 
@@ -163,148 +188,156 @@ impl Patch {
             view.setWantsLayer(true);
             view.setLayer(Some(&layer));
         }
-        Self { panel, layer, stream: None, shown: None }
+        Self {
+            panel,
+            layer,
+            plan: PatchPlan::default(),
+            shown: None,
+            showing: None,
+            reader: Reader::default(),
+            wall: None,
+            picture: None,
+            rendering: None,
+            said: None,
+        }
     }
 
-    fn apply(&mut self, mtm: MainThreadMarker, plan: PatchPlan) {
-        let Some(rect) = plan.show else {
-            if self.shown.take().is_some() {
-                self.panel.orderOut(None);
-                tracing::debug!("corner patch: hidden");
+    fn hide(&mut self) {
+        self.showing = None;
+        if self.shown.take().is_some() {
+            self.panel.orderOut(None);
+            tracing::debug!("corner patch: hidden");
+        }
+    }
+
+    /// Logs `line` once until something else is said.
+    fn say(&mut self, line: String, off: bool) {
+        if self.said.as_deref() != Some(line.as_str()) {
+            if off {
+                tracing::info!("corner patch: off: {line}");
+            } else {
+                tracing::info!("corner patch: {line}");
             }
-            self.stop();
+            self.said = Some(line);
+        }
+    }
+
+    fn reconcile(&mut self, mtm: MainThreadMarker) {
+        let Some(rect) = self.plan.show else {
+            self.hide();
             return;
         };
-        if !(CGPreflightScreenCaptureAccess() && capture::pictures_expected()) {
-            // No live picture: an empty or stale patch would be worse than the sliver.
-            self.panel.orderOut(None);
-            self.shown = None;
-            self.stop();
+        if self.wall.is_none() {
+            let wall = self.reader.read(mtm);
+            self.wall = Some((Instant::now(), wall));
+        }
+        let Some((_, wall)) = self.wall.clone() else { return };
+        let (decision, job) = match &wall.outcome {
+            Ok(ok) => ok.clone(),
+            Err(why) => {
+                self.hide();
+                let name = wall.path.as_deref().map(wallpaper::file_name).unwrap_or_default();
+                self.say(format!("{why} ({name})"), true);
+                return;
+            }
+        };
+        let key = job.key();
+        if self.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
             return;
         }
+        if self.picture.as_ref().is_some_and(|p| p.key != key) {
+            // Another picture or frame: never show the old one meanwhile.
+            self.picture = None;
+            self.hide();
+        }
+        let shown = self.picture.as_ref().and_then(|p| crop_for(&p.image, p.region, p.scale, wall.screen, rect));
+        let Some(image) = shown else {
+            self.hide();
+            let region = wp::region(Size::new(wall.screen.w, wall.screen.h), wp::local(rect, wall.screen));
+            if self.rendering.as_ref() != Some(&(key.clone(), region)) {
+                self.rendering = Some((key, region));
+                start_render(job, wall.screen, rect);
+            }
+            return;
+        };
+        let style = decision.style.map_or_else(|| "-".into(), |s| format!("{s:?}").to_lowercase());
+        self.say(
+            format!(
+                "drawing {} ({}, frame {}, style {style}, {}, {}x scale, {})",
+                job.file_name(),
+                decision.kind,
+                decision.frame.index,
+                decision.placement.name(),
+                job.scale,
+                job.space_key
+            ),
+            false,
+        );
+        self.show(mtm, rect, &image, job.scale);
+        self.showing = Some((key, self.plan.clone()));
+    }
+
+    fn show(&mut self, mtm: MainThreadMarker, rect: Rect, image: &CGImage, scale: f64) {
         let h = desktop::primary_height(mtm);
         let frame = NSRect::new(NSPoint::new(rect.x, h - rect.y - rect.h), NSSize::new(rect.w, rect.h));
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        // SAFETY: a CGImage is accepted as a layer's contents; the layer retains it.
+        let contents = unsafe { &*(image as *const CGImage).cast::<AnyObject>() };
+        // SAFETY: as above.
+        unsafe { self.layer.setContents(Some(contents)) };
+        self.layer.setContentsScale(scale);
+        CATransaction::commit();
         self.panel.setFrame_display(frame, false);
-        if self.stream.as_ref().is_none_or(|(_, _, r)| *r != rect) {
-            self.stop();
-            self.start(rect, plan.fps);
-        }
-        match plan.above {
+        match self.plan.above {
             Some(id) => self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, id as isize),
             None => self.panel.orderFrontRegardless(),
         }
         if self.shown != Some(rect) {
-            tracing::debug!(%rect, above = ?plan.above, "corner patch: shown");
+            tracing::debug!(%rect, above = ?self.plan.above, "corner patch: shown");
         }
         self.shown = Some(rect);
         NUMBER.store(self.panel.windowNumber() as u32, Ordering::SeqCst);
     }
 
-    fn show_surface(&self, surface: &IOSurfaceRef) {
-        // SAFETY: an IOSurface is accepted as a layer's contents; the layer retains it.
-        let contents = unsafe { &*(surface as *const IOSurfaceRef).cast::<AnyObject>() };
-        // SAFETY: as above.
-        unsafe { self.layer.setContents(Some(contents)) };
-    }
-
-    fn stop(&mut self) {
-        if let Some((stream, _, _)) = self.stream.take() {
-            // SAFETY: a running stream; no completion handler needed.
-            unsafe { stream.stopCaptureWithCompletionHandler(None) };
+    /// A render finished (main thread): keep it when it is still the one wanted.
+    fn rendered(&mut self, mtm: MainThreadMarker, key: String, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
+        if self.rendering.as_ref().map(|(k, _)| k) != Some(&key) {
+            return;
+        }
+        self.rendering = None;
+        match result {
+            Ok((region, image)) => {
+                self.picture = Some(Picture { key, region, scale, image });
+                self.reconcile(mtm);
+            }
+            Err(why) => {
+                self.hide();
+                self.say(format!("the picture cannot be drawn: {why}"), true);
+            }
         }
     }
+}
 
-    /// Starts the stream for `rect` once the shareable content (the desktop windows) is
-    /// known; on the main thread again when it is.
-    fn start(&mut self, rect: Rect, fps: u32) {
-        let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
-            // SAFETY: SCK passes a valid object or null for each.
-            let Some(content) = (unsafe { content.as_ref() }) else {
-                let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
-                tracing::warn!(?why, "corner patch: no shareable content; no picture");
-                return;
-            };
-            let Some(filter) = desktop_filter(content) else {
-                tracing::warn!("corner patch: no desktop windows found to capture");
-                return;
-            };
-            let filter = SendFilter(filter);
-            DispatchQueue::main().exec_async(move || {
-                let filter = filter;
-                PATCH.with(|p| {
-                    if let Some(p) = p.borrow_mut().as_mut()
-                        && p.shown == Some(rect)
-                        && p.stream.is_none()
-                    {
-                        p.stream = run_stream(&filter.0, rect, fps);
-                    }
-                });
+/// Renders on a thread of its own (decoding a large HEIC frame takes a moment) and hands
+/// the result to the main thread.
+fn start_render(job: Job, screen: Rect, rect: Rect) {
+    let key = job.key();
+    let spawned = std::thread::Builder::new().name("corner-patch-render".into()).spawn(move || {
+        let started = Instant::now();
+        let result = picture_for(&job, screen, rect);
+        tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: rendered");
+        let scale = job.scale;
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            PATCH.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.rendered(mtm, key, scale, result);
+                }
             });
         });
-        // SAFETY: the handler has the documented signature; SCK copies the block.
-        unsafe { SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, true, &handler) };
-    }
-}
-
-struct SendFilter(Retained<SCContentFilter>);
-// SAFETY: a content filter is an immutable value object once made.
-unsafe impl Send for SendFilter {}
-
-/// The main display with only the windows below the normal level on it (the desktop
-/// picture, the desktop icons, widgets).
-fn desktop_filter(content: &SCShareableContent) -> Option<Retained<SCContentFilter>> {
-    let main = CGMainDisplayID();
-    let own = std::process::id() as i32;
-    // SAFETY: plain getters of live objects.
-    unsafe {
-        let display = content.displays().iter().find(|d| d.displayID() == main)?;
-        let below: Vec<Retained<SCWindow>> = content
-            .windows()
-            .iter()
-            .filter(|w| w.windowLayer() < 0 && w.isOnScreen())
-            .filter(|w| w.owningApplication().is_none_or(|a| a.processID() != own))
-            .collect();
-        if below.is_empty() {
-            return None;
-        }
-        let list = NSArray::from_retained_slice(&below);
-        Some(SCContentFilter::initWithDisplay_includingWindows(SCContentFilter::alloc(), &display, &list))
-    }
-}
-
-/// Starts a stream of `filter` cropped to `rect` (global, top-left: the main display's
-/// origin is the global origin).
-fn run_stream(filter: &SCContentFilter, rect: Rect, fps: u32) -> Option<(Retained<SCStream>, Retained<PatchOutput>, Rect)> {
-    let scale = 2.0;
-    let output = PatchOutput::new();
-    // SAFETY: plain setters on a fresh configuration; the stream keeps the output (we keep it
-    // too); the queue outlives the stream.
-    unsafe {
-        let config = SCStreamConfiguration::new();
-        config.setSourceRect(CGRect::new(CGPoint::new(rect.x, rect.y), CGSize::new(rect.w, rect.h)));
-        config.setWidth((rect.w * scale) as usize);
-        config.setHeight((rect.h * scale) as usize);
-        config.setMinimumFrameInterval(CMTime::new(1, fps.clamp(1, 60) as i32));
-        config.setShowsCursor(false);
-        config.setQueueDepth(3);
-        config.setPixelFormat(u32::from_be_bytes(*b"BGRA"));
-        let stream = SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), filter, &config, None);
-        let queue = DispatchQueue::new("dev.eugene.stagemanager.corner-patch", None);
-        if let Err(e) = stream.addStreamOutput_type_sampleHandlerQueue_error(
-            ProtocolObject::from_ref(&*output),
-            SCStreamOutputType::Screen,
-            Some(&queue),
-        ) {
-            tracing::warn!("corner patch: cannot add the stream output: {}", e.localizedDescription());
-            return None;
-        }
-        let started = RcBlock::new(|error: *mut NSError| {
-            if let Some(e) = error.as_ref() {
-                tracing::warn!("corner patch: the stream did not start: {}", e.localizedDescription());
-            }
-        });
-        stream.startCaptureWithCompletionHandler(Some(&started));
-        tracing::info!(%rect, fps, "corner patch: live capture of the desktop under the corner");
-        Some((stream, output, rect))
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("corner patch: cannot start a render: {e}");
     }
 }

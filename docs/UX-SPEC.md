@@ -438,6 +438,11 @@ Ours:
    window surfaces.
 3. **Parked windows leave a sliver** in the display's bottom-right corner (macOS keeps part
    of every window onscreen; another corner when a second display sits beyond that one). Apple moves them off by private means.
+   The prototype `[windows] corner_patch` (off by default) covers them with a small panel
+   showing the desktop picture under them, drawn from the wallpaper's file (no screen
+   capture): it stays off where that cannot be exact (videos, aerials, shuffles, Photos,
+   a dynamic picture whose style is unknown) and while a desktop icon lies under it;
+   widgets in the corner would be covered (their places are not public).
 4. **Spaces are recognized, not named.** No public API names a Space, so Spaces are told
    apart by their windows: an empty Desktop is forgotten when left, and a Desktop whose
    windows are all hidden or minimized is taken for a new one until one of them shows. The

@@ -1,13 +1,13 @@
 //! The wallpaper corner patch (`[windows] corner_patch`, a prototype, off by default): a
-//! small panel over the park corner that shows what lies under the parked windows' slivers
-//! (the desktop picture, Finder's desktop icons, desktop widgets), captured live, so the
-//! corner looks empty as Apple's does. This module is its geometry and when it may show.
+//! small opaque panel over the park corner that shows the desktop picture under the parked
+//! windows' slivers, drawn from the picture's file ([`super::wallpaper`]; no screen
+//! capture), so the corner looks empty as Apple's does. This module is its geometry and
+//! when it may show.
 //!
 //! - **Where** ([`patch_rect`]): the parked windows' slivers as the window server lists them,
 //!   each grown by the shadow's reach ([`DEFAULT_REACH`], `[windows] corner_patch_reach`),
 //!   on the display. A park or unpark that shrinks it a little keeps the rectangle in use
-//!   ([`steady_rect`]), so its live capture is not restarted for every sliver that comes
-//!   and goes.
+//!   ([`steady_rect`]), so the panel does not move for every sliver that comes and goes.
 //! - **Ordering.** The patch is a normal-level window ordered just above the topmost parked
 //!   window under it (`orderWindow:relativeTo:` with another app's window number). Whether
 //!   it sits right is checked afresh at every plan against the window server's list
@@ -18,6 +18,9 @@
 //! - **Not ordered right** (the fallback): the patch sits above every normal window there,
 //!   so it shows only while no shown window reaches its rectangle, no window is being
 //!   dragged and no switch is running ([`visibility`]).
+//! - **Desktop items.** The patch draws the picture only: a Finder desktop icon under it
+//!   (read through Accessibility, [`item_reach`]) keeps it off. Widgets' places are not
+//!   public; with widgets shown on the desktop the patch would cover one in the corner (logged).
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
 //!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
 //!   down (nothing parked).
@@ -97,7 +100,7 @@ pub fn ordered_right(front_to_back: &[Listed], patch: u32, rect: Rect, parked: &
 /// What the patch's visibility depends on.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PatchFacts {
-    /// `[windows] corner_patch`, the app managing windows and captures allowed.
+    /// `[windows] corner_patch` and the app managing windows.
     pub on: bool,
     /// The patch's rectangle ([`patch_rect`]).
     pub rect: Option<Rect>,
@@ -114,6 +117,18 @@ pub struct PatchFacts {
     pub dragging: bool,
     /// A switch's transition is running.
     pub transition: bool,
+    /// Finder's desktop icons with their labels ([`item_reach`]), as last read.
+    pub items: Vec<Rect>,
+}
+
+/// How far past a desktop icon's image (Accessibility's `AXImage` frame) its label and
+/// selection reach: sideways, above, below (two lines of label).
+pub const ITEM_REACH: (f64, f64, f64) = (36.0, 6.0, 44.0);
+
+/// A desktop icon's image frame grown by its label ([`ITEM_REACH`]).
+pub fn item_reach(icon: Rect) -> Rect {
+    let (side, above, below) = ITEM_REACH;
+    Rect::new(icon.x - side, icon.y - above, icon.w + 2.0 * side, icon.h + above + below)
 }
 
 /// Whether the patch shows, and why not.
@@ -127,6 +142,9 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
     }
     if f.fullscreen {
         return Err("a full-screen Space shows");
+    }
+    if f.items.iter().any(|i| i.intersect(&rect).is_some()) {
+        return Err("a desktop icon lies under the corner");
     }
     if f.ordered == Some(true) {
         return Ok(rect);
@@ -205,6 +223,16 @@ mod tests {
     }
 
     #[test]
+    fn a_desktop_icon_under_the_corner_keeps_it_off() {
+        // An icon at the bottom of Finder's rightmost column, its label reaching the patch.
+        let icon = Rect::new(2440.0 - 48.0 - 20.0, 1300.0, 48.0, 48.0);
+        let f = PatchFacts { ordered: Some(true), items: vec![item_reach(icon)], ..facts() };
+        assert_eq!(visibility(&f), Err("a desktop icon lies under the corner"));
+        let away = Rect::new(2000.0, 100.0, 48.0, 48.0);
+        assert!(visibility(&PatchFacts { items: vec![item_reach(away)], ..f }).is_ok());
+    }
+
+    #[test]
     fn never_on_a_full_screen_space() {
         for ordered in [None, Some(false), Some(true)] {
             let f = PatchFacts { ordered, fullscreen: true, ..facts() };
@@ -217,9 +245,9 @@ mod tests {
         let wide = patch_rect(&[sliver(32.0), sliver(52.0)], MAIN, 60.0).expect("slivers");
         let narrow = patch_rect(&[sliver(32.0)], MAIN, 60.0).expect("a sliver");
         assert_ne!(wide, narrow);
-        // Safari's sliver goes (an unpark): the capture keeps its rectangle.
+        // Safari's sliver goes (an unpark): the patch keeps its rectangle.
         assert_eq!(steady_rect(Some(wide), narrow), wide);
-        // It comes back: the same rectangle again, no restart.
+        // It comes back: the same rectangle again, the panel stays put.
         assert_eq!(steady_rect(Some(wide), wide), wide);
         // Fresh, or growing past the one in use: the new one.
         assert_eq!(steady_rect(None, narrow), narrow);

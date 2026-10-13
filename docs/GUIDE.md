@@ -502,9 +502,8 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `windows.park_inside` | `1.0` | number, -10000 to 32 | Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it. |
 | `windows.park_drop` | `-1.0` | number, -32 to 10000 | How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it. |
 | `windows.hide_parked_apps` | `false` | true or false | An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default. |
-| `windows.corner_patch` | `false` | true or false | Cover the parked windows' slivers with a live picture of the desktop under them (wallpaper, desktop icons, widgets; Screen Recording). A prototype: off by default. |
+| `windows.corner_patch` | `false` | true or false | Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture); off while it cannot be drawn exactly (videos, aerials, shuffles, Photos) or a desktop icon lies under it. A prototype: off by default. |
 | `windows.corner_patch_reach` | `60.0` | number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow. |
-| `windows.corner_patch_fps` | `10` | whole number, 1 to 60 | Most frames a second of the corner patch's live picture (a still wallpaper sends none). |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
 | `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
@@ -729,6 +728,7 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"
 "$B" ctl state | jq '.stages'
 "$B" probe-windows dev.eugene.stagemanager.fixture   # the window server's view of an app
 "$B" probe-screen                                    # windows covering the display (full screen; overlays: Mission Control)
+"$B" probe-patch                                     # what the corner patch would show, from the wallpaper's file -> /tmp/stage-manager-patch.png
 ```
 
 Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reachable.
@@ -816,6 +816,13 @@ screen-access alerts macOS showed meanwhile (from replayd's log, any app).
 - Parked windows leave a sliver in the park corner (bottom-right unless another display
   sits beyond it). The other corners are unmeasured: that macOS keeps the asked-for `x` off
   the left side as it does off the right is assumed, not seen.
+- The corner patch prototype (`[windows] corner_patch`, off) draws the wallpaper from its
+  file over the slivers. It stays off for video and aerial wallpapers, shuffles and Photos,
+  a dynamic picture whose Light/Dark/Automatic/Dynamic choice it cannot read, a solar
+  picture near a frame change (the sun is placed by the time zone, not your location), and
+  while a desktop icon lies under it. Desktop widgets' places are not public: one in the
+  corner would be covered. `stage-manager probe-patch` writes what it would show to
+  `/tmp/stage-manager-patch.png`.
 - ⌘M: the window is parked, then un-minimized there, so macOS may show a short restore
   animation toward the bottom-right corner (Apple's window shrinks into the strip).
 - Thumbnails are stills refreshed every 1.5 s (Apple's cards are live).
