@@ -119,6 +119,14 @@ pub const MOVE_NEEDS: Duration = Duration::from_millis(90);
 /// mid-slide) or a move's window is not listed; then what is not taken goes once more.
 pub const ARRIVAL_CHECK_FOR: Duration = Duration::from_millis(400);
 
+/// When [`ARRIVAL_CHECK_FOR`] is up, the arrival's check goes on one round a tick while moves
+/// the round's cap deferred or cut, or moves owed their exact frame, are left: for at most
+/// this many ticks more…
+pub const TAIL_OVER_TICKS: u32 = 10;
+
+/// …and at most this long; then what stayed unsent is logged at warn (R15 1).
+pub const TAIL_OVER_FOR: Duration = Duration::from_millis(300);
+
 /// One move of an arrangement made on a Desktop not shown, as the window server should show
 /// it: parked (in the park zone), or at a frame; with how often it was sent again.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,6 +146,8 @@ pub(super) struct Expect {
     last: Option<(Instant, Option<Rect>)>,
     /// Sent again by the arrival's check (once), by a call the round's cap did not cut.
     final_sent: bool,
+    /// Given its one exact move at the arrival's time-up ([`owed_exact`], R15 2).
+    exact_last: bool,
     /// The window's stage as the arrangement left it (`None`: pinned, or not known): a move
     /// is checked only while the model still has the window there, parked as `park` says
     /// ([`Model::move_holds`]).
@@ -146,7 +156,7 @@ pub(super) struct Expect {
 
 impl Expect {
     fn new(id: u32, frame: Rect, before: Option<Rect>, park: bool) -> Self {
-        Expect { id, frame, before, park, tries: 0, gave_up: false, nudged_only: false, last: None, final_sent: false, stage: None }
+        Expect { id, frame, before, park, tries: 0, gave_up: false, nudged_only: false, last: None, final_sent: false, exact_last: false, stage: None }
     }
 }
 
@@ -172,6 +182,9 @@ pub(super) struct Verify {
     /// When the predicted Desktop arrived, and until when the arrival's check looks
     /// ([`ARRIVAL_CHECK_FOR`], [`Controller::arrival_round`]).
     tail: Option<(Instant, Instant)>,
+    /// The arrival's check's ticks since its time was up, this one counted
+    /// ([`tail_past_ceiling`], R15 1).
+    over_ticks: u32,
     /// The stage arranged on its Desktop: the check ends once it is not the active one there
     /// or a switch touched it ([`Model::ahead_holds`], R13 1).
     mark: AheadMark,
@@ -282,6 +295,81 @@ fn send_round(due: &[usize], mut send: impl FnMut(usize) -> bool) -> Vec<usize> 
         }
     }
     Vec::new()
+}
+
+/// True when the arrival's check, its time up, may not go on: past its `over_ticks`-th tick
+/// since (the first counted 1, then [`TAIL_OVER_TICKS`] more) or [`TAIL_OVER_FOR`] past it.
+fn tail_past_ceiling(over_ticks: u32, past: Duration) -> bool {
+    over_ticks > TAIL_OVER_TICKS + 1 || past >= TAIL_OVER_FOR
+}
+
+/// How a tick of the arrival's check ends ([`tail_round`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TailEnd {
+    /// Moves left: deferred or cut by the round's cap, or owed their exact frame at time-up.
+    NextTick,
+    /// Nothing left: the check ends.
+    Done,
+    /// Its ceiling reached with these moves still to send: the check ends (logged at warn).
+    Ceiling(Vec<usize>),
+}
+
+/// What a tick of the arrival's check did ([`tail_round`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TailRound {
+    /// The moves due the round's cap deferred (not sent).
+    left: Vec<usize>,
+    /// The moves due whose exact move the cap cut (sent again next tick).
+    cut: usize,
+    /// The move given its owed exact frame this tick, at time-up.
+    exact: Option<usize>,
+    end: TailEnd,
+}
+
+/// One tick of the arrival's check on `moves` (`due`: [`tail_step`]'s; `seen`: each judged;
+/// `over`: [`ARRIVAL_CHECK_FOR`] is up; `ceiling`: [`tail_past_ceiling`]). `resend` sends a
+/// move within the tick's round ([`Controller::resend`]). The due moves go first, as many as
+/// the round's cap lets ([`send_round`]); those it deferred or cut go next tick, the time up
+/// or not (R15 1). Before the time is up the check then ends; once it is, a move still owed
+/// its exact frame ([`owed_exact`]) gets one exact move on its full timeout, on a tick with
+/// nothing else to send and one a tick (R15 2). Past the ceiling nothing is sent: what is
+/// left ends it.
+fn tail_round(moves: &mut [Expect], due: &[usize], seen: &[Option<Seen>], over: bool, ceiling: bool, mut resend: impl FnMut(&mut Expect) -> Resent) -> TailRound {
+    let pending_exact = |moves: &[Expect]| -> Vec<usize> { owed_exact(moves, seen).into_iter().filter(|&i| !moves[i].exact_last).collect() };
+    if over && ceiling {
+        let mut unsent = due.to_vec();
+        unsent.extend(pending_exact(moves).into_iter().filter(|i| !due.contains(i)));
+        let end = if unsent.is_empty() { TailEnd::Done } else { TailEnd::Ceiling(unsent) };
+        return TailRound { left: Vec::new(), cut: 0, exact: None, end };
+    }
+    let left = send_round(due, |i| {
+        let e = &mut moves[i];
+        e.gave_up = false;
+        let resent = resend(e);
+        // Only a send the round's cap did not cut is the final one (R13 2).
+        e.final_sent |= resent == Resent::Full;
+        resent != Resent::Deferred
+    });
+    let cut = due.iter().filter(|&&i| !moves[i].final_sent).count() - left.len();
+    let round = |end| TailRound { left: left.clone(), cut, exact: None, end };
+    if cut > 0 || !left.is_empty() {
+        return round(TailEnd::NextTick);
+    }
+    if !over {
+        return round(TailEnd::Done);
+    }
+    let owed = pending_exact(moves);
+    let Some(&i) = owed.first() else { return round(TailEnd::Done) };
+    if !due.is_empty() {
+        // This tick's round sent moves: the exact one waits for a round of its own.
+        return round(TailEnd::NextTick);
+    }
+    let e = &mut moves[i];
+    let resent = resend(e);
+    e.exact_last = resent != Resent::Deferred;
+    e.final_sent |= resent == Resent::Full;
+    let end = if owed.len() > 1 { TailEnd::NextTick } else { TailEnd::Done };
+    TailRound { left: Vec::new(), cut: 0, exact: Some(i), end }
 }
 
 /// Forgets the move of window `id` (the user acted on it: nothing sends it again under
@@ -877,6 +965,7 @@ impl Controller {
             polling: true,
             told: false,
             tail: None,
+            over_ticks: 0,
             mark,
             moves: expected,
         });
@@ -1055,15 +1144,17 @@ impl Controller {
         self.arrival_round(ob, list, now);
     }
 
-    /// One look of the arrival's check ([`tail_step`]): the moves the model has moved on from
-    /// dropped first, the whole check ended by any switch of the stage arranged
-    /// ([`Self::verify_stands`]); every move judged on `list`; while it shows the slide, or a
-    /// move's window is not listed, the next fast tick looks again (until
+    /// One look of the arrival's check ([`tail_step`], [`tail_round`]): the moves the model
+    /// has moved on from dropped first, the whole check ended by any switch of the stage
+    /// arranged ([`Self::verify_stands`]); every move judged on `list`; while it shows the
+    /// slide, or a move's window is not listed, the next fast tick looks again (until
     /// [`ARRIVAL_CHECK_FOR`] runs out); then every move not taken, or owed its exact frame
     /// after a nudge, is sent once more whatever the slide's budget left (an unsure park only
     /// when never sent again), held to [`RESEND_ROUND_CAP`] a round: one the cap deferred or
-    /// cut goes next tick. When the time is up, a move still owed its exact frame gets one
-    /// more exact move on its full timeout. The outcome is logged at info.
+    /// cut goes next tick, the time up or not. Once the time is up, a move still owed its
+    /// exact frame gets one more exact move on its full timeout, one a tick. Past the time by
+    /// [`TAIL_OVER_TICKS`] ticks or [`TAIL_OVER_FOR`] the check ends with what is left logged
+    /// at warn (R15 1, 2). The outcome is logged at info.
     fn arrival_round(&mut self, ob: &Observer, list: &[CgWindow], now: Instant) {
         if !self.verify_stands() {
             return;
@@ -1072,6 +1163,10 @@ impl Controller {
         let Some(v) = self.verify.as_mut() else { return };
         let Some((arrived, until)) = v.tail else { return };
         let over = now >= until;
+        if over {
+            v.over_ticks += 1;
+        }
+        let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(until));
         let listed = |id: u32| list.iter().find(|w| w.id == id);
         let seen: Vec<Option<Seen>> =
             v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), main.frame, |r| main.parks(r)))).collect();
@@ -1089,50 +1184,55 @@ impl Controller {
         let sliding = due.iter().filter(|&&i| seen[i] == Some(Seen::Sliding)).count();
         let mut moves = std::mem::take(&mut v.moves);
         let round = Instant::now();
-        let left = send_round(&due, |i| {
-            let e = &mut moves[i];
-            e.gave_up = false;
-            let resent = self.resend(ob, e, now, round);
-            // Only a send the round's cap did not cut is the final one (R13 2).
-            e.final_sent |= resent == Resent::Full;
-            resent != Resent::Deferred
-        });
-        let cut = due.iter().filter(|&&i| !moves[i].final_sent).count() - left.len();
-        if !over && (cut > 0 || !left.is_empty()) {
-            tracing::debug!(left = left.len(), cut, "arrival: the final check's round time is up; the rest go next tick");
-            if let Some(v) = self.verify.as_mut() {
-                v.moves = moves;
-            }
-            return;
-        }
-        if over {
-            // The time is up: a move still owed its exact frame gets one more exact move, on
-            // its full timeout (a round of its own each).
-            for i in owed_exact(&moves, &seen) {
-                let resent = self.resend(ob, &mut moves[i], now, Instant::now());
-                moves[i].final_sent |= resent == Resent::Full;
-            }
-        }
+        let out = tail_round(&mut moves, &due, &seen, over, ceiling, |e| self.resend(ob, e, now, round));
         let Some(v) = self.verify.as_mut() else { return };
         v.moves = moves;
-        let owed_still: Vec<u32> = due.iter().map(|&i| &v.moves[i]).filter(|e| e.nudged_only || e.gave_up).map(|e| e.id).collect();
-        let unsent: Vec<u32> = left.iter().map(|&i| v.moves[i].id).collect();
+        let unsent = match &out.end {
+            TailEnd::NextTick => {
+                tracing::debug!(
+                    left = out.left.len(),
+                    cut = out.cut,
+                    exact = ?out.exact.map(|i| v.moves[i].id),
+                    over,
+                    "arrival: the final check's round time is up; the rest go next tick"
+                );
+                return;
+            }
+            TailEnd::Done => Vec::new(),
+            TailEnd::Ceiling(left) => left.iter().map(|&i| v.moves[i].id).collect(),
+        };
+        let owed_still: Vec<u32> = v.moves.iter().filter(|e| e.nudged_only || e.gave_up).map(|e| e.id).collect();
         let unlisted = seen.iter().filter(|s| s.is_none()).count();
-        tracing::info!(
-            moves = v.moves.len(),
-            ?resent,
-            sliding,
-            unlisted,
-            ?owed_still,
-            ?unsent,
-            rounds = v.rounds,
-            slid = v.slid,
-            tries = v.moves.iter().map(|e| e.tries).sum::<u32>(),
-            after_ms = ms(v.sent, now),
-            since_arrival_ms = ms(arrived, now),
-            "arrival: the final check of the arrangement's moves, {}",
-            if over { "its time out" } else { "the Desktop settled" }
-        );
+        let tries = v.moves.iter().map(|e| e.tries).sum::<u32>();
+        let (after_ms, since_arrival_ms) = (ms(v.sent, now), ms(arrived, now));
+        if unsent.is_empty() {
+            tracing::info!(
+                moves = v.moves.len(),
+                ?resent,
+                sliding,
+                unlisted,
+                ?owed_still,
+                rounds = v.rounds,
+                slid = v.slid,
+                tries,
+                after_ms,
+                since_arrival_ms,
+                "arrival: the final check of the arrangement's moves, {}",
+                if over { "its time out" } else { "the Desktop settled" }
+            );
+        } else {
+            tracing::warn!(
+                moves = v.moves.len(),
+                ?unsent,
+                ?owed_still,
+                over_ticks = v.over_ticks,
+                rounds = v.rounds,
+                tries,
+                after_ms,
+                since_arrival_ms,
+                "arrival: the final check of the arrangement's moves ran past its time; these stay unsent"
+            );
+        }
         self.verify = None;
     }
 
@@ -2113,5 +2213,93 @@ mod tests {
         let mut failed = Expect::new(4, r, None, true);
         assert_eq!(record_resend(&mut failed, Err(AxError::CANNOT_COMPLETE), Ok(()), true), Resent::Full);
         assert!(failed.gave_up && owed_exact(&[failed], &[Some(Seen::Missing)]).is_empty());
+    }
+
+    /// Drives the arrival's check from its time-up as the controller does: each tick's due
+    /// moves from [`tail_step`], one [`tail_round`] with `send` as the round's resend (`k`:
+    /// the move's place in the tick's round), the ceiling counted. Returns each tick's sends
+    /// (ids) and the last tick's outcome.
+    fn run_tail(moves: &mut [Expect], seen: &[Option<Seen>], mut send: impl FnMut(&mut Expect, usize) -> Resent) -> (Vec<Vec<u32>>, TailRound) {
+        let mut ticks = Vec::new();
+        for over_ticks in 1u32.. {
+            let TailStep::Send(due) = tail_step(moves, seen, true) else { panic!("the time is up: no wait") };
+            let ceiling = tail_past_ceiling(over_ticks, VERIFY_EVERY * (over_ticks - 1));
+            let mut sent = Vec::new();
+            let out = tail_round(moves, &due, seen, true, ceiling, |e| {
+                let r = send(e, sent.len());
+                if r != Resent::Deferred {
+                    sent.push(e.id);
+                }
+                r
+            });
+            ticks.push(sent);
+            if out.end != TailEnd::NextTick {
+                return (ticks, out);
+            }
+        }
+        unreachable!()
+    }
+
+    #[test]
+    fn moves_the_rounds_cap_deferred_at_time_up_go_over_the_next_ticks() {
+        // R15 1: three moves due at time-up, each ~100 ms: the cap lets one a round; the
+        // rest go on the following ticks, not dropped as unsent.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let mut moves: Vec<Expect> = (1..=3).map(|id| Expect::new(id, r, None, false)).collect();
+        let seen = vec![Some(Seen::Missing); 3];
+        let (ticks, out) = run_tail(&mut moves, &seen, |_, k| if k == 0 { Resent::Full } else { Resent::Deferred });
+        assert_eq!(ticks, vec![vec![1], vec![2], vec![3]], "one a tick");
+        assert_eq!(out.end, TailEnd::Done);
+        assert!(moves.iter().all(|e| e.final_sent), "every move sent once more");
+        // Before the time is up the same: the deferred ones go next tick.
+        let mut fresh: Vec<Expect> = (1..=2).map(|id| Expect::new(id, r, None, false)).collect();
+        let out = tail_round(&mut fresh, &[0, 1], &seen[..2], false, false, |e| if e.id == 1 { Resent::Full } else { Resent::Deferred });
+        assert_eq!((out.left, out.end), (vec![1], TailEnd::NextTick));
+    }
+
+    #[test]
+    fn the_owed_exact_moves_at_time_up_go_one_a_tick() {
+        // R15 2: each owed exact move takes its full 50 ms: one a tick, after the round's
+        // sends, never stacked on top of a round.
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let owed = |id| Expect { nudged_only: true, final_sent: true, tries: 1, ..Expect::new(id, r, None, false) };
+        let mut moves = vec![owed(1), owed(2), Expect::new(3, r, None, false)];
+        let seen = vec![Some(Seen::Missing); 3];
+        // Move 3 is due this tick; the owed exacts of 1 and 2 wait for ticks of their own.
+        // Each exact move fails on its full timeout: given once, never again.
+        let (ticks, out) = run_tail(&mut moves, &seen, |e, _| {
+            if e.nudged_only {
+                assert!(!e.exact_last, "one exact move each");
+            }
+            Resent::Full
+        });
+        assert_eq!(ticks, vec![vec![3], vec![1], vec![2]], "the round, then one owed exact a tick");
+        assert_eq!(out.end, TailEnd::Done);
+        assert!(moves[..2].iter().all(|e| e.exact_last && e.nudged_only), "still owed (the app's), not sent again");
+        let mut once = vec![owed(1), owed(2)];
+        let out = tail_round(&mut once, &[], &seen[..2], true, false, |_| Resent::Full);
+        assert_eq!((out.exact, out.end), (Some(0), TailEnd::NextTick));
+        let out = tail_round(&mut once, &[], &seen[..2], true, false, |_| Resent::Full);
+        assert_eq!((out.exact, out.end), (Some(1), TailEnd::Done));
+        let out = tail_round(&mut once, &[], &seen[..2], false, false, |_| panic!("before the time-up: no exact pass"));
+        assert_eq!(out.end, TailEnd::Done);
+    }
+
+    #[test]
+    fn the_arrivals_check_past_its_ceiling_ends_with_what_stayed_unsent() {
+        // R15 1: an app whose exact move the cap always cuts: the check goes on 10 ticks past
+        // its time, then ends, the move unsent (logged at warn).
+        assert!(!tail_past_ceiling(1, Duration::ZERO) && !tail_past_ceiling(11, Duration::from_millis(200)));
+        assert!(tail_past_ceiling(12, Duration::ZERO) && tail_past_ceiling(2, TAIL_OVER_FOR));
+        let r = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let mut moves = vec![Expect::new(1, r, None, false), Expect { nudged_only: true, final_sent: true, ..Expect::new(2, r, None, false) }];
+        let seen = vec![Some(Seen::Missing); 2];
+        let (ticks, out) = run_tail(&mut moves, &seen, |e, _| if e.id == 1 { Resent::Cut } else { Resent::Full });
+        assert_eq!(ticks.len(), 12, "the time-up tick, 10 more, and the one that ends it");
+        assert!(ticks[..11].iter().all(|t| t == &vec![1]) && ticks[11].is_empty(), "nothing sent past the ceiling: {ticks:?}");
+        assert_eq!(out.end, TailEnd::Ceiling(vec![0, 1]), "the cut move and the exact one never reached");
+        assert!(!moves[1].exact_last);
+        let mut done = vec![Expect { final_sent: true, ..Expect::new(1, r, None, false) }];
+        assert_eq!(tail_round(&mut done, &[], &seen[..1], true, true, |_| panic!()).end, TailEnd::Done, "nothing left: no warn");
     }
 }

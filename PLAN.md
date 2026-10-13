@@ -123,6 +123,14 @@ each launch adds ~30 lines plus one per window found, each quit ~8. A person's w
 is then about 7 000 lines, 1 MB; a heavy day 2-3 MB. Even the suite's machine pace for
 8 hours stays near 13 MB, well under the 100 MB day cap.
 
+## Accepted trade-offs (review rounds)
+
+Known gaps a review found and the owner accepted as rare, left as they are:
+
+- R15: `activation_frame` (`src/platform/controller.rs`), on a display whose only non-sticky
+  shown window belongs to an app that posts no move notice, reads a horizontal-only user drag
+  of that window as a Desktop slide and keeps its stale tracked frame.
+
 ## Out of scope (prototype)
 
 Multi-monitor beyond the main display (the model keys stages by display), fullscreen windows
