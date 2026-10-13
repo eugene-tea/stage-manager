@@ -124,7 +124,7 @@ const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
-/// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::dock_bar_now`]).
+/// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 
 /// Longest wait for the strip to draw a transition's snapshots before windows move anyway.

@@ -491,15 +491,16 @@ impl Strip {
     }
 
     /// Ends the running transition now (it `landed`, or a new one starts).
-    /// Shows the cards the running transition holds hidden on the pane being left; the
-    /// transition runs on (its snapshots, its timers, the controller's unveil). The pane
-    /// taking over hides the same stages if it has them ([`Strip::layout_cards`]) and the
-    /// transition's end shows them there.
+    /// Shows the cards the running transition holds hidden on the pane being left and drops
+    /// the hold: it belongs to that pane, whose snapshots land on the overlay left there. The
+    /// transition runs on (its snapshots, its timers, the controller's unveil); the pane
+    /// taking over draws its cards as usual, pressable.
     pub(super) fn release_held_cards(&mut self) {
-        let Some(r) = self.motion.running.as_ref() else { return };
+        let Some(r) = self.motion.running.as_mut() else { return };
+        let held = std::mem::take(&mut r.held);
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
-        for stage in &r.held {
+        for stage in &held {
             if let Some(layers) = self.pane.cards.get(stage) {
                 layers.card.setOpacity(1.0);
             }
