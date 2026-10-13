@@ -23,7 +23,7 @@ from pathlib import Path
 DEFAULT_VARIANT = "sky"
 
 CANVAS = 1024  # Icon Composer's macOS canvas, in points; the system masks the rounded square.
-MIDDLE_Y = 532.0  # the cards stack on this line, and their perspective looks from it
+MIDDLE_Y = 512.0  # the cards stack on this line (the canvas middle), and their perspective looks from it
 
 
 def srgb(hex_colour: str, alpha: float = 1.0) -> str:
@@ -41,7 +41,7 @@ VARIANTS = {
         "background_dark": ("#3a3f4b", "#16181d"),
         "pane": "#ffffff",
         "cards": ["#ffffff"] * 3,
-        "badges": ["#ff9f0a", "#34c759", "#ff375f"],
+        "badges": ["#ff5f57", "#febc2e", "#28c840"],  # top to bottom, as a window's close, minimize and zoom buttons
         "cards_n": 3,
         "pane_translucency": 0.35,
         "title_dots": False,

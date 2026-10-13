@@ -17,7 +17,7 @@ use objc2_foundation::{
 use crate::updates::{PAGES_URL, REPO_URL};
 
 /// The copyright line.
-pub const COPYRIGHT: &str = "© 2026 eugene-tea";
+pub const COPYRIGHT: &str = "© 2026 Eugene T";
 
 /// The version shown (`CFBundleShortVersionString`, else the crate's) and the build
 /// (`CFBundleVersion`, when the bundle has one that differs).
