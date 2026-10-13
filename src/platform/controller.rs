@@ -1404,24 +1404,31 @@ impl Controller {
                     u.tries += 1;
                     let element = ob.window(id).map(|w| w.element.clone()).unwrap_or_else(|| u.entry.element.clone());
                     let restore = u.entry.restore;
-                    let end = Instant::now() + leftovers::RESTORE_RETRY.budget;
-                    let set = |e: &AxElement| {
+                    let set = |e: &AxElement, end: Instant| {
                         if force { safety::set_frame_retrying(e, id, restore, end.saturating_duration_since(Instant::now())) } else { e.set_frame(restore) }
                     };
-                    let mut result = set(&element);
-                    // At quit the lookup and its try must fit in the window's budget.
-                    let fits = !force || leftovers::leftover_fits(end.saturating_duration_since(Instant::now()), false);
+                    let mut result = set(&element, Instant::now() + leftovers::RESTORE_RETRY.budget);
                     if let Err(e) = result
                         && refresh_element(e, u.refreshed)
-                        && fits
                         && let Ok(pid) = element.pid()
                     {
                         // The element we kept went stale (a window reported destroyed while
-                        // ordered out): the app's own list may have it again. Once (L5).
+                        // ordered out): the app's own list may have it again. Once (L5). The
+                        // lookup and its try have a budget of their own (the review of 6X2, 1:
+                        // the busy app's budget never fitted them, so at quit it never ran).
                         u.refreshed = true;
-                        if let Ok(fresh) = safety::ax_window(pid, id) {
-                            result = set(&fresh);
-                            u.entry.element = fresh;
+                        let end = Instant::now() + leftovers::REFRESH_BUDGET;
+                        match safety::ax_window(pid, id) {
+                            // At quit, the try only when it still fits after the lookup.
+                            Ok(fresh) if !force || leftovers::leftover_fits(end.saturating_duration_since(Instant::now()), true) => {
+                                result = set(&fresh, end);
+                                u.entry.element = fresh;
+                            }
+                            Ok(fresh) => {
+                                tracing::warn!(id, "a stale element's lookup ran long: no time left to try the window afresh");
+                                u.entry.element = fresh;
+                            }
+                            Err(why) => tracing::debug!(id, "a stale element's lookup: {why}"),
                         }
                     }
                     match result {

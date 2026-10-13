@@ -119,12 +119,13 @@ mod app {
     /// How long Quit waits for the WM thread to put `windows` windows back: the action in
     /// flight when Quit came (a batch stops between actions), then a frame per window, each
     /// up to three AX calls (size, position, size) that a slow or hung app may let run to
-    /// the 0.25 s messaging timeout, tried again quickly while the app is busy (at most
-    /// [`leftovers::RESTORE_RETRY`]'s budget). At least 4 s, at most 30 s; plus the
-    /// leftovers check after the unpark (at most [`leftovers::LEFTOVERS_MAX`]).
+    /// the 0.25 s messaging timeout, tried again quickly while the app is busy, or a stale
+    /// element looked up afresh (at most [`leftovers::window_restore_max`]). At least 4 s, at
+    /// most 30 s; plus the leftovers check after the unpark (at most
+    /// [`leftovers::LEFTOVERS_MAX`]).
     pub(crate) fn shutdown_timeout(windows: usize) -> Duration {
         let one_try = 3.0 * f64::from(wm_thread::AX_TIMEOUT_SECONDS);
-        let per_window = one_try.max(leftovers::RESTORE_RETRY.budget.as_secs_f64()) + 0.05;
+        let per_window = one_try.max(leftovers::window_restore_max().as_secs_f64()) + 0.05;
         let secs = 2.0 + per_window * windows as f64;
         Duration::from_secs_f64(secs.clamp(4.0, 30.0)) + leftovers::LEFTOVERS_MAX
     }

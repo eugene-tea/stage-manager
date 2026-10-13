@@ -44,6 +44,21 @@ pub const AX_CALL_MAX: Duration = Duration::from_millis(250);
 /// The longest one restore try may take: size, position, size, each to the timeout.
 pub const TRY_MAX: Duration = Duration::from_millis(750);
 
+/// A stale element's once-only fresh lookup (the app's window list, reaching the window in
+/// it) and the try through what it finds, budgeted apart from the window's
+/// [`RESTORE_RETRY`] (the review of 6X2, 1): that budget is for a busy app, and a stale
+/// element fails at once, without the app. Its own budget must fit the lookup and a try
+/// ([`leftover_fits`]), or the lookup at quit never runs.
+pub const REFRESH_BUDGET: Duration = AX_CALL_MAX.saturating_mul(2).saturating_add(TRY_MAX);
+
+/// The most one window's restore may take in an unpark (quit, stand-down): a busy app's
+/// quick retries ([`RESTORE_RETRY`]), or a stale element's failed try (one call) and its
+/// fresh lookup ([`REFRESH_BUDGET`]), whichever is longer. What quit's timeout allows a
+/// window.
+pub fn window_restore_max() -> Duration {
+    TRY_MAX.max(RESTORE_RETRY.budget).max(AX_CALL_MAX + REFRESH_BUDGET)
+}
+
 /// The most the registry's unpark spends trying busy apps again (all its windows together,
 /// [`RESTORE_RETRY`] each): once spent, each window left gets its one try, no retry.
 pub const REGISTRY_RETRY_BUDGET: Duration = Duration::from_secs(2);
@@ -287,6 +302,18 @@ mod tests {
         assert!(leftover_fits(TRY_MAX + AX_CALL_MAX * 2, false));
         assert!(!leftover_fits(TRY_MAX - Duration::from_millis(1), true));
         assert!(!leftover_fits(Duration::ZERO, true));
+    }
+
+    /// The review of 6X2, 1: the quit's fresh lookup for a stale element has a budget of its
+    /// own that fits the lookup and its try (the window's busy-app budget, 1.2 s, never did:
+    /// the gate wanted 1.25 s), and quit's timeout allows a window that much.
+    #[test]
+    fn a_stale_elements_lookup_fits_its_own_budget() {
+        assert!(leftover_fits(REFRESH_BUDGET, false));
+        assert!(!leftover_fits(REFRESH_BUDGET - Duration::from_millis(1), false), "no slack hidden in it");
+        assert!(window_restore_max() >= RESTORE_RETRY.budget);
+        assert!(window_restore_max() >= AX_CALL_MAX + REFRESH_BUDGET);
+        assert!(window_restore_max() >= TRY_MAX);
     }
 
     // ----- where a leftover goes ---------------------------------------------------------

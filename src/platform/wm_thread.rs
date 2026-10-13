@@ -204,8 +204,10 @@ struct WmState {
     /// ([`Rescan`]).
     rescan: Rescan,
     /// A stand-down's leftovers check left windows in the park zone: they are looked for
-    /// again whenever a Desktop shows, as the held ones are.
-    stand_down_leftovers: bool,
+    /// again whenever a Desktop shows, as the held ones are, with what that check knew of
+    /// them ([`safety::Ours`], each window left judged ours): by then `state.json` is dropped
+    /// and the controller fresh (the review of 6X2, 2). `None`: nothing left.
+    stand_down_leftovers: Option<safety::Ours>,
     /// When the scan after a main display change is due.
     display_sweep: Option<Instant>,
 }
@@ -409,19 +411,21 @@ impl WmState {
                     // The window server's word, as at quit (the review of 6X): every allowed
                     // app's window still in a park zone comes back now, known to this run or
                     // not; one that cannot is looked for again whenever a Desktop shows.
-                    let back = safety::leftovers_back("stand-down", self.controller.model_window_ids());
+                    let left = safety::leftovers_back_knowing("stand-down", safety::Ours::now(self.controller.model_window_ids()));
+                    let back = left.is_none();
                     let unrestored = self.controller.account_unrestored(&self.observer);
                     if failed > 0 || !back {
                         tracing::info!(failed, unrestored, back, "restores that failed at the stand-down, after the leftovers check");
                     }
-                    self.stand_down_leftovers = !back;
+                    self.stand_down_leftovers = left;
                 }
                 Task::HoldStranded => {
                     let held = safety::hold_remaining();
-                    if held > 0 || self.stand_down_leftovers {
-                        tracing::warn!(held, leftovers = self.stand_down_leftovers, "standing down: windows of another Space come back when their Space shows");
+                    let leftovers = self.stand_down_leftovers.is_some();
+                    if held > 0 || leftovers {
+                        tracing::warn!(held, leftovers, "standing down: windows of another Space come back when their Space shows");
                     }
-                    self.stand_down.released(held == 0 && !self.stand_down_leftovers);
+                    self.stand_down.released(held == 0 && !leftovers);
                 }
                 Task::DropSavedStages => drop_saved_stages(),
                 Task::StopObserving => {
@@ -458,13 +462,18 @@ impl WmState {
     }
 
     /// Tries the held windows again, when there are any, and the stand-down's leftovers
-    /// (windows still in the park zone that no registry held).
+    /// (windows still in the park zone that no registry held), knowing what the stand-down's
+    /// check knew of them ([`retry_leftovers`]).
     fn retry_held(&mut self) {
         if self.stand_down.stranded() {
             let mut all_back = safety::retry_held();
-            if self.stand_down_leftovers {
-                self.stand_down_leftovers = !safety::leftovers_back("stand-down, a Desktop shows", Default::default());
-                all_back &= !self.stand_down_leftovers;
+            if let Some(kept) = self.stand_down_leftovers.take() {
+                self.stand_down_leftovers = retry_leftovers(
+                    kept,
+                    || safety::Ours::now(Default::default()),
+                    |ours| safety::leftovers_back_knowing("stand-down, a Desktop shows", ours),
+                );
+                all_back &= self.stand_down_leftovers.is_none();
             }
             self.stand_down.released(all_back);
         }
@@ -536,6 +545,15 @@ impl WmState {
 }
 
 /// Removes `state.json`: its stages are stale once Apple's Stage Manager arranges windows.
+/// One more try at a stand-down's leftovers: `check` (the leftovers check) with what the
+/// earlier checks knew (`kept`: the model's windows, `state.json`, the windows left judged
+/// ours) and what is known `now`; what to keep for the try after, `None` once every window
+/// is back. A window we parked, left as a sliver by a busy app, stays ours on every retry,
+/// though the stand-down dropped `state.json` and the controller (the review of 6X2, 2).
+fn retry_leftovers(kept: safety::Ours, now: impl FnOnce() -> safety::Ours, check: impl FnOnce(safety::Ours) -> Option<safety::Ours>) -> Option<safety::Ours> {
+    check(kept.merged(now()))
+}
+
 fn drop_saved_stages() {
     let state = super::paths::state_file();
     match std::fs::remove_file(&state) {
@@ -566,7 +584,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         displays: None,
         settings: None,
         rescan: Rescan::default(),
-        stand_down_leftovers: false,
+        stand_down_leftovers: None,
         display_sweep: None,
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -613,5 +631,60 @@ mod tests {
     #[test]
     fn the_leftovers_know_the_messaging_timeout() {
         assert_eq!(Duration::from_secs_f32(AX_TIMEOUT_SECONDS), leftovers::AX_CALL_MAX);
+    }
+
+    /// The review of 6X2, 2: a managed window a busy app left as a sliver at the stand-down
+    /// stays ours on every retry, though `state.json` and the model are gone by then, until
+    /// a check finds it back.
+    #[test]
+    fn a_stand_downs_retries_remember_whose_windows_are_left() {
+        use crate::engine::geometry::Rect;
+        use crate::engine::park::Corner;
+        use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow, StateFile};
+        use crate::engine::recovery::{Known, ScanDisplays, is_stranded};
+        use std::collections::BTreeSet;
+
+        let displays = ScanDisplays::new(Rect::new(0.0, 0.0, 1440.0, 900.0), Rect::new(0.0, 25.0, 1440.0, 875.0), vec![], [Corner::BottomRight]);
+        let sliver = Rect::new(1439.0, 820.0, 600.0, 392.0);
+        let (id, bundle) = (4242, Some("com.example.mail"));
+        let saved = SavedWindow {
+            bundle_id: "com.example.mail".into(),
+            title: "Inbox".into(),
+            frame: Rect::new(100.0, 100.0, 600.0, 392.0),
+            z: 0,
+            key: false,
+            pinned: false,
+            role: SavedRole::Standard,
+            original: None,
+        };
+        let state = StateFile::single(SavedSpace { id: 1, current: true, stages: vec![SavedStage { name: None, windows: vec![saved] }], active_index: Some(0), strip_slots: vec![] });
+
+        // After the stand-down (state.json dropped, a fresh controller) nothing knows it: a
+        // sliver of an unknown window is never brought back.
+        let after = safety::Ours::default();
+        assert_eq!(after.known(id, bundle), Known::Unknown);
+        assert!(!is_stranded(sliver, &displays, after.known(id, bundle)));
+
+        // The first check knew it (the model's window, its app in state.json) and left it.
+        let first = safety::Ours::from_parts(BTreeSet::new(), [id].into(), Some(state.clone()));
+        assert_eq!(first.known(id, bundle), Known::Managed);
+        let mut kept = Some(first.kept_for_retry(&[id]));
+
+        // Two retries while the app is busy, then it answers.
+        let mut seen = Vec::new();
+        for round in 0..3 {
+            let k = kept.take().expect("the windows left are kept until each is back");
+            kept = retry_leftovers(k, safety::Ours::default, |ours| {
+                seen.push((ours.known(id, bundle), is_stranded(sliver, &displays, ours.known(id, bundle)), ours.state.clone()));
+                (round < 2).then(|| ours.kept_for_retry(&[id]))
+            });
+        }
+        assert!(kept.is_none(), "back on the third retry: nothing more to keep");
+        assert_eq!(seen.len(), 3);
+        for (known, stranded, st) in seen {
+            assert_eq!(known, Known::Registered);
+            assert!(stranded, "the sliver still counts as parked");
+            assert_eq!(st.as_ref(), Some(&state), "the frames it goes back to");
+        }
     }
 }

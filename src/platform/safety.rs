@@ -468,25 +468,56 @@ fn stranded_ids(registered: &BTreeSet<u32>) -> Vec<u32> {
 
 /// Whose windows the safety paths know as ours (the review of 6X, L3): the registry's, the
 /// windows the model manages, and the apps with a window in `state.json`. The park test
-/// counts a sliver only for these ([`Known`]).
+/// counts a sliver only for these ([`Known`]). A leftovers check that could not bring every
+/// window back hands what it knew to the next try ([`Self::kept_for_retry`]): a stand-down
+/// drops `state.json` and the model before it looks again (the review of 6X2, 2).
 #[derive(Debug, Clone, Default)]
 pub struct Ours {
-    /// Windows we registered (parked, fitted).
+    /// Windows we registered (parked, fitted), and windows an earlier check judged ours and
+    /// could not bring back.
     pub registered: BTreeSet<u32>,
     /// Windows the model manages.
     pub managed: BTreeSet<u32>,
     /// Bundle ids with a window in `state.json`.
     pub bundles: BTreeSet<String>,
+    /// `state.json` as it was read: the frames a leftover goes back to.
+    pub state: Option<StateFile>,
 }
 
 impl Ours {
-    /// The registry now, `managed` (the model's windows, when the caller has them) and the
-    /// bundles `state.json` names.
+    /// The registry now, `managed` (the model's windows, when the caller has them) and
+    /// `state.json` (its bundles and frames).
     pub fn now(managed: BTreeSet<u32>) -> Self {
-        let bundles = read_state("safety")
+        Self::from_parts(registry_ids(), managed, read_state("safety"))
+    }
+
+    /// What is known from the registry's ids, the model's windows and `state.json`.
+    pub fn from_parts(registered: BTreeSet<u32>, managed: BTreeSet<u32>, state: Option<StateFile>) -> Self {
+        let bundles = state
+            .as_ref()
             .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).map(|w| w.bundle_id.clone()).collect())
             .unwrap_or_default();
-        Self { registered: registry_ids(), managed, bundles }
+        Self { registered, managed, bundles, state }
+    }
+
+    /// What a check that left `left` in the park zone hands its next try: everything it knew,
+    /// and each window left judged registered (it was ours, in the zone; a sliver of it still
+    /// counts, whatever the registry, the model and `state.json` say by then).
+    pub fn kept_for_retry(mut self, left: &[u32]) -> Self {
+        self.registered.extend(left.iter().copied());
+        self
+    }
+
+    /// `self` (what an earlier check knew) with what is known `now`: every window either
+    /// knows; `self`'s `state.json` first (read before a stand-down dropped it), else `now`'s.
+    pub fn merged(mut self, now: Ours) -> Self {
+        self.registered.extend(now.registered);
+        self.managed.extend(now.managed);
+        self.bundles.extend(now.bundles);
+        if self.state.is_none() {
+            self.state = now.state;
+        }
+        self
     }
 
     /// What is known of window `id` of an app with `bundle`.
@@ -819,16 +850,23 @@ pub fn set_frame_retrying(element: &AxElement, id: u32, frame: Rect, left: Durat
 /// `managed`: the model's windows, when the caller has them ([`Ours`]). Never takes more
 /// than [`leftovers::LEFTOVERS_MAX`]: the second read gets what is left.
 pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
+    leftovers_back_knowing(reason, Ours::now(managed)).is_none()
+}
+
+/// [`leftovers_back`] with what is known of the windows given (`ours`: an earlier check's,
+/// [`Ours::merged`] with now). `None` when no window is left in the park zone; else what this
+/// check knew, the windows left judged ours ([`Ours::kept_for_retry`]), for the next try:
+/// a stand-down's retries pass it until each window is back (the review of 6X2, 2).
+pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
     let start = Instant::now();
     let end = start + LEFTOVERS_MAX;
-    let ours = Ours::now(managed);
     let read = |max: Duration| {
         let began = Instant::now();
         leftovers::settle(|| stranded_allowed(&ours), max, UNPARK_POLL, || began.elapsed(), std::thread::sleep)
     };
     let left = read(UNPARK_SETTLE);
     if left.is_empty() {
-        return true;
+        return None;
     }
     let seen: Vec<(u32, bool)> = left.iter().map(|w| (w.id, w.onscreen)).collect();
     tracing::warn!(reason, windows = ?seen, "windows still parked after unparking (id, on screen); bringing each back");
@@ -839,11 +877,11 @@ pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
     let took_ms = start.elapsed().as_millis() as u64;
     if after.is_empty() {
         tracing::info!(reason, back = left.len(), took_ms, "every window still parked after unparking is back");
-        return true;
+        return None;
     }
     let ids: Vec<u32> = after.iter().map(|w| w.id).collect();
     tracing::error!(reason, windows = ?ids, unreached = ?unreached, took_ms, "windows still parked: the guardian brings each back once its Desktop shows or its app answers");
-    false
+    Some(ours.kept_for_retry(&ids))
 }
 
 /// Brings back every window in `left` (listed in the park zone after an unpark) before
@@ -854,7 +892,7 @@ pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
 /// Desktop's, an app that does not answer, no time left).
 pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> Vec<u32> {
     let displays = scan_displays();
-    let state = read_state("quit leftovers");
+    let state = ours.state.as_ref();
     let mut back = Vec::new();
     let mut unreached = Vec::new();
     for w in left {
@@ -880,9 +918,25 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         // The title only matters for a state.json match (no registry frame).
         let title = if entry.is_none() { element.title().unwrap_or_default() } else { String::new() };
         let live = LiveWindow { bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
-        let (frame, source) = leftovers::leftover_frame(entry.as_ref().map(|e| e.restore), &live, state.as_ref(), &displays);
+        let (frame, source) = leftovers::leftover_frame(entry.as_ref().map(|e| e.restore), &live, state, &displays);
         let known = ours.known(w.id, bundle.as_deref());
-        match set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now())) {
+        let mut result = set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now()));
+        // The registry's element went stale (the window was reported destroyed while ordered
+        // out, its app relaunched it): the app's own list may have it, when that and a try
+        // still fit (the review of 6X2, 1).
+        if entry.is_some()
+            && result == Err(AxError::INVALID_ELEMENT)
+            && leftovers::leftover_fits(deadline.saturating_duration_since(Instant::now()), false)
+        {
+            match ax_window(w.pid, w.id) {
+                Ok(fresh) => {
+                    tracing::info!(reason, id = w.id, pid = w.pid, "a window still parked: the registry's element is stale, trying the app's own");
+                    result = set_frame_retrying(&fresh, w.id, frame, deadline.saturating_duration_since(Instant::now()));
+                }
+                Err(why) => tracing::debug!(reason, id = w.id, "a stale registry element's lookup: {why}"),
+            }
+        }
+        match result {
             Ok(()) => {
                 tracing::warn!(reason, id = w.id, pid = w.pid, bundle, ?known, from = %w.bounds, to = %frame, source = source.name(), "a window still parked after unparking is brought back");
                 back.push(w.id);
