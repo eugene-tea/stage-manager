@@ -124,8 +124,9 @@ pub const ARRIVAL_CHECK_FOR: Duration = Duration::from_millis(400);
 /// this many ticks more…
 pub const TAIL_OVER_TICKS: u32 = 10;
 
-/// …and at most this long; then what stayed unsent is logged at warn (R15 1).
-pub const TAIL_OVER_FOR: Duration = Duration::from_millis(300);
+/// …and at most this long (room for every counted tick of a slow app: the round's cap plus a
+/// tick each); then what stayed unsent is logged at warn (R15 1).
+pub const TAIL_OVER_FOR: Duration = Duration::from_millis(1300);
 
 /// One move of an arrangement made on a Desktop not shown, as the window server should show
 /// it: parked (in the park zone), or at a frame; with how often it was sent again.
@@ -300,7 +301,9 @@ fn send_round(due: &[usize], mut send: impl FnMut(usize) -> bool) -> Vec<usize> 
 /// True when the arrival's check, its time up, may not go on: past its `over_ticks`-th tick
 /// since (the first counted 1, then [`TAIL_OVER_TICKS`] more) or [`TAIL_OVER_FOR`] past it.
 fn tail_past_ceiling(over_ticks: u32, past: Duration) -> bool {
-    over_ticks > TAIL_OVER_TICKS + 1 || past >= TAIL_OVER_FOR
+    // The time-up round itself always goes; a slow app's rounds take their cap plus a tick
+    // each, so the time ceiling leaves room for every counted tick (R15 review).
+    over_ticks > 1 && (over_ticks > TAIL_OVER_TICKS + 1 || past >= TAIL_OVER_FOR)
 }
 
 /// How a tick of the arrival's check ends ([`tail_round`]).
@@ -2223,7 +2226,7 @@ mod tests {
         let mut ticks = Vec::new();
         for over_ticks in 1u32.. {
             let TailStep::Send(due) = tail_step(moves, seen, true) else { panic!("the time is up: no wait") };
-            let ceiling = tail_past_ceiling(over_ticks, VERIFY_EVERY * (over_ticks - 1));
+            let ceiling = tail_past_ceiling(over_ticks, (RESEND_ROUND_CAP + VERIFY_EVERY) * (over_ticks - 1));
             let mut sent = Vec::new();
             let out = tail_round(moves, &due, seen, true, ceiling, |e| {
                 let r = send(e, sent.len());
@@ -2291,6 +2294,11 @@ mod tests {
         // its time, then ends, the move unsent (logged at warn).
         assert!(!tail_past_ceiling(1, Duration::ZERO) && !tail_past_ceiling(11, Duration::from_millis(200)));
         assert!(tail_past_ceiling(12, Duration::ZERO) && tail_past_ceiling(2, TAIL_OVER_FOR));
+        assert!(!tail_past_ceiling(1, Duration::from_secs(5)), "the time-up round always goes");
+        assert!(
+            !tail_past_ceiling(TAIL_OVER_TICKS + 1, (RESEND_ROUND_CAP + VERIFY_EVERY) * TAIL_OVER_TICKS),
+            "a slow app's rounds (cap plus a tick each) get every counted tick"
+        );
         let r = Rect::new(80.0, 78.0, 520.0, 392.0);
         let mut moves = vec![Expect::new(1, r, None, false), Expect { nudged_only: true, final_sent: true, ..Expect::new(2, r, None, false) }];
         let seen = vec![Some(Seen::Missing); 2];
