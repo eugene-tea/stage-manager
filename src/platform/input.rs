@@ -86,11 +86,18 @@ impl Drop for InputMonitor {
     }
 }
 
-/// Calls `sink` (main thread) for every left mouse down/up and key down in another app.
-pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Option<InputMonitor> {
+/// Calls `sink` (main thread) for every left mouse down/up and key down in another app, and
+/// `moved` with the pointer (global, top-left) for every mouse move over another app's
+/// window or the desktop.
+pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
+        if event.r#type() == NSEventType::MouseMoved {
+            let at = NSEvent::mouseLocation();
+            moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
+            return;
+        }
         let kind = match event.r#type() {
             NSEventType::LeftMouseDown => InputKind::MouseDown,
             NSEventType::LeftMouseUp => InputKind::MouseUp,
@@ -113,7 +120,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
             key,
         });
     });
-    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::KeyDown;
+    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::KeyDown | NSEventMask::MouseMoved;
     let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)?;
     Some(InputMonitor { token })
 }

@@ -650,7 +650,7 @@ mod app {
             }
             let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
             wm_input.send(WmCommand::Input(event, drop));
-        });
+        }, strip::pointer_moved);
         if input_monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
