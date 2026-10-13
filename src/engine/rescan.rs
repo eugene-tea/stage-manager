@@ -18,9 +18,12 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Apps that did not answer a scan are scanned again for this long (counted from the scan
-/// they first missed) ...
+/// Apps that did not answer a scan are scanned again for this long after their last miss
+/// (an app busy 10-40 s after a display change, 10-13: Telegram) ...
 pub const RESCAN_FOR: Duration = Duration::from_secs(30);
+
+/// ... but never longer than this from their first miss (an app that never answers is let go).
+pub const RESCAN_MAX: Duration = Duration::from_secs(120);
 
 /// ... and at least this many times, however long a sweep kept them waiting (the review of
 /// 6X2, 3: a long sweep goes first, and the apps that did not answer must not run out of
@@ -60,12 +63,14 @@ struct Retrying {
     q: Queued,
     until: Instant,
     tries: u32,
+    /// Its first miss.
+    since: Instant,
 }
 
 impl Retrying {
-    /// Its time is out and it had its tries.
+    /// Its time is out and it had its tries, or [`RESCAN_MAX`] has passed since its first miss.
     fn expired(&self, now: Instant) -> bool {
-        now >= self.until && self.tries >= RESCAN_TRIES
+        (now >= self.until && self.tries >= RESCAN_TRIES) || now >= self.since + RESCAN_MAX
     }
 }
 
@@ -102,7 +107,7 @@ impl Rescan {
                     r.q.why = stronger(r.q.why, why);
                     r.until = r.until.max(now + RESCAN_FOR);
                 }
-                None => self.retry.push_back(Retrying { q: Queued { pid, why }, until: now + RESCAN_FOR, tries: 0 }),
+                None => self.retry.push_back(Retrying { q: Queued { pid, why }, until: now + RESCAN_FOR, tries: 0, since: now }),
             }
         }
         if any {
@@ -169,6 +174,10 @@ impl Rescan {
         let missed = |pid: i32| unanswered.iter().any(|q| q.pid == pid);
         let in_flight = std::mem::take(&mut self.in_flight);
         self.retry.retain(|r| !in_flight.contains(&r.q.pid) || missed(r.q.pid));
+        // A retried app that missed again gets its time from this miss (the review of 6X3, 3).
+        for r in self.retry.iter_mut().filter(|r| in_flight.contains(&r.q.pid) && missed(r.q.pid)) {
+            r.until = r.until.max(now + RESCAN_FOR);
+        }
         for q in unanswered.iter().filter(|q| !in_flight.contains(&q.pid)) {
             self.unanswered([q.pid], q.why, now);
         }
@@ -185,6 +194,45 @@ fn stronger(a: Why, b: Why) -> Why {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_app_busy_for_forty_seconds_is_still_scanned_and_one_that_never_answers_goes() {
+        let t0 = Instant::now();
+        let mut r = Rescan::default();
+        let q = Queued { pid: 7, why: Why::Display };
+        r.unanswered([7], Why::Display, t0);
+        // Missing every 3 s until 40 s: still queued at 42 s.
+        let mut now = t0;
+        let mut scanned_after_40 = false;
+        while now < t0 + Duration::from_secs(45) {
+            now += RESCAN_EVERY;
+            let (pass, _) = r.due(now, |_| false);
+            if pass.iter().any(|p| p.pid == 7) {
+                if now >= t0 + Duration::from_secs(40) {
+                    scanned_after_40 = true;
+                    r.done(&[], now);
+                    break;
+                }
+                r.done(&[q], now);
+            }
+        }
+        assert!(scanned_after_40, "scanned once it answers at 40 s");
+        // Never answering: let go by RESCAN_MAX.
+        let mut r = Rescan::default();
+        r.unanswered([8], Why::Display, t0);
+        let q8 = Queued { pid: 8, why: Why::Display };
+        let mut now = t0;
+        let mut last = t0;
+        while now < t0 + RESCAN_MAX + Duration::from_secs(30) {
+            now += RESCAN_EVERY;
+            let (pass, _) = r.due(now, |_| false);
+            if pass.iter().any(|p| p.pid == 8) {
+                last = now;
+                r.done(&[q8], now);
+            }
+        }
+        assert!(last <= t0 + RESCAN_MAX, "let go by RESCAN_MAX: last try at {:?}", last - t0);
+    }
+
     fn pids(q: &[Queued]) -> Vec<i32> {
         q.iter().map(|q| q.pid).collect()
     }
@@ -193,7 +241,7 @@ mod tests {
 
     /// The launch's scan: apps that did not answer are tried again two at a time every 3 s,
     /// in turn; an app the observer reads by then needs no scan; one that never answers is
-    /// let go 30 s after its first miss, once tried three times (not retried for ever).
+    /// let go [`RESCAN_MAX`] after its first miss (each miss gives it 30 s more until then).
     #[test]
     fn apps_that_did_not_answer_the_launch_are_tried_again_two_a_pass() {
         let t0 = Instant::now();
@@ -210,12 +258,7 @@ mod tests {
         let (pass, _) = r.due(t0 + RESCAN_EVERY * 3, NONE);
         assert_eq!(pids(&pass), vec![11], "its third try");
         r.done(&pass, t0 + RESCAN_EVERY * 3);
-        let (pass, expired) = r.due(t0 + RESCAN_FOR - Duration::from_millis(1), NONE);
-        assert!(expired.is_empty(), "its 30 s are not out");
-        r.done(&pass, t0 + RESCAN_FOR - Duration::from_millis(1));
-        let (pass, expired) = r.due(t0 + RESCAN_FOR + RESCAN_EVERY, NONE);
-        assert!(pass.is_empty());
-        assert_eq!(pids(&expired), vec![11], "30 s from its first miss, tried more than three times");
+        assert_eq!(expire_at(&mut r, 11, t0 + RESCAN_EVERY * 4), t0 + RESCAN_MAX, "missing on: let go at RESCAN_MAX");
         assert!(r.is_empty());
     }
 
@@ -249,8 +292,23 @@ mod tests {
             assert_eq!((pids(&pass), expired), (vec![4], vec![]), "try {k}");
             r.done(&pass, t);
         }
-        let (_, expired) = r.due(t0 + RESCAN_FOR, NONE);
-        assert_eq!(pids(&expired), vec![4], "tried for 30 s after its first miss, three times");
+        assert_eq!(expire_at(&mut r, 4, t1 + RESCAN_EVERY * (RESCAN_TRIES + 1)), t0 + RESCAN_MAX, "missing on: let go at RESCAN_MAX after its first miss");
+    }
+
+    /// Runs passes every [`RESCAN_EVERY`] from `from`, `pid` missing each, until it is let go;
+    /// returns the pass that let it go.
+    fn expire_at(r: &mut Rescan, pid: i32, from: Instant) -> Instant {
+        let mut t = from;
+        loop {
+            let (pass, expired) = r.due(t, NONE);
+            if expired.iter().any(|q| q.pid == pid) {
+                return t;
+            }
+            let missed: Vec<Queued> = pass.iter().copied().filter(|q| q.pid == pid).collect();
+            r.done(&missed, t);
+            t += RESCAN_EVERY;
+            assert!(t < from + RESCAN_MAX * 2, "let go at last");
+        }
     }
 
     #[test]
@@ -318,10 +376,11 @@ mod tests {
                 r.done(&missed, t);
             }
             t += Duration::from_millis(250);
-            assert!(t < t0 + Duration::from_secs(120), "the queue empties");
+            assert!(t < t0 + RESCAN_MAX + Duration::from_secs(30), "the queue empties");
         }
         let let_go = let_go.expect("never answering, it is let go");
         assert!(let_go > t0 + RESCAN_FOR, "the sweep outlasted its 30 s");
-        assert_eq!(tries, RESCAN_TRIES, "tried three times before it was let go, none of them during the sweep");
+        assert!(let_go <= t0 + RESCAN_MAX + RESCAN_EVERY, "let go at RESCAN_MAX");
+        assert!(tries >= RESCAN_TRIES, "tried at least three times before it was let go, none of them during the sweep");
     }
 }

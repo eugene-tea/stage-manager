@@ -377,7 +377,14 @@ impl WmState {
                 // now, known to this run or not (6X); one that cannot (another Space's, an app
                 // that does not answer) leaves the exit unclean, so the guardian watches until
                 // it is back.
-                let back = safety::leftovers_back("quit", self.controller.model_window_ids());
+                // A quit while stood down still knows whose windows the stand-down left
+                // (its model and state.json are gone by then; the review of 6X3, 2).
+                let now = safety::Ours::now(self.controller.model_window_ids());
+                let ours = match self.stand_down_leftovers.take() {
+                    Some(kept) => kept.merged(now),
+                    None => now,
+                };
+                let back = safety::leftovers_back_knowing("quit", ours).is_none();
                 // A restore that failed but went through late is seen back now.
                 let unrestored = self.controller.account_unrestored(&self.observer);
                 if failed > 0 {
