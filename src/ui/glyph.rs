@@ -40,8 +40,9 @@ pub struct Style {
 }
 
 impl Style {
-    /// The shipped look: window corners as tight as `macwindow`'s, cards with a hint of depth.
-    pub const DEFAULT: Style = Style { corner_radius: 2.0, far_scale: 0.94 };
+    /// The shipped look: window corners as tight as `macwindow`'s; the cards turned like the
+    /// strip's, a quarter softer than the first draft's 0.8.
+    pub const DEFAULT: Style = Style { corner_radius: 2.0, far_scale: 0.85 };
 
     /// The cards' corner radius: in the same proportion to their height as the window's.
     pub fn card_radius(&self) -> f64 {
@@ -232,11 +233,12 @@ mod tests {
     }
 
     #[test]
-    fn cards_have_only_a_hint_of_depth_and_corners_in_proportion() {
+    fn cards_turn_like_the_strip_softly_with_corners_in_proportion() {
         let s = Style::DEFAULT;
-        assert!(s.far_scale >= 0.9, "a hint of depth, not trapezoids");
+        assert!(s.far_scale > 0.8 && s.far_scale < 0.9, "the strip's turn, a little softer than 0.8, not flat");
         let [_, tr, br, _] = Shape::card_corners(0.0, 1.5, 4.5, 3.0, s.far_scale);
-        assert!(tr.1 - 1.5 < 0.5 && (br.1 - tr.1 - 3.0 * s.far_scale).abs() < 1e-9);
+        assert!(tr.1 > 1.5, "above the middle, the far edge drops toward it");
+        assert!((br.1 - tr.1 - 3.0 * s.far_scale).abs() < 1e-9, "the far edge is shorter");
         let flat = Shape::card_corners(0.0, 1.5, 4.5, 3.0, 1.0);
         assert_eq!(flat[1].1, 1.5, "far_scale 1 is flat");
         assert!((s.card_radius() / CARD_HEIGHT - s.corner_radius / FRAME.3).abs() < 1e-9);
