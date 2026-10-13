@@ -491,7 +491,23 @@ impl Strip {
     }
 
     /// Ends the running transition now (it `landed`, or a new one starts).
-    pub(super) fn finish_transition(&mut self, landed: bool) {
+    /// Shows the cards the running transition holds hidden on the pane being left; the
+    /// transition runs on (its snapshots, its timers, the controller's unveil). The pane
+    /// taking over hides the same stages if it has them ([`Strip::layout_cards`]) and the
+    /// transition's end shows them there.
+    pub(super) fn release_held_cards(&mut self) {
+        let Some(r) = self.motion.running.as_ref() else { return };
+        objc2_quartz_core::CATransaction::begin();
+        objc2_quartz_core::CATransaction::setDisableActions(true);
+        for stage in &r.held {
+            if let Some(layers) = self.pane.cards.get(stage) {
+                layers.card.setOpacity(1.0);
+            }
+        }
+        objc2_quartz_core::CATransaction::commit();
+    }
+
+    fn finish_transition(&mut self, landed: bool) {
         let Some(r) = self.motion.running.take() else { return };
         for t in &r.timers {
             t.invalidate();

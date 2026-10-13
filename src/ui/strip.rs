@@ -1227,12 +1227,12 @@ impl Strip {
 
     /// The Desktop shown is being left: what the user was doing on its strip ends, its tab
     /// goes and its panel goes back below windows; its cards stay as they are, so it slides
-    /// back in with them when the Desktop shows again. A transition still landing on it ends
-    /// first: its held cards are this pane's, and ending later would show them on the pane
-    /// that takes over, leaving a gap here (seen 10-13: a switch on Desktop 1 cut by a Dock
-    /// click to Messages on Desktop 3 left Mail's slot empty).
+    /// back in with them when the Desktop shows again. Cards a transition still holds hidden
+    /// show again on it ([`Self::release_held_cards`]): the transition ends on the pane that
+    /// takes over, which would leave a gap here (seen 10-13: a switch on Desktop 1 cut by a
+    /// Dock click to an app on Desktop 3 left Mail's slot empty on Desktop 1).
     fn leave_pane(&mut self) {
-        self.finish_transition(false);
+        self.release_held_cards();
         self.pressed = None;
         self.squeezed = None;
         self.set_hover(None);

@@ -826,10 +826,15 @@ impl Controller {
     /// corner's zone of each display with a parked window (the main display's always) and
     /// which windows sit parked (with incoming windows still held in the corner behind a
     /// transition's snapshots).
-    fn publish_shield(&mut self) {
-        let on = self.store.config().windows.inert_slivers;
-        let dock = if on { self.dock_bar_now() } else { sliver::DockBar::default() };
+    ///
+    /// Off while Mission Control, App Exposé or Show Desktop shows: their windows stand where
+    /// the slivers are, and a press there is theirs. The Dock's bar comes from the cache
+    /// [`Self::refresh_dock_bar`] keeps (no Accessibility call here: this runs after every
+    /// batch).
+    fn publish_shield(&self) {
         let Some(m) = &self.model else { return };
+        let on = self.store.config().windows.inert_slivers && self.overview.showing().is_none();
+        let dock = if on { self.dock_bar.as_ref().map(|(_, b)| b.clone()).unwrap_or_default() } else { sliver::DockBar::default() };
         let mut parked: HashSet<u32> =
             if on { m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect() } else { HashSet::new() };
         if on && let Some(p) = &self.pending {
@@ -855,23 +860,26 @@ impl Controller {
         super::sliver_tap::publish(sliver::Shield { on, zones, parked, dock });
     }
 
-    /// The Dock's pid and bar for the tap, read again (Accessibility, the Dock's bounded
-    /// timeout) when older than [`DOCK_BAR_FRESH`]: its size, side or display may change.
-    fn dock_bar_now(&mut self) -> sliver::DockBar {
-        let now = Instant::now();
-        if let Some((at, bar)) = &self.dock_bar
-            && now.duration_since(*at) < DOCK_BAR_FRESH
-        {
-            return bar.clone();
+    /// From the tick: reads the Dock's pid and bar again (Accessibility, the Dock's bounded
+    /// timeout) once the last read is [`DOCK_BAR_FRESH`] old, so its size, side, display or
+    /// auto-hide changing is caught while nothing else happens; the tap gets it when it
+    /// changed. Not while an overview shows (the shield is off then).
+    fn refresh_dock_bar(&mut self, now: Instant) {
+        if !self.store.config().windows.inert_slivers || self.overview.showing().is_some() {
+            return;
+        }
+        if self.dock_bar.as_ref().is_some_and(|(at, _)| now.duration_since(*at) < DOCK_BAR_FRESH) {
+            return;
         }
         let pid = super::dock::dock_pid();
         let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
         let bar = sliver::DockBar { pid, bars };
-        if self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar) {
-            tracing::debug!(pid = ?bar.pid, bars = ?bar.bars, "inert slivers: the Dock's bar");
+        let changed = self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar);
+        self.dock_bar = Some((Instant::now(), bar));
+        if changed {
+            tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");
+            self.publish_shield();
         }
-        self.dock_bar = Some((now, bar.clone()));
-        bar
     }
 
     /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
@@ -2006,9 +2014,11 @@ impl Controller {
             overview::Change::None => {}
             overview::Change::Began(kind) => {
                 tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
+                self.publish_shield();
             }
             overview::Change::Ended(kind) => {
                 tracing::info!("{} closed: Space inference resumes after a settle", kind.name());
+                self.publish_shield();
             }
             overview::Change::Stuck(kind) => {
                 tracing::warn!(
@@ -2016,6 +2026,7 @@ impl Controller {
                     kind.name(),
                     overview::OVERVIEW_STUCK.as_secs()
                 );
+                self.publish_shield();
             }
         }
         let frozen = self.overview.freezes(now);
@@ -2908,6 +2919,7 @@ impl Controller {
             }
         }
         if self.model.is_some() && !safety::quit_requested() {
+            self.refresh_dock_bar(now);
             self.expire_ahead(ob, now);
             if self.space_pending {
                 self.settle_space(ob);
