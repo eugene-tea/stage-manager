@@ -31,7 +31,12 @@ would manage the fixtures). Guided prompts say exactly what to do; answer with R
 Checks: each Desktop has its own stages and strip; the same app has stages on both; a card
 click on Desktop 2 switches stages and never changes the Desktop (the strip panel is on the
 Desktop shown); activating an app whose window waits parked on Desktop 1 (a Dock click,
-Cmd-Tab) shows Desktop 1 with that window's stage active; going back shows Desktop 1's stages; quit with a window parked on the other
+Cmd-Tab) shows Desktop 1 with that window's stage active, arranged by the time the app has
+sent it (hands-free, twice: through the app's Dock item, where the stage left must never
+show even during the slide, and by `open`; the window server sampled every 30 ms through
+the slide, no transition for the arrival, the timeline printed; before it, a probe says
+whether macOS carries out a move of a window on a Desktop not shown); going back shows
+Desktop 1's stages; quit with a window parked on the other
 Desktop brings it back (Accessibility reaching another Space); a relaunch rebuilds both
 Desktops' stages; kill -9 with a window parked on the other Desktop: the guardian waits,
 says what for, brings it back as soon as you go there (on screen outside the park zone for a
@@ -63,6 +68,12 @@ say, check, ctl, state = ts.say, ts.check, ts.ctl, ts.state
 ARGS = sys.argv[1:]
 AUTO = "--auto" in ARGS or os.environ.get("SM_AUTO") == "1"
 DRY = "--dry-run" in ARGS
+# What the probe of moves on a Desktop not shown found (said again at the end of the run).
+PROBE = []
+
+
+def app_env():
+    return {"STAGE_MANAGER_TEST": "1"}
 
 
 def ask(what):
@@ -562,8 +573,16 @@ planned steps (hands-free):
               user's shortcuts; a fixture frontmost first); while it shows the window server no longer
               lists the strip on screen; by eye: screenshot; ctl debug-expose escape; same Desktop, the
               strip back and drawn as before, a card click switches, each Desktop's pane on its own Desktop
-  activation  on Desktop 2: open Alpha (its only window parked in an inactive stage of Desktop 1);
-              checks: Desktop 1 comes up with Alpha 1's stage active, and it stays
+  probe       on Desktop 2: ctl debug-frame <Fixture 1 (Desktop 1, shown in its stage)> +40 pt only (no raise,
+              no focus), the window server's bounds read (all Desktops), then put back; says whether macOS
+              carries out moves on a Desktop not shown (round 6T); no Desktop 1 window may show meanwhile
+  activation  on Desktop 2, twice, the window server sampled every 30 ms for 3 s each: (1) Alpha's Dock item
+              (ctl debug-dock-click: the Dock's hit-test at the item, as a real click, then AXPress), Alpha 1 parked in an
+              inactive stage of Desktop 1: Desktop 1 comes up with Alpha 1's stage, the path is dock-click and
+              Fixture 1-2 (the stage left) never show once Desktop 1 is on screen, not even during the slide;
+              then ctl switch to Desktop 1's Fixture stage, ctl debug-space <toward>; (2) open Alpha (the
+              notice's fallback): Fixture 1-2 never show once the arrangement is sent; both: no transition for
+              the arrival, the timeline printed
   back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
               (Desktop 2's pane stays there)
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
@@ -681,7 +700,7 @@ def run():
     say("\n== Desktop 1: Fixture 1-2 and Alpha 1 ==")
     ts.start_fixture(2)
     ts.start_extra("a", 1)
-    s = ts.start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    s = ts.start_app(3, extra_env=app_env())
     if not check(s is not None, "app up with three windows"):
         return
     d1 = current_space()
@@ -804,7 +823,7 @@ def run():
         say("    (Accessibility could not move a window on the other Desktop; the guardian watches: go there to check)")
 
     say("\n== relaunch: both Desktops' stages come back ==")
-    s = ts.start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    s = ts.start_app(3, extra_env=app_env())
     check(s is not None and s["space"] == d1, "Desktop 1 recognized at launch with its saved id")
     check(spaces().get("saved_spaces_not_visited") == 1, "Desktop 2 waits for its first visit")
     go("d2", "Switch to Desktop 2")
@@ -853,7 +872,7 @@ def run():
     # Only the Desktop shown has its windows managed at launch (here Desktop 2's two); the
     # others' wait for a visit.
     shown_now = [w for w in ts.fixture_windows()[0] if w["onscreen"]]
-    s = ts.start_app(len(shown_now), extra_env={"STAGE_MANAGER_TEST": "1"})
+    s = ts.start_app(len(shown_now), extra_env=app_env())
     if not check(s is not None, f"the app is up with the {len(shown_now)} windows of the Desktop shown"):
         return
     desk = s["space"]
@@ -913,16 +932,70 @@ def activation_to_desktop_1(d1, d2):
     """Round 6R, the owner's bug: from Desktop 2, Alpha (whose only window waits parked in an
     inactive stage of Desktop 1) is activated, as a Dock click or Cmd-Tab does; macOS shows
     Desktop 1 with Alpha 1 focused, and Desktop 1 must come up with Alpha 1's stage active
-    (Apple's), not the stage that was active when it was left. Its focus may come before the
-    Space change notice, during it, or after it; the arrival asks AX and replays what was held."""
+    (Apple's), not the stage that was active when it was left.
+
+    Rounds 6T/6U, the owner's report of 10-13 (the Desktop slid in with its previous stage,
+    then switched): every notice comes at the end of the slide, so the app arranges the
+    arriving Desktop at the Dock click. Hands-free it runs twice, the window server sampled
+    every 30 ms from the activation for 3 s each time:
+
+    - **Dock click** (`ctl debug-dock-click`: Alpha's real Dock item, hit-tested at its
+      center and handed through the press and release path as a real click is, then pressed
+      with AXPress, which activates the app as a click does): the timeline's path is `dock-click` and Fixture 1-2 (the
+      stage Desktop 1 was left with) never show out of the park zone once Desktop 1 is on
+      screen, not even during the slide.
+    - **`open`** (no click: the 6T fallback at the notice): once the arrangement is sent,
+      Fixture 1-2 never show.
+
+    Both: no transition (ghosts, overlay) for the arrival; the timeline is printed. Between
+    the two, Desktop 1's Fixture stage is made active again and the test goes back to
+    Desktop 2. Guided: one arrival, by the person's own Dock click or Cmd-Tab."""
     s = state()
     alpha = next((w for w in s["windows"] if w["title"] == "Alpha 1"), None)
     if not check(alpha is not None and alpha["space"] == d1, f"Alpha 1 lives on Desktop 1 ({alpha and alpha['space']})"):
         return
-    check(alpha["parked"], "Alpha 1 waits parked in an inactive stage of Desktop 1")
-    if AUTO:
+    left = [w["id"] for w in s["windows"] if w["title"] in ("Fixture 1", "Fixture 2") and w["space"] == d1]
+    probe_moves_elsewhere(d1, left)
+    if not AUTO:
+        arrive_on_desktop_1(d1, alpha, left, None)
+        return
+    arrive_on_desktop_1(d1, alpha, left, "dock")
+    say("\n== again by `open` (no Dock click: the fallback at the Space change notice) ==")
+    x = state()
+    fixture_stage = stage_holding(x, "Fixture 1")
+    if x.get("space") == d1 and fixture_stage:
+        ctl("switch", fixture_stage)
+    x = ts.wait_state(lambda y: any(w["title"] == "Alpha 1" and w["parked"] for w in y["windows"]),
+                      "Alpha 1 parked again", timeout=4)
+    if not check(x is not None, "Desktop 1's Fixture stage is active again (Alpha 1 parked)"):
+        return
+    go("d2", "Switch to Desktop 2")
+    if not check(current_space() == d2, "back on Desktop 2 for the second arrival"):
+        return
+    arrive_on_desktop_1(d1, alpha, left, "open")
+
+
+def arrive_on_desktop_1(d1, alpha, left, how):
+    """One arrival on Desktop 1 for Alpha 1 from Desktop 2: `how` is "dock" (its Dock item,
+    `ctl debug-dock-click`), "open", or None (guided: the person clicks)."""
+    s = state()
+    check(any(w["id"] == alpha["id"] and w["parked"] for w in s["windows"]), "Alpha 1 waits parked in an inactive stage of Desktop 1")
+    check(left and not any(w["parked"] for w in s["windows"] if w["id"] in left),
+          "Desktop 1 was left with the Fixture stage active (Fixture 1-2 shown there)")
+    sampler, t_open = None, time.time()
+    if how:
         WATCH.pause()
-        say(f"    activating {os.path.basename(ts.EXTRA['a'][1])} (open, as a Dock click does)")
+        sampler = subprocess.Popen([ts.BIN, "probe-windows", "--every", "30", "--for", "3000", *ts.ALL_IDS],
+                                   env=ts.ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.1)  # the sampler's first look is before the activation
+        t_open = time.time()
+    if how == "dock":
+        say(f"    clicking {os.path.basename(ts.EXTRA['a'][1])}'s Dock item (ctl debug-dock-click, then AXPress)")
+        r = ctl("debug-dock-click", ts.EXTRA["a"][0])
+        check(r.get("ok"), f"the Dock item was pressed ({r.get('error') or 'ok'})")
+        check(r.get("predicted") == alpha["id"], f"the click predicted Alpha 1 ({r.get('predicted')})")
+    elif how == "open":
+        say(f"    activating {os.path.basename(ts.EXTRA['a'][1])} (open: no Dock click)")
         subprocess.run(["open", ts.EXTRA["a"][1]], capture_output=True)
     else:
         ask(f"Click {os.path.basename(ts.EXTRA['a'][1])[:-4]} in the Dock (or Cmd-Tab to it): macOS goes to Desktop 1")
@@ -935,7 +1008,7 @@ def activation_to_desktop_1(d1, d2):
         return x if w and not w["parked"] and x["active"] == stage_holding(x, "Alpha 1") else None
 
     s = ts.wait_until(arrived, 6, "Desktop 1 with Alpha 1's stage active")
-    if AUTO:
+    if how:
         WATCH.desk("d1" if current_space() == d1 else "d2")
     check(s is not None, "Desktop 1 came up with the activated window's stage active (Alpha 1 shown, not parked)"
           + ("" if s else f" (now: space {state().get('space')}, active {state().get('active')}, "
@@ -944,6 +1017,158 @@ def activation_to_desktop_1(d1, d2):
         time.sleep(1.5)  # past the once-a-second checks: it stays
         x = state()
         check(x["space"] == d1 and x["active"] == stage_holding(x, "Alpha 1"), "Alpha 1's stage stays active")
+    if sampler:
+        try:
+            out, _ = sampler.communicate(timeout=10)
+            samples = json.loads(out)["samples"]
+            display = json.loads(out)["display"]
+        except Exception as e:  # noqa: BLE001 - a sampler that failed is reported, not fatal
+            sampler.kill()
+            check(False, f"the window server was sampled during the slide ({e})")
+            return
+        judge_arrival(t_open, samples, display, left, alpha["id"], set(WATCH.ids["d1"]), set(WATCH.ids["d2"]), how)
+    else:
+        say("    (the slide is sampled in the hands-free run only)")
+
+
+LOG_TIME = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) ([+-]\d\d:\d\d) ")
+
+
+def log_events(since):
+    """(epoch seconds, line) for every line of today's app log written at or after `since`."""
+    import datetime
+    out = []
+    for line in ts.log_text().splitlines():
+        m = LOG_TIME.match(line)
+        if not m:
+            continue
+        t = datetime.datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S.%f %z").timestamp()
+        if t >= since - 0.05:
+            out.append((t, line))
+    return out
+
+
+def first_after(events, text, since):
+    return next((t for t, line in events if t >= since and text in line), None)
+
+
+def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how):
+    """The arrival as the window server showed it, against the app's log (see
+    `activation_to_desktop_1`); `how` "dock" is strict: arranged at the click, the stage left
+    never shows during the slide."""
+    events = log_events(t_open)
+    rel = lambda t: "-" if t is None else f"+{(t - t_open) * 1000:.0f} ms"  # noqa: E731
+    focus = first_after(events, "focus held until its Desktop is recognized", t_open)
+    notice = first_after(events, "Space change notified", t_open)
+    ahead = first_after(events, "arrival: the Desktop arranged ahead for the window", t_open)
+    recognized = first_after(events, "Space changed from=", t_open)
+    switched = first_after(events, "the focused window waits in a stage of this Space; switching", t_open)
+    trigger = next((line.split("trigger=")[1].split()[0].strip('"') for t, line in events
+                    if "arranged ahead for the window" in line and "trigger=" in line), None)
+    sent = ahead or switched or recognized
+
+    def shown(w):
+        return w["onscreen"] and not ts.is_parked(w["bounds"], display)
+
+    d1_on = [x["t"] for x in samples if any(w["onscreen"] and w["id"] in d1_ids for w in x["windows"])]
+    d2_on = [x["t"] for x in samples if any(w["onscreen"] and w["id"] in d2_ids for w in x["windows"])]
+    slide_from = d1_on[0] if d1_on else None
+    slide_to = max((t for t in d2_on if slide_from and t >= slide_from), default=None)
+    stale = [x["t"] for x in samples if any(w["id"] in left and shown(w) for w in x["windows"])]
+    if ahead:
+        path = f"6T: arranged ahead at the {trigger}"
+    elif switched:
+        path = "6R fallback: switched at the recognition"
+    else:
+        path = "no switch logged"
+    say(f"    timeline from the activation: focus {rel(focus)}, notice {rel(notice)}, arranged "
+        f"{rel(sent)}, recognized {rel(recognized)}; path: {path}")
+    say(f"    window server ({len(samples)} looks, every ~30 ms): Desktop 1's windows on screen from {rel(slide_from)}, "
+        f"Desktop 2's until {rel(slide_to)}; the stage left shown out of the park zone at "
+        f"{[rel(t) for t in stale if slide_from and t >= slide_from][:12]}")
+    check(sent is not None, "the app's log says when the arrival's arrangement was sent")
+    # Nothing below may pass for want of looking: the sampler saw the slide and the windows.
+    check(slide_from is not None, "the window server was seen showing Desktop 1 during the 3 s sampled")
+    last = samples[-1]["windows"] if samples else []
+    check(any(w["id"] in left for w in last), "Fixture 1-2 are listed at the last look (the stage left was looked at)")
+    if focus is not None and notice is not None and focus <= notice:
+        check(ahead is not None, f"the focus came before the notice: arranged ahead (6T), not at the recognition ({path})")
+    elif ahead is None:
+        say(f"    (no focus before the notice in the log: {path})")
+    if sent is not None:
+        late = [t for t in stale if t >= sent + 0.05]
+        check(not late, "once the arrangement was sent, the stage Desktop 1 was left with never shows "
+              f"(Fixture 1-2 in the park zone at every look 50 ms after it){'' if not late else ': ' + str([rel(t) for t in late][:8])}")
+    if how == "dock":
+        check(trigger == "dock-click", f"arranged at the Dock click ({path})")
+        during = [t for t in stale if slide_from is not None and t >= slide_from]
+        check(not during, "the stage left never shows once Desktop 1 is on screen, not even during the slide"
+              + ("" if not during else f": {[rel(t) for t in during][:8]}"))
+    check(any(w["id"] == alpha_id and shown(w) for w in last), "Alpha 1 on screen out of the park zone at the last look")
+    window = [line for t, line in events if t <= t_open + 3.0]
+    ghosts = [line for line in window if "transition: " in line or "transition covered" in line
+              or "transition reached the strip" in line]
+    check(not ghosts, "no switch transition (ghosts, overlay) ran for the arrival"
+          + ("" if not ghosts else f": {len(ghosts)} transition lines"))
+    if switched is not None:
+        check(any("instant=true" in line for t, line in window if "waits in a stage of this Space; switching" in line),
+              "the arrival's own switch was instant (its log line says so)")
+
+
+def probe_moves_elsewhere(d1, left):
+    """Round 6T probe: does macOS carry out a frame change of a window on a Desktop not shown?
+    On Desktop 2, Fixture 1 (Desktop 1, shown in its stage) is moved 40 pt to the right through
+    Accessibility alone (`ctl debug-frame ID X Y W H only`: no raise, no focus, which would
+    take macOS there), the window server's bounds read (its full list includes other Desktops'
+    windows with their frames), then it is put back. No Desktop 1 window may show meanwhile
+    (sampled every ~0.1 s). The arrangement at a Dock click (round 6U) rests on a yes: it
+    moves the windows of Desktop 1 while Desktop 2 still shows."""
+    if not left:
+        PROBE.append("PROBE (moves on a Desktop not shown): skipped, no Desktop 1 fixture window shown in its stage")
+        return None
+    wid = left[0]
+
+    def bounds():
+        w = next((w for w in probe_all() if w["id"] == wid), None)
+        return w and w["bounds"]
+
+    before = bounds()
+    if not before:
+        PROBE.append(f"PROBE (moves on a Desktop not shown): skipped, the window server does not list window {wid}")
+        return None
+    moved = dict(before, x=before["x"] + 40)
+    stop, hits = threading.Event(), []
+    if AUTO:
+        WATCH.pause()
+        threading.Thread(target=sample_onscreen, args=(WATCH.ids["d1"], stop, hits), daemon=True).start()
+    try:
+        r = ctl("debug-frame", wid, moved["x"], moved["y"], moved["w"], moved["h"], "only")
+        time.sleep(0.3)
+        after = bounds()
+    finally:
+        back_reply = ctl("debug-frame", wid, before["x"], before["y"], before["w"], before["h"], "only")
+        time.sleep(0.3)
+        back = bounds()
+        stop.set()
+        if AUTO:
+            WATCH.desk("d2")
+    took = bool(r.get("ok") and after and ts.close(after, moved, tol=2.0))
+    say(f"    probe: debug-frame only said {r}; window server: before {ts.fmt(before)}, after "
+        f"{after and ts.fmt(after)}, put back {back and ts.fmt(back)} ({back_reply.get('ok')})")
+    if not r.get("ok"):
+        verdict = f"AX refused the move ({r.get('error')}); the arrangement at a Dock click cannot work here"
+    elif took:
+        verdict = ("TAKES EFFECT: the window server moved the window of the Desktop not shown 40 pt; "
+                   "the arrangement at a Dock click can work")
+    else:
+        verdict = ("does NOT take effect: AX said yes but the window server kept the old frame; "
+                   "the arrangement at a Dock click cannot show during the slide (only the notice's fallback helps)")
+    PROBE.append(f"PROBE (moves on a Desktop not shown, round 6T): {verdict}")
+    say(f"    {PROBE[-1]}")
+    check(not hits, "the probe never showed Desktop 1 (no raise, no focus: no Desktop jump)"
+          + (f": {hits[:3]}" if hits else ""))
+    check(bool(back and ts.close(back, before, tol=2.0)), "the probe's window is back where it was")
+    return took
 
 
 def expose_on_desktop_2(d1, d2):
@@ -1065,6 +1290,8 @@ def main():
 
 
 def report():
+    for line in PROBE:
+        say(f"\n{line}")
     say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed (every app run's log: {ts.HOME}/stage-manager.run-*.log and today's {ts.HOME}/YYYY-MM-DD.log)")
     for f in ts.failed:
         say(f"  FAIL {f}")

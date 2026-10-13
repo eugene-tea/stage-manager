@@ -14,7 +14,10 @@
 //!   [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
 //!   no Accessibility, no login item), or renders it to a PNG and exits.
 //! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
-//!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts.
+//!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts;
+//!   `probe-windows --every MS --for MS <bundle-id>...` samples them that often for that
+//!   long (each sample with its wall-clock time), one JSON line at the end: the Spaces
+//!   check's look at a Desktop slide.
 //! - `stage-manager probe-screen` prints the on-screen windows that cover the main display
 //!   (a full-screen app's Space), one JSON line, for test scripts.
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
@@ -75,7 +78,7 @@ mod app {
     use std::ptr::NonNull;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use block2::RcBlock;
     use dispatch2::DispatchQueue;
@@ -693,32 +696,57 @@ mod app {
 
     /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows.
     pub fn probe_windows(args: &[String]) -> ExitCode {
+        let usage = || {
+            eprintln!("usage: stage-manager probe-windows [--every MS --for MS] <bundle-id>...");
+            ExitCode::from(2)
+        };
+        let (sampling, args) = match args {
+            [every, e, r#for, f, rest @ ..] if every == "--every" && r#for == "--for" => {
+                match (e.parse::<u64>(), f.parse::<u64>()) {
+                    (Ok(e), Ok(f)) if e > 0 => (Some((Duration::from_millis(e), Duration::from_millis(f))), rest),
+                    _ => return usage(),
+                }
+            }
+            _ => (None, args),
+        };
         if args.is_empty() {
-            eprintln!("usage: stage-manager probe-windows <bundle-id>...");
-            return ExitCode::from(2);
+            return usage();
         }
         let pids: Vec<i32> = args
             .iter()
             .flat_map(|bundle| NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle)))
             .map(|a| a.processIdentifier())
             .collect();
-        let list = windows::list_windows();
-        let z = windows::z_order(&list);
-        let out: Vec<_> = list
-            .iter()
-            .filter(|w| pids.contains(&w.pid))
-            .map(|w| {
-                json!({
-                    "id": w.id,
-                    "pid": w.pid,
-                    "layer": w.layer,
-                    "onscreen": w.onscreen,
-                    "alpha": w.alpha,
-                    "bounds": w.bounds,
-                    "z": z.get(&w.id),
+        let look = || {
+            let list = windows::list_windows();
+            let z = windows::z_order(&list);
+            list.iter()
+                .filter(|w| pids.contains(&w.pid))
+                .map(|w| {
+                    json!({
+                        "id": w.id,
+                        "pid": w.pid,
+                        "layer": w.layer,
+                        "onscreen": w.onscreen,
+                        "alpha": w.alpha,
+                        "bounds": w.bounds,
+                        "z": z.get(&w.id),
+                    })
                 })
-            })
-            .collect();
+                .collect::<Vec<_>>()
+        };
+        let mut samples = Vec::new();
+        if let Some((every, span)) = sampling {
+            let start = Instant::now();
+            let mut due = start;
+            while start.elapsed() <= span {
+                let t = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+                samples.push(json!({ "t": t, "windows": look() }));
+                due += every;
+                std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            }
+        }
+        let out = look();
         // The main display, with its visible frame (the park zone sits above a bottom Dock).
         let mut display = json!(desktop::cg_display_bounds().first().copied());
         if let (Some(mtm), Some(obj)) = (MainThreadMarker::new(), display.as_object_mut())
@@ -726,7 +754,13 @@ mod app {
         {
             obj.insert("visible".into(), json!(main.visible));
         }
-        println!("{}", json!({ "ok": true, "pids": pids, "display": display, "windows": out }));
+        let mut reply = json!({ "ok": true, "pids": pids, "display": display, "windows": out });
+        if sampling.is_some()
+            && let Some(obj) = reply.as_object_mut()
+        {
+            obj.insert("samples".into(), json!(samples));
+        }
+        println!("{reply}");
         ExitCode::SUCCESS
     }
 

@@ -8,7 +8,9 @@
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
-//! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
+//! topmost), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
+//! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
 //! screen, `debug-close ID` closes one (its close button), `debug-expose
@@ -95,12 +97,16 @@ pub enum Command {
         hold_ms: u64,
     },
     /// Sets a shown managed window's frame through AX and brings it to the front (needs
-    /// `STAGE_MANAGER_TEST=1`).
+    /// `STAGE_MANAGER_TEST=1`). With `only`: the frame and nothing else (no raise, no
+    /// focus), for a window shown in its stage on any Desktop, the one shown or not (the
+    /// Spaces check's probe of moves on a Desktop not shown).
     DebugFrame {
         /// The window id.
         id: u32,
         /// The frame, global top-left coordinates.
         frame: Rect,
+        /// The frame only, on any Desktop.
+        only: bool,
     },
     /// Types the Desktop switch shortcut ("Move left/right a space") at the HID tap and
     /// waits for the Space change (needs `STAGE_MANAGER_TEST=1`).
@@ -126,6 +132,13 @@ pub enum Command {
     DebugOverlay {
         /// The region, global top-left coordinates.
         region: Option<Rect>,
+    },
+    /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
+    /// click on it (the Dock-click prediction runs as for a real click), then presses it
+    /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
+    DebugDockClick {
+        /// The app's bundle id.
+        bundle: String,
     },
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
@@ -206,10 +219,10 @@ impl Command {
                 let points = nums.chunks(2).map(|c| Point::new(c[0], c[1])).collect();
                 Ok(Self::DebugDrag { points, shift, hold_ms })
             }
-            ["debug-frame", id, x, y, w, h] => {
+            ["debug-frame", id, x, y, w, h, rest @ ..] if rest.is_empty() || rest == ["only"] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
-                Ok(Self::DebugFrame { id, frame: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?) })
+                Ok(Self::DebugFrame { id, frame: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?), only: !rest.is_empty() })
             }
             ["debug-hover", x, y, ms] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
@@ -244,6 +257,7 @@ impl Command {
                 };
                 Ok(Self::DebugFullscreen { id, on })
             }
+            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string() }),
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
@@ -444,8 +458,19 @@ mod tests {
         assert!(Command::parse("debug-drag 1 2 3").is_err());
         assert_eq!(
             Command::parse("debug-frame 7 200 300 800 600"),
-            Ok(Command::DebugFrame { id: 7, frame: Rect::new(200.0, 300.0, 800.0, 600.0) })
+            Ok(Command::DebugFrame { id: 7, frame: Rect::new(200.0, 300.0, 800.0, 600.0), only: false })
         );
+        assert_eq!(
+            Command::parse("debug-frame 7 200 300 800 600 only"),
+            Ok(Command::DebugFrame { id: 7, frame: Rect::new(200.0, 300.0, 800.0, 600.0), only: true })
+        );
+        assert!(Command::parse("debug-frame 7 200 300 800 600 raise").is_err());
+        assert!(Command::parse("debug-frame 7 200 300 800").is_err());
+        assert_eq!(
+            Command::parse("debug-dock-click dev.example.app"),
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into() })
+        );
+        assert!(Command::parse("debug-dock-click").is_err());
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert_eq!(Command::parse("space"), Ok(Command::Space));
         assert_eq!(

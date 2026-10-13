@@ -202,6 +202,11 @@ impl Observer {
         self.apps.get(&pid).and_then(|a| a.bundle_id.as_deref())
     }
 
+    /// The running apps with bundle id `bundle` (the Dock's item for an app).
+    pub fn pids_with_bundle(&self, bundle: &str) -> Vec<i32> {
+        self.apps.values().filter(|a| a.bundle_id.as_deref() == Some(bundle)).map(|a| a.pid).collect()
+    }
+
     /// Re-reads a tracked window's frame through AX, keeping the result.
     pub fn refresh_frame(&mut self, id: u32) -> Option<Rect> {
         let w = self.windows.get_mut(&id)?;

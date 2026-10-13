@@ -281,6 +281,62 @@ Ours:
   (`engine::focus_replay`); on arrival AX is asked for the focused window now and, when that
   names no window of the Desktop shown, the held one is replayed. A card click, a hotkey or
   a focus that acted forgets it.
+- The owner's log of 10-13 (the same case, after 6R): the focus at +0 ms (held, its Desktop
+  known), the Space change notice at +4 ms, the Desktop recognized at +64 ms (every app's
+  window list read again first), the switch sent at +80–86 ms, not animated (no transition
+  ran; the "stage switch" line counts any switch) but after the slide had begun: he saw the
+  Desktop slide in with its previous stage, then the switch. Its strip took over first in
+  the old order and the stage left faded into its slot 18 ms later. Now (round 6T) the
+  held window's stage goes out **at the notice**, as soon as the window server lists the
+  window on screen (its Desktop is the one sliding in), before the window lists are read
+  again; the recognition then finds it arranged (nothing moves), raises its windows and
+  focuses the window (that window counts as the focused one then, whatever a late
+  Accessibility answer says; gone meanwhile, the stage that was there comes back); the
+  arriving Desktop's strip is redrawn at the notice too, in its final order. The stage
+  left is saved as a switch saves it (the window list's order, its front window as key).
+  A focus whose event comes after the notice: the app is asked for its focused window at
+  the notice (50 ms Accessibility timeout); a focus held while a change settles is
+  arranged for as soon as the window server lists its window. Without a held window the arrival's switch is part of the arrival's own
+  batch, and the strip gets one snapshot for it. Either way the arriving strip is laid out
+  at once (no glide, no fade).
+- Measured live on 10-13 (the hands-free Spaces check): macOS carries out moves of windows
+  on a Desktop not shown (a window of Desktop 1 moved 40 pt while Desktop 2 showed), and
+  every public notice of a Dock arrival comes at the **end** of the slide: from an `open`
+  activation the arriving Desktop's windows were on screen from +90 ms and the leaving
+  one's until +327 ms; the activation ~+324 ms, the notice +346 ms, the arrangement +363 ms,
+  the recognition +399 ms; the stage left showed through the whole slide. The owner's Dock
+  click: the focus +419 ms and the notice +423 ms after the mouse-down. So the notice
+  arranges too late to be seen, and the arrival is arranged **at the Dock click** (round
+  6U): a left mouse-down over the Dock's own window is hit-tested through public
+  Accessibility (`AXUIElementCopyElementAtPosition` on the Dock, an `AXDockItem` of
+  subrole `AXApplicationDockItem` or one of its parents, its `AXURL` the app; a miss is
+  logged with what was found), and the click's prediction is worked out then, at the
+  press, so the release only arranges; let go over the same item soon
+  (under 0.6 s, the Dock's menu comes on a held press) and without moving (6 pt) or a
+  modifier, it is a click. When macOS will switch Desktops for it ("When switching to an
+  application, switch to a Space with open windows for the application" on,
+  `com.apple.dock` `workspaces-auto-swoosh`, absent = on; the app running, with no window
+  on the Desktop shown in the model nor any on screen out of the park zone in the window
+  server's list, none unplaced, not hidden: on the safe side, no prediction when unsure;
+  the model's gates and the list are looked at before the app is asked anything), the
+  window macOS will show (the app's focused window when it waits on another
+  Desktop, else, the app not answering, the key window of its most recently active stage
+  there; a focus of another window of that same stage then retargets the arrangement) has
+  its Desktop arranged
+  at once, through the cached Accessibility elements of that Desktop's windows, and its
+  strip pane redrawn in its final order: the Desktop slides in arranged. Its own moves
+  make the window's late focus an echo; a focus of another known window of that app still
+  counts (macOS showed another window than predicted: undone, arranged for that one at the
+  notice). No Space change
+  within 1 s of the click undoes it. ⌘Tab keeps the notice's arrangement for now: no
+  public notice names the app chosen before its activation; the switcher is drawn by the
+  Dock, and whether its Accessibility tree exposes the selected app while ⌘ is held (to
+  read at the ⌘ release) has not been looked at live. A wrong
+  prediction (another Desktop recognized, the user acting on the Desktop shown, another
+  known window or another app focused, a full-screen Space, no Space change within the
+  hold, the window not on screen at the notice) gives the Desktop back
+  its previous stage, slots and recency; windows brought back on a Desktop not shown stay
+  in the safety registry until seen there.
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
   Accessibility before bringing its app forward (never all its windows), so macOS has no
   reason to switch Spaces.

@@ -9,8 +9,8 @@ use std::ptr::NonNull;
 
 use objc2_application_services::{AXError as RawAxError, AXObserver, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CGPoint, CGSize,
-    kCFRunLoopDefaultMode,
+    CFArray, CFBoolean, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
+    CGSize, kCFRunLoopDefaultMode,
 };
 
 use crate::engine::geometry::{Point, Rect, Size};
@@ -34,6 +34,11 @@ pub mod names {
     pub const FRONTMOST: &str = "AXFrontmost";
     pub const RAISE: &str = "AXRaise";
     pub const FOCUSED_APPLICATION: &str = "AXFocusedApplication";
+    pub const CHILDREN: &str = "AXChildren";
+    pub const PARENT: &str = "AXParent";
+    pub const URL: &str = "AXURL";
+    pub const ROLE_DOCK_ITEM: &str = "AXDockItem";
+    pub const SUBROLE_APPLICATION_DOCK_ITEM: &str = "AXApplicationDockItem";
 
     pub const ROLE_WINDOW: &str = "AXWindow";
     pub const SUBROLE_STANDARD: &str = "AXStandardWindow";
@@ -171,6 +176,16 @@ impl AxElement {
     pub fn set_messaging_timeout(&self, seconds: f32) -> AxResult<()> {
         // SAFETY: valid element; plain float argument.
         AxError::check(unsafe { self.0.set_messaging_timeout(seconds) })
+    }
+
+    /// Runs `f` on this element with a messaging timeout of `seconds`, then puts the
+    /// element's app back on the global timeout (0 resets it): a query that must not hold
+    /// the WM thread up never leaves the app with a short budget for later actions.
+    pub fn bounded<T>(&self, seconds: f32, f: impl FnOnce(&AxElement) -> T) -> T {
+        let _ = self.set_messaging_timeout(seconds);
+        let out = f(self);
+        let _ = self.set_messaging_timeout(0.0);
+        out
     }
 
     /// The process id owning this element.
@@ -380,6 +395,39 @@ impl AxElement {
     /// Sets `AXFrontmost` on an application element.
     pub fn set_frontmost(&self, frontmost: bool) -> AxResult<()> {
         self.set_bool_attr(names::FRONTMOST, frontmost)
+    }
+
+    /// The element at a global point (top-left origin) within this application element (or
+    /// any app's, from the system-wide element): `AXUIElementCopyElementAtPosition`.
+    pub fn element_at(&self, p: Point) -> AxResult<AxElement> {
+        let mut out: *const AXUIElement = std::ptr::null();
+        // SAFETY: valid element and out pointer; on success it holds a +1 reference.
+        let code = unsafe { self.0.copy_element_at_position(p.x as f32, p.y as f32, NonNull::from(&mut out)) };
+        AxError::check(code)?;
+        let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
+        // SAFETY: the Copy rule hands us ownership of one reference.
+        Ok(AxElement(unsafe { CFRetained::from_raw(ptr) }))
+    }
+
+    /// `AXParent`.
+    pub fn parent(&self) -> AxResult<AxElement> {
+        self.element_attr(names::PARENT)
+    }
+
+    /// `AXChildren`.
+    pub fn children(&self) -> AxResult<Vec<AxElement>> {
+        let v = self.attribute(names::CHILDREN)?;
+        let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(names::CHILDREN))?;
+        // SAFETY: AXChildren is documented as an array of AXUIElement; items are type-checked.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
+        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+    }
+
+    /// `AXURL` as a POSIX path (a Dock item's application bundle).
+    pub fn url_path(&self) -> AxResult<String> {
+        let v = self.attribute(names::URL)?;
+        let url = v.downcast_ref::<CFURL>().ok_or(AxError::WrongType(names::URL))?;
+        url.file_system_path(CFURLPathStyle::CFURLPOSIXPathStyle).map(|s| s.to_string()).ok_or(AxError::Value)
     }
 
     /// The `CGWindowID` of a window element (via `_AXUIElementGetWindow`).

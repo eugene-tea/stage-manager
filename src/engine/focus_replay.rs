@@ -113,6 +113,11 @@ impl FocusReplay {
     pub fn clear(&mut self) {
         self.held = None;
     }
+
+    /// When the held event came, if one is held and recent enough.
+    pub fn came(&self, now: Instant) -> Option<Instant> {
+        self.held.filter(|h| h.fresh(now)).map(|h| h.came)
+    }
 }
 
 #[cfg(test)]
@@ -130,10 +135,12 @@ mod tests {
         assert_eq!(r.take(t0), None);
         r.hold(Wanted::Window { id: WindowId(1), pid: 10 }, t0);
         r.hold(Wanted::Window { id: WindowId(2), pid: 20 }, ms(t0, 100));
+        assert_eq!(r.came(ms(t0, 200)), Some(ms(t0, 100)), "when the newest came");
         assert_eq!(r.peek(ms(t0, 200)), Some(Wanted::Window { id: WindowId(2), pid: 20 }));
         assert_eq!(r.take(ms(t0, 200)), Some(Wanted::Window { id: WindowId(2), pid: 20 }));
         assert_eq!(r.take(ms(t0, 300)), None, "taken once");
         r.hold(Wanted::App(30), t0);
+        assert_eq!(r.came(t0 + FOCUS_REPLAY_MAX), None, "too old to say");
         assert_eq!(r.take(t0 + FOCUS_REPLAY_MAX), None, "too old");
         r.hold(Wanted::App(30), t0);
         r.clear();

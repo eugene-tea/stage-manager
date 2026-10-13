@@ -46,7 +46,9 @@
 //!   keeps a window that does not join every Space on the Space it was first ordered in;
 //!   ordering it out and in again does not move it). When a snapshot for another Space
 //!   arrives, the pane already on the Space shown (`isOnActiveSpace`) takes over with the
-//!   cards it had, else a new one; the pane left keeps its cards on its Desktop. A full-screen
+//!   cards it had, else a new one; the pane left keeps its cards on its Desktop. The pane
+//!   taking over is laid out at once, in its final order (no glide, no fade: it slides in
+//!   with its Desktop, already arranged, as Apple's does). A full-screen
 //!   app's Space gets none. The motion overlay gets a fresh panel on each Space change; card
 //!   drag ghosts join every Space.
 //! - Extensions, off by default (`[reveal]`): the **edge tab**, a slim translucent tab at the
@@ -965,6 +967,9 @@ struct Strip {
     layouts: Vec<CardLayout>,
     snapshot: StripSnapshot,
     has_snapshot: bool,
+    /// The snapshot being laid out is a Desktop's arrival: its cards take their slots at
+    /// once (no glide, no fade-in).
+    instant: bool,
     hovered: Option<u64>,
     pressed: Option<u64>,
     /// The card drawn pressed (`[cards] press_scale`): from the mouse-down until its
@@ -1009,6 +1014,7 @@ impl Strip {
             layouts: Vec::new(),
             snapshot: StripSnapshot::default(),
             has_snapshot: false,
+            instant: false,
             hovered: None,
             pressed: None,
             squeezed: None,
@@ -1086,6 +1092,10 @@ impl Strip {
     // -- snapshots ------------------------------------------------------------------------
 
     fn present(&mut self, snapshot: StripSnapshot) {
+        if snapshot.away {
+            self.present_away(snapshot);
+            return;
+        }
         if snapshot.style != self.style {
             self.style = snapshot.style.clone();
             // The reveal's delays are no part of the geometry: a new `[reveal]` (the config
@@ -1130,7 +1140,10 @@ impl Strip {
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
         }
+        // A Desktop arriving: its strip is already arranged when it slides in.
+        self.instant = rehome;
         self.layout_cards(force);
+        self.instant = false;
         if let (Some(t), Some(starts)) = (transition, starts) {
             // Decide whether this snapshot shows the strip before aiming: a switch that
             // reveals (or hides) the strip lands its snapshots where the cards will be, not
@@ -1179,6 +1192,35 @@ impl Strip {
         self.update_visibility();
         self.update_targets();
         self.publish_panel();
+    }
+
+    /// The cards of a Desktop not shown (`snapshot.away`): its pane, when it has one, is laid
+    /// out with them at once; the pane shown, its snapshot, layouts and published card frames
+    /// stay as they are.
+    fn present_away(&mut self, snapshot: StripSnapshot) {
+        let Some(i) = self.others.iter().position(|p| p.placed && p.space == snapshot.space) else {
+            tracing::debug!(space = snapshot.space, "strip: no pane on that Desktop yet; it is drawn on arrival");
+            return;
+        };
+        std::mem::swap(&mut self.pane, &mut self.others[i]);
+        let shown_snapshot = std::mem::replace(&mut self.snapshot, snapshot);
+        let layouts = std::mem::take(&mut self.layouts);
+        let logged = std::mem::take(&mut self.logged_order);
+        let card_drag = self.card_drag.take();
+        let hovered = self.hovered.take();
+        let drop_over = std::mem::replace(&mut self.drop_over, false);
+        self.instant = true;
+        self.layout_cards(false);
+        self.instant = false;
+        tracing::debug!(space = self.snapshot.space, order = ?self.logged_order, "strip: the arriving Desktop's pane arranged ahead");
+        self.drop_over = drop_over;
+        self.hovered = hovered;
+        self.card_drag = card_drag;
+        self.logged_order = logged;
+        self.layouts = layouts;
+        self.snapshot = shown_snapshot;
+        std::mem::swap(&mut self.pane, &mut self.others[i]);
+        self.publish_cards();
     }
 
     // -- panes ----------------------------------------------------------------------------
@@ -1563,7 +1605,7 @@ impl Strip {
                 if self.motion.holds(card.stage) {
                     // A transition's snapshots are landing here; the card shows when they do.
                     card_layer.setOpacity(0.0);
-                } else if self.has_snapshot {
+                } else if self.has_snapshot && !self.instant {
                     fade_in(&card_layer, fade);
                 }
                 let layers = CardLayers {
@@ -1606,7 +1648,7 @@ impl Strip {
         if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
             // The whole card glides to its new place as one unit.
             let to = Self::unit_offset(layout, layers.built);
-            move_to(glide, &layers.unit, to, immediate);
+            move_to(glide, &layers.unit, to, immediate || self.instant);
             layers.card.setTransform(hover);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
