@@ -11,3 +11,4 @@ pub mod strip_model;
 #[cfg(feature = "debug-render")]
 pub mod strip_render;
 pub mod strip_visibility;
+pub mod transition_plan;

@@ -6,14 +6,18 @@
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
-//! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift]` drags along
-//! the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
+//! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
+//! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, `debug-close ID` closes one (its close button), and `debug-expose mission-control|app-windows|show-desktop|escape` types Mission
-//! Control's own shortcut (or Escape, to leave it). `space` (any time) is the Space shown as
-//! the engine sees it.
+//! screen, `debug-close ID` closes one (its close button), `debug-expose
+//! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
+//! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
+//! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
+//! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
+//! read back from a capture of our own overlay window. `space` (any time) is the Space shown
+//! as the engine sees it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -85,6 +89,8 @@ pub enum Command {
         points: Vec<Point>,
         /// Hold shift.
         shift: bool,
+        /// How long the button stays down at the last point (`hold=MS`; default 400 ms).
+        hold_ms: u64,
     },
     /// Sets a shown managed window's frame through AX and brings it to the front (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -110,6 +116,14 @@ pub enum Command {
         id: u32,
         /// In (true) or out (false).
         on: bool,
+    },
+    /// What the strip draws this frame (needs `STAGE_MANAGER_TEST=1`).
+    DebugStrip,
+    /// Where the motion overlay draws, read back from its pixels, within a global region
+    /// when given (needs `STAGE_MANAGER_TEST=1`).
+    DebugOverlay {
+        /// The region, global top-left coordinates.
+        region: Option<Rect>,
     },
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
@@ -168,6 +182,13 @@ impl Command {
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-drag", rest @ ..] => {
+                let (rest, hold_ms) = match rest.split_last() {
+                    Some((last, r)) if last.starts_with("hold=") => {
+                        let ms = last["hold=".len()..].parse::<u64>().map_err(|_| format!("expected hold=MS, got {last:?}"))?;
+                        (r, ms)
+                    }
+                    _ => (rest, 400),
+                };
                 let (coords, shift) = match rest.split_last() {
                     Some((&"shift", c)) => (c, true),
                     _ => (rest, false),
@@ -180,7 +201,7 @@ impl Command {
                     .map(|w| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}")))
                     .collect::<Result<Vec<_>, _>>()?;
                 let points = nums.chunks(2).map(|c| Point::new(c[0], c[1])).collect();
-                Ok(Self::DebugDrag { points, shift })
+                Ok(Self::DebugDrag { points, shift, hold_ms })
             }
             ["debug-frame", id, x, y, w, h] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
@@ -199,6 +220,12 @@ impl Command {
             ["debug-space", dir, rest @ ..] if rest.is_empty() || rest == ["numpad"] => {
                 let direction = Direction::parse(dir).ok_or_else(|| format!("expected left or right, got {dir:?}"))?;
                 Ok(Self::DebugSpace { direction, numpad: !rest.is_empty() })
+            }
+            ["debug-strip"] => Ok(Self::DebugStrip),
+            ["debug-overlay"] => Ok(Self::DebugOverlay { region: None }),
+            ["debug-overlay", x, y, w, h] => {
+                let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
+                Ok(Self::DebugOverlay { region: Some(Rect::new(n(x)?, n(y)?, n(w)?, n(h)?)) })
             }
             ["debug-expose", "escape"] => Ok(Self::DebugExpose { which: None }),
             ["debug-expose", word] => match Expose::parse(word) {
@@ -404,7 +431,11 @@ mod tests {
         assert!(Command::parse("debug-hover 1 720").is_err());
         assert_eq!(
             Command::parse("debug-drag 1 2 3 4 shift"),
-            Ok(Command::DebugDrag { points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)], shift: true })
+            Ok(Command::DebugDrag { points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)], shift: true, hold_ms: 400 })
+        );
+        assert_eq!(
+            Command::parse("debug-drag 1 2 3 4 hold=1500"),
+            Ok(Command::DebugDrag { points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)], shift: false, hold_ms: 1500 })
         );
         assert!(Command::parse("debug-drag 1 2 3").is_err());
         assert_eq!(

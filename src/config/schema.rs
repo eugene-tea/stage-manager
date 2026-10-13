@@ -241,7 +241,7 @@ pub const KEYS: &[KeyDef] = &[
     k("reveal", "launch_reveal", Kind::Bool, "false", "Show a covered strip for a moment at launch (an extension)."),
     k("reveal", "launch_reveal_ms", i(0, 60_000), "3000", "How long that launch showing lasts."),
     // [drag]
-    k("drag", "threshold", f(0.0, 100.0), "4.0", "A press that moves farther than this (points) drags the card; less is a click."),
+    k("drag", "threshold", f(0.0, 100.0), "5.0", "A press that moves farther than this (points, at least 5) drags the card; less is a click."),
     k("drag", "grow_distance", f(1.0, 3000.0), "260.0", "Past the strip, the dragged card grows to its window's size over this distance."),
     k("drag", "lifted_opacity", f(0.0, 1.0), "0.3", "Opacity of a card in the strip while it is dragged out."),
     k("drag", "ghost_opacity", f(0.0, 1.0), "0.92", "Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip."),

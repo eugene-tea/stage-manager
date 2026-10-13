@@ -2,7 +2,10 @@
 //!
 //! A worker thread takes a still of every requested window each interval with
 //! `SCScreenshotManager` and an `SCContentFilter(desktopIndependentWindow:)`, sized as asked
-//! (the strip asks for 2× its thumbnail size). Each image goes to the main thread through
+//! (the strip asks for 2× its thumbnail size) but always in the window's own proportions
+//! ([`fit_to_content`]): asked for another shape, ScreenCaptureKit pads the image and pins the
+//! window to its top-left corner (measured 10-12), so a snapshot stretched over the window's
+//! frame drew its content smaller and off to one side. Each image goes to the main thread through
 //! GCD, keyed by window id. Parked windows still render, so they capture too.
 //!
 //! Only the requested windows are captured; the caller replaces the request whenever the
@@ -423,6 +426,19 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
     }
 }
 
+/// The image size for a capture asked at `asked` pixels of a window whose content is
+/// `content` pixels: the largest size of the content's proportions that fits in `asked`,
+/// never larger than the content itself (so the image is the window, edge to edge, with no
+/// padding). An unknown content size keeps what was asked.
+pub fn fit_to_content(asked: (u32, u32), content: (f64, f64)) -> (u32, u32) {
+    let (cw, ch) = content;
+    if !(cw >= 1.0 && ch >= 1.0) {
+        return (asked.0.max(1), asked.1.max(1));
+    }
+    let k = (f64::from(asked.0.max(1)) / cw).min(f64::from(asked.1.max(1)) / ch).min(1.0);
+    ((cw * k).round().max(1.0) as u32, (ch * k).round().max(1.0) as u32)
+}
+
 /// What one round did.
 struct RoundResult {
     /// Window ids that produced an image or were found missing.
@@ -481,12 +497,18 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 let _ = content_tx.send(Msg::Missing { round, id: t.id });
                 continue;
             };
-            // SAFETY: designated initializer with a live SCWindow; plain setters.
+            // SAFETY: designated initializer with a live SCWindow; plain setters and getters.
             let (filter, config) = unsafe {
                 let filter = SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window);
+                let content = filter.contentRect();
+                let scale = f64::from(filter.pointPixelScale()).max(1.0);
+                let (width, height) = fit_to_content(
+                    (t.width, t.height),
+                    (content.size.width * scale, content.size.height * scale),
+                );
                 let config = SCStreamConfiguration::new();
-                config.setWidth(t.width.max(1) as usize);
-                config.setHeight(t.height.max(1) as usize);
+                config.setWidth(width as usize);
+                config.setHeight(height as usize);
                 config.setShowsCursor(false);
                 config.setIgnoreShadowsSingleWindow(true);
                 config.setScalesToFit(true);
@@ -607,5 +629,22 @@ fn note_outcomes(batch: &[Target], handled: &[u32], failed: &HashMap<u32, String
             (Some(false), true) => tracing::debug!(window = t.id, "capture works again"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_to_content;
+
+    #[test]
+    fn a_capture_keeps_the_windows_proportions_and_never_grows_past_it() {
+        // Asked at its own size: as asked.
+        assert_eq!(fit_to_content((4202, 2540), (4202.0, 2540.0)), (4202, 2540));
+        // Asked wider than the window (a stale frame): the window's shape, no padding.
+        assert_eq!(fit_to_content((5042, 2540), (4202.0, 2540.0)), (4202, 2540));
+        // Asked smaller and narrower: scaled down in the window's shape.
+        assert_eq!(fit_to_content((300, 300), (4202.0, 2540.0)), (300, 181));
+        // Unknown content: as asked.
+        assert_eq!(fit_to_content((10, 0), (0.0, 0.0)), (10, 1));
     }
 }

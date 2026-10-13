@@ -440,17 +440,39 @@ mod app {
                 }
                 debug_space(&wm, direction, numpad)
             }
+            Command::DebugStrip => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-strip needs STAGE_MANAGER_TEST=1");
+                }
+                let mut probe = serde_json::Value::Null;
+                DispatchQueue::main().exec_sync(|| probe = strip::probe());
+                json!({ "ok": true, "strip": probe })
+            }
+            Command::DebugOverlay { region } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-overlay needs STAGE_MANAGER_TEST=1");
+                }
+                let mut overlay = None;
+                DispatchQueue::main().exec_sync(|| overlay = strip::overlay_window());
+                let Some((number, origin)) = overlay else {
+                    return json!({ "ok": true, "shown": false });
+                };
+                match stage_manager::platform::self_capture::opaque_bounds(number as u32, origin, region, Duration::from_secs(3)) {
+                    Ok(bounds) => json!({ "ok": true, "shown": true, "bounds": bounds }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
             Command::DebugExpose { which } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");
                 }
                 debug_expose(which)
             }
-            Command::DebugDrag { points, shift } => {
+            Command::DebugDrag { points, shift, hold_ms } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
                 }
-                match input::drag(&points, shift, Duration::from_millis(400)) {
+                match input::drag(&points, shift, Duration::from_millis(hold_ms.min(5000))) {
                     Ok(()) => json!({ "ok": true }),
                     Err(e) => ctl::error_reply(&e),
                 }

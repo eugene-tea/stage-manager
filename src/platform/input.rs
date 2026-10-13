@@ -146,6 +146,15 @@ impl Triggers {
         }
     }
 
+    /// Records the release of the latest press: it is the same user action, so a trigger
+    /// already used stays used (a Shift-click's mouse-up must not re-arm the Shift sugar for
+    /// the next app that activates on its own; review R1-ui 10).
+    pub fn record_release(&mut self, now: Instant, mods: Modifiers) {
+        let used = self.used;
+        self.record(now, mods);
+        self.used = used;
+    }
+
     /// The latest trigger did its job; it does not count again.
     pub fn consume(&mut self) {
         self.used = true;
@@ -320,6 +329,23 @@ mod tests {
     const SHIFT: Modifiers = Modifiers { shift: true, cmd: false };
     const CMD: Modifiers = Modifiers { shift: false, cmd: true };
     const CMD_SHIFT: Modifiers = Modifiers { shift: true, cmd: true };
+
+    #[test]
+    fn the_release_of_a_used_shift_click_does_not_re_arm_it() {
+        let t0 = Instant::now();
+        let mut t = Triggers::default();
+        t.record(t0, SHIFT); // Shift-click in the Dock: down
+        assert!(t.shift_here(t0 + Duration::from_millis(50), ACTIVATION_WINDOW, NONE));
+        t.consume(); // the app's windows came here
+        t.record_release(t0 + Duration::from_millis(100), SHIFT); // and up
+        assert!(
+            !t.shift_here(t0 + Duration::from_millis(900), ACTIVATION_WINDOW, NONE),
+            "another app activating on its own is not pulled here"
+        );
+        // A new press counts again.
+        t.record(t0 + Duration::from_millis(1000), SHIFT);
+        assert!(t.shift_here(t0 + Duration::from_millis(1050), ACTIVATION_WINDOW, NONE));
+    }
 
     #[test]
     fn a_recent_shift_trigger_counts_once() {
