@@ -994,11 +994,12 @@ def activation_to_desktop_1(d1, d2):
 
 def owners_case(d1, d2):
     """The owner's case (10-13, VS Code with a window on each Desktop): the fixture app has
-    windows on both Desktops (Fixture 1-2 on Desktop 1, Fixture 3 on Desktop 2), its last
-    focused window is Fixture 1, parked on Desktop 1 behind Alpha's stage, and another app
-    (Bravo) is active on Desktop 2. A click on the fixture's Dock item: macOS goes to
-    Desktop 1 (the app's focused window's Desktop, though it has a window here) and the app
-    predicts it at the press. $SM_DOCK_REPEATS arrivals, every one clean (strict)."""
+    windows on both Desktops (Fixture 1-2 on Desktop 1, Fixture 3 on Desktop 2), Fixture 1
+    parked on Desktop 1 behind Alpha's stage, and the fixture app is the **active** one on
+    Desktop 2 (Fixture 3's stage in front). A click on its Dock item: macOS goes to the other
+    Desktop holding its windows (Desktop 1) and the app predicts it at the press. An inactive
+    app with a window here stays here (his log 10-13 09:55:50, run go10), so that is not the
+    case. $SM_DOCK_REPEATS arrivals, every one clean (strict)."""
     say("\n== the owner's case: an app with a window on each Desktop, its focused one on the other ==")
     if current_space() != d1:
         go("d1", "Switch to Desktop 1")
@@ -1040,7 +1041,13 @@ def owners_arrivals(d1, d2, clean):
             return
         go("d2", "Switch to Desktop 2")
         x = state()
-        check(x["active"] == stage_holding(x, "Bravo 1"), "Bravo's stage is active on Desktop 2 (Fixture 3 parked there)")
+        if not check(x.get("space") == d2, f"on Desktop 2 to make the fixture app active (Space {x.get('space')})"):
+            return
+        # The fixture app active on Desktop 2: Fixture 3's stage in front, Fixture 3 focused.
+        ctl("switch", stage_holding(x, "Fixture 3"))
+        x = ts.wait_state(lambda y: y["active"] == stage_holding(y, "Fixture 3"), "Fixture 3's stage", timeout=4)
+        if not check(x is not None, "the fixture app is active on Desktop 2 (Fixture 3's stage in front)"):
+            return
         target = next(w for w in x["windows"] if w["title"] == "Fixture 1")
         left = [w["id"] for w in x["windows"] if w["title"] == "Alpha 1"]
         say(f"\n== the owner's case, Dock arrival {n + 1} of {DOCK_REPEATS} ==")

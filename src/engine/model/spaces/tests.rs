@@ -1276,7 +1276,10 @@ mod arranged_ahead {
         mac.put(1, 7, 40, "com.example.mail", "Drafts");
         mac.go(1);
         assert!(mac.m.dock_arrival(40, none, None).is_err(), "no answer and a window on the Desktop shown");
-        assert_eq!(mac.m.dock_arrival(40, none, Some(w(5))), Ok(w(5)), "its answer names the other Desktop's window");
+        assert!(
+            mac.m.dock_arrival(40, none, Some(w(5))).is_err(),
+            "inactive with a window here: macOS activates it here, whatever its answer (run go10)"
+        );
         assert!(mac.m.dock_arrival(40, none, Some(w(7))).is_err(), "its answer names the window here");
     }
 
@@ -1286,10 +1289,9 @@ mod arranged_ahead {
         // The editor (pid 10): window 1 parked on Desktop 1, window 3 shown on Desktop 2.
         let (mac, _, _) = editor_on_both();
         let none = AppFacts::default();
-        assert_eq!(
-            mac.m.dock_arrival(10, none, Some(w(1))),
-            Ok(w(1)),
-            "another app active, the editor's focused window on Desktop 1: Desktop 1 (10-13)"
+        assert!(
+            mac.m.dock_arrival(10, none, Some(w(1))).is_err(),
+            "another app active, the editor's focused window on Desktop 1: macOS stays here (his log 09:55:50, run go10)"
         );
         assert!(mac.m.dock_arrival(10, none, Some(w(3))).is_err(), "its focused window here: macOS stays");
         assert!(mac.m.dock_arrival(10, none, None).is_err(), "no answer, a window here: on the safe side, none");
