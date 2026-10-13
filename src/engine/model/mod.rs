@@ -11,9 +11,12 @@
 //! stages, active stage, strip order and recency. A stage belongs to one Space ([`SpaceId`],
 //! a synthetic id the model gives each Space as the platform reports visits, see
 //! [`Model::arrive`]); operations act on the current Space of a display only, so nothing
-//! ever moves, raises or focuses a window on another Space (which would make macOS switch
-//! Spaces). Only the safety paths ([`Model::unpark_all`]) cover windows on every Space.
+//! ever raises or focuses a window on another Space (which would make macOS switch
+//! Spaces). Only the safety paths ([`Model::unpark_all`]) and the arrangement of a Desktop
+//! macOS is about to show for a window the user went to ([`Model::arrange_ahead`], moves
+//! only, undone when another Desktop comes) touch windows of a Space not shown.
 
+mod ahead;
 mod ops;
 mod spaces;
 mod strip;
@@ -29,6 +32,7 @@ use super::park::{Corner, clamp_to_visible, is_parked_in_at, park_frame_at};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
+pub use ahead::Ahead;
 pub use spaces::{Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 

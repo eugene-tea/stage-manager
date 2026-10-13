@@ -20,6 +20,8 @@ struct Mac {
     focused: Option<WindowId>,
     /// Every action on a window that is not on the shown Desktop.
     elsewhere: Vec<Action>,
+    /// macOS leaves windows of a Desktop not shown where they are (moves there do nothing).
+    still_elsewhere: bool,
 }
 
 impl Mac {
@@ -30,6 +32,7 @@ impl Mac {
             shown: 0,
             focused: None,
             elsewhere: Vec::new(),
+            still_elsewhere: false,
         }
     }
 
@@ -64,6 +67,9 @@ impl Mac {
             };
             if !self.on_screen(id.0) {
                 self.elsewhere.push(*a);
+                if self.still_elsewhere {
+                    continue;
+                }
             }
             match *a {
                 Action::SetFrame { id, frame } | Action::Park { id, frame } => {
@@ -934,5 +940,214 @@ mod focus_on_arrival {
         assert!(!mac.m.waits_on_another_space(w(4)));
         assert!(mac.m.waits_on_another_space(w(1)));
         assert!(!mac.m.waits_on_another_space(w(99)), "unknown windows are the controller's to hold");
+    }
+}
+
+// ----- the Desktop arranged ahead of its arrival (round 6T) --------------------------------
+
+mod arranged_ahead {
+    use super::*;
+
+    /// The owner's case of 10-13 (as `focus_on_arrival::editor_on_both`): Desktop 1 shows the
+    /// browser's stage, the editor's window 1 waits parked in its own; the user is on
+    /// Desktop 2 and goes to window 1 (Dock click, ⌘Tab).
+    fn editor_on_both() -> (Mac, StageId, StageId) {
+        let mut mac = two_desktops();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let editor = mac.m.stage_of(w(1)).expect("editor stage");
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        assert!(mac.parked(1), "the editor's Desktop 1 window waits in its stage");
+        mac.focused = Some(w(3));
+        mac.go(1);
+        mac.elsewhere.clear();
+        (mac, editor, browser)
+    }
+
+    /// Every managed window is where the model says: parked ones in the park zone, shown
+    /// ones out of it (on whichever Desktop).
+    fn consistent(mac: &Mac) {
+        for (id, (_, frame, _)) in &mac.wins {
+            if let Some(st) = mac.m.window(w(*id)) {
+                assert_eq!(st.parked, parked_at(*frame), "window {id}: the model says parked={}, its frame {frame}", st.parked);
+            }
+        }
+    }
+
+    fn moves(actions: &[Action]) -> Vec<Action> {
+        actions.iter().copied().filter(|a| matches!(a, Action::SetFrame { .. } | Action::Park { .. })).collect()
+    }
+
+    fn raises_or_focus(actions: &[Action]) -> bool {
+        actions.iter().any(|a| matches!(a, Action::Raise { .. } | Action::Focus { .. }))
+    }
+
+    /// The arrival as the controller runs it: recognized, then the arrangement confirmed
+    /// (or undone), then the window the Desktop was shown for; every move it makes.
+    fn arrival(mac: &mut Mac, ahead: Option<&Ahead>, held: Option<Wanted>) -> Vec<Action> {
+        let mut all = mac.arrive();
+        if let Some(a) = ahead {
+            let more = if mac.space() == a.space { mac.m.finish_ahead(a) } else { mac.m.undo_ahead(a) };
+            all.extend(mac.run(more));
+        }
+        let obs = mac.obs();
+        let a = mac.m.bring_focus_forward(mac.focused, held, &obs);
+        all.extend(mac.run(a));
+        all
+    }
+
+    use crate::engine::focus_replay::Wanted;
+    use crate::engine::model::Ahead;
+
+    #[test]
+    fn arranged_at_the_space_notice_the_desktop_arrives_with_nothing_left_to_move() {
+        let (mut mac, editor, browser) = editor_on_both();
+        let slot_of_editor = mac.m.slots[&mac.m.space_of(w(1)).expect("space")].iter().position(|s| *s == editor);
+        // The notice: Desktop 1 slides in (macOS lists its windows), the model still says 2.
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        assert_eq!((ahead.window, ahead.stage, ahead.previous), (w(1), editor, browser));
+        assert!(!raises_or_focus(&actions), "moves only: {actions:?}");
+        assert_eq!(actions.last(), Some(&Action::StateChanged));
+        mac.run(actions);
+        assert!(!mac.parked(1) && mac.parked(2), "the editor's window shows, the browser's parked");
+        assert_eq!(mac.m.active_stage_in(ahead.space), Some(editor));
+        assert_ne!(mac.m.main_active_stage(), Some(editor), "Desktop 2 is still the one shown for the model");
+
+        let at = arrival(&mut mac, Some(&ahead), Some(Wanted::Window { id: w(1), pid: 10 }));
+        assert!(moves(&at).is_empty(), "nothing moves at the arrival: {at:?}");
+        assert!(at.contains(&Action::Focus { id: w(1) }), "the window is focused once its Desktop shows");
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert_eq!(mac.focused, Some(w(1)));
+        let slots = &mac.m.slots[&ahead.space];
+        assert_eq!(slots.iter().position(|s| *s == browser), slot_of_editor, "the browser's card took the editor's slot");
+        consistent(&mac);
+    }
+
+    #[test]
+    fn arranged_at_the_focus_it_moves_only_the_predicted_desktops_windows() {
+        let (mut mac, editor, _) = editor_on_both();
+        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        mac.run(actions);
+        assert!(!raises_or_focus(&mac.elsewhere), "never a raise or focus on a Desktop not shown: {:?}", mac.elsewhere);
+        let touched: Vec<WindowId> = mac
+            .elsewhere
+            .iter()
+            .filter_map(|a| match *a {
+                Action::SetFrame { id, .. } | Action::Park { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert!(touched.iter().all(|id| [w(1), w(2)].contains(id)), "Desktop 1's windows only: {touched:?}");
+        consistent(&mac);
+        // The slide ends on Desktop 1: nothing left to move.
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        let at = arrival(&mut mac, Some(&ahead), Some(Wanted::Window { id: w(1), pid: 10 }));
+        assert!(moves(&at).is_empty(), "{at:?}");
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn a_wrong_prediction_is_undone_and_the_desktop_comes_back_as_it_was() {
+        let (mut mac, editor, browser) = editor_on_both();
+        let space = mac.m.space_of(w(1)).expect("space");
+        let slots = mac.m.slots[&space].clone();
+        let key = mac.m.stage(editor).and_then(|s| s.key);
+        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        mac.run(actions);
+        // macOS stays on Desktop 2 (or another focus comes): undone.
+        let undo = mac.m.undo_ahead(&ahead);
+        assert!(!raises_or_focus(&undo), "{undo:?}");
+        assert!(!moves(&undo).is_empty());
+        mac.run(undo);
+        assert_eq!(mac.m.active_stage_in(space), Some(browser));
+        assert_eq!(mac.m.slots[&space], slots, "the strip's slots as they were");
+        assert_eq!(mac.m.stage(editor).and_then(|s| s.key), key);
+        assert!(mac.parked(1) && !mac.parked(2));
+        consistent(&mac);
+        // Undone once; a second time changes nothing.
+        assert!(mac.m.undo_ahead(&ahead).is_empty());
+        // Desktop 1 later: as it was, nothing to fix.
+        mac.focused = Some(w(2));
+        let at = mac.go(0);
+        assert!(moves(&at).is_empty(), "{at:?}");
+        assert_eq!(mac.m.main_active_stage(), Some(browser));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn moves_macos_did_not_carry_out_are_matched_at_the_arrival() {
+        // A Desktop not shown whose windows macOS leaves where they are.
+        for predicted in [true, false] {
+            let (mut mac, editor, browser) = editor_on_both();
+            mac.still_elsewhere = true;
+            let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+            mac.run(actions);
+            assert!(mac.parked(1) && !mac.parked(2), "nothing moved");
+            if !predicted {
+                // Undone while still away: the model is back to what the screen shows.
+                let undo = mac.m.undo_ahead(&ahead);
+                mac.run(undo);
+                consistent(&mac);
+            }
+            // Desktop 1 comes, for window 1 (predicted) or another way (the browser in front).
+            mac.shown = 0;
+            mac.focused = Some(w(if predicted { 1 } else { 2 }));
+            let ahead = predicted.then_some(&ahead);
+            arrival(&mut mac, ahead, None);
+            consistent(&mac);
+            let want = if predicted { editor } else { browser };
+            assert_eq!(mac.m.main_active_stage(), Some(want), "predicted {predicted}");
+        }
+    }
+
+    #[test]
+    fn another_desktop_arriving_undoes_it_and_a_shown_desktop_is_left_as_it_is() {
+        // Arranged for Desktop 1, but Desktop 2 is recognized (the slide went elsewhere).
+        let (mut mac, _, browser) = editor_on_both();
+        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        mac.run(actions);
+        let at = arrival(&mut mac, Some(&ahead), None);
+        let off: Vec<&Action> =
+            at.iter().filter(|a| matches!(a, Action::Raise { .. } | Action::Focus { .. }) && !mac.on_screen(id_of(a))).collect();
+        assert!(off.is_empty(), "never a raise or focus on a Desktop not shown: {off:?}");
+        assert_eq!(mac.m.active_stage_in(ahead.space), Some(browser));
+        consistent(&mac);
+
+        // Arrived as predicted: undoing then changes nothing (what shows is right).
+        let (mut mac, editor, _) = editor_on_both();
+        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        mac.run(actions);
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        arrival(&mut mac, Some(&ahead), None);
+        assert!(mac.m.undo_ahead(&ahead).is_empty());
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+    }
+
+    fn id_of(a: &Action) -> u32 {
+        match *a {
+            Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id.0,
+            Action::StateChanged => 0,
+        }
+    }
+
+    #[test]
+    fn nothing_is_arranged_when_there_is_nothing_to_arrange_or_undo() {
+        let (mut mac, _, browser) = editor_on_both();
+        assert!(mac.m.arrange_ahead(w(3)).is_none(), "a window of the Desktop shown");
+        assert!(mac.m.arrange_ahead(w(2)).is_none(), "a window whose stage is already active there");
+        assert!(mac.m.arrange_ahead(w(99)).is_none(), "an unknown window");
+        // The stage active there holds no window: leaving it would drop it, nothing to undo to.
+        let space = mac.m.space_of(w(1)).expect("space");
+        let empty = mac.m.create_stage(space, None);
+        mac.m.active.insert(space, empty);
+        assert!(mac.m.arrange_ahead(w(1)).is_none());
+        mac.m.active.insert(space, browser);
+        assert!(mac.m.arrange_ahead(w(1)).is_some());
     }
 }

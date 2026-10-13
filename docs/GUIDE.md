@@ -175,7 +175,10 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   Space shows its strip (the first visit after launch groups its windows one stage per app,
   or as saved); a Dock click or ⌘Tab to an app may switch Spaces the way macOS's own
   setting says ("When switching to an application, switch to a Space with open windows for
-  the application", Desktop & Dock → Mission Control); we never fight it. A window moved to
+  the application", Desktop & Dock → Mission Control); we never fight it. When that lands
+  on a window waiting in another stage of the other Desktop, the Desktop comes with that
+  window's stage active, at once: no switch animation (the Desktop's slide is the motion), its
+  strip already in its final order. A window moved to
   another Space (Mission Control, or dragged across) leaves its stage and joins the current
   stage there. A window on every Space ("Assign To: All Desktops") is treated as pinned.
   Full-screen apps are Spaces of their own: no strip there; entering or leaving full screen
@@ -368,6 +371,7 @@ Changes apply live.
 | A new card (or a merge preview's windows) fading in | `cards.fade_ms` | 200 ms (not measured) |
 | A card dropped on a card shrinking into it | `drag.merge_ms` | 200 ms (an extension) |
 | Edge tab, drag ghosts, the moving snapshots' arrival and removal | none | at once, no fade (Apple shows none of these) |
+| A Desktop arriving (its strip, and the stage of the window a Dock click or ⌘Tab went there for) | none | at once: the Desktop's own slide is the motion |
 
 When the strip slides back in, after how long it hides again, and the edge's dwell are
 `[reveal]` delays, not animations: `speed` leaves them alone, as it does `cover_ms` and the
@@ -514,6 +518,7 @@ lines; the measurement is in `PLAN.md`, "Before public release"), far under the 
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
 | `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
 | `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-*`) and `debug-post-space` |
+| `STAGE_MANAGER_ARRANGE_AT_FOCUS` | `1`: arrange a Desktop for the window a Dock click or ⌘Tab goes to as soon as its focus comes, before macOS shows the Desktop (`0`: at the Space change notice, the default until the Spaces check's probe shows macOS moves windows of a Desktop not shown) |
 | `STAGE_MANAGER_NO_CAPTURE` | window captures off whatever `[strip] capture` says (test runs): no ScreenCaptureKit call, plain cards and ghosts |
 
 ## ctl socket
@@ -542,7 +547,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there; the refusal lists our own windows) |
 | `debug-hover X Y MS` | move the pointer to a global point and rest there (the strip's edge reveal; only with `STAGE_MANAGER_TEST=1`, same guard); the next synthetic click or drag puts the pointer back |
 | `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
-| `debug-frame ID X Y W H` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`) |
+| `debug-frame ID X Y W H [only]` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`); with `only`, set the frame and nothing else, for a window shown in its stage on any Desktop, the one shown or not (the Spaces check's probe; answers with the frame AX reads back) |
 | `debug-space left\|right [numpad]` | type "Move left/right a space" (the shortcut from Keyboard Shortcuts, posted at the HID tap) and answer once the engine has handled the Space change, or after 6 s with `"changed":false` (only with `STAGE_MANAGER_TEST=1`); `stage-manager debug-post-space left\|right` launched with `open -n` does the same once while the app is down |
 | `debug-expose mission-control\|app-windows\|show-desktop\|escape` | type Mission Control's own shortcut ("Mission Control", "Application windows", "Show Desktop" from Keyboard Shortcuts, posted at the HID tap), or Escape to leave; never changes the Desktop (only with `STAGE_MANAGER_TEST=1`) |
 | `debug-fullscreen ID on\|off` | put a `STAGE_MANAGER_ONLY` app's standard window in or out of full screen through Accessibility (`AXFullScreen`, else its full-screen button); any other window is refused (only with `STAGE_MANAGER_TEST=1`) |

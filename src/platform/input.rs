@@ -199,6 +199,11 @@ impl Triggers {
     pub fn consume(&mut self) {
         self.used = true;
     }
+
+    /// When the latest user action came (a mouse down or up, a key down in another app).
+    pub fn last_at(&self) -> Option<Instant> {
+        self.last.map(|(at, _)| at)
+    }
 }
 
 // ---------------------------------------------------------------------------------------

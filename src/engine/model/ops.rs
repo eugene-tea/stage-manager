@@ -209,21 +209,36 @@ impl Model {
     /// macOS switch Spaces). Pinned windows are untouched. In the strip the stage left behind
     /// takes the target's slot (or enters the strip if the target had none).
     pub fn switch_to(&mut self, target: StageId, obs: &Observation) -> Vec<Action> {
-        let mut actions = Vec::new();
         let Some(space) = self.stage(target).map(|s| s.space) else {
-            return actions;
+            return Vec::new();
         };
         if !self.is_shown_space(space) {
-            return actions;
+            return Vec::new();
         }
         let current = self.ensure_active(space);
         if current == target {
-            return actions;
+            return Vec::new();
         }
+        self.switch_in(space, current, target, Some(obs))
+    }
+
+    /// The body of a switch on `space` from its active stage `current` to `target`: `obs`
+    /// saves the live state of the stage left (none for a Desktop not shown, whose windows
+    /// keep the frames last recorded: [`Model::arrange_ahead`]).
+    pub(crate) fn switch_in(
+        &mut self,
+        space: SpaceId,
+        current: StageId,
+        target: StageId,
+        obs: Option<&Observation>,
+    ) -> Vec<Action> {
+        let mut actions = Vec::new();
         // Where the user saw the target's card, before anything changes (V2).
         let clicked = self.slot_showing(space, target);
         self.revealed.remove(&space);
-        self.capture(current, obs);
+        if let Some(obs) = obs {
+            self.capture(current, obs);
+        }
         self.park_stage(current, &mut actions);
         let t = self.tick();
         if let Some(s) = self.stage_mut(current) {

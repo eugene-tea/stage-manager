@@ -279,6 +279,27 @@ Ours:
   (`engine::focus_replay`); on arrival AX is asked for the focused window now and, when that
   names no window of the Desktop shown, the held one is replayed. A card click, a hotkey or
   a focus that acted forgets it.
+- The owner's log of 10-13 (the same case, after 6R): the focus at +0 ms (held, its Desktop
+  known), the Space change notice at +4 ms, the Desktop recognized at +64 ms (every app's
+  window list read again first), the switch sent at +80–86 ms, not animated (no transition
+  ran; the "stage switch" line counts any switch) but after the slide had begun: he saw the
+  Desktop slide in with its previous stage, then the switch. Its strip took over first in
+  the old order and the stage left faded into its slot 18 ms later. Now (round 6T) the
+  held window's stage goes out **at the notice**, as soon as the window server lists the
+  window on screen (its Desktop is the one sliding in), before the window lists are read
+  again; the recognition then finds it arranged (nothing moves), raises its windows and
+  focuses the window; the arriving Desktop's strip is redrawn at the notice too, in its
+  final order. Without a held window the arrival's switch is part of the arrival's own
+  batch, and the strip gets one snapshot for it. Either way the arriving strip is laid out
+  at once (no glide, no fade). Whether moves of a Desktop's windows sent before the slide (at the
+  focus) show during it depends on whether macOS carries out moves on a Desktop not shown;
+  the hands-free Spaces check probes it (`ctl debug-frame … only` on a Desktop 1 window
+  from Desktop 2) and samples the window server through the slide. The arrangement at the
+  focus (`STAGE_MANAGER_ARRANGE_AT_FOCUS=1`, off by default) waits for that proof. A wrong
+  prediction (another Desktop recognized, the user acting on the Desktop shown, another
+  focus held, a full-screen Space, no Space change within the hold) gives the Desktop back
+  its previous stage, slots and recency; windows brought back on a Desktop not shown stay
+  in the safety registry until seen there.
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
   Accessibility before bringing its app forward (never all its windows), so macOS has no
   reason to switch Spaces.
