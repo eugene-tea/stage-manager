@@ -28,6 +28,7 @@ pub mod names {
     pub const MINIMIZED: &str = "AXMinimized";
     pub const FULLSCREEN: &str = "AXFullScreen";
     pub const FULLSCREEN_BUTTON: &str = "AXFullScreenButton";
+    pub const CLOSE_BUTTON: &str = "AXCloseButton";
     pub const PRESS: &str = "AXPress";
     pub const HIDDEN: &str = "AXHidden";
     pub const FRONTMOST: &str = "AXFrontmost";
@@ -324,6 +325,11 @@ impl AxElement {
     /// Presses a window's full-screen button (the green button's full-screen action).
     pub fn press_fullscreen_button(&self) -> AxResult<()> {
         self.element_attr(names::FULLSCREEN_BUTTON)?.perform_action(names::PRESS)
+    }
+
+    /// Presses a window's close button (test support).
+    pub fn press_close_button(&self) -> AxResult<()> {
+        self.element_attr(names::CLOSE_BUTTON)?.perform_action(names::PRESS)
     }
 
     /// `AXHidden` of an application element (⌘H); an app without the attribute is shown.

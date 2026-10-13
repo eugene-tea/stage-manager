@@ -103,6 +103,9 @@ pub struct StripConfig {
     pub order: StripOrder,
     /// Show the active stage as a card (fixed order only).
     pub show_active: bool,
+    /// Hide the strip while a wallpaper click shows the desktop (an option; Apple keeps it
+    /// shown, as the way back to a stage). It comes back on any window activation.
+    pub hide_while_desktop_shown: bool,
     /// How many cards show.
     pub capacity: CapacityRule,
     /// Thumbnail refresh interval.
@@ -544,6 +547,7 @@ impl Config {
             strip: StripConfig {
                 order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
                 show_active: v.flag("strip.show_active"),
+                hide_while_desktop_shown: v.flag("strip.hide_while_desktop_shown"),
                 capacity: CapacityRule {
                     fixed: v.count("strip.capacity"),
                     pitch: v.num("strip.capacity_pitch"),
@@ -886,6 +890,7 @@ mod tests {
         assert!(c.windows.minimize_to_strip);
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
         assert!(c.style.reorder, "invisible until a card is dragged");
+        assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         let a = &c.style.animation;
         assert!(a.enabled && (a.spring_stiffness, a.spring_damping, a.spring_mass) == (240.0, 31.0, 1.0));
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
@@ -916,6 +921,7 @@ level = "above_windows"
 reorder = false
 show_active = true
 show_numbers = true
+hide_while_desktop_shown = true
 thumbnail_interval_ms = 2000
 capacity = 4
 
@@ -963,7 +969,7 @@ unpark_at = 0.9
         assert!(!c.style.reorder);
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert_eq!(c.strip.order, StripOrder::Fixed);
-        assert!(c.strip.show_active && c.style.show_numbers);
+        assert!(c.strip.show_active && c.style.show_numbers && c.strip.hide_while_desktop_shown);
         assert_eq!(c.strip.thumbnail_interval_ms, 2000);
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 4);
         assert_eq!(c.style.cards.tilt, Auto::Value(30.0));

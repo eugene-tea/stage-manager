@@ -163,6 +163,8 @@ pub const KEYS: &[KeyDef] = &[
     k("strip", "reorder", Kind::Bool, "true",
         "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
     k("strip", "show_active", Kind::Bool, "false", "Also show the active stage as a card (fixed order only; Apple never does)."),
+    k("strip", "hide_while_desktop_shown", Kind::Bool, "false",
+        "Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown."),
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
     k("strip", "show_names", Kind::Bool, "false", "Draw stage names under cards. Apple shows none."),
     k("strip", "width", f(60.0, 800.0), "200.0",
@@ -397,6 +399,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-2.toml"),
     include_str!("legacy/default-3.toml"),
     include_str!("legacy/default-4.toml"),
+    include_str!("legacy/default-5.toml"),
 ];
 
 #[cfg(test)]

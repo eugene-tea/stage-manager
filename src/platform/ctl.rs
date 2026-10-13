@@ -10,7 +10,7 @@
 //! topmost), `debug-frame ID X Y W H` sets a shown managed window's frame, `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen. `space` (any time) is the Space shown as the engine sees it.
+//! screen, and `debug-close ID` closes one (its close button). `space` (any time) is the Space shown as the engine sees it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -104,6 +104,12 @@ pub enum Command {
         /// In (true) or out (false).
         on: bool,
     },
+    /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
+    /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
+    DebugClose {
+        /// The window id.
+        id: u32,
+    },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -186,6 +192,10 @@ impl Command {
                     other => return Err(format!("expected on or off, got {other:?}")),
                 };
                 Ok(Self::DebugFullscreen { id, on })
+            }
+            ["debug-close", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugClose { id })
             }
             [] => Err("empty command".into()),
             _ => Err(format!("unknown command: {}", words.join(" "))),
@@ -356,6 +366,8 @@ mod tests {
         assert!(Command::parse("debug-space left fast").is_err());
         assert_eq!(Command::parse("debug-fullscreen 42 on"), Ok(Command::DebugFullscreen { id: 42, on: true }));
         assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
+        assert_eq!(Command::parse("debug-close 42"), Ok(Command::DebugClose { id: 42 }));
+        assert!(Command::parse("debug-close").is_err());
         assert!(Command::parse("debug-fullscreen 42 toggle").is_err());
         assert!(Command::parse("debug-fullscreen x on").is_err());
         assert!(Command::parse("debug-fullscreen 42").is_err());

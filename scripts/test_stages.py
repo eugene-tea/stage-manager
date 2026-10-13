@@ -13,7 +13,11 @@ synthetic click and shift-click on a card of the real strip; the click is posted
 only when its own strip window is topmost at that point), native (Apple's defaults with three
 more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
-along the whole path, and the pointer is put back), visible (by default, Apple's: no window
+along the whole path, and the pointer is put back; then wallpaper clicks with a Finder
+window of the test's own scratch folder: Finder's echo never brings its window back, card
+clicks while the desktop shows, a deliberate Finder activation, `[strip]
+hide_while_desktop_shown`; skipped while the owner has Finder windows open or Apple's own
+wallpaper click would act), visible (by default, Apple's: no window
 is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of the strip on
 first start, switch and creation, a too-wide one narrowed and given back its exact frame on
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
@@ -859,6 +863,227 @@ def phase_native():
     stop_app()
     all_onscreen("native quit")
     stop_all_fixtures()
+    native_wallpaper()
+
+
+# ----- native: wallpaper clicks and Finder ----------------------------------------------
+
+
+FINDER = "com.apple.finder"
+
+
+def wm_default(key):
+    """A `com.apple.WindowManager` value as text, or None when absent."""
+    r = subprocess.run(["defaults", "read", "com.apple.WindowManager", key], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def finder_windows():
+    """Finder's standard windows (layer 0; the desktop is below), on any Space."""
+    return [w for w in probe(FINDER)["windows"] if w["layer"] == 0]
+
+
+def finder_parked():
+    """Every Finder standard window sits in the park zone (and there is one)."""
+    p = probe(FINDER)
+    wins = [w for w in p["windows"] if w["layer"] == 0]
+    return bool(wins) and all(is_parked(w["bounds"], p["display"]) for w in wins)
+
+
+def shown(s, title):
+    """Window `title` is in the active stage and not parked."""
+    w = by_title(s).get(title)
+    return w is not None and not w["parked"] and w["home"] == s["active"]
+
+
+def switched_since_click():
+    """Lines since the first wallpaper click of this run that switched stages."""
+    text = log_text()
+    i = text.find("wallpaper click x=")
+    return [ln for ln in text[i:].splitlines() if "; switching" in ln] if i >= 0 else []
+
+
+def wallpaper_point(s, avoid):
+    """A point on the main display where only the wallpaper is (Finder's desktop window
+    topmost): right of the strip column, clear of every window in `avoid` (bounds) and of
+    the managed windows' saved frames. Found by asking the app to click there: it posts
+    nothing while another app's window is topmost, so a refused point costs nothing.
+    Returns the point clicked, or None."""
+    vis = s["display"]["visible"]
+    frames = avoid + [w["restore"] for w in s["windows"]]
+
+    def clear(x, y):
+        return not any(f["x"] - 20 <= x <= f["x"] + f["w"] + 20 and f["y"] - 20 <= y <= f["y"] + f["h"] + 20
+                       for f in frames)
+
+    x0 = vis["x"] + s["strip_width"] + 80
+    for y in range(int(vis["y"] + 120), int(vis["y"] + vis["h"] - 120), 140):
+        for x in range(int(vis["x"] + vis["w"] - 120), int(x0), -160):
+            if clear(x, y) and ctl("debug-click", x, y).get("ok"):
+                return x, y
+    return None
+
+
+def wallpaper_click(pt, what):
+    r = ctl("debug-click", *pt)
+    check(r.get("ok"), f"{what}: clicked the wallpaper ({r.get('error', 'ok')})")
+    time.sleep(1.5)  # past the reveal and Finder's echo
+    return state()
+
+
+def click_card(s, title, what):
+    """Clicks the card of the stage holding `title` (its drawn frame); True when posted."""
+    home = by_title(s)[title]["home"]
+    b = next((c["frame"] for c in s.get("strip_cards", []) if c["number"] == home), None)
+    r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2) if b else {"ok": False, "error": "no card drawn"}
+    return check(r.get("ok"), f"clicked {what} ({r.get('error', 'ok')}{whose(r.get('error'))})")
+
+
+def strip_titles(s):
+    """The strip, top to bottom, as each card's sorted window titles."""
+    st = stage_titles(s)
+    return [sorted(st.get(n, [])) for n in s["strip"]]
+
+
+def native_wallpaper():
+    """Apple's wallpaper click with Finder in play (the owner's report of 10-12: "Finder comes
+    back and leaves, back and leaves, on each desktop click"). macOS gives the desktop to
+    Finder, so each click activates Finder and may focus its window; that echo must never
+    bring Finder's window back. A second click brings back the stage the first revealed
+    (UX-SPEC), never Finder's. A card clicked while the desktop shows brings exactly that
+    stage; the other cards keep their order. A deliberate Finder activation (`open -b`: the
+    Dock's and the app switcher's path) brings Finder's stage, as Apple's does.
+
+    Finder is managed here (STAGE_MANAGER_ONLY gains com.apple.finder), so the sub-test runs
+    only when Finder has no window of its own: the test opens one on a scratch folder in the
+    test home, while the app runs, and closes it (through the app) at the end. It also needs
+    Apple's Stage Manager off and "Click wallpaper to reveal desktop" not set to Always
+    (macOS itself would move every window aside on the synthetic click)."""
+    say("-- wallpaper clicks with a Finder window (the test's own scratch folder)")
+    if wm_default("GloballyEnabled") == "1":
+        say("  skipped: Apple's Stage Manager is on; a real wallpaper click would act on every window")
+        return
+    if wm_default("EnableStandardClickToShowDesktop") == "1":
+        say("  skipped: \"Click wallpaper to reveal desktop\" is Always; macOS would move every window aside")
+        return
+    if finder_windows():
+        say(f"  skipped: Finder has {len(finder_windows())} window(s) of the owner's open; managing Finder would move them")
+        return
+    folder = os.path.join(HOME, "finder-scratch")
+    os.makedirs(folder, exist_ok=True)
+    env = {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_ONLY": ONLY + "," + FINDER}
+    try:
+        write_config(None)
+        start_extra("a", 1)
+        start_extra("b", 1)
+        activate("a")
+        time.sleep(1.0)
+        if not check(start_app(2, extra_env=env) is not None, "app up with Finder managed"):
+            return
+        subprocess.run(["open", folder], check=True)
+        s = wait_state(lambda x: any(w["bundle_id"] == FINDER for w in x["windows"]), "the scratch Finder window managed", 10)
+        if not check(s is not None and len(finder_windows()) == 1, "a Finder window on the scratch folder, managed"):
+            return
+        finder = next(w["title"] for w in s["windows"] if w["bundle_id"] == FINDER)
+        time.sleep(1.0)
+        activate("a")
+        s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
+        check(s is not None and not shown(s, finder) and finder_parked(),
+              f"Alpha's stage is shown; Finder's window sits parked in its own stage ({s and stage_titles(s)})")
+        alpha_frame = by_title(state())["Alpha 1"]["restore"]
+        time.sleep(1.0)
+        pt = wallpaper_point(state(), [w["bounds"] for w in finder_windows()])
+        if not check(pt is not None, "found a spot where only the wallpaper is (and clicked it)"):
+            return
+        time.sleep(1.5)
+
+        say("-- first click: the desktop; Finder's echo is ignored")
+        s = state()
+        check(s["desktop_revealed"] and not active_titles(s), f"the desktop is revealed ({stage_titles(s)})")
+        check(finder_parked(), "Finder's window stays parked")
+        check(by_title(s)["Alpha 1"]["parked"] and by_title(s)["Bravo 1"]["parked"], "every fixture window is parked")
+        check(["Alpha 1"] in strip_titles(s), "the revealed stage's card is in the strip")
+        check("after a wallpaper click: ignored" in log_text(), "Finder's activation or focus after the click was ignored")
+        check(not switched_since_click(), f"nothing switched after the click ({switched_since_click()})")
+        consistent("first wallpaper click")
+
+        say("-- second click: the revealed stage comes back (UX-SPEC), never Finder's")
+        s = wallpaper_click(pt, "second click")
+        check(shown(s, "Alpha 1"), f"Alpha's stage is back ({stage_titles(s)})")
+        check(finder_parked() and not shown(s, finder), "Finder's window stays parked")
+        consistent("second wallpaper click")
+
+        say("-- third click: the desktop again")
+        s = wallpaper_click(pt, "third click")
+        check(s["desktop_revealed"] and finder_parked() and by_title(s)["Alpha 1"]["parked"],
+              "the desktop is revealed again; Finder's window stays parked")
+        check(not switched_since_click(), f"no wallpaper click or echo switched stages ({switched_since_click()})")
+        consistent("third wallpaper click")
+
+        say("-- a card click while the desktop shows: the stage just revealed, as it was")
+        others = [c for c in strip_titles(s) if c != ["Alpha 1"]]
+        if click_card(s, "Alpha 1", "the revealed stage's card"):
+            time.sleep(1.5)  # past Finder's echo
+            s = state()
+            check(shown(s, "Alpha 1") and close(by_title(s)["Alpha 1"]["restore"], alpha_frame),
+                  "exactly that stage, at its frame")
+            check(finder_parked() and by_title(s)["Bravo 1"]["parked"], "every other window stays parked")
+            check(strip_titles(s) == others, f"the other cards keep their order ({strip_titles(s)} vs {others})")
+            consistent("card click while revealed")
+
+        say("-- a card click while the desktop shows: another stage")
+        s = wallpaper_click(pt, "fourth click")
+        others = [c for c in strip_titles(s) if c != ["Bravo 1"]]
+        if click_card(s, "Bravo 1", "Bravo's card"):
+            time.sleep(1.5)
+            s = state()
+            check(shown(s, "Bravo 1"), "exactly Bravo's stage, no bounce")
+            check(finder_parked() and by_title(s)["Alpha 1"]["parked"], "every other window stays parked")
+            check(strip_titles(s) == others, f"the other cards keep their order ({strip_titles(s)} vs {others})")
+            consistent("second card click while revealed")
+
+        say("-- a deliberate Finder activation brings Finder's stage")
+        wallpaper_click(pt, "fifth click")
+        time.sleep(0.5)  # well past the click's echo
+        subprocess.run(["open", "-b", FINDER], check=True)
+        s = wait_state(lambda x: shown(x, finder), "Finder's stage after open -b", timeout=4)
+        check(s is not None and not finder_parked(),
+              "open -b com.apple.finder with the desktop shown: Finder's stage comes (Apple's Dock click)")
+        activate("b")
+        wait_state(lambda x: shown(x, "Bravo 1"), "Bravo's stage")
+        time.sleep(1.0)
+        subprocess.run(["open", "-b", FINDER], check=True)
+        s = wait_state(lambda x: shown(x, finder), "Finder's stage after open -b", timeout=4)
+        check(s is not None and not finder_parked() and by_title(s)["Bravo 1"]["parked"],
+              "open -b com.apple.finder from another app: Finder's stage comes (Apple's app switcher)")
+        check(len(finder_windows()) == 1, f"no new Finder window ({len(finder_windows())})")
+
+        say("-- [strip] hide_while_desktop_shown = true")
+        with open(os.path.join(HOME, "config.toml"), "w") as f:
+            f.write("[strip]\nhide_while_desktop_shown = true\n")
+        do("reload")
+        activate("a")
+        wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
+        time.sleep(1.0)
+        s = wallpaper_click(pt, "click with the option on")
+        check(s["desktop_revealed"] and s["strip_hidden_for_desktop"], "the strip hides while the desktop shows")
+        check(finder_parked() and s["strip_hidden_for_desktop"], "Finder's echo changes nothing (the strip stays hidden)")
+        activate("b")
+        s = wait_state(lambda x: not x["strip_hidden_for_desktop"], "the strip back")
+        check(s is not None and shown(s, "Bravo 1"), "an activation brings the strip back with its stage")
+    finally:
+        # The test's own Finder window goes (through our app, while it runs), then the app.
+        for w in finder_windows():
+            r = ctl("debug-close", w["id"])
+            if not r.get("ok"):
+                say(f"  could not close Finder window {w['id']}: {r}")
+        wait_until(lambda: not finder_windows(), 5, "the scratch Finder window to close")
+        stop_app()
+        check(not finder_windows(), "the scratch Finder window is closed")
+        all_onscreen("wallpaper quit")
+        stop_all_fixtures()
+        write_config(None)
+        subprocess.run(["rm", "-rf", folder])
 
 
 # ----- motion: strip level, drops into a slot, card reorder, switch animation -----------
