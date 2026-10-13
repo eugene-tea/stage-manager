@@ -5,6 +5,7 @@
 
 pub mod desktop_echo;
 pub mod displays;
+pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
 pub mod guard_watch;

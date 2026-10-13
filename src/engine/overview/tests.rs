@@ -41,8 +41,13 @@ fn sightings(list: &[W]) -> Vec<Sighting<'static>> {
         .collect()
 }
 
-fn seen(list: &[W]) -> Option<Overview> {
+fn seen(list: &[W]) -> Sight {
     overview_in(sightings(list), D)
+}
+
+/// The overview one listing says shows by itself (without what showed before).
+fn told(list: &[W]) -> Option<Overview> {
+    seen(list).overview
 }
 
 /// App windows (layer 0, ours to know) listed on screen.
@@ -176,35 +181,51 @@ fn nothing_shows_on_a_plain_desktop() {
         STRIP,
         fx(48717, 300.0, 218.0),
     ];
-    assert_eq!(seen(&plain), None);
+    assert_eq!(seen(&plain), Sight::default());
     // Listed but off screen does not count.
     let mut off = sightings(&[DOCK, WM19]);
     for s in &mut off {
         s.onscreen = false;
     }
-    assert_eq!(overview_in(off, D), None);
+    assert_eq!(overview_in(off, D), Sight::default());
 }
 
 #[test]
 fn the_recorded_overviews_are_told() {
     let mc = mission_control();
-    assert_eq!(seen(at(&mc, 0)), None);
-    for t in [100, 450, 1528, 1779, 1841, 2014] {
-        assert_eq!(seen(at(&mc, t)), Some(Overview::MissionControl), "Mission Control at {t} ms");
+    assert_eq!(seen(at(&mc, 0)), Sight::default());
+    for t in [100, 450, 1528, 1779] {
+        assert_eq!(told(at(&mc, t)), Some(Overview::MissionControl), "Mission Control at {t} ms");
     }
-    assert_eq!(seen(at(&mc, 2132)), None);
+    // Its exit: WindowManager's window has gone, the Dock's is still listed. By itself that
+    // is no overview (the Dock brought up looks the same); the watch carries it.
+    for t in [1841, 2014] {
+        assert_eq!(seen(at(&mc, t)), Sight { overview: None, dock_cover: true }, "Mission Control's exit at {t} ms");
+    }
+    assert_eq!(seen(at(&mc, 2132)), Sight::default());
+    let mut w = OverviewWatch::default();
+    let t0 = Instant::now();
+    for (t, list) in &mc {
+        w.see(seen(list), ms(t0, *t));
+        let shows = (100..2132).contains(t);
+        assert_eq!(w.showing(), shows.then_some(Overview::MissionControl), "the watch at {t} ms");
+    }
     let ax = app_expose();
-    for t in [41, 429, 1575, 1738, 1789] {
-        assert_eq!(seen(at(&ax, t)), Some(Overview::MissionControl), "App Exposé at {t} ms");
+    for t in [41, 429, 1575, 1738] {
+        assert_eq!(told(at(&ax, t)), Some(Overview::MissionControl), "App Exposé at {t} ms");
     }
-    assert_eq!(seen(at(&ax, 2120)), None);
+    assert_eq!(seen(at(&ax, 1789)), Sight { overview: None, dock_cover: true });
+    assert_eq!(seen(at(&ax, 2120)), Sight::default());
     let sd = show_desktop();
     for t in [0, 70, 356, 4800, 5015] {
-        assert_eq!(seen(at(&sd, t)), Some(Overview::ShowDesktop), "Show Desktop at {t} ms");
+        assert_eq!(told(at(&sd, t)), Some(Overview::ShowDesktop), "Show Desktop at {t} ms");
     }
-    assert_eq!(seen(at(&sd, 5072)), None);
+    assert_eq!(seen(at(&sd, 5072)), Sight::default());
     // On another display's frame nothing covers.
-    assert_eq!(overview_in(sightings(&[DOCK, WM19]), Rect::new(2560.0, 0.0, 1920.0, 1080.0)), None);
+    assert_eq!(overview_in(sightings(&[DOCK, WM19]), Rect::new(2560.0, 0.0, 1920.0, 1080.0)), Sight::default());
+    // Mission Control over Show Desktop: Mission Control.
+    assert_eq!(told(&[WM18, WM19, DOCK]), Some(Overview::MissionControl));
+    assert_eq!(told(&[WM19, WM18]), Some(Overview::MissionControl));
 }
 
 #[test]
@@ -357,4 +378,59 @@ fn a_desktop_clicked_in_mission_control_is_handled_once_it_has_closed() {
     assert_eq!(app_windows(at(&frames, arrived)), vec![48720], "the list shows only the clicked Desktop's window");
     // Inference stays frozen a little longer than the arrival waits.
     assert!(w.freezes(ms(t0, arrived)));
+}
+
+/// The owner's Dock (auto-hide on) brought up by the pointer resting on the bottom edge
+/// (recorded 10-12 20:44 on his Mac, passively: only the Dock's and WindowManager's windows):
+/// the Dock lists its full-display layer-20 window from 300 ms after the pointer reached the
+/// edge until it hid again 2.9 s later, with no WindowManager window above layer 0.
+fn dock_brought_up(shown_from: u64, hidden_at: u64) -> Vec<Frame> {
+    let desk = || vec![MENU, STRIP, W("WindowManager", -2147483624, 0.0, 0.0, 2560.0, 1440.0, 0), fx(48717, 300.0, 218.0)];
+    vec![(0, desk()), (shown_from, [vec![DOCK], desk()].concat()), (hidden_at, desk()), (hidden_at + 8000, desk())]
+}
+
+#[test]
+fn the_dock_brought_up_is_no_overview() {
+    let frames = dock_brought_up(300, 3185);
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    for t in (0..=6000).step_by(25) {
+        assert_eq!(w.see(seen(at(&frames, t)), ms(t0, t)), Change::None, "nothing begins at {t} ms");
+        assert!(!w.freezes(ms(t0, t)) && !w.holds_arrival(ms(t0, t)), "nothing waits at {t} ms");
+    }
+    // A Dock click that changes Desktops while the Dock is up (the owner's log of 10-12,
+    // 20:36:23): the change is handled at once, never held for an overview.
+    let mut w = OverviewWatch::default();
+    w.see(seen(&[DOCK, MENU]), t0);
+    assert!(!w.holds_arrival(t0));
+    // Windows of another Desktop listed while the Dock is up still count (a change the
+    // notification missed is recognized as before).
+    let homes: BTreeMap<u32, u8> = [(48666, 2), (48652, 1)].into();
+    let missed: Vec<Frame> = vec![(0, vec![MENU, fx(48666, 300.0, 218.0)]), (500, vec![DOCK, MENU, fx(48652, 80.0, 78.0)])];
+    assert_eq!(replay(&missed, &homes, 2, 0, 3000), vec![2000]);
+}
+
+#[test]
+fn the_dock_brought_up_during_an_overview_exit_ends_with_it() {
+    // App Exposé's exit with the pointer then resting on the Dock: the Dock's window stays
+    // listed; the overview still ends a moment later (the Stuck cap is the backstop), and an
+    // overview that begins later is told from WindowManager's window again.
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    w.see(seen(&[DOCK, WM19]), t0);
+    assert_eq!(w.showing(), Some(Overview::MissionControl));
+    assert_eq!(w.see(seen(&[DOCK]), ms(t0, 1000)), Change::None, "its exit is carried");
+    assert_eq!(w.see(seen(&[MENU]), ms(t0, 1200)), Change::Ended(Overview::MissionControl));
+    assert_eq!(w.see(seen(&[DOCK]), ms(t0, 1300)), Change::None, "the Dock alone does not bring it back");
+    assert!(!w.freezes(ms(t0, 2300)));
+    // The pointer holds the Dock up after the exit: carried only for the exit's length.
+    let mut w = OverviewWatch::default();
+    w.see(seen(&[DOCK, WM19]), t0);
+    assert_eq!(w.see(seen(&[DOCK]), ms(t0, 1400)), Change::None);
+    assert_eq!(w.see(seen(&[DOCK]), ms(t0, 1500)), Change::Ended(Overview::MissionControl), "not for as long as the Dock is up");
+    assert!(!w.freezes(ms(t0, 2500)));
+    // Show Desktop is never carried by the Dock.
+    let mut w = OverviewWatch::default();
+    w.see(seen(&[WM18]), t0);
+    assert_eq!(w.see(seen(&[DOCK]), ms(t0, 500)), Change::Ended(Overview::ShowDesktop));
 }

@@ -94,9 +94,10 @@ rules (a 1–2 pt reading error on screenshots):
   icon 36 pt right. No badge, no name.
 - **Thumbnail edge.** Corners about 4 pt; a thin light edge; a soft shadow about 4 pt.
 - **Hover.** The card under the pointer grows **6 %** about its center (Fork 159 × 161 →
-  168 × 171, both edges moving), in about **200 ms**, eased out.
-- **Slide.** Hiding moves the cards **286 pt** left (x 15 → −271) on the same spring as the
-  transitions (50 % at ~100 ms, 90 % at ~220 ms, settled by ~500 ms); showing reverses it.
+  168 × 171, both edges moving), in about **210 ms**, eased out (see "Transitions").
+- **Slide.** Hiding moves the cards **286 pt** left (x 15 → −271) on a spring close to the
+  transitions' (ω ≈ 16.8: 50 % at ~100 ms, 90 % at ~235 ms, 99 % at ~400 ms); showing
+  reverses it.
 - **Count.** 5 cards at 1130 pt of visible height, 6 at 1410 pt.
 
 Our strip is checked against these numbers in `ui::strip_layout`'s tests (every stable box
@@ -147,19 +148,46 @@ them 79–93 pt and 75–90 pt.
 
 ## Transitions
 
-- **Trigger:** a card click acts on **mouse-up**. Motion starts within one frame.
-  Activations from the Dock or ⌘Tab start about **110–200 ms** after the input, after the
-  app activates. Ours: a card click or hotkey makes the new stage's app frontmost and its
-  key window main at once, with the parks; the windows themselves arrive behind their
-  growing snapshots, so keystrokes typed during the animation already go to the new stage
-  (before 10-12 the focus waited ~430 ms for the snapshots). Typing does not cut the
-  animation short.
-- **Curve:** incoming windows grow from their card to their saved frame along a
-  **critically damped spring, ω ≈ 15.5 rad/s**. Progress is about 2 % at 20 ms, 14 % at
-  55 ms, 50 % at 110–120 ms, 90 % at 250 ms and 99 % at 400–430 ms. It is fully settled by
-  about 500 ms, with no overshoot. Outgoing windows shrink into their slot on the same curve.
-  As a `CASpringAnimation`: mass 1, stiffness 240, damping 31.
-- **Other cards** glide to their new slots on the same curve.
+Measured 10-12 (round 6R) on the laptop session (`session.jsonl`: every window's bounds and
+the pointer at ~120 Hz while the owner used Apple's Stage Manager, 1800 × 1169 pt; 61
+incoming and 24 outgoing windows over the strip clicks, 37 incoming fitted cleanly; 198 card
+glides, 155 strip slides, 135 hovers, 12 presses). Every number is a config key with this
+value as its default (`docs/GUIDE.md`, "Animations"); `[animation] speed` scales them all.
+
+- **Press.** On **mouse-down** the pressed card answers within one to four frames (median
+  first change 24 ms after the press): it eases back from its hover growth to a little under
+  its resting size (0.987), 50 % at 36 ms, 90 % at 72 ms, done by ~100 ms
+  (`[cards] press_scale`, `press_ms`). Ours: the same, from the strip's own mouse-down (no
+  round trip), and the incoming snapshots later grow from the card as pressed.
+- **Trigger.** The switch itself acts on **mouse-up**: the first frame of motion is one
+  frame after the release (median 13 ms incoming, 15 ms outgoing). Activations from the
+  Dock or ⌘Tab start about **110–200 ms** after the input, after the app activates. Ours: a
+  card click or hotkey makes the new stage's app frontmost and its key window main at once,
+  with the parks; the windows themselves arrive behind their growing snapshots, so
+  keystrokes typed during the animation already go to the new stage. Typing does not cut the
+  animation short. The windows' frames are read through AX at the press (`CardPressed`), so
+  the release goes straight to the motion (the owner's log of 10-12: ~10 ms of AX reads
+  after the release before any motion); the strip logs how long each transition waited for
+  the main thread (`queued_ms`; his Dock click waited 70 ms once, cause not known yet).
+- **Curve.** Incoming windows grow from their card to their frame along a **critically
+  damped spring, ω ≈ 16.5 rad/s** (stiffness 272, damping 33, mass 1; pooled fit over 37
+  windows, rms 0.021; per window ω 16.4–17.0). Median progress after the mouse-up: 13 % at
+  50 ms, 40 % at 100 ms, 66 % at 150 ms, 82 % at 200 ms, 91 % at 250 ms, 96 % at 300 ms,
+  99 % at 400 ms, 99.8 % at 500 ms (99 % ~405 ms after the motion starts; 99.9 % at ~556 ms
+  after the release). No overshoot. Outgoing windows shrink into their slot on the same
+  curve (50 % at 89 ms, 90 % at 208 ms from the release). Before 10-12 ours used ω 15.5
+  (stiffness 240, damping 31): 99 % ~30 ms later than Apple's, and started ~2 frames later.
+- **Other cards** glide to their new slots on a spring of **ω ≈ 17.0** (stiffness 289,
+  damping 34; 50 % at 89 ms, 90 % at 228 ms, 99 % at 375 ms), `[motion] spring_*`.
+- **Slide.** The strip slides out and back in on **ω ≈ 16.8** (stiffness 282, damping 33.6;
+  50 % at 102 ms, 90 % at 237 ms, 99 % at 400 ms), `[motion] slide_*`.
+- **Hover.** Grows 6 % in **~210 ms** eased out (median 208 ms growing, 220 ms shrinking;
+  50 % at 76 ms), `[cards] hover_ms`.
+- Ours vs Apple's for a card click, from the release (expected from the parts; not yet
+  measured live, round 6R ran no live phase): the motion starts one to two frames after it
+  (Apple's one), 99 % at ~410 ms (Apple's ~405), the incoming window in place behind its
+  snapshot at 99 % (`unpark_at`). Before 10-12 the owner's log showed ~450–520 ms from the
+  click to the window in place.
 - Switching Spaces (not Stage Manager) slides the whole screen 2609 pt in about 230–310 ms;
   every Space has its own strip (see "Spaces").
 
@@ -213,7 +241,9 @@ Native (Apple's Stage Manager guide; the 5K session; the owner's report of 10-12
 - **Full-screen apps** are Spaces of their own, with no strip.
 - **Dock and ⌘Tab** may switch Spaces according to macOS's own setting ("When switching to
   an application, switch to a Space with open windows for the application", Desktop & Dock
-  → Mission Control). Stage Manager follows; it never fights it.
+  → Mission Control). Stage Manager follows; it never fights it. A Dock click, ⌘Tab or
+  activation that lands on a window of another Desktop shows that Desktop with **that
+  window's stage** active.
 - Switching Spaces slides the whole screen (2609 pt in about 230–310 ms at 5K); the new
   Space's strip slides in with it.
 
@@ -239,6 +269,16 @@ Ours:
   Space changes in a row, the last back where it came from (a window moved to another
   Desktop and straight back looks the same for two, and stays an ordinary window). A
   window in full screen still belongs to its Desktop: it never counts as missing there.
+- Arriving on a Desktop through an app (Dock, ⌘Tab, an activation), its window's stage
+  comes at once (no animation: the Desktop's slide just showed it), whatever order macOS's
+  events came in. The owner's log of 10-12 (VS Code with a window on each Desktop, his Dock
+  click): the window's focus came ~40 ms before the Space change notice and ~0.7 s before
+  the Desktop was recognized, and was lost, so the Desktop came up with its previous stage.
+  Now a focus or activation that cannot act yet (its window on a Desktop not shown, not
+  known yet, or a Space change settling) is held for up to 3 s
+  (`engine::focus_replay`); on arrival AX is asked for the focused window now and, when that
+  names no window of the Desktop shown, the held one is replayed. A card click, a hotkey or
+  a focus that acted forgets it.
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through
   Accessibility before bringing its app forward (never all its windows), so macOS has no
   reason to switch Spaces.
@@ -275,7 +315,12 @@ Ours:
   the Desktop's windows slid off the display), so nothing is inferred from the list then and
   for a second after (`engine::overview`; they are told by macOS's own windows covering the
   display, measured 10-12: the Dock's at layer 20 and WindowManager's at 19 for Mission
-  Control and App Exposé, WindowManager's at 18 for Show Desktop). Windows of another
+  Control and App Exposé, WindowManager's at 18 for Show Desktop). WindowManager's window
+  tells them: the Dock's full-display window alone is an auto-hiding Dock brought up by the
+  pointer (measured 10-12 on the owner's Mac: listed 2.9 s while the pointer rested on the
+  bottom edge, no WindowManager window with it; before round 6R every Dock click to another
+  Desktop was read as Mission Control and held the arrival), and it only carries a Mission
+  Control already shown through its exit (at most 1.5 s). Windows of another
   Desktop on screen count only when seen at two checks a second apart. A Desktop clicked in
   Mission Control comes with its notification and is recognized once Mission Control has
   closed.
@@ -302,7 +347,7 @@ Ours:
    appear exactly over them, the windows park behind them, and the snapshots shrink into
    the slot of their stage's card; the incoming windows' snapshots grow from their card to
    their frames, and the windows come back behind them at 99 % of the motion
-   (`unpark_at`, ~430 ms); the snapshots go and the outgoing stage's card appears in the
+   (`unpark_at`, ~400 ms); the snapshots go and the outgoing stage's card appears in the
    same frame once they have landed. The incoming snapshots start within a frame or two of
    the mouse-up; the outgoing ones hold still over their windows until those have parked
    (`cover_ms` plus the parks, about two to four frames), so no real window ever peeks out
@@ -311,7 +356,7 @@ Ours:
    snapshot of each shown window is kept fresh every `snapshot_interval_ms`, 2 s, and at
    once when the pointer reaches or presses a card or ⌘ goes down for the app switcher, and
    a window's last one before it parks is what grows back), so content that changed since
-   jumps when the motion ends; and during the ~430 ms an incoming window is not yet
+   jumps when the motion ends; and during the ~400 ms an incoming window is not yet
    clickable (a click or key press brings every incoming window in at once, and a click
    where one is arriving is never taken as a wallpaper click).
 2. **Thumbnails are snapshots**, refreshed every 1–2 s through ScreenCaptureKit, not live
@@ -353,7 +398,8 @@ Ours:
 ## Still to measure
 
 The edge-reveal and auto-hide delays (the laptop session's slide-ins followed window moves,
-not the edge), a hover's exact easing, Shift-click on a card holding several apps (ours
+not the edge), a hover's exact easing (ours: ease-out over the measured duration), a new
+card's fade, Shift-click on a card holding several apps (ours
 merges the whole card), Apple's thumbnail shadow and corner radius beyond what the
 screenshots show (ours: about 4 pt each), and the moving windows' shadow during a switch
 (ours: `[animation] shadow_*`, a guess).

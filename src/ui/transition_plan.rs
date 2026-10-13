@@ -102,7 +102,7 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
         return None;
     }
     outgoing.reverse();
-    Some(Transition { id, outgoing, incoming })
+    Some(Transition { id, outgoing, incoming, sent: None })
 }
 
 /// The stage ids of `slots`, top to bottom (for the logs).

@@ -30,7 +30,8 @@ would manage the fixtures). Guided prompts say exactly what to do; answer with R
 
 Checks: each Desktop has its own stages and strip; the same app has stages on both; a card
 click on Desktop 2 switches stages and never changes the Desktop (the strip panel is on the
-Desktop shown); going back shows Desktop 1's stages; quit with a window parked on the other
+Desktop shown); activating an app whose window waits parked on Desktop 1 (a Dock click,
+Cmd-Tab) shows Desktop 1 with that window's stage active; going back shows Desktop 1's stages; quit with a window parked on the other
 Desktop brings it back (Accessibility reaching another Space); a relaunch rebuilds both
 Desktops' stages; kill -9 with a window parked on the other Desktop: the guardian waits,
 says what for, brings it back as soon as you go there (on screen outside the park zone for a
@@ -561,7 +562,10 @@ planned steps (hands-free):
               user's shortcuts; a fixture frontmost first); while it shows the window server no longer
               lists the strip on screen; by eye: screenshot; ctl debug-expose escape; same Desktop, the
               strip back and drawn as before, a card click switches, each Desktop's pane on its own Desktop
-  back        ctl debug-space <back> to Desktop 1; checks as guided (Desktop 2's pane stays there)
+  activation  on Desktop 2: open Alpha (its only window parked in an inactive stage of Desktop 1);
+              checks: Desktop 1 comes up with Alpha 1's stage active, and it stays
+  back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
+              (Desktop 2's pane stays there)
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
   guardian    debug-space <back> to Desktop 1; kill -9 the app; checks: still parked, the guardian waits;
               `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
@@ -689,6 +693,11 @@ def run():
         WATCH.markers("d1", [w["id"] for w in probe_all() if w["onscreen"]])
         WATCH.desk("d1")
     check(len(s["stages"]) == 2, f"two stages on Desktop 1 ({ts.stage_titles(s)})")
+    # The Fixture stage active, so Alpha 1 waits parked in its own stage (for the activation
+    # check from Desktop 2).
+    fixture_stage = stage_holding(s, "Fixture 1")
+    if fixture_stage and s["active"] != fixture_stage:
+        ctl("switch", fixture_stage)
 
     say("\n== Desktop 2: Fixture 3 (the same app) and Bravo 1 ==")
     if AUTO:
@@ -757,8 +766,12 @@ def run():
     say("\n== Mission Control and App Exposé on Desktop 2: the strip hides, then comes back ==")
     expose_on_desktop_2(d1, d2)
 
+    say("\n== an activation that lands on a window of Desktop 1 shows that window's stage ==")
+    activation_to_desktop_1(d1, d2)
+
     say("\n== back on Desktop 1 ==")
-    go("d1", "Switch back to Desktop 1 (Control-Left Arrow)")
+    if current_space() != d1:
+        go("d1", "Switch back to Desktop 1 (Control-Left Arrow)")
     s = ts.wait_state(lambda x: x["space"] == d1, "Desktop 1 recognized", timeout=5)
     check(s is not None, "Desktop 1 recognized by its windows")
     if s:
@@ -888,6 +901,49 @@ def run():
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "the end: no fixture window parked on any Desktop")
+
+
+def stage_holding(s, title):
+    """The number of the stage holding the window titled `title` (None when there is none)."""
+    ids = [w["id"] for w in s["windows"] if w["title"] == title]
+    return next((st["number"] for st in s["stages"] if ids and ids[0] in st["windows"]), None)
+
+
+def activation_to_desktop_1(d1, d2):
+    """Round 6R, the owner's bug: from Desktop 2, Alpha (whose only window waits parked in an
+    inactive stage of Desktop 1) is activated, as a Dock click or Cmd-Tab does; macOS shows
+    Desktop 1 with Alpha 1 focused, and Desktop 1 must come up with Alpha 1's stage active
+    (Apple's), not the stage that was active when it was left. Its focus may come before the
+    Space change notice, during it, or after it; the arrival asks AX and replays what was held."""
+    s = state()
+    alpha = next((w for w in s["windows"] if w["title"] == "Alpha 1"), None)
+    if not check(alpha is not None and alpha["space"] == d1, f"Alpha 1 lives on Desktop 1 ({alpha and alpha['space']})"):
+        return
+    check(alpha["parked"], "Alpha 1 waits parked in an inactive stage of Desktop 1")
+    if AUTO:
+        WATCH.pause()
+        say(f"    activating {os.path.basename(ts.EXTRA['a'][1])} (open, as a Dock click does)")
+        subprocess.run(["open", ts.EXTRA["a"][1]], capture_output=True)
+    else:
+        ask(f"Click {os.path.basename(ts.EXTRA['a'][1])[:-4]} in the Dock (or Cmd-Tab to it): macOS goes to Desktop 1")
+
+    def arrived():
+        x = state()
+        if x.get("space") != d1:
+            return None
+        w = next((w for w in x["windows"] if w["title"] == "Alpha 1"), None)
+        return x if w and not w["parked"] and x["active"] == stage_holding(x, "Alpha 1") else None
+
+    s = ts.wait_until(arrived, 6, "Desktop 1 with Alpha 1's stage active")
+    if AUTO:
+        WATCH.desk("d1" if current_space() == d1 else "d2")
+    check(s is not None, "Desktop 1 came up with the activated window's stage active (Alpha 1 shown, not parked)"
+          + ("" if s else f" (now: space {state().get('space')}, active {state().get('active')}, "
+                          f"stages {ts.stage_titles(state())})"))
+    if s:
+        time.sleep(1.5)  # past the once-a-second checks: it stays
+        x = state()
+        check(x["space"] == d1 and x["active"] == stage_holding(x, "Alpha 1"), "Alpha 1's stage stays active")
 
 
 def expose_on_desktop_2(d1, d2):
