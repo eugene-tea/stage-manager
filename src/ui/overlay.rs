@@ -162,10 +162,36 @@ impl Ghost {
     }
 }
 
+/// The overlay's panel: click-through, transparent, above every window.
+fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        rect,
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHasShadow(false);
+    panel.setLevel(NSStatusWindowLevel);
+    panel.setIgnoresMouseEvents(true);
+    // On the active Space only: it moves there when shown, and is renewed on a Space change.
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::MoveToActiveSpace
+            | NSWindowCollectionBehavior::Transient
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    panel.setHidesOnDeactivate(false);
+    // SAFETY: the panel is owned by the overlay, which closes it when it is replaced.
+    unsafe { panel.setReleasedWhenClosed(false) };
+    panel
+}
+
 /// The overlay panel and its perspective container.
 pub struct Overlay {
     panel: Retained<NSPanel>,
-    _view: Retained<NSView>,
+    view: Retained<NSView>,
     root: Retained<CALayer>,
     space: Retained<CALayer>,
     /// The overlay's top-left corner, global coordinates.
@@ -177,27 +203,7 @@ impl Overlay {
     /// Creates the overlay (hidden).
     pub fn new(mtm: MainThreadMarker) -> Self {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(100.0, 100.0));
-        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            rect,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
-        panel.setOpaque(false);
-        panel.setBackgroundColor(Some(&NSColor::clearColor()));
-        panel.setHasShadow(false);
-        panel.setLevel(NSStatusWindowLevel);
-        panel.setIgnoresMouseEvents(true);
-        // On the active Space only: it moves there when shown.
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::MoveToActiveSpace
-                | NSWindowCollectionBehavior::Transient
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        panel.setHidesOnDeactivate(false);
-        // SAFETY: the panel is owned by the overlay for the life of the app.
-        unsafe { panel.setReleasedWhenClosed(false) };
+        let panel = make_panel(mtm, rect);
         let view = NSView::initWithFrame(NSView::alloc(mtm), rect);
         let root = CALayer::new();
         root.setGeometryFlipped(true);
@@ -206,7 +212,7 @@ impl Overlay {
         let space = CALayer::new();
         root.addSublayer(&space);
         panel.setContentView(Some(&view));
-        Self { panel, _view: view, root, space, origin: Point::new(0.0, 0.0), shown: false }
+        Self { panel, view, root, space, origin: Point::new(0.0, 0.0), shown: false }
     }
 
     /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them) and sets
@@ -245,6 +251,18 @@ impl Overlay {
             self.shown = true;
             self.panel.orderFrontRegardless();
         }
+    }
+
+    /// A hidden overlay moves its view to a fresh panel (never ordered in yet, so it goes to
+    /// the Space shown when it is), keeping its frame; a shown one stays as it is.
+    pub fn renew(&mut self, mtm: MainThreadMarker) {
+        if self.shown {
+            return;
+        }
+        let panel = make_panel(mtm, self.panel.frame());
+        panel.setContentView(Some(&self.view));
+        let old = std::mem::replace(&mut self.panel, panel);
+        old.close();
     }
 
     /// Hides the overlay.

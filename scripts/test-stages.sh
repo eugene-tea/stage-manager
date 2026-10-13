@@ -27,14 +27,21 @@ SUFFIX="${FIX_ID##*.}"
 FIX_NAME="SM Fixture $(tr '[:lower:]' '[:upper:]' <<<"${SUFFIX:0:1}")${SUFFIX:1}"
 if [ -z "${SKIP_BUILD:-}" ]; then
   make sign >/dev/null || { echo "build failed" >&2; exit 1; }
-  # The main fixture, plus three apps for the native phase (<id>.a, .b, .c).
-  for k in "" a b c; do
-    if [ -z "$k" ]; then id="$FIX_ID"; app="target/$FIX_NAME.app"
-    else id="$FIX_ID.$k"; app="target/$FIX_NAME $(tr '[:lower:]' '[:upper:]' <<<"$k").app"; fi
-    FIXTURE_ID="$id" FIXTURE_APP="$app" scripts/bundle.sh fixture >/dev/null || exit 1
-    scripts/sign.sh "$app" >/dev/null || exit 1
-  done
 fi
+# The main fixture, plus three apps for the native phase (<id>.a, .b, .c). Built every run,
+# and with SKIP_BUILD whenever one is missing or older than its source: an old fixture
+# ignores the signals newer drills send it (SIGWINCH and SIGINFO are ignored by default).
+for k in "" a b c; do
+  if [ -z "$k" ]; then id="$FIX_ID"; app="target/$FIX_NAME.app"
+  else id="$FIX_ID.$k"; app="target/$FIX_NAME $(tr '[:lower:]' '[:upper:]' <<<"$k").app"; fi
+  exe="$app/Contents/MacOS/sm-fixture"
+  if [ -n "${SKIP_BUILD:-}" ] && [ -x "$exe" ] && [ ! scripts/fixture/main.swift -nt "$exe" ]; then
+    continue
+  fi
+  [ -n "${SKIP_BUILD:-}" ] && echo "SKIP_BUILD: $app is missing or older than scripts/fixture; rebuilding it" >&2
+  FIXTURE_ID="$id" FIXTURE_APP="$app" scripts/bundle.sh fixture >/dev/null || exit 1
+  scripts/sign.sh "$app" >/dev/null || exit 1
+done
 # `spaces` is the two-Desktop check (scripts/test_spaces.py), run alone: guided (a person at
 # the Mac switches Desktops when asked) or `--auto` (hands-free). A dry run acts on nothing,
 # not even the dev copy.

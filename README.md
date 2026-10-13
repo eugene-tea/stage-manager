@@ -441,8 +441,9 @@ card click ending with every frame exact, and `level = "above_windows"`, all ove
 unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip column, the
 drags pass over our windows and the fixtures only, with the strip reached for the reorder and
 the click the way a person does when a window covers it (the pointer resting at the left
-edge). `ctl state` lists the drawn cards' frames (`strip_cards`) and the strip panel's state
-(`strip_panel`) for these drags. Every app run's log is kept as `stage-manager.run-NN.log` in
+edge). `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
+(`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
+whether it is the active one, ordered in, on the Space shown, slid in). Every app run's log is kept as `stage-manager.run-NN.log` in
 the test home (the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
 is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
 `scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.

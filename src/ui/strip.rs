@@ -31,11 +31,14 @@
 //! - **Transitions** (`[animation]`, see `strip_motion`): snapshots of the windows that
 //!   leave and arrive move in the motion overlay above everything while the real windows
 //!   jump behind them.
-//! - **Spaces**: the panel belongs to one Space at a time, like any window, and slides away
-//!   with it, as each Space's own strip does. When a snapshot for another Space arrives the
-//!   panel is ordered out, its old cards are dropped without animation, the new ones laid
-//!   out, and it is ordered in again, which puts it on the Space shown now. On a full-screen
-//!   app's Space it stays out.
+//! - **Spaces**: each Desktop has a strip panel of its own ([`Pane`]), as Apple's does: made
+//!   on the Desktop's first visit while it shows, it lives there and slides with it (AppKit
+//!   keeps a window that does not join every Space on the Space it was first ordered in;
+//!   ordering it out and in again does not move it). When a snapshot for another Space
+//!   arrives, the pane already on the Space shown (`isOnActiveSpace`) takes over with the
+//!   cards it had, else a new one; the pane left keeps its cards on its Desktop. A full-screen
+//!   app's Space gets none. The motion overlay gets a fresh panel on each Space change; card
+//!   drag ghosts join every Space.
 //! - Extensions, off by default (`[reveal]`): the **edge tab**, a slim translucent tab at the
 //!   left edge while a window covers the strip; the **launch reveal**, a covered strip shown
 //!   for a moment at launch.
@@ -82,7 +85,7 @@ const DROP_STAGE: u64 = u64::MAX;
 /// The strip's window level below windows (Apple's): just under normal windows.
 const BELOW_WINDOWS: isize = NSNormalWindowLevel - 1;
 
-/// After a re-home, when to check that the panel is on the Space shown (seconds).
+/// After a Space change, when to check that the active pane is on the Space shown (seconds).
 const REHOME_CHECKS: [f64; 2] = [0.4, 1.2];
 /// A band of a card's height that will mean "onto this card" (a later merge); none yet.
 const MERGE_BAND: f64 = 0.0;
@@ -122,6 +125,11 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     tracing::info!(thumbnail_interval_ms, "strip installed");
 }
 
+/// The user went to another Space (`activeSpaceDidChangeNotification`). Main thread.
+pub fn space_changed() {
+    with_strip(Strip::space_changed);
+}
+
 /// Changes the thumbnail refresh interval (config reload). Main thread.
 pub fn set_thumbnail_interval(ms: u64) {
     with_strip(|s| s.capturer.set_interval(Duration::from_millis(ms.max(1))));
@@ -148,17 +156,17 @@ pub fn debug_render(path: &std::path::Path) -> Result<(), String> {
         s.slide(true, false);
         let root = CALayer::new();
         root.setGeometryFlipped(true);
-        root.setFrame(s.root.bounds());
+        root.setFrame(s.pane.root.bounds());
         root.setBackgroundColor(Some(&color(0.93, 0.55, 0.22, 1.0)));
-        s.cards_root.removeFromSuperlayer();
-        s.overlay.removeFromSuperlayer();
-        root.addSublayer(&s.cards_root);
-        root.addSublayer(&s.overlay);
+        s.pane.cards_root.removeFromSuperlayer();
+        s.pane.overlay.removeFromSuperlayer();
+        root.addSublayer(&s.pane.cards_root);
+        root.addSublayer(&s.pane.overlay);
         let result = crate::ui::strip_render::render_to_file(&root, 2.0, path);
-        s.cards_root.removeFromSuperlayer();
-        s.overlay.removeFromSuperlayer();
-        s.root.addSublayer(&s.cards_root);
-        s.root.addSublayer(&s.overlay);
+        s.pane.cards_root.removeFromSuperlayer();
+        s.pane.overlay.removeFromSuperlayer();
+        s.pane.root.addSublayer(&s.pane.cards_root);
+        s.pane.root.addSublayer(&s.pane.overlay);
         result
     })
     .unwrap_or_else(|| Err("no strip".into()))
@@ -319,7 +327,7 @@ impl EdgeTab {
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
         panel.setLevel(NSFloatingWindowLevel);
-        // One Space at a time (re-homed on a Space change), never over a full-screen app.
+        // Lives on its pane's Desktop (the one it is first ordered in on), never full screen.
         panel.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
         panel.setHidesOnDeactivate(false);
         panel.setBecomesKeyOnlyIfNeeded(true);
@@ -736,10 +744,16 @@ struct CardDrag {
 }
 
 // ---------------------------------------------------------------------------------------
-// The strip
+// One Desktop's panel
 
-struct Strip {
-    mtm: MainThreadMarker,
+/// One Desktop's strip: a panel that belongs to the Desktop it was first ordered in on and
+/// slides with it, as Apple's strip does, with its own cards, slide, level and edge tab.
+///
+/// AppKit keeps a window that does not join every Space on the Space it was first ordered
+/// in (ordering it out and in again brings it back there), so the strip keeps one pane per
+/// Desktop instead of moving one panel around. Which pane a Desktop has is read from the
+/// panels themselves (`isOnActiveSpace`), never from the engine's synthetic Space ids.
+struct Pane {
     panel: Retained<NSPanel>,
     _view: Retained<StripView>,
     root: Retained<CALayer>,
@@ -747,39 +761,26 @@ struct Strip {
     cards_root: Retained<CALayer>,
     /// Flat layer for icons, badges, names and the drop placeholder; slides in 2D.
     overlay: Retained<CALayer>,
-    style: Arc<StripStyle>,
-    geometry: Geometry,
-    scale: f64,
     cards: HashMap<u64, CardLayers>,
-    layouts: Vec<CardLayout>,
-    snapshot: StripSnapshot,
-    has_snapshot: bool,
-    hovered: Option<u64>,
-    pressed: Option<u64>,
-    thumbs: HashMap<u32, CFRetained<CGImage>>,
-    icons: HashMap<i32, Option<CFRetained<CGImage>>>,
-    visibility: Visibility,
+    /// Slid in.
     shown: bool,
-    poll_timer: Option<Retained<NSTimer>>,
-    capturer: Capturer,
-    card_drag: Option<CardDrag>,
-    /// A window drag is over the strip: the gap shows (at `drop_before`'s card).
-    drop_over: bool,
-    drop_before: Option<u64>,
-    /// The edge tab shown while a window hides the strip (`[reveal] edge_tab`).
-    tab: EdgeTab,
-    /// The launch reveal happened (once per launch).
-    announced: bool,
     /// The panel is above windows now (`None` before the first decision).
     lifted: Option<bool>,
-    /// Snapshots, transitions and the dragged window's card (`strip_motion`).
-    motion: motion::Motion,
+    /// The edge tab shown while a window hides the strip (`[reveal] edge_tab`).
+    tab: EdgeTab,
+    /// The engine's id of the Space whose cards it showed last.
+    space: u64,
+    /// Ordered in once: from then on it lives on that Desktop.
+    placed: bool,
+    /// The geometry its panel and layers were sized for.
+    geometry: Option<Geometry>,
+    /// The style and backing scale its cards were built with.
+    built: Option<(Arc<StripStyle>, f64)>,
 }
 
-impl Strip {
-    fn new(mtm: MainThreadMarker, interval: Duration) -> Self {
-        let style = Arc::new(StripStyle::default());
-        let geometry = Geometry::current(mtm, &style);
+impl Pane {
+    /// A new pane (not ordered in, so not on any Desktop yet), sized for `geometry`.
+    fn new(mtm: MainThreadMarker, geometry: &Geometry) -> Self {
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -792,12 +793,12 @@ impl Strip {
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setHasShadow(false);
         panel.setLevel(BELOW_WINDOWS);
-        // One Space at a time (re-homed on a Space change), never over a full-screen app.
+        // One Desktop (the one it is first ordered in on), never a full-screen app's Space.
         panel.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
         panel.setHidesOnDeactivate(false);
         panel.setBecomesKeyOnlyIfNeeded(true);
         panel.setAcceptsMouseMovedEvents(true);
-        // SAFETY: the panel is owned by `Strip` for the life of the app.
+        // SAFETY: the panel is owned by its pane and closed when the pane goes.
         unsafe { panel.setReleasedWhenClosed(false) };
 
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), geometry.panel.size);
@@ -822,21 +823,97 @@ impl Strip {
         let overlay = CALayer::new();
         root.addSublayer(&cards_root);
         root.addSublayer(&overlay);
-
-        let scale = panel.backingScaleFactor();
-        let capturer = Capturer::start(interval, thumbnail_arrived);
         let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()));
-        let mut strip = Self {
-            mtm,
+        Self {
             panel,
             _view: view,
             root,
             cards_root,
             overlay,
+            cards: HashMap::new(),
+            shown: false,
+            lifted: None,
+            tab,
+            space: 0,
+            placed: false,
+            geometry: None,
+            built: None,
+        }
+    }
+
+    /// Ordered in and on the Space shown now.
+    fn on_space_shown(&self) -> bool {
+        self.placed && self.panel.isVisible() && self.panel.isOnActiveSpace()
+    }
+
+    fn status(&self, active: bool) -> strip_model::PaneStatus {
+        strip_model::PaneStatus {
+            space: self.space,
+            active,
+            ordered_in: self.panel.isVisible(),
+            on_active_space: self.panel.isOnActiveSpace(),
+            shown: self.shown,
+        }
+    }
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        self.tab.panel.orderOut(None);
+        self.tab.panel.close();
+        self.panel.orderOut(None);
+        self.panel.close();
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The strip
+
+struct Strip {
+    mtm: MainThreadMarker,
+    /// The pane of the Desktop shown (or last shown, on a full-screen app's Space).
+    pane: Pane,
+    /// Other Desktops' panes, each on its own Desktop with the cards it had when left.
+    others: Vec<Pane>,
+    style: Arc<StripStyle>,
+    geometry: Geometry,
+    scale: f64,
+    layouts: Vec<CardLayout>,
+    snapshot: StripSnapshot,
+    has_snapshot: bool,
+    hovered: Option<u64>,
+    pressed: Option<u64>,
+    thumbs: HashMap<u32, CFRetained<CGImage>>,
+    icons: HashMap<i32, Option<CFRetained<CGImage>>>,
+    visibility: Visibility,
+    poll_timer: Option<Retained<NSTimer>>,
+    capturer: Capturer,
+    card_drag: Option<CardDrag>,
+    /// A window drag is over the strip: the gap shows (at `drop_before`'s card).
+    drop_over: bool,
+    drop_before: Option<u64>,
+    /// The launch reveal happened (once per launch).
+    announced: bool,
+    /// Counts the Space changes macOS reported (`activeSpaceDidChangeNotification`).
+    space_epoch: u64,
+    /// Snapshots, transitions and the dragged window's card (`strip_motion`).
+    motion: motion::Motion,
+}
+
+impl Strip {
+    fn new(mtm: MainThreadMarker, interval: Duration) -> Self {
+        let style = Arc::new(StripStyle::default());
+        let geometry = Geometry::current(mtm, &style);
+        let pane = Pane::new(mtm, &geometry);
+        let scale = pane.panel.backingScaleFactor();
+        let capturer = Capturer::start(interval, thumbnail_arrived);
+        let mut strip = Self {
+            mtm,
+            pane,
+            others: Vec::new(),
             style,
             geometry,
             scale,
-            cards: HashMap::new(),
             layouts: Vec::new(),
             snapshot: StripSnapshot::default(),
             has_snapshot: false,
@@ -845,15 +922,13 @@ impl Strip {
             thumbs: HashMap::new(),
             icons: HashMap::new(),
             visibility: Visibility::default(),
-            shown: false,
             poll_timer: None,
             capturer,
             card_drag: None,
             drop_over: false,
             drop_before: None,
-            tab,
             announced: false,
-            lifted: None,
+            space_epoch: 0,
             motion: motion::Motion::new(mtm),
         };
         strip.apply_geometry();
@@ -871,20 +946,23 @@ impl Strip {
     }
 
     fn current_dx(&self) -> f64 {
-        if self.shown { 0.0 } else { self.hidden_dx() }
+        if self.pane.shown { 0.0 } else { self.hidden_dx() }
     }
 
-    /// Sizes the panel and the layer tree for the current geometry; cards are rebuilt.
+    /// Sizes the pane's panel, its layer tree and its edge tab for the current geometry;
+    /// its cards are rebuilt.
     fn apply_geometry(&mut self) {
         let g = &self.geometry;
-        self.panel.setFrame_display(g.panel, false);
+        self.pane.panel.setFrame_display(g.panel, false);
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(g.panel.size.width, g.panel.size.height));
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        self.root.setFrame(bounds);
-        self.cards_root.setFrame(bounds);
-        self.overlay.setBounds(bounds);
+        self.pane.root.setFrame(bounds);
+        self.pane.cards_root.setFrame(bounds);
+        self.pane.overlay.setBounds(bounds);
         CATransaction::commit();
+        self.pane.tab.place(g.cocoa(g.tab()));
+        self.pane.geometry = Some(g.clone());
         self.clear_cards();
         self.icons.clear();
         self.visibility.set_timing(Timing::from_style(&self.style.reveal));
@@ -894,12 +972,12 @@ impl Strip {
     fn clear_cards(&mut self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        for layers in self.cards.values() {
+        for layers in self.pane.cards.values() {
             layers.card.removeFromSuperlayer();
             layers.flat.removeFromSuperlayer();
         }
         CATransaction::commit();
-        self.cards.clear();
+        self.pane.cards.clear();
     }
 
     // -- snapshots ------------------------------------------------------------------------
@@ -912,34 +990,30 @@ impl Strip {
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
             self.geometry = geometry;
-            self.apply_geometry();
-            self.tab.place(self.geometry.cocoa(self.geometry.tab()));
-            let shown = self.shown;
-            self.slide(shown, false);
         }
-        let scale = self.panel.backingScaleFactor();
-        let rescaled = scale != self.scale;
-        self.scale = scale;
-
-        let force = rescaled || snapshot.style != self.snapshot.style;
         let transition = snapshot.transition.clone();
         // Where incoming windows grow from: their cards before this snapshot replaces them.
         let starts = transition.as_ref().map(|t| self.incoming_starts(t));
-        // Another Space (or a full-screen one): out at once, the old cards dropped, so none
-        // of them shows on the new Space; ordered in below, on the Space shown now.
+        // Another Space (or a full-screen one): the pane of the Desktop shown takes over (it
+        // was left there with that Desktop's cards, or is new); the one left stays on its
+        // Desktop and slides away with it.
         let rehome = !self.has_snapshot
             || snapshot.space != self.snapshot.space
             || snapshot.fullscreen != self.snapshot.fullscreen;
-        let moved = rehome && self.has_snapshot;
-        if moved {
+        if rehome && self.has_snapshot {
             tracing::debug!(space = snapshot.space, fullscreen = snapshot.fullscreen, "strip: another Space");
-            self.panel.orderOut(None);
-            self.tab.show(false, self.mtm);
-            self.set_hover(None);
-            self.pressed = None;
-            self.card_drag = None;
-            self.clear_cards();
+            self.leave_pane();
         }
+        let fullscreen = snapshot.fullscreen;
+        if rehome && !fullscreen {
+            self.select_pane();
+        }
+        if fullscreen {
+            self.keep_off_fullscreen();
+        } else {
+            self.pane.space = snapshot.space;
+        }
+        let force = self.sync_pane(&snapshot.style);
         self.snapshot = snapshot;
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
@@ -954,31 +1028,22 @@ impl Strip {
         self.after_snapshot();
         if rehome {
             self.has_snapshot = true;
-            if !self.snapshot.fullscreen {
-                // Ordered in on the next turn of the run loop: out and in within one
-                // transaction may leave the panel on the Space it was on.
-                if !moved {
-                    self.panel.orderFrontRegardless();
-                } else {
-                    DispatchQueue::main().exec_async(|| {
-                        with_strip(|s| {
-                            if !s.snapshot.fullscreen {
-                                s.panel.orderFrontRegardless();
-                            }
-                            s.publish_panel();
-                        });
-                    });
-                }
-                // Ordered in while the Space still slides, the panel could stay behind on the
-                // Space being left: look again once the slide is over.
+            if !fullscreen {
+                self.order_in();
+                // Ordered in for the first time while the Space still slides, a new pane
+                // could land on the Desktop being left: look again once the slide is over.
+                let epoch = self.space_epoch;
                 for seconds in REHOME_CHECKS {
-                    let check = RcBlock::new(|_t: NonNull<NSTimer>| {
-                        with_strip(Strip::ensure_on_active_space);
+                    let check = RcBlock::new(move |_t: NonNull<NSTimer>| {
+                        with_strip(|s| s.ensure_on_active_space(epoch));
                     });
                     // SAFETY: the block runs once on the main run loop.
                     let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds, false, &check) };
                 }
             }
+        }
+        if !fullscreen {
+            self.drop_duplicates();
         }
         if self.snapshot.announce && !self.announced {
             self.announced = true;
@@ -990,6 +1055,107 @@ impl Strip {
         self.update_visibility();
         self.update_targets();
         self.publish_panel();
+    }
+
+    // -- panes ----------------------------------------------------------------------------
+
+    /// The Desktop shown is being left: what the user was doing on its strip ends, its tab
+    /// goes and its panel goes back below windows; its cards stay as they are, so it slides
+    /// back in with them when the Desktop shows again.
+    fn leave_pane(&mut self) {
+        self.set_hover(None);
+        self.pressed = None;
+        self.card_drag = None;
+        self.drop_over = false;
+        self.pane.tab.show(false, self.mtm);
+        let resting = self.style.level == StripLevel::AboveWindows;
+        if self.pane.lifted.is_some_and(|l| l != resting) {
+            // Only the level: ordering it in now could take it to another Space.
+            self.pane.panel.setLevel(if resting { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+            self.pane.lifted = Some(resting);
+        }
+    }
+
+    /// Makes the pane of the Desktop shown the active one: the pane on it already, else one
+    /// never ordered in, else a new one (it inherits the slide, so the strip simply shows).
+    fn select_pane(&mut self) {
+        if self.pane.on_space_shown() {
+            return;
+        }
+        let next = if let Some(i) = self.others.iter().position(Pane::on_space_shown) {
+            self.others.swap_remove(i)
+        } else if !self.pane.placed {
+            return;
+        } else if let Some(i) = self.others.iter().position(|p| !p.placed) {
+            self.others.swap_remove(i)
+        } else {
+            let mut pane = Pane::new(self.mtm, &self.geometry);
+            pane.shown = self.pane.shown;
+            pane
+        };
+        let old = std::mem::replace(&mut self.pane, next);
+        tracing::info!(
+            left = old.space,
+            panes = self.others.len() + 2,
+            reused = self.pane.placed,
+            "strip: the pane of the Desktop shown takes over"
+        );
+        self.others.push(old);
+        self.layouts.clear();
+        self.hovered = None;
+    }
+
+    /// Brings the active pane up to date with the current geometry and `style`; true when its
+    /// cards must be rebuilt (the style or the backing scale changed since they were built).
+    fn sync_pane(&mut self, style: &Arc<StripStyle>) -> bool {
+        if self.pane.geometry.as_ref() != Some(&self.geometry) {
+            self.apply_geometry();
+            let shown = self.pane.shown;
+            self.slide(shown, false);
+        }
+        self.scale = self.pane.panel.backingScaleFactor();
+        let force = self.pane.built.as_ref().is_some_and(|(s, k)| s != style || *k != self.scale);
+        self.pane.built = Some((style.clone(), self.scale));
+        force
+    }
+
+    /// Orders the active pane in if it never was: it then lives on the Desktop shown.
+    fn order_in(&mut self) {
+        if self.pane.placed || self.snapshot.fullscreen {
+            return;
+        }
+        self.pane.panel.orderFrontRegardless();
+        self.pane.placed = true;
+        tracing::debug!(space = self.pane.space, on_active_space = self.pane.panel.isOnActiveSpace(), "strip: a pane ordered in");
+    }
+
+    /// A full-screen app's Space has no strip: a pane found there (none should be) goes.
+    fn keep_off_fullscreen(&mut self) {
+        let before = self.others.len();
+        self.others.retain(|p| !p.on_space_shown());
+        let mut gone = before - self.others.len();
+        if self.pane.on_space_shown() {
+            let fresh = Pane::new(self.mtm, &self.geometry);
+            drop(std::mem::replace(&mut self.pane, fresh));
+            self.layouts.clear();
+            gone += 1;
+        }
+        if gone > 0 {
+            tracing::warn!(gone, "strip: a pane was on a full-screen Space; closed");
+        }
+    }
+
+    /// Two panes on the Desktop shown (a Desktop removed in Mission Control hands its
+    /// windows to another): the active one stays, the others go.
+    fn drop_duplicates(&mut self) {
+        if !self.pane.on_space_shown() {
+            return;
+        }
+        let before = self.others.len();
+        self.others.retain(|p| !p.on_space_shown());
+        if self.others.len() != before {
+            tracing::info!(closed = before - self.others.len(), "strip: another pane on the Desktop shown; closed");
+        }
     }
 
     /// The cards in the order shown now: the snapshot's, with a card being dragged moved to
@@ -1056,7 +1222,7 @@ impl Strip {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         let keep: Vec<u64> = layouts.iter().map(|l| l.stage).collect();
-        self.cards.retain(|stage, layers| {
+        self.pane.cards.retain(|stage, layers| {
             let kept = keep.contains(stage);
             if !kept {
                 layers.card.removeFromSuperlayer();
@@ -1091,7 +1257,7 @@ impl Strip {
     /// Publishes where the cards are (global), for `ctl state`.
     fn publish_cards(&self) {
         let g = self.geometry.global;
-        let frames = if self.shown {
+        let frames = if self.pane.shown {
             self.layouts
                 .iter()
                 .filter(|l| l.stage != DROP_STAGE)
@@ -1128,7 +1294,7 @@ impl Strip {
         let size = self.geometry.panel.size;
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height));
         let hovered = self.hovered == Some(card.stage);
-        let rebuild = match self.cards.get(&card.stage) {
+        let rebuild = match self.pane.cards.get(&card.stage) {
             Some(layers) => {
                 force_rebuild
                     || layers.snapshot != *card
@@ -1146,8 +1312,8 @@ impl Strip {
                 let flat = CALayer::new();
                 flat.setBounds(bounds);
                 flat.setPosition(CGPoint::new(size.width / 2.0, size.height / 2.0));
-                self.cards_root.addSublayer(&card_layer);
-                self.overlay.addSublayer(&flat);
+                self.pane.cards_root.addSublayer(&card_layer);
+                self.pane.overlay.addSublayer(&flat);
                 let fade = self.style.cards.fade_ms as f64 / 1000.0;
                 if self.motion.holds(card.stage) {
                     // A transition's snapshots are landing here; the card shows when they do.
@@ -1166,7 +1332,7 @@ impl Strip {
                     snapshot: card.clone(),
                     layout: layout.clone(),
                 };
-                self.cards.insert(card.stage, layers);
+                self.pane.cards.insert(card.stage, layers);
                 true
             }
         };
@@ -1174,10 +1340,10 @@ impl Strip {
             self.fill_card(card.stage, layout, card);
         }
         let motion = self.style.motion.clone();
-        let Some(built) = self.cards.get(&card.stage).map(|l| l.built) else { return };
+        let Some(built) = self.pane.cards.get(&card.stage).map(|l| l.built) else { return };
         let flat_at = self.flat_position(layout, built);
         let (hover_3d, hover_flat) = self.hover_transforms(layout, hovered, flat_at);
-        if let Some(layers) = self.cards.get_mut(&card.stage) {
+        if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
             // Each plane glides to its new place; the icons follow with the flat twin.
             for (slot, (_, plane)) in layout.thumbs.iter().rev().zip(&layers.planes) {
                 let to = CGPoint::new(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y + slot.rect.h / 2.0);
@@ -1193,7 +1359,7 @@ impl Strip {
 
     /// (Re)builds a card's thumbnail planes, icons, badge and name.
     fn fill_card(&mut self, stage: u64, layout: &CardLayout, card: &CardSnapshot) {
-        let Some(layers) = self.cards.get(&stage) else { return };
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
         let (card_layer, flat) = (layers.card.clone(), layers.flat.clone());
         let m = self.m().clone();
         let style = self.style.clone();
@@ -1289,7 +1455,7 @@ impl Strip {
             label.setShadowOffset(CGSize::new(0.0, 1.0));
             flat.addSublayer(&label);
         }
-        if let Some(layers) = self.cards.get_mut(&stage) {
+        if let Some(layers) = self.pane.cards.get_mut(&stage) {
             layers.planes = planes;
             layers.images = images;
             layers.built = origin;
@@ -1304,7 +1470,7 @@ impl Strip {
             return;
         }
         self.motion.thumbnail_arrived(id, &image);
-        for layers in self.cards.values() {
+        for layers in self.pane.cards.values() {
             for (wid, layer) in &layers.images {
                 if *wid == id {
                     // SAFETY: a CGImage is valid layer contents.
@@ -1323,7 +1489,7 @@ impl Strip {
         let shown_ids: Vec<u32> = self.layouts.iter().flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
         self.thumbs.retain(|id, _| shown_ids.contains(id));
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
-        let targets = if self.shown {
+        let targets = if self.pane.shown {
             self.layouts
                 .iter()
                 .flat_map(|l| l.thumbs.iter())
@@ -1354,7 +1520,7 @@ impl Strip {
     }
 
     fn mouse_down(&mut self, p: Point) {
-        self.pressed = if self.shown { self.card_at(p) } else { None };
+        self.pressed = if self.pane.shown { self.card_at(p) } else { None };
         self.card_drag = self.pressed.and_then(|stage| self.drag_for(stage));
         if let Some(stage) = self.pressed {
             // A click is likely: fresh snapshots of what leaves and what arrives.
@@ -1390,7 +1556,7 @@ impl Strip {
 
     /// Sets a dragged card's opacity in the strip (lifted out, or back).
     fn set_card_opacity(&self, stage: u64, opacity: f32) {
-        if let Some(layers) = self.cards.get(&stage) {
+        if let Some(layers) = self.pane.cards.get(&stage) {
             layers.card.setOpacity(opacity);
             layers.flat.setOpacity(opacity);
         }
@@ -1479,7 +1645,7 @@ impl Strip {
             return Some(StripEvent::CardDropped { stage: drag.stage, x: origin.x, y: origin.y });
         }
         let pressed = self.pressed.take()?;
-        if !self.shown || self.card_at(p) != Some(pressed) {
+        if !self.pane.shown || self.card_at(p) != Some(pressed) {
             return None;
         }
         match self.icon_at(pressed, p) {
@@ -1501,7 +1667,7 @@ impl Strip {
     }
 
     fn hover_at(&mut self, p: Option<Point>) {
-        let card = if self.shown { p.and_then(|p| self.card_at(p)) } else { None };
+        let card = if self.pane.shown { p.and_then(|p| self.card_at(p)) } else { None };
         self.set_hover(card);
     }
 
@@ -1520,9 +1686,9 @@ impl Strip {
         for (stage, on) in [(previous, false), (card, true)] {
             let Some(stage) = stage else { continue };
             let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
-            let Some(built) = self.cards.get(&stage).map(|l| l.built) else { continue };
+            let Some(built) = self.pane.cards.get(&stage).map(|l| l.built) else { continue };
             let (t3, tf) = self.hover_transforms(&layout, on, self.flat_position(&layout, built));
-            if let Some(layers) = self.cards.get(&stage) {
+            if let Some(layers) = self.pane.cards.get(&stage) {
                 ease_transform(&layers.card, t3, seconds);
                 ease_transform(&layers.flat, tf, seconds);
             }
@@ -1550,45 +1716,60 @@ impl Strip {
         self.update_visibility();
     }
 
-    /// After a re-home: the panel must be on the Space shown (unless a full-screen Space
-    /// shows); if it stayed behind, it is ordered in again, which puts it there.
-    fn ensure_on_active_space(&mut self) {
-        if !self.has_snapshot || self.snapshot.fullscreen || !self.panel.isVisible() {
+    /// After a Space change (`epoch` is the count of Space changes then): the active pane
+    /// must be on the Space shown (unless a full-screen Space shows). A new pane ordered in
+    /// while the Space still slid can land on the Desktop being left; then the pane of the
+    /// Desktop shown takes over (a new one if there is none) and the stray one stays where it
+    /// is, as that Desktop's second pane, closed when that Desktop shows again.
+    fn ensure_on_active_space(&mut self, epoch: u64) {
+        if !self.has_snapshot || self.snapshot.fullscreen {
             return;
         }
-        if !self.panel.isOnActiveSpace() {
-            tracing::warn!(space = self.snapshot.space, "strip: the panel is not on the Space shown; ordering it in again");
-            self.panel.orderOut(None);
-            // In again on the next turn of the run loop, not in the same transaction.
-            DispatchQueue::main().exec_async(|| {
-                with_strip(|s| {
-                    if !s.snapshot.fullscreen {
-                        s.panel.orderFrontRegardless();
-                    }
-                    tracing::info!(on_active_space = s.panel.isOnActiveSpace(), "strip: the panel ordered in again");
-                    s.publish_panel();
-                });
-            });
+        if epoch != self.space_epoch {
+            // The Space changed again since: its snapshot decides.
+            return;
+        }
+        if !self.pane.on_space_shown() {
+            tracing::warn!(space = self.snapshot.space, "strip: the pane is not on the Space shown; another takes over");
+            self.leave_pane();
+            self.select_pane();
+            self.pane.space = self.snapshot.space;
+            let style = self.style.clone();
+            let force = self.sync_pane(&style);
+            self.layout_cards(force);
+            self.order_in();
+            self.drop_duplicates();
+            self.update_visibility();
+            self.update_targets();
+            tracing::info!(on_active_space = self.pane.panel.isOnActiveSpace(), "strip: the pane of the Space shown");
         }
         self.publish_panel();
     }
 
-    /// Publishes the panel's state for `ctl state` ([`strip_model::panel_status`]).
+    /// The user went to another Space (main thread, from the Space-change notification).
+    fn space_changed(&mut self) {
+        self.space_epoch += 1;
+        self.motion.space_changed(self.mtm);
+    }
+
+    /// Publishes the panes' state for `ctl state` ([`strip_model::panel_status`]).
     fn publish_panel(&self) {
         strip_model::publish_panel_status(strip_model::PanelStatus {
-            shown: self.shown,
-            lifted: self.lifted.unwrap_or(false),
-            ordered_in: self.panel.isVisible(),
-            on_active_space: self.panel.isOnActiveSpace(),
+            shown: self.pane.shown,
+            lifted: self.pane.lifted.unwrap_or(false),
+            ordered_in: self.pane.panel.isVisible(),
+            on_active_space: self.pane.panel.isOnActiveSpace(),
             frame: self.geometry.global,
             space: self.snapshot.space,
         });
+        let panes = std::iter::once(self.pane.status(true)).chain(self.others.iter().map(|p| p.status(false))).collect();
+        strip_model::publish_pane_statuses(panes);
     }
 
     fn update_visibility(&mut self) {
         let overlapped = strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global);
         let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, overlapped);
-        self.visibility.set_tab(self.tab.shown.then(|| self.geometry.tab()));
+        self.visibility.set_tab(self.pane.tab.shown.then(|| self.geometry.tab()));
         let window_drag = self.snapshot.window_drag.is_some();
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
@@ -1608,8 +1789,8 @@ impl Strip {
         }
         // Never hide under a card being dragged.
         let card_dragging = self.card_drag.as_ref().is_some_and(|d| d.mode != DragMode::Pressed);
-        let shown = decision.shown || drop_over || (card_dragging && self.shown);
-        if shown != self.shown {
+        let shown = decision.shown || drop_over || (card_dragging && self.pane.shown);
+        if shown != self.pane.shown {
             tracing::debug!(shown, ?mode, "strip visibility");
             self.slide(shown, true);
             self.update_targets();
@@ -1619,28 +1800,29 @@ impl Strip {
         let lift = self.style.level == StripLevel::AboveWindows
             || drop_over
             || card_dragging
-            || (self.shown && mode == Mode::EdgeOnly);
+            || (self.pane.shown && mode == Mode::EdgeOnly);
         self.set_lifted(lift);
         self.window_drag_card(over);
         self.set_polling(decision.poll || window_drag || card_dragging);
         let tab = self.style.reveal.edge_tab
             && !self.snapshot.fullscreen
             && self.covered()
-            && !self.shown
+            && !self.pane.shown
             && !window_drag
             && !card_dragging;
-        self.tab.show(tab, self.mtm);
+        self.pane.tab.show(tab, self.mtm);
     }
 
     /// Puts the panel above windows or back below them.
     fn set_lifted(&mut self, lift: bool) {
-        if self.lifted == Some(lift) {
+        if self.pane.lifted == Some(lift) {
             return;
         }
-        self.lifted = Some(lift);
-        self.panel.setLevel(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
-        if lift {
-            self.panel.orderFrontRegardless();
+        self.pane.lifted = Some(lift);
+        self.pane.panel.setLevel(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+        // Only a pane already on its Desktop: a first order-in decides the Desktop it lives on.
+        if lift && self.pane.placed && !self.snapshot.fullscreen {
+            self.pane.panel.orderFrontRegardless();
         }
         tracing::debug!(lift, "strip level");
         self.publish_panel();
@@ -1649,10 +1831,10 @@ impl Strip {
     /// Slides the strip in or out (cards in 3D, icons flat) and lets clicks through while it
     /// is out.
     fn slide(&mut self, shown: bool, animated: bool) {
-        self.shown = shown;
+        self.pane.shown = shown;
         self.publish_cards();
         self.publish_panel();
-        self.panel.setIgnoresMouseEvents(!shown);
+        self.pane.panel.setIgnoresMouseEvents(!shown);
         if !shown {
             self.set_hover(None);
             self.pressed = None;
@@ -1665,7 +1847,7 @@ impl Strip {
         let m = self.m().clone();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        for layers in self.cards.values() {
+        for layers in self.pane.cards.values() {
             if animated {
                 spring_sublayer_transform(&motion, &layers.card, perspective(&m, dx));
             } else {
@@ -1673,9 +1855,9 @@ impl Strip {
             }
         }
         if animated {
-            spring_position(&motion, &self.overlay, to);
+            spring_position(&motion, &self.pane.overlay, to);
         } else {
-            self.overlay.setPosition(to);
+            self.pane.overlay.setPosition(to);
         }
         CATransaction::commit();
     }
