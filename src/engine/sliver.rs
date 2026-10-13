@@ -1,0 +1,286 @@
+//! Inert slivers (`[windows] inert_slivers`): a press on what a parked window keeps on screen
+//! does nothing, as with Apple's Stage Manager, whose parked windows cannot be grabbed.
+//!
+//! macOS keeps a strip of every parked window on screen (one point wide, 32 to 66 points of
+//! title bar tall, [`super::park`]); a press there used to reach the app, so a stray click in
+//! the corner focused, dragged or resized a parked window. The platform's event tap asks this
+//! module, for every mouse press:
+//!
+//! 1. **Cheap first** ([`Shield::may_hit`]): only a press inside the corner zone of the park
+//!    corner ([`corner_zone`]) can hit a sliver. Everywhere else (nearly every press) the
+//!    answer is "pass" after a few rectangle tests, without asking the window server.
+//! 2. **Then exact** ([`topmost_at`]): the topmost on-screen window under the press, our own
+//!    windows (the strip's panels, the motion overlay) and transparent ones skipped. Only
+//!    when that window is one the model counts as parked is the press swallowed: a window of
+//!    the active stage over the corner, the Dock, a menu bar extra or the wallpaper keep
+//!    their presses.
+//! 3. **The whole gesture** ([`PressGate`]): a swallowed press swallows its drags and its
+//!    release too, button by button, so no app sees half a click.
+
+use std::collections::HashSet;
+
+use super::geometry::{Point, Rect};
+use super::park::{Corner, MACOS_KEEPS_TITLE, PARK_MARGIN};
+
+/// How far above the visible frame's bottom (or below its top, for a top corner) the zone
+/// reaches: the tallest title strip macOS was seen to keep (66 pt, Telegram) with room.
+pub const ZONE_REACH: f64 = 2.0 * PARK_MARGIN + MACOS_KEEPS_TITLE;
+
+/// Where slivers of windows parked in `corner` of a display (`frame`, `visible`) can be
+/// pressed: [`PARK_MARGIN`] points in from the corner's side; at a bottom corner from
+/// [`ZONE_REACH`] points above the visible frame's bottom on to the display's edge (a bottom
+/// Dock sits under it); at a top corner the whole side, since macOS keeps a window parked
+/// there below the menu bar at its full height.
+pub fn corner_zone(frame: Rect, visible: Rect, corner: Corner) -> Rect {
+    let v = if visible.is_degenerate() { frame } else { visible };
+    let x = if corner.right() { frame.max_x() - PARK_MARGIN } else { frame.x };
+    if corner.bottom() {
+        let top = v.max_y() - ZONE_REACH;
+        Rect::new(x, top, PARK_MARGIN, frame.max_y() - top)
+    } else {
+        Rect::new(x, frame.y, PARK_MARGIN, frame.h)
+    }
+}
+
+/// A window on screen at a press, as the window server lists it (front to back).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Listed {
+    /// `CGWindowID`.
+    pub id: u32,
+    /// Owning process.
+    pub pid: i32,
+    /// Bounds, top-left origin.
+    pub bounds: Rect,
+    /// Alpha (0: transparent, click-through in practice).
+    pub alpha: f64,
+}
+
+/// The topmost window of `front_to_back` under `at`, our own (`own_pid`) and transparent
+/// windows skipped.
+pub fn topmost_at(front_to_back: &[Listed], at: Point, own_pid: i32) -> Option<Listed> {
+    front_to_back.iter().copied().find(|w| w.pid != own_pid && w.alpha > 0.0 && contains(w.bounds, at))
+}
+
+/// Half-open containment, as the window server hit-tests: the right and bottom edges are
+/// outside.
+fn contains(r: Rect, p: Point) -> bool {
+    p.x >= r.x && p.x < r.max_x() && p.y >= r.y && p.y < r.max_y()
+}
+
+/// What the event tap knows, published by the WM thread after every change: whether the
+/// shield is on, the corner zones, and the windows the model counts as parked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shield {
+    /// `[windows] inert_slivers`, and the app managing windows.
+    pub on: bool,
+    /// The corner zones of the main display ([`corner_zone`]).
+    pub zones: Vec<Rect>,
+    /// Windows parked now (every Space: the shown one's are the ones on screen).
+    pub parked: HashSet<u32>,
+}
+
+impl Shield {
+    /// The cheap test: a press at `at` may hit a sliver.
+    pub fn may_hit(&self, at: Point) -> bool {
+        self.on && !self.parked.is_empty() && self.zones.iter().any(|z| contains(*z, at))
+    }
+
+    /// The exact test, given the window server's on-screen list at the press: the topmost
+    /// window there is parked.
+    pub fn hits(&self, front_to_back: &[Listed], at: Point, own_pid: i32) -> Option<u32> {
+        if !self.may_hit(at) {
+            return None;
+        }
+        topmost_at(front_to_back, at, own_pid).map(|w| w.id).filter(|id| self.parked.contains(id))
+    }
+}
+
+/// A mouse button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Right,
+    Other,
+}
+
+impl Button {
+    fn index(self) -> usize {
+        match self {
+            Button::Left => 0,
+            Button::Right => 1,
+            Button::Other => 2,
+        }
+    }
+}
+
+/// A mouse event the tap sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Press {
+    Down(Button),
+    Dragged(Button),
+    Up(Button),
+}
+
+/// Swallows whole gestures: from a press on a sliver to its release, per button.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PressGate {
+    swallowing: [bool; 3],
+}
+
+impl PressGate {
+    /// No gesture swallowed.
+    pub const fn new() -> Self {
+        Self { swallowing: [false; 3] }
+    }
+
+    /// Whether to swallow `event`. `on_sliver` is asked only for a press (it may cost a
+    /// window list read); drags and releases follow their press.
+    pub fn swallow(&mut self, event: Press, on_sliver: impl FnOnce() -> bool) -> bool {
+        match event {
+            Press::Down(b) => {
+                let s = on_sliver();
+                self.swallowing[b.index()] = s;
+                s
+            }
+            Press::Dragged(b) => self.swallowing[b.index()],
+            Press::Up(b) => std::mem::take(&mut self.swallowing[b.index()]),
+        }
+    }
+
+    /// True while a swallowed press of some button is still down.
+    pub fn busy(&self) -> bool {
+        self.swallowing.iter().any(|s| *s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::geometry::Size;
+    use crate::engine::park::park_frame_at;
+
+    const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+    const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);
+    const OWN: i32 = 1;
+
+    /// Where macOS leaves a window parked bottom-right that keeps `kept` points of title
+    /// (measured 10-13: Safari 52, Chrome 41, Telegram 66, most apps 32).
+    fn sliver(id: u32, kept: f64) -> Listed {
+        let asked = park_frame_at(Size::new(1200.0, 900.0), MAIN, Corner::BottomRight);
+        Listed { id, pid: 100 + id as i32, bounds: Rect::new(asked.x, VISIBLE.max_y() - kept, 1200.0, 900.0), alpha: 1.0 }
+    }
+
+    fn shield(parked: &[u32]) -> Shield {
+        Shield {
+            on: true,
+            zones: vec![corner_zone(MAIN, VISIBLE, Corner::BottomRight)],
+            parked: parked.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn every_measured_sliver_lies_in_the_zone() {
+        let zone = corner_zone(MAIN, VISIBLE, Corner::BottomRight);
+        for kept in [32.0, 41.0, 52.0, 66.0] {
+            let s = sliver(1, kept);
+            let seen = s.bounds.intersect(&MAIN).expect("a sliver shows");
+            assert!(zone.contains_rect(&seen), "{kept}: {seen:?} outside {zone:?}");
+        }
+    }
+
+    #[test]
+    fn a_press_on_a_sliver_is_swallowed_and_its_neighbours_pass() {
+        let list = [sliver(7, 52.0), sliver(8, 32.0)];
+        let s = shield(&[7, 8]);
+        // On Safari's 52 pt strip, above the 32 pt one.
+        assert_eq!(s.hits(&list, Point::new(2559.5, VISIBLE.max_y() - 45.0), OWN), Some(7));
+        // Where both overlap, the front one (first listed) takes it.
+        assert_eq!(s.hits(&list, Point::new(2559.5, VISIBLE.max_y() - 10.0), OWN), Some(7));
+        // One point left of the slivers: the wallpaper.
+        assert_eq!(s.hits(&list, Point::new(2558.5, VISIBLE.max_y() - 10.0), OWN), None);
+    }
+
+    #[test]
+    fn a_shown_window_over_the_corner_keeps_its_press() {
+        let shown = Listed { id: 3, pid: 50, bounds: Rect::new(1800.0, 900.0, 800.0, 600.0), alpha: 1.0 };
+        let list = [shown, sliver(7, 52.0)];
+        assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() - 20.0), OWN), None);
+    }
+
+    #[test]
+    fn the_dock_and_menu_bar_extras_over_the_corner_keep_their_presses() {
+        // The Dock's bar (a layer above windows, listed first) under a press in the zone.
+        let dock = Listed { id: 2, pid: 40, bounds: Rect::new(0.0, VISIBLE.max_y(), 2560.0, 30.0), alpha: 1.0 };
+        let list = [dock, sliver(7, 52.0)];
+        assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() + 5.0), OWN), None);
+        // A menu bar extra sits far from a bottom zone: the cheap test passes it.
+        assert!(!shield(&[7]).may_hit(Point::new(2540.0, 10.0)));
+    }
+
+    #[test]
+    fn our_own_and_transparent_windows_are_seen_through() {
+        let overlay = Listed { id: 90, pid: OWN, bounds: MAIN, alpha: 1.0 };
+        let clear = Listed { id: 91, pid: 60, bounds: MAIN, alpha: 0.0 };
+        let list = [overlay, clear, sliver(7, 32.0)];
+        assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() - 5.0), OWN), Some(7));
+    }
+
+    #[test]
+    fn a_window_not_parked_in_the_corner_keeps_its_press() {
+        // An unmanaged window, or one the model shows, tucked into the corner.
+        let list = [sliver(9, 32.0)];
+        assert_eq!(shield(&[7]).hits(&list, Point::new(2559.5, VISIBLE.max_y() - 5.0), OWN), None);
+    }
+
+    #[test]
+    fn off_or_with_nothing_parked_nothing_is_swallowed() {
+        let list = [sliver(7, 32.0)];
+        let at = Point::new(2559.5, VISIBLE.max_y() - 5.0);
+        assert_eq!(Shield { on: false, ..shield(&[7]) }.hits(&list, at, OWN), None);
+        assert_eq!(shield(&[]).hits(&list, at, OWN), None);
+    }
+
+    #[test]
+    fn presses_away_from_the_corner_never_ask_the_window_server() {
+        let s = shield(&[7]);
+        for p in [Point::new(100.0, 100.0), Point::new(1280.0, 1400.0), Point::new(2559.0, 100.0), Point::new(2400.0, 1400.0)] {
+            assert!(!s.may_hit(p), "{p:?}");
+        }
+        assert!(s.may_hit(Point::new(2559.5, 1430.0)));
+    }
+
+    #[test]
+    fn every_corner_has_its_zone_at_its_side() {
+        for corner in Corner::ALL {
+            let zone = corner_zone(MAIN, VISIBLE, corner);
+            let asked = park_frame_at(Size::new(900.0, 700.0), MAIN, corner);
+            let y = if corner.bottom() { VISIBLE.max_y() - MACOS_KEEPS_TITLE } else { VISIBLE.y };
+            let at = Rect::new(asked.x, y, asked.w, asked.h);
+            let seen = at.intersect(&MAIN).expect("a sliver shows");
+            assert!(zone.contains_rect(&seen), "{corner:?}: {seen:?} outside {zone:?}");
+            assert!(zone.w <= PARK_MARGIN, "{corner:?}: a narrow zone {zone:?}");
+            if corner.bottom() {
+                assert!(zone.h <= MAIN.h / 4.0, "{corner:?}: a small zone {zone:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_swallowed_press_takes_its_drags_and_release_and_nothing_else() {
+        let mut g = PressGate::default();
+        assert!(g.swallow(Press::Down(Button::Left), || true));
+        assert!(g.busy());
+        assert!(g.swallow(Press::Dragged(Button::Left), || unreachable!()));
+        // Another button's gesture meanwhile is its own.
+        assert!(!g.swallow(Press::Down(Button::Right), || false));
+        assert!(!g.swallow(Press::Up(Button::Right), || unreachable!()));
+        assert!(g.swallow(Press::Up(Button::Left), || unreachable!()));
+        assert!(!g.busy());
+        // The next gesture is judged afresh.
+        assert!(!g.swallow(Press::Down(Button::Left), || false));
+        assert!(!g.swallow(Press::Dragged(Button::Left), || unreachable!()));
+        assert!(!g.swallow(Press::Up(Button::Left), || unreachable!()));
+        // A release with no press seen passes.
+        assert!(!g.swallow(Press::Up(Button::Other), || unreachable!()));
+    }
+}

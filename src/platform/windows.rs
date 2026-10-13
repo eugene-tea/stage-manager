@@ -64,6 +64,11 @@ pub fn list_windows() -> Vec<CgWindow> {
     out
 }
 
+/// The on-screen windows only (desktop elements excluded), front to back: one query.
+pub fn on_screen() -> Vec<CgWindow> {
+    query(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
+}
+
 fn query(options: CGWindowListOption) -> Vec<CgWindow> {
     let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
         tracing::warn!("CGWindowListCopyWindowInfo returned nothing");

@@ -89,6 +89,7 @@ use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::park::choose_corner;
+use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::geometry::{Point, Rect};
@@ -766,6 +767,22 @@ impl Controller {
         entries
     }
 
+    /// Tells the inert-slivers tap ([`super::sliver_tap`], `[windows] inert_slivers`) the park
+    /// corner's zone and which windows sit parked (with incoming windows still held in the
+    /// corner behind a transition's snapshots).
+    fn publish_shield(&self) {
+        let Some(m) = &self.model else { return };
+        let on = self.store.config().windows.inert_slivers;
+        let d = m.main_display();
+        let mut parked: HashSet<u32> =
+            if on { m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect() } else { HashSet::new() };
+        if on && let Some(p) = &self.pending {
+            parked.extend(p.entries.keys().copied());
+        }
+        let zones = if on { vec![sliver::corner_zone(d.frame, d.visible, d.corner)] } else { Vec::new() };
+        super::sliver_tap::publish(sliver::Shield { on, zones, parked });
+    }
+
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
     /// config.
     fn sync_fit(&mut self) {
@@ -875,6 +892,7 @@ impl Controller {
         } else {
             safety::registry_replace(self.parked_entries(ob));
         }
+        self.publish_shield();
         self.remember();
         if changed {
             self.mark_dirty();
@@ -2352,6 +2370,7 @@ impl Controller {
             self.sync_fit();
             self.execute(ob, actions);
         }
+        self.publish_shield();
     }
 
     /// Fresh `com.apple.WindowManager` values.
@@ -2650,6 +2669,7 @@ impl Controller {
                 }
                 self.echoes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
                 self.sync_fit();
+                self.publish_shield();
                 if let Some(m) = self.model.as_mut() {
                     let capacity = strip_capacity(m.main_display().visible, &config);
                     m.set_strip_options(config.strip_options(capacity));

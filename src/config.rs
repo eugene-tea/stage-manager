@@ -308,6 +308,9 @@ pub struct WindowsConfig {
     pub fit_margin: f64,
     pub minimize_to_strip: bool,
     pub focus_echo_ms: u64,
+    /// A press on a parked window's sliver does nothing (Apple's parked windows cannot be
+    /// grabbed); off, it reaches the app and its stage comes on release.
+    pub inert_slivers: bool,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -782,6 +785,7 @@ impl Config {
                 fit_margin: v.num("windows.fit_margin"),
                 minimize_to_strip: v.flag("windows.minimize_to_strip"),
                 focus_echo_ms: v.uint("windows.focus_echo_ms"),
+                inert_slivers: v.flag("windows.inert_slivers"),
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,

@@ -341,6 +341,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `windows.fit_margin` | `16.0` | number, 0 to 500 | With fit: room kept between the strip column and the windows. |
 | `windows.minimize_to_strip` | `true` | true or false | Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock. |
 | `windows.focus_echo_ms` | `700` | whole number, 0 to 10000 | Focus changes this soon after we moved a window are taken as our own and never switch stages. |
+| `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
 | `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
 | `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |
