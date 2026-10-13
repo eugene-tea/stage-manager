@@ -1,6 +1,6 @@
 //! Which display a window belongs to.
 //!
-//! Stages live on the main display only (README: "other displays are left alone"). The
+//! Stages live on the main display only (docs/GUIDE.md: "other displays are left alone"). The
 //! platform asks [`on_other_display`] before it hands a window to the engine and once a
 //! second for every managed window that shows: a window that shows more of itself on another
 //! display than on the main one is not managed there (it waits, unmanaged, until it is back on

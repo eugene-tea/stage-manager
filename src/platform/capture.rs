@@ -28,7 +28,7 @@
 //!   [`retry_now`] (the user asked for access) probes again at once.
 //! - Quit waits for captures in flight ([`quiesce`]): replayd checks a capture's approval
 //!   after answering it, and for a process that has just exited it cannot resolve the app's
-//!   path, so it alerts as if the app were new (see README's Known limitations).
+//!   path, so it alerts as if the app were new (see the guide's Known limitations).
 
 use std::collections::{HashMap, HashSet};
 use std::ptr::NonNull;

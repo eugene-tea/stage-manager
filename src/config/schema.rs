@@ -4,7 +4,7 @@
 //! The table is the single source for parsing and validation ([`super::Config::parse`]),
 //! for the commented file written on first run ([`default_file`]), for
 //! `stage-manager config --print-defaults` and `--explain <key>`, and for the configuration
-//! reference in `README.md` ([`markdown_reference`]; a test keeps it in sync).
+//! reference in `docs/GUIDE.md` ([`markdown_reference`]; a test keeps it in sync).
 
 use std::fmt::Write as _;
 
@@ -395,7 +395,7 @@ pub fn explain(path: &str) -> Option<String> {
     ))
 }
 
-/// The configuration reference for README: one table row per key.
+/// The configuration reference for docs/GUIDE.md: one table row per key.
 pub fn markdown_reference() -> String {
     let mut out = String::from("| Key | Default | Values | What it does |\n|---|---|---|---|\n");
     for d in KEYS {

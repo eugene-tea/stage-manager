@@ -44,7 +44,7 @@ Tests that need an extension turn it on in their own config.toml.
 
 Window captures (ScreenCaptureKit) are off in every app run (STAGE_MANAGER_NO_CAPTURE=1:
 cards and switch ghosts are drawn without pictures) except the capture phase's single
-launch, because macOS may answer a capture with a screen-access alert (README, Known
+launch, because macOS may answer a capture with a screen-access alert (docs/GUIDE.md, Known
 limitations). The run ends with the number of replayd alerts macOS showed meanwhile.
 
 No phase runs while the owner's installed app is up, and only our own app's guardian is

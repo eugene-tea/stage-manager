@@ -873,7 +873,7 @@ impl ConfigStore {
 }
 
 /// `stage-manager config ...`: `--print-defaults`, `--explain <section.key>`,
-/// `--reference` (README's table), `--check [file]`. Returns the exit code and output.
+/// `--reference` (the guide's table), `--check [file]`. Returns the exit code and output.
 pub fn command(args: &[String]) -> (i32, String) {
     match args.first().map(String::as_str) {
         Some("--print-defaults") => (0, default_file()),
@@ -993,10 +993,10 @@ mod tests {
 
     #[test]
     fn readme_has_the_generated_reference() {
-        let readme = include_str!("../README.md");
+        let readme = include_str!("../docs/GUIDE.md");
         assert!(
             readme.contains(&schema::markdown_reference()),
-            "README.md's configuration reference is out of date: paste `stage-manager config --reference`"
+            "docs/GUIDE.md's configuration reference is out of date: paste `stage-manager config --reference`"
         );
     }
 

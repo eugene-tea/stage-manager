@@ -8,7 +8,7 @@
 //!   `log path [DATE]` prints its file.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
 //! - `stage-manager config --print-defaults | --explain <section.key> | --reference |
-//!   --check [file]` prints the commented default config, explains a key, prints README's
+//!   --check [file]` prints the commented default config, explains a key, prints the guide's
 //!   configuration table, or validates a file.
 //! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts.

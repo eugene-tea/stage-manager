@@ -442,7 +442,7 @@ pub struct Controller {
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
     /// Managed windows showing mostly on another display than the main one: checks in a
-    /// row (left alone there, README).
+    /// row (left alone there, the guide).
     elsewhere: HashMap<u32, u32>,
     /// The Space shown and its active stage at the last strip snapshot (the day's log
     /// counts a switch when the stage changes on the same Space).
@@ -1965,7 +1965,7 @@ impl Controller {
     }
 
     /// Managed windows (shown, standard) that show mostly on another display in two checks in
-    /// a row are let go: other displays are left alone (README). They wait, unmanaged, and
+    /// a row are let go: other displays are left alone (docs/GUIDE.md). They wait, unmanaged, and
     /// come back as new windows once they show on the main display.
     fn leave_other_displays(&mut self, ob: &Observer, shown: &HashSet<u32>, shown_main: &HashSet<u32>) {
         let Some(m) = self.model.as_ref() else { return };
@@ -2694,7 +2694,7 @@ fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
 }
 
 /// The windows on screen on the main display: [`on_screen`] minus those that show mostly on
-/// another display ([`on_other_display`]), which are left alone (README: stages live on the
+/// another display ([`on_other_display`]), which are left alone (docs/GUIDE.md: stages live on the
 /// main display only). `main` is the main display's frame.
 fn on_main_screen(list: &[windows::CgWindow], main: Rect) -> HashSet<u32> {
     let others: Vec<Rect> = desktop::cg_display_bounds().into_iter().skip(1).collect();
