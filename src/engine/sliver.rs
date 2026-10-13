@@ -95,40 +95,13 @@ pub struct DockBar {
     pub pid: Option<i32>,
     /// The bar's frames (the Dock's `AXList` children), top-left origin; empty when unknown.
     pub bars: Vec<Rect>,
-    /// The park corner is a Quick Note hot corner ([`quick_note_at`]): the note the Dock
-    /// shows there is pressable and may be drawn in that same window, so the window is never
-    /// seen through (an auto-hiding Dock brought up then keeps the presses on slivers, as
-    /// before e86b6a7).
-    pub quick_note: bool,
 }
 
 impl DockBar {
     /// True when `w` is the Dock's window and clear where `on_bar` finds no bar: seen
     /// through, as clicks go through it there.
     fn clear_over(&self, w: &Listed, on_bar: impl Fn(Rect) -> bool) -> bool {
-        !self.quick_note && Some(w.pid) == self.pid && w.layer == DOCK_LAYER && !self.bars.iter().any(|b| on_bar(*b))
-    }
-}
-
-/// The hot corner action for Quick Note (`com.apple.dock` `wvous-*-corner`).
-pub const HOT_CORNER_QUICK_NOTE: i64 = 14;
-
-/// True when `corner`'s hot corner (`raw`: its `wvous-*-corner` value, `None` when never set)
-/// is Quick Note: macOS's default for the bottom-right corner since macOS 12.
-pub fn quick_note_at(raw: Option<i64>, corner: Corner) -> bool {
-    match raw {
-        Some(v) => v == HOT_CORNER_QUICK_NOTE,
-        None => corner == Corner::BottomRight,
-    }
-}
-
-/// The `com.apple.dock` key of `corner`'s hot corner action.
-pub fn hot_corner_key(corner: Corner) -> &'static str {
-    match corner {
-        Corner::TopLeft => "wvous-tl-corner",
-        Corner::TopRight => "wvous-tr-corner",
-        Corner::BottomLeft => "wvous-bl-corner",
-        Corner::BottomRight => "wvous-br-corner",
+        Some(w.pid) == self.pid && w.layer == DOCK_LAYER && !self.bars.iter().any(|b| on_bar(*b))
     }
 }
 
@@ -288,7 +261,7 @@ mod tests {
             on: true,
             zones: vec![corner_zone(MAIN, VISIBLE, Corner::BottomRight)],
             parked: parked.iter().copied().collect(),
-            dock: DockBar { pid: Some(DOCK), bars: vec![BAR], quick_note: false },
+            dock: DockBar { pid: Some(DOCK), bars: vec![BAR] },
         }
     }
 
@@ -352,7 +325,7 @@ mod tests {
         // into the corner keeps a press there.
         let dock = Listed { id: 2, pid: DOCK, bounds: MAIN, alpha: 1.0, layer: DOCK_LAYER };
         let list = [dock, sliver(7, 52.0)];
-        let wide = Shield { dock: DockBar { bars: vec![Rect::new(0.0, 1370.0, 2560.0, 70.0)], ..shield(&[7]).dock }, ..shield(&[7]) };
+        let wide = Shield { dock: DockBar { pid: Some(DOCK), bars: vec![Rect::new(0.0, 1370.0, 2560.0, 70.0)] }, ..shield(&[7]) };
         assert_eq!(wide.hits(&list, Point::new(2559.5, VISIBLE.max_y() - 5.0), OWN), None);
         // A menu bar extra sits far from a bottom zone: the cheap test passes it.
         assert!(!shield(&[7]).may_hit(Point::new(2540.0, 10.0)));
@@ -367,7 +340,7 @@ mod tests {
         let at = Point::new(2559.5, VISIBLE.max_y() - 20.0);
         assert_eq!(shield(&[7]).hits(&list, at, OWN), Some(7));
         // Its bar unknown: still seen through (the bar rarely reaches the corner).
-        let blind = Shield { dock: DockBar { bars: Vec::new(), ..shield(&[7]).dock }, ..shield(&[7]) };
+        let blind = Shield { dock: DockBar { pid: Some(DOCK), bars: Vec::new() }, ..shield(&[7]) };
         assert_eq!(blind.hits(&list, at, OWN), Some(7));
         // Another app's window at the Dock's layer, or the Dock at another layer (Mission
         // Control's, Launchpad's), is not.
@@ -381,19 +354,6 @@ mod tests {
         // Nor does the Dock's window own the zone for the log's note.
         let zone = corner_zone(MAIN, VISIBLE, Corner::BottomRight);
         assert_eq!(zone_owner(&list, zone, OWN, &shield(&[7])), None);
-    }
-
-    #[test]
-    fn a_quick_note_corner_keeps_the_docks_window() {
-        assert!(quick_note_at(None, Corner::BottomRight), "macOS's default");
-        assert!(!quick_note_at(None, Corner::BottomLeft));
-        assert!(!quick_note_at(Some(1), Corner::BottomRight), "set to nothing");
-        assert!(quick_note_at(Some(HOT_CORNER_QUICK_NOTE), Corner::TopLeft));
-        let dock = Listed { id: 46, pid: DOCK, bounds: MAIN, alpha: 1.0, layer: DOCK_LAYER };
-        let at = Point::new(2559.5, VISIBLE.max_y() - 20.0);
-        let s = shield(&[7]);
-        let noted = Shield { dock: DockBar { quick_note: true, ..s.dock.clone() }, ..s };
-        assert_eq!(noted.hits(&[dock, sliver(7, 52.0)], at, OWN), None);
     }
 
     #[test]
