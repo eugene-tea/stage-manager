@@ -112,6 +112,8 @@ pub struct MenuState {
     pub strip_visible: bool,
     /// config.toml failed to load (the last good config stays in force).
     pub config_error: Option<String>,
+    /// macOS refused window captures; "Grant Screen Recording…" shows and retries them.
+    pub capture_refused: bool,
 }
 
 /// The menu's config line: hidden (`None`) while the config is fine.
@@ -225,7 +227,7 @@ impl StatusMenu {
         }
         self.warning_line.setHidden(!state.apple_stage_manager_on);
         self.grant_accessibility.setHidden(state.permissions.accessibility);
-        self.grant_screen_recording.setHidden(state.permissions.screen_recording);
+        self.grant_screen_recording.setHidden(state.permissions.screen_recording && !state.capture_refused);
         let strip = if state.strip_visible { "Hide Strip" } else { "Show Strip" };
         self.toggle_strip.setTitle(&NSString::from_str(strip));
     }

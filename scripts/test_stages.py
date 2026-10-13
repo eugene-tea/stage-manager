@@ -23,9 +23,15 @@ card's app icon brings every window of that app), motion (the strip below window
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
 across a relaunch; a card click animates and every frame is exact afterwards;
-`level = "above_windows"` keeps the strip on top).
+`level = "above_windows"` keeps the strip on top), capture (the one phase with window
+captures on: real thumbnails and snapshots, and a quit that waits for captures in flight).
 
 Tests that need an extension turn it on in their own config.toml.
+
+Window captures (ScreenCaptureKit) are off in every app run (STAGE_MANAGER_NO_CAPTURE=1:
+cards and switch ghosts are drawn without pictures) except the capture phase's single
+launch, because macOS may answer a capture with a screen-access alert (README, Known
+limitations). The run ends with the number of replayd alerts macOS showed meanwhile.
 
 No phase runs while the owner's installed app is up, and only our own app's guardian is
 ever signalled.
@@ -198,7 +204,8 @@ def archive_log():
     return path
 
 
-def start_app(expect_windows, extra_env=None, fresh_log=True):
+def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
+    """Launches the app (window captures off unless `capture`) and waits for its windows."""
     if app_pid():
         stop_app()
     if fresh_log:
@@ -210,6 +217,8 @@ def start_app(expect_windows, extra_env=None, fresh_log=True):
         "STAGE_MANAGER_NO_PROMPT": "1",
         "RUST_LOG": "info,stage_manager=debug",
     }
+    if not capture:
+        env["STAGE_MANAGER_NO_CAPTURE"] = "1"
     env.update(extra_env or {})
     for k, v in env.items():
         args += ["--env", f"{k}={v}"]
@@ -1065,6 +1074,48 @@ def phase_motion():
     stop_all_fixtures()
 
 
+# ----- capture: the one launch with window captures on -----------------------------------
+
+
+def phase_capture():
+    """The only app run with window captures on: thumbnails and switch snapshots are real
+    pictures, and a quit with captures running waits for those in flight (an exit with one
+    in flight makes macOS alert about screen access). The only phase that may raise that
+    alert: on the first run from a new app path, which macOS approves once."""
+    say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(3)
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    if not check(s is not None, "app up with captures on"):
+        return
+    check(s.get("capture", {}).get("mode") == "on", f"captures are on ({s.get('capture')})")
+    t = by_title(s)
+    # Fixture 3 stays (clear of the strip, so it shows); 1 and 2 make the one card.
+    for n in (1, 2):
+        do("send", 2, t[f"Fixture {n}"]["id"])
+    s = wait_until(lambda: (lambda x: x if x.get("capture", {}).get("images", 0) >= 2 else None)(state()),
+                   10, "window pictures")
+    cap = state().get("capture", {})
+    check(s is not None and cap.get("gate") == "open",
+          f"window pictures arrive and captures stay open ({cap})")
+    for n in (2, 1):
+        do("switch", n)
+        time.sleep(1.2)
+        consistent(f"a switch to stage {n} with real snapshots")
+    cap = state().get("capture", {})
+    check(cap.get("images", 0) > (s or {}).get("capture", {}).get("images", 0),
+          f"pictures keep coming ({cap.get('images')} so far)")
+    stop_app()
+    text = log_text()
+    check("bye" in text and "window captures on" in text, "a clean quit after captures ran")
+    check("refused window captures" not in text, "macOS did not refuse a capture")
+    all_onscreen("capture quit")
+
+
 # ----- visible: the stage area beside the strip, the edge tab, quit right after a start --
 
 
@@ -1273,7 +1324,8 @@ def phase_visible():
         os.remove(LOG)
     args = ["open", "-n", APP]
     for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": ONLY, "STAGE_MANAGER_NO_PROMPT": "1",
-                 "STAGE_MANAGER_TEST": "1", "RUST_LOG": "info,stage_manager=debug"}.items():
+                 "STAGE_MANAGER_NO_CAPTURE": "1", "STAGE_MANAGER_TEST": "1",
+                 "RUST_LOG": "info,stage_manager=debug"}.items():
         args += ["--env", f"{k}={v}"]
     subprocess.run(args, check=True)
     pid = wait_until(app_pid, 15, "the app")
@@ -1395,14 +1447,26 @@ def frontmost_bundle():
     return out.split("=", 1)[1].strip().strip('"') if "=" in out else None
 
 
+def replayd_alerts(since):
+    """How many screen-access alerts macOS (replayd) showed since `since` (any app), or
+    None when the log cannot be read."""
+    r = subprocess.run(["log", "show", "--style", "compact", "--start", since, "--predicate",
+                        'process == "replayd" AND eventMessage CONTAINS "showAlertWithTitle"'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return sum(1 for line in r.stdout.splitlines() if line.rstrip().endswith("]:140"))
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "capture"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
     if pids_of("Stage Manager.app/Contents/MacOS/stage-manager$") and not app_pid():
         say("note: another Stage Manager is running (not ours); it uses another home and is left alone")
     say(f"home: {HOME}")
+    since = time.strftime("%Y-%m-%d %H:%M:%S")
     front = frontmost_bundle()
     try:
         for p in phases:
@@ -1411,7 +1475,8 @@ def main():
                 failed.append("the owner's app is running")
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
-             "native": phase_native, "parity": phase_parity, "motion": phase_motion}[p]()
+             "native": phase_native, "parity": phase_parity, "motion": phase_motion,
+             "capture": phase_capture}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
@@ -1419,7 +1484,10 @@ def main():
         stop_all_fixtures()
         if front and front not in ALL_IDS:
             subprocess.run(["open", "-b", front], capture_output=True)
-    say(f"\n{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager*.log)")
+    time.sleep(1.0)
+    alerts = replayd_alerts(since)
+    say(f"\nscreen-access alerts macOS showed during this run (any app): {'unknown' if alerts is None else alerts}")
+    say(f"{len(passed)} passed, {len(failed)} failed (every app run's log: {HOME}/stage-manager*.log)")
     for f in failed:
         say(f"  FAIL {f}")
     return 1 if failed else 0

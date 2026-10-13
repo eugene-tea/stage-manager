@@ -83,7 +83,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::fullscreen;
     use stage_manager::platform::space_keys::{self, Direction, SpaceKey, SpaceView};
-    use stage_manager::platform::{guardian, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
@@ -99,6 +99,9 @@ mod app {
         let secs = 2.0 + per_window * windows as f64;
         Duration::from_secs_f64(secs.clamp(4.0, 30.0))
     }
+
+    /// How long exit waits for window captures in flight (see [`capture::quiesce`]).
+    const CAPTURE_QUIESCE: Duration = Duration::from_secs(2);
 
     /// After a signal, the main thread gets the shutdown timeout plus this before the
     /// watcher thread unparks on its own.
@@ -122,6 +125,8 @@ mod app {
         config_error: Option<String>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
+        /// Window captures were refused when the menu was last drawn.
+        capture_refused: bool,
         display: Option<Display>,
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
@@ -150,6 +155,7 @@ mod app {
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
                 strip_visible: self.strip_visible,
                 config_error: self.config_error.clone(),
+                capture_refused: self.capture_refused,
             }
         }
 
@@ -170,6 +176,11 @@ mod app {
                     self.wm.send(WmCommand::Accessibility(now.accessibility));
                 }
                 self.permissions = now;
+                self.refresh_menu();
+            }
+            let refused = capture::refused();
+            if refused != self.capture_refused {
+                self.capture_refused = refused;
                 self.refresh_menu();
             }
             if let Some(settings) = native_settings::refresh() {
@@ -193,8 +204,9 @@ mod app {
 
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
-                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms } => {
+                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms, capture: on } => {
                     self.config_error = error;
+                    capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
                         strip::set_thumbnail_interval(thumbnail_interval_ms);
                         self.thumbnail_interval_ms = Some(thumbnail_interval_ms);
@@ -218,6 +230,8 @@ mod app {
                     open_url(PrivacyPane::Accessibility.url());
                 }
                 MenuAction::GrantScreenRecording => {
+                    // A user click: refused captures try again now.
+                    capture::retry_now();
                     permissions::request_screen_recording();
                     open_url(PrivacyPane::ScreenRecording.url());
                 }
@@ -275,6 +289,8 @@ mod app {
             return;
         }
         safety::request_quit();
+        // No new window capture from here on; those in flight are waited for at exit.
+        capture::begin_shutdown();
         let timeout = shutdown_timeout(safety::registry_len());
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
         let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
@@ -302,6 +318,8 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        // A capture still in flight at exit makes macOS alert about screen access.
+        capture::quiesce(CAPTURE_QUIESCE);
         tracing::info!("bye");
         std::process::exit(code);
     }
@@ -534,6 +552,7 @@ mod app {
             config_error: None,
             hotkeys: None,
             thumbnail_interval_ms: None,
+            capture_refused: false,
             display: None,
             _workspace: workspace,
             _spaces: spaces,
