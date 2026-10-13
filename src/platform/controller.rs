@@ -88,7 +88,9 @@ use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, Hot
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
+use crate::engine::leftovers;
 use crate::engine::park::{ParkRequest, choose_corner};
+use crate::engine::recovery::{self, Known};
 use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
@@ -411,6 +413,74 @@ struct Unrestored {
     entry: ParkedEntry,
     /// Retries so far (the first failure is logged at warn, later ones at debug).
     tries: u32,
+    /// A parked window the model let go ([`Controller::watch_forgotten`]): quiet in the log
+    /// until it is seen in the park zone a second time (closing a parked window lists it there
+    /// for a moment; the review of 6X, L6).
+    forgotten: Forgotten,
+    /// The element was looked up afresh in its app's list once already (L5).
+    refreshed: bool,
+}
+
+/// How often a forgotten parked window was seen in the park zone ([`Unrestored::forgotten`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Forgotten {
+    /// Not a forgotten window: a failed restore.
+    Not,
+    /// Seen once, when the model let it go.
+    Once,
+    /// Seen again at a check: warned.
+    Again,
+}
+
+impl Unrestored {
+    fn failed(entry: ParkedEntry) -> Self {
+        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false }
+    }
+}
+
+/// How a batch of actions runs ([`Controller::execute_batch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Batch {
+    /// What the user caused: stops between actions once Quit is requested, one try each.
+    User,
+    /// A switch's arrivals unveiled behind their snapshots: never interrupted (these windows
+    /// are not parked in the model's eyes), one try each (M2).
+    Unveil,
+    /// An unpark (quit, stand-down): never interrupted, and a busy app is tried again
+    /// quickly ([`safety::set_frame_retrying`]).
+    Unpark,
+}
+
+impl Batch {
+    /// Stops between actions once Quit is requested.
+    fn interruptible(self) -> bool {
+        self == Self::User
+    }
+
+    /// Tries a busy app's restore again quickly: only an unpark; a switch's arrivals keep
+    /// the single try, so a busy app never holds a switch up (the review of 6X, M2).
+    fn retries(self) -> bool {
+        self == Self::Unpark
+    }
+}
+
+impl Forgotten {
+    /// A check of a forgotten window gave `step`: whether to warn now (its second sighting
+    /// in the park zone) and what it is now. A closed window, gone at the first check,
+    /// never warns (L6).
+    fn after(self, step: UnrestoredStep) -> (Self, bool) {
+        match (self, step) {
+            (Self::Once, UnrestoredStep::Retry | UnrestoredStep::Wait) => (Self::Again, true),
+            (f, _) => (f, false),
+        }
+    }
+}
+
+/// Whether a failed move is worth looking the window up afresh in its app's list: only when
+/// the element we kept is stale (`kAXErrorInvalidUIElement`: a window reported destroyed while
+/// ordered out), and once per window, not at every check while it refuses to move (L5).
+fn refresh_element(error: AxError, refreshed: bool) -> bool {
+    !refreshed && error == AxError::INVALID_ELEMENT
 }
 
 /// What to do with an [`Unrestored`] window at a check.
@@ -1135,10 +1205,11 @@ impl Controller {
     /// model counts as parked, whether or not its park was carried out, but a window the
     /// model already counts as shown would otherwise stay parked (the review's S2).
     fn execute(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
-        self.execute_batch(ob, actions, true)
+        self.execute_batch(ob, actions, Batch::User)
     }
 
-    fn execute_batch(&mut self, ob: &Observer, actions: Vec<Action>, interruptible: bool) -> usize {
+    fn execute_batch(&mut self, ob: &Observer, actions: Vec<Action>, batch: Batch) -> usize {
+        let (interruptible, retrying) = (batch.interruptible(), batch.retries());
         if actions.is_empty() {
             return 0;
         }
@@ -1174,7 +1245,9 @@ impl Controller {
                     .then(|| safety::registry_entry(id))
                     .flatten();
                 let result = match (action, &kept) {
-                    (Action::SetFrame { frame, .. }, Some(e)) if !interruptible => Some(safety::set_frame_retrying(&e.element, id, frame)),
+                    (Action::SetFrame { frame, .. }, Some(e)) if retrying => {
+                        Some(safety::set_frame_retrying(&e.element, id, frame, leftovers::RESTORE_RETRY.budget))
+                    }
                     (Action::SetFrame { frame, .. }, Some(e)) => Some(e.element.set_frame(frame)),
                     (Action::Park { frame, .. }, Some(e)) => Some(e.element.set_position(frame.origin())),
                     _ => None,
@@ -1198,8 +1271,8 @@ impl Controller {
             };
             self.echoes.touch_window(id, now);
             let result = match action {
-                // An unpark (quit, stand-down, arrivals) tries a busy app again quickly (6X).
-                Action::SetFrame { frame, .. } if !interruptible => safety::set_frame_retrying(&w.element, id, frame),
+                // An unpark (quit, stand-down) tries a busy app again quickly (6X).
+                Action::SetFrame { frame, .. } if retrying => safety::set_frame_retrying(&w.element, id, frame, leftovers::RESTORE_RETRY.budget),
                 Action::SetFrame { frame, .. } => w.element.set_frame(frame),
                 Action::Park { frame, .. } => w.element.set_position(frame.origin()),
                 Action::Raise { .. } => w.element.raise(),
@@ -1270,13 +1343,15 @@ impl Controller {
     /// it. Never lets the batch's registry replace drop a window whose restore failed (S1).
     fn restore_failed(&mut self, id: u32, entry: ParkedEntry) {
         tracing::warn!(id, restore = %entry.restore, "restore failed: the window stays registered and is retried until it is seen back");
-        self.unrestored.insert(id, Unrestored { entry, tries: 0 });
+        self.unrestored.insert(id, Unrestored::failed(entry));
     }
 
     /// Checks windows whose restore failed against the window server, about once a second:
     /// seen on screen out of the park zone, gone, or parked again in the model → forgotten;
     /// still in the park zone → moved again; off screen → kept registered. With `force`
-    /// (quit) every one is retried at once, whatever the list says.
+    /// (quit) every one is retried at once, whatever the list says, a busy app tried again
+    /// quickly within one [`leftovers::RESTORE_RETRY`] budget per window (the review of 6X,
+    /// L1).
     fn retry_unrestored(&mut self, ob: &Observer, force: bool) {
         if self.unrestored.is_empty() {
             return;
@@ -1287,39 +1362,67 @@ impl Controller {
         }
         self.unrestored_checked = now;
         let list = windows::list_windows();
+        let mut scan: Option<recovery::ScanDisplays> = None;
         let before = self.unrestored.len();
         let ids: Vec<u32> = self.unrestored.keys().copied().collect();
         for id in ids {
             let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
-            let parks = |f: Rect| self.model.as_ref().is_some_and(|m| m.main_display().parks(f));
-            let listed = list.iter().find(|w| w.id == id).map(|w| (w.onscreen, parks(w.bounds)));
+            let listed = list.iter().find(|w| w.id == id).map(|w| {
+                let zone = match model_parked {
+                    Some(_) => self.model.as_ref().is_some_and(|m| m.main_display().parks(w.bounds)),
+                    // A window the model forgot: the safety paths' test, which honours the
+                    // other displays (it may sit on one now) and knows it is ours (L2).
+                    None => recovery::is_stranded(w.bounds, scan.get_or_insert_with(safety::scan_displays), Known::Registered),
+                };
+                (w.onscreen, zone)
+            });
             let forgotten_parked = model_parked.is_none() && listed.is_some_and(|(_, zone)| zone);
             let step = if force && (model_parked == Some(false) || forgotten_parked) && listed.is_some() {
                 UnrestoredStep::Retry
             } else {
                 unrestored_step(model_parked, listed)
             };
+            let Some(u) = self.unrestored.get_mut(&id) else { continue };
+            // A forgotten window is quiet until it is seen in the zone a second time (L6).
+            let quiet = u.forgotten == Forgotten::Once;
+            let (forgotten, warn) = u.forgotten.after(step);
+            u.forgotten = forgotten;
+            if warn {
+                tracing::warn!(id, ?listed, restore = %u.entry.restore, "a parked window the model let go is still in the park zone: it stays registered until it is back");
+            }
             match step {
+                UnrestoredStep::Done if quiet => {
+                    tracing::debug!(id, ?listed, "a parked window the model let go is accounted for (closed, or back)");
+                    self.unrestored.remove(&id);
+                }
                 UnrestoredStep::Done => {
                     tracing::info!(id, ?model_parked, ?listed, "a window whose restore failed is accounted for");
                     self.unrestored.remove(&id);
                 }
                 UnrestoredStep::Wait => {}
                 UnrestoredStep::Retry => {
-                    let Some(u) = self.unrestored.get_mut(&id) else { continue };
                     u.tries += 1;
                     let element = ob.window(id).map(|w| w.element.clone()).unwrap_or_else(|| u.entry.element.clone());
-                    let set = |e: &AxElement| if force { safety::set_frame_retrying(e, id, u.entry.restore) } else { e.set_frame(u.entry.restore) };
+                    let restore = u.entry.restore;
+                    let end = Instant::now() + leftovers::RESTORE_RETRY.budget;
+                    let set = |e: &AxElement| {
+                        if force { safety::set_frame_retrying(e, id, restore, end.saturating_duration_since(Instant::now())) } else { e.set_frame(restore) }
+                    };
                     let mut result = set(&element);
-                    if let Err(e) = &result
-                        && *e != AxError::CANNOT_COMPLETE
-                        && let Some(pid) = element.pid().ok()
-                        && let Ok(fresh) = safety::ax_window(pid, id)
+                    // At quit the lookup and its try must fit in the window's budget.
+                    let fits = !force || leftovers::leftover_fits(end.saturating_duration_since(Instant::now()), false);
+                    if let Err(e) = result
+                        && refresh_element(e, u.refreshed)
+                        && fits
+                        && let Ok(pid) = element.pid()
                     {
                         // The element we kept went stale (a window reported destroyed while
-                        // ordered out): the app's own list has it again.
-                        result = set(&fresh);
-                        u.entry.element = fresh;
+                        // ordered out): the app's own list may have it again. Once (L5).
+                        u.refreshed = true;
+                        if let Ok(fresh) = safety::ax_window(pid, id) {
+                            result = set(&fresh);
+                            u.entry.element = fresh;
+                        }
                     }
                     match result {
                         Ok(()) => {
@@ -1361,22 +1464,30 @@ impl Controller {
         }
         let ids: Vec<u32> = kept.iter().map(|(id, _)| *id).collect();
         let listed = windows::describe(&ids);
+        let displays = safety::scan_displays();
         let mut added = false;
         for (id, entry) in kept {
             if self.unrestored.contains_key(&id) || self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some()) {
                 continue;
             }
             let Some(l) = listed.iter().find(|l| l.id == id) else { continue };
-            if !self.model.as_ref().is_some_and(|m| m.main_display().parks(l.bounds)) {
+            // The safety paths' test: it honours the other displays (L2).
+            if !recovery::is_stranded(l.bounds, &displays, Known::Registered) {
                 continue;
             }
-            tracing::warn!(id, at = %l.bounds, onscreen = l.onscreen, restore = %entry.restore, "a parked window the model let go is still in the park zone: it stays registered until it is back");
-            self.unrestored.insert(id, Unrestored { entry, tries: 0 });
+            // A closed window is listed here for a moment: quiet until a second sighting (L6).
+            tracing::debug!(id, at = %l.bounds, onscreen = l.onscreen, restore = %entry.restore, "a parked window the model let go is in the park zone: it stays registered until it is back or gone");
+            self.unrestored.insert(id, Unrestored { forgotten: Forgotten::Once, ..Unrestored::failed(entry) });
             added = true;
         }
         if added {
             safety::registry_replace(self.parked_entries(ob));
         }
+    }
+
+    /// Every window the model manages (the safety paths count a sliver of theirs as parked).
+    pub fn model_window_ids(&self) -> BTreeSet<u32> {
+        self.model.as_ref().map(|m| m.windows().map(|w| w.meta.id.0).collect()).unwrap_or_default()
     }
 
     /// Quit, after its leftovers check: windows whose restore failed are checked against the
@@ -1433,7 +1544,7 @@ impl Controller {
         if !early.is_empty() {
             let started = Instant::now();
             let n = early.len();
-            failed += self.execute_batch(ob, early, true);
+            failed += self.execute_batch(ob, early, Batch::User);
             tracing::debug!(windows = n, took_ms = started.elapsed().as_millis() as u64, "the activated app's windows came to their frames first");
         }
         failed + self.execute_animated_rest(ob, actions, &first)
@@ -1539,7 +1650,7 @@ impl Controller {
                     _ => None,
                 })
                 .collect();
-            self.execute_batch(ob, p.actions, false);
+            self.execute_batch(ob, p.actions, Batch::Unveil);
             // Where the windows really are now: their snapshots land exactly there.
             let mut arrived = Vec::new();
             for (id, frame) in asked {
@@ -3117,7 +3228,7 @@ impl Controller {
         let Some(m) = self.model.as_mut() else { return self.unrestored.len() };
         let actions = m.unpark_all();
         let n = actions.len();
-        let failed = self.execute_batch(ob, actions, false);
+        let failed = self.execute_batch(ob, actions, Batch::Unpark);
         safety::registry_replace(self.parked_entries(ob));
         // Any app of ours the batch did not bring back (none should be left).
         let unhidden = safety::unhide_ours("unpark-all");
@@ -3681,6 +3792,37 @@ mod tests {
         assert_eq!(unrestored_step(None, Some((true, false))), Done, "seen back");
         assert_eq!(unrestored_step(None, Some((false, false))), Done, "out of the zone elsewhere");
         assert_eq!(unrestored_step(None, None), Done, "closed");
+    }
+
+    /// The review of 6X, M2: only an unpark tries a busy app again; a switch's arrivals
+    /// (unveiled behind their snapshots) keep the single try and are never interrupted.
+    #[test]
+    fn only_an_unpark_retries_a_busy_app() {
+        assert!(Batch::Unpark.retries() && !Batch::Unpark.interruptible());
+        assert!(!Batch::Unveil.retries() && !Batch::Unveil.interruptible());
+        assert!(!Batch::User.retries() && Batch::User.interruptible());
+    }
+
+    /// The review of 6X, L5: a window that refuses to move is looked up afresh only when its
+    /// element went stale, and once.
+    #[test]
+    fn a_fresh_lookup_only_for_a_stale_element_and_once() {
+        assert!(refresh_element(AxError::INVALID_ELEMENT, false));
+        assert!(!refresh_element(AxError::INVALID_ELEMENT, true), "once");
+        assert!(!refresh_element(AxError::CANNOT_COMPLETE, false), "a busy app keeps its element");
+        assert!(!refresh_element(AxError::ATTRIBUTE_UNSUPPORTED, false), "a window that refuses to move");
+    }
+
+    /// The review of 6X, L6: closing a parked window lists it in the park zone for a moment;
+    /// it warns only when a check sees it there again.
+    #[test]
+    fn a_forgotten_window_warns_only_on_its_second_sighting() {
+        use UnrestoredStep::*;
+        assert_eq!(Forgotten::Once.after(Done), (Forgotten::Once, false), "closed: gone at the first check, quiet");
+        assert_eq!(Forgotten::Once.after(Retry), (Forgotten::Again, true));
+        assert_eq!(Forgotten::Once.after(Wait), (Forgotten::Again, true));
+        assert_eq!(Forgotten::Again.after(Retry), (Forgotten::Again, false), "warned once");
+        assert_eq!(Forgotten::Not.after(Retry), (Forgotten::Not, false), "a failed restore logs as before");
     }
 
     #[test]

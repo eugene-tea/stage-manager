@@ -83,6 +83,9 @@ impl AxError {
     pub const NO_VALUE: Self = Self::Api(-25212);
     /// `kAXErrorCannotComplete`: messaging failed (hung app, app still launching).
     pub const CANNOT_COMPLETE: Self = Self::Api(-25204);
+    /// `kAXErrorInvalidUIElement`: the element is no longer valid (its window went away, or
+    /// was reported destroyed while ordered out).
+    pub const INVALID_ELEMENT: Self = Self::Api(-25202);
     /// `kAXErrorAttributeUnsupported`.
     pub const ATTRIBUTE_UNSUPPORTED: Self = Self::Api(-25205);
     /// `kAXErrorNotificationAlreadyRegistered`.

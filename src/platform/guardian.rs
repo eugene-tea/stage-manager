@@ -239,7 +239,7 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
             }
         };
         match element.frame() {
-            Ok(f) if !is_stranded(f, displays) => {
+            Ok(f) if !is_stranded(f, displays, x.known()) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
                     log_event(&e);
                     continue;
@@ -255,7 +255,7 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
         match Watch::restore_frame(&x, displays) {
             Some(frame) => match element.set_frame(frame) {
                 Ok(()) => match element.frame() {
-                    Ok(f) if !is_stranded(f, displays) => {
+                    Ok(f) if !is_stranded(f, displays, x.known()) => {
                         tracing::warn!(id = x.id, pid = x.pid, to = %f, "guardian: its Desktop shows; window brought back");
                         if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                             log_event(&e);
@@ -276,7 +276,7 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
     tracing::info!(restored = r.restored, failed = r.failed, "guardian: scanned the shown Desktop");
     for x in scanned {
         match safety::ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
-            Ok(f) if !is_stranded(f, displays) => {
+            Ok(f) if !is_stranded(f, displays, x.known()) => {
                 if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                     log_event(&e);
                 }

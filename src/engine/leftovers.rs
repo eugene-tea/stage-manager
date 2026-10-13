@@ -34,20 +34,47 @@ pub const UNPARK_POLL: Duration = Duration::from_millis(50);
 pub const LEFTOVER_BUDGET: Duration = Duration::from_secs(2);
 
 /// The most the whole leftovers check may add to a quit: a settle, the budget, a settle.
+/// Enforced as a deadline: the second settle gets what is left.
 pub const LEFTOVERS_MAX: Duration = Duration::from_secs(4);
 
-/// Asks `probe` until it answers nothing or `max` has passed, sleeping `step` between asks;
+/// The longest one Accessibility call may take: the messaging timeout the WM thread sets on
+/// the system-wide element (`wm_thread::AX_TIMEOUT_SECONDS`, the whole process's).
+pub const AX_CALL_MAX: Duration = Duration::from_millis(250);
+
+/// The longest one restore try may take: size, position, size, each to the timeout.
+pub const TRY_MAX: Duration = Duration::from_millis(750);
+
+/// The most the registry's unpark spends trying busy apps again (all its windows together,
+/// [`RESTORE_RETRY`] each): once spent, each window left gets its one try, no retry.
+pub const REGISTRY_RETRY_BUDGET: Duration = Duration::from_secs(2);
+
+/// Asks `probe` until it answers nothing or `max` has passed (`elapsed`: time since the
+/// settle began, its reads included), sleeping `step` between asks but never past `max`;
 /// returns its last answer (what is still there after the settle).
-pub fn settle<T>(mut probe: impl FnMut() -> Vec<T>, max: Duration, step: Duration, mut sleep: impl FnMut(Duration)) -> Vec<T> {
-    let mut waited = Duration::ZERO;
+pub fn settle<T>(
+    mut probe: impl FnMut() -> Vec<T>,
+    max: Duration,
+    step: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> Vec<T> {
     loop {
         let found = probe();
-        if found.is_empty() || waited >= max {
+        let spent = elapsed();
+        if found.is_empty() || spent >= max {
             return found;
         }
-        sleep(step);
-        waited += step;
+        sleep(step.min(max - spent));
     }
+}
+
+/// True when a window still parked may be tried with `left` of the leftovers' budget: its
+/// try ([`TRY_MAX`]) and, for one the registry does not know, reaching it through its app's
+/// list and reading its title (an Accessibility call each) must fit. Never a try that would
+/// end past the budget (the review of 6X, L1).
+pub fn leftover_fits(left: Duration, registered: bool) -> bool {
+    let reach = if registered { Duration::ZERO } else { AX_CALL_MAX * 2 };
+    left >= reach + TRY_MAX
 }
 
 /// Where a window still parked after the unpark goes back to.
@@ -99,6 +126,13 @@ pub struct QuickRetry {
     pub budget: Duration,
 }
 
+impl QuickRetry {
+    /// The same retry with at most `left` of time (a caller's deadline): a shorter budget.
+    pub fn within(self, left: Duration) -> Self {
+        Self { budget: self.budget.min(left), ..self }
+    }
+}
+
 /// The restore retry: three tries 75 ms apart, all within 1.2 s (a hung app costs up to 0.5 s
 /// a try: size and position, each to the messaging timeout, so it gets two).
 pub const RESTORE_RETRY: QuickRetry = QuickRetry { tries: 3, gap: Duration::from_millis(75), budget: Duration::from_millis(1200) };
@@ -119,7 +153,8 @@ pub struct Retried<E> {
 /// `policy.gap`, asks `landed` (the window server lists the window out of the park zone: the
 /// earlier request went through late) and tries again, up to `policy.tries` tries, and never
 /// one that would end after `policy.budget` judged by the last try's cost (`elapsed`: time
-/// since the first try began). Any other error ends at once.
+/// since the first try began), nor a wait that would. Any other error ends at once. The
+/// first try is always made: a caller with a deadline decides beforehand whether it fits.
 pub fn retry_quickly<E>(
     policy: QuickRetry,
     mut attempt: impl FnMut() -> Result<(), E>,
@@ -137,7 +172,7 @@ pub fn retry_quickly<E>(
             Err(e) => e,
         };
         let cost = elapsed().saturating_sub(began);
-        if !busy(&err) || tries >= policy.tries.max(1) {
+        if !busy(&err) || tries >= policy.tries.max(1) || elapsed() + policy.gap > policy.budget {
             return Retried { result: Err(err), tries, landed_late: false };
         }
         sleep(policy.gap);
@@ -156,7 +191,7 @@ mod tests {
     use super::*;
     use crate::engine::park::{Corner, is_parked};
     use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow};
-    use crate::engine::recovery::is_stranded;
+    use crate::engine::recovery::{Known, is_stranded};
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);
@@ -185,43 +220,73 @@ mod tests {
 
     // ----- the settle ------------------------------------------------------------------
 
+    /// [`settle`] on a fake clock: each read costs `read`; returns the answer, the reads made
+    /// and the time spent.
+    fn settled(answers: impl Fn(u32) -> Vec<u32>, max: Duration, read: Duration) -> (Vec<u32>, u32, Duration) {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let reads = std::cell::Cell::new(0);
+        let left = settle(
+            || {
+                reads.set(reads.get() + 1);
+                clock.set(clock.get() + read);
+                answers(reads.get())
+            },
+            max,
+            UNPARK_POLL,
+            || clock.get(),
+            |d| clock.set(clock.get() + d),
+        );
+        (left, reads.get(), clock.get())
+    }
+
     #[test]
     fn windows_listed_in_place_after_a_few_reads_are_not_left() {
         // The window server lists the old frames for the first reads after the moves.
-        let mut reads = 0;
-        let mut slept = Duration::ZERO;
-        let left = settle(
-            || {
-                reads += 1;
-                if reads <= 3 { vec![4551, 4550] } else { Vec::new() }
-            },
-            UNPARK_SETTLE,
-            UNPARK_POLL,
-            |d| slept += d,
-        );
+        let (left, reads, took) = settled(|n| if n <= 3 { vec![4551, 4550] } else { Vec::new() }, UNPARK_SETTLE, Duration::ZERO);
         assert!(left.is_empty(), "no false warning");
         assert_eq!(reads, 4);
-        assert_eq!(slept, UNPARK_POLL * 3);
+        assert_eq!(took, UNPARK_POLL * 3);
     }
 
     #[test]
     fn a_window_really_still_parked_is_reported_after_the_settle() {
-        let mut slept = Duration::ZERO;
-        let left = settle(|| vec![4600], UNPARK_SETTLE, UNPARK_POLL, |d| slept += d);
+        let (left, _, took) = settled(|_| vec![4600], UNPARK_SETTLE, Duration::ZERO);
         assert_eq!(left, [4600]);
-        assert!(slept >= UNPARK_SETTLE && slept < UNPARK_SETTLE + UNPARK_POLL, "waited about a second: {slept:?}");
+        assert_eq!(took, UNPARK_SETTLE, "waited a second, not a poll more");
+    }
+
+    /// The review of 6X, L1: the reads count against the settle's time too.
+    #[test]
+    fn slow_reads_count_against_the_settle() {
+        let (left, reads, took) = settled(|_| vec![4600], UNPARK_SETTLE, Duration::from_millis(200));
+        assert_eq!(left, [4600]);
+        assert!(reads <= 5, "{reads} reads");
+        assert!(took <= UNPARK_SETTLE + Duration::from_millis(200), "{took:?}");
     }
 
     #[test]
     fn nothing_parked_answers_at_once() {
-        let mut slept = Duration::ZERO;
-        assert!(settle(Vec::<u32>::new, UNPARK_SETTLE, UNPARK_POLL, |d| slept += d).is_empty());
-        assert_eq!(slept, Duration::ZERO);
+        let (left, reads, took) = settled(|_| Vec::new(), UNPARK_SETTLE, Duration::ZERO);
+        assert!(left.is_empty());
+        assert_eq!((reads, took), (1, Duration::ZERO));
     }
 
     #[test]
     fn the_whole_check_stays_within_its_bound() {
         assert!(UNPARK_SETTLE * 2 + LEFTOVER_BUDGET <= LEFTOVERS_MAX);
+        assert_eq!(TRY_MAX, AX_CALL_MAX * 3);
+    }
+
+    /// The review of 6X, L1: a leftover is tried only when its try (and reaching it, for one
+    /// the registry does not know) fits in what is left of the budget.
+    #[test]
+    fn a_leftover_is_tried_only_when_its_try_fits() {
+        assert!(leftover_fits(LEFTOVER_BUDGET, false));
+        assert!(leftover_fits(TRY_MAX, true));
+        assert!(!leftover_fits(TRY_MAX, false), "reaching it and its title come first");
+        assert!(leftover_fits(TRY_MAX + AX_CALL_MAX * 2, false));
+        assert!(!leftover_fits(TRY_MAX - Duration::from_millis(1), true));
+        assert!(!leftover_fits(Duration::ZERO, true));
     }
 
     // ----- where a leftover goes ---------------------------------------------------------
@@ -232,7 +297,7 @@ mod tests {
     fn a_leftover_goes_to_its_registered_frame_else_its_saved_one_else_the_center() {
         let d = displays();
         let parked = Rect::new(2559.0, 1388.0, 1621.0, 1183.0);
-        assert!(is_stranded(parked, &d));
+        assert!(is_stranded(parked, &d, Known::Unknown));
         let mail = live("com.apple.mail", "Inbox", parked);
 
         let registered = Rect::new(67.0, 39.0, 1621.0, 1130.0);
@@ -318,6 +383,32 @@ mod tests {
         // A fast-failing busy app gets every try.
         let (r, _) = run(&[], &[], Duration::from_millis(5));
         assert_eq!(r.tries, RESTORE_RETRY.tries);
+    }
+
+    /// The review of 6X, L1: a deadline shorter than the retry's budget is a bound: no try
+    /// and no wait that would end past it.
+    #[test]
+    fn a_deadline_bounds_the_retry() {
+        let left = Duration::from_millis(600);
+        let mut a = std::iter::repeat(Err::<(), E>(E::Busy));
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let r = retry_quickly(
+            RESTORE_RETRY.within(left),
+            || {
+                clock.set(clock.get() + Duration::from_millis(250));
+                a.next().unwrap_or(Err(E::Busy))
+            },
+            |e| *e == E::Busy,
+            || false,
+            || clock.get(),
+            |d| clock.set(clock.get() + d),
+        );
+        assert_eq!(r.tries, 2, "250 + 75 + 250 fits, a third would not");
+        assert!(clock.get() <= left, "{:?}", clock.get());
+        assert_eq!(RESTORE_RETRY.within(Duration::from_secs(9)), RESTORE_RETRY);
+        // No room for the wait: one try only.
+        let r = retry_quickly(RESTORE_RETRY.within(Duration::from_millis(300)), || Err(E::Busy), |e| *e == E::Busy, || true, || Duration::from_millis(250), |_| {});
+        assert_eq!(r, Retried { result: Err(E::Busy), tries: 1, landed_late: false });
     }
 
     #[test]

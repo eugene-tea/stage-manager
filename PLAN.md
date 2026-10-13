@@ -61,7 +61,11 @@ Defence in depth, because a parked window that never returns is the worst bug:
    app still in a park zone (known to this run or not) is brought back to its registry frame,
    its `state.json` frame, or centered, before it exits; one it cannot reach leaves the exit
    unclean for the guardian. A restore a busy app cannot answer (`CannotComplete`) is retried
-   quickly (three tries 75 ms apart, within 1.2 s).
+   quickly (three tries 75 ms apart, within 1.2 s) on an unpark only (quit, stand-down, the
+   safety paths), never in a switch. Every budget is a bound: the leftovers check takes at
+   most 4 s (a try starts only when it fits), the registry's quick retries 2 s in all. A
+   stand-down (Apple's Stage Manager turned on) ends with the same check; a window it cannot
+   reach is looked for again whenever a Desktop shows.
 3. **Panic hook** unparks (uses `try_lock`; falls back to a scan, below).
 4. **SIGTERM/SIGINT/SIGHUP** go through a self-pipe to a watcher thread that unparks and exits.
 5. **Guardian process.** At launch the app spawns itself as `stage-manager --guardian <pid>`.
@@ -71,9 +75,14 @@ Defence in depth, because a parked window that never returns is the worst bug:
    once its Space shows.
 6. **Recovery scan** (launch and guardian): every window of every app whose frame lies in a
    park zone is moved back to its saved frame from `state.json`, or centered on the display.
-   Apps that do not answer at launch are scanned again for 30 s; after a main display change
-   the scan runs again (macOS puts windows back where they were the last time that
-   arrangement was in use, parked ones included), leaving the windows we park alone.
+   After a main display change every app is scanned again (macOS puts windows back where
+   they were the last time that arrangement was in use, parked ones included), leaving the
+   windows we park alone; apps that do not answer, at launch or then, are scanned again for
+   30 s. The scans go in slices (two apps a pass; one that does not answer holds the next pass
+   off 3 s), so a busy app never holds the WM thread longer than that.
+   A thin sliver at the edge (at most 8 pt by 256 pt on screen, past the right or bottom edge)
+   counts as parked only for windows we manage or registered, and for apps with a window in
+   `state.json`; any other app's window must sit clearly in the park zone.
 7. **Restore frames are clamped** onto the visible display before being applied.
 
 Across Spaces: the registry keeps every Space's parked windows (AX elements taken while
@@ -134,6 +143,13 @@ is then about 7 000 lines, 1 MB; a heavy day 2-3 MB. Even the suite's machine pa
 
 Known gaps a review found and the owner accepted as rare, left as they are:
 
+- 6X review L3: the sliver rule (`src/engine/park.rs`, `Slivers`) still applies to every
+  window the model manages, since the model sees only managed apps' windows and must not
+  adopt a parked window macOS left a few points above the corner. A user's window pushed
+  almost wholly off the right or bottom edge in the display's bottom-right quarter, with at
+  most 8 pt by 256 pt on screen, is then taken as parked: its frame there is not recorded, a
+  stage switch brings it back to its last frame, and the launch's scan centers it when its
+  app has a window in `state.json`. Other apps' windows are judged without the rule.
 - R15: `activation_frame` (`src/platform/controller.rs`), on a display whose only non-sticky
   shown window belongs to an app that posts no move notice, reads a horizontal-only user drag
   of that window as a Desktop slide and keeps its stale tracked frame.

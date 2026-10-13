@@ -41,6 +41,7 @@ use super::observe::{self, Observer};
 use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
+use crate::engine::rescan::{Queued, Rescan, Why};
 use crate::engine::stand_down::{StandDown, Step, Task, Work, release_plan, resume_plan};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
@@ -79,18 +80,6 @@ fn arm_fast_tick() {
 
 /// App-observation retries run every this many ticks (about once a second).
 const RETRY_EVERY: u32 = 4;
-
-/// After the launch's recovery scan, apps that did not answer it are scanned again for this
-/// long (an app busy after a display change answers `CannotComplete` for a while: 6X, Mail
-/// and Telegram stayed parked behind it) ...
-const RESCAN_FOR: Duration = Duration::from_secs(30);
-
-/// ... every this many ticks (about every 3 s) ...
-const RESCAN_EVERY: u32 = 12;
-
-/// ... at most this many apps a time (each one that does not answer holds the WM thread up
-/// to the 0.25 s messaging timeout).
-const RESCAN_APPS: usize = 2;
 
 /// After the main display changes, how long until every allowed app's windows are scanned
 /// for the park zone: macOS puts windows back where they were the last time that display
@@ -211,8 +200,12 @@ struct WmState {
     /// The last displays and `com.apple.WindowManager` values, for a fresh controller.
     displays: Option<Vec<Display>>,
     settings: Option<RawSettings>,
-    /// Apps the launch's recovery scan could not read, scanned again until when.
-    rescan: Option<(Vec<i32>, Instant)>,
+    /// Apps a recovery scan could not read, and a display change's sweep, scanned in slices
+    /// ([`Rescan`]).
+    rescan: Rescan,
+    /// A stand-down's leftovers check left windows in the park zone: they are looked for
+    /// again whenever a Desktop shows, as the held ones are.
+    stand_down_leftovers: bool,
     /// When the scan after a main display change is due.
     display_sweep: Option<Instant>,
 }
@@ -319,7 +312,7 @@ impl WmState {
                     }
                     if !unanswered.is_empty() {
                         tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
-                        self.rescan = Some((unanswered, Instant::now() + RESCAN_FOR));
+                        self.rescan.unanswered(unanswered, Why::Launch, Instant::now());
                     }
                 }
                 self.trusted = trusted;
@@ -382,7 +375,7 @@ impl WmState {
                 // now, known to this run or not (6X); one that cannot (another Space's, an app
                 // that does not answer) leaves the exit unclean, so the guardian watches until
                 // it is back.
-                let back = safety::leftovers_back("quit");
+                let back = safety::leftovers_back("quit", self.controller.model_window_ids());
                 // A restore that failed but went through late is seen back now.
                 let unrestored = self.controller.account_unrestored(&self.observer);
                 if failed > 0 {
@@ -413,13 +406,22 @@ impl WmState {
                     if failed > 0 || safety::registry_len() > 0 {
                         safety::emergency_unpark("stand-down");
                     }
+                    // The window server's word, as at quit (the review of 6X): every allowed
+                    // app's window still in a park zone comes back now, known to this run or
+                    // not; one that cannot is looked for again whenever a Desktop shows.
+                    let back = safety::leftovers_back("stand-down", self.controller.model_window_ids());
+                    let unrestored = self.controller.account_unrestored(&self.observer);
+                    if failed > 0 || !back {
+                        tracing::info!(failed, unrestored, back, "restores that failed at the stand-down, after the leftovers check");
+                    }
+                    self.stand_down_leftovers = !back;
                 }
                 Task::HoldStranded => {
                     let held = safety::hold_remaining();
-                    if held > 0 {
-                        tracing::warn!(held, "standing down: windows of another Space come back when their Space shows");
+                    if held > 0 || self.stand_down_leftovers {
+                        tracing::warn!(held, leftovers = self.stand_down_leftovers, "standing down: windows of another Space come back when their Space shows");
                     }
-                    self.stand_down.released(held == 0);
+                    self.stand_down.released(held == 0 && !self.stand_down_leftovers);
                 }
                 Task::DropSavedStages => drop_saved_stages(),
                 Task::StopObserving => {
@@ -455,10 +457,15 @@ impl WmState {
         }
     }
 
-    /// Tries the held windows again, when there are any.
+    /// Tries the held windows again, when there are any, and the stand-down's leftovers
+    /// (windows still in the park zone that no registry held).
     fn retry_held(&mut self) {
         if self.stand_down.stranded() {
-            let all_back = safety::retry_held();
+            let mut all_back = safety::retry_held();
+            if self.stand_down_leftovers {
+                self.stand_down_leftovers = !safety::leftovers_back("stand-down, a Desktop shows", Default::default());
+                all_back &= !self.stand_down_leftovers;
+            }
             self.stand_down.released(all_back);
         }
     }
@@ -468,46 +475,44 @@ impl WmState {
         if self.ticks.is_multiple_of(RETRY_EVERY) {
             self.observer.retry_pending(ax_callback);
         }
-        if self.ticks.is_multiple_of(RESCAN_EVERY) {
-            self.rescan_unanswered();
-        }
         self.sweep_after_display_change();
+        self.rescan_pass();
         self.pump();
         self.controller.tick(&mut self.observer);
     }
 
-    /// Scans the apps the launch's recovery scan could not read again ([`RESCAN_EVERY`],
-    /// [`RESCAN_APPS`] a time, for [`RESCAN_FOR`]); windows we park are left alone. An app the
-    /// observer reads by now needs no scan: the controller brings back a window it finds in
-    /// the park zone.
-    fn rescan_unanswered(&mut self) {
-        let Some((mut pids, until)) = self.rescan.take() else { return };
+    /// One slice of the scans waiting ([`Rescan`]): apps a scan could not read, tried again
+    /// for 30 s, and a display change's sweep, two apps a pass at most; windows we park are
+    /// left alone (the registry's). A launch's app the observer reads by now needs no scan:
+    /// the controller brings back a window it finds in the park zone.
+    fn rescan_pass(&mut self) {
+        if self.rescan.is_empty() {
+            return;
+        }
+        let now = Instant::now();
         let observed: std::collections::HashSet<i32> = self.observer.windows().values().map(|w| w.pid).collect();
-        pids.retain(|p| !observed.contains(p));
-        let later = pids.split_off(pids.len().min(RESCAN_APPS));
-        if pids.is_empty() {
+        let (pass, expired) = self.rescan.due(now, |p| observed.contains(&p));
+        if !expired.is_empty() {
+            let apps: Vec<i32> = expired.iter().map(|q| q.pid).collect();
+            tracing::warn!(?apps, "apps still do not answer: their windows are not scanned for the park zone (the quit's check and the next launch are)");
+        }
+        if pass.is_empty() {
             return;
         }
+        let pids: Vec<i32> = pass.iter().map(|q| q.pid).collect();
+        let reason = if pass.iter().all(|q| q.why == Why::Launch) { "launch, apps that did not answer" } else { "display change" };
         let scope = safety::ScanScope { pids: Some(pids), skip: safety::registry_ids() };
-        let (r, mut unanswered) = safety::recovery_scan_with("launch, apps that did not answer", &scope);
+        let (r, unanswered) = safety::recovery_scan_with(reason, &scope);
         if r.restored > 0 {
-            tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
+            tracing::warn!(reason, restored = r.restored, "windows left in the park zone were brought back");
         }
-        // The apps not tried yet go first next time.
-        let mut next = later;
-        next.append(&mut unanswered);
-        if next.is_empty() {
-            return;
-        }
-        if Instant::now() < until {
-            self.rescan = Some((next, until));
-        } else {
-            tracing::warn!(apps = ?next, "apps still do not answer: their windows are not scanned for the park zone (the quit's check and the next launch are)");
-        }
+        let missed: Vec<Queued> = pass.into_iter().filter(|q| unanswered.contains(&q.pid)).collect();
+        self.rescan.done(&missed, Instant::now());
     }
 
-    /// After a main display change ([`DISPLAY_SWEEP_AFTER`]): every allowed app's window
-    /// macOS left in the park zone comes back, except those we park (the registry's).
+    /// After a main display change ([`DISPLAY_SWEEP_AFTER`]): every allowed app is queued
+    /// for a scan ([`Rescan::sweep`], in slices): each window macOS left in the park zone comes
+    /// back, except those we park (the registry's).
     fn sweep_after_display_change(&mut self) {
         let Some(due) = self.display_sweep else { return };
         if Instant::now() < due {
@@ -517,11 +522,9 @@ impl WmState {
         if !self.observer.observing() || !self.stand_down.admits(Work::Observe) {
             return;
         }
-        let scope = safety::ScanScope { pids: None, skip: safety::registry_ids() };
-        let (r, _) = safety::recovery_scan_with("display change", &scope);
-        if r.restored > 0 {
-            tracing::warn!(restored = r.restored, "windows macOS left in the park zone after the display change were brought back");
-        }
+        let pids = safety::scan_pids();
+        tracing::info!(apps = pids.len(), "display change: every app is scanned for windows in the park zone, a few at a time");
+        self.rescan.sweep(pids);
     }
 
     fn after_panic(&mut self) {
@@ -562,7 +565,8 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         stand_down: StandDown::default(),
         displays: None,
         settings: None,
-        rescan: None,
+        rescan: Rescan::default(),
+        stand_down_leftovers: false,
         display_sweep: None,
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -598,4 +602,16 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
     tracing::debug!("WM thread running");
     CFRunLoop::run();
     tracing::debug!("WM thread stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::leftovers;
+
+    /// The leftovers' time bounds count each Accessibility call at the timeout set here.
+    #[test]
+    fn the_leftovers_know_the_messaging_timeout() {
+        assert_eq!(Duration::from_secs_f32(AX_TIMEOUT_SECONDS), leftovers::AX_CALL_MAX);
+    }
 }

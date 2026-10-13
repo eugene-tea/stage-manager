@@ -347,10 +347,12 @@ mod app {
 
     /// The registry's unpark, then the window server's word on it (6X): a registry move that
     /// "succeeded" is not proof, so every window of an allowed app still in the park zone is
-    /// brought back or leaves the exit unclean (the guardian waits for it).
+    /// brought back or leaves the exit unclean (the guardian waits for it). Bounded: the
+    /// registry's quick retries share one budget ([`leftovers::REGISTRY_RETRY_BUDGET`], then
+    /// one try a window), the leftovers check at most [`leftovers::LEFTOVERS_MAX`].
     fn registry_then_leftovers(reason: &str) -> bool {
         let registry = safety::emergency_unpark(reason);
-        let leftovers = safety::leftovers_back(reason);
+        let leftovers = safety::leftovers_back(reason, Default::default());
         registry && leftovers
     }
 
