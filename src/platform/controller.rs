@@ -1563,7 +1563,13 @@ impl Controller {
         if !early.is_empty() {
             let started = Instant::now();
             let n = early.len();
+            // The early batch notes the model as it is now (the windows leaving already parked
+            // in its eyes); the transition is planned against the state before the switch, or
+            // the windows leaving get no snapshot (10-13: every Cmd-Tab switch since 6V was
+            // instant, the outgoing stage gone with no motion into the strip).
+            let before = self.before.clone();
             failed += self.execute_batch(ob, early, Batch::User);
+            self.before = before;
             tracing::debug!(windows = n, took_ms = started.elapsed().as_millis() as u64, "the activated app's windows came to their frames first");
         }
         failed + self.execute_animated_rest(ob, actions, &first)
