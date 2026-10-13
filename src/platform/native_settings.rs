@@ -39,8 +39,15 @@ pub const KEYS: [&str; 7] = [
 pub const DOCK_DOMAIN: &str = "com.apple.dock";
 
 /// Every key read from [`DOCK_DOMAIN`] ("When switching to an application, switch to a Space
-/// with open windows for the application").
-pub const DOCK_KEYS: [&str; 1] = [crate::engine::settings::SWITCH_TO_APP_SPACE];
+/// with open windows for the application"; the hot corners' actions, for the inert slivers'
+/// Quick Note corner, [`crate::engine::sliver::quick_note_at`]).
+pub const DOCK_KEYS: [&str; 5] = [
+    crate::engine::settings::SWITCH_TO_APP_SPACE,
+    "wvous-tl-corner",
+    "wvous-tr-corner",
+    "wvous-bl-corner",
+    "wvous-br-corner",
+];
 
 /// Raw values: key → integer (booleans as 0/1). A missing key means "macOS default".
 pub type RawSettings = BTreeMap<String, i64>;

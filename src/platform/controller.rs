@@ -873,7 +873,9 @@ impl Controller {
         }
         let pid = super::dock::dock_pid();
         let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
-        let bar = sliver::DockBar { pid, bars };
+        let corner = self.model.as_ref().map(|m| m.main_display().corner).unwrap_or_default();
+        let raw = super::native_settings::current().get(sliver::hot_corner_key(corner)).copied();
+        let bar = sliver::DockBar { pid, bars, quick_note: sliver::quick_note_at(raw, corner) };
         let changed = self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar);
         self.dock_bar = Some((Instant::now(), bar));
         if changed {
