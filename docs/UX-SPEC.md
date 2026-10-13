@@ -40,6 +40,7 @@ whose default is Apple's value (`stage-manager config --explain <key>`).
 | The strip's level | below windows: a window moved over it covers it (owner, 10-12) | same; above windows only while a window or card is dragged over it or the edge reveals it over a window | `[strip] level = "above_windows"` |
 | Switching | windows grow from their card and shrink into their slot on the spring | same, drawn with snapshots (deviation 1) | `[animation]` |
 | Drag a card up or down in the strip | nothing (Apple's strip cannot be reordered) | moves the card to that slot (an extension, invisible until used) | `[strip] reorder` |
+| Drop a card on another card | nothing (Apple draws a similar stacked card for a stage of several apps, but a drop there does not merge) | merges the two stages (an extension, invisible until used; the owner's ask, 10-12) | `[strip] merge_on_drop`, `[drag] merge_zone` |
 | Edge tab, launch reveal | none | off | `[reveal] edge_tab`, `launch_reveal` |
 | The strip while a wallpaper click shows the desktop | stays shown (the way back to a stage) | same | `[strip] hide_while_desktop_shown = true` hides it until the reveal ends or any window activation |
 | Card numbers, stage names | none | off | `[strip] show_numbers`, `show_names` |
@@ -122,8 +123,27 @@ under the pointer (the gap between the cards whose middles are above and below i
 order is saved; in Apple's order the swap rule above carries on from it, and in `"fixed"`
 order the stage moves in creation order (its hotkey number follows the strip). A card
 dragged past the column turns into the drag-out ghost (below); back over the column it
-follows the pointer again. The hit test already tells a gap from a card's middle so that a
-card-on-card merge can be added later; it is not built.
+follows the pointer again.
+
+**Merge (an extension, `[strip] merge_on_drop = true`; Apple: nothing).** While a card is
+dragged in the column, the middle part of every other card (`[drag] merge_zone` of its
+height, default the middle half) means "onto this card"; above and below it, and between
+cards, is the reorder gap as before. Both are measured on the cards at rest with the dragged
+card's slot left out, the same reference the gap always had, so the cards making room never
+move a target. Held over a card's middle, the reorder gap closes (the dragged card keeps its
+own slot meanwhile) and that card grows by the hover scale on the hover's easing and draws
+the dragged card's windows stacked behind its own, exactly as the merged card will look (a
+target that already shows `max_windows` windows only grows); leaving the middle undoes it,
+the cards moving on the spring. Released there, the dragged card shrinks into the target and
+fades, the dragged stage's windows join the target's stage behind its own (they stay parked
+with their saved frames; nothing moves on screen), the target keeps its slot, key window,
+name and the more recent of the two stages' recency, and the dragged card's slot frees by
+the slot rule (the cards close up; a free slot takes the most recent stage out of view). An
+emptied declared stage stays, as with a Shift-click merge. Undo: pick the merged card and
+drag a window onto the strip, which makes it a stage of its own again. Zones on his
+displays (four cards: a full-height window, 1280 × 940, a 920 × 436 Finder window, a tall
+narrow window): onto-card bands 55–91 pt (laptop) and 53–88 pt (5K) tall, the gaps between
+them 79–93 pt and 75–90 pt.
 
 ## Transitions
 
@@ -149,6 +169,7 @@ card-on-card merge can be added later; it is not built.
 | Click a card's app icon | All of the app's windows, also those in other stages (MacMost; Apple's docs are silent) | Switches to the card's stage and brings the app's windows from other stages there |
 | ⌘M | The window goes to the strip, not the Dock | Same: parked as a stage of its own, then un-minimized there (deviation 7) |
 | Drag card into main area | The window grows to full size as it leaves the strip, follows the pointer, and joins the **current** stage on drop | Same gesture: a press that moves more than 5 pt lifts the card (less, or a drag released over its own slot, is a click); a ghost of its front window follows the pointer and grows from thumbnail to window size over the 260 pt past the strip's edge, the grab point sliding into the title bar. Released in the main area, the stage's windows join the current stage and the front window lands with its title bar under the pointer (clamped onto the screen); the others keep their saved frames. Released over the strip: cancelled. See deviation 5 |
+| Drop a card on another card | Nothing: the card goes back to its slot (Apple's strip has no drop target on a card) | The two stages merge: see "Merge" under "Strip order" (`[strip] merge_on_drop`) |
 | Drag window onto strip | The window shrinks to card size under the pointer as soon as the pointer is over the strip and the cards make room where it is; on drop it becomes **its own stage** in that slot (settles in about 400 ms) | While a managed window is dragged by its title bar and the pointer is over the strip column, the strip comes above windows (and slides in if hidden), a card-sized snapshot of the window, turned like a card, follows the pointer (every drag event), and the cards open a gap at the slot under the pointer on the spring. Released there, the window becomes its own stage, its snapshot shrinks into the gap and becomes its card, and its pre-drag frame is its saved frame. Leaving the column takes the snapshot away and the strip back below windows. See deviation 5 |
 | Dock click or ⌘Tab to an app in the strip | Switches to that app's stage; the outgoing stage takes the vacated slot | Same |
 | Shift + Dock click on an app in another stage | (No native meaning) | Sugar: the app's windows come to the current stage instead (all of them; the most recent with One at a Time) |

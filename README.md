@@ -133,6 +133,16 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
 - **Drag a card up or down** within the strip to give it another slot (an extension, on
   because it is invisible until used; `[strip] reorder`): the card follows the pointer, the
   others make room, and the order stays (also across relaunches).
+- **Drop a card onto another card** to merge the two stages (an extension: Apple's strip
+  draws a similar stacked card but never merges; on because it is invisible until used;
+  `[strip] merge_on_drop`). Hold the dragged card over the middle of another card (the
+  middle half of its height, `[drag] merge_zone`): that card grows a little and shows the
+  dragged card's windows stacked behind its own, as the merged card will look, and the gap
+  closes; above or below that middle the cards open a gap and the drop reorders as before.
+  Let go over the middle: the dragged card goes into the other one, which keeps its slot,
+  and the cards below close up (a stage out of view may take the freed slot). Nothing moves
+  on screen; the windows come with that card when you pick it. **To undo**, pick the merged
+  card and drag a window out of it onto the strip: it becomes a stage of its own again.
 - **Drag a window onto the strip** (by its title bar) to give it a stage of its own: once
   the pointer is over the strip column, the strip comes above windows, a card-sized picture
   of the window, turned like a card, follows the pointer, and the cards open a gap where
@@ -226,6 +236,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
+| `strip.merge_on_drop` | `true` | true or false | Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used). |
 | `strip.show_active` | `false` | true or false | Also show the active stage as a card (fixed order only; Apple never does). |
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
@@ -286,6 +297,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `reveal.launch_reveal` | `false` | true or false | Show a covered strip for a moment at launch (an extension). |
 | `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |
 | `drag.threshold` | `5.0` | number, 0 to 100 | A press that moves farther than this (points, at least 5) drags the card; less is a click. |
+| `drag.merge_zone` | `0.5` | number, 0 to 1 | With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards. |
 | `drag.grow_distance` | `260.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance. |
 | `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
 | `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip. |
@@ -505,7 +517,9 @@ config with no live values, ⌘M sending a window to the strip (the fixture mini
 window on SIGUSR2) and a click on a card's app icon bringing every window of the app; and
 motion: the strip below windows (layer -1), lifted (layer 3) with the dragged window's card in
 the motion overlay while a window is dragged over it, the window dropped above the first card
-taking that slot, a card dragged to the top keeping its slot across a relaunch, an animated
+taking that slot, a card dropped on the middle of another card merging the two stages (one
+card fewer, the target's stage holding both, nothing unparked) and one dropped in a gap
+reordering as before, a card dragged to the top keeping its slot across a relaunch, an animated
 card click ending with every frame exact, and `level = "above_windows"`, all over an
 unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip column, the
 drags pass over our windows and the fixtures only, with the strip reached for the reorder and
@@ -657,7 +671,7 @@ limited to the fixture.
   thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,
   `native_settings`, `ctl`, `logging`, `paths`.
 - `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
-  clicks, level, card drag and reorder, the gap for window drags, slide), `strip_motion`
+  clicks, level, card drag, reorder and merge, the gap for window drags, slide), `strip_motion`
   (full-size snapshots, transitions, the dragged window's card), `overlay` (the
   click-through motion layer above everything), `motion_math` (pure: spring timing, planes,
   drop spots, snapshot budget), `strip_layout` (pure geometry and tilt), `strip_visibility`

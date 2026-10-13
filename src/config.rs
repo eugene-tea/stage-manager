@@ -182,6 +182,8 @@ pub struct RevealStyle {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DragStyle {
     pub threshold: f64,
+    /// The middle fraction of a card's height that takes a dropped card (a merge).
+    pub merge_zone: f64,
     pub grow_distance: f64,
     pub lifted_opacity: f64,
     pub ghost_opacity: f64,
@@ -221,6 +223,8 @@ pub struct StripStyle {
     pub level: StripLevel,
     /// Cards can be dragged to another slot.
     pub reorder: bool,
+    /// A card dropped onto another card merges the two stages.
+    pub merge_on_drop: bool,
     /// Column width.
     pub width: f64,
     /// Multiplies every strip length.
@@ -637,6 +641,7 @@ impl Config {
                     _ => StripLevel::BelowWindows,
                 },
                 reorder: v.flag("strip.reorder"),
+                merge_on_drop: v.flag("strip.merge_on_drop"),
                 width: v.num("strip.width"),
                 scale: v.num("strip.scale"),
                 scale_to_display: v.flag("strip.scale_to_display"),
@@ -697,6 +702,7 @@ impl Config {
                 },
                 drag: DragStyle {
                     threshold: v.num("drag.threshold"),
+                    merge_zone: v.num("drag.merge_zone"),
                     grow_distance: v.num("drag.grow_distance"),
                     lifted_opacity: v.num("drag.lifted_opacity"),
                     ghost_opacity: v.num("drag.ghost_opacity"),
@@ -965,6 +971,8 @@ mod tests {
         assert!(c.windows.minimize_to_strip);
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
         assert!(c.style.reorder, "invisible until a card is dragged");
+        assert!(c.style.merge_on_drop, "invisible until a card is dropped on a card (the owner's word, 10-12)");
+        assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         let a = &c.style.animation;
         assert!(a.enabled && (a.spring_stiffness, a.spring_damping, a.spring_mass) == (240.0, 31.0, 1.0));
@@ -1005,6 +1013,7 @@ mod tests {
 order = "fixed"
 level = "above_windows"
 reorder = false
+merge_on_drop = false
 show_active = true
 show_numbers = true
 hide_while_desktop_shown = true
@@ -1052,7 +1061,7 @@ unpark_at = 0.9
         );
         let c = p.config;
         assert_eq!(c.style.level, StripLevel::AboveWindows);
-        assert!(!c.style.reorder);
+        assert!(!c.style.reorder && !c.style.merge_on_drop);
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert_eq!(c.strip.order, StripOrder::Fixed);
         assert!(c.strip.show_active && c.style.show_numbers && c.strip.hide_while_desktop_shown);

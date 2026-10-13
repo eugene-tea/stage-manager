@@ -212,6 +212,36 @@ fn a_card_click_never_touches_another_desktop() {
 }
 
 #[test]
+fn a_card_dropped_on_a_card_merges_on_the_shown_desktop_only() {
+    let mut mac = two_desktops();
+    mac.put(0, 6, 40, "com.example.music", "Playlist");
+    mac.focused = Some(w(1));
+    mac.go(0);
+    let d1 = mac.space();
+    let d1_cards: Vec<StageId> = mac.m.strip().iter().map(|c| c.stage).collect();
+    assert_eq!(d1_cards.len(), 2, "two cards on Desktop 1");
+    mac.go(1);
+    let d2 = mac.space();
+    let d2_card = mac.m.strip()[0].stage;
+    // While Desktop 2 shows, Desktop 1's cards cannot merge, nor with Desktop 2's.
+    let obs = mac.obs();
+    assert!(mac.m.merge_stages(d1_cards[0], d1_cards[1], &obs).is_empty());
+    assert!(mac.m.merge_stages(d1_cards[0], d2_card, &obs).is_empty());
+    assert!(mac.m.merge_stages(d2_card, d1_cards[1], &obs).is_empty());
+    mac.go(0);
+    assert_eq!(mac.space(), d1);
+    let obs = mac.obs();
+    let a = mac.m.merge_stages(d1_cards[0], d1_cards[1], &obs);
+    let a = mac.run(a);
+    assert_eq!(a, [Action::StateChanged]);
+    assert!(mac.elsewhere.is_empty(), "nothing on Desktop 2 touched: {:?}", mac.elsewhere);
+    assert_eq!(mac.strip().len(), 1, "one card left on Desktop 1");
+    assert_eq!(mac.strip()[0].len(), 2, "holding both stages' windows");
+    assert_eq!(mac.m.stages_in(d2).count(), 2, "Desktop 2's stages untouched");
+    assert!(mac.m.stage(d1_cards[1]).is_some_and(|s| s.space == d1));
+}
+
+#[test]
 fn stage_numbers_and_hotkeys_are_per_desktop() {
     let mut mac = two_desktops();
     mac.focused = Some(w(1));

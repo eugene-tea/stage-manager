@@ -1128,6 +1128,111 @@ fn merge_leaves_pinned_windows_alone() {
     assert_eq!(e.members(1), [2, 3]);
 }
 
+// ----- merge by dropping a card on a card -------------------------------------------------
+
+/// The stage holding window `id`.
+fn stage_holding(e: &Env, id: u32) -> StageId {
+    e.m.stage_of(w(id)).expect("in a stage")
+}
+
+#[test]
+fn a_card_dropped_on_a_card_keeps_every_window_parked_and_moves_nothing() {
+    let mut e = stages(4, 6);
+    let (s1, s2, s3) = (stage_holding(&e, 1), stage_holding(&e, 2), stage_holding(&e, 3));
+    assert_eq!(e.m.strip_slots(MAIN), [s1, s2, s3]);
+    let saved: Vec<Rect> = [1, 3].iter().map(|&id| e.m.window(w(id)).expect("known").restore).collect();
+    let desk = e.d.frames.clone();
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(s1, s3, &obs);
+    e.run(a.clone());
+    assert_eq!(a, [Action::StateChanged], "nothing moves on screen");
+    assert_eq!(e.d.frames, desk);
+    assert!(e.m.stage(s1).is_none(), "the emptied stage is gone");
+    assert_eq!(e.m.stage(s3).expect("kept").windows, [w(3), w(1)], "behind the target's own windows");
+    assert_eq!(e.m.stage(s3).expect("kept").key, Some(w(3)), "the target keeps its key window");
+    assert!(e.m.window(w(1)).is_some_and(|x| x.parked) && e.m.window(w(3)).is_some_and(|x| x.parked));
+    let now: Vec<Rect> = [1, 3].iter().map(|&id| e.m.window(w(id)).expect("known").restore).collect();
+    assert_eq!(now, saved, "saved frames kept");
+    assert_eq!(e.m.windows().count(), 4, "every window kept");
+    assert_eq!(e.m.strip_slots(MAIN), [s2, s3], "the dropped card's slot closes; the target keeps its place");
+    let card = e.m.strip().into_iter().find(|c| c.stage == s3).expect("a card");
+    assert_eq!(card.windows, [w(3), w(1)], "the target's card shows both, its own in front");
+    assert_eq!(card.apps.len(), 2);
+    // Switching to it brings both back.
+    let obs = e.d.obs();
+    let a = e.m.switch_to(s3, &obs);
+    e.run(a);
+    assert!(!e.d.parked(w(1)) && !e.d.parked(w(3)));
+    assert_eq!(e.d.frames[&w(1)], saved[0]);
+}
+
+#[test]
+fn a_merge_frees_the_slot_for_the_most_recent_stage_out_of_view_and_keeps_recency() {
+    let mut e = stages(5, 2);
+    let slots = e.m.strip_slots(MAIN);
+    assert_eq!(slots.len(), 2);
+    let out: Vec<StageId> = e
+        .m
+        .stages()
+        .iter()
+        .map(|s| s.id)
+        .filter(|s| !slots.contains(s) && Some(*s) != e.m.main_active_stage())
+        .collect();
+    let newest_out = *out.iter().max_by_key(|s| e.m.stage(**s).expect("known").last_active).expect("one out of view");
+    let (src, dest) = (slots[1], slots[0]);
+    let recency = e.m.stage(src).expect("known").last_active.max(e.m.stage(dest).expect("known").last_active);
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(src, dest, &obs);
+    e.run(a);
+    assert_eq!(e.m.strip_slots(MAIN), [dest, newest_out], "the target keeps its slot; the free one is refilled");
+    assert_eq!(e.m.stage(dest).expect("kept").last_active, recency, "the more recent of the two");
+}
+
+#[test]
+fn merging_cards_carries_children_and_keeps_a_declared_stage() {
+    let mut e = Env::with(ModelOptions {
+        named_stages: vec!["Work".into(), "Chat".into()],
+        ..Default::default()
+    });
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.chat"), RuleAction::Stage("Chat".into()));
+    let c = child(5, 11, Some(2));
+    e.d.frames.insert(c.id, c.frame);
+    let obs = e.d.obs();
+    let a = e.m.add_window(c, &Decision::default(), &obs);
+    e.run(a);
+    e.add(meta(3, 12, "com.example.b"), RuleAction::New);
+    let (chat, s3) = (stage_holding(&e, 2), stage_holding(&e, 3));
+    // Window 3's stage is active; go to Work so Chat and window 3's stage are both cards.
+    e.switch(1);
+    assert!(e.d.parked(w(2)) && e.d.parked(w(5)) && e.d.parked(w(3)));
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(chat, s3, &obs);
+    e.run(a);
+    assert!(e.m.stage(chat).is_some_and(|s| s.windows.is_empty()), "a declared stage survives empty");
+    assert_eq!(e.m.stage(s3).expect("kept").windows, [w(3), w(2)]);
+    assert_eq!(e.m.stage_of(w(5)), Some(s3), "the child follows its parent");
+    assert!(e.d.parked(w(5)) && e.m.window(w(5)).is_some_and(|x| x.parked), "and stays parked");
+}
+
+#[test]
+fn merging_into_the_active_stage_restores_and_the_active_card_never_moves() {
+    let mut e = stages(3, 6);
+    let (s1, s2, s3) = (stage_holding(&e, 1), stage_holding(&e, 2), stage_holding(&e, 3));
+    assert_eq!(e.m.main_active_stage(), Some(s3));
+    let obs = e.d.obs();
+    assert!(e.m.merge_stages(s3, s1, &obs).is_empty(), "the active stage is not dropped on a card");
+    assert!(e.m.merge_stages(s1, s1, &obs).is_empty(), "onto itself");
+    assert!(e.m.merge_stages(s1, StageId(99), &obs).is_empty(), "onto an unknown stage");
+    assert!(e.m.merge_stages(StageId(99), s1, &obs).is_empty(), "an unknown stage");
+    // Onto the active stage's card (fixed order with show_active): a shift-click merge.
+    let a = e.m.merge_stages(s2, s3, &obs);
+    e.run(a);
+    assert!(e.m.stage(s2).is_none());
+    assert_eq!(e.m.stage(s3).expect("active").windows, [w(2), w(3)]);
+    assert!(!e.d.parked(w(2)));
+}
+
 // ----- property test ----------------------------------------------------------------------
 
 /// Tiny deterministic generator (SplitMix64).
@@ -1274,7 +1379,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
         for _ in 0..150 {
             let alive: Vec<WindowId> = e.d.frames.keys().copied().collect();
             let managed: Vec<WindowId> = e.m.windows().map(|w| w.meta.id).collect();
-            let op = rng.below(19);
+            let op = rng.below(20);
             let step = format!("seed {seed} op {op} after {log:?}");
             match op {
                 0..=2 => {
@@ -1447,6 +1552,15 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         let obs = e.d.obs();
                         let a = e.m.merge_into_active_at(stage, at, &obs);
                         e.run(a);
+                    }
+                }
+                18 => {
+                    let ids: Vec<StageId> = e.m.stages().iter().map(|s| s.id).collect();
+                    if let (Some(a), Some(b)) = (rng.pick(&ids), rng.pick(&ids)) {
+                        log.push(format!("drop card {} on card {}", a.0, b.0));
+                        let obs = e.d.obs();
+                        let acts = e.m.merge_stages(a, b, &obs);
+                        e.run(acts);
                     }
                 }
                 _ => {

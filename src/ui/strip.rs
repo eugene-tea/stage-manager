@@ -27,6 +27,12 @@
 //!   column a ghost of its front thumbnail follows the pointer in its own click-through
 //!   panel and grows toward the window's size; released outside the strip it goes out as
 //!   [`StripEvent::CardDropped`].
+//! - **Drop a card on a card** (`[strip] merge_on_drop`, an extension): over the middle part
+//!   of another card (`[drag] merge_zone` of its height, measured on the cards at rest) the
+//!   reorder gap closes and that card grows and shows the dragged card's windows stacked
+//!   behind its own, as the merged card will look; leaving the zone undoes it on the spring.
+//!   Released there, the dragged card shrinks into it and fades, and the drop goes out as
+//!   [`StripEvent::CardMerged`].
 //! - **Drop target**: while the controller reports a window drag
 //!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip column, the strip is
 //!   lifted above windows, a card-sized snapshot of the window, turned like a card, follows
@@ -92,8 +98,13 @@ const BELOW_WINDOWS: isize = NSNormalWindowLevel - 1;
 
 /// After a Space change, when to check that the active pane is on the Space shown (seconds).
 const REHOME_CHECKS: [f64; 2] = [0.4, 1.2];
-/// A band of a card's height that will mean "onto this card" (a later merge); none yet.
-const MERGE_BAND: f64 = 0.0;
+/// A window dragged over the strip goes between cards only (dropping it onto a card's
+/// stage is not built).
+const WINDOW_DROP_BAND: f64 = 0.0;
+/// The shortest fade of a card dropped onto another, in seconds.
+const MERGE_FADE: f64 = 0.15;
+/// What a card dropped onto another shrinks to, about the target's middle.
+const MERGE_SHRINK: f64 = 0.5;
 /// The edge tab's window: width and height in points (the drawn pill is narrower).
 const TAB_SIZE: (f64, f64) = (10.0, 72.0);
 /// The drawn pill's width.
@@ -736,7 +747,8 @@ impl Drop for Ghost {
 enum DragMode {
     /// Pressed, not moved past the threshold: a click on release.
     Pressed,
-    /// Following the pointer within the strip column to another slot (`[strip] reorder`).
+    /// Following the pointer within the strip column: to another slot (`[strip] reorder`) or
+    /// onto another card (`[strip] merge_on_drop`).
     Reorder,
     /// Dragged out: the ghost follows the pointer and grows.
     Out,
@@ -750,6 +762,8 @@ struct CardDrag {
     origin: CardLayout,
     /// While reordering: the stage whose card it goes above (`None`: the bottom).
     before: Option<u64>,
+    /// While reordering: the card it would merge into, when held over its middle.
+    onto: Option<u64>,
     /// Where the press was (global).
     press: Point,
     /// The front thumbnail where it was pressed (global).
@@ -762,6 +776,15 @@ struct CardDrag {
     front: u32,
     /// The ghost, once the press moved past the threshold.
     ghost: Option<Ghost>,
+}
+
+/// Where a card or window released over the column goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spot {
+    /// Into the gap right above this stage's card (`None`: below the last card).
+    Before(Option<u64>),
+    /// Onto this stage's card (a merge).
+    Onto(u64),
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1197,6 +1220,11 @@ impl Strip {
         {
             let card = cards.remove(from);
             let to = d.before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
+            // Held over another card: that card shows the merge (the dragged card keeps its
+            // own slot meanwhile; `before` is that slot).
+            if let Some(target) = d.onto.and_then(|o| cards.iter_mut().find(|c| c.stage == o)) {
+                *target = target.merged_with(&card);
+            }
             cards.insert(to, card);
         }
         if let Some(w) = self.snapshot.window_drag.filter(|_| self.drop_over) {
@@ -1213,8 +1241,10 @@ impl Strip {
         strip_layout::layout_column(&self.snapshot.cards, self.geometry.height(), self.m())
     }
 
-    /// The slot a release at `p` (global) goes to among `layouts`, leaving out `skip`'s card.
-    fn slot_at(&self, layouts: &[CardLayout], p: Point, skip: Option<u64>) -> Option<u64> {
+    /// Where a release at `p` (global) goes among `layouts`, leaving out `skip`'s card: the
+    /// gap right above a stage's card (`None`: the bottom), or onto a card when `p` is within
+    /// the middle `band` of its height.
+    fn spot_at(&self, layouts: &[CardLayout], p: Point, skip: Option<u64>, band: f64) -> Spot {
         let m = self.m();
         let others: Vec<&CardLayout> = layouts.iter().filter(|l| Some(l.stage) != skip && l.stage != DROP_STAGE).collect();
         let bands: Vec<(f64, f64)> = others
@@ -1225,14 +1255,45 @@ impl Strip {
             })
             .collect();
         let y = p.y - self.geometry.global.y;
-        match motion_math::drop_spot(&bands, y, MERGE_BAND) {
-            DropSpot::Gap(i) | DropSpot::OnCard(i) => others.get(i).map(|l| l.stage),
+        match motion_math::drop_spot(&bands, y, band) {
+            DropSpot::Gap(i) => Spot::Before(others.get(i).map(|l| l.stage)),
+            DropSpot::OnCard(i) => others.get(i).map_or(Spot::Before(None), |l| Spot::Onto(l.stage)),
         }
     }
 
     /// The slot for a window released at `p` (global).
     fn drop_slot_at(&self, p: Point) -> StripDrop {
-        StripDrop { before: self.slot_at(&self.resting_layouts(), p, None) }
+        let before = match self.spot_at(&self.resting_layouts(), p, None, WINDOW_DROP_BAND) {
+            Spot::Before(b) => b,
+            Spot::Onto(_) => None,
+        };
+        StripDrop { before }
+    }
+
+    /// Where `stage`'s card, dragged within the column, goes at `p` (global): (the stage whose
+    /// card it goes above, the card it merges into). Measured on the cards at rest with its
+    /// own slot left out, so the cards making room never move the target. Over the middle of
+    /// another card (`[strip] merge_on_drop`) it merges and keeps its own slot meanwhile; so
+    /// it does in a gap without `[strip] reorder`.
+    fn card_spot(&self, p: Point, stage: u64) -> (Option<u64>, Option<u64>) {
+        let band = if self.style.merge_on_drop { self.style.drag.merge_zone.clamp(0.0, 1.0) } else { 0.0 };
+        let cards = &self.snapshot.cards;
+        let own = cards.iter().position(|c| c.stage == stage).and_then(|i| cards.get(i + 1)).map(|c| c.stage);
+        match self.spot_at(&self.resting_layouts(), p, Some(stage), band) {
+            Spot::Onto(into) => (own, Some(into)),
+            Spot::Before(before) if self.style.reorder => (before, None),
+            Spot::Before(_) => (own, None),
+        }
+    }
+
+    /// The card a dragged card would merge into now.
+    fn merge_onto(&self) -> Option<u64> {
+        self.card_drag.as_ref().filter(|d| d.mode == DragMode::Reorder).and_then(|d| d.onto)
+    }
+
+    /// A card is drawn grown: under the pointer, or about to take a dragged card.
+    fn grown(&self, stage: u64) -> bool {
+        self.hovered == Some(stage) || self.merge_onto() == Some(stage)
     }
 
     /// Lays out the column ([`Strip::shown_cards`]) and moves every card's layers to its slot;
@@ -1340,6 +1401,7 @@ impl Strip {
             "cards": cards,
             "lifted": self.lifted_card.as_ref().map(|l| l.0),
             "dragging": self.card_drag.as_ref().map(|d| format!("{:?}", d.mode)),
+            "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
             "overlay_top_down": self.motion_top_down(),
         })
@@ -1381,7 +1443,14 @@ impl Strip {
     fn place_card(&mut self, layout: &CardLayout, card: &CardSnapshot, force_rebuild: bool, immediate: bool) {
         let size = self.geometry.panel.size;
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height));
-        let hovered = self.hovered == Some(card.stage);
+        let hovered = self.grown(card.stage);
+        // Planes a merge preview adds fade in.
+        let fresh: Vec<u32> = match self.pane.cards.get(&card.stage) {
+            Some(l) if self.merge_onto() == Some(card.stage) => {
+                layout.thumbs.iter().map(|t| t.id).filter(|id| !l.layout.thumbs.iter().any(|o| o.id == *id)).collect()
+            }
+            _ => Vec::new(),
+        };
         let rebuild = match self.pane.cards.get(&card.stage) {
             Some(layers) => {
                 force_rebuild
@@ -1439,6 +1508,10 @@ impl Strip {
                 l.unit.removeAnimationForKey(&NSString::from_str("position"));
                 l.unit.setPosition(CGPoint::new(d.x - l.built.x, d.y - l.built.y));
                 CATransaction::commit();
+                let fade = self.style.cards.fade_ms as f64 / 1000.0;
+                for (_, plane) in l.planes.iter().filter(|(id, _)| fresh.contains(id)) {
+                    fade_in(plane, fade);
+                }
             }
         }
         let motion = self.style.motion.clone();
@@ -1632,7 +1705,7 @@ impl Strip {
         let m = self.m();
         let d = self.drawn_offset(l.stage);
         let b = l.bounds(m).translate(d.x, d.y);
-        if self.hovered != Some(l.stage) {
+        if !self.grown(l.stage) {
             return b;
         }
         let c = l.hover_center(m);
@@ -1732,6 +1805,7 @@ impl Strip {
             mode: DragMode::Pressed,
             origin: layout.clone(),
             before: None,
+            onto: None,
             press,
             thumb,
             grab,
@@ -1754,17 +1828,18 @@ impl Strip {
         let primary_height = self.geometry.primary_height;
         let mtm = self.mtm;
         let style = self.style.drag.clone();
-        let reorder = self.style.reorder;
+        let follow = self.style.reorder || self.style.merge_on_drop;
         let Some(drag) = self.card_drag.as_ref() else { return };
         if drag.mode == DragMode::Pressed && (p.x - drag.press.x).hypot(p.y - drag.press.y) <= style.threshold.max(MIN_DRAG_THRESHOLD) {
             return;
         }
         let stage = drag.stage;
         let in_column = self.geometry.global.contains(p);
-        let mode = if reorder && in_column { DragMode::Reorder } else { DragMode::Out };
-        let before = if mode == DragMode::Reorder { self.slot_at(&self.resting_layouts(), p, Some(stage)) } else { None };
+        let mode = if follow && in_column { DragMode::Reorder } else { DragMode::Out };
+        let (before, onto) = if mode == DragMode::Reorder { self.card_spot(p, stage) } else { (None, None) };
         let image = self.thumbs.get(&drag.front).cloned();
         let was = drag.mode;
+        let was_onto = self.merge_onto();
         if was == DragMode::Pressed {
             tracing::debug!(stage, ?mode, "card drag started");
         }
@@ -1772,6 +1847,7 @@ impl Strip {
             let Some(drag) = self.card_drag.as_mut() else { return };
             drag.mode = mode;
             drag.before = before;
+            drag.onto = onto;
             if mode == DragMode::Reorder {
                 drag.ghost = None;
             } else {
@@ -1800,6 +1876,10 @@ impl Strip {
                 }
             }
         }
+        if onto != was_onto {
+            tracing::debug!(stage, ?onto, "card held over a card");
+            self.ease_growth([was_onto, onto]);
+        }
         self.update_visibility();
     }
 
@@ -1810,6 +1890,20 @@ impl Strip {
             self.pressed = None;
             self.set_card_opacity(drag.stage, 1.0);
             let at = self.pointer();
+            if drag.mode == DragMode::Reorder
+                && let Some(into) = drag.onto
+                && self.merge_locally(drag.stage, into)
+            {
+                // The target shows the merge already; the dropped card goes into it. The
+                // controller's snapshot agrees.
+                tracing::debug!(stage = drag.stage, into, "card dropped on a card");
+                self.set_hover(Some(into));
+                self.vanish_into(drag.stage, into);
+                self.layout_cards(false);
+                self.update_visibility();
+                self.update_targets();
+                return Some(StripEvent::CardMerged { stage: drag.stage, into });
+            }
             if drag.mode == DragMode::Reorder {
                 // Put the card in its new slot now; the controller's snapshot agrees. It stays
                 // above the others until it has glided in.
@@ -1875,6 +1969,52 @@ impl Strip {
         cards.iter().map(|c| c.stage).collect::<Vec<_>>() != old
     }
 
+    /// Merges `stage`'s card into `into`'s in the snapshot (see
+    /// [`CardSnapshot::merged_with`]); false when either card is not there.
+    fn merge_locally(&mut self, stage: u64, into: u64) -> bool {
+        let cards = &mut self.snapshot.cards;
+        if stage == into || !cards.iter().any(|c| c.stage == into) {
+            return false;
+        }
+        let Some(from) = cards.iter().position(|c| c.stage == stage) else { return false };
+        let card = cards.remove(from);
+        if let Some(target) = cards.iter_mut().find(|c| c.stage == into) {
+            *target = target.merged_with(&card);
+        }
+        true
+    }
+
+    /// The card dropped onto `into`'s goes into it: it shrinks toward the target's middle and
+    /// fades out, then its layers go.
+    fn vanish_into(&mut self, stage: u64, into: u64) {
+        if self.lifted_card.as_ref().is_some_and(|l| l.0 == stage)
+            && let Some((_, Some(timer))) = self.lifted_card.take()
+        {
+            timer.invalidate();
+        }
+        let Some(layers) = self.pane.cards.remove(&stage) else { return };
+        let m = self.m().clone();
+        let seconds = (self.style.cards.fade_ms as f64 / 1000.0).max(MERGE_FADE);
+        let toward = self.layouts.iter().find(|l| l.stage == into).map(|l| {
+            let c = l.hover_center(&m);
+            let d = self.drawn_offset(into);
+            Point::new(c.x + d.x, c.y + d.y)
+        });
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        layers.card.setOpacity(0.0);
+        let fade = ease("opacity", &NSNumber::new_f32(1.0), &NSNumber::new_f32(0.0), seconds);
+        layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
+        if let Some(c) = toward {
+            ease_transform(&layers.card, scale_about(MERGE_SHRINK, c, m.eye), seconds);
+        }
+        CATransaction::commit();
+        let card = layers.card.clone();
+        let gone = RcBlock::new(move |_t: NonNull<NSTimer>| card.removeFromSuperlayer());
+        // SAFETY: the block runs once on the main run loop.
+        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds + 0.05, false, &gone) };
+    }
+
     fn hover_at(&mut self, p: Option<Point>) {
         let card = if self.pane.shown { p.and_then(|p| self.card_at(p)) } else { None };
         self.set_hover(card);
@@ -1893,13 +2033,17 @@ impl Strip {
             self.prefetch(card);
         }
         let previous = std::mem::replace(&mut self.hovered, card);
+        self.ease_growth([previous, card]);
+    }
+
+    /// Eases each of `stages`' cards to its size now: grown or not ([`Strip::grown`]).
+    fn ease_growth(&self, stages: [Option<u64>; 2]) {
         let seconds = self.style.cards.hover_ms as f64 / 1000.0;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        for (stage, on) in [(previous, false), (card, true)] {
-            let Some(stage) = stage else { continue };
+        for stage in stages.into_iter().flatten() {
             let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
-            let t = self.hover_transform(&layout, on);
+            let t = self.hover_transform(&layout, self.grown(stage));
             if let Some(layers) = self.pane.cards.get(&stage) {
                 ease_transform(&layers.card, t, seconds);
             }
