@@ -16,7 +16,10 @@
 //!   parked keeps its registry entry (element and frame) while the observer has lost it
 //!   (Accessibility revoked, an element destroyed while ordered out): the registry and the
 //!   guardian's parked file never forget a parked window, and its actions go through that
-//!   element.
+//!   element. A restore (`SetFrame`) that fails (a hung app, Accessibility revoked) keeps
+//!   the window registered at the frame it was asked to take, and it is retried about once
+//!   a second until the window server lists it on screen out of the park zone (or it is
+//!   gone, or parked again); Quit retries it too.
 //! - **Stage area**: while the strip shows, placed windows are kept clear of it (moved
 //!   right, narrowed when too wide unless `[stages] fit_windows = false`); their pre-fit
 //!   frames come back on quit ([`FitOptions`]).
@@ -336,6 +339,44 @@ struct Pending {
     frames: Vec<Rect>,
 }
 
+/// A window whose restore (`SetFrame`) failed: the model counts it shown, but it may still sit
+/// in the park zone. It keeps its registry entry until the window server lists it on screen
+/// out of the park zone (the review's S1), and the restore is retried meanwhile.
+#[derive(Debug)]
+struct Unrestored {
+    /// The registry entry: element and the frame it was asked to take.
+    entry: ParkedEntry,
+    /// Retries so far (the first failure is logged at warn, later ones at debug).
+    tries: u32,
+}
+
+/// What to do with an [`Unrestored`] window at a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnrestoredStep {
+    /// Back on screen out of the park zone, gone, or parked again in the model's eyes (its
+    /// own registry entry covers it): forget it.
+    Done,
+    /// On screen and still in the park zone: move it again.
+    Retry,
+    /// Not on screen (another Space, its app hidden): keep it registered and wait.
+    Wait,
+}
+
+/// The step for an [`Unrestored`] window: `model_parked` is `None` when the model no longer
+/// has the window, `listed` is `None` when the window server lists it nowhere, else whether
+/// it is on screen and whether its frame lies in the park zone.
+fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>) -> UnrestoredStep {
+    match (model_parked, listed) {
+        (None | Some(true), _) | (_, None) => UnrestoredStep::Done,
+        (Some(false), Some((true, false))) => UnrestoredStep::Done,
+        (Some(false), Some((true, true))) => UnrestoredStep::Retry,
+        (Some(false), Some((false, _))) => UnrestoredStep::Wait,
+    }
+}
+
+/// How often unrestored windows are checked and retried.
+const UNRESTORED_RETRY: Duration = Duration::from_secs(1);
+
 /// The engine plus everything around it on the WM thread.
 pub struct Controller {
     model: Option<Model>,
@@ -404,6 +445,10 @@ pub struct Controller {
     /// A parked window focused while the left button is down (grabbed by its sliver): its
     /// stage comes once the button is up ([`Model::parked_window_dropped`]).
     focus_after_press: Option<u32>,
+    /// Windows whose restore failed, kept registered until seen back ([`Unrestored`]).
+    unrestored: BTreeMap<u32, Unrestored>,
+    /// When the unrestored windows were last checked.
+    unrestored_checked: Instant,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -488,6 +533,8 @@ impl Controller {
             desktop_echo: DesktopEcho::default(),
             strip_hidden_for_desktop: false,
             focus_after_press: None,
+            unrestored: BTreeMap::new(),
+            unrestored_checked: Instant::now(),
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -599,6 +646,9 @@ impl Controller {
                 entries.entry(*id).or_insert_with(|| e.clone());
             }
         }
+        for (id, u) in &self.unrestored {
+            entries.entry(*id).or_insert_with(|| u.entry.clone());
+        }
         entries
     }
 
@@ -654,7 +704,7 @@ impl Controller {
                 let kept = matches!(action, Action::SetFrame { .. } | Action::Park { .. })
                     .then(|| safety::registry_entry(id))
                     .flatten();
-                let result = match (action, kept) {
+                let result = match (action, &kept) {
                     (Action::SetFrame { frame, .. }, Some(e)) => Some(e.element.set_frame(frame)),
                     (Action::Park { frame, .. }, Some(e)) => Some(e.element.set_position(frame.origin())),
                     _ => None,
@@ -664,6 +714,9 @@ impl Controller {
                     Some(Err(e)) => {
                         failed += 1;
                         tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
+                        if let (Action::SetFrame { frame, .. }, Some(kept)) = (action, kept) {
+                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: false, ..kept });
+                        }
                     }
                     None if matches!(action, Action::SetFrame { .. }) => {
                         failed += 1;
@@ -693,6 +746,10 @@ impl Controller {
             if let Err(e) = result {
                 failed += 1;
                 tracing::warn!(id, ?action, "action failed: {e}");
+                if let Action::SetFrame { frame, .. } = action {
+                    let child = w.kind == WindowKind::Child;
+                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false });
+                }
             } else {
                 tracing::trace!(id, ?action, "done");
             }
@@ -709,6 +766,67 @@ impl Controller {
             self.present();
         }
         failed
+    }
+
+    /// Keeps a window whose `SetFrame` failed registered (with the frame it was asked to
+    /// take) until it is seen back out of the park zone; [`Self::retry_unrestored`] retries
+    /// it. Never lets the batch's registry replace drop a window whose restore failed (S1).
+    fn restore_failed(&mut self, id: u32, entry: ParkedEntry) {
+        tracing::warn!(id, restore = %entry.restore, "restore failed: the window stays registered and is retried until it is seen back");
+        self.unrestored.insert(id, Unrestored { entry, tries: 0 });
+    }
+
+    /// Checks windows whose restore failed against the window server, about once a second:
+    /// seen on screen out of the park zone, gone, or parked again in the model → forgotten;
+    /// still in the park zone → moved again; off screen → kept registered. With `force`
+    /// (quit) every one is retried at once, whatever the list says.
+    fn retry_unrestored(&mut self, ob: &Observer, force: bool) {
+        if self.unrestored.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        if !force && now.duration_since(self.unrestored_checked) < UNRESTORED_RETRY {
+            return;
+        }
+        self.unrestored_checked = now;
+        let list = windows::list_windows();
+        let before = self.unrestored.len();
+        let ids: Vec<u32> = self.unrestored.keys().copied().collect();
+        for id in ids {
+            let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
+            let parks = |f: Rect| self.model.as_ref().is_some_and(|m| m.main_display().parks(f));
+            let listed = list.iter().find(|w| w.id == id).map(|w| (w.onscreen, parks(w.bounds)));
+            let step = if force && model_parked == Some(false) && listed.is_some() {
+                UnrestoredStep::Retry
+            } else {
+                unrestored_step(model_parked, listed)
+            };
+            match step {
+                UnrestoredStep::Done => {
+                    tracing::info!(id, ?model_parked, ?listed, "a window whose restore failed is accounted for");
+                    self.unrestored.remove(&id);
+                }
+                UnrestoredStep::Wait => {}
+                UnrestoredStep::Retry => {
+                    let Some(u) = self.unrestored.get_mut(&id) else { continue };
+                    u.tries += 1;
+                    let element = ob.window(id).map(|w| w.element.clone()).unwrap_or_else(|| u.entry.element.clone());
+                    match element.set_frame(u.entry.restore) {
+                        Ok(()) => {
+                            tracing::info!(id, tries = u.tries, restore = %u.entry.restore, "a failed restore went through on a retry");
+                            if force {
+                                self.unrestored.remove(&id);
+                            }
+                        }
+                        Err(e) if u.tries == 1 || force => tracing::warn!(id, tries = u.tries, "a failed restore failed again: {e}"),
+                        Err(e) => tracing::debug!(id, tries = u.tries, "a failed restore failed again: {e}"),
+                    }
+                }
+            }
+        }
+        if self.unrestored.len() != before {
+            safety::registry_replace(self.parked_entries(ob));
+        }
     }
 
     /// Notes which windows are parked, where every window lives and the strip's slots, for
@@ -2053,12 +2171,16 @@ impl Controller {
     /// failed; the registry is empty afterwards when none did.
     pub fn unpark_all(&mut self, ob: &Observer) -> usize {
         self.flush_pending(ob);
-        let Some(m) = self.model.as_mut() else { return 0 };
+        // Windows whose restore failed earlier: the model counts them shown, so its unpark
+        // has nothing for them (S1).
+        self.retry_unrestored(ob, true);
+        let Some(m) = self.model.as_mut() else { return self.unrestored.len() };
         let actions = m.unpark_all();
         let n = actions.len();
         let failed = self.execute_batch(ob, actions, false);
-        tracing::info!(windows = n, failed, "unparked every window");
-        failed
+        safety::registry_replace(self.parked_entries(ob));
+        tracing::info!(windows = n, failed, unrestored = self.unrestored.len(), "unparked every window");
+        failed + self.unrestored.len()
     }
 
     /// Re-reads config.toml and applies it; a bad file keeps the last good config.
@@ -2103,6 +2225,9 @@ impl Controller {
             self.flush_pending(ob);
         }
         self.echoes.prune(now);
+        if !safety::quit_requested() {
+            self.retry_unrestored(ob, false);
+        }
         if self.focus_after_press.is_some() && !input::left_button_down() {
             // The button came up without a mouse-up the monitor saw.
             self.focus_after_press_done(ob);
@@ -2478,6 +2603,21 @@ mod tests {
         assert!(!runs_after_quit(&Action::Raise { id }));
         assert!(!runs_after_quit(&Action::Focus { id }));
         assert!(!runs_after_quit(&Action::StateChanged));
+    }
+
+    #[test]
+    fn a_failed_restore_stays_registered_until_the_window_is_seen_back() {
+        use UnrestoredStep::*;
+        // Still in the park zone on screen: moved again, never dropped.
+        assert_eq!(unrestored_step(Some(false), Some((true, true))), Retry);
+        // Off screen (another Space, app hidden): kept, waiting.
+        assert_eq!(unrestored_step(Some(false), Some((false, true))), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((false, false))), Wait);
+        // Seen back out of the zone, closed, or parked again by the model: done.
+        assert_eq!(unrestored_step(Some(false), Some((true, false))), Done);
+        assert_eq!(unrestored_step(Some(false), None), Done);
+        assert_eq!(unrestored_step(None, Some((true, true))), Done);
+        assert_eq!(unrestored_step(Some(true), Some((true, true))), Done);
     }
 
     #[test]
