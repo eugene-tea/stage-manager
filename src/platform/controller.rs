@@ -273,6 +273,8 @@ pub struct Controller {
     settle: Settle,
     /// When the last Space change was handled.
     space_changed_at: Option<Instant>,
+    /// Space changes handled since launch (`ctl space`: a test's switch shows as a step).
+    space_changes: u64,
     /// When the window server's list was last checked for Space changes.
     space_checked: Instant,
     /// Managed windows of other Spaces on screen at the last check.
@@ -353,6 +355,7 @@ impl Controller {
             space_pending: false,
             settle: Settle::default(),
             space_changed_at: None,
+            space_changes: 0,
             space_checked: Instant::now(),
             foreign: Vec::new(),
             absent: HashMap::new(),
@@ -1187,6 +1190,7 @@ impl Controller {
             return;
         }
         let now = Instant::now();
+        self.space_changes += 1;
         self.space_changed_at = Some(now);
         self.space_checked = now;
         self.foreign.clear();
@@ -1715,6 +1719,25 @@ impl Controller {
         self.flush_pending(ob);
         match cmd {
             Command::State => self.state_json(ob),
+            Command::Space => match &self.model {
+                Some(m) => json!({
+                    "ok": true,
+                    "space": m.current_space(m.main_display().id).0,
+                    "fullscreen": self.fullscreen,
+                    "settling": self.space_pending,
+                    "changes": self.space_changes,
+                }),
+                None => json!({ "ok": false, "error": not_managing() }),
+            },
+            Command::DebugFullscreen { id, on } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-fullscreen needs STAGE_MANAGER_TEST=1" });
+                }
+                match test_fullscreen(ob, id, on) {
+                    Ok(reply) => reply,
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            }
             Command::Dump => {
                 let mut dump = ob.dump();
                 dump["spaces"] = self.spaces_json();
@@ -1761,7 +1784,8 @@ impl Controller {
             }
             Command::Ping | Command::Quit | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugClick { .. }
             | Command::DebugHover { .. }
-            | Command::DebugDrag { .. } => {
+            | Command::DebugDrag { .. }
+            | Command::DebugSpace { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }
         }
@@ -1897,6 +1921,46 @@ fn launch_hints(list: &[windows::CgWindow]) -> LaunchHints {
         z_order: list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect(),
         frontmost: AxElement::system_wide().focused_application().ok().and_then(|a| a.pid().ok()),
     }
+}
+
+/// Test only (`ctl debug-fullscreen`): puts window `id` in or out of full screen through
+/// Accessibility. Only a window of an app on the `STAGE_MANAGER_ONLY` list (a fixture) is
+/// touched; without that list, or for any other window, it refuses. Sets `AXFullScreen`; a
+/// window that refuses the attribute gets its full-screen button pressed instead. A window
+/// already where asked is left alone.
+fn test_fullscreen(ob: &Observer, id: u32, on: bool) -> Result<Value, String> {
+    let only = ob.only().ok_or("debug-fullscreen needs STAGE_MANAGER_ONLY (fixture apps only)")?;
+    let cg = windows::list_windows().into_iter().find(|w| w.id == id).ok_or(format!("no window {id}"))?;
+    let bundle = ob.bundle_id(cg.pid).map(str::to_string).unwrap_or_default();
+    if cg.pid == std::process::id() as i32 || !only.contains(&bundle) {
+        return Err(format!("window {id} is not a STAGE_MANAGER_ONLY app's window; refused"));
+    }
+    let element = match ob.window(id) {
+        Some(t) => t.element.clone(),
+        None => AxElement::application(cg.pid)
+            .windows()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|e| e.window_id().ok() == Some(id))
+            .ok_or(format!("window {id} is not reachable through Accessibility (its Space is not shown?)"))?,
+    };
+    if element.subrole().ok().as_deref() != Some(super::ax::names::SUBROLE_STANDARD) {
+        return Err(format!("window {id} is not a standard window"));
+    }
+    let before = element.is_fullscreen().map_err(|e| e.to_string())?;
+    if before == on {
+        return Ok(json!({ "ok": true, "fullscreen_before": before, "changed": false }));
+    }
+    let via = match element.set_fullscreen(on) {
+        Ok(()) => "AXFullScreen",
+        Err(e) => {
+            tracing::info!(id, "debug-fullscreen: AXFullScreen refused ({e}); pressing the full-screen button");
+            element.press_fullscreen_button().map_err(|b| format!("AXFullScreen: {e}; full-screen button: {b}"))?;
+            "AXFullScreenButton"
+        }
+    };
+    tracing::info!(id, on, via, "debug-fullscreen");
+    Ok(json!({ "ok": true, "fullscreen_before": before, "changed": true, "via": via }))
 }
 
 /// The focused window: the frontmost app's `AXFocusedWindow`, as a `CGWindowID`.

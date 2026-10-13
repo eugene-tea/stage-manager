@@ -6,8 +6,13 @@
 //! - `stage-manager config --print-defaults | --explain <section.key> | --reference |
 //!   --check [file]` prints the commented default config, explains a key, prints README's
 //!   configuration table, or validates a file.
-//! - `stage-manager probe-windows <bundle-id>` prints that app's windows as the window
+//! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts.
+//! - `stage-manager probe-screen` prints the on-screen windows that cover the main display
+//!   (a full-screen app's Space), one JSON line, for test scripts.
+//! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
+//!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
+//!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.
 
 use std::process::ExitCode;
 
@@ -27,6 +32,10 @@ fn main() -> ExitCode {
         Some("--guardian") => stage_manager::platform::guardian::run(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-windows") => app::probe_windows(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("probe-screen") => app::probe_screen(),
+        #[cfg(target_os = "macos")]
+        Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
             println!("stage-manager {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -35,7 +44,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
             );
             ExitCode::from(2)
         }
@@ -53,7 +62,7 @@ mod app {
     use std::ptr::NonNull;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, OnceLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use block2::RcBlock;
     use dispatch2::DispatchQueue;
@@ -72,6 +81,8 @@ mod app {
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState, PrivacyPane};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
+    use stage_manager::engine::fullscreen;
+    use stage_manager::platform::space_keys::{self, Direction, SpaceKey, SpaceView};
     use stage_manager::platform::{guardian, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -341,6 +352,12 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugSpace { direction, numpad } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-space needs STAGE_MANAGER_TEST=1");
+                }
+                debug_space(&wm, direction, numpad)
+            }
             Command::DebugDrag { points, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
@@ -353,6 +370,54 @@ mod app {
             other => wm
                 .ctl(other, Duration::from_secs(4))
                 .unwrap_or_else(|| ctl::error_reply("WM thread did not answer")),
+        })
+    }
+
+    /// The Space shown as the engine sees it.
+    fn space_view(wm: &WmHandle) -> Option<SpaceView> {
+        wm.ctl(Command::Space, Duration::from_secs(2)).and_then(|v| SpaceView::from_json(&v))
+    }
+
+    /// `ctl debug-space`: types the Desktop switch shortcut at the HID tap, then waits up to
+    /// [`ctl::SPACE_WAIT`] for the engine to handle the Space change. Runs on a ctl
+    /// connection thread (never the main thread: the change notification comes there).
+    fn debug_space(wm: &WmHandle, direction: Direction, numpad: bool) -> serde_json::Value {
+        let Some(before) = space_view(wm) else {
+            return ctl::error_reply("the engine did not say which Space shows");
+        };
+        if before.settling {
+            return ctl::error_reply("a Space change is still settling");
+        }
+        let key = SpaceKey::read(direction);
+        if let Err(e) = space_keys::post(&key, numpad) {
+            return ctl::error_reply(&e);
+        }
+        tracing::info!(direction = direction.name(), key = key.describe(), numpad, "debug-space: shortcut typed");
+        let start = Instant::now();
+        let mut last = before;
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            if let Some(now) = space_view(wm) {
+                last = now;
+                if now.moved_from(&before) {
+                    break;
+                }
+            }
+            if start.elapsed() >= ctl::SPACE_WAIT {
+                break;
+            }
+        }
+        let changed = last.moved_from(&before);
+        tracing::info!(changed, from = before.space, to = last.space, fullscreen = last.fullscreen, "debug-space");
+        json!({
+            "ok": true,
+            "changed": changed,
+            "before": before,
+            "after": last,
+            "ms": start.elapsed().as_millis() as u64,
+            "key": key.describe(),
+            "key_from_settings": key.from_settings,
+            "numpad": numpad,
         })
     }
 
@@ -491,14 +556,15 @@ mod app {
         ExitCode::SUCCESS
     }
 
-    /// `probe-windows <bundle-id>`: the window server's view of one app's windows.
+    /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows.
     pub fn probe_windows(args: &[String]) -> ExitCode {
-        let Some(bundle) = args.first() else {
-            eprintln!("usage: stage-manager probe-windows <bundle-id>");
+        if args.is_empty() {
+            eprintln!("usage: stage-manager probe-windows <bundle-id>...");
             return ExitCode::from(2);
-        };
-        let pids: Vec<i32> = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle))
+        }
+        let pids: Vec<i32> = args
             .iter()
+            .flat_map(|bundle| NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle)))
             .map(|a| a.processIdentifier())
             .collect();
         let list = windows::list_windows();
@@ -520,5 +586,63 @@ mod app {
         let display = desktop::cg_display_bounds().first().copied();
         println!("{}", json!({ "ok": true, "pids": pids, "display": display, "windows": out }));
         ExitCode::SUCCESS
+    }
+
+    /// `probe-screen`: the on-screen windows covering the whole main display (menu bar
+    /// included), as a full-screen app's Space shows one; pids and bounds only.
+    pub fn probe_screen() -> ExitCode {
+        let display = desktop::cg_display_bounds().first().copied();
+        let covering: Vec<_> = display
+            .map(|d| {
+                windows::list_windows()
+                    .into_iter()
+                    .filter(|w| w.onscreen && w.layer == 0 && fullscreen::covers_display(w.bounds, d))
+                    .map(|w| json!({ "id": w.id, "pid": w.pid, "bounds": w.bounds }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        println!("{}", json!({ "ok": display.is_some(), "display": display, "covering": covering }));
+        ExitCode::SUCCESS
+    }
+
+    /// `debug-post-space left|right [numpad]` (test only): types the Desktop switch shortcut
+    /// once and exits. Launched through LaunchServices (`open -n`) it has the app's
+    /// Accessibility, so a test can switch Desktops while the app itself is down (the
+    /// guardian drill). It never serves the ctl socket, so a guardian does not take it for
+    /// Stage Manager running again. The outcome is appended to `post-space.log` in the log
+    /// directory.
+    pub fn post_space(args: &[String]) -> ExitCode {
+        if std::env::var_os(TEST_ENV).is_none() {
+            eprintln!("debug-post-space needs STAGE_MANAGER_TEST=1");
+            return ExitCode::from(2);
+        }
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (direction, numpad) = match words.as_slice() {
+            [d] => (Direction::parse(d), false),
+            [d, "numpad"] => (Direction::parse(d), true),
+            _ => (None, false),
+        };
+        let Some(direction) = direction else {
+            eprintln!("usage: stage-manager debug-post-space left|right [numpad]");
+            return ExitCode::from(2);
+        };
+        let key = SpaceKey::read(direction);
+        let result = space_keys::post(&key, numpad);
+        let line = json!({
+            "pid": std::process::id(),
+            "direction": direction.name(),
+            "key": key.describe(),
+            "numpad": numpad,
+            "accessibility": permissions::accessibility_trusted(),
+            "ok": result.is_ok(),
+            "error": result.as_ref().err(),
+        });
+        println!("{line}");
+        let log = paths::log_dir().join("post-space.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{line}");
+        }
+        if result.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
     }
 }

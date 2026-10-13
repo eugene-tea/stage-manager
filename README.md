@@ -369,7 +369,7 @@ no managed app's window in the park zone on any Space; otherwise the guardian ta
 | `STAGE_MANAGER_NO_PROMPT` | never show permission dialogs at launch |
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
 | `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
-| `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-panic`) |
+| `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-*`) and `debug-post-space` |
 
 ## ctl socket
 
@@ -380,6 +380,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | Command | Does |
 |---------|------|
 | `ping` | `{"ok":true,"pong":true,"pid":…,"version":…}` |
+| `space` | the Space shown as the engine sees it: synthetic id, full screen, a change still settling, Space changes so far |
 | `dump` | observed apps and windows (says so when Accessibility is missing), and `spaces`: each Space's synthetic id, display, whether it shows, its active stage and stage ids (no titles), plus windows waiting to show and saved Spaces not visited yet |
 | `state` | stages (with their Space), windows, restore and live frames, parked flags, strip, the Space shown, config error |
 | `switch N` | switch to stage N (of the Space shown) |
@@ -396,11 +397,14 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `debug-hover X Y MS` | move the pointer to a global point and rest there (the strip's edge reveal; only with `STAGE_MANAGER_TEST=1`, same guard); the next synthetic click or drag puts the pointer back |
 | `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
 | `debug-frame ID X Y W H` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`) |
+| `debug-space left\|right [numpad]` | type "Move left/right a space" (the shortcut from Keyboard Shortcuts, posted at the HID tap) and answer once the engine has handled the Space change, or after 6 s with `"changed":false` (only with `STAGE_MANAGER_TEST=1`); `stage-manager debug-post-space left\|right` launched with `open -n` does the same once while the app is down |
+| `debug-fullscreen ID on\|off` | put a `STAGE_MANAGER_ONLY` app's standard window in or out of full screen through Accessibility (`AXFullScreen`, else its full-screen button); any other window is refused (only with `STAGE_MANAGER_TEST=1`) |
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
 "$B" ctl state | jq '.stages'
 "$B" probe-windows dev.eugene.stagemanager.fixture   # the window server's view of an app
+"$B" probe-screen                                    # windows covering the display (full screen)
 ```
 
 Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reachable.
@@ -441,6 +445,7 @@ edge). `ctl state` lists the drawn cards' frames (`strip_cards`) and the strip p
 (`strip_panel`) for these drags. Every app run's log is kept as `stage-manager.run-NN.log` in
 the test home (the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
 is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
+`scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
 Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
 drags are posted only where our own or a fixture's windows are topmost along the whole path,
 and the pointer is put back. Apple's own Stage Manager must be off for the window-position

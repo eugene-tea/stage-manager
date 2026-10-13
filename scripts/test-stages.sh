@@ -7,13 +7,17 @@
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 strip native visible parity
 #   scripts/test-stages.sh m3 safety       # some phases
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
+#   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
+#                                          # Desktops and toggles full screen; nobody at the Mac
+#   scripts/test-stages.sh spaces --auto --dry-run   # preflight and planned steps only
 #   SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 #
 # Every app run uses STAGE_MANAGER_HOME=$TEST_HOME (default: a new /tmp/sm-test.* dir) and
 # STAGE_MANAGER_ONLY=<the fixtures>; only fixture windows ever move. The fixture app comes to
 # the front during switches; the app that was frontmost is activated again at the end.
 # No phase runs while the owner's installed app (~/Applications/Stage Manager.app) is up;
-# SM_SCREENSHOTS=<dir> is where the visible phase saves its strip screenshots.
+# SM_SCREENSHOTS=<dir> is where the visible phase saves its strip screenshots; SM_SHOTS=<dir>
+# is where `spaces --auto` saves its by-eye screenshots (default the test home, never the repo).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -31,11 +35,16 @@ if [ -z "${SKIP_BUILD:-}" ]; then
     scripts/sign.sh "$app" >/dev/null || exit 1
   done
 fi
+# `spaces` is the two-Desktop check (scripts/test_spaces.py), run alone: guided (a person at
+# the Mac switches Desktops when asked) or `--auto` (hands-free). A dry run acts on nothing,
+# not even the dev copy.
+if [ "${1:-}" = "spaces" ]; then
+  case " ${*:2} " in
+    *" --dry-run "*) ;;
+    *) scripts/dev-app.sh >/dev/null || exit 1 ;;
+  esac
+  exec python3 scripts/test_spaces.py "${@:2}"
+fi
 # The app runs from the fixed dev copy (one screen-access approval for every worktree).
 scripts/dev-app.sh >/dev/null || exit 1
-# `spaces` is the guided two-Desktop check (scripts/test_spaces.py): run it alone, with a
-# person at the Mac to switch Desktops when asked.
-if [ "${1:-}" = "spaces" ]; then
-  exec python3 scripts/test_spaces.py
-fi
 exec python3 scripts/test_stages.py "$@"

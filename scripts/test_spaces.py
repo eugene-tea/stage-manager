@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
-"""Guided live check of Spaces (Desktops), run with a person at the Mac: it needs two
-Desktops and asks you to switch between them (a script never switches Spaces itself).
+"""Live check of Spaces (Desktops). Two modes:
 
-Run it as `scripts/test-stages.sh spaces`: that builds the app and the fixtures, copies the
-app to the fixed dev location, then runs this script.
+- **Guided** (default), run with a person at the Mac: it needs two Desktops and asks you to
+  switch between them (a script never switches Spaces itself in this mode).
+- **Hands-free** (`--auto`, or `SM_AUTO=1`): nobody at the Mac (unlocked, untouched). Every
+  ask becomes an action: the app types the Desktop switch shortcut ("Move left/right a
+  space", `ctl debug-space`; while the app is down, the one-shot `debug-post-space`
+  launched through LaunchServices), and a fixture window goes in and out of full screen
+  through Accessibility (`ctl debug-fullscreen`). The neighbouring Desktop is found from the
+  start one (right first, then left); no Desktop is created, removed or reordered, and
+  Desktops are told apart by the app's synthetic ids and by which fixture windows the window
+  server shows. The two by-eye questions become screenshots (in `$SM_SHOTS`, else the test
+  home; never the repo) printed with "by eye:" for a person to look at after the run; they
+  count neither pass nor fail. A Desktop change the test did not ask for (someone uses the
+  Mac) stops the run; cleanup still runs but never switches Desktops then. Cleanup (also on
+  Ctrl-C and SIGTERM): full screen left on every fixture window, back to the start Desktop,
+  the app quit, no window left parked, the fixtures quit. It refuses to start while another
+  Stage Manager runs, the screen is locked, or a full-screen app's Space shows.
+  `--auto --dry-run` prints the preflight and the planned steps and does nothing.
+
+Run it as `scripts/test-stages.sh spaces [--auto [--dry-run]]`: that builds the app and the
+fixtures, copies the app to the fixed dev location, then runs this script.
 
 Like test_stages.py, the app runs with its own STAGE_MANAGER_HOME and STAGE_MANAGER_ONLY
 (the fixtures only): only fixture windows ever move. No other Stage Manager may run (both
-would manage the fixtures). Prompts say exactly what to do; answer with Return.
+would manage the fixtures). Guided prompts say exactly what to do; answer with Return.
 
 Checks: each Desktop has its own stages and strip; the same app has stages on both; a card
 click on Desktop 2 switches stages and never changes the Desktop (the strip panel is on the
@@ -22,15 +39,24 @@ Every app run's log is kept (stage-manager.run-NN.log in the test home; the guar
 on into its run's file).
 """
 
+import json
 import os
+import plistlib
+import re
 import signal
+import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_stages as ts  # noqa: E402
 
 say, check, ctl, state = ts.say, ts.check, ts.ctl, ts.state
+
+ARGS = sys.argv[1:]
+AUTO = "--auto" in ARGS or os.environ.get("SM_AUTO") == "1"
+DRY = "--dry-run" in ARGS
 
 
 def ask(what):
@@ -46,6 +72,7 @@ def wait_for(what, cond, timeout):
     """Polls `cond` until it holds for a second; no Return needed. None on timeout."""
     end, since = time.time() + timeout, None
     while time.time() < end:
+        guard()
         try:
             ok = cond()
         except Exception:  # the app may be busy with the Space change
@@ -65,6 +92,7 @@ def holds(cond, seconds):
     """True when `cond` holds at every look (every 0.2 s) for `seconds`."""
     end = time.time() + seconds
     while time.time() < end:
+        guard()
         try:
             if not cond():
                 return False
@@ -149,12 +177,444 @@ def other_stage_managers():
     return [p for p in ts.pids_of("Stage Manager.app/Contents/MacOS/stage-manager$") if p != ours]
 
 
+# ----- hands-free mode (--auto) ------------------------------------------------------------
+
+
+class Interrupted(BaseException):
+    """The Desktop shown changed without the test asking. A BaseException, so the polling
+    helpers' `except Exception` never swallows it."""
+
+
+class Stopped(BaseException):
+    """SIGTERM."""
+
+
+class Abort(Exception):
+    """The run cannot go on (no neighbouring Desktop, a switch not seen)."""
+
+
+def guard():
+    """Raises Interrupted once the watcher saw a Desktop change nobody asked for (auto mode
+    only; never during cleanup)."""
+    if WATCH is not None and WATCH.reason and not CLEANING:
+        raise Interrupted(WATCH.reason)
+
+
+def probe_all():
+    """Every fixture window as the window server lists it, in one probe."""
+    r = ts.run([ts.BIN, "probe-windows", *ts.ALL_IDS], timeout=10)
+    return [w for w in json.loads(r.stdout)["windows"] if w["layer"] == 0]
+
+
+class Watch:
+    """Watches, from the window server alone (works while the app is down), that the Desktop
+    shown is the one the test expects: Desktop 1 shows its fixture windows and none of
+    Desktop 2's, and so on. Paused while the test itself switches. A mismatch for three
+    looks in a row (about 1.5 s) is a change nobody asked for; the screen locking (looked at
+    every few seconds) stops the run too."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ids = {"d1": set(), "d2": set()}
+        self.expect = None  # None (paused), ("desk", "d1"|"d2") or ("fullscreen", window id)
+        self.where = "d1"
+        self.reason = None
+        self.stopped = False
+        self.misses = 0
+        self.thread = threading.Thread(target=self._loop, name="watch", daemon=True)
+        self.thread.start()
+
+    def markers(self, name, ids):
+        with self.lock:
+            self.ids[name] = set(ids)
+
+    def pause(self):
+        with self.lock:
+            self.expect, self.misses = None, 0
+
+    def desk(self, name):
+        with self.lock:
+            self.expect, self.where, self.misses = ("desk", name), name, 0
+
+    def fullscreen(self, wid):
+        with self.lock:
+            self.expect, self.misses = ("fullscreen", wid), 0
+
+    def stop(self):
+        self.stopped = True
+
+    def mismatch(self, on):
+        """What is wrong with the window ids `on` the screen shows, or None."""
+        kind, what = self.expect
+        d1, d2 = self.ids["d1"], self.ids["d2"]
+        if kind == "fullscreen":
+            if on & d1 or on & (d2 - {what}):
+                return "a Desktop shows instead of the full-screen window's Space"
+            return None
+        mine, other = (d1, d2) if what == "d1" else (d2, d1)
+        if on & other:
+            return f"Desktop {2 if what == 'd1' else 1}'s windows show while Desktop {what[1]} is expected"
+        if mine and not on & mine:
+            return f"none of Desktop {what[1]}'s windows shows"
+        return None
+
+    def _loop(self):
+        looks = 0
+        while not self.stopped:
+            time.sleep(0.5)
+            looks += 1
+            if looks % 8 == 0 and not self.reason and not CLEANING and screen_locked():
+                self.reason = "the screen locked"
+            with self.lock:
+                expect = self.expect
+            if expect is None or self.reason:
+                continue
+            try:
+                on = {w["id"] for w in probe_all() if w["onscreen"]}
+            except Exception:  # noqa: BLE001 - a busy window server: look again
+                continue
+            with self.lock:
+                if self.expect != expect:
+                    continue
+                problem = self.mismatch(on)
+                self.misses = self.misses + 1 if problem else 0
+                if self.misses >= 3:
+                    self.reason = (f"{problem}: the Desktop shown changed without the test asking "
+                                   "(someone using the Mac, or the app moved it)")
+
+
+WATCH = None
+CLEANING = False
+ROUTE = {"toward": None, "back": None, "numpad": False}
+IDS = {"d1": None, "d2": None}
+STARTED = time.time()
+BY_EYE = []
+OPPOSITE = {"right": "left", "left": "right"}
+# An app whose windows live only on that Desktop: activating it is macOS's own way there (the
+# fallback when a typed shortcut is not seen).
+ONLY_ON = {"d1": "a", "d2": "b"}
+
+
+def shots_dir():
+    """$SM_SHOTS (else $SM_SCREENSHOTS, else the test home), never inside the repo."""
+    d = os.environ.get("SM_SHOTS") or os.environ.get("SM_SCREENSHOTS") or ts.HOME
+    real, repo = os.path.realpath(d), os.path.realpath(ts.ROOT)
+    if real == repo or real.startswith(repo + os.sep):
+        say(f"    (screenshots never go into the repo; using {ts.HOME})")
+        d = ts.HOME
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def shot(name, region=None):
+    """A screenshot now (the main display, or `region` x,y,w,h); returns its path or None."""
+    path = os.path.join(shots_dir(), f"spaces-auto-{time.strftime('%H%M%S')}-{name}.png")
+    args = ["screencapture", "-x"] + (["-R", ",".join(f"{v:.0f}" for v in region)] if region else ["-m"]) + [path]
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode == 0 and os.path.exists(path):
+        return path
+    say(f"    screenshot failed: {r.stderr.strip()}")
+    return None
+
+
+def by_eye(question, path):
+    BY_EYE.append((question, path))
+    say(f"    by eye: {path or '(no screenshot)'} — {question}")
+
+
+def space_now():
+    r = ctl("space")
+    return r if r.get("ok") else None
+
+
+def moved(before, now):
+    """The Python side of SpaceView::moved_from."""
+    return bool(now) and not now["settling"] and (
+        now["changes"] > before["changes"] or now["space"] != before["space"] or now["fullscreen"] != before["fullscreen"])
+
+
+def space_step(direction, numpad=False):
+    """`ctl debug-space`: the app types the shortcut and reports the Space change. A change
+    seen only after the app's wait still counts (looked at once more a second later)."""
+    words = ["debug-space", direction] + (["numpad"] if numpad else [])
+    r = ctl(*words)
+    if not r.get("ok"):
+        raise Abort(f"ctl {' '.join(words)}: {r.get('error')}")
+    if not r.get("changed"):
+        time.sleep(1.0)
+        now = space_now()
+        if moved(r["before"], now):
+            r.update(changed=True, after=now)
+    say(f"    typed {r.get('key')}{' +numpad' if numpad else ''} ({direction}): "
+        + (f"Space {r['before']['space']} → {r['after']['space']}"
+           + (" (full screen)" if r["after"]["fullscreen"] else "") if r.get("changed") else "no Space change")
+        + f" in {r.get('ms')} ms")
+    return r
+
+
+def find_neighbour(what):
+    """The first trip: right of the start Desktop, else left; a full-screen app's Space next
+    door is left again at once. With neither, the same with the numeric-pad flag a hardware
+    arrow key carries. Remembers the way there and back."""
+    say(f"\n>>> {what}: the app types the shortcut (right first, then left)")
+    WATCH.pause()
+    start = space_now()
+    if not start:
+        raise Abort("the app does not say which Space shows")
+    for numpad in (False, True):
+        for direction in ("right", "left"):
+            r = space_step(direction, numpad)
+            if not r.get("changed"):
+                continue
+            if r["after"]["fullscreen"]:
+                say(f"    the Space to the {direction} is a full-screen app's; going back")
+                back = space_step(OPPOSITE[direction], numpad)
+                if not back.get("changed") or back["after"]["fullscreen"] or back["after"]["space"] != start["space"]:
+                    raise Abort("could not come back from the full-screen Space next door")
+                continue
+            ROUTE.update(toward=direction, back=OPPOSITE[direction], numpad=numpad)
+            WATCH.desk("d2")
+            return
+    WATCH.desk("d1")
+    raise Abort("no Desktop next to the start one was reached: the shortcut typed by the app was not seen "
+                "(right and left, with and without the numeric-pad flag), or there is only one Desktop")
+
+
+def activate_only_on(name):
+    """Activates the fixture app whose windows live only on Desktop `name`: macOS goes to
+    that Desktop (the fallback when a typed shortcut is not seen)."""
+    path = ts.EXTRA[ONLY_ON[name]][1]
+    say(f"    shortcut not seen; activating {os.path.basename(path)} (its windows live only on Desktop {name[1]})")
+    subprocess.run(["open", path], capture_output=True)
+
+
+def auto_switch(name, what):
+    """A Desktop switch through the app: types the shortcut toward Desktop `name`; when no
+    change is seen, activates an app living only there."""
+    say(f"\n>>> {what}: the app types the shortcut")
+    if ROUTE["toward"] is None:
+        raise Abort("no way to the other Desktop is known")
+    WATCH.pause()
+    direction = ROUTE["toward"] if name == "d2" else ROUTE["back"]
+    before = space_now()
+    if not before:
+        raise Abort("the app does not say which Space shows")
+    r = space_step(direction, ROUTE["numpad"])
+    if not r.get("changed"):
+        activate_only_on(name)
+        if not wait_for("the Desktop switch", lambda: moved(before, space_now()), 8):
+            raise Abort(f"the switch to Desktop {name[1]} was not seen")
+    now = space_now()
+    if now and IDS[name] is not None and now["space"] != IDS[name]:
+        say(f"    (the engine shows Space {now['space']}; Desktop {name[1]} was {IDS[name]})")
+    WATCH.desk(name)
+
+
+def appless_switch(name, what, ids):
+    """A Desktop switch while the app is down (the guardian drill): the one-shot
+    `debug-post-space`, launched through LaunchServices so it has the app's Accessibility;
+    noticed from the window server (one of `ids` shows); the activation fallback after."""
+    say(f"\n>>> {what}: a one-shot of the app types the shortcut")
+    if ROUTE["toward"] is None:
+        raise Abort("no way to the other Desktop is known")
+    WATCH.pause()
+    direction = ROUTE["toward"] if name == "d2" else ROUTE["back"]
+    args = ["open", "-n", "-g", ts.APP, "--env", "STAGE_MANAGER_TEST=1", "--env", f"STAGE_MANAGER_HOME={ts.HOME}",
+            "--args", "debug-post-space", direction] + (["numpad"] if ROUTE["numpad"] else [])
+    subprocess.run(args, capture_output=True)
+    if not wait_for("the Desktop switch", lambda: bool(onscreen_ids(ids)), 8):
+        activate_only_on(name)
+        if not wait_for("the Desktop switch", lambda: bool(onscreen_ids(ids)), 8):
+            raise Abort(f"the switch to Desktop {name[1]} was not seen (app down)")
+    WATCH.desk(name)
+
+
+def go(name, guided_prompt):
+    """Guided: asks for the switch. Auto: the app switches."""
+    if AUTO:
+        auto_switch(name, guided_prompt)
+    else:
+        switch_to(guided_prompt)
+
+
+def sample_onscreen(ids, stop, hits):
+    """Looks at the window server every ~0.1 s until `stop` is set; records any of `ids` on
+    screen (a jump to their Desktop, however short)."""
+    while not stop.is_set():
+        try:
+            on = [w["id"] for w in probe_all() if w["onscreen"] and w["id"] in ids]
+        except Exception:  # noqa: BLE001
+            on = []
+        if on:
+            hits.append((round(time.time(), 2), on))
+        time.sleep(0.1)
+
+
+def screen_locked(ioreg_text=None):
+    """True while the session's screen is locked: `ioreg -n Root -d1` lists
+    CGSSessionScreenIsLocked (absent when unlocked) in the console user's entry."""
+    if ioreg_text is None:
+        ioreg_text = subprocess.run(["ioreg", "-n", "Root", "-d1"], capture_output=True, text=True).stdout
+    m = re.search(r'"CGSSessionScreenIsLocked"\s*=\s*(\w+)', ioreg_text)
+    return bool(m) and m.group(1) != "No"
+
+
+def covering_windows():
+    """On-screen windows covering the whole main display (a full-screen app's Space)."""
+    r = ts.run([ts.BIN, "probe-screen"], timeout=10)
+    try:
+        return json.loads(r.stdout).get("covering", [])
+    except (json.JSONDecodeError, AttributeError):
+        return [{"error": (r.stdout + r.stderr).strip()[:200]}]
+
+
+def switch_shortcuts():
+    """"Move left/right a space" as the user's settings have them: id → enabled."""
+    r = subprocess.run(["defaults", "export", "com.apple.symbolichotkeys", "-"], capture_output=True)
+    try:
+        keys = plistlib.loads(r.stdout).get("AppleSymbolicHotKeys", {})
+    except Exception:  # noqa: BLE001 - absent or unreadable: macOS defaults (on)
+        keys = {}
+    return {n: bool(keys.get(str(n), {}).get("enabled", True)) for n in (79, 81)}
+
+
+def preflight():
+    """Why a hands-free run must not start now (empty: it may)."""
+    problems = []
+    others = other_stage_managers()
+    if others:
+        problems.append(f"another Stage Manager runs (pids {others}); quit it first")
+    if screen_locked():
+        problems.append("the screen is locked (CGSSessionScreenIsLocked in `ioreg -n Root -d1`)")
+    cover = covering_windows()
+    if cover:
+        problems.append(f"the Space shown looks like a full-screen app's (windows covering the display: {cover})")
+    keys = switch_shortcuts()
+    off = [n for n, on in keys.items() if not on]
+    if off:
+        problems.append(f"Move left/right a space is turned off in Keyboard Shortcuts (hotkeys {off})")
+    return problems
+
+
+PLAN = """\
+planned steps (hands-free):
+  preflight   refuse unless: no other Stage Manager, screen unlocked, a Desktop shows (not full screen),
+              Move left/right a space on
+  Desktop 1   open Fixture 1-2 and Alpha 1; start the app; ctl space says not full screen
+  first trip  ctl debug-space right (else left; a full-screen Space next door is left at once; then the same
+              with the numeric-pad flag); the way there and back is remembered; Desktops by synthetic id
+  Desktop 2   Fixture 3 (SIGUSR1) and Bravo 1; checks as guided; by eye: screenshot of the strip column
+  card click  debug-click on a card while the window server is sampled every ~0.1 s for Desktop 1's
+              windows (any = a jump); by eye: screenshot of the main display
+  back        ctl debug-space <back> to Desktop 1; checks as guided
+  quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
+  guardian    debug-space <back> to Desktop 1; kill -9 the app; checks: still parked, the guardian waits;
+              `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
+              checks: restored, the guardian ends
+  full screen twice: ctl debug-fullscreen <a shown Fixture window> on, checks, off, checks
+  cleanup     (also on Ctrl-C/SIGTERM) full screen off on every fixture window; back to the start Desktop
+              (not when someone else changed the Desktop); quit the app; no window parked; quit the fixtures
+  watch       all along, the window server must show the expected Desktop's fixture windows; a change
+              nobody asked for stops the run"""
+
+
+def install_guards():
+    """Auto mode: every ctl call, check and wait looks for a Desktop change nobody asked for."""
+    global check, ctl
+    plain_ctl, plain_check, plain_wait = ts.ctl, ts.check, ts.wait_until
+
+    def guarded_ctl(*words):
+        guard()
+        return plain_ctl(*words)
+
+    def guarded_check(cond, msg):
+        guard()
+        return plain_check(cond, msg)
+
+    def guarded_wait(fn, timeout, what):
+        def step():
+            guard()
+            return fn()
+        return plain_wait(step, timeout, what)
+
+    ts.ctl, ts.check, ts.wait_until = guarded_ctl, guarded_check, guarded_wait
+    check, ctl = guarded_check, guarded_ctl
+
+
+def on_sigterm(_sig, _frame):
+    raise Stopped()
+
+
+def auto_cleanup(interrupted):
+    """Full screen left on every fixture window, back to the start Desktop (unless someone
+    else changed it), the app quit, no window left parked, the fixtures quit. Never raises."""
+    global CLEANING
+    CLEANING = True
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    say("\n== cleanup ==")
+    if WATCH:
+        WATCH.pause()
+    try:
+        if ts.app_pid():
+            for w in probe_all():
+                r = ctl("debug-fullscreen", w["id"], "off")
+                if r.get("changed"):
+                    say(f"    window {w['id']} left full screen")
+            wait_for("full screen to end", lambda: (lambda sp: sp is None or (not sp["fullscreen"] and not sp["settling"]))(space_now()), 15)
+    except Exception as e:  # noqa: BLE001
+        say(f"    leaving full screen: {e}")
+    try:
+        if interrupted:
+            say("    not switching Desktops: someone else changed the Desktop shown")
+        elif IDS["d1"] is not None and ROUTE["toward"]:
+            back_to_start()
+    except BaseException as e:  # noqa: BLE001 - cleanup goes on
+        say(f"    could not return to the start Desktop ({e}); it was Space {IDS['d1']}")
+    ts.stop_app()
+    try:
+        left = parked_anywhere()
+        ts.check(not left, "cleanup: no fixture window parked on any Desktop" + (f" (left: {[w['id'] for w in left]})" if left else ""))
+    except Exception as e:  # noqa: BLE001
+        say(f"    parked check: {e}")
+    ts.stop_all_fixtures()
+    if WATCH:
+        WATCH.stop()
+
+
+def back_to_start():
+    """The Desktop the run started on, only from Desktop 2 as the window server shows it
+    (anywhere else, nobody knows the way): through the app while it runs, else the one-shot."""
+    d1_ids, d2_ids = WATCH.ids["d1"], WATCH.ids["d2"]
+    on = {w["id"] for w in probe_all() if w["onscreen"]}
+    if on & d1_ids:
+        return
+    if not on & d2_ids:
+        say(f"    not on Desktop 1 or 2 as far as the window server shows; not switching (the start was Space {IDS['d1']})")
+        return
+    if ts.app_pid():
+        auto_switch("d1", "Back to the start Desktop")
+    else:
+        appless_switch("d1", "Back to the start Desktop", d1_ids)
+
+
+# ----- the check ---------------------------------------------------------------------------
+
+
 def run():
     if other_stage_managers():
         say("STOP: another Stage Manager is running (the owner's?). Quit it first; both would manage the fixtures.")
         ts.failed.append("another Stage Manager runs")
         return
-    ask("Make sure there are two Desktops (Mission Control) and Desktop 1 is shown")
+    if AUTO:
+        problems = preflight()
+        if problems:
+            for p in problems:
+                say(f"STOP: {p}")
+            ts.failed.append("preflight: " + "; ".join(problems))
+            return
+    else:
+        ask("Make sure there are two Desktops (Mission Control) and Desktop 1 is shown")
     p = os.path.join(ts.HOME, "state.json")
     if os.path.exists(p):
         os.remove(p)
@@ -166,10 +626,20 @@ def run():
     if not check(s is not None, "app up with three windows"):
         return
     d1 = current_space()
+    if AUTO:
+        IDS["d1"] = d1
+        sp = space_now()
+        if not sp or sp["fullscreen"]:
+            raise Abort(f"the app does not see a Desktop at the start ({sp})")
+        WATCH.markers("d1", [w["id"] for w in probe_all() if w["onscreen"]])
+        WATCH.desk("d1")
     check(len(s["stages"]) == 2, f"two stages on Desktop 1 ({ts.stage_titles(s)})")
 
     say("\n== Desktop 2: Fixture 3 (the same app) and Bravo 1 ==")
-    switch_to("Switch to Desktop 2 (Control-Right Arrow)")
+    if AUTO:
+        find_neighbour("Switch to Desktop 2")
+    else:
+        switch_to("Switch to Desktop 2 (Control-Right Arrow)")
     pid = ts.pids_of(ts.FIX_EXE)
     if pid:
         os.kill(pid[0], signal.SIGUSR1)
@@ -178,11 +648,19 @@ def run():
     if not check(s is not None, "Desktop 2's windows are managed"):
         return
     d2 = s["space"]
+    if AUTO:
+        IDS["d2"] = d2
+        WATCH.markers("d2", [w["id"] for w in probe_all() if w["onscreen"] and w["id"] not in WATCH.ids["d1"]])
     check(d2 != d1, f"Desktop 2 is its own Space ({d1} then {d2})")
     check(titles_on_space(s, d2) == ["Bravo 1", "Fixture 3"], f"Desktop 2's stages hold only its windows: {titles_on_space(s, d2)}")
     check(set(titles_on_space(s, d1)) == {"Alpha 1", "Fixture 1", "Fixture 2"}, "Desktop 1's stages are untouched")
     check(set(strip_titles(s)) <= {"Bravo 1", "Fixture 3"}, f"the strip shows only Desktop 2's windows: {strip_titles(s)}")
-    check(yes("Does the strip on Desktop 2 show only Bravo or Fixture 3 (no Fixture 1, 2 or Alpha)?"), "strip on Desktop 2 (by eye)")
+    if AUTO:
+        vis = s["display"]["visible"]
+        by_eye("the strip on Desktop 2 shows only Bravo or Fixture 3 (no Fixture 1, 2 or Alpha)",
+               shot("strip-desktop-2", (vis["x"], vis["y"], s["strip_width"] + 40, vis["h"])))
+    else:
+        check(yes("Does the strip on Desktop 2 show only Bravo or Fixture 3 (no Fixture 1, 2 or Alpha)?"), "strip on Desktop 2 (by eye)")
 
     say("\n== a card click on Desktop 2 never changes the Desktop ==")
     vis = s["display"]["visible"]
@@ -196,17 +674,32 @@ def run():
     listed = ts.strip_panel([w for w in ts.our_windows()])
     check(listed is not None, f"the window server lists the strip on screen ({listed and listed['bounds']})")
     before = s["active"]
+    if AUTO:
+        # A jump to Desktop 1 is the sampler's to judge, not the watcher's.
+        WATCH.pause()
+        stop, hits = threading.Event(), []
+        sampler = threading.Thread(target=sample_onscreen, args=(WATCH.ids["d1"], stop, hits), daemon=True)
+        sampler.start()
     r = ctl("debug-click", x, y)
     check(r.get("ok"), f"clicked the card ({r.get('error', 'ok')})")
     s = ts.wait_state(lambda x: x["active"] != before, "the card click to switch", timeout=4)
     check(s is not None, "the card click switched stages")
     time.sleep(1.5)
     check(current_space() == d2, "still on Desktop 2 (as the engine sees it)")
-    check(not yes("Did the screen jump to Desktop 1 (even for a moment)?"), "no jump to Desktop 1 (by eye)")
+    if AUTO:
+        stop.set()
+        sampler.join(timeout=3)
+        check(not hits, "no Desktop 1 window on screen during the click and 1.5 s after (window server, every ~0.1 s)"
+              + (f": {hits[:3]}" if hits else ""))
+        WATCH.desk("d2")
+        by_eye("the screen shows Desktop 2 (no jump to Desktop 1; a still cannot show a short jump, the sampling above does)",
+               shot("after-card-click"))
+    else:
+        check(not yes("Did the screen jump to Desktop 1 (even for a moment)?"), "no jump to Desktop 1 (by eye)")
     check(ctl("switch", 1).get("ok") and current_space() == d2, "a hotkey switch stays on Desktop 2")
 
     say("\n== back on Desktop 1 ==")
-    switch_to("Switch back to Desktop 1 (Control-Left Arrow)")
+    go("d1", "Switch back to Desktop 1 (Control-Left Arrow)")
     s = ts.wait_state(lambda x: x["space"] == d1, "Desktop 1 recognized", timeout=5)
     check(s is not None, "Desktop 1 recognized by its windows")
     if s:
@@ -228,7 +721,7 @@ def run():
     s = ts.start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
     check(s is not None and s["space"] == d1, "Desktop 1 recognized at launch with its saved id")
     check(spaces().get("saved_spaces_not_visited") == 1, "Desktop 2 waits for its first visit")
-    switch_to("Switch to Desktop 2")
+    go("d2", "Switch to Desktop 2")
     s = ts.wait_state(lambda x: x["space"] == d2, "Desktop 2 rebuilt", timeout=6)
     check(s is not None, "Desktop 2 rebuilt with its saved id")
     if s:
@@ -241,7 +734,7 @@ def run():
     s = state()
     check(any(w["space"] == d2 and w["parked"] for w in s["windows"]), "a window is parked on Desktop 2")
     d2_ids = [w["id"] for w in s["windows"] if w["space"] == d2]
-    switch_to("Switch to Desktop 1")
+    go("d1", "Switch to Desktop 1")
     time.sleep(1.5)
     app = ts.app_pid()
     guardians = ts.guardian_pids(app)
@@ -255,7 +748,10 @@ def run():
     check(still and bool(parked), "the guardian waits while the window's Desktop is not shown")
     check(any("waiting for" in line and "on_desktops_not_shown=[\"" in line for line in guardian_lines()),
           "the guardian's log says it waits for a window on a Desktop not shown")
-    switch_to_windows("Switch to Desktop 2", d2_ids)
+    if AUTO:
+        appless_switch("d2", "Switch to Desktop 2", d2_ids)
+    else:
+        switch_to_windows("Switch to Desktop 2", d2_ids)
     back = wait_for("the parked window to come back", lambda: not parked_anywhere(), 8)
     check(back is True, "the guardian brought Desktop 2's parked window back once Desktop 2 showed")
     ended = wait_for("the guardian to end", lambda: not ts.pids_of(f"stage-manager --guardian {app}$"), 6)
@@ -275,17 +771,33 @@ def run():
     windows_before = sorted(w["id"] for w in s["windows"])
     ids_before = sorted(x["id"] for x in spaces().get("list", []))
     for round_no in (1, 2):
-        say(f"\n>>> Round {round_no} of 2: make a Fixture window full screen (green button) within a minute;")
-        say("    the test notices by itself, then asks you to leave full screen")
-        if not wait_for("a full-screen window", lambda: spaces().get("fullscreen") is True, 60):
-            say("    full-screen check skipped")
-            break
+        if AUTO:
+            wid = fullscreen_on(round_no, desk)
+            if wid is None:
+                break
+            if not wait_for("a full-screen window", lambda: spaces().get("fullscreen") is True, 20):
+                say("    full-screen check skipped")
+                break
+            WATCH.fullscreen(wid)
+        else:
+            say(f"\n>>> Round {round_no} of 2: make a Fixture window full screen (green button) within a minute;")
+            say("    the test notices by itself, then asks you to leave full screen")
+            if not wait_for("a full-screen window", lambda: spaces().get("fullscreen") is True, 60):
+                say("    full-screen check skipped")
+                break
         check(True, f"round {round_no}: the engine knows a full-screen Space shows")
         check(holds(lambda: spaces().get("fullscreen") is True, 3), f"round {round_no}: it stays known for three seconds (no flapping)")
         panel = ts.strip_panel([w for w in ts.our_windows() if w.get("onscreen", True)])
         check(panel is None, f"round {round_no}: no strip on the full-screen Space ({panel and panel['bounds']})")
-        say("\n>>> Leave full screen (green button or Control-Command-F); the test notices by itself")
-        back = wait_for("full screen to end", lambda: (lambda d: d.get("fullscreen") is False and not d.get("settling"))(spaces()), 120)
+        if AUTO:
+            WATCH.pause()
+            r = ctl("debug-fullscreen", wid, "off")
+            check(r.get("ok"), f"round {round_no}: window {wid} asked to leave full screen ({r.get('error', r.get('via', 'ok'))})")
+            back = wait_for("full screen to end", lambda: (lambda d: d.get("fullscreen") is False and not d.get("settling"))(spaces()), 30)
+            WATCH.desk(WATCH.where)
+        else:
+            say("\n>>> Leave full screen (green button or Control-Command-F); the test notices by itself")
+            back = wait_for("full screen to end", lambda: (lambda d: d.get("fullscreen") is False and not d.get("settling"))(spaces()), 120)
         check(back is True, f"round {round_no}: back on a Desktop")
         time.sleep(2.5)  # past the once-a-second checks
         s = state()
@@ -301,16 +813,89 @@ def run():
     check(not left, "the end: no fixture window parked on any Desktop")
 
 
+def fullscreen_on(round_no, desk):
+    """Auto: a shown Fixture window of the Desktop shown goes full screen through the app
+    (`ctl debug-fullscreen`). Returns its id, or None when none could."""
+    s = state()
+    shown = [w for w in s["windows"] if w["space"] == desk and not w["parked"] and w["role"] == "standard"]
+    shown.sort(key=lambda w: (not w["title"].startswith("Fixture"), w["title"]))
+    if not shown:
+        say("    no shown fixture window to make full screen; full-screen check skipped")
+        return None
+    wid = shown[0]["id"]
+    say(f"\n>>> Round {round_no} of 2: {shown[0]['title']} goes full screen (ctl debug-fullscreen {wid} on)")
+    WATCH.pause()
+    r = ctl("debug-fullscreen", wid, "on")
+    if not check(r.get("ok"), f"round {round_no}: window {wid} asked into full screen ({r.get('error', r.get('via', 'ok'))})"):
+        WATCH.desk(WATCH.where)
+        return None
+    return wid
+
+
+def dry_run():
+    """Prints the preflight and the plan; acts on nothing."""
+    say("dry run: nothing is launched, switched or moved")
+    say(f"home (scratch): {ts.HOME}")
+    say(f"screenshots would go to: {shots_dir()}")
+    say(f"app binary for the probes: {ts.BIN}")
+    say(f"Move left/right a space (79/81) on: {switch_shortcuts()}")
+    problems = preflight()
+    for p in problems:
+        say(f"  a real run would refuse now: {p}")
+    if not problems:
+        say("  preflight clear: a real run would start now")
+    say(PLAN)
+    return 0
+
+
 def main():
+    global WATCH
+    if AUTO and DRY:
+        target_bin = os.path.join(ts.ROOT, "target", "Stage Manager.app", "Contents", "MacOS", "stage-manager")
+        if os.path.exists(target_bin):
+            ts.BIN = target_bin  # the dev copy is not refreshed for a dry run
+        return dry_run()
     if not os.path.exists(ts.BIN):
         say("build first: scripts/test-stages.sh builds the app and the fixtures")
         return 2
     say(f"home: {ts.HOME}")
+    if not AUTO:
+        try:
+            run()
+        finally:
+            ts.stop_app()
+            ts.stop_all_fixtures()
+        return report()
+    install_guards()
+    signal.signal(signal.SIGTERM, on_sigterm)
+    # No display sleep or screen saver (and so no lock) while the run lasts.
+    subprocess.Popen(["caffeinate", "-d", "-i", "-w", str(os.getpid())])
+    WATCH = Watch()
+    interrupted = False
     try:
         run()
+    except Interrupted as e:
+        interrupted = True
+        say(f"\nSTOP: {e}")
+        ts.failed.append(f"stopped: {e}")
+    except (KeyboardInterrupt, Stopped):
+        say("\nSTOP: interrupted by a signal")
+        ts.failed.append("stopped by a signal")
+    except Abort as e:
+        say(f"\nSTOP: {e}")
+        ts.failed.append(f"aborted: {e}")
     finally:
-        ts.stop_app()
-        ts.stop_all_fixtures()
+        auto_cleanup(interrupted)
+    if BY_EYE:
+        say("\nby eye (not counted):")
+        for q, path in BY_EYE:
+            say(f"  {path or '(no screenshot)'}: {q}")
+    took = time.time() - STARTED
+    say(f"\nthe run took {int(took // 60)} min {int(took % 60)} s")
+    return report()
+
+
+def report():
     say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed (every app run's log: {ts.HOME}/stage-manager*.log)")
     for f in ts.failed:
         say(f"  FAIL {f}")
