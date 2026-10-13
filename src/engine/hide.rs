@@ -10,6 +10,8 @@
 //!
 //! An app may be hidden only when ([`may_hide`]):
 //! - the feature is on, and it is not Finder (Finder owns the desktop);
+//! - its bundle id is known: every unhide of ours checks the pid still runs the bundle we
+//!   hid, so an app without one could be hidden but never brought back by us;
 //! - the model manages at least one of its windows, and every one of them, on every Desktop,
 //!   is parked (none in an active stage, none pinned or on every Desktop): hiding is per
 //!   app, across Desktops;
@@ -44,6 +46,8 @@ pub struct HideFacts {
     pub on: bool,
     /// The app is Finder.
     pub finder: bool,
+    /// The app's bundle id is known (our unhides match the pid against it).
+    pub bundle_known: bool,
     /// The model's view.
     pub park: AppPark,
     /// Windows of the app the window server lists that the model does not manage.
@@ -65,6 +69,9 @@ pub fn may_hide(f: &HideFacts) -> Result<(), &'static str> {
     }
     if f.finder {
         return Err("Finder owns the desktop");
+    }
+    if !f.bundle_known {
+        return Err("no bundle id (our unhide could not match the app)");
     }
     if f.park.windows == 0 {
         return Err("no managed window");
@@ -101,6 +108,7 @@ mod tests {
     fn ok() -> HideFacts {
         HideFacts {
             on: true,
+            bundle_known: true,
             park: AppPark { windows: 2, shown: 0, keep: vec![(7, Rect::new(100.0, 100.0, 800.0, 600.0))], stage_here: true },
             ..HideFacts::default()
         }
@@ -116,6 +124,7 @@ mod tests {
         let cases: Vec<(&str, HideFacts)> = vec![
             ("off", HideFacts { on: false, ..ok() }),
             ("Finder", HideFacts { finder: true, ..ok() }),
+            ("no bundle id (never unhidden by us)", HideFacts { bundle_known: false, ..ok() }),
             ("no window", HideFacts { park: AppPark { windows: 0, ..ok().park }, ..ok() }),
             ("split across the active stage", HideFacts { park: AppPark { shown: 1, ..ok().park }, ..ok() }),
             ("an unmanaged window (full screen, ignored, another Desktop)", HideFacts { unmanaged: 1, ..ok() }),

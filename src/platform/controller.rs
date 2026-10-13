@@ -94,7 +94,7 @@ use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
-    Action, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole,
+    Action, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
@@ -731,16 +731,32 @@ impl Controller {
         // as a window's frame when AX has none).
         let listed: HashMap<u32, Rect> =
             list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
-        let frames = m
+        // The activation often lands before the Space change's notice, while the Desktop
+        // slides: the list then shows its windows shifted sideways by up to the display's
+        // width. Settling after a change, or off the display, or slid on a display where no
+        // window is listed at its tracked frame, the tracked frame stays.
+        let settling = self.space_pending || self.space_changed_at.is_some_and(|t| t.elapsed() < SPACE_SETTLE);
+        let shown: Vec<(&WindowState, Rect, Option<Rect>)> = m
             .windows()
             .filter(|w| !w.parked && (w.space == space || w.sticky))
-            .filter_map(|w| {
-                let tracked = ob.window(w.meta.id.0)?.frame;
-                let frame = activation_frame(tracked, listed.get(&w.meta.id.0).copied());
+            .filter_map(|w| Some((w, ob.window(w.meta.id.0)?.frame, listed.get(&w.meta.id.0).copied())))
+            .collect();
+        let steady: HashSet<DisplayId> = shown
+            .iter()
+            .filter(|(w, tracked, cg)| !w.sticky && cg.is_some_and(|cg| !frames_differ(cg, *tracked)))
+            .map(|(w, _, _)| m.display(w.meta.display).id)
+            .collect();
+        let frames = shown
+            .into_iter()
+            .map(|(w, tracked, cg)| {
+                let display = m.display(w.meta.display);
+                let frame = activation_frame(tracked, cg, display.frame, settling, steady.contains(&display.id));
                 if frame != tracked {
                     tracing::debug!(id = w.meta.id.0, %tracked, %frame, "activation: the window server's frame differs from the tracked one; it wins");
+                } else if let Some(cg) = cg.filter(|cg| frames_differ(*cg, tracked)) {
+                    tracing::debug!(id = w.meta.id.0, %tracked, listed = %cg, settling, "activation: the window server's frame looks mid-slide; the tracked one stays");
                 }
-                Some((w.meta.id, frame))
+                (w.meta.id, frame)
             })
             .collect();
         let focused = if needs_focus { arrival::focused_window_of(pid) } else { None };
@@ -3274,16 +3290,30 @@ fn fallback_displays() -> Vec<Display> {
     }]
 }
 
+/// True when the window server's bounds `cg` disagree with frame `tracked` by more than a
+/// point (CG rounds to whole points).
+fn frames_differ(cg: Rect, tracked: Rect) -> bool {
+    (cg.x - tracked.x).abs() > 1.0
+        || (cg.y - tracked.y).abs() > 1.0
+        || (cg.w - tracked.w).abs() > 1.0
+        || (cg.h - tracked.h).abs() > 1.0
+}
+
 /// A shown window's frame for an activation's switch: the window server's bounds
-/// (`listed`) when they disagree with the tracked frame by more than a point (CG rounds to
-/// whole points; an app may have moved the window without a notice), else the tracked one.
-fn activation_frame(tracked: Rect, listed: Option<Rect>) -> Rect {
+/// (`listed`) when they disagree with the tracked frame by more than a point (an app may
+/// have moved the window without a notice), else the tracked one. The tracked one stays too
+/// when the list may be a Desktop slide's (the activation often lands before the Space
+/// change's notice): a Space change is pending or `settling`; the bounds miss the window's
+/// `display`; or they are the tracked frame moved sideways only, by up to about the
+/// display's width ([`arrival::slid_from`]), and the display is not `steady` (no window of
+/// its Desktop listed at its tracked frame: a slide shifts them all).
+fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling: bool, steady: bool) -> Rect {
     match listed {
         Some(cg)
-            if (cg.x - tracked.x).abs() > 1.0
-                || (cg.y - tracked.y).abs() > 1.0
-                || (cg.w - tracked.w).abs() > 1.0
-                || (cg.h - tracked.h).abs() > 1.0 =>
+            if frames_differ(cg, tracked)
+                && !settling
+                && cg.intersect(&display).is_some()
+                && (steady || !arrival::slid_from(cg, tracked, display.w)) =>
         {
             cg
         }
@@ -3515,18 +3545,42 @@ mod tests {
         assert!(!drag_plausible(title_bar, None, Some(Point::new(230.0, 120.0))), "not shown at the press");
     }
 
+    /// A 1440-point-wide display at the origin.
+    const DISPLAY: Rect = Rect { x: 0.0, y: 0.0, w: 1440.0, h: 900.0 };
+
     #[test]
     fn an_activation_takes_the_window_servers_frame_when_the_tracked_one_is_stale() {
         let tracked = Rect::new(100.0, 200.0, 800.0, 600.0);
         // An app that moved its window without a notice: the window server's bounds win.
         let moved = Rect::new(400.0, 260.0, 800.0, 600.0);
-        assert_eq!(activation_frame(tracked, Some(moved)), moved);
+        assert_eq!(activation_frame(tracked, Some(moved), DISPLAY, false, false), moved);
         let resized = Rect::new(100.0, 200.0, 900.0, 600.0);
-        assert_eq!(activation_frame(tracked, Some(resized)), resized);
+        assert_eq!(activation_frame(tracked, Some(resized), DISPLAY, false, false), resized);
         // CG's whole points against a fractional AX frame: the exact tracked one stays.
         let exact = Rect::new(100.5, 200.25, 800.0, 599.5);
-        assert_eq!(activation_frame(exact, Some(tracked)), exact);
+        assert_eq!(activation_frame(exact, Some(tracked), DISPLAY, false, false), exact);
         // Not listed on screen: the tracked frame.
-        assert_eq!(activation_frame(tracked, None), tracked);
+        assert_eq!(activation_frame(tracked, None, DISPLAY, false, false), tracked);
+    }
+
+    #[test]
+    fn an_activation_mid_slide_keeps_the_tracked_frame() {
+        let tracked = Rect::new(100.0, 200.0, 800.0, 600.0);
+        // The Desktop slides before the Space change's notice: shifted sideways on screen.
+        let slid = Rect::new(-1100.0, 200.0, 800.0, 600.0);
+        assert_eq!(activation_frame(tracked, Some(slid), DISPLAY, false, false), tracked);
+        let slid_right = Rect::new(1300.0, 200.0, 800.0, 600.0);
+        assert_eq!(activation_frame(tracked, Some(slid_right), DISPLAY, false, false), tracked);
+        // Shifted off the window's display altogether: tracked.
+        let off = Rect::new(2100.0, 200.0, 800.0, 600.0);
+        assert_eq!(activation_frame(tracked, Some(off), DISPLAY, false, true), tracked, "off the display");
+        // A Space change pending or settling: tracked, whatever the list says.
+        let moved = Rect::new(400.0, 260.0, 800.0, 600.0);
+        assert_eq!(activation_frame(tracked, Some(moved), DISPLAY, true, true), tracked);
+        // A sideways move while another window of the Desktop is listed where tracked: no
+        // slide (it would shift them all), so the app's move wins.
+        assert_eq!(activation_frame(tracked, Some(slid_right), DISPLAY, false, true), slid_right);
+        // A move with a vertical part is never a slide.
+        assert_eq!(activation_frame(tracked, Some(moved), DISPLAY, false, false), moved);
     }
 }

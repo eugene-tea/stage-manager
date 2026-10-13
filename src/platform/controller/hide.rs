@@ -20,7 +20,8 @@
 //!   later ([`RECONCILE_AFTER`]), once no activation of the app is held and no switch is
 //!   running ([`reconcile_due`]).
 //! - **The user's hides** are never adopted (an app hidden already is never "ours") and
-//!   never undone. Finder is never hidden.
+//!   never undone. Finder is never hidden, nor an app without a bundle id (our unhides
+//!   match the pid against it).
 //! - **Safety**: every app we hid is recorded ([`safety::set_hidden`]) in the parked file
 //!   before it is asked to hide, and stays recorded until our unhide returns (a crash in
 //!   between leaves it listed); every unpark path unhides it (quit through the batch above,
@@ -224,11 +225,14 @@ impl Controller {
         // Read once, and only when an app passes every cheap test first.
         let mut list: Option<Vec<windows::CgWindow>> = None;
         for pid in candidates {
-            let bundle = ob.bundle_id(pid).map(String::from).or_else(|| apps::bundle_of(pid)).unwrap_or_default();
+            let bundle = ob.bundle_id(pid).map(String::from).or_else(|| apps::bundle_of(pid)).filter(|b| !b.is_empty());
+            let bundle_known = bundle.is_some();
+            let bundle = bundle.unwrap_or_default();
             let waiting = self.unplaced.iter().filter(|id| ob.window(**id).is_some_and(|w| w.pid == pid)).count();
             let mut facts = HideFacts {
                 on: true,
                 finder: bundle == FINDER_BUNDLE_ID,
+                bundle_known,
                 park: self.model.as_ref().map(|m| m.app_park(pid)).unwrap_or_default(),
                 unmanaged: 0,
                 waiting,

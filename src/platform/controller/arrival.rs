@@ -185,7 +185,7 @@ enum Seen {
 
 /// True when `bounds` is `reference` moved sideways only, by more than 2 pt and at most
 /// about the display's width (`width`): a Desktop slide's offset.
-fn slid_from(bounds: Rect, reference: Rect, width: f64) -> bool {
+pub(crate) fn slid_from(bounds: Rect, reference: Rect, width: f64) -> bool {
     let dx = (bounds.x - reference.x).abs();
     (bounds.y - reference.y).abs() <= 2.0 && dx > 2.0 && dx <= width * 1.05
 }
