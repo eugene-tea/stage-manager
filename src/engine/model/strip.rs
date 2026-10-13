@@ -107,24 +107,45 @@ impl Model {
         };
         let cards: Vec<StripCard> = ids.into_iter().filter_map(|id| self.card(id, Some(id) == active)).collect();
         if self.options.settings.app_windows == AppWindows::OneAtATime {
-            self.group_one_at_a_time(space, cards)
+            self.group_one_at_a_time(space, cards).into_iter().map(|(_, c)| c).collect()
         } else {
             cards
         }
+    }
+
+    /// The stage whose slot shows `target`'s card on `space` (native order): `target` itself,
+    /// or with "One at a Time" the first stage of its app's group, whose slot the grouped card
+    /// takes while carrying `target` (the app's next window). `None` when no card shows it.
+    pub(crate) fn slot_showing(&self, space: SpaceId, target: StageId) -> Option<StageId> {
+        if self.options.strip.order != StripOrder::Native {
+            return None;
+        }
+        let active = self.active_stage_in(space);
+        let slots = self.slots.get(&space)?;
+        let cards: Vec<StripCard> = slots.iter().filter_map(|&id| self.card(id, Some(id) == active)).collect();
+        if self.options.settings.app_windows != AppWindows::OneAtATime {
+            return slots.contains(&target).then_some(target);
+        }
+        self.group_one_at_a_time(space, cards)
+            .into_iter()
+            .find(|(_, c)| c.stage == target)
+            .map(|(slot, _)| slot)
     }
 
     /// With "One at a Time", an app's windows sit in stages of one window each; Apple shows
     /// the app once on the left, and clicking it again opens the next window. So the cards
     /// of single-app stages of one app become one card (in the first one's slot) whose stage
     /// is the app's least recently shown window (clicks cycle through them all), with the
-    /// app's other waiting windows stacked behind it.
-    fn group_one_at_a_time(&self, space: SpaceId, cards: Vec<StripCard>) -> Vec<StripCard> {
+    /// app's other waiting windows stacked behind it. Each card comes with the stage whose
+    /// slot it takes.
+    fn group_one_at_a_time(&self, space: SpaceId, cards: Vec<StripCard>) -> Vec<(StageId, StripCard)> {
         let single_app = |c: &StripCard| (c.apps.len() == 1).then(|| c.apps[0]);
-        let mut out: Vec<StripCard> = Vec::new();
+        let mut out: Vec<(StageId, StripCard)> = Vec::new();
         let mut done: Vec<Pid> = Vec::new();
         for card in cards {
+            let slot = card.stage;
             let Some(pid) = single_app(&card).filter(|_| !card.active) else {
-                out.push(card);
+                out.push((slot, card));
                 continue;
             };
             if done.contains(&pid) {
@@ -142,7 +163,7 @@ impl Model {
                 .collect();
             group.sort();
             let Some(next) = group.first().map(|g| g.1).and_then(|id| self.card(id, false)) else {
-                out.push(card);
+                out.push((slot, card));
                 continue;
             };
             let mut windows = next.windows.clone();
@@ -155,7 +176,7 @@ impl Model {
                     }
                 }
             }
-            out.push(StripCard { windows, ..next });
+            out.push((slot, StripCard { windows, ..next }));
         }
         out
     }
@@ -211,14 +232,27 @@ impl Model {
             && (!s.windows.is_empty() || s.name.as_deref().is_some_and(|n| self.is_declared(n)))
     }
 
-    /// The stage `leaving` gives up the active spot to `target`: swap slots, or let `leaving`
-    /// enter the strip when `target` had no card.
-    pub(crate) fn strip_swap(&mut self, space: SpaceId, leaving: StageId, target: StageId) {
+    /// The stage `leaving` gives up the active spot to `target`, whose card showed in the slot
+    /// of `clicked` ([`Model::slot_showing`]; `target` itself unless "One at a Time" grouped
+    /// it): `leaving` takes that slot. A grouped card's slot stage moves to `target`'s own
+    /// slot (or enters the strip when `target` had none), so the app's card stays in view. With
+    /// no card for `target`, `leaving` enters the strip.
+    pub(crate) fn strip_swap(&mut self, space: SpaceId, leaving: StageId, target: StageId, clicked: Option<StageId>) {
         let slots = self.slots.entry(space).or_default();
-        if let Some(i) = slots.iter().position(|&s| s == target) {
-            slots[i] = leaving;
-        } else {
-            self.strip_enter(space, leaving);
+        let shown_at = clicked.and_then(|c| slots.iter().position(|&s| s == c));
+        let own = slots.iter().position(|&s| s == target);
+        match (shown_at, own) {
+            (Some(i), _) if slots[i] == target => slots[i] = leaving,
+            (Some(i), own) => {
+                let displaced = slots[i];
+                slots[i] = leaving;
+                match own {
+                    Some(j) => slots[j] = displaced,
+                    None => self.strip_enter(space, displaced),
+                }
+            }
+            (None, Some(j)) => slots[j] = leaving,
+            (None, None) => self.strip_enter(space, leaving),
         }
     }
 

@@ -5,6 +5,16 @@
 //! visible; that sliver is expected. A window that never comes back from the park zone is the
 //! worst bug this app can have, so [`is_parked`] is deliberately inclusive and
 //! [`clamp_to_visible`] never returns a frame inside the park zone.
+//!
+//! **Where macOS leaves a parked window.** Measured (every parked window the test runs logged
+//! on a 2560x1440 display whose visible frame reaches its bottom edge): the window keeps its
+//! asked-for `x` (one point inside the right edge) but its `y` is clamped so that
+//! [`MACOS_KEEPS_TITLE`] points of title bar stay above the bottom of the **visible** frame.
+//! With a Dock at the bottom the window therefore sits above the Dock, up to ~110 pt above
+//! the display's bottom edge, outside the full frame's park zone. So every "is it parked"
+//! test goes through [`is_parked_in`], which accepts the park zone of the full frame *and*
+//! of the visible frame: that covers a Dock at the bottom, on the left, on the right (whether
+//! macOS clamps `x` against the full or the visible frame) and auto-hidden, on any display.
 
 use super::geometry::{Rect, Size};
 
@@ -15,6 +25,11 @@ pub const PARK_MARGIN: f64 = 64.0;
 /// Height of a standard title bar; [`clamp_to_visible`] keeps this strip inside the visible
 /// frame so the window can always be grabbed.
 pub const TITLE_BAR_HEIGHT: f64 = 28.0;
+
+/// Points of title bar macOS keeps above the bottom of the visible frame when a window is
+/// moved below it (measured: a window asked to sit at `max_y - 1` of a 1440 pt display with
+/// no Dock at the bottom is listed at `y = 1408`).
+pub const MACOS_KEEPS_TITLE: f64 = 32.0;
 
 /// Size used when a restore frame is degenerate and must be invented.
 pub const FALLBACK_SIZE: Size = Size::new(800.0, 600.0);
@@ -50,6 +65,13 @@ pub fn is_parked(frame: Rect, display: Rect) -> bool {
         None => frame.w > 0.0 && frame.h > 0.0,
         Some(seen) => seen.w <= PARK_MARGIN && seen.h <= PARK_MARGIN,
     }
+}
+
+/// True when `frame` sits in the park zone of a display whose full frame is `display` and
+/// whose visible frame (no menu bar, no Dock) is `visible`: the one park test every caller
+/// uses (module docs, "Where macOS leaves a parked window").
+pub fn is_parked_in(frame: Rect, display: Rect, visible: Rect) -> bool {
+    is_parked(frame, display) || (!visible.is_degenerate() && is_parked(frame, visible))
 }
 
 /// A restore frame that is fully reachable inside `visible` (the display minus menu bar and
@@ -91,6 +113,91 @@ mod tests {
 
     const DISPLAY: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
     const VISIBLE: Rect = Rect::new(0.0, 25.0, 1440.0, 800.0);
+
+    /// Where macOS leaves a window asked to sit at `asked`: `y` clamped so
+    /// [`MACOS_KEEPS_TITLE`] points stay above the visible frame's bottom; `x` clamped the
+    /// same way against the visible frame's right edge when `x_by_visible` (unmeasured: a
+    /// Dock on the right may or may not do this), else kept.
+    fn macos_places(asked: Rect, visible: Rect, x_by_visible: bool) -> Rect {
+        let y = asked.y.min(visible.max_y() - MACOS_KEEPS_TITLE);
+        let x = if x_by_visible { asked.x.min(visible.max_x() - 1.0) } else { asked.x };
+        Rect::new(x, y, asked.w, asked.h)
+    }
+
+    /// Visible frames for a display: menu bar on top, and a Dock at the bottom, on the left,
+    /// on the right, auto-hidden (a 4 pt strip) or on another display.
+    fn dock_layouts(d: Rect, menu: f64) -> Vec<(&'static str, Rect)> {
+        let top = d.y + menu;
+        let h = d.h - menu;
+        vec![
+            ("no Dock", Rect::new(d.x, top, d.w, h)),
+            ("Dock at the bottom, 76 pt", Rect::new(d.x, top, d.w, h - 76.0)),
+            ("Dock at the bottom, largest", Rect::new(d.x, top, d.w, h - 140.0)),
+            ("Dock on the left", Rect::new(d.x + 80.0, top, d.w - 80.0, h)),
+            ("Dock on the right", Rect::new(d.x, top, d.w - 80.0, h)),
+            ("Dock auto-hidden at the bottom", Rect::new(d.x, top, d.w, h - 4.0)),
+            ("Dock auto-hidden on the right", Rect::new(d.x, top, d.w - 4.0, h)),
+        ]
+    }
+
+    #[test]
+    fn a_parked_window_is_parked_for_every_dock_position_on_every_display() {
+        let displays = [
+            ("built-in", Rect::new(0.0, 0.0, 1512.0, 982.0), 37.0),
+            ("5K", Rect::new(0.0, 0.0, 2560.0, 1440.0), 30.0),
+            ("second, right of main", Rect::new(2560.0, 200.0, 1920.0, 1080.0), 25.0),
+            ("second, left of main, higher", Rect::new(-1440.0, -300.0, 1440.0, 900.0), 25.0),
+            ("second, below main", Rect::new(300.0, 1440.0, 1512.0, 982.0), 0.0),
+        ];
+        for (name, d, menu) in displays {
+            for (dock, visible) in dock_layouts(d, menu) {
+                for size in [Size::new(600.0, 392.0), Size::new(300.0, 120.0), Size::new(2400.0, 1300.0)] {
+                    for x_by_visible in [false, true] {
+                        let at = macos_places(park_frame(size, d), visible, x_by_visible);
+                        assert!(
+                            is_parked_in(at, d, visible),
+                            "{name}, {dock}, {size:?}, x by visible {x_by_visible}: {at:?} not parked"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_full_frame_alone_misses_a_window_parked_above_a_bottom_dock() {
+        // The review's case: 76 pt Dock at the bottom of the 5K.
+        let d = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let visible = Rect::new(0.0, 30.0, 2560.0, 1334.0);
+        let at = Rect::new(2559.0, visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
+        assert!(!is_parked(at, d), "the old test missed it");
+        assert!(is_parked_in(at, d, visible));
+    }
+
+    #[test]
+    fn ordinary_windows_are_not_parked_whatever_the_dock() {
+        let d = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        for (dock, visible) in dock_layouts(d, 30.0) {
+            for f in [
+                Rect::new(100.0, 100.0, 800.0, 600.0),
+                Rect::new(1600.0, 700.0, 800.0, 600.0),
+                // Dragged low, most of it above the Dock.
+                Rect::new(1200.0, visible.max_y() - 300.0, 800.0, 600.0),
+                // A small window tucked in the corner above the Dock, mostly visible.
+                Rect::new(visible.max_x() - 300.0, visible.max_y() - 200.0, 280.0, 180.0),
+                Rect::new(-2000.0, -2000.0, 100.0, 100.0),
+            ] {
+                assert!(!is_parked_in(f, d, visible), "{dock}: {f:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_degenerate_visible_frame_falls_back_to_the_full_frame() {
+        let at = park_frame(Size::new(400.0, 300.0), DISPLAY);
+        assert!(is_parked_in(at, DISPLAY, Rect::default()));
+        assert!(!is_parked_in(Rect::new(10.0, 10.0, 400.0, 300.0), DISPLAY, Rect::default()));
+    }
 
     #[test]
     fn park_frame_sits_in_the_corner_and_keeps_size() {

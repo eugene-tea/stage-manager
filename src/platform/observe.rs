@@ -25,7 +25,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::apps::{AppEvent, AppInfo};
-use super::ax::{AxElement, AxError, AxObserver, names, notifications as n};
+use super::ax::{AxElement, AxError, AxObserver, AxResult, names, notifications as n};
 use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
 use crate::engine::geometry::Rect;
@@ -497,9 +497,12 @@ impl Observer {
         out
     }
 
-    /// True when the window is minimized now (asked through AX; false when AX cannot tell).
+    /// True when the window is minimized now (asked through AX), **or AX cannot tell** (a
+    /// hung app at the timeout, an element going away): both callers ask "is it off screen
+    /// for a reason?", and an unknown answer must never count a window as gone from its
+    /// Space (the review's L4). A window without the attribute is not minimized.
     pub fn is_minimized_now(&self, id: u32) -> bool {
-        self.windows.get(&id).is_some_and(|w| w.element.is_minimized().unwrap_or(false))
+        self.windows.get(&id).is_some_and(|w| unknown_is_true(w.element.is_minimized()))
     }
 
     /// True when the window is in full screen now (on its own Space; asked through AX, which
@@ -509,9 +512,10 @@ impl Observer {
         self.windows.get(&id).is_some_and(|w| w.element.is_fullscreen().unwrap_or(false))
     }
 
-    /// True when app `pid` is hidden now (⌘H; asked through AX).
+    /// True when app `pid` is hidden now (⌘H; asked through AX), or AX cannot tell (as
+    /// [`Self::is_minimized_now`]).
     pub fn app_hidden_now(&self, pid: i32) -> bool {
-        self.observed.get(&pid).is_some_and(|a| a.element.is_hidden().unwrap_or(false))
+        self.observed.get(&pid).is_some_and(|a| unknown_is_true(a.element.is_hidden()))
     }
 
     /// Handles one AX notification for app `pid`.
@@ -703,6 +707,19 @@ fn cg_lookup() -> HashMap<u32, CgWindow> {
     windows::list_windows().into_iter().map(|w| (w.id, w)).collect()
 }
 
+/// An AX yes/no answer where "cannot tell" (timeout, invalid element) reads as yes; a missing
+/// attribute reads as no.
+fn unknown_is_true(answer: AxResult<bool>) -> bool {
+    match answer {
+        Ok(v) => v,
+        Err(e) if e == AxError::NO_VALUE || e == AxError::ATTRIBUTE_UNSUPPORTED => false,
+        Err(e) => {
+            tracing::debug!("AX cannot tell ({e}); counted as off screen for a reason");
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +730,16 @@ mod tests {
         assert_eq!(windows_or_retry::<u32>(Err(AxError::NO_VALUE)), (vec![], false), "no windows: nothing to retry");
         assert_eq!(windows_or_retry::<u32>(Err(AxError::CANNOT_COMPLETE)), (vec![], true), "busy at the timeout");
         assert_eq!(windows_or_retry::<u32>(Err(AxError::Value)), (vec![], true));
+    }
+
+    #[test]
+    fn an_ax_answer_that_cannot_tell_counts_as_a_reason() {
+        assert!(unknown_is_true(Ok(true)));
+        assert!(!unknown_is_true(Ok(false)));
+        assert!(!unknown_is_true(Err(AxError::NO_VALUE)));
+        assert!(!unknown_is_true(Err(AxError::ATTRIBUTE_UNSUPPORTED)));
+        assert!(unknown_is_true(Err(AxError::CANNOT_COMPLETE)));
+        assert!(unknown_is_true(Err(AxError::Api(-25202))));
     }
 
     #[test]

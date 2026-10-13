@@ -34,7 +34,7 @@ use super::ax::{AxElement, names};
 use super::{desktop, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::persist::StateFile;
-use crate::engine::recovery::{self, LiveWindow, Registered, ScanDisplays};
+use crate::engine::recovery::{self, LiveWindow, ParkedFile, Registered, ScanDisplays};
 use crate::logbook::counters::{self, Count};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
@@ -52,6 +52,9 @@ pub struct ParkedEntry {
     /// A child window (dialog, sheet, panel): some refuse a resize or a move; the recovery
     /// scan covers them.
     pub child: bool,
+    /// A shown window we fitted clear of the strip (not parked): `restore` is its exact
+    /// pre-fit frame.
+    pub fitted: bool,
 }
 
 /// Set once Quit is requested: the WM thread stops long batches and answers Quit first.
@@ -104,18 +107,25 @@ pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
 /// The registry as the guardian needs it: ids, pids and restore frames.
 fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
     map.iter()
-        .map(|(&id, e)| Registered { id, pid: e.element.pid().unwrap_or(-1), restore: e.restore, child: e.child })
+        .map(|(&id, e)| Registered {
+            id,
+            pid: e.element.pid().unwrap_or(-1),
+            restore: e.restore,
+            child: e.child,
+            fitted: e.fitted,
+        })
         .collect()
 }
 
 /// What the parked file holds now (only rewritten when it changes).
-static PARKED_WRITTEN: Mutex<Option<Vec<Registered>>> = Mutex::new(None);
+static PARKED_WRITTEN: Mutex<Option<ParkedFile>> = Mutex::new(None);
 
-/// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, written
-/// atomically; removed when the registry is empty.
+/// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
+/// main display's visible frame, written atomically; removed when the registry is empty.
 fn write_parked_file(listed: &[Registered]) {
+    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec() };
     let Ok(mut written) = PARKED_WRITTEN.lock() else { return };
-    if written.as_deref() == Some(listed) {
+    if written.as_ref() == Some(&file) {
         return;
     }
     let path = paths::parked_file(std::process::id());
@@ -126,32 +136,37 @@ fn write_parked_file(listed: &[Registered]) {
         }
     } else {
         let tmp = path.with_extension("json.tmp");
-        serde_json::to_vec(listed)
+        serde_json::to_vec(&file)
             .map_err(std::io::Error::other)
             .and_then(|bytes| std::fs::write(&tmp, bytes))
             .and_then(|()| std::fs::rename(&tmp, &path))
     };
     match result {
-        Ok(()) => *written = Some(listed.to_vec()),
+        Ok(()) => *written = Some(file),
         Err(e) => tracing::warn!("cannot write {}: {e}", path.display()),
     }
 }
 
-/// The windows the app process `pid` had registered (its parked file); empty when it has
-/// none or the file cannot be read.
-pub fn read_parked_file(pid: u32) -> Vec<Registered> {
+/// What the app process `pid` left in its parked file: its registered windows and the main
+/// display's visible frame; empty when it has none or the file cannot be read.
+pub fn read_parked_file(pid: u32) -> ParkedFile {
     let path = paths::parked_file(pid);
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        Ok(bytes) => ParkedFile::from_json(&bytes).unwrap_or_else(|e| {
             tracing::warn!("cannot read {}: {e}", path.display());
-            Vec::new()
+            ParkedFile::default()
         }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ParkedFile::default(),
         Err(e) => {
             tracing::warn!("cannot read {}: {e}", path.display());
-            Vec::new()
+            ParkedFile::default()
         }
     }
+}
+
+/// The registry's entry for a window, if it has one.
+pub fn registry_entry(id: u32) -> Option<ParkedEntry> {
+    lock_registry().get(&id).cloned()
 }
 
 /// How many windows the registry holds.
@@ -159,11 +174,29 @@ pub fn registry_len() -> usize {
     lock_registry().len()
 }
 
-/// Remembers the main display's visible frame for clamping in scans.
+/// Remembers the main display's visible frame for the park test and clamping in scans, and
+/// writes it to the parked file for the guardian (when windows are registered).
 pub fn set_visible_frame(visible: Rect) {
+    let changed = match VISIBLE.lock() {
+        Ok(mut v) => v.replace(visible) != Some(visible),
+        Err(_) => false,
+    };
+    if changed {
+        let listed = registered(&lock_registry());
+        write_parked_file(&listed);
+    }
+}
+
+/// Takes the main display's visible frame without writing a parked file (the guardian, from
+/// the app's parked file).
+pub fn assume_visible_frame(visible: Rect) {
     if let Ok(mut v) = VISIBLE.lock() {
         *v = Some(visible);
     }
+}
+
+fn visible_frame() -> Option<Rect> {
+    VISIBLE.lock().ok().and_then(|v| *v)
 }
 
 /// The outcome of an unpark or a scan.
@@ -414,10 +447,7 @@ pub(crate) fn bundle_id_of(pid: i32) -> Option<String> {
 pub(crate) fn scan_displays() -> ScanDisplays {
     let mut bounds = desktop::cg_display_bounds();
     let main = bounds.remove(0);
-    let visible = VISIBLE
-        .lock()
-        .ok()
-        .and_then(|v| *v)
+    let visible = visible_frame()
         .filter(|v| main.contains_rect(v))
         .unwrap_or_else(|| Rect::new(main.x, main.y + MENU_BAR_GUESS, main.w, main.h - MENU_BAR_GUESS));
     ScanDisplays { main, visible, others: bounds }

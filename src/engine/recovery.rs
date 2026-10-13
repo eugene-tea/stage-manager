@@ -6,7 +6,8 @@
 //! Accessibility; this module decides, without touching anything:
 //!
 //! - a window is **stranded** when it sits in the main display's park zone
-//!   ([`is_parked`]) and does not show on another display either (so a window on a second
+//!   ([`is_parked_in`]: the full frame's or the visible frame's, since macOS keeps a parked
+//!   window above a bottom Dock) and does not show on another display either (so a window on a second
 //!   display to the bottom-right of the main one is left alone);
 //! - a stranded window goes back to its frame from `state.json` (any Space; exact bundle ID + title
 //!   first, then bundle ID only, each saved window used once), else it is centered; the
@@ -23,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{PARK_MARGIN, clamp_to_visible, is_parked};
+use super::park::{PARK_MARGIN, clamp_to_visible, is_parked_in};
 use super::persist::{SavedRole, StateFile};
 use super::stage_area::same_frame;
 
@@ -49,10 +50,18 @@ pub struct ScanDisplays {
     pub others: Vec<Rect>,
 }
 
+impl ScanDisplays {
+    /// True when `frame` is in the main display's park zone ([`is_parked_in`]), whatever
+    /// shows on other displays.
+    pub fn parks(&self, frame: Rect) -> bool {
+        is_parked_in(frame, self.main, self.visible)
+    }
+}
+
 /// True when `frame` is in the main display's park zone and not meaningfully on any other
 /// display (it shows at most [`PARK_MARGIN`] points on both axes there).
 pub fn is_stranded(frame: Rect, displays: &ScanDisplays) -> bool {
-    if !is_parked(frame, displays.main) {
+    if !displays.parks(frame) {
         return false;
     }
     !displays.others.iter().any(|d| {
@@ -121,7 +130,7 @@ pub fn plan(
         });
         if let Some((k, (_, _, _, Some(o)))) = found {
             used[k] = true;
-            let back = if is_parked(*o, displays.main) { clamp_to_visible(*o, displays.visible) } else { *o };
+            let back = if displays.parks(*o) { clamp_to_visible(*o, displays.visible) } else { *o };
             out.push((i, back));
         }
     }
@@ -140,6 +149,38 @@ pub struct Registered {
     pub restore: Rect,
     /// A child window (dialog, sheet, panel).
     pub child: bool,
+    /// A shown window we fitted clear of the strip: `restore` is its exact pre-fit frame, and
+    /// it is back only once there (or once the guardian has moved it there).
+    #[serde(default)]
+    pub fitted: bool,
+}
+
+/// The parked file the app keeps for its guardian: the registered windows and the main
+/// display's visible frame (the guardian runs without AppKit's screens; with a Dock at the
+/// bottom the park zone is measured against the visible frame, so a guess would miss parked
+/// windows).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParkedFile {
+    /// The main display's visible frame when written.
+    pub visible: Option<Rect>,
+    /// The registered windows.
+    pub windows: Vec<Registered>,
+}
+
+impl ParkedFile {
+    /// Reads the file's JSON; also the older form, a bare list of windows.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Any {
+            File(ParkedFile),
+            List(Vec<Registered>),
+        }
+        Ok(match serde_json::from_slice(bytes)? {
+            Any::File(f) => f,
+            Any::List(windows) => Self { visible: None, windows },
+        })
+    }
 }
 
 /// A window the window server lists (on any Space), as the guardian sees it.
@@ -160,7 +201,7 @@ pub struct Listed {
 /// A restore frame clamped onto the visible display and never in a park zone.
 pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
     let mut f = clamp_to_visible(frame, displays.visible);
-    if is_parked(f, displays.main) {
+    if displays.parks(f) {
         f = clamp_to_visible(Rect::new(f64::NAN, 0.0, 0.0, 0.0), displays.visible);
     }
     f
@@ -170,7 +211,7 @@ pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
 mod tests {
     use super::*;
     use crate::engine::geometry::Size;
-    use crate::engine::park::park_frame;
+    use crate::engine::park::{MACOS_KEEPS_TITLE, is_parked, park_frame};
     use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
@@ -288,6 +329,37 @@ mod tests {
         assert!(is_parked(on_second, MAIN));
         assert!(!is_stranded(on_second, &d));
         assert!(is_stranded(parked(400.0, 300.0), &displays()));
+    }
+
+    /// The review's S1: a 76 pt Dock at the bottom; macOS keeps the parked window's title bar
+    /// above it. The scan, the guardian and the clean-quit check must all see it parked.
+    #[test]
+    fn a_window_parked_above_a_bottom_dock_is_stranded() {
+        let d = ScanDisplays { main: MAIN, visible: Rect::new(0.0, 25.0, 1440.0, 799.0), others: vec![] };
+        let at = Rect::new(1439.0, d.visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
+        assert!(!is_parked(at, MAIN), "the full frame alone misses it");
+        assert!(is_stranded(at, &d));
+        let p = plan(&[live("com.example.a", "Draft", at)], None, &d);
+        assert_eq!(p.len(), 1);
+        assert!(!d.parks(p[0].1) && d.visible.contains_rect(&p[0].1), "{:?}", p[0].1);
+        // Same Dock on the right: macOS may or may not clamp x against it.
+        let right = ScanDisplays { main: MAIN, visible: Rect::new(0.0, 25.0, 1360.0, 875.0), others: vec![] };
+        for x in [1439.0, 1359.0] {
+            assert!(is_stranded(Rect::new(x, 900.0 - MACOS_KEEPS_TITLE, 600.0, 392.0), &right));
+        }
+    }
+
+    #[test]
+    fn the_parked_file_round_trips_and_reads_the_older_list() {
+        let f = ParkedFile {
+            visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
+            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true }],
+        };
+        let json = serde_json::to_vec(&f).unwrap_or_default();
+        assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
+        let old = serde_json::to_vec(&f.windows).unwrap_or_default();
+        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, ..f }));
+        assert!(ParkedFile::from_json(b"{").is_err());
     }
 
     #[test]

@@ -143,6 +143,9 @@ def parked_anywhere():
     """Fixture windows in the park zone on any Space (the window server lists other Spaces'
     windows too, off screen, with their frames)."""
     wins, d = ts.fixture_windows()
+    if not wins:
+        # A fixture that crashed or a failed probe must not read as "nothing parked".
+        raise AssertionError("the window server lists no fixture window")
     return [w for w in wins if ts.is_parked(w["bounds"], d)]
 
 

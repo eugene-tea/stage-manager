@@ -141,7 +141,14 @@ def wait_until(fn, timeout, what):
 
 
 def is_parked(b, d):
-    """engine::park::is_parked on the main display."""
+    """engine::park::is_parked_in on the main display: its full frame's park zone or, when
+    `d` carries it, its visible frame's (macOS keeps a parked window above a bottom Dock)."""
+    v = d.get("visible")
+    return is_parked_on(b, d) or (bool(v) and v["w"] > 0 and v["h"] > 0 and is_parked_on(b, v))
+
+
+def is_parked_on(b, d):
+    """engine::park::is_parked against one frame."""
     x, y, w, h = b["x"], b["y"], b["w"], b["h"]
     dx, dy, dw, dh = d["x"], d["y"], d["w"], d["h"]
     if x >= dx + dw - PARK_MARGIN and y >= dy + dh - PARK_MARGIN:
@@ -301,6 +308,9 @@ def stage_titles(s):
 
 def all_onscreen(what):
     wins, d = fixture_windows()
+    if not wins:
+        # A fixture that crashed, or a probe that failed, must not pass as "nothing parked".
+        return check(False, f"{what}: every fixture window onscreen (the window server lists no fixture window)")
     stuck = [fmt(w["bounds"]) for w in wins if is_parked(w["bounds"], d)]
     return check(not stuck, f"{what}: every fixture window onscreen" + (f" (parked: {stuck})" if stuck else ""))
 
@@ -315,6 +325,8 @@ def consistent(what):
     for w in s["windows"]:
         c = cg.get(w["id"])
         if not c:
+            if w.get("bundle_id") in ALL_IDS:
+                bad.append(f"{w['title']} managed but not listed by the window server")
             continue
         parked_now = is_parked(c["bounds"], d)
         if w["parked"] and not parked_now:
@@ -423,7 +435,11 @@ def phase_m3():
     consistent("after reveal")
     do("reveal")
     s = state()
-    check(s["active"] == active or len([x for x in s["windows"] if not x["parked"]]) > 0, "a second reveal brings it back")
+    back = [x for x in s["windows"] if x["role"] == "standard" and x["home"] == active]
+    check(
+        s["active"] == active and bool(back) and not any(x["parked"] for x in back),
+        "a second reveal brings it back (the stage active again, its windows shown)",
+    )
     consistent("after the second reveal")
 
     p = by_title(state())["Fixture Panel"]

@@ -6,7 +6,7 @@ use super::{
     StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::park::{clamp_to_visible, is_parked};
+use crate::engine::park::clamp_to_visible;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
@@ -220,6 +220,8 @@ impl Model {
         if current == target {
             return actions;
         }
+        // Where the user saw the target's card, before anything changes (V2).
+        let clicked = self.slot_showing(space, target);
         self.revealed.remove(&space);
         self.capture(current, obs);
         self.park_stage(current, &mut actions);
@@ -233,7 +235,7 @@ impl Model {
             s.last_active = t;
         }
         if self.strip_eligible(current) {
-            self.strip_swap(space, current, target);
+            self.strip_swap(space, current, target, clicked);
         } else if let Some(slots) = self.slots.get_mut(&space) {
             slots.retain(|&s| s != target);
         }
@@ -268,6 +270,11 @@ impl Model {
         };
         let src = self.windows[&id].home;
         let space = self.windows[&id].space;
+        if !self.is_shown_space(space) {
+            // Its Desktop is not shown: moving, raising or focusing it there could make macOS
+            // switch Desktops (L2; only `ctl send` by window id can ask this).
+            return actions;
+        }
         let count = self.stages_in(space).count();
         let dest = match target {
             Target::Number(n) if n >= 1 && n <= count => match self.stage_by_number(space, n) {
@@ -435,6 +442,10 @@ impl Model {
         }
         let display = self.known_display(self.windows[&id].meta.display);
         let space = self.windows[&id].space;
+        if !self.is_shown_space(space) {
+            // As in `send_window`: never act on another Desktop's window (L2).
+            return actions;
+        }
         let mut group = vec![id];
         group.extend(self.children_of(id));
         match self.windows[&id].home {
@@ -972,16 +983,40 @@ impl Model {
         actions
     }
 
-    /// Replaces the display list (first = main). Spaces of a display that is gone are
-    /// folded into the main display's current Space: their stages move there, the ones that
-    /// were active become inactive and are parked, and windows already parked are parked
-    /// again on the main display. New displays get a Space with an empty active stage. An
-    /// empty list is ignored.
+    /// Replaces the display list (first = main). An empty list is ignored.
+    ///
+    /// - **The main display under a new id** (docking or undocking moves the menu bar to
+    ///   another display, and the old main display is not in the list any more): the same
+    ///   desk, relabeled in place. Its Spaces, stages, active stages and strip slots stay;
+    ///   the active stage stays active and shown (the review's V1-B).
+    /// - **A display's frame or visible frame changed** (resolution, scaling, a Dock moved,
+    ///   a new id): every parked window of a Space shown on it is parked again at its new
+    ///   corner (V1-A: parked windows would otherwise sit mid-screen on a bigger display).
+    ///   Parked windows of Spaces not shown are parked again when their Space shows
+    ///   ([`Model::arrive`]).
+    /// - Spaces of a secondary display that is gone are folded into the main display's
+    ///   current Space: their stages move there, the ones that were active become inactive
+    ///   and are parked, and windows already parked are parked again on the main display.
+    ///   New displays get a Space with an empty active stage.
     pub fn set_displays(&mut self, displays: Vec<Display>) -> Vec<Action> {
         let mut actions = Vec::new();
         if displays.is_empty() {
             return actions;
         }
+        let mut before = std::mem::take(&mut self.displays);
+        let (old_main, new_main) = (before[0].id, displays[0].id);
+        if old_main != new_main
+            && !displays.iter().any(|d| d.id == old_main)
+            && !before.iter().any(|d| d.id == new_main)
+        {
+            self.relabel_display(old_main, new_main);
+            before[0].id = new_main;
+        }
+        let moved_frames: Vec<DisplayId> = displays
+            .iter()
+            .filter(|d| before.iter().any(|o| o.id == d.id && (o.frame != d.frame || o.visible != d.visible)))
+            .map(|d| d.id)
+            .collect();
         self.displays = displays;
         let main = self.displays[0].id;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
@@ -1034,15 +1069,67 @@ impl Model {
             let space = self.current_space(d);
             self.ensure_active(space);
         }
-        for s in moved {
-            if !self.is_active(s) {
-                self.park_stage(s, &mut actions);
-                self.drop_if_dead(s, &mut actions);
+        for s in &moved {
+            if !self.is_active(*s) {
+                self.park_stage(*s, &mut actions);
+                self.drop_if_dead(*s, &mut actions);
             }
+        }
+        let parked_again: Vec<WindowId> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Park { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        // A restore frame that falls in a changed display's park zone now (the display shrank)
+        // is replaced by a safe one, so no window is ever brought back into hiding.
+        let stale: Vec<(WindowId, Rect)> = self
+            .windows
+            .values()
+            .filter(|w| moved_frames.contains(&w.meta.display) && self.display(w.meta.display).parks(w.restore))
+            .map(|w| (w.meta.id, self.safe_restore(w.restore, w.meta.display)))
+            .collect();
+        for (id, restore) in stale {
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.restore = restore;
+            }
+        }
+        let repark: Vec<WindowId> = self
+            .windows
+            .values()
+            .filter(|w| w.parked && moved_frames.contains(&w.meta.display) && self.is_shown_space(w.space))
+            .map(|w| w.meta.id)
+            .filter(|id| !parked_again.contains(id))
+            .collect();
+        for id in repark {
+            self.park_window(id, &mut actions);
         }
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Renames display `old` to `new` everywhere (the main display under a new id).
+    fn relabel_display(&mut self, old: DisplayId, new: DisplayId) {
+        for s in &mut self.spaces {
+            if s.display == old {
+                s.display = new;
+            }
+        }
+        for s in &mut self.stages {
+            if s.display == old {
+                s.display = new;
+            }
+        }
+        for w in self.windows.values_mut() {
+            if w.meta.display == old {
+                w.meta.display = new;
+            }
+        }
+        if let Some(space) = self.current.remove(&old) {
+            self.current.insert(new, space);
+        }
     }
 
     /// Replaces the declared stage names (config reload). New names get a stage; stages whose
@@ -1066,6 +1153,6 @@ impl Model {
     /// True when `frame` would count as parked on the window's display. Exposed for the
     /// platform's recovery scan of windows it observes.
     pub fn frame_is_parked(&self, display: DisplayId, frame: Rect) -> bool {
-        is_parked(frame, self.display(display).frame)
+        self.display(display).parks(frame)
     }
 }

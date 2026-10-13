@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::geometry::Rect;
+use super::park::MACOS_KEEPS_TITLE;
 use super::model::{
     Action, Display, DisplayId, Model, ModelOptions, Observation, Pid, WindowId, WindowMeta,
     WindowRole,
@@ -10,7 +11,25 @@ use super::model::{
 
 pub const MAIN: DisplayId = DisplayId(1);
 pub const FRAME: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
-pub const VISIBLE: Rect = Rect::new(0.0, 25.0, 1440.0, 875.0);
+/// A menu bar on top and a 75 pt Dock at the bottom (the review's S1 case: macOS keeps a
+/// parked window's title bar above it, outside the full frame's park zone).
+pub const VISIBLE: Rect = Rect::new(0.0, 25.0, 1440.0, 800.0);
+
+/// True when `f` is in the test display's park zone (the one park test, [`Display::parks`]).
+pub fn parked_at(f: Rect) -> bool {
+    display().parks(f)
+}
+
+/// Where macOS leaves a window asked to sit at `asked` on the test display: its title bar
+/// kept [`MACOS_KEEPS_TITLE`] points above the visible frame's bottom (above the Dock).
+pub fn macos_places(asked: Rect) -> Rect {
+    macos_places_in(asked, VISIBLE)
+}
+
+/// [`macos_places`] on a display whose visible frame is `visible`.
+pub fn macos_places_in(asked: Rect, visible: Rect) -> Rect {
+    Rect::new(asked.x, asked.y.min(visible.max_y() - MACOS_KEEPS_TITLE), asked.w, asked.h)
+}
 
 pub fn display() -> Display {
     Display {
@@ -64,6 +83,8 @@ pub struct Desk {
     /// Front to back.
     pub z: Vec<WindowId>,
     pub focused: Option<WindowId>,
+    /// The visible frame macOS clamps against (`None`: the test display's [`VISIBLE`]).
+    pub visible: Option<Rect>,
 }
 
 impl Desk {
@@ -94,7 +115,7 @@ impl Desk {
             match *a {
                 Action::SetFrame { id, frame } | Action::Park { id, frame } => {
                     if let Some(f) = self.frames.get_mut(&id) {
-                        *f = frame;
+                        *f = macos_places_in(frame, self.visible.unwrap_or(VISIBLE));
                     }
                 }
                 Action::Raise { id } => self.raise(id),
@@ -120,6 +141,6 @@ impl Desk {
     pub fn parked(&self, id: WindowId) -> bool {
         self.frames
             .get(&id)
-            .is_some_and(|f| super::park::is_parked(*f, FRAME))
+            .is_some_and(|f| parked_at(*f))
     }
 }

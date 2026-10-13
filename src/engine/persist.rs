@@ -20,7 +20,6 @@ use super::model::{
     Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowMeta, WindowRole,
     WindowState,
 };
-use super::park::is_parked;
 use super::rules::Decision;
 use super::settings::AppWindows;
 use super::stage_area::same_frame;
@@ -215,6 +214,27 @@ pub fn exact_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
                 && !used.contains(&l.id)
                 && l.bundle_id == sw.bundle_id
                 && l.title == sw.title
+        }) {
+            used.insert(l.id);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// How many live standard windows match a saved standard window of `space` by bundle ID
+/// alone (each saved window used once): weak evidence, for the launch fallback.
+pub fn bundle_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
+    let mut used: HashSet<WindowId> = HashSet::new();
+    let mut n = 0;
+    for sw in space
+        .stages
+        .iter()
+        .flat_map(|s| s.windows.iter())
+        .filter(|w| w.role == SavedRole::Standard)
+    {
+        if let Some(l) = live.iter().find(|l| {
+            l.role == WindowRole::Standard && !used.contains(&l.id) && !l.bundle_id.is_empty() && l.bundle_id == sw.bundle_id
         }) {
             used.insert(l.id);
             n += 1;
@@ -696,7 +716,7 @@ impl Model {
             let stuck = self
                 .windows
                 .get(&id)
-                .is_some_and(|w| is_parked(w.meta.frame, self.display(w.meta.display).frame));
+                .is_some_and(|w| self.display(w.meta.display).parks(w.meta.frame));
             if stuck {
                 self.restore_window(id, actions);
             }
@@ -711,7 +731,7 @@ impl Model {
         restore_frames: bool,
     ) {
         let display = self.known_display(meta.display);
-        let live_parked = is_parked(meta.frame, self.display(display).frame);
+        let live_parked = self.display(display).parks(meta.frame);
         let base = if restore_frames || live_parked || meta.frame.is_degenerate() {
             saved.frame
         } else {

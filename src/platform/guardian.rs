@@ -118,8 +118,14 @@ pub fn run(args: &[String]) -> ExitCode {
         tracing::debug!(parent, "guardian: clean exit; nothing to do");
         return ExitCode::SUCCESS;
     }
-    let registered = safety::read_parked_file(parent as u32);
-    tracing::warn!(parent, registered = registered.len(), "guardian: {UNCLEAN_EXIT}; running the recovery scan");
+    let file = safety::read_parked_file(parent as u32);
+    // The park zone sits above a bottom Dock: the app's visible frame, not a guess.
+    match file.visible {
+        Some(v) => safety::assume_visible_frame(v),
+        None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide parked windows from the scan)"),
+    }
+    let registered = file.windows;
+    tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
     let r = safety::recovery_scan("guardian");
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
     install_stop_handlers();
@@ -228,8 +234,10 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
             Ok(f) if !is_stranded(f, displays) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
                     log_event(&e);
+                    continue;
                 }
-                continue;
+                // A fitted window still at its fitted frame: moved to its pre-fit frame below.
+                tracing::debug!(id = x.id, at = %f, "guardian: a fitted window; putting back its pre-fit frame");
             }
             Ok(_) => {}
             Err(e) => tracing::debug!(id = x.id, "guardian: cannot read its frame ({e})"),
@@ -297,6 +305,10 @@ fn log_event(e: &Event) {
             }
         },
         Event::LetGo { id, pid, why } => tracing::warn!(id, pid, "guardian: let go of a window: {why}"),
+        Event::Blind { listed } => tracing::warn!(
+            listed,
+            "guardian: the window server lists no window on screen (another user's session, the login window, or no answer); nothing counts until it does"
+        ),
     }
 }
 
