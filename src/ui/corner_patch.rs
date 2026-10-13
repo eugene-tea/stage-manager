@@ -1,5 +1,5 @@
-//! The wallpaper corner patch's panel and picture (`[windows] corner_patch`, a prototype,
-//! off by default; the geometry and the rules are [`crate::engine::corner_patch`]).
+//! The wallpaper corner patch's panel and picture (`[windows] corner_patch`, on by
+//! default; the geometry and the rules are [`crate::engine::corner_patch`]).
 //!
 //! - **Panel**: borderless, non-activating, click-through, no shadow, opaque, at the normal
 //!   window level, never key or main; collection behavior [`panels::corner_patch`]

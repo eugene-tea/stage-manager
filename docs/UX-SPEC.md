@@ -438,7 +438,7 @@ Ours:
    window surfaces.
 3. **Parked windows leave a sliver** in the display's bottom-right corner (macOS keeps part
    of every window onscreen; another corner when a second display sits beyond that one). Apple moves them off by private means.
-   The prototype `[windows] corner_patch` (off by default) covers them with a small panel
+   `[windows] corner_patch` (on by default: Apple's corner is clean) covers them with a small panel
    showing the desktop picture under them, drawn from the wallpaper's file (no screen
    capture): it stays off where that cannot be exact (videos, aerials, shuffles, Photos,
    a dynamic picture whose style is unknown; Center, Tile and Fit with no fill colour until

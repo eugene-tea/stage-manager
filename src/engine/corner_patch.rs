@@ -1,4 +1,4 @@
-//! The wallpaper corner patch (`[windows] corner_patch`, a prototype, off by default): a
+//! The wallpaper corner patch (`[windows] corner_patch`, on by default: Apple's corner is clean): a
 //! small opaque panel over the park corner that shows the desktop picture under the parked
 //! windows' slivers, drawn from the picture's file ([`super::wallpaper`]; no screen
 //! capture), so the corner looks empty as Apple's does. This module is its geometry and
