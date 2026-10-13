@@ -38,14 +38,14 @@ The first signing with a new key makes macOS ask whether codesign may use it: ch
 | `make bundle`  | assembles `target/Stage Manager.app` (`LSUIElement`, bundle ID `dev.eugene.stagemanager`, version from `Cargo.toml`) |
 | `make sign`    | signs the bundle by SHA-1 with "Stage Manager Local Signing" (hardened runtime, no timestamp); fails pointing at `scripts/make-cert.sh` when the identity is missing; never ad-hoc |
 | `make dev`     | `sign`, then copies the app to `~/Library/Application Support/Stage Manager Dev/` (`scripts/dev-app.sh`). macOS asks for screen access once per app location, so dev runs and tests always launch from there, whichever worktree built them |
-| `make run`     | `sign`, copies the app to the dev location, then launches it through LaunchServices (`open -n`) and tails `~/Library/Logs/Stage Manager/stage-manager.log`; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
+| `make run`     | `sign`, copies the app to the dev location, then launches it through LaunchServices (`open -n`) and tails today's log (`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`) from this run's first line; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
 | `make install` | copies the signed app to `~/Applications` |
 | `make fixture` | builds and signs `target/SM Fixture.app` (test windows, below) |
 | `make check`   | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
 
-`make run` passes `RUST_LOG` (default `info,stage_manager=debug`), `STAGE_MANAGER_NO_PROMPT`,
-`STAGE_MANAGER_ONLY`, `STAGE_MANAGER_HOME` and `STAGE_MANAGER_TEST` through to the app when
-they are set.
+`make run` passes `RUST_LOG` (overrides `[log] level`), `STAGE_MANAGER_NO_PROMPT`,
+`STAGE_MANAGER_ONLY`, `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST`
+through to the app when they are set.
 
 Why LaunchServices: a binary started straight from a terminal has its TCC grants checked
 against the terminal. Launched with `open`, macOS checks the bundle's own signature.
@@ -305,6 +305,10 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
+| `log.level` | `"debug"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "debug" (the trial default) records every decision, "info" only the main ones. |
+| `log.days` | `14` | whole number, 1 to 365 | Day files older than this many days are deleted. |
+| `log.max_mb_per_day` | `100` | whole number, 1 to 10000 | A day's file this big takes only warnings, errors, marks and counts from then on. |
+| `log.max_mb_total` | `500` | whole number, 1 to 100000 | The log folder's cap: the oldest days go first, never today's. |
 
 `cards.tilt` and `cards.perspective` default to `"auto"`: Apple's values for the display,
 measured on a 1800 pt wide laptop (44.2°, 1346 pt) and a 2560 pt wide 5K display (47.9°,
@@ -364,11 +368,58 @@ Every Space counts: the registry holds parked windows of every Space (their AX e
 were taken while their Space showed), and Quit is clean only when the window server lists
 no managed app's window in the park zone on any Space; otherwise the guardian takes over.
 
+## Daily log and problem marks
+
+The app, its guardian and one-shot commands write one file per local day,
+`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`, switching to the next file at local midnight
+while running. Every line has the local time to the millisecond, the UTC offset and the
+process:
+
+```text
+2026-10-12 15:04:05.123 +02:00 app[6612] INFO  platform::controller: card clicked stage=7 number=2 shift=false
+2026-10-12 15:04:05.130 +02:00 app[6612] INFO  platform::controller: stage switch from=1 to=2 stage=7
+2026-10-12 16:00:00.251 +02:00 app[6612] COUNT counts kind=hour since=09:12 switches=41 card_clicks=17 …
+```
+
+- **Level** (`[log] level`, default `"debug"` for the trial): every decision the app makes
+  (window events, new windows and their rule, stage switches and new stages, card clicks,
+  drags and drops, reorders, Space changes, full screen, captures starting to fail or working
+  again, recoveries), never per-move or per-frame lines (those are `trace`). Changes apply on
+  config reload; `RUST_LOG` overrides it.
+- **Limits:** a day's file is capped at `[log] max_mb_per_day` (100 MB): past it, only
+  warnings, errors, marks and counts are written, after one line saying so. Day files older
+  than `[log] days` (14) are deleted, and the oldest days go first while the folder is over
+  `[log] max_mb_total` (500 MB); today's file never. Checked at launch and every hour. The
+  earlier single `stage-manager.log` (and `.log.1`) is deleted by the same age rule.
+- **Counts:** the app counts switches, card clicks, drops, reorders, new windows, new
+  stages, Space changes, full-screen entries, captures ok and failed, recoveries, warnings,
+  errors and panics, and writes them as a `COUNT` line every hour, at midnight (into the day
+  that ends) and at quit.
+- **Mark a Problem** (status menu, shown while the level is `debug` or `trace`), or
+  `stage-manager mark ["note"]` from a terminal: writes a delimited block with the local
+  time and the note, then `ctl state` and `ctl dump` (Spaces, stages, windows, frames, strip
+  panels; or that the WM thread did not answer) and the last 30 s of lines at `trace` kept
+  in memory, whatever the file's level. With the app not running, `mark` writes the time and
+  note alone. The menu item then shows when the last mark went in.
+- **Reading a day:** `stage-manager log summary [YYYY-MM-DD|yesterday]` prints the day's
+  counts (the last `COUNT` line of each app run, added up), the runs and unclean exits,
+  every mark with its line number, and every warning and error deduplicated (numbers folded,
+  with how often and when), short enough to paste. `stage-manager log path [DATE]` prints
+  the file.
+
+**Privacy:** the log stays on this Mac. Window titles and app bundle IDs appear in it (they
+help debugging), so the files are readable by their owner only; nothing sends them anywhere,
+and no log is ever committed to this repository.
+
+A working day at the default level should come to roughly 1 to 3 MB (about 7 000 to 20 000
+lines; the measurement is in `PLAN.md`, "Before public release"), far under the day's cap.
+
 ## Environment
 
 | Variable | Effect |
 |----------|--------|
-| `RUST_LOG` | log filter (default `info,stage_manager=debug`) |
+| `RUST_LOG` | log filter (`target=level` directives); overrides `[log] level` |
+| `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone (default `~/Library/Logs/Stage Manager`, or `STAGE_MANAGER_HOME`) |
 | `STAGE_MANAGER_NO_PROMPT` | never show permission dialogs at launch |
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
 | `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
@@ -394,6 +445,7 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 | `reveal` | reveal the desktop / bring the stage back (a wallpaper click) |
 | `unpark-all` | bring every parked window back (the stages stay; a safety command) |
 | `reload` | re-read `config.toml` |
+| `mark [NOTE…]` | write a problem mark into the day's log (`stage-manager mark` is the client); answers its time and file |
 | `quit` | unpark everything and quit |
 | `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
 | `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there; the refusal lists our own windows) |
@@ -447,7 +499,7 @@ the click the way a person does when a window covers it (the pointer resting at 
 edge). `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
 (`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
 whether it is the active one, ordered in, on the Space shown, slid in). Every app run's log is kept as `stage-manager.run-NN.log` in
-the test home (the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
+the test home (renamed from the day's `YYYY-MM-DD.log`; the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
 is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
 `scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
 Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
@@ -545,6 +597,9 @@ limited to the fixture.
 
 - `src/engine`, `src/config.rs` — pure Rust engine and configuration (unit tested);
   `src/config/schema.rs` lists every key with its type, range, default and doc line.
+- `src/logbook` — the daily log, pure Rust (unit tested): local dates and stamps, the day's
+  file with its cap, retention, the event counters, the ring of recent lines, marks and
+  `log summary`; `platform::logging` is its tracing layer.
 - `src/platform` — macOS glue: `ax` (AXUIElement / AXObserver wrappers), `wm_thread` (the
   thread that owns every AX call), `observe` (observed apps and windows), `controller` (the
   engine on the WM thread: observations in, actions out, strip snapshots, `state.json`),

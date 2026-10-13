@@ -2,6 +2,10 @@
 //!
 //! - `stage-manager` runs the menu bar app.
 //! - `stage-manager ctl <words...>` sends one command to the running app's ctl socket.
+//! - `stage-manager mark [NOTE...]` writes a problem mark into the day's log (through the
+//!   app, with a state dump; without it when the app is not running).
+//! - `stage-manager log summary [DATE]` prints a day's counts, marks, warnings and errors;
+//!   `log path [DATE]` prints its file.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
 //! - `stage-manager config --print-defaults | --explain <section.key> | --reference |
 //!   --check [file]` prints the commented default config, explains a key, prints README's
@@ -21,6 +25,10 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         #[cfg(target_os = "macos")]
         Some("ctl") => stage_manager::platform::ctl::run_client(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("mark") => stage_manager::platform::ctl::run_mark(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("log") => stage_manager::platform::logging::command(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("strip-demo") => stage_manager::ui::strip_demo::run(),
         Some("config") => {
@@ -44,7 +52,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <--print-defaults | --explain KEY | --reference | --check [FILE]> | strip-demo | probe-windows <bundle-id>... | probe-screen | --version]"
             );
             ExitCode::from(2)
         }
@@ -120,6 +128,7 @@ mod app {
         settings: RawSettings,
         strip_visible: bool,
         config_error: Option<String>,
+        last_mark: Option<String>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
         display: Option<Display>,
@@ -150,6 +159,8 @@ mod app {
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
                 strip_visible: self.strip_visible,
                 config_error: self.config_error.clone(),
+                mark_shown: logging::verbose_now(),
+                last_mark: self.last_mark.clone(),
             }
         }
 
@@ -228,6 +239,25 @@ mod app {
                     self.wm.send(WmCommand::ReloadConfig);
                 }
                 MenuAction::OpenConfig => open_config(),
+                MenuAction::MarkProblem => {
+                    // Off the main thread: the dumps come from the WM thread.
+                    let wm = self.wm.clone();
+                    let spawned = std::thread::Builder::new().name("mark".into()).spawn(move || {
+                        let reply = mark_problem(&wm, "");
+                        let at = reply["at"].as_str().map(str::to_string);
+                        DispatchQueue::main().exec_async(move || {
+                            with_app(|app| {
+                                if at.is_some() {
+                                    app.last_mark = at;
+                                }
+                                app.refresh_menu();
+                            })
+                        });
+                    });
+                    if let Err(e) = spawned {
+                        tracing::warn!("cannot mark a problem: {e}");
+                    }
+                }
                 MenuAction::Quit => quit(),
             }
         }
@@ -302,8 +332,28 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        logging::write_counts("quit");
         tracing::info!("bye");
         std::process::exit(code);
+    }
+
+    /// How long a problem mark waits for each of the WM thread's dumps.
+    const MARK_DUMP_WAIT: Duration = Duration::from_secs(3);
+
+    /// Writes a problem mark: the note, `ctl state` and `ctl dump` (each, or that the WM
+    /// thread did not answer: a hung WM thread is worth marking too) and the recent detailed
+    /// lines. Runs off the main thread.
+    fn mark_problem(wm: &WmHandle, note: &str) -> serde_json::Value {
+        let ask = |cmd: Command| {
+            wm.ctl(cmd, MARK_DUMP_WAIT)
+                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                .unwrap_or_else(|| "the WM thread did not answer".to_string())
+        };
+        let sections = [("state", ask(Command::State)), ("dump", ask(Command::Dump))];
+        match logging::write_mark(note, &sections) {
+            Ok(m) => json!({ "ok": true, "at": m.at, "file": m.file }),
+            Err(e) => ctl::error_reply(&e),
+        }
     }
 
     fn ctl_handler(wm: WmHandle) -> ctl::Handler {
@@ -317,6 +367,19 @@ mod app {
             Command::Quit => {
                 DispatchQueue::main().exec_async(quit);
                 json!({ "ok": true, "quitting": true })
+            }
+            Command::Mark(note) => {
+                let reply = mark_problem(&wm, &note);
+                let at = reply["at"].as_str().map(str::to_string);
+                if at.is_some() {
+                    DispatchQueue::main().exec_async(move || {
+                        with_app(|app| {
+                            app.last_mark = at;
+                            app.refresh_menu();
+                        })
+                    });
+                }
+                reply
             }
             Command::DebugMenuQuit => {
                 if std::env::var_os(TEST_ENV).is_none() {
@@ -433,7 +496,7 @@ mod app {
 
     /// Runs the menu bar app until Quit.
     pub fn run() -> ExitCode {
-        logging::init();
+        logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
         if let Some(home) = paths::custom_home() {
@@ -532,6 +595,7 @@ mod app {
             settings,
             strip_visible: true,
             config_error: None,
+            last_mark: None,
             hotkeys: None,
             thumbnail_interval_ms: None,
             display: None,

@@ -103,6 +103,26 @@ listed on any Space for 3 s). It never exits while one waits unless Stage Manage
 Each milestone ends with a commit and a manual test checklist; `cargo test` and
 `cargo clippy -- -D warnings` stay clean.
 
+## Before public release
+
+The owner runs a trial week on the daily log (`README.md`, "Daily log and problem marks")
+before the first public release. Before that release:
+
+- [ ] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
+  Problem by default (it shows only while the level is `debug` or `trace`).
+- [ ] Decide which window titles the log keeps (all, none, or hashed) and say so in README.
+- [ ] Revisit the caps (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against the
+  trial's real volume (`stage-manager log summary` for each day).
+
+Volume at the default level, measured 10-12 on the automated suite's logs (fixture apps
+only; 0.4 h of app time over 220 launches): about 117 bytes a line; the scripted work
+itself (switches, sends, clicks, drags, new windows, Space changes, ~780 focus changes) came
+to 12 000 lines and 1.6 MB an hour, about 10 lines per user action and 1-2 per focus change;
+each launch adds ~30 lines plus one per window found, each quit ~8. A person's working day
+(~300 switches, ~1500 focus changes, ~100 new windows, ~30 Space changes, a launch or two)
+is then about 7 000 lines, 1 MB; a heavy day 2-3 MB. Even the suite's machine pace for
+8 hours stays near 13 MB, well under the 100 MB day cap.
+
 ## Out of scope (prototype)
 
 Multi-monitor beyond the main display (the model keys stages by display), fullscreen windows

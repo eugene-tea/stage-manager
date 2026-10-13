@@ -21,6 +21,8 @@ pub enum MenuAction {
     ToggleStrip,
     ReloadConfig,
     OpenConfig,
+    /// Write a problem mark into the day's log (shown while the log is verbose).
+    MarkProblem,
     Quit,
 }
 
@@ -88,6 +90,11 @@ define_class!(
             dispatch(MenuAction::OpenConfig);
         }
 
+        #[unsafe(method(markProblem:))]
+        fn mark_problem(&self, _sender: Option<&AnyObject>) {
+            dispatch(MenuAction::MarkProblem);
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
             dispatch(MenuAction::Quit);
@@ -112,6 +119,18 @@ pub struct MenuState {
     pub strip_visible: bool,
     /// config.toml failed to load (the last good config stays in force).
     pub config_error: Option<String>,
+    /// Show Mark a Problem (the log is verbose: the trial default).
+    pub mark_shown: bool,
+    /// When the last problem mark was written (`HH:MM:SS`).
+    pub last_mark: Option<String>,
+}
+
+/// The Mark a Problem item's title: when the last mark went in, if any.
+pub fn mark_title(last: Option<&str>) -> String {
+    match last {
+        Some(at) => format!("Mark a Problem (last at {at})"),
+        None => "Mark a Problem".to_string(),
+    }
 }
 
 /// The menu's config line: hidden (`None`) while the config is fine.
@@ -135,6 +154,7 @@ pub struct StatusMenu {
     grant_accessibility: Retained<NSMenuItem>,
     grant_screen_recording: Retained<NSMenuItem>,
     toggle_strip: Retained<NSMenuItem>,
+    mark: Retained<NSMenuItem>,
 }
 
 fn item(mtm: MainThreadMarker, title: &str, action: Option<Sel>, target: &MenuTarget) -> Retained<NSMenuItem> {
@@ -186,13 +206,14 @@ impl StatusMenu {
         let toggle_strip = item(mtm, "Hide Strip", Some(sel!(toggleStrip:)), &target);
         let reload = item(mtm, "Reload Config", Some(sel!(reloadConfig:)), &target);
         let open = item(mtm, "Open Config", Some(sel!(openConfig:)), &target);
+        let mark = item(mtm, &mark_title(None), Some(sel!(markProblem:)), &target);
         let quit = item(mtm, "Quit Stage Manager", Some(sel!(quit:)), &target);
 
         for it in [&state_line, &config_line, &warning_line, &grant_accessibility, &grant_screen_recording] {
             menu.addItem(it);
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        for it in [&toggle_strip, &reload, &open] {
+        for it in [&toggle_strip, &reload, &open, &mark] {
             menu.addItem(it);
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -208,12 +229,13 @@ impl StatusMenu {
             grant_accessibility,
             grant_screen_recording,
             toggle_strip,
+            mark,
         }
     }
 
     /// Shows `state`: the state line, the config error (only while there is one), the Apple
-    /// Stage Manager warning, the grant items (only while missing) and the strip toggle's
-    /// title.
+    /// Stage Manager warning, the grant items (only while missing), the strip toggle's title
+    /// and Mark a Problem (while the log is verbose).
     pub fn update(&self, state: &MenuState) {
         self.state_line.setTitle(&NSString::from_str(&state.permissions.summary()));
         match config_line(state.config_error.as_deref()) {
@@ -228,6 +250,8 @@ impl StatusMenu {
         self.grant_screen_recording.setHidden(state.permissions.screen_recording);
         let strip = if state.strip_visible { "Hide Strip" } else { "Show Strip" };
         self.toggle_strip.setTitle(&NSString::from_str(strip));
+        self.mark.setHidden(!state.mark_shown);
+        self.mark.setTitle(&NSString::from_str(&mark_title(state.last_mark.as_deref())));
     }
 }
 
@@ -243,5 +267,11 @@ mod tests {
         let line = config_line(Some(&long)).unwrap_or_default();
         assert_eq!(line.chars().count(), 90);
         assert!(line.ends_with('…'));
+    }
+
+    #[test]
+    fn the_mark_item_says_when_the_last_mark_went_in() {
+        assert_eq!(mark_title(None), "Mark a Problem");
+        assert_eq!(mark_title(Some("15:04:05")), "Mark a Problem (last at 15:04:05)");
     }
 }

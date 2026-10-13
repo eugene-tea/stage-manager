@@ -29,6 +29,8 @@ use super::safety::{self, guarded};
 use super::{ctl, observe, paths, windows};
 use crate::engine::guard_watch::{Event, Look, Watch, Waiting};
 use crate::engine::recovery::{Listed, Registered, ScanDisplays, is_stranded};
+use crate::logbook::UNCLEAN_EXIT;
+use crate::logbook::counters::{self, Count};
 
 /// The AX messaging timeout used by the guardian.
 const AX_TIMEOUT_SECONDS: f32 = 0.25;
@@ -94,8 +96,11 @@ pub fn spawn() -> Option<u32> {
 /// `stage-manager --guardian <pid>`: waits for `pid` to exit; unless it wrote its clean-exit
 /// marker, runs the recovery scan and waits for every window left parked (module docs).
 pub fn run(args: &[String]) -> ExitCode {
-    super::logging::init();
-    std::panic::set_hook(Box::new(|info| tracing::error!("guardian: panic: {info}")));
+    super::logging::init(super::logging::Process::Guardian);
+    std::panic::set_hook(Box::new(|info| {
+        counters::bump(Count::Panic);
+        tracing::error!("guardian: panic: {info}");
+    }));
     let Some(parent) = args.first().and_then(|a| a.parse::<i32>().ok()).filter(|p| *p > 0) else {
         eprintln!("usage: stage-manager --guardian <pid>");
         return ExitCode::from(2);
@@ -114,11 +119,7 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let registered = safety::read_parked_file(parent as u32);
-    tracing::warn!(
-        parent,
-        registered = registered.len(),
-        "guardian: the app exited without a clean exit; running the recovery scan"
-    );
+    tracing::warn!(parent, registered = registered.len(), "guardian: {UNCLEAN_EXIT}; running the recovery scan");
     let r = safety::recovery_scan("guardian");
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
     install_stop_handlers();

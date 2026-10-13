@@ -2,7 +2,8 @@
 //! and answering each with one line of JSON. `stage-manager ctl <words...>` is the client.
 //!
 //! Commands: `ping`, `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
-//! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`. Without an `ID`, `send`, `new`
+//! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`, `mark [NOTE…]` (a problem mark
+//! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift]` drags along
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use super::logging::{self, Process};
 use super::paths;
 use super::space_keys::Direction;
 use crate::engine::geometry::{Point, Rect};
@@ -55,6 +57,9 @@ pub enum Command {
     UnparkAll,
     /// Re-read config.toml.
     Reload,
+    /// Write a problem mark into the day's log: the note (may be empty), a state dump and
+    /// the last seconds of detailed lines.
+    Mark(String),
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
     /// Test only: quit the way the menu's Quit item does (from inside a menu action).
@@ -143,6 +148,7 @@ impl Command {
             ["reveal"] => Ok(Self::Reveal),
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
+            ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-drag", rest @ ..] => {
@@ -282,7 +288,7 @@ pub fn request(line: &str, timeout: Duration) -> std::io::Result<String> {
 pub fn run_client(words: &[String]) -> ExitCode {
     if words.is_empty() {
         eprintln!(
-            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload>"
+            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload|mark [NOTE]>"
         );
         return ExitCode::from(2);
     }
@@ -299,6 +305,43 @@ pub fn run_client(words: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("stage-manager is not reachable at {}: {e}", paths::socket_path().display());
             ExitCode::from(2)
+        }
+    }
+}
+
+/// How long `mark` waits for the app (it asks the WM thread for two dumps).
+const MARK_WAIT: Duration = Duration::from_secs(12);
+
+/// `stage-manager mark [NOTE…]`: asks the running app to write a problem mark (state dump
+/// and recent detail included). With the app not running, the mark is written here, without
+/// a dump. Prints where it went.
+pub fn run_mark(words: &[String]) -> ExitCode {
+    logging::init(Process::Tool { name: "mark", echo: false });
+    let note = words.join(" ");
+    let line = if note.trim().is_empty() { "mark".to_string() } else { format!("mark {note}") };
+    match request(&line, MARK_WAIT) {
+        Ok(reply) => {
+            let v: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
+            if v["ok"] == true {
+                println!("problem marked at {} in {}", v["at"].as_str().unwrap_or("?"), v["file"].as_str().unwrap_or("?"));
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("the app could not mark: {}", v["error"].as_str().unwrap_or(&reply));
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            let why = format!("Stage Manager is not reachable ({e}): no state to dump");
+            match logging::write_mark(&note, &[("app", why.clone())]) {
+                Ok(m) => {
+                    println!("{why}; problem marked at {} in {}", m.at, m.file.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{why}; cannot mark: {e}");
+                    ExitCode::from(1)
+                }
+            }
         }
     }
 }
@@ -323,6 +366,8 @@ mod tests {
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
+        assert_eq!(Command::parse("mark"), Ok(Command::Mark(String::new())));
+        assert_eq!(Command::parse("mark  strip  gone "), Ok(Command::Mark("strip gone".into())));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(
