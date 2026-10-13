@@ -1945,7 +1945,9 @@ def phase_visible():
 
     say("-- fit = \"move\" with the launch reveal and the edge tab on: a too-wide window stays put")
     stop_all_fixtures()
-    write_config('[windows]\nfit = "move"\n[reveal]\nedge_tab = true\nlaunch_reveal = true\n')
+    # A long hide delay: the strip a tab click reveals stays while the polls (each a probe
+    # subprocess) look, and while a click goes through its empty column.
+    write_config('[windows]\nfit = "move"\n[reveal]\nedge_tab = true\nlaunch_reveal = true\nhide_delay_ms = 4000\n')
     start_extra_frames("a", 1, "10,120,-40,500")
     activate("a")
     time.sleep(1.0)
@@ -1966,9 +1968,24 @@ def phase_visible():
         screenshot("edge-tab.png", s)
         r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
         check(r.get("ok"), f"clicked the tab ({r.get('error', 'ok')})")
+        clicked = wait_until(lambda: "edge tab clicked" in log_text(), 2, "the tab's click in the log")
+        check(clicked is not None, "the tab got the click (the log says so)")
         gone = wait_until(lambda: edge_tab() is None, 3, "the tab to give way to the strip")
         check(gone is not None, "a click on the tab reveals the strip (the tab hides)")
-        back = wait_until(edge_tab, 4, "the tab to come back once the pointer is away")
+        shown = (state().get("strip_panel") or {}).get("shown")
+        say(f"  strip after the tab click: shown {shown}")
+        # R1-ui 8: the strip, lifted over Alpha 1 (which covers the column), has no card (one
+        # stage); a click in its empty column goes through to Alpha 1, never to the strip.
+        a1 = live_frame("Alpha 1")
+        pt = (vis["x"] + 100, min(a1["y"] + a1["h"] - 40, vis["y"] + vis["h"] - 60))
+        if shown and a1["x"] <= pt[0] - 20 and a1["y"] <= pt[1] - 20:
+            mark = len(log_text())
+            r = ctl("debug-click", *pt)
+            through = r.get("ok") and wait_until(lambda: "mouse down in another app" in log_text()[mark:], 2, "the click to reach Alpha 1")
+            check(bool(through), f"a click on the strip's empty column goes through to the window below ({r.get('error', 'ok')})")
+        else:
+            check(False, f"the strip shows over Alpha 1 for the click-through check (shown {shown}, Alpha 1 {fmt(a1)})")
+        back = wait_until(edge_tab, 8, "the tab to come back once the pointer is away")
         check(back is not None, "the strip auto-hides again and the tab returns")
     stop_app()
     all_onscreen("nudge-only quit")
@@ -1980,8 +1997,7 @@ def phase_visible():
     start_extra("a", 3)
     start_extra("b", 2)
     start_extra("c", 2)
-    if os.path.exists(log_path()):
-        os.remove(log_path())
+    archive_log()
     args = ["open", "-n", APP]
     for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": ONLY, "STAGE_MANAGER_NO_PROMPT": "1",
                  "STAGE_MANAGER_NO_CAPTURE": "1", "STAGE_MANAGER_TEST": "1",
@@ -2304,6 +2320,56 @@ def expose_round(which, label, shot=None):
     return True
 
 
+def show_desktop_round():
+    """macOS's own Show Desktop (`ctl debug-expose show-desktop`, the user's shortcut; the same
+    reveal as a wallpaper click with "Click wallpaper to reveal desktop: Always", his default)
+    slides every window aside. Reports what the window server lists for the shown fixture
+    windows meanwhile (`kCGWindowIsOnscreen` and frames, review R2 V8), and checks the Desktop
+    is never recognized again (no Space change counted, the same Space id, no re-recognition
+    in the log) while it lasts, the same shortcut ends it, and every window is back."""
+    label = "Show Desktop"
+    say(f"\n  -- {label} (macOS's own reveal) --")
+    s = state()
+    sp = ctl("space")
+    shown = [w for w in s["windows"] if not w["parked"] and w["role"] == "standard"]
+    if not make_fixture_front(s):
+        check(False, f"{label}: a fixture is frontmost; front is {frontmost_bundle()}")
+        return
+    mark = len(log_text())
+    r = ctl("debug-expose", "show-desktop")
+    if not r.get("ok") and "turned off" in str(r.get("error")):
+        say(f"  skipped: {r.get('error')}")
+        return
+    if not check(r.get("ok"), f"{label}: shortcut typed ({r.get('key', r.get('error'))})"):
+        return
+    time.sleep(1.5)
+    wins, _ = fixture_windows([FIX_ID])
+    by_id = {w["id"]: w for w in wins}
+    for w in shown:
+        cg = by_id.get(w["id"])
+        say(f"  {w['title']} during {label}: " + (f"listed on screen {cg['onscreen']}, at {fmt(cg['bounds'])} (restore {fmt(w['restore'])})" if cg else "not listed"))
+    say(f"  strip pane during {label}: listed on screen {strip_panel() is not None}")
+    # Two once-a-second checks and the settle: a missed Space change would be counted by now.
+    time.sleep(3.0)
+    after = ctl("space")
+    text = log_text()[mark:]
+    check(after.get("space") == sp.get("space") and after.get("changes") == sp.get("changes")
+          and "recognizing the Space again" not in text and "windows left this Desktop" not in text,
+          f"{label}: the Desktop is never recognized again while it shows (Space {sp.get('space')} then {after.get('space')}, changes {sp.get('changes')} then {after.get('changes')})")
+    ctl("debug-expose", "show-desktop")
+    time.sleep(1.5)
+    def all_back():
+        now = {w["id"]: w for w in fixture_windows([FIX_ID])[0]}
+        return all(now.get(w["id"], {}).get("onscreen") and close(now[w["id"]]["bounds"], w["restore"]) for w in shown)
+
+    back = wait_until(all_back, 5, "the windows back")
+    if not check(back is not None, f"{label}: the same shortcut ends it, every shown window back at its frame"):
+        ctl("debug-expose", "show-desktop")
+        time.sleep(1.5)
+    check(ctl("space").get("space") == sp.get("space"), f"{label}: the same Desktop afterwards")
+    consistent(f"after {label}")
+
+
 def phase_expose():
     say("\n== expose: the strip hides in Mission Control and App Exposé, and comes back ==")
     stop_app()
@@ -2329,6 +2395,7 @@ def phase_expose():
         if not expose_round(which, label):
             break
     consistent("after Mission Control and App Exposé")
+    show_desktop_round()
     stop_app()
     all_onscreen("expose quit")
 

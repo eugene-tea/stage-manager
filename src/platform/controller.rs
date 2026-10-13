@@ -1373,6 +1373,7 @@ impl Controller {
         }
         match event.kind {
             InputKind::MouseDown => {
+                tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
