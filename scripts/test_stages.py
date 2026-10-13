@@ -36,6 +36,7 @@ the native phase's apps are <id>.a, <id>.b and <id>.c.
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -677,6 +678,14 @@ def stop_extra(k):
     wait_until(lambda: not pids_of(pattern), 10, f"{EXTRA[k][3]} to quit")
 
 
+def activate(k):
+    """Brings fixture app `k` (the running instance, from this tree's target/) to the front.
+    By path, never `open -b`: every worktree registers its own copy under the same bundle ID,
+    and `open -b` launched LaunchServices' preferred copy (often another tree's) as a second
+    instance with default windows, which then sat on the screen as a stray."""
+    subprocess.run(["open", EXTRA[k][1]], check=True)
+
+
 def extra_pid(k):
     p = pids_of(EXTRA[k][2])
     return p[0] if p else None
@@ -732,9 +741,9 @@ def phase_native():
     start_extra("a", 2)
     start_extra("b", 1)
     start_extra("c", 1)
-    subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
+    activate("b")
     time.sleep(1.0)
-    # Recency comes from the window server's z-order at launch (orderBack and `open -b` from
+    # Recency comes from the window server's z-order at launch (orderBack and an `open` from
     # a background shell do not order the apps predictably): each app's frontmost window.
     wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["c"][0]])
     pid_of = {w["pid"]: k for k in ("a", "c") for w in fixture_windows([EXTRA[k][0]])[0]}
@@ -793,7 +802,7 @@ def phase_native():
     pt = topmost_point("Alpha")
     r = ctl("debug-click", pt[0], pt[1], "shift") if pt else {"ok": False, "error": "no Alpha window"}
     check(r.get("ok"), f"shift-clicked an Alpha window ({r.get('error', 'ok')})")
-    subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
+    activate("b")
     s = wait_state(lambda x: "Bravo 1" in active_titles(x), "Bravo here")
     check(s is not None and len(s["stages"]) == 1, "a Shift activation brings Bravo into the current stage")
     consistent("Shift activation")
@@ -817,7 +826,7 @@ def phase_native():
     front = state()["stages"][1]["windows"][0]
     drop = (vis["x"] + 700, cy)
     r = ctl("debug-drag", cx, cy, cx + 60, cy, *drop)
-    check(r.get("ok"), f"dragged the card to {drop[0]:.0f},{drop[1]:.0f} ({r.get('error', 'ok')})")
+    check(r.get("ok"), f"dragged the card to {drop[0]:.0f},{drop[1]:.0f} ({r.get('error', 'ok')}{whose(r.get('error'))})")
     s = wait_state(lambda x: len(x["stages"]) == 1, "the card's windows to join")
     check(s is not None and len(active_titles(s)) == 6, "the dropped card's windows join the current stage")
     if s:
@@ -839,7 +848,7 @@ def phase_native():
     pre = by_title(s)["Alpha 1"]["restore"]
     grab = (pre["x"] + 500, pre["y"] + 12)
     r = ctl("debug-drag", *grab, grab[0] - 60, grab[1], vis["x"] + 60, grab[1])
-    check(r.get("ok"), f"dragged Alpha 1 by its title bar onto the strip ({r.get('error', 'ok')})")
+    check(r.get("ok"), f"dragged Alpha 1 by its title bar onto the strip ({r.get('error', 'ok')}{whose(r.get('error'))})")
     s = wait_state(lambda x: by_title(x)["Alpha 1"]["parked"], "Alpha 1 to become its own stage")
     if check(s is not None, "a window dropped on the strip gets a stage of its own"):
         a1 = by_title(s)["Alpha 1"]
@@ -858,9 +867,9 @@ def phase_native():
 OVERLAY_LAYER = 25  # NSStatusWindowLevel: the click-through motion overlay
 
 
-def our_windows():
-    """Our own app's onscreen windows (layer, bounds), by our pid."""
-    pid = app_pid()
+def our_windows(pid=None):
+    """Our own app's onscreen windows (layer, bounds), by our pid (asked when not given)."""
+    pid = pid or app_pid()
     if not pid:
         return []
     r = run([BIN, "probe-windows", "dev.eugene.stagemanager"], timeout=10)
@@ -878,16 +887,44 @@ def strip_panel(wins=None):
     return tall[0] if tall else None
 
 
-def drag_in_background(points, hold_from, what):
-    """Starts a synthetic drag (ctl debug-drag) and returns (process, seconds until the
-    pointer rests at the last point)."""
-    path = 0.0
-    for (x0, y0), (x1, y1) in zip(points, points[1:]):
-        path += ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+def drag_sampled(points, what, wait=5.0):
+    """A synthetic drag (ctl debug-drag) along `points`, sampling our windows while it runs
+    (see `sample_during`). The app refuses a drag, posting nothing, while anything but our
+    own or a fixture's window is topmost on the path; a refused drag is tried again until
+    `wait` seconds have passed (a window of the phase before still going away). Returns the
+    last reply and the samples of the drag that ran."""
     words = [str(round(c, 1)) for p in points for c in p]
-    proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+    end = time.time() + wait
     say(f"  dragging {what}")
-    return proc, hold_from + 0.12 + (path / 4.0) * 0.012
+    while True:
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        seen = sample_during(proc)
+        out, _ = proc.communicate(timeout=20)
+        refused = "not ours or a fixture's" in out or "no window at" in out
+        if not refused or time.time() >= end:
+            return out, seen
+        say(f"  the path is not clear yet ({out.strip()[:120]}{whose(out)}); trying again")
+        time.sleep(0.5)
+
+
+def whose(reply):
+    """For a ctl reply refusing a click or drag over another process's window: which program
+    that is (` = <name>`), while it still runs; empty otherwise."""
+    m = re.search(r"not ours or a fixture's \(pid (\d+)\)", reply or "")
+    if not m:
+        return ""
+    r = subprocess.run(["ps", "-o", "comm=", "-p", m.group(1)], capture_output=True, text=True)
+    return f" = {r.stdout.strip() or 'gone'}"
+
+
+def sample_during(proc):
+    """Our onscreen windows, sampled back to back for as long as the drag `proc` runs (the
+    strip is lifted only while the pointer is over it, under a second; a single timed sample
+    missed it). Every sample is a list as `our_windows` gives."""
+    seen, pid = [], app_pid()
+    while proc.poll() is None:
+        seen.append(our_windows(pid))
+    return seen
 
 
 CONFIG_BACKDROP = f"""
@@ -904,7 +941,7 @@ def start_backdrop(s):
     and the fixtures only. The fixtures are raised in front of it afterwards."""
     vis = s["display"]["visible"]
     start_extra_frames("c", 1, f"0,0,{s['strip_width'] + 900:.0f},{vis['h']:.0f}")
-    subprocess.run(["open", "-b", EXTRA["c"][0]], check=True)
+    activate("c")
     time.sleep(0.8)
 
 
@@ -960,14 +997,13 @@ def phase_motion():
     pre = by_title(s)["Fixture 5"]["restore"]
     grab = (pre["x"] + 300, pre["y"] + 12)
     target = (vis["x"] + 60, (first["y"] - 6) if first else vis["y"] + 40)
-    proc, rest_at = drag_in_background([grab, (grab[0] - 60, grab[1]), target], 0.0, "Fixture 5 onto the strip")
-    time.sleep(rest_at + 0.2)
-    mid = our_windows()
-    lifted = strip_panel(mid)
-    check(lifted is not None and lifted["layer"] == 3, f"the strip is above windows while a window is over it (layer {lifted and lifted['layer']})")
-    check(any(w["layer"] == OVERLAY_LAYER for w in mid), "the dragged window's card shows in the motion overlay")
-    out, _ = proc.communicate(timeout=20)
-    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]})")
+    out, seen = drag_sampled([grab, (grab[0] - 60, grab[1]), target], "Fixture 5 onto the strip")
+    layers = sorted({p["layer"] for p in (strip_panel(m) for m in seen) if p})
+    lifted = [m for m in seen if (lambda p: p is not None and p["layer"] == 3)(strip_panel(m))]
+    check(bool(lifted), f"the strip is above windows while a window is over it (layers seen {layers} in {len(seen)} samples)")
+    check(any(w["layer"] == OVERLAY_LAYER for m in lifted for w in m),
+          "the dragged window's card shows in the motion overlay (while the strip is lifted)")
+    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
     s = wait_state(lambda x: by_title(x)["Fixture 5"]["parked"], "Fixture 5 to become its own stage")
     if check(s is not None, "a window dropped on the strip gets a stage of its own"):
         f5 = by_title(s)["Fixture 5"]
@@ -988,9 +1024,8 @@ def phase_motion():
         last, top = cards[-1], cards[0]["frame"]
         b = last["frame"]
         start = (vis["x"] + 70, b["y"] + b["h"] / 2)
-        proc, _ = drag_in_background([start, (start[0], start[1] - 30), (vis["x"] + 70, top["y"] + 4)], 0.0, "the last card to the top")
-        out, _ = proc.communicate(timeout=20)
-        check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]})")
+        out, _ = drag_sampled([start, (start[0], start[1] - 30), (vis["x"] + 70, top["y"] + 4)], "the last card to the top")
+        check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
         s = wait_state(lambda x: x["strip"][:1] == [last["number"]], "the card to move to the top")
         check(s is not None, f"the dragged card is first ({state()['strip']})")
         order = state()["strip"]
@@ -1085,7 +1120,7 @@ def phase_visible():
     frames = {"a": "20,60,700,400;10,120,-40,500", "b": "30,90,600,380"}
     start_extra_frames("a", 2, frames["a"])
     start_extra_frames("b", 1, frames["b"])
-    subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
+    activate("a")
     time.sleep(1.0)
     wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["b"][0]])
     s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
@@ -1124,7 +1159,7 @@ def phase_visible():
     # Bravo: one over the strip column (its stage is parked at first start).
     start_extra_frames("a", 2, "20,60,700,400;10,120,-40,500")
     start_extra_frames("b", 1, "30,90,600,380")
-    subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
+    activate("a")
     time.sleep(1.0)
     before = {}
     wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["b"][0]])
@@ -1201,7 +1236,7 @@ def phase_visible():
     stop_all_fixtures()
     write_config('[windows]\nfit = "move"\n[reveal]\nedge_tab = true\nlaunch_reveal = true\n')
     start_extra_frames("a", 1, "10,120,-40,500")
-    subprocess.run(["open", "-b", EXTRA["a"][0]], check=True)
+    activate("a")
     time.sleep(1.0)
     # The largest of the app's windows (an active app also lists its menu bar strip).
     wide = max((w["bounds"] for w in fixture_windows([EXTRA["a"][0]])[0]), key=lambda b: b["w"] * b["h"])
@@ -1288,7 +1323,7 @@ def phase_parity():
     write_config(None)
     start_extra_frames("a", 2, "400,80,600,400;460,140,620,420")
     start_extra_frames("b", 1, "420,100,640,420")
-    subprocess.run(["open", "-b", EXTRA["b"][0]], check=True)
+    activate("b")
     time.sleep(1.0)
     s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
     if not check(s is not None, "app up with Alpha (2 windows) and Bravo"):
