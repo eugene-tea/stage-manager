@@ -105,6 +105,7 @@ use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEve
 use crate::ui::{motion_math, transition_plan};
 
 mod arrival;
+mod hide;
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
@@ -432,6 +433,8 @@ pub struct Controller {
     /// corner, or a natively unhidden app's, already in place): `[animation]
     /// activation_grows` off.
     arrive_now: HashSet<u32>,
+    /// `[windows] hide_parked_apps`: the apps we hid ([`hide`]).
+    hides: hide::Hides,
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
@@ -579,6 +582,7 @@ impl Controller {
             parked_note: None,
             arrived_note: None,
             arrive_now: HashSet::new(),
+            hides: hide::Hides::default(),
             unplaced: BTreeSet::new(),
             fullscreen: false,
             space_pending: false,
@@ -808,6 +812,7 @@ impl Controller {
             return 0;
         }
         self.pressed_obs = None;
+        let unhide = self.before_batch_hides(ob, &actions);
         let parked = self.parked_entries(ob);
         safety::registry_add(parked.clone());
         let now = Instant::now();
@@ -893,6 +898,7 @@ impl Controller {
         } else {
             safety::registry_replace(self.parked_entries(ob));
         }
+        self.after_batch_hides(unhide);
         self.publish_shield();
         self.remember();
         if changed {
@@ -1023,7 +1029,8 @@ impl Controller {
         self.flush_pending(ob);
         // An activated app's windows first, before the strip is told and anything parks:
         // macOS has raised them in the park corner already, so every moment counts (6V).
-        let first = std::mem::take(&mut self.arrive_now);
+        let mut first = std::mem::take(&mut self.arrive_now);
+        first.extend(self.hidden_arrivals(ob, &actions));
         let (early, actions): (Vec<Action>, Vec<Action>) =
             actions.into_iter().partition(|a| matches!(a, Action::SetFrame { id, .. } if first.contains(&id.0)));
         let mut failed = 0;
@@ -1462,7 +1469,7 @@ impl Controller {
     /// An app was hidden or unhidden (NSWorkspace): `[windows] hide_parked_apps` follows
     /// its own hides and unhides.
     fn on_app_hidden(&mut self, _ob: &mut Observer, pid: i32, hidden: bool) {
-        tracing::debug!(pid, hidden, "app visibility changed");
+        self.app_visibility(pid, hidden);
     }
 
     /// How long before an activation a Shift press still counts (`[sugar]`).
@@ -1873,7 +1880,9 @@ impl Controller {
         m.windows()
             .filter(|w| w.meta.role == WindowRole::Standard && !w.sticky && !shown.contains(&w.meta.id.0))
             .filter(|w| ob.window(w.meta.id.0).is_some())
-            .filter(|w| !*hidden.entry(w.meta.pid).or_insert_with(|| ob.app_hidden_now(w.meta.pid)))
+            .filter(|w| {
+                !*hidden.entry(w.meta.pid).or_insert_with(|| self.counts_hidden(w.meta.pid) || ob.app_hidden_now(w.meta.pid))
+            })
             .filter(|w| !ob.is_minimized_now(w.meta.id.0))
             .filter(|w| !ob.is_fullscreen_now(w.meta.id.0))
             .map(|w| w.meta.id)
@@ -2182,7 +2191,11 @@ impl Controller {
         let missing: Vec<u32> = missing
             .into_iter()
             .filter(|&(id, pid)| {
-                ob.window(id).is_some() && !ob.app_hidden_now(pid) && !ob.is_minimized_now(id) && !ob.is_fullscreen_now(id)
+                ob.window(id).is_some()
+                    && !self.counts_hidden(pid)
+                    && !ob.app_hidden_now(pid)
+                    && !ob.is_minimized_now(id)
+                    && !ob.is_fullscreen_now(id)
             })
             .map(|(id, _)| id)
             .collect();
@@ -2646,7 +2659,9 @@ impl Controller {
         let n = actions.len();
         let failed = self.execute_batch(ob, actions, false);
         safety::registry_replace(self.parked_entries(ob));
-        tracing::info!(windows = n, failed, unrestored = self.unrestored.len(), "unparked every window");
+        // Any app of ours the batch did not bring back (none should be left).
+        let unhidden = safety::unhide_ours("unpark-all");
+        tracing::info!(windows = n, failed, unrestored = self.unrestored.len(), unhidden, "unparked every window");
         failed + self.unrestored.len()
     }
 
@@ -2722,6 +2737,7 @@ impl Controller {
             } else {
                 self.check_spaces(ob);
             }
+            self.hide_pass(ob);
         }
         if self.strip_dirty {
             self.present();

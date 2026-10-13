@@ -2410,3 +2410,34 @@ fn one_at_a_time_shows_an_app_once_and_its_card_cycles_through_its_windows() {
     seen.sort_unstable();
     assert_eq!(seen, [1, 2, 3], "clicks cycle through every window");
 }
+
+// ----- hide_parked_apps ------------------------------------------------------------------
+
+#[test]
+fn an_app_wholly_in_inactive_stages_keeps_its_most_recent_stage_in_place() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 10, "com.example.a"), RuleAction::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+    // Stage 3 (pid 11) is active; pid 10's stages 1 and 2 are parked, 2 the more recent.
+    let p = e.m.app_park(10);
+    assert_eq!((p.windows, p.shown), (2, 0));
+    assert_eq!(p.keep.iter().map(|k| k.0).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(p.keep[0].1, e.m.window(w(2)).map(|x| x.restore).unwrap_or_default());
+    assert!(p.stage_here);
+    // The active app shows; an app split across the active stage shows.
+    assert_eq!(e.m.app_park(11).shown, 1);
+    e.add(meta(4, 10, "com.example.a"), RuleAction::Current);
+    assert_eq!(e.m.app_park(10).shown, 1);
+}
+
+#[test]
+fn a_pinned_window_keeps_its_app_shown_and_an_empty_stage_says_so() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Float);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert_eq!(e.m.app_park(10).shown, 1, "pinned");
+    // The desktop revealed: the active stage is empty.
+    e.reveal();
+    assert!(!e.m.app_park(11).stage_here);
+}

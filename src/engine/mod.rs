@@ -9,6 +9,7 @@ pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
 pub mod guard_watch;
+pub mod hide;
 pub mod model;
 pub mod overview;
 pub mod park;

@@ -17,6 +17,7 @@
 //! only, undone when another Desktop comes) touch windows of a Space not shown.
 
 mod ahead;
+mod hide;
 mod ops;
 mod spaces;
 mod strip;

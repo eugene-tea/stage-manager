@@ -302,6 +302,8 @@ pub const KEYS: &[KeyDef] = &[
         "Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it."),
     k("windows", "park_drop", f(-32.0, 10_000.0), "-1.0",
         "How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it."),
+    k("windows", "hide_parked_apps", Kind::Bool, "false",
+        "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]

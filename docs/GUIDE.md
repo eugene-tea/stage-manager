@@ -343,6 +343,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `windows.focus_echo_ms` | `700` | whole number, 0 to 10000 | Focus changes this soon after we moved a window are taken as our own and never switch stages. |
 | `windows.park_inside` | `1.0` | number, -10000 to 32 | Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it. |
 | `windows.park_drop` | `-1.0` | number, -32 to 10000 | How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it. |
+| `windows.hide_parked_apps` | `false` | true or false | An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default. |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
 | `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |

@@ -315,6 +315,9 @@ pub struct WindowsConfig {
     pub park_inside: f64,
     /// How far below the display's bottom a parked window's top is asked.
     pub park_drop: f64,
+    /// Apps whose every window sits in inactive stages are hidden instead of parked in view
+    /// (a prototype).
+    pub hide_parked_apps: bool,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -792,6 +795,7 @@ impl Config {
                 inert_slivers: v.flag("windows.inert_slivers"),
                 park_inside: v.num("windows.park_inside"),
                 park_drop: v.num("windows.park_drop"),
+                hide_parked_apps: v.flag("windows.hide_parked_apps"),
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
