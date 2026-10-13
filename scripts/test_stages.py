@@ -23,7 +23,12 @@ card's app icon brings every window of that app), motion (the strip below window
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
 across a relaunch; a card click animates and every frame is exact afterwards;
-`level = "above_windows"` keeps the strip on top).
+`level = "above_windows"` keeps the strip on top), slots (a dozen card clicks in a mixed order,
+one at a time and fast, each a strict swap with every snapshot starting on its window and
+landing on the card or window it aimed at; a 2 pt and a 7 pt wobble are clicks; a card
+dragged down stays whole and above the others; a window dragged over the strip shows its card
+under the pointer at the top and bottom quarter, read back from the overlay's pixels; a slowed
+switch's snapshot lands on its window).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -1065,6 +1070,282 @@ def phase_motion():
     stop_all_fixtures()
 
 
+# ----- slots: every switch lands where it aims; clicks are clicks; a card drags whole ------
+
+
+CONFIG_SLOTS = """
+[strip]
+level = "above_windows"
+""" + CONFIG_BACKDROP
+
+# A slow spring (about ten times Apple's), so the overlay can be read back while it moves.
+CONFIG_SLOW = CONFIG_SLOTS.replace("[strip]", "[animation]\nspring_stiffness = 6.0\nspring_damping = 4.9\n\n[strip]")
+
+CLICK_RE = re.compile(r"card click in slot stage=(\d+) slot=Some\((\d+)\)")
+
+
+def ids_by_number(s):
+    return {st["number"]: st["id"] for st in s["stages"]}
+
+
+def numbers_by_id(s):
+    return {st["id"]: st["number"] for st in s["stages"]}
+
+
+def center(f):
+    return (f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+
+
+def inside(p, f, pad=0.0):
+    return f["x"] - pad <= p[0] <= f["x"] + f["w"] + pad and f["y"] - pad <= p[1] <= f["y"] + f["h"] + pad
+
+
+def off(a, b):
+    return max(abs(a[k] - b[k]) for k in ("x", "y", "w", "h"))
+
+
+def cg_bounds(wid):
+    wins, _ = fixture_windows([FIX_ID])
+    return next((w["bounds"] for w in wins if w["id"] == wid), None)
+
+
+def swap_holds(before, after, slot, leaving):
+    """Apple's swap: the stage left took the clicked card's slot; every other card kept its."""
+    return (len(before) == len(after) and after[slot] == leaving
+            and all(a == b for i, (a, b) in enumerate(zip(before, after)) if i != slot))
+
+
+def click_slot(slot, what, settle=1.0):
+    """Clicks the card in `slot` and checks the swap, the drawn order, and where every
+    snapshot of the transition started, aimed and ended. Returns the state after."""
+    s0 = state()
+    order0, active0, cards = s0["strip"], s0["active"], s0.get("strip_cards", [])
+    if not check(len(cards) == len(order0) and [c["number"] for c in cards] == order0,
+                 f"{what}: the strip draws the engine's order ({[c['number'] for c in cards]} vs {order0})"):
+        return s0
+    target = order0[slot]
+    t0 = s0.get("last_transition") or {}
+    leaving_ids = {w["id"] for w in s0["windows"] if w["home"] == active0 and not w["parked"] and w["role"] == "standard"}
+    pre = {wid: cg_bounds(wid) for wid in leaving_ids}
+    r = ctl("debug-click", *center(cards[slot]["frame"]))
+    check(r.get("ok"), f"{what}: clicked slot {slot} ({r.get('error', 'ok')})")
+    if not check(wait_state(lambda x: x["active"] == target, f"{what}: the switch") is not None,
+                 f"{what}: slot {slot}'s stage {target} is active"):
+        return state()
+    time.sleep(settle)
+    s = state()
+    order = s["strip"]
+    check(swap_holds(order0, order, slot, active0),
+          f"{what}: swap: stage {active0} took slot {slot}, every other card kept its slot ({order0} -> {order})")
+    check([c["number"] for c in s.get("strip_cards", [])] == order,
+          f"{what}: the cards are drawn in that order ({[c['number'] for c in s.get('strip_cards', [])]})")
+    t = s.get("last_transition") or {}
+    if not check(t.get("id") and t.get("id") != t0.get("id"), f"{what}: a transition was drawn"):
+        return s
+    num = numbers_by_id(s)
+    bad = []
+    drawn = s["strip_cards"][slot]["frame"]
+    for g in t["ghosts"]:
+        if g["outgoing"]:
+            if g["slot"] != slot or g["aimed_slot"] != slot or num.get(g["stage"]) != active0:
+                bad.append(f"outgoing {g['window']} aimed at slot {g['aimed_slot']} (engine {g['slot']}, stage {num.get(g['stage'])})")
+            if not inside(center(g["end"]), drawn, 4):
+                bad.append(f"outgoing {g['window']} ends at {fmt(g['end'])}, its card is drawn at {fmt(drawn)}")
+            b = pre.get(g["window"])
+            if b and off(g["start"], b) > 1.0:
+                bad.append(f"outgoing {g['window']} starts at {fmt(g['start'])}, the window was at {fmt(b)}")
+        else:
+            if g["aimed_slot"] != slot or num.get(g["stage"]) != target:
+                bad.append(f"incoming {g['window']} grew from slot {g['aimed_slot']} (stage {num.get(g['stage'])})")
+            b = cg_bounds(g["window"])
+            if not g.get("real") or not b or off(g["real"], b) > 1.0 or off(g["end"], b) > 1.0:
+                bad.append(f"incoming {g['window']} ends at {fmt(g['end'])}, the window is at {b and fmt(b)}")
+    check(not bad, f"{what}: every snapshot started on its window and landed on its card or window" + (f" ({'; '.join(bad)})" if bad else ""))
+    return s
+
+
+def strip_probe():
+    r = ctl("debug-strip")
+    return r.get("strip") if r.get("ok") else None
+
+
+def sample_strip_during(proc, after=0.8):
+    """`ctl debug-strip` samples while the drag `proc` runs, and `after` seconds more (the
+    card gliding into its slot)."""
+    seen = []
+    while proc.poll() is None:
+        p = strip_probe()
+        if p:
+            seen.append(p)
+    end = time.time() + after
+    while time.time() < end:
+        p = strip_probe()
+        if p:
+            seen.append(p)
+    return seen
+
+
+def phase_slots():
+    say("\n== slots: a switch's snapshots land where they aim; clicks are clicks; a card drags whole ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(CONFIG_SLOTS)
+    start_fixture(7)
+    s = start_app(7, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with seven fixture windows"):
+        return
+    start_backdrop(s)
+    vis = s["display"]["visible"]
+    left = vis["x"] + s["strip_width"] + 60
+    t = by_title(s)
+    # All the same size, clear of the strip: the slots keep their places, only the order moves.
+    for n in range(1, 8):
+        ctl("debug-frame", t[f"Fixture {n}"]["id"], left, vis["y"] + 60, 640, 420)
+    for n in range(1, 7):
+        do("new", t[f"Fixture {n}"]["id"])
+    time.sleep(1.5)
+    s = state()
+    n_cards = len(s.get("strip_cards", []))
+    if not check(n_cards >= 4, f"cards drawn ({s['strip']}, {n_cards} drawn, capacity {s['strip_capacity']})"):
+        return
+    overlay = ctl("debug-strip").get("strip") or {}
+    check(overlay.get("overlay_top_down") is True, "the motion overlay draws top-down")
+
+    say("-- clicking around, one click at a time, in a mixed order")
+    picks = [p % n_cards for p in (3, 0, 4, 1, 2, 4, 0, 3, 1, 2, 0, 5)]
+    for i, slot in enumerate(picks):
+        click_slot(slot, f"click {i + 1} (slot {slot})")
+
+    say("-- clicking around fast: each click while the last one still moves")
+    s = state()
+    frames = [c["frame"] for c in s["strip_cards"]]
+    order, active = list(s["strip"]), s["active"]
+    ids = ids_by_number(s)
+    expected = []
+    before_log = len(log_text())
+    for slot in [p % n_cards for p in (2, 0, 3, 1, 4, 2, 0, 1, 3, 0)]:
+        target = order[slot]
+        order[slot], active = active, target
+        expected.append((ids[target], slot))
+        ctl("debug-click", *center(frames[slot]))
+        time.sleep(0.15)
+    s = wait_state(lambda x: x["active"] == active, "the last fast click to switch", timeout=8)
+    time.sleep(1.5)
+    s = state()
+    check(s["strip"] == order and s["active"] == active,
+          f"fast clicks: the order is exactly the swaps' ({s['strip']}, active {s['active']}; expected {order}, active {active})")
+    clicks = [(int(a), int(b)) for a, b in CLICK_RE.findall(log_text()[before_log:])]
+    check(clicks == expected, f"fast clicks: each click hit the card drawn under the pointer ({clicks} vs {expected})")
+    check([c["number"] for c in s.get("strip_cards", [])] == s["strip"], "fast clicks: the cards are drawn in the engine's order")
+
+    say("-- a press that wobbles is a click, never a reorder")
+    for wobble in (2, 7):
+        s0 = state()
+        slot = 1 % n_cards
+        c = center(s0["strip_cards"][slot]["frame"])
+        target, active0, order0 = s0["strip"][slot], s0["active"], s0["strip"]
+        before_log = len(log_text())
+        out, _ = drag_sampled([c, (c[0], c[1] + wobble)], f"a {wobble} pt wobble on slot {slot}")
+        s = wait_state(lambda x: x["active"] == target, f"the {wobble} pt wobble to switch")
+        check(s is not None, f"a press that moves {wobble} pt and lets go switches like a click ({out.strip()[:80]})")
+        if s:
+            time.sleep(1.0)
+            check(swap_holds(order0, state()["strip"], slot, active0), f"{wobble} pt wobble: the swap, nothing reordered ({order0} -> {state()['strip']})")
+        check("card moved to another slot" not in log_text()[before_log:], f"{wobble} pt wobble: no reorder")
+
+    say("-- a card dragged down passes over the others whole (thumbnail and icons together)")
+    s = state()
+    if n_cards >= 4:
+        a, b = s["strip_cards"][0]["frame"], s["strip_cards"][3]["frame"]
+        dragged = ids_by_number(s)[s["strip"][0]]
+        start = center(a)
+        path = [start, (start[0], start[1] + 12), (start[0], b["y"] + b["h"] * 0.75)]
+        words = [str(round(v, 1)) for p in path for v in p] + ["hold=600"]
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        seen = sample_strip_during(proc)
+        proc.communicate(timeout=20)
+        lifted = [p for p in seen if p.get("lifted") == dragged]
+        on_top = all(
+            next((c["z"] for c in p["cards"] if c["stage"] == dragged), 0) > max([c["z"] for c in p["cards"] if c["stage"] != dragged] or [0])
+            for p in lifted)
+        check(bool(lifted) and on_top, f"the dragged card is above every other card while dragged and gliding ({len(lifted)} of {len(seen)} samples)")
+        rel = []
+        for p in lifted:
+            c = next((c for c in p["cards"] if c["stage"] == dragged), None)
+            if c and c.get("thumb") and c.get("icons"):
+                th, ic = c["thumb"], c["icons"][0]
+                rel.append(((ic["x"] - th["x"]) / th["w"], (ic["y"] - th["y"]) / th["h"], th["w"], th["h"]))
+        if check(len(rel) >= 3, f"the dragged card's thumbnail and icon were sampled ({len(rel)} samples)"):
+            dev = max(max(abs(r[0] - rel[0][0]) * r[2], abs(r[1] - rel[0][1]) * r[3]) for r in rel)
+            check(dev <= 1.0, f"its icon keeps its place on the thumbnail through the drag and the glide (largest drift {dev:.2f} pt)")
+        time.sleep(0.5)
+        st = state()
+        n = numbers_by_id(st).get(dragged)
+        check(n in st["strip"] and st["strip"].index(n) == 3, f"it took slot 3 ({st['strip']}, the dragged card is {n})")
+
+    say("-- a window dragged over the strip: its card is under the pointer (top and bottom quarter)")
+    for frac in (0.25, 0.75):
+        s = state()
+        shown = [w for w in s["windows"] if w["home"] == s["active"] and not w["parked"] and w["role"] == "standard"]
+        if not shown:
+            do("switch", s["strip"][0])
+            time.sleep(1.0)
+            s = state()
+            shown = [w for w in s["windows"] if w["home"] == s["active"] and not w["parked"] and w["role"] == "standard"]
+        if not check(bool(shown), f"a shown window to drag ({frac})"):
+            continue
+        f = shown[0]["restore"]
+        grab = (f["x"] + 300, f["y"] + 12)
+        target = (vis["x"] + 60, vis["y"] + vis["h"] * frac)
+        words = [str(round(v, 1)) for p in (grab, (grab[0] - 60, grab[1]), target) for v in p] + ["hold=1500"]
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.9)
+        region = [vis["x"], vis["y"], s["strip_width"] + 120, vis["h"]]
+        got = ctl("debug-overlay", *region)
+        proc.communicate(timeout=20)
+        b = got.get("bounds")
+        grab_y = 12 / f["h"]
+        ok = bool(b) and inside(target, b, 4) and abs(b["y"] + grab_y * b["h"] - target[1]) <= 8
+        check(ok, f"{int(frac * 100)} % down: the dragged window's card is drawn under the pointer "
+                  f"(pointer {target[0]:.0f},{target[1]:.0f}; card {b and fmt(b)}; {got.get('error', '')})")
+        time.sleep(1.0)
+
+    say("-- slowed down: a window's snapshot lands exactly on the window")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(CONFIG_SLOW)
+    ctl("reload")
+    time.sleep(1.0)
+    s = state()
+    if s.get("strip_cards"):
+        slot = 0
+        target = s["strip"][slot]
+        incoming = [w for w in s["windows"] if w["home"] == target and w["role"] == "standard"]
+        if check(bool(incoming), "a card with a window to bring back"):
+            win = incoming[0]
+            r = win["restore"]
+            region = [r["x"] - 40, r["y"] - 40, r["w"] + 80, r["h"] + 80]
+            ctl("debug-click", *center(s["strip_cards"][slot]["frame"]))
+            last, end = None, time.time() + 8
+            while time.time() < end:
+                got = ctl("debug-overlay", *region)
+                if got.get("bounds"):
+                    last = got["bounds"]
+                elif last and got.get("ok"):
+                    break
+                time.sleep(0.05)
+            b = cg_bounds(win["id"])
+            check(bool(last) and b is not None and off(last, b) <= 3.0,
+                  f"the growing snapshot's last frame drawn is the window's frame (drawn {last and fmt(last)}, window {b and fmt(b)})")
+            t = state().get("last_transition") or {}
+            g = next((g for g in t.get("ghosts", []) if g["window"] == win["id"]), None)
+            check(g is not None and g.get("real") and b and off(g["end"], b) <= 1.0,
+                  f"its last frame is within 1 pt of the window's (end {g and fmt(g['end'])}, window {b and fmt(b)})")
+    stop_app()
+    all_onscreen("slots quit")
+    write_config(None)
+    stop_all_fixtures()
+
+
 # ----- visible: the stage area beside the strip, the edge tab, quit right after a start --
 
 
@@ -1396,7 +1677,7 @@ def frontmost_bundle():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "slots"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -1411,7 +1692,7 @@ def main():
                 failed.append("the owner's app is running")
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
-             "native": phase_native, "parity": phase_parity, "motion": phase_motion}[p]()
+             "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

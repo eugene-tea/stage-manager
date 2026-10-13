@@ -380,11 +380,11 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
-            Command::DebugDrag { points, shift } => {
+            Command::DebugDrag { points, shift, hold_ms } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-drag needs STAGE_MANAGER_TEST=1");
                 }
-                match input::drag(&points, shift, Duration::from_millis(400)) {
+                match input::drag(&points, shift, Duration::from_millis(hold_ms.min(5000))) {
                     Ok(()) => json!({ "ok": true }),
                     Err(e) => ctl::error_reply(&e),
                 }

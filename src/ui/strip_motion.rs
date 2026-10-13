@@ -9,7 +9,11 @@
 //!   back when its stage returns; a card's thumbnail stands in when there is none.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
 //!   snapshots appear exactly over them and shrink into their card's slot on the spring;
-//!   incoming windows' snapshots grow from their card to their frames. The strip answers
+//!   incoming windows' snapshots grow from their card to their frames. The slot is the
+//!   engine's ([`MovingWindow::slot`], `ui::transition_plan`), never one the strip works out
+//!   on its own; once the incoming windows are in place their frames are read back and their
+//!   snapshots finish exactly there. Each snapshot's start, end and slot are logged and kept
+//!   for `ctl state` ([`strip_model::last_transition`]). The strip answers
 //!   with what it covered ([`strip_model::cover`]); the controller parks the outgoing
 //!   windows behind their snapshots and holds the incoming ones until
 //!   [`StripEvent::Unveil`] (at `unpark_at` of the motion). The outgoing stage's card stays
