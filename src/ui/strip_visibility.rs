@@ -87,6 +87,9 @@ pub struct Visibility {
     dwell_since: Option<Instant>,
     left_since: Option<Instant>,
     revealed: bool,
+    /// The last step was [`Mode::Shown`]: a strip in plain view that a window now covers
+    /// stays revealed while the pointer is on it.
+    was_shown: bool,
     /// Shown regardless of the pointer until then (the launch announce).
     hold_until: Option<Instant>,
     /// The edge tab's area (global), when it shows: resting on it counts as the edge.
@@ -126,11 +129,20 @@ impl Visibility {
     pub fn step(&mut self, mode: Mode, pointer: Option<Point>, strip: &Rect, now: Instant) -> Decision {
         match mode {
             Mode::Off | Mode::Shown => {
-                *self = Self { tab: self.tab, timing: self.timing, ..Self::default() };
+                *self = Self { tab: self.tab, timing: self.timing, was_shown: mode == Mode::Shown, ..Self::default() };
                 Decision { shown: mode == Mode::Shown, poll: false }
             }
             Mode::EdgeOnly => {
                 let in_rows = |p: &Point| p.y >= strip.y && p.y <= strip.max_y();
+                // Shown a moment ago with the pointer on it (a card click to a stage whose
+                // window covers the strip): it stays until the pointer leaves, as after an
+                // edge reveal (10-13: it slid away under the pointer, and the clicked
+                // stage's window grew from its card already off screen).
+                if std::mem::take(&mut self.was_shown) && pointer.is_some_and(|p| strip.contains(p)) {
+                    self.revealed = true;
+                    self.dwell_since = None;
+                    self.left_since = None;
+                }
                 let on_tab = |p: &Point| self.tab.is_some_and(|t| t.contains(*p));
                 let held = self.hold_until.is_some_and(|t| now < t);
                 if !held {
@@ -189,6 +201,24 @@ mod tests {
         assert!(overlaps(&[Rect::new(150.0, 100.0, 500.0, 400.0)], &STRIP));
         assert!(!overlaps(&[Rect::new(200.0, 100.0, 500.0, 400.0)], &STRIP));
         assert!(!overlaps(&[], &STRIP));
+    }
+
+    #[test]
+    fn a_strip_in_view_that_a_window_covers_stays_under_the_pointer() {
+        let mut v = Visibility::default();
+        let t = Instant::now();
+        let inside = Some(Point::new(120.0, 500.0));
+        let away = Some(Point::new(900.0, 500.0));
+        assert!(v.step(Mode::Shown, None, &STRIP, t).shown);
+        assert!(v.step(Mode::EdgeOnly, inside, &STRIP, ms(t, 10)).shown, "the pointer on it: kept");
+        assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 20)).shown, "leaving: the delay first");
+        assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 5000)).shown, "then hidden");
+        // The pointer elsewhere when the window comes: hidden at once, as before.
+        let mut v = Visibility::default();
+        assert!(v.step(Mode::Shown, None, &STRIP, t).shown);
+        assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 10)).shown);
+        // Only right after Shown: a later pass over the strip needs the edge.
+        assert!(!v.step(Mode::EdgeOnly, inside, &STRIP, ms(t, 20)).shown);
     }
 
     #[test]
