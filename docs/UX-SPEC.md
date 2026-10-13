@@ -17,9 +17,9 @@ made the geometry and timing measurable without a screen recording.
 
 | macOS setting (System Settings → Desktop & Dock) | Key in `com.apple.WindowManager` | His value | Our behavior |
 |---|---|---|---|
-| Stage Manager on/off | `GloballyEnabled` | 1 | We warn while Apple's is on; both cannot run |
-| Show recent apps in Stage Manager | `AutoHide` (1 = hidden) | 0 | 1 hides our strip until edge hover |
-| Show windows from an application: All at Once / One at a Time | `AppWindowGroupingBehavior` (1 = all at once) | 1 | See "Grouping" |
+| Stage Manager on/off | `GloballyEnabled` | 1 | Both cannot run: while Apple's is on we stand down (every window back, no strip, nothing arranged) and offer "Turn Off Apple's Stage Manager" (written only on that click); when it goes off we start afresh from the windows on screen |
+| Show recent apps in Stage Manager | `AutoHide` (1 = hidden) | 0 | 1 hides our strip until edge hover; our Settings writes it on a click, as Apple's Customize sheet does |
+| Show windows from an application: All at Once / One at a Time | `AppWindowGroupingBehavior` (1 = all at once) | 1 | See "Grouping"; our Settings writes it on a click |
 | Show items: On Desktop, in Stage Manager | `HideDesktop` (1 = hidden) | 0 | Read; Finder desktop icons are not ours to hide (deviation) |
 | Click wallpaper to reveal desktop | `EnableStandardClickToShowDesktop` (1 or absent = Always, macOS's default since Sonoma; 0 = Only in Stage Manager) | absent (= Always) | Only in Stage Manager: our click toggles the desktop reveal. Always: macOS moves every window aside itself and our reveal stays off, so the two never fight |
 | Widgets in Stage Manager | `StageManagerHideWidgets` | 1 | Not applicable |
@@ -34,6 +34,8 @@ whose default is Apple's value (`stage-manager config --explain <key>`).
 
 | What | Apple | Our default | Key to change it |
 |---|---|---|---|
+| Menu bar icon | none (Apple's Stage Manager has no menu bar item; Control Center holds its toggle) | on: Apple's menu-bar-app menu (approvals while missing, About, Check for Updates…, Settings… ⌘,, Quit); off in Settings, the app runs with no indicator and opening it again shows Settings (the owner's word, 10-13) | `[app] show_menu_bar_icon` |
+| Launch at login | n/a (part of macOS) | on: an installed copy registers itself as a login item at its first launch (the owner's word, 10-13) | `[app] launch_at_login` |
 | Turning Stage Manager on | moves and resizes nothing (a window at x = −6, 1800 wide, stays) | same | — |
 | Switching stages | each window back at exactly its own frame, even over the strip | same | `[windows] fit = "move"` / `"narrow"` keeps windows clear of the strip |
 | A window over the strip | the strip hides while it overlaps | same | — |

@@ -91,6 +91,11 @@ pub fn state_file() -> PathBuf {
     config_dir().join("state.json")
 }
 
+/// `app-state.json`: what the app remembers about itself (see [`crate::app_state`]).
+pub fn app_state_file() -> PathBuf {
+    config_dir().join("app-state.json")
+}
+
 /// The clean-exit marker of the app process `pid`: written right before a clean exit, after
 /// every window is back onscreen; the guardian then exits without a recovery scan.
 pub fn clean_exit_marker(pid: u32) -> PathBuf {
@@ -136,6 +141,7 @@ mod tests {
         }
         assert!(config_file().ends_with("config.toml"));
         assert!(state_file().ends_with("state.json"));
+        assert!(app_state_file().ends_with("app-state.json"));
         assert!(clean_exit_marker(42).ends_with(".clean-exit-42"));
         assert!(parked_file(42).ends_with(".parked-42.json"));
     }

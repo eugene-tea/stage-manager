@@ -8,6 +8,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+# The build number (CFBundleVersion, shown in parentheses in About): the commit count, which
+# only grows; the version itself (CFBundleShortVersionString) comes from Cargo.toml.
+BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
 write_plist() { # path id name executable extra-keys
   cat > "$1" <<PLIST
@@ -30,7 +33,7 @@ write_plist() { # path id name executable extra-keys
 	<key>CFBundleShortVersionString</key>
 	<string>$VERSION</string>
 	<key>CFBundleVersion</key>
-	<string>$VERSION</string>
+	<string>$BUILD</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>

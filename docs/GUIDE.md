@@ -50,24 +50,37 @@ through to the app when they are set.
 Why LaunchServices: a binary started straight from a terminal has its TCC grants checked
 against the terminal. Launched with `open`, macOS checks the bundle's own signature.
 
-## Permissions
+## Permissions (approvals)
 
-- **Accessibility** — observing and moving windows. Without it the app runs, says so in the
-  menu, and starts observing within 2 s of the grant (no relaunch).
-- **Screen Recording** — strip thumbnails and switch-animation snapshots (ScreenCaptureKit).
-  The strip also asks through `SCShareableContent`, which is what lists the app in System
-  Settings on recent macOS. `[strip] capture = false` turns window pictures off: cards and
-  switch ghosts are drawn plain and the app never touches screen capture.
+The exact texts for the outside world (the DMG, the info page) are in `docs/APPROVALS.md`.
 
-At launch the app asks macOS for whatever is missing (system dialogs), unless
-`STAGE_MANAGER_NO_PROMPT` is set. The menu shows "Grant Accessibility…" / "Grant Screen
-Recording…" while a grant is missing; each opens the matching Privacy pane.
+- **Accessibility** (required) — observing and moving windows. Without it the app runs,
+  says so in the menu, and starts observing within a second of the grant (no relaunch).
+  The input monitor's key-downs and the test-only posted events ride on it too.
+- **Screen Recording** (optional) — strip thumbnails and switch-animation snapshots
+  (ScreenCaptureKit). Without it, cards draw plain window shapes with the app's icon and
+  switches move plain ghosts. The strip also asks through `SCShareableContent`, which is what
+  lists the app in System Settings on recent macOS. `[strip] capture = false` turns window
+  pictures off: then Screen Recording is never asked for.
+- **Input Monitoring** — not needed: no event tap and no HID access. Mouse events come from
+  an `NSEvent` global monitor (no grant), key-downs from the same monitor under
+  Accessibility, hotkeys from Carbon's `RegisterEventHotKey` (no grant).
+
+**No system prompt at launch.** The **welcome window** asks instead: it shows at the first
+launch, and at any launch while Accessibility is missing or Apple's Stage Manager is on. One
+row per approval (what it is for; a green check mark once allowed, else **Allow…**, which
+asks macOS to list the app and opens the right Privacy pane), a row to turn Apple's Stage
+Manager off while it is on, **Open Settings…** and **Later** / **Done**. Rows update live as
+approvals land; once everything is in place it says "Stage Manager is all set". While any
+approval is missing the menu also starts with "Stage Manager needs … access" and
+"Allow …"; both go once everything is granted. `STAGE_MANAGER_NO_PROMPT` (test runs) shows
+no welcome.
 
 macOS may also show its own screen-access alert ("… is requesting to bypass the system
 private window picker and directly access your screen and audio"); see Known limitations.
 If macOS refuses a capture as not permitted, the app stops capturing (plain cards and
 ghosts), says so once in the log, tries again after 10 minutes (doubling up to 2 hours),
-and "Grant Screen Recording…" shows in the menu; clicking it tries again at once.
+and "Allow Screen Recording…" shows in the menu; clicking it tries again at once.
 
 The stable signature keeps the grants across rebuilds. Its designated requirement is
 `identifier "dev.eugene.stagemanager" and certificate leaf = H"<sha1>"`; check with
@@ -78,8 +91,36 @@ The stable signature keeps the grants across rebuilds. Its designated requiremen
 Apple's `com.apple.WindowManager` preferences are the source of truth wherever they exist
 (`AppWindowGroupingBehavior`, `AutoHide`, `HideDesktop`, `GloballyEnabled`,
 `StageManagerHideWidgets`, `StandardHideWidgets`, `EnableStandardClickToShowDesktop`). The
-app re-reads them every 2 s and logs changes. Apple's own Stage Manager must be off while
-this app runs; the log and the menu warn when `GloballyEnabled` is 1.
+app re-reads them every second and logs changes. Settings changes two of them on a click,
+the same keys Apple's own Customize sheet writes: "Show recent apps" (`AutoHide`) and "Show
+windows from an application" (`AppWindowGroupingBehavior`); "Click wallpaper to reveal
+desktop" is never written (Settings opens Desktop & Dock for it).
+
+### Apple's Stage Manager on: the app stands down
+
+Both cannot run. While `GloballyEnabled` is 1 (at launch, or turned on from Control Center
+while the app runs) the app **stands down**: every parked window comes back through the
+quit path (the controller's unpark, then the registry and a recovery scan; a window on
+another Space comes back when its Space shows), the strip hides on every Desktop,
+observation stops, and no click, drag, hotkey or Space change arranges anything. When
+Apple's turns off, the app starts afresh from the windows on screen, as a first start
+does: the stages saved before (`state.json`) are dropped, since Apple's arranged the
+windows meanwhile. The state machine is `engine::stand_down`; the WM thread carries it out.
+
+- **At launch while it is on:** the welcome window (when due) has a row for it; otherwise an
+  alert says "Stage Manager takes over from it — turn Apple's off to continue." with **Turn
+  Off Apple's Stage Manager** and **Not Now**.
+- **Turned on while the app runs:** no window pops up; the menu shows **Turn Off Apple's
+  Stage Manager…** at the top.
+- **Settings → Stage Manager** shows its state, with **Turn Off** while it is on.
+- **Turning it off** (only on one of those clicks) writes `GloballyEnabled = false` to
+  `com.apple.WindowManager` with CFPreferences, synchronizes, and checks 2 s later that it
+  stopped: the key reads back 0 and Apple's `WindowManager` process shows no more on-screen
+  windows than before (`CGWindowListCopyWindowInfo`; its strip's cards are its windows).
+  Otherwise System Settings → Desktop & Dock opens with a one-line hint. Unit tests and
+  test runs never write it; `scripts/test-apple-stage-manager.sh` (only with
+  `SM_TEST_TOGGLE_APPLE_SM=1`, the owner's to run) toggles it live and restores his value on
+  every exit.
 
 ## Using it
 
@@ -195,8 +236,109 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   `EnableStandardClickToShowDesktop` means Always), macOS itself moves every window aside
   and we move nothing, so the two never run together. Either way Finder's activation that
   follows the click never switches stages.
-- **Quit** from the menu bar item brings every parked window back first, and every window
-  we narrowed or moved clear of the strip back to its earlier frame.
+- **Quit** (the menu, ⌘Q in Settings, or a quit from the system such as logging out) brings
+  every parked window back first, and every window we narrowed or moved clear of the strip
+  back to its earlier frame.
+
+## The menu bar icon and its menu
+
+The icon is on by default (`[app] show_menu_bar_icon`; Apple's Stage Manager has none, the
+owner's word 10-13). Its menu, in Apple's menu-bar-app order:
+
+1. While something is missing: "Stage Manager needs Accessibility access" with "Allow
+   Accessibility…", the same for Screen Recording (only while window pictures are on),
+   "Turn Off Apple's Stage Manager…" while Apple's is on, and the config file's error.
+2. **About Stage Manager**, **Check for Updates…**
+3. **Settings…** (⌘, shown; no action needs a shortcut)
+4. **Mark a Problem** while the log is verbose (the trial week)
+5. **Quit Stage Manager**
+
+**Without the icon** the app runs with no indicator at all. Opening Stage Manager again
+(Finder, Spotlight, Launchpad, `open`) shows its Settings window: macOS hands the launch to
+the running app (`applicationShouldHandleReopen`), and a second process started another way
+(`open -n`, a terminal) asks the running one over the ctl socket (`ctl settings`) and exits.
+
+## Settings
+
+One window in the look of System Settings (a grouped form, standard controls). Every change
+applies at once and is written to `config.toml` keeping its comments: a key changed from
+its default is uncommented in place (`key = value`), and set back to its default it is
+commented out again, so the file keeps holding no live values for defaults (`config::edit`,
+`toml_edit` for keys written another way). A file edited elsewhere (an agent, an editor)
+shows in the open window within a second.
+
+- **General:** Launch at login · Show menu bar icon ("To open Settings again, open Stage
+  Manager from Applications.") · Check for updates automatically · the version with
+  **Check for Updates…**.
+- **Stage Manager** (Apple's Customize sheet): Apple's Stage Manager (state, **Turn Off**) ·
+  Show recent apps in Stage Manager · Show windows from an application (All at Once / One at
+  a Time) · Click wallpaper to reveal desktop (shown; **Desktop & Dock Settings…** opens
+  System Settings, never written).
+- **Extras:** Merge stages by dropping a card on a card (`[strip] merge_on_drop`) · Hold Shift
+  to bring apps to the current stage (`[sugar] shift_brings_here`) · Keep windows clear of
+  the strip (`[windows] fit`) · Keyboard shortcuts (`[hotkeys] enabled`) · Animation speed
+  (`[animation] speed`: a slider from Slower through Native, Apple's 1, to Faster, stopping
+  at 0.25, 0.33, 0.5, 0.75, 1, 1.5, 2, 3, 4; disabled while `[animation] enabled = false` or
+  `speed = 0`).
+- **Advanced:** "Every option lives in a config file." with **Reveal in Finder** and **Open
+  Config File…**, the file's error if it has one, and "The easiest way to change anything
+  else is to ask an AI agent (Claude Code, Codex, …) to do it." with **Copy Instructions for
+  Agents**: a short prompt naming `docs/AGENTS.md` on GitHub, the config file's path and the
+  `config check` command, ending "What I want: " for the user's ask.
+
+`stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate|apple
+[--dark|--light] [--png FILE]` opens one of these windows alone (no WM thread, no event
+monitor, no Accessibility, no login item, built-in defaults, nothing written), or draws it
+into a PNG in-process (`cacheDisplayInRect`, never a screen capture; an undisplayed window
+draws as inactive, so switches that are on show grey) and exits.
+
+## About and updates
+
+**About Stage Manager** is AppKit's standard panel: the icon, name, version and build
+(`CFBundleShortVersionString` from `Cargo.toml`, `CFBundleVersion` the commit count), "By
+eugene-tea" linked to <https://eugene-tea.github.io/stage-manager/>, and "Source code on
+GitHub".
+
+**Updates** come from GitHub Releases: `GET
+https://api.github.com/repos/eugene-tea/stage-manager/releases/latest` through an ephemeral
+`NSURLSession` (no cookies, no cache, a generic user agent; nothing about the user is sent).
+The version is the tag (`vX.Y.Z`, the `v` stripped), compared as semver. No release yet
+(404) counts as up to date.
+
+- A newer one: "A new version of Stage Manager is available" / "Stage Manager X is
+  available — you have Y." with **Download** (opens the release's `Stage-Manager.dmg`, else
+  its page), **Later** and **Skip This Version** (automatic checks stay quiet about it).
+- Nothing newer (a manual check only): "You're up to date".
+- A failure: a plain alert for a manual check, one quiet log line for an automatic one.
+- Automatic checks (`[app] check_for_updates`, on by default): 30 s after launch, then
+  hourly, running only when a day has passed since the last one that reached GitHub
+  (`app-state.json`). Never in test runs (`STAGE_MANAGER_NO_PROMPT` or `STAGE_MANAGER_HOME`).
+
+Alerts never block: they show as ordinary windows (`runModal` would stop the main run
+loop's timers while one waits).
+
+The checks assume nothing about the signature: a Developer ID signed and notarized DMG and a
+locally signed build behave the same.
+
+## Launch at login
+
+`SMAppService.mainApp` (System Settings → General → Login Items lists the app itself).
+`[app] launch_at_login` is on by default: an installed copy registers at its first launch
+(once; `app-state.json` remembers), and from then on the Settings switch (or an edit of the
+key) registers or unregisters it. The switch shows the real state: turned off in Login
+Items it shows off; "requires approval" shows a note and **Login Items…**.
+
+Only an installed copy ever registers: the bundle directly in `/Applications` or
+`~/Applications`, not translocated, not under `target/`, not the dev copy
+(`~/Library/Application Support/Stage Manager Dev/`), and neither `STAGE_MANAGER_HOME` nor
+`STAGE_MANAGER_NO_LOGIN_ITEM` set (`platform::login_item::gate`, unit tested). Tests never
+add a login item. Elsewhere the switch is disabled with "Available when Stage Manager runs
+from Applications."
+
+## Notes for AI agents
+
+`docs/AGENTS.md` is the guide for an agent configuring the app (where the config lives, how
+changes apply, how to check the file, how to read state and logs, what never to do).
 
 ### Hotkeys (optional, off by default)
 
@@ -219,7 +361,7 @@ changes; one another app already holds is logged and skipped.
 ## Configuration
 
 `~/.config/stage-manager/config.toml` (or `$STAGE_MANAGER_HOME/config.toml`), re-read within
-a second of every save (also Reload Config in the menu, or `ctl reload`). Look and motion
+a second of every save (also `ctl reload`; Settings writes keys for you). Look and motion
 keys apply to the strip live. A bad value keeps the last good config (the error shows in the
 menu and the log); unknown keys and out-of-range numbers only warn (numbers are clamped).
 Apple's own Stage Manager settings are read live from `com.apple.WindowManager` and never
@@ -235,7 +377,7 @@ today's at launch, and the log says so; any other file is left alone.
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
 "$B" config --print-defaults        # the commented default file
 "$B" config --explain cards.tilt    # one key: what it does, type, range, default
-"$B" config --check [file]          # validate a file (default: the real one)
+"$B" config check [file]            # validate a file (default: the real one); errors name their line
 "$B" config --reference             # the table below
 ```
 
@@ -243,6 +385,9 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 
 | Key | Default | Values | What it does |
 |---|---|---|---|
+| `app.launch_at_login` | `true` | true or false | Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers. |
+| `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none; on by the owner's word). Without it, open Stage Manager again from Applications to reach Settings. |
+| `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
 | `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
@@ -510,7 +655,9 @@ lines; the measurement is in `PLAN.md`, "Before public release"), far under the 
 |----------|--------|
 | `RUST_LOG` | log filter (`target=level` directives); overrides `[log] level` |
 | `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone (default `~/Library/Logs/Stage Manager`, or `STAGE_MANAGER_HOME`) |
-| `STAGE_MANAGER_NO_PROMPT` | never show permission dialogs at launch |
+| `STAGE_MANAGER_NO_PROMPT` | no permission dialogs, no welcome window, no prompts and no automatic update check (test runs) |
+| `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item |
+| `SM_TEST_TOGGLE_APPLE_SM` | `1`: a test run (`STAGE_MANAGER_HOME`) may write `com.apple.WindowManager` (the owner's live stand-down test only) |
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
 | `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
 | `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-*`) and `debug-post-space` |
@@ -524,7 +671,8 @@ line of JSON per reply. The same binary is the client (set the same `STAGE_MANAG
 
 | Command | Does |
 |---------|------|
-| `ping` | `{"ok":true,"pong":true,"pid":…,"version":…}` |
+| `ping` | `{"ok":true,"pong":true,"pid":…,"version":…,"apple_stage_manager_on":…}` |
+| `settings` | show the Settings window (a second launch hands off with this) |
 | `space` | the Space shown as the engine sees it: synthetic id, full screen, a change still settling, Space changes so far, the overview showing (Mission Control or App Exposé, Show Desktop) and whether Space inference waits for it |
 | `dump` | observed apps and windows (says so when Accessibility is missing), and `spaces`: each Space's synthetic id, display, whether it shows, its active stage and stage ids (no titles), plus windows waiting to show and saved Spaces not visited yet |
 | `state` | stages (with their Space), windows, restore and live frames, parked flags, strip, the Space shown, config error |
@@ -678,7 +826,7 @@ screen-access alerts macOS showed meanwhile (from replayd's log, any app).
 the live window list every second (no Accessibility; it never moves a window): one stage per
 app, as Apple's "All at Once" (so it compares like for like with Apple's strip), and the
 stage holding the frontmost window is "active" (its frames drive auto-hide). Clicks are
-logged; the menu's Show/Hide Strip toggles it. Its look comes from the built-in defaults, or
+logged. Its look comes from the built-in defaults, or
 from `$STAGE_MANAGER_HOME/config.toml` when that is set (re-read when saved, never written).
 
 ```sh
@@ -727,7 +875,11 @@ limited to the fixture.
 ## Layout
 
 - `src/engine`, `src/config.rs` — pure Rust engine and configuration (unit tested);
-  `src/config/schema.rs` lists every key with its type, range, default and doc line.
+  `src/config/schema.rs` lists every key with its type, range, default and doc line;
+  `src/config/edit.rs` writes one key keeping the file's comments; `engine::stand_down` is
+  the stand-down state machine.
+- `src/updates.rs`, `src/app_state.rs` — pure: versions, the release JSON, when to check;
+  what the app remembers about itself (`app-state.json`).
 - `src/logbook` — the daily log, pure Rust (unit tested): local dates and stamps, the day's
   file with its cap, retention, the event counters, the ring of recent lines, marks and
   `log summary`; `platform::logging` is its tracing layer.
@@ -739,11 +891,17 @@ limited to the fixture.
   `desktop` (displays, wallpaper clicks), `input` (the global mouse and key monitor, live
   modifiers, the Shift sugar's trigger record, test-only synthetic input), `capture` (ScreenCaptureKit thumbnails on a worker
   thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,
-  `native_settings`, `ctl`, `logging`, `paths`.
+  `native_settings` (also its click-only writes), `ctl`, `logging`, `paths`, `login_item`
+  (SMAppService and its gate), `update_check` (NSURLSession).
 - `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
   clicks, level, card drag, reorder and merge, the gap for window drags, slide), `strip_motion`
   (full-size snapshots, transitions, the dragged window's card), `overlay` (the
   click-through motion layer above everything), `motion_math` (pure: spring timing, planes,
   drop spots, snapshot budget), `strip_layout` (pure geometry and tilt), `strip_visibility`
-  (pure auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`.
-- `scripts/` — signing identity, bundling, signing, run, fixture, `test-stages.sh`.
+  (pure auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`;
+  the app's own windows: `shell` (About, Settings, welcome, updates, login item, Apple's
+  Stage Manager), `settings_window`, `welcome`, `about`, `alert` (non-blocking NSAlert),
+  `app_menu` (delegate, reopen, the hidden main menu), `form` (the grouped-form toolkit and
+  the PNG render), `preview`.
+- `scripts/` — signing identity, bundling, signing, run, fixture, `test-stages.sh`,
+  `test-apple-stage-manager.sh` (opt-in, the owner's).

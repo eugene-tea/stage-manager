@@ -63,6 +63,8 @@ pub enum Command {
     UnparkAll,
     /// Re-read config.toml.
     Reload,
+    /// Show the Settings window (a second launch hands off with this).
+    Settings,
     /// Write a problem mark into the day's log: the note (may be empty), a state dump and
     /// the last seconds of detailed lines.
     Mark(String),
@@ -178,6 +180,7 @@ impl Command {
             ["reveal"] => Ok(Self::Reveal),
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
+            ["settings"] => Ok(Self::Settings),
             ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
@@ -340,7 +343,7 @@ pub fn request(line: &str, timeout: Duration) -> std::io::Result<String> {
 pub fn run_client(words: &[String]) -> ExitCode {
     if words.is_empty() {
         eprintln!(
-            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload|mark [NOTE]>"
+            "usage: stage-manager ctl <ping|space|dump|state|quit|switch N|send N [ID]|new [ID]|pin [ID]|merge N|reveal|unpark-all|reload|settings|mark [NOTE]>"
         );
         return ExitCode::from(2);
     }
@@ -418,6 +421,7 @@ mod tests {
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
+        assert_eq!(Command::parse("settings"), Ok(Command::Settings));
         assert_eq!(Command::parse("mark"), Ok(Command::Mark(String::new())));
         assert_eq!(Command::parse("mark  strip  gone "), Ok(Command::Mark("strip gone".into())));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));

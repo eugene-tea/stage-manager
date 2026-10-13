@@ -6,6 +6,12 @@
 //! The send happens before the block is scheduled, so a wake-up is never lost; a drain that
 //! finds the channel already empty is harmless.
 //!
+//! While Apple's Stage Manager is on the thread stands down ([`StandDown`]): every parked
+//! window comes back through the controller's unpark (the quit path), the strip hides on
+//! every Desktop, observation stops and a fresh controller waits; when Apple's turns off,
+//! observation starts again and the fresh controller builds stages from the windows on
+//! screen, without the stale `state.json`.
+//!
 //! Every entry point (command drain, AX callback, timer) runs inside
 //! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
 //! of killing the thread that owns the windows.
@@ -28,11 +34,12 @@ use super::ax::AxElement;
 use super::controller::Controller;
 use super::ctl::Command;
 use super::input::InputEvent;
-use super::native_settings::RawSettings;
+use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
 use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
+use crate::engine::stand_down::{StandDown, Step, Work};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
@@ -173,6 +180,10 @@ struct WmState {
     controller: Controller,
     scanned: bool,
     ticks: u32,
+    /// Accessibility as last reported by the main thread.
+    trusted: bool,
+    /// Apple's Stage Manager is on: nothing is arranged.
+    stand_down: StandDown,
 }
 
 thread_local! {
@@ -266,11 +277,34 @@ impl WmState {
                         tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
                     }
                 }
-                self.observer.set_accessibility(trusted, ax_callback);
+                self.trusted = trusted;
+                if self.stand_down.admits(Work::Observe) || !trusted {
+                    self.observer.set_accessibility(trusted, ax_callback);
+                } else {
+                    tracing::info!("Apple's Stage Manager is on: observation waits until it is off");
+                }
             }
             WmCommand::NativeSettings(settings) => {
+                let apple_on = native_settings::apple_stage_manager_enabled(&settings);
                 self.controller.set_settings(&settings);
                 self.observer.set_settings(settings);
+                match self.stand_down.apple(apple_on) {
+                    Step::Release => self.release(),
+                    Step::Resume => self.resume(),
+                    Step::Nothing => {}
+                }
+            }
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
+                if !self.stand_down.admits(Work::Input) =>
+            {
+                tracing::debug!("Apple's Stage Manager is on: input ignored");
+            }
+            WmCommand::SpaceChanged if !self.stand_down.admits(Work::SpaceChange) => {
+                if self.stand_down.stranded() {
+                    // A window the release could not reach may show on this Space now.
+                    let ok = safety::emergency_unpark("stand-down") && safety::registry_len() == 0;
+                    self.stand_down.released(ok);
+                }
             }
             WmCommand::Displays(displays) => self.controller.set_displays(&mut self.observer, displays),
             // Without Accessibility no window can move: a stage change now would leave the
@@ -316,6 +350,41 @@ impl WmState {
         }
     }
 
+    /// Apple's Stage Manager came on: every parked window back (the quit path, with the
+    /// registry and a recovery scan behind it), every strip pane hidden, observation stopped,
+    /// and a fresh controller (no stages) waiting for [`Self::resume`].
+    fn release(&mut self) {
+        tracing::warn!("Apple's Stage Manager is on: standing down (every window back, no strip, nothing arranged)");
+        let failed = self.controller.unpark_all(&self.observer);
+        let mut all_back = failed == 0 && safety::registry_len() == 0;
+        if !all_back {
+            all_back = safety::emergency_unpark("stand-down") && safety::registry_len() == 0;
+        }
+        if !all_back {
+            tracing::warn!(left = safety::registry_len(), "standing down: some windows wait for their Space to show to come back");
+        }
+        self.stand_down.released(all_back);
+        self.observer.stop();
+        let _ = self.observer.take_events();
+        self.controller = Controller::new();
+        dispatch2::DispatchQueue::main().exec_async(crate::ui::strip::stand_down);
+    }
+
+    /// Apple's Stage Manager went off: start afresh from the windows on screen. The saved
+    /// stages are stale (Apple's arranged the windows meanwhile), so `state.json` goes.
+    fn resume(&mut self) {
+        tracing::info!("Apple's Stage Manager is off: starting fresh from the windows on screen");
+        let state = super::paths::state_file();
+        match std::fs::remove_file(&state) {
+            Ok(()) => tracing::info!("saved stages from before Apple's Stage Manager dropped"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("cannot remove {}: {e}", state.display()),
+        }
+        if self.trusted {
+            self.observer.set_accessibility(true, ax_callback);
+        }
+    }
+
     fn tick(&mut self) {
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks.is_multiple_of(RETRY_EVERY) {
@@ -349,6 +418,8 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         controller: Controller::new(),
         scanned: false,
         ticks: 0,
+        trusted: false,
+        stand_down: StandDown::default(),
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));

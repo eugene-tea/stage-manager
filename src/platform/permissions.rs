@@ -33,6 +33,99 @@ impl PermissionState {
     }
 }
 
+/// One approval (TCC grant) the app asks for. The audit (10-13): Accessibility is required
+/// (observing and moving windows; the input monitor's key events and the test-only posted
+/// events ride on it too); Screen Recording is optional (window pictures for cards and
+/// switches; without it cards draw plain window shapes with the app icon); Input Monitoring
+/// is not needed (no event tap or HID access: mouse events come from an `NSEvent` global
+/// monitor, which needs no grant, key-downs from the same monitor under Accessibility, and
+/// hotkeys from Carbon's `RegisterEventHotKey`, which needs none).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Approval {
+    Accessibility,
+    ScreenRecording,
+}
+
+impl Approval {
+    /// Both, in the order they are shown.
+    pub const ALL: [Approval; 2] = [Approval::Accessibility, Approval::ScreenRecording];
+
+    /// The name System Settings uses.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Accessibility => "Accessibility",
+            Self::ScreenRecording => "Screen Recording",
+        }
+    }
+
+    /// What it is for, one sentence (the welcome window's row).
+    pub fn why(self) -> &'static str {
+        match self {
+            Self::Accessibility => "Lets Stage Manager move, hide and bring back your windows.",
+            Self::ScreenRecording => "Shows live pictures of your windows on the cards and in switches.",
+        }
+    }
+
+    /// What happens without it.
+    pub fn without(self) -> &'static str {
+        match self {
+            Self::Accessibility => "Stage Manager cannot arrange windows; it waits until access is allowed.",
+            Self::ScreenRecording => "Cards show plain window shapes with the app's icon.",
+        }
+    }
+
+    /// Whether the app cannot work without it.
+    pub fn required(self) -> bool {
+        self == Self::Accessibility
+    }
+
+    /// The menu's disabled line while it is missing.
+    pub fn needs_line(self) -> String {
+        format!("Stage Manager needs {} access", self.name())
+    }
+
+    /// The menu item and button that ask for it.
+    pub fn allow_title(self) -> String {
+        format!("Allow {}…", self.name())
+    }
+
+    /// An SF Symbol for its row.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Accessibility => "accessibility",
+            Self::ScreenRecording => "rectangle.dashed.badge.record",
+        }
+    }
+
+    /// Its System Settings pane.
+    pub fn pane(self) -> PrivacyPane {
+        match self {
+            Self::Accessibility => PrivacyPane::Accessibility,
+            Self::ScreenRecording => PrivacyPane::ScreenRecording,
+        }
+    }
+
+    /// Whether `state` has it.
+    pub fn granted(self, state: &PermissionState) -> bool {
+        match self {
+            Self::Accessibility => state.accessibility,
+            Self::ScreenRecording => state.screen_recording,
+        }
+    }
+}
+
+/// The approvals to ask for: those missing, plus Screen Recording when macOS refuses
+/// captures. Screen Recording counts only while window pictures are on (`[strip] capture`).
+pub fn missing(state: &PermissionState, capture_on: bool, capture_refused: bool) -> Vec<Approval> {
+    Approval::ALL
+        .into_iter()
+        .filter(|a| match a {
+            Approval::Accessibility => !state.accessibility,
+            Approval::ScreenRecording => capture_on && (!state.screen_recording || capture_refused),
+        })
+        .collect()
+}
+
 /// Which System Settings privacy pane to open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivacyPane {
@@ -104,6 +197,19 @@ mod tests {
         assert_eq!(s(false, true), "Missing: Accessibility");
         assert_eq!(s(true, false), "Missing: Screen Recording");
         assert!(s(false, false).contains("Accessibility, Screen Recording"));
+    }
+
+    #[test]
+    fn missing_approvals_follow_the_grants_and_the_capture_setting() {
+        let p = |a, r| PermissionState { accessibility: a, screen_recording: r };
+        assert_eq!(missing(&p(true, true), true, false), vec![]);
+        assert_eq!(missing(&p(false, true), true, false), vec![Approval::Accessibility]);
+        assert_eq!(missing(&p(false, false), true, false), Approval::ALL.to_vec());
+        assert_eq!(missing(&p(true, false), false, false), vec![], "no window pictures, no Screen Recording");
+        assert_eq!(missing(&p(true, true), true, true), vec![Approval::ScreenRecording], "captures refused");
+        assert!(Approval::Accessibility.required() && !Approval::ScreenRecording.required());
+        assert_eq!(Approval::ScreenRecording.needs_line(), "Stage Manager needs Screen Recording access");
+        assert_eq!(Approval::Accessibility.allow_title(), "Allow Accessibility…");
     }
 
     #[test]
