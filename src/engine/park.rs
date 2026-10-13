@@ -240,13 +240,36 @@ pub fn choose_corner(main: Rect, visible: Rect, others: &[Rect]) -> CornerChoice
     best
 }
 
+/// Whether a park test counts a thin sliver at the display's edge as parked ([`is_sliver`]).
+///
+/// The sliver rule (6X) sees a parked window macOS left a little above the corner's margin
+/// after a display change; it would also see a user's window pushed almost wholly off the
+/// right or bottom edge. So it is for windows we manage (the model's, which are all of
+/// managed apps, and the corner patch's) and for windows we registered or whose app has a
+/// window in `state.json` ([`super::recovery::Known`]); a scan of any other app's windows
+/// leaves it out (the review of 6X, L3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slivers {
+    /// A sliver counts as parked.
+    Count,
+    /// Only the margin's square and a frame wholly beyond the edges count.
+    Ignored,
+}
+
+/// True when `frame` sits in `display`'s park zone, slivers included ([`is_parked_with`]
+/// with [`Slivers::Count`]).
+pub fn is_parked(frame: Rect, display: Rect) -> bool {
+    is_parked_with(frame, display, Slivers::Count)
+}
+
 /// True when `frame` sits in `display`'s park zone.
 ///
 /// Inclusive on purpose (the recovery scan runs this on windows the engine never saw): a
 /// frame is parked when its origin lies within [`PARK_MARGIN`] of the bottom-right corner or
 /// beyond it, or when it is mostly offscreen to the bottom-right (its visible part is at
-/// most `PARK_MARGIN` on both axes and its origin is right of and below the display center).
-pub fn is_parked(frame: Rect, display: Rect) -> bool {
+/// most `PARK_MARGIN` on both axes and its origin is right of and below the display center),
+/// or, with [`Slivers::Count`], when what shows is a thin sliver at the edge ([`is_sliver`]).
+pub fn is_parked_with(frame: Rect, display: Rect, slivers: Slivers) -> bool {
     if !(frame.x.is_finite() && frame.y.is_finite()) {
         return false;
     }
@@ -255,27 +278,71 @@ pub fn is_parked(frame: Rect, display: Rect) -> bool {
     if frame.x >= corner_x && frame.y >= corner_y {
         return true;
     }
-    let center = display.center();
-    if frame.x <= center.x || frame.y <= center.y {
-        return false;
-    }
-    match frame.intersect(&display) {
+    let Some(seen) = offscreen_part(frame, display) else { return false };
+    match seen {
         None => frame.w > 0.0 && frame.h > 0.0,
-        Some(seen) => seen.w <= PARK_MARGIN && seen.h <= PARK_MARGIN,
+        Some(seen) => (seen.w <= PARK_MARGIN && seen.h <= PARK_MARGIN) || (slivers == Slivers::Count && thin(seen)),
     }
 }
 
-/// True when `frame` sits in `display`'s park zone at `corner`: [`is_parked`] for the bottom
-/// corners (mirrored for the left one); for the top ones, its origin within [`PARK_MARGIN`]
-/// of the side's edge or beyond it, in the display's top half (or up to [`PARK_MARGIN`]
-/// above it).
+/// True when what shows of `frame` on `display` is a parked window's sliver: right of and
+/// below the display's center, reaching past its right or bottom edge, at most
+/// [`PARK_SLIVER`] thick and [`PARK_SLIVER_LENGTH`] long on screen.
+pub fn is_sliver(frame: Rect, display: Rect) -> bool {
+    if !(frame.x.is_finite() && frame.y.is_finite()) {
+        return false;
+    }
+    matches!(offscreen_part(frame, display), Some(Some(seen)) if thin(seen))
+}
+
+/// For a frame right of and below `display`'s center that reaches past its right or bottom
+/// edge: what of it shows on the display (`None` inside: nothing). `None` outside for any
+/// other frame.
+fn offscreen_part(frame: Rect, display: Rect) -> Option<Option<Rect>> {
+    let center = display.center();
+    if frame.x <= center.x || frame.y <= center.y {
+        return None;
+    }
+    // "Mostly offscreen" needs the frame to reach past the right or bottom edge: a small
+    // window wholly on the display (a helper app's invisible 1×1, a 64×64 cursor window) is
+    // not parked, however little of it there is (6X: 24 such windows made every quit warn).
+    if frame.max_x() <= display.max_x() && frame.max_y() <= display.max_y() {
+        return None;
+    }
+    Some(frame.intersect(&display))
+}
+
+fn thin(seen: Rect) -> bool {
+    seen.w.min(seen.h) <= PARK_SLIVER && seen.w.max(seen.h) <= PARK_SLIVER_LENGTH
+}
+
+/// A parked window's sliver: at most this thick on one axis ...
+///
+/// (6X: after a display change macOS left a parked window at `2559,1374` of a 2560×1440
+/// display, one point wide and 66 tall on screen, two points above the corner's margin: no
+/// run counted it parked, so the next one adopted it in the corner.)
+pub const PARK_SLIVER: f64 = 8.0;
+
+/// ... and at most this long on the other.
+pub const PARK_SLIVER_LENGTH: f64 = 4.0 * PARK_MARGIN;
+
+/// True when `frame` sits in `display`'s park zone at `corner`, slivers included
+/// ([`is_parked_at_with`]).
 pub fn is_parked_at(frame: Rect, display: Rect, corner: Corner) -> bool {
+    is_parked_at_with(frame, display, corner, Slivers::Count)
+}
+
+/// True when `frame` sits in `display`'s park zone at `corner`: [`is_parked_with`] for the
+/// bottom corners (mirrored for the left one); for the top ones, its origin within
+/// [`PARK_MARGIN`] of the side's edge or beyond it, in the display's top half (or up to
+/// [`PARK_MARGIN`] above it).
+pub fn is_parked_at_with(frame: Rect, display: Rect, corner: Corner, slivers: Slivers) -> bool {
     if !(frame.x.is_finite() && frame.y.is_finite() && frame.w.is_finite()) {
         return false;
     }
     let f = if corner.right() { frame } else { mirror_x(frame, display) };
     if corner.bottom() {
-        is_parked(f, display)
+        is_parked_with(f, display, slivers)
     } else {
         f.x >= display.max_x() - PARK_MARGIN && f.y >= display.y - PARK_MARGIN && f.y <= display.center().y
     }
@@ -290,9 +357,14 @@ pub fn is_parked_in(frame: Rect, display: Rect, visible: Rect) -> bool {
 
 /// True when `frame` sits in the park zone at `corner` of a display whose full frame is
 /// `display` and whose visible frame (no menu bar, no Dock) is `visible`: the one park test
-/// every caller uses (module docs, "Where macOS leaves a parked window").
+/// every caller uses (module docs, "Where macOS leaves a parked window"), slivers included.
 pub fn is_parked_in_at(frame: Rect, display: Rect, visible: Rect, corner: Corner) -> bool {
-    is_parked_at(frame, display, corner) || (!visible.is_degenerate() && is_parked_at(frame, visible, corner))
+    is_parked_in_at_with(frame, display, visible, corner, Slivers::Count)
+}
+
+/// [`is_parked_in_at`], counting slivers or not ([`Slivers`]).
+pub fn is_parked_in_at_with(frame: Rect, display: Rect, visible: Rect, corner: Corner, slivers: Slivers) -> bool {
+    is_parked_at_with(frame, display, corner, slivers) || (!visible.is_degenerate() && is_parked_at_with(frame, visible, corner, slivers))
 }
 
 /// True when `frame` sits in the park zone of any corner of `display`.
@@ -529,8 +601,13 @@ mod tests {
         let d = Rect::new(0.0, 0.0, 2560.0, 1440.0);
         let visible = Rect::new(0.0, 30.0, 2560.0, 1334.0);
         let at = Rect::new(2559.0, visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
-        assert!(!is_parked(at, d), "the old test missed it");
         assert!(is_parked_in(at, d, visible));
+        // Since 6X the full frame's sliver rule sees it too (1 pt wide, 108 tall on screen);
+        // a wider one above the Dock still needs the visible frame.
+        assert!(is_parked(at, d));
+        let wider = Rect::new(2496.0, visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
+        assert!(!is_parked(wider, d), "the full frame alone misses it");
+        assert!(is_parked_in(wider, d, visible));
     }
 
     #[test]
@@ -639,6 +716,62 @@ mod tests {
         assert!(is_parked(f, DISPLAY));
         let beyond = Rect::new(2000.0, 1200.0, 100.0, 100.0);
         assert!(is_parked(beyond, DISPLAY));
+    }
+
+    /// 6X, the owner's log: helper apps' invisible windows (1×1 at the 5K's center seen on
+    /// the built-in display, a 64×64 cursor window) sat wholly on the display, right of and
+    /// below its center, and counted as parked: every quit warned about 24 of them.
+    #[test]
+    fn a_small_window_wholly_on_the_display_is_not_parked() {
+        let laptop = Rect::new(0.0, 0.0, 1800.0, 1169.0);
+        assert!(!is_parked(Rect::new(1280.0, 720.0, 1.0, 1.0), laptop));
+        assert!(!is_parked(Rect::new(1300.0, 900.0, 64.0, 64.0), laptop));
+        assert!(!is_parked(Rect::new(1736.0, 1100.0, 64.0, 64.0), laptop), "touching the corner, not past it");
+        // A parked one still is: past the edge, one point inside.
+        assert!(is_parked(Rect::new(1799.0, 1137.0, 1157.0, 1023.0), laptop));
+    }
+
+    /// 6X, the owner's log: after a display change macOS left a parked Telegram window at
+    /// `2559,1374 1157x1023` of a 2560×1440 display, a 1×66 sliver two points above the
+    /// corner's margin; no run counted it parked.
+    #[test]
+    fn a_thin_sliver_at_the_right_edge_is_parked() {
+        let five_k = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let visible = Rect::new(0.0, 30.0, 2560.0, 1410.0);
+        let telegram = Rect::new(2559.0, 1374.0, 1157.0, 1023.0);
+        assert!(is_parked(telegram, five_k));
+        assert!(is_parked_in(telegram, five_k, visible));
+        // A sliver at the bottom edge, the same.
+        assert!(is_parked(Rect::new(2400.0, 1436.0, 800.0, 600.0), five_k));
+        // A window dragged mostly off the right edge, half way down, is no sliver of ours.
+        assert!(!is_parked(Rect::new(2550.0, 700.0, 800.0, 600.0), five_k));
+        // Nor one showing 100 pt.
+        assert!(!is_parked(Rect::new(2460.0, 1300.0, 800.0, 600.0), five_k));
+    }
+
+    /// The review of 6X, L3: the sliver rule is a choice; without it a user's window pushed
+    /// almost wholly off the right edge in the bottom half is not parked, while the margin's
+    /// square and a frame wholly beyond the edges still are.
+    #[test]
+    fn slivers_count_only_when_asked() {
+        let five_k = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let visible = Rect::new(0.0, 30.0, 2560.0, 1410.0);
+        let telegram = Rect::new(2559.0, 1374.0, 1157.0, 1023.0);
+        assert!(is_sliver(telegram, five_k));
+        assert!(!is_parked_with(telegram, five_k, Slivers::Ignored));
+        assert!(!is_parked_in_at_with(telegram, five_k, visible, Corner::BottomRight, Slivers::Ignored));
+        assert!(is_parked_in_at_with(telegram, five_k, visible, Corner::BottomRight, Slivers::Count));
+        // Mirrored at the bottom-left corner.
+        let left = Rect::new(1.0 - 1157.0, 1374.0, 1157.0, 1023.0);
+        assert!(is_parked_at_with(left, five_k, Corner::BottomLeft, Slivers::Count));
+        assert!(!is_parked_at_with(left, five_k, Corner::BottomLeft, Slivers::Ignored));
+        // The margin's square and a frame wholly beyond count either way.
+        for f in [Rect::new(2559.0, 1408.0, 600.0, 392.0), Rect::new(2600.0, 1500.0, 600.0, 392.0), Rect::new(2520.0, 1400.0, 800.0, 600.0)] {
+            assert!(is_parked_with(f, five_k, Slivers::Ignored), "{f:?}");
+            assert!(!is_sliver(f, five_k) || is_parked_with(f, five_k, Slivers::Count));
+        }
+        // A window wholly on screen is never a sliver.
+        assert!(!is_sliver(Rect::new(2000.0, 1000.0, 400.0, 300.0), five_k));
     }
 
     #[test]

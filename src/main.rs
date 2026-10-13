@@ -105,7 +105,7 @@ mod app {
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
-    use stage_manager::engine::fullscreen;
+    use stage_manager::engine::{fullscreen, leftovers};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
     use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::shell;
@@ -119,11 +119,15 @@ mod app {
     /// How long Quit waits for the WM thread to put `windows` windows back: the action in
     /// flight when Quit came (a batch stops between actions), then a frame per window, each
     /// up to three AX calls (size, position, size) that a slow or hung app may let run to
-    /// the 0.25 s messaging timeout. At least 4 s, at most 30 s.
+    /// the 0.25 s messaging timeout, tried again quickly while the app is busy, or a stale
+    /// element looked up afresh (at most [`leftovers::window_restore_max`]). At least 4 s, at
+    /// most 30 s; plus the leftovers check after the unpark (at most
+    /// [`leftovers::LEFTOVERS_MAX`]).
     pub(crate) fn shutdown_timeout(windows: usize) -> Duration {
-        let per_window = 3.0 * f64::from(wm_thread::AX_TIMEOUT_SECONDS) + 0.05;
+        let one_try = 3.0 * f64::from(wm_thread::AX_TIMEOUT_SECONDS);
+        let per_window = one_try.max(leftovers::window_restore_max().as_secs_f64()) + 0.05;
         let secs = 2.0 + per_window * windows as f64;
-        Duration::from_secs_f64(secs.clamp(4.0, 30.0))
+        Duration::from_secs_f64(secs.clamp(4.0, 30.0)) + leftovers::LEFTOVERS_MAX
     }
 
     /// How long exit waits for window captures in flight (see [`capture::quiesce`]).
@@ -328,18 +332,29 @@ mod app {
             Some(Some(true)) => true,
             Some(Some(false)) => {
                 tracing::warn!("some windows did not come back through the WM thread; retrying from the registry");
-                safety::emergency_unpark("quit")
+                registry_then_leftovers("quit")
             }
             Some(None) => {
                 tracing::warn!("WM thread did not answer; unparking from the registry");
-                safety::emergency_unpark("quit")
+                registry_then_leftovers("quit")
             }
             None => {
                 tracing::warn!("no WM thread; unparking from the registry");
-                safety::emergency_unpark("quit")
+                registry_then_leftovers("quit")
             }
         };
         finish_exit(ok, 0);
+    }
+
+    /// The registry's unpark, then the window server's word on it (6X): a registry move that
+    /// "succeeded" is not proof, so every window of an allowed app still in the park zone is
+    /// brought back or leaves the exit unclean (the guardian waits for it). Bounded: the
+    /// registry's quick retries share one budget ([`leftovers::REGISTRY_RETRY_BUDGET`], then
+    /// one try a window), the leftovers check at most [`leftovers::LEFTOVERS_MAX`].
+    fn registry_then_leftovers(reason: &str) -> bool {
+        let registry = safety::emergency_unpark(reason);
+        let leftovers = safety::leftovers_back(reason, Default::default());
+        registry && leftovers
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
@@ -563,7 +578,7 @@ mod app {
         std::thread::sleep(grace);
         tracing::error!("main thread did not quit after a signal; unparking from the signal watcher");
         QUITTING.store(true, Ordering::SeqCst);
-        let ok = safety::emergency_unpark("signal");
+        let ok = registry_then_leftovers("signal");
         finish_exit(ok, 1);
     }
 

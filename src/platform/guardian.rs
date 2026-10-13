@@ -229,7 +229,7 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
         if !a.due(now) {
             continue;
         }
-        let element = match ax_window(x.pid, x.id) {
+        let element = match safety::ax_window(x.pid, x.id) {
             Ok(e) => e,
             Err(why) => {
                 a.count += 1;
@@ -239,7 +239,7 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
             }
         };
         match element.frame() {
-            Ok(f) if !is_stranded(f, displays) => {
+            Ok(f) if !is_stranded(f, displays, x.known()) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
                     log_event(&e);
                     continue;
@@ -255,7 +255,7 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
         match Watch::restore_frame(&x, displays) {
             Some(frame) => match element.set_frame(frame) {
                 Ok(()) => match element.frame() {
-                    Ok(f) if !is_stranded(f, displays) => {
+                    Ok(f) if !is_stranded(f, displays, x.known()) => {
                         tracing::warn!(id = x.id, pid = x.pid, to = %f, "guardian: its Desktop shows; window brought back");
                         if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                             log_event(&e);
@@ -275,8 +275,8 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
     let r = safety::recovery_scan("guardian: a Desktop with parked windows shows");
     tracing::info!(restored = r.restored, failed = r.failed, "guardian: scanned the shown Desktop");
     for x in scanned {
-        match ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
-            Ok(f) if !is_stranded(f, displays) => {
+        match safety::ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
+            Ok(f) if !is_stranded(f, displays, x.known()) => {
                 if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                     log_event(&e);
                 }
@@ -357,17 +357,10 @@ fn listed_windows() -> Vec<Listed> {
             let ok = *allowed
                 .entry(w.pid)
                 .or_insert_with(|| observe::app_allowed(only.as_ref(), own, w.pid, safety::bundle_id_of(w.pid).as_deref()));
-            Listed { id: w.id, pid: w.pid, bounds: w.bounds, onscreen: w.onscreen, allowed: ok }
+            // A transparent window (a helper's) never joins the watch on its own.
+            Listed { id: w.id, pid: w.pid, bounds: w.bounds, onscreen: w.onscreen, allowed: ok && w.alpha > 0.0 }
         })
         .collect()
-}
-
-/// Window `id` of `pid` through Accessibility; the reason when it cannot be reached.
-fn ax_window(pid: i32, id: u32) -> Result<AxElement, String> {
-    let list = AxElement::application(pid).windows().map_err(|e| format!("its app does not answer ({e})"))?;
-    list.into_iter()
-        .find(|w| w.window_id().ok() == Some(id))
-        .ok_or_else(|| "its app does not list it through Accessibility yet".to_string())
 }
 
 extern "C" fn on_stop(sig: libc::c_int) {

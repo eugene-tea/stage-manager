@@ -6,7 +6,7 @@
 //! Accessibility; this module decides, without touching anything:
 //!
 //! - a window is **stranded** when it sits in the main display's park zone at one of the
-//!   corners that count ([`ScanDisplays::corners`]; [`is_parked_in_at`]: the full frame's or
+//!   corners that count ([`ScanDisplays::corners`]; [`super::park::is_parked_in_at`]: the full frame's or
 //!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
 //!   show on another display either (so a window on a second display to the bottom-right of
 //!   the main one is left alone);
@@ -25,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{Corner, PARK_MARGIN, choose_corner, clamp_to_visible, is_parked_in_at};
+use super::park::{Corner, PARK_MARGIN, Slivers, choose_corner, clamp_to_visible, is_parked_in_at_with};
 use super::persist::{SavedRole, StateFile};
 use super::stage_area::same_frame;
 
@@ -67,16 +67,50 @@ impl ScanDisplays {
     }
 
     /// True when `frame` is in the main display's park zone at any corner that counts
-    /// ([`is_parked_in_at`]), whatever shows on other displays.
+    /// ([`super::park::is_parked_in_at`], slivers included), whatever shows on other
+    /// displays. For frames we put windows at (never a sliver) and windows we know.
     pub fn parks(&self, frame: Rect) -> bool {
-        self.corners.iter().any(|c| is_parked_in_at(frame, self.main, self.visible, *c))
+        self.parks_with(frame, Slivers::Count)
+    }
+
+    /// [`Self::parks`], counting slivers or not ([`Slivers`]).
+    pub fn parks_with(&self, frame: Rect, slivers: Slivers) -> bool {
+        self.corners.iter().any(|c| is_parked_in_at_with(frame, self.main, self.visible, *c, slivers))
     }
 }
 
+/// What a park test knows about the window it looks at (the review of 6X, L3 and L4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Known {
+    /// Any app's window: a frame clearly in the park zone, no thin sliver
+    /// ([`Slivers::Ignored`]: it may be a user's window pushed off the edge), and no helper's
+    /// tiny window ([`MIN_STRANDED_SIDE`]).
+    Unknown,
+    /// A window of an app we manage (one with a window in `state.json`): a sliver counts too.
+    Managed,
+    /// A window we registered (parked or fitted: the registry, the parked file): a sliver
+    /// counts and no size is too small (a small window we parked is still ours).
+    Registered,
+}
+
+impl Known {
+    fn slivers(self) -> Slivers {
+        if self == Self::Unknown { Slivers::Ignored } else { Slivers::Count }
+    }
+}
+
+/// Windows smaller than this on either side are never stranded: no window we park is that
+/// small, and helper apps keep invisible ones (1×1 and the like) that would make
+/// every safety path wait for them (6X).
+pub const MIN_STRANDED_SIDE: f64 = 48.0;
+
 /// True when `frame` is in the main display's park zone and not meaningfully on any other
-/// display (it shows at most [`PARK_MARGIN`] points on both axes there).
-pub fn is_stranded(frame: Rect, displays: &ScanDisplays) -> bool {
-    if !displays.parks(frame) {
+/// display (it shows at most [`PARK_MARGIN`] points on both axes there), as far as what is
+/// `known` of its window allows ([`Known`]: slivers, and helpers' tiny windows,
+/// [`MIN_STRANDED_SIDE`]).
+pub fn is_stranded(frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
+    let tiny = frame.w < MIN_STRANDED_SIDE || frame.h < MIN_STRANDED_SIDE;
+    if (tiny && known != Known::Registered) || !displays.parks_with(frame, known.slivers()) {
         return false;
     }
     !displays.others.iter().any(|d| {
@@ -86,12 +120,40 @@ pub fn is_stranded(frame: Rect, displays: &ScanDisplays) -> bool {
     })
 }
 
+/// Where a frame the scan moves a window to comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSource {
+    /// Its window's frame in `state.json` (or its pre-fit frame there).
+    Saved,
+    /// No saved window matched: centered on the visible frame.
+    Centered,
+}
+
+impl FrameSource {
+    /// A short name for the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Saved => "state.json",
+            Self::Centered => "centered",
+        }
+    }
+}
+
 /// For every stranded window in `windows`, its index and the frame to move it to.
 pub fn plan(
     windows: &[LiveWindow],
     state: Option<&StateFile>,
     displays: &ScanDisplays,
 ) -> Vec<(usize, Rect)> {
+    plan_sourced(windows, state, displays).into_iter().map(|(i, f, _)| (i, f)).collect()
+}
+
+/// [`plan`], with where each frame comes from.
+pub fn plan_sourced(
+    windows: &[LiveWindow],
+    state: Option<&StateFile>,
+    displays: &ScanDisplays,
+) -> Vec<(usize, Rect, FrameSource)> {
     let saved: Vec<(&str, &str, Rect, Option<Rect>)> = state
         .map(|s| {
             s.all_stages()
@@ -101,10 +163,14 @@ pub fn plan(
                 .collect()
         })
         .unwrap_or_default();
+    // An app with a window in state.json is one we manage: a sliver of its counts (L3).
+    let known = |w: &LiveWindow| {
+        if !w.bundle_id.is_empty() && saved.iter().any(|(b, ..)| *b == w.bundle_id) { Known::Managed } else { Known::Unknown }
+    };
     let stranded: Vec<usize> = windows
         .iter()
         .enumerate()
-        .filter(|(_, w)| is_stranded(w.frame, displays))
+        .filter(|(_, w)| is_stranded(w.frame, displays, known(w)))
         .map(|(i, _)| i)
         .collect();
     let mut used = vec![false; saved.len()];
@@ -129,11 +195,12 @@ pub fn plan(
             }
         }
     }
-    let mut out: Vec<(usize, Rect)> = stranded
+    let mut out: Vec<(usize, Rect, FrameSource)> = stranded
         .iter()
         .zip(target)
         .map(|(&i, saved)| {
-            (i, safe_restore(saved.unwrap_or(windows[i].frame), displays))
+            let source = if saved.is_some() { FrameSource::Saved } else { FrameSource::Centered };
+            (i, safe_restore(saved.unwrap_or(windows[i].frame), displays), source)
         })
         .collect();
     for (i, w) in windows.iter().enumerate() {
@@ -146,7 +213,7 @@ pub fn plan(
         if let Some((k, (_, _, _, Some(o)))) = found {
             used[k] = true;
             let back = if displays.parks(*o) { clamp_to_visible(*o, displays.visible) } else { *o };
-            out.push((i, back));
+            out.push((i, back, FrameSource::Saved));
         }
     }
     out
@@ -360,8 +427,39 @@ mod tests {
         d.others.push(Rect::new(1440.0, 600.0, 1920.0, 1080.0));
         let on_second = Rect::new(1500.0, 950.0, 800.0, 600.0);
         assert!(is_parked(on_second, MAIN));
-        assert!(!is_stranded(on_second, &d));
-        assert!(is_stranded(parked(400.0, 300.0), &displays()));
+        assert!(!is_stranded(on_second, &d, Known::Unknown));
+        assert!(is_stranded(parked(400.0, 300.0), &displays(), Known::Unknown));
+    }
+
+    /// 6X: a helper's tiny window in the corner is never stranded (no window we park is that
+    /// small); a real one there is.
+    #[test]
+    fn tiny_windows_are_never_stranded() {
+        let d = displays();
+        assert!(!is_stranded(Rect::new(1439.0, 899.0, 1.0, 1.0), &d, Known::Unknown));
+        assert!(!is_stranded(Rect::new(1439.0, 868.0, 40.0, 40.0), &d, Known::Unknown));
+        assert!(is_stranded(Rect::new(1439.0, 868.0, 300.0, 200.0), &d, Known::Unknown));
+        let p = plan(&[live("com.example.helper", "", Rect::new(1439.0, 899.0, 1.0, 1.0))], None, &d);
+        assert!(p.is_empty(), "the scan leaves it alone");
+    }
+
+    /// The review of 6X, L3 and L4: a sliver counts for a window of an app we manage or one
+    /// we registered, not for any app's; a small window we registered is still ours.
+    #[test]
+    fn what_is_known_of_a_window_decides_slivers_and_size() {
+        let d = displays();
+        let sliver = Rect::new(1439.0, 820.0, 600.0, 392.0);
+        assert!(!is_stranded(sliver, &d, Known::Unknown), "maybe a user's window pushed off the edge");
+        assert!(is_stranded(sliver, &d, Known::Managed));
+        assert!(is_stranded(sliver, &d, Known::Registered));
+        let small = Rect::new(1439.0, 868.0, 40.0, 30.0);
+        assert!(!is_stranded(small, &d, Known::Unknown));
+        assert!(!is_stranded(small, &d, Known::Managed));
+        assert!(is_stranded(small, &d, Known::Registered));
+        // The scan: the sliver of an app in state.json comes back, another app's stays.
+        let st = state(vec![saved("com.example.a", "Draft", Rect::new(100.0, 100.0, 600.0, 392.0))]);
+        let p = plan(&[live("com.example.a", "Other", sliver), live("com.example.b", "Draft", sliver)], Some(&st), &d);
+        assert_eq!(p.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0]);
     }
 
     /// The review's S1: a 76 pt Dock at the bottom; macOS keeps the parked window's title bar
@@ -369,16 +467,16 @@ mod tests {
     #[test]
     fn a_window_parked_above_a_bottom_dock_is_stranded() {
         let d = ScanDisplays::new(MAIN, Rect::new(0.0, 25.0, 1440.0, 799.0), vec![], []);
-        let at = Rect::new(1439.0, d.visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
+        let at = Rect::new(1380.0, d.visible.max_y() - MACOS_KEEPS_TITLE, 600.0, 392.0);
         assert!(!is_parked(at, MAIN), "the full frame alone misses it");
-        assert!(is_stranded(at, &d));
+        assert!(is_stranded(at, &d, Known::Unknown));
         let p = plan(&[live("com.example.a", "Draft", at)], None, &d);
         assert_eq!(p.len(), 1);
         assert!(!d.parks(p[0].1) && d.visible.contains_rect(&p[0].1), "{:?}", p[0].1);
         // Same Dock on the right: macOS may or may not clamp x against it.
         let right = ScanDisplays::new(MAIN, Rect::new(0.0, 25.0, 1360.0, 875.0), vec![], []);
         for x in [1439.0, 1359.0] {
-            assert!(is_stranded(Rect::new(x, 900.0 - MACOS_KEEPS_TITLE, 600.0, 392.0), &right));
+            assert!(is_stranded(Rect::new(x, 900.0 - MACOS_KEEPS_TITLE, 600.0, 392.0), &right, Known::Unknown));
         }
     }
 

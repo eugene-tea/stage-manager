@@ -31,7 +31,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::geometry::Rect;
-use super::recovery::{Listed, Registered, ScanDisplays, is_stranded, safe_restore};
+use super::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded, safe_restore};
 use super::stage_area::same_frame;
 
 /// The window list counts as settled this long after the set of windows on screen changed.
@@ -293,11 +293,16 @@ impl Watch {
             self.on_screen = Some(on_screen);
         }
         let settled = self.settled(now);
-        for l in listed.iter().filter(|l| is_stranded(l.bounds, displays)) {
+        for l in listed {
             if self.waiting.contains_key(&l.id) {
                 continue;
             }
             let reg = self.registered.iter().find(|r| r.id == l.id);
+            // A window the app registered is its own, however small, sliver or not (L4).
+            let known = if reg.is_some() { Known::Registered } else { Known::Unknown };
+            if !is_stranded(l.bounds, displays, known) {
+                continue;
+            }
             if reg.is_some() || l.allowed {
                 let fitted = reg.is_some_and(|r| r.fitted);
                 self.waiting.insert(l.id, Waiting { fitted, ..waiting(l.id, l.pid, reg.map(|r| r.restore)) });
@@ -318,7 +323,7 @@ impl Watch {
                 }
                 Some(l) => {
                     w.missing_since = None;
-                    if is_stranded(l.bounds, displays) {
+                    if is_stranded(l.bounds, displays, w.known()) {
                         w.out_since = None;
                         Look::Parked { shown: l.onscreen, frame: l.bounds }
                     } else if !l.onscreen {
@@ -358,7 +363,8 @@ impl Watch {
     /// A fitted window read away from its pre-fit frame is let go only after the guardian
     /// moved it (`moved`): never a fight with the user over a frame macOS adjusted.
     pub fn read_through_ax(&mut self, id: u32, frame: Rect, moved: bool, displays: &ScanDisplays) -> Option<Event> {
-        if is_stranded(frame, displays) {
+        let known = self.waiting.get(&id).map_or(Known::Unknown, Waiting::known);
+        if is_stranded(frame, displays, known) {
             return None;
         }
         if !moved && self.waiting.get(&id).is_some_and(|w| w.fitted && !at_pre_fit(w, frame, displays)) {
@@ -367,6 +373,14 @@ impl Watch {
         let w = self.waiting.remove(&id)?;
         let why = if moved { Release::BroughtBack { frame } } else { Release::ReadBack { frame } };
         Some(Event::LetGo { id, pid: w.pid, why })
+    }
+}
+
+impl Waiting {
+    /// What the park test knows of it: a window the app registered is its own (any size,
+    /// slivers count), one found in the park zone is any app's.
+    pub fn known(&self) -> Known {
+        if self.registered.is_some() { Known::Registered } else { Known::Unknown }
     }
 }
 
@@ -424,6 +438,56 @@ mod tests {
     /// Desktop 2 shows, window 1 at `frame` on screen.
     fn on_desktop_2(frame: Rect) -> Vec<Listed> {
         vec![at(1, frame, true), at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), true), at(9, RESTORE, false)]
+    }
+
+    /// 6X, the owner's log: helper apps' invisible windows (1×1 at 1280,720 seen on the
+    /// built-in display, 64×64 ones) counted as parked; the guardian would have waited for
+    /// them. Only a real parked window of an allowed app joins.
+    #[test]
+    fn helper_windows_never_join_the_watch() {
+        let laptop = Rect::new(0.0, 0.0, 1800.0, 1169.0);
+        let d = ScanDisplays::new(laptop, Rect::new(0.0, 39.0, 1800.0, 1130.0), vec![], []);
+        let mut w = Watch::new(&[]);
+        let allowed = |id, bounds, onscreen| Listed { id, pid: 8, bounds, onscreen, allowed: true };
+        let listed = [
+            allowed(20, Rect::new(1280.0, 720.0, 1.0, 1.0), false),
+            allowed(21, Rect::new(1700.0, 1100.0, 64.0, 64.0), false),
+            allowed(22, Rect::new(1799.0, 1168.0, 1.0, 1.0), false),
+            allowed(23, Rect::new(1799.0, 1137.0, 1051.0, 906.0), false),
+            allowed(24, Rect::new(200.0, 100.0, 800.0, 600.0), true),
+        ];
+        let events = w.observe(Instant::now(), &listed, &d);
+        let joined: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Joined { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, vec![23], "only the real parked window");
+    }
+
+    /// The review of 6X, L4: a small window the app registered (a 40 pt palette it parked)
+    /// joins and waits like any other, while another app's window that small never joins.
+    #[test]
+    fn a_small_registered_window_is_never_lost() {
+        let d = displays();
+        let small = Rect::new(2559.0, 1408.0, 40.0, 30.0);
+        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false };
+        let mut w = Watch::new(&[reg]);
+        let listed = [
+            Listed { id: 7, pid: 8, bounds: small, onscreen: false, allowed: true },
+            Listed { id: 9, pid: 8, bounds: small, onscreen: false, allowed: true },
+            at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), true),
+        ];
+        let t0 = Instant::now();
+        w.observe(t0, &listed, &d);
+        let ids: Vec<u32> = w.waiting().map(|w| w.id).collect();
+        assert_eq!(ids, vec![7], "the registered one waits, the stranger's does not join");
+        assert_eq!(w.waiting().next().and_then(|w| w.look), Some(Look::Parked { shown: false, frame: small }));
+        // Read through Accessibility still in the corner: not let go.
+        assert_eq!(w.read_through_ax(7, small, true, &d), None);
+        assert!(w.read_through_ax(7, Rect::new(300.0, 300.0, 40.0, 30.0), true, &d).is_some());
     }
 
     #[test]
@@ -654,7 +718,7 @@ mod tests {
         let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false }];
         let w = Watch::new(&r);
         let f = w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())).unwrap_or_default();
-        assert!(!is_stranded(f, &displays()) && VISIBLE.contains_rect(&f), "{f:?}");
+        assert!(!is_stranded(f, &displays(), Known::Registered) && VISIBLE.contains_rect(&f), "{f:?}");
     }
 
     #[test]

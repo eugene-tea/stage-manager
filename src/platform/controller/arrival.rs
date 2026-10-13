@@ -1612,7 +1612,7 @@ impl Controller {
             let Some(w) = ob.window(id.0) else { continue };
             let entry = ParkedEntry { element: w.element.clone(), restore: frame, child: w.kind == WindowKind::Child, fitted: false };
             tracing::debug!(id = id.0, restore = %frame, "brought back for an arrival: registered until seen out of the park zone");
-            self.unrestored.insert(id.0, Unrestored { entry, tries: 0 });
+            self.unrestored.insert(id.0, Unrestored::failed(entry));
         }
     }
 

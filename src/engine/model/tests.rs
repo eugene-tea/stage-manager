@@ -307,6 +307,24 @@ fn a_child_of_a_parked_parent_is_parked_at_birth() {
     assert!(e.d.parked(w(3)));
 }
 
+/// 6X: the platform takes the registry entries of every window `window_left_space` lets go
+/// of before it does, so a parked one still in the corner stays watched.
+#[test]
+fn the_group_a_window_leaving_its_space_takes_along() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.app"), RuleAction::Current);
+    e.add(child(3, 10, Some(1)), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert_eq!(e.m.group_of(w(1)), vec![1, 3]);
+    assert_eq!(e.m.group_of(w(3)), vec![1, 3], "a child stands for its parent");
+    assert_eq!(e.m.group_of(w(2)), vec![2]);
+    assert!(e.m.group_of(w(9)).is_empty());
+    let (_, forgotten) = e.m.window_left_space(w(3));
+    let mut forgotten: Vec<u32> = forgotten.into_iter().map(|w| w.0).collect();
+    forgotten.sort_unstable();
+    assert_eq!(forgotten, vec![1, 3]);
+}
+
 #[test]
 fn a_child_of_an_unmanaged_parent_stays_unmanaged() {
     let mut e = Env::new();

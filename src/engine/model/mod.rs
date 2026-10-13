@@ -584,6 +584,13 @@ impl Model {
         None
     }
 
+    /// The windows [`Model::window_left_space`] lets go of for `id`: the standard window it
+    /// stands for and that window's children (empty when it has none).
+    pub fn group_of(&self, id: WindowId) -> Vec<u32> {
+        let Some(top) = self.resolve_standard(id) else { return Vec::new() };
+        std::iter::once(top).chain(self.children_of(top)).map(|w| w.0).collect()
+    }
+
     /// Children (direct and nested) of a window, in ID order.
     pub(crate) fn children_of(&self, id: WindowId) -> Vec<WindowId> {
         let mut out = Vec::new();
