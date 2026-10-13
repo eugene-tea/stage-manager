@@ -248,6 +248,7 @@ impl Demo {
             self.style = Arc::new(style);
         }
         strip::set_thumbnail_interval(self.config.strip.thumbnail_interval_ms);
+        crate::platform::capture::set_enabled(self.config.strip.capture);
     }
 
     /// With `debug-render`: `STAGE_MANAGER_DEMO_FAKE="<bundle id>:<w>x<h>;..."` stands in for
@@ -331,6 +332,7 @@ impl Demo {
             }
             MenuAction::Quit => {
                 tracing::info!("demo: quitting");
+                crate::platform::capture::quiesce(std::time::Duration::from_secs(2));
                 std::process::exit(0);
             }
             other => tracing::info!(?other, "demo: menu item ignored"),
@@ -345,6 +347,7 @@ impl Demo {
             config_error: None,
             mark_shown: false,
             last_mark: None,
+            capture_refused: false,
         }
     }
 }
@@ -370,6 +373,8 @@ pub fn run() -> ExitCode {
         .and_then(|v| v.parse().ok())
         .unwrap_or(Config::default().strip.thumbnail_interval_ms);
     strip::install(mtm, interval);
+    // The built-in default until a config file says otherwise (`reload_config`).
+    crate::platform::capture::set_enabled(Config::default().strip.capture);
     strip_model::set_event_sink(|event| {
         tracing::info!(?event, "demo: strip event");
         if let StripEvent::CardClicked { stage, shift: false } = event {

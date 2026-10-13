@@ -185,6 +185,8 @@ pub const KEYS: &[KeyDef] = &[
         "Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not."),
     k("strip", "thumbnail_interval_ms", i(250, 60_000), "1500", "How often thumbnails are refreshed, in milliseconds."),
     k("strip", "thumbnail_resolution", f(0.5, 4.0), "2.0", "Thumbnails are captured at this multiple of their drawn size."),
+    k("strip", "capture", Kind::Bool, "true",
+        "Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture."),
     // [cards]
     k("cards", "x", f(-100.0, 400.0), "15.0", "Left edge of every card, from the screen's left edge."),
     k("cards", "full_height", f(10.0, 1000.0), "161.0",

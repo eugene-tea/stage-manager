@@ -113,6 +113,8 @@ pub enum UiUpdate {
         hotkeys: HotkeyConfig,
         /// The strip's thumbnail refresh interval.
         thumbnail_interval_ms: u64,
+        /// `[strip] capture`: window pictures on or off.
+        capture: bool,
     },
     /// The strip's Show/Hide state.
     StripVisible(bool),
@@ -379,6 +381,7 @@ impl Controller {
             error: self.config_error.clone(),
             hotkeys: config.hotkeys.clone(),
             thumbnail_interval_ms: config.strip.thumbnail_interval_ms,
+            capture: config.strip.capture,
         });
     }
 
@@ -1897,6 +1900,7 @@ impl Controller {
             "strip_visible": self.strip_visible,
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "animation": self.store.config().style.animation.enabled,
+            "capture": super::capture::status(),
             "strip_cards": strip_model::published_cards()
                 .into_iter()
                 .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))

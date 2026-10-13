@@ -307,6 +307,8 @@ pub fn install_panic_hook() {
             return;
         }
         emergency_unpark("panic");
+        // A capture in flight at exit makes macOS alert about screen access.
+        super::capture::quiesce(std::time::Duration::from_secs(1));
         logging::write_counts("panic");
         std::process::exit(101);
     }));

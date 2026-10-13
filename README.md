@@ -54,12 +54,20 @@ against the terminal. Launched with `open`, macOS checks the bundle's own signat
 
 - **Accessibility** — observing and moving windows. Without it the app runs, says so in the
   menu, and starts observing within 2 s of the grant (no relaunch).
-- **Screen Recording** — strip thumbnails (ScreenCaptureKit). The strip also asks through
-  `SCShareableContent`, which is what lists the app in System Settings on recent macOS.
+- **Screen Recording** — strip thumbnails and switch-animation snapshots (ScreenCaptureKit).
+  The strip also asks through `SCShareableContent`, which is what lists the app in System
+  Settings on recent macOS. `[strip] capture = false` turns window pictures off: cards and
+  switch ghosts are drawn plain and the app never touches screen capture.
 
 At launch the app asks macOS for whatever is missing (system dialogs), unless
 `STAGE_MANAGER_NO_PROMPT` is set. The menu shows "Grant Accessibility…" / "Grant Screen
 Recording…" while a grant is missing; each opens the matching Privacy pane.
+
+macOS may also show its own screen-access alert ("… is requesting to bypass the system
+private window picker and directly access your screen and audio"); see Known limitations.
+If macOS refuses a capture as not permitted, the app stops capturing (plain cards and
+ghosts), says so once in the log, tries again after 10 minutes (doubling up to 2 hours),
+and "Grant Screen Recording…" shows in the menu; clicking it tries again at once.
 
 The stable signature keeps the grants across rebuilds. Its designated requirement is
 `identifier "dev.eugene.stagemanager" and certificate leaf = H"<sha1>"`; check with
@@ -229,6 +237,7 @@ Every key (generated from the same table as the file; a test keeps this copy in 
 | `strip.scale_to_display` | `false` | true or false | Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not. |
 | `strip.thumbnail_interval_ms` | `1500` | whole number, 250 to 60000 | How often thumbnails are refreshed, in milliseconds. |
 | `strip.thumbnail_resolution` | `2.0` | number, 0.5 to 4 | Thumbnails are captured at this multiple of their drawn size. |
+| `strip.capture` | `true` | true or false | Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture. |
 | `cards.x` | `15.0` | number, -100 to 400 | Left edge of every card, from the screen's left edge. |
 | `cards.full_height` | `161.0` | number, 10 to 1000 | A window as tall as the visible screen becomes a card this tall; every window gets the same scale. |
 | `cards.min_height` | `97.0` | number, 0 to 1000 | Small windows are drawn at least this tall. |
@@ -424,6 +433,7 @@ lines; the measurement is in `PLAN.md`, "Before public release"), far under the 
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
 | `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
 | `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-*`) and `debug-post-space` |
+| `STAGE_MANAGER_NO_CAPTURE` | window captures off whatever `[strip] capture` says (test runs): no ScreenCaptureKit call, plain cards and ghosts |
 
 ## ctl socket
 
@@ -466,7 +476,7 @@ Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reacha
 
 ## Test script
 
-`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion]` builds the app and private
+`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion] [capture]` builds the app and private
 fixtures (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`,
 plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native phase;
 `SM_FIXTURE_ID` picks another base ID, so runs never collide) and checks, against `ctl state` and the window
@@ -498,7 +508,9 @@ drags pass over our windows and the fixtures only, with the strip reached for th
 the click the way a person does when a window covers it (the pointer resting at the left
 edge). `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
 (`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
-whether it is the active one, ordered in, on the Space shown, slid in). Every app run's log is kept as `stage-manager.run-NN.log` in
+whether it is the active one, ordered in, on the Space shown, slid in); and capture: real
+thumbnails and switch snapshots arrive (`ctl state`'s `capture`: mode, gate, images
+delivered) and a quit with captures running is clean. Every app run's log is kept as `stage-manager.run-NN.log` in
 the test home (renamed from the day's `YYYY-MM-DD.log`; the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
 is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
 `scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
@@ -509,6 +521,13 @@ checks: while it is on it scales inactive apps' windows into its own strip. Ever
 `STAGE_MANAGER_HOME` (default a new `/tmp/sm-test.*`, or `TEST_HOME`) and
 `STAGE_MANAGER_ONLY` set to the fixtures. The fixture comes to the front during switches;
 the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips the build.
+
+Window captures are off in every app run (`STAGE_MANAGER_NO_CAPTURE=1`; cards and switch
+ghosts are drawn plain) except the `capture` phase's single launch, so **only the `capture`
+phase may raise macOS's screen-access alert**, and only on the first run from a new app path
+(the fixed dev copy is approved once; see Known limitations). Every phase of
+`scripts/test-stages.sh spaces` runs with captures off. A run ends with the number of
+screen-access alerts macOS showed meanwhile (from replayd's log, any app).
 
 ## Known limitations
 
@@ -532,6 +551,27 @@ the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips
 - ⌘M: the window is parked, then un-minimized there, so macOS may show a short restore
   animation toward the bottom-right corner (Apple's window shrinks into the strip).
 - Thumbnails are stills refreshed every 1.5 s (Apple's cards are live).
+- **macOS's screen-access alert.** Since macOS 15, an app that captures windows with
+  ScreenCaptureKit directly (not through Apple's content picker, which asks the user to pick
+  what to share and does not suit a strip of every window) gets an alert from replayd: "…
+  is requesting to bypass the system private window picker and directly access your screen
+  and audio" [Allow] [Open System Settings], and again about monthly. What replayd's log
+  showed on the development Mac (36 alerts in 8 hours of test runs, 10-12):
+  - Approvals are kept per **app path** (one entry per bundle URL in replayd's
+    `ScreenCaptureApprovals.plist`): the first capture from a new location alerts once (4 of
+    the 36: three worktrees' `target/` copies and the fixed dev copy). A rebuild or a
+    fresh copy at an approved path did not alert again (the dev copy was replaced on every
+    test run after its first alert), so it is not per code signature hash nor per process.
+    The entry's `kScreenCapturePrivacyHintPolicy` is 2592000 s: the monthly reminder.
+  - The other 32 came from **a process that exited with a capture in flight**. replayd
+    checks a capture's approval after answering it; for a pid that has just exited it logs
+    "Error resolving binary path and audit token", cannot match the approved path, and
+    alerts for an app that is gone: one alert per capture in flight (two at once when both
+    capturers were mid-round), which is how they stacked on test quits and drills.
+  - So the app now waits for its captures in flight before it exits (Quit, SIGTERM/SIGINT,
+    a panic; up to 2 s), the first capture of a process goes alone and nothing else is
+    issued until it answers, and test runs keep captures off but for one launch. A
+    `kill -9` while a capture is in flight can still raise one alert.
 - A dialog or panel's parent is a guess: the app's frontmost standard window at the time.
 - New windows are matched to rules by their title when they appear; an app that sets the
   title later is matched with the early title.

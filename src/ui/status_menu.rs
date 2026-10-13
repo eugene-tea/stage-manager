@@ -123,6 +123,8 @@ pub struct MenuState {
     pub mark_shown: bool,
     /// When the last problem mark was written (`HH:MM:SS`).
     pub last_mark: Option<String>,
+    /// macOS refused window captures; "Grant Screen Recording…" shows and retries them.
+    pub capture_refused: bool,
 }
 
 /// The Mark a Problem item's title: when the last mark went in, if any.
@@ -247,7 +249,7 @@ impl StatusMenu {
         }
         self.warning_line.setHidden(!state.apple_stage_manager_on);
         self.grant_accessibility.setHidden(state.permissions.accessibility);
-        self.grant_screen_recording.setHidden(state.permissions.screen_recording);
+        self.grant_screen_recording.setHidden(state.permissions.screen_recording && !state.capture_refused);
         let strip = if state.strip_visible { "Hide Strip" } else { "Show Strip" };
         self.toggle_strip.setTitle(&NSString::from_str(strip));
         self.mark.setHidden(!state.mark_shown);

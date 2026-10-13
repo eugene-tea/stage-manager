@@ -23,7 +23,9 @@ Run it as `scripts/test-stages.sh spaces [--auto [--dry-run]]`: that builds the 
 fixtures, copies the app to the fixed dev location, then runs this script.
 
 Like test_stages.py, the app runs with its own STAGE_MANAGER_HOME and STAGE_MANAGER_ONLY
-(the fixtures only): only fixture windows ever move. No other Stage Manager may run (both
+(the fixtures only): only fixture windows ever move. Window captures are off in every run
+(STAGE_MANAGER_NO_CAPTURE=1, through test_stages.start_app), so no phase here raises macOS's
+screen-access alert. No other Stage Manager may run (both
 would manage the fixtures). Guided prompts say exactly what to do; answer with Return.
 
 Checks: each Desktop has its own stages and strip; the same app has stages on both; a card

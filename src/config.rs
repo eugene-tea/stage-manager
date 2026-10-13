@@ -107,6 +107,8 @@ pub struct StripConfig {
     pub capacity: CapacityRule,
     /// Thumbnail refresh interval.
     pub thumbnail_interval_ms: u64,
+    /// Capture window pictures (thumbnails, switch snapshots).
+    pub capture: bool,
 }
 
 /// `[cards]`: the look of each card.
@@ -623,6 +625,7 @@ impl Config {
                     max: v.count("strip.capacity_max"),
                 },
                 thumbnail_interval_ms: v.uint("strip.thumbnail_interval_ms"),
+                capture: v.flag("strip.capture"),
             },
             style: StripStyle {
                 level: match v.text("strip.level") {
