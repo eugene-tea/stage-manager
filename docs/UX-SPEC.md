@@ -307,16 +307,23 @@ Ours:
   arranges too late to be seen, and the arrival is arranged **at the Dock click** (round
   6U): a left mouse-down over the Dock's own window is hit-tested through public
   Accessibility (`AXUIElementCopyElementAtPosition` on the Dock, an `AXDockItem` of
-  subrole `AXApplicationDockItem`, its `AXURL` the app); let go over the same item soon
+  subrole `AXApplicationDockItem` or one of its parents, its `AXURL` the app; a miss is
+  logged with what was found), and the click's prediction is worked out then, at the
+  press, so the release only arranges; let go over the same item soon
   (under 0.6 s, the Dock's menu comes on a held press) and without moving (6 pt) or a
   modifier, it is a click. When macOS will switch Desktops for it ("When switching to an
   application, switch to a Space with open windows for the application" on,
   `com.apple.dock` `workspaces-auto-swoosh`, absent = on; the app running, with no window
-  on the Desktop shown, none unplaced, not hidden: on the safe side, no prediction when
-  unsure), the window macOS will show (the app's focused window when it waits on another
+  on the Desktop shown in the model nor any on screen out of the park zone in the window
+  server's list, none unplaced, not hidden: on the safe side, no prediction when unsure;
+  the model's gates and the list are looked at before the app is asked anything), the
+  window macOS will show (the app's focused window when it waits on another
   Desktop, else its frontmost there in the window server's order) has its Desktop arranged
   at once, through the cached Accessibility elements of that Desktop's windows, and its
-  strip pane redrawn in its final order: the Desktop slides in arranged. No Space change
+  strip pane redrawn in its final order: the Desktop slides in arranged. Its own moves
+  make the window's late focus an echo; a focus of another known window of that app still
+  counts (macOS showed another window than predicted: undone, arranged for that one at the
+  notice). No Space change
   within 1 s of the click undoes it. ⌘Tab keeps the notice's arrangement for now: no
   public notice names the app chosen before its activation; the switcher is drawn by the
   Dock, and whether its Accessibility tree exposes the selected app while ⌘ is held (to

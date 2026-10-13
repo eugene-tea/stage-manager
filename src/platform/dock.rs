@@ -46,15 +46,18 @@ pub struct DockItem {
     pub frame: Rect,
 }
 
-/// A left mouse-down on a Dock item, waiting for its mouse-up.
+/// A left mouse-down on a Dock item, waiting for its mouse-up, with what its click would
+/// do, worked out at the press (`T`: the controller's prediction).
 #[derive(Debug, Clone, PartialEq)]
-pub struct DockPress {
+pub struct DockPress<T> {
     /// The item pressed.
     pub item: DockItem,
-    /// Where and when.
+    /// Where.
     pub at: Point,
     /// When.
     pub when: Instant,
+    /// The prediction made at the press.
+    pub prediction: T,
 }
 
 /// True when the topmost window on screen at `p` is the Dock's (`dock`: its pid) above the
@@ -65,9 +68,16 @@ pub fn dock_under(list: &[CgWindow], p: Point, dock: i32) -> bool {
         .is_some_and(|w| w.pid == dock && w.layer > 0)
 }
 
+/// True when app `pid` has a window on screen (layer 0) out of the park zone (`parks`), on
+/// any display: macOS activates it there and switches no Desktop, whatever the model knows
+/// (a window ignored by a rule, one not tracked, a placement not caught up yet).
+pub fn visible_window_of(list: &[CgWindow], pid: i32, parks: impl Fn(Rect) -> bool) -> bool {
+    list.iter().any(|w| w.pid == pid && w.layer == 0 && w.onscreen && !parks(w.bounds))
+}
+
 /// True when a press on a Dock item let go at `up` (when `up_at`) is a click on it: over
 /// the same item, within [`CLICK_SLOP`] of the press, before [`CLICK_MAX`], no modifier held.
-pub fn is_click(press: &DockPress, up: Point, up_at: Instant, modifiers: bool) -> bool {
+pub fn is_click<T>(press: &DockPress<T>, up: Point, up_at: Instant, modifiers: bool) -> bool {
     !modifiers
         && press.item.frame.contains(up)
         && (up.x - press.at.x).abs().max((up.y - press.at.y).abs()) <= CLICK_SLOP
@@ -82,16 +92,30 @@ pub fn dock_pid() -> Option<i32> {
         .map(|a| a.processIdentifier())
 }
 
-/// The application item of the Dock (`dock`: its pid) at `p`, if any.
-pub fn item_at(dock: i32, p: Point) -> Option<DockItem> {
+/// The application item of the Dock (`dock`: its pid) at `p`, with its element; else what
+/// the hit-test found there (its role), for the log.
+pub fn item_at(dock: i32, p: Point) -> Result<(AxElement, DockItem), String> {
     AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
-        let element = app.element_at(p).ok()?;
-        application_item(&element)
+        let element = app.element_at(p).map_err(|e| format!("nothing ({e})"))?;
+        // The hit-test may answer a part of the item: its parents are looked at too.
+        let mut at = element.clone();
+        for _ in 0..3 {
+            if let Some(item) = application_item(&at) {
+                return Ok((at, item));
+            }
+            let Ok(parent) = at.parent() else { break };
+            at = parent;
+        }
+        Err(format!(
+            "{} / {}",
+            element.role().unwrap_or_else(|_| "?".into()),
+            element.subrole().unwrap_or_else(|_| "?".into())
+        ))
     })
 }
 
 /// The Dock's application item for the app with bundle id `bundle` (any of the Dock's
-/// lists), with its element (the test hook presses it).
+/// lists): where the test hook clicks.
 pub fn item_for_bundle(dock: i32, bundle: &str) -> Option<(AxElement, DockItem)> {
     AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
         let lists = app.children().ok()?;
@@ -136,12 +160,27 @@ mod tests {
     }
 
     #[test]
+    fn an_apps_window_on_screen_out_of_the_park_zone_keeps_macos_here() {
+        let parks = |r: Rect| r.x >= 1700.0 && r.y >= 1100.0;
+        let shown = CgWindow { id: 2, ..win(9, 0, Rect::new(100.0, 100.0, 600.0, 400.0)) };
+        let parked = CgWindow { id: 3, ..win(9, 0, Rect::new(1780.0, 1150.0, 600.0, 400.0)) };
+        let away = CgWindow { onscreen: false, ..shown.clone() };
+        assert!(visible_window_of(std::slice::from_ref(&shown), 9, parks), "a window here (any display)");
+        assert!(!visible_window_of(&[parked], 9, parks), "a parked sliver: the model's gate decides");
+        assert!(!visible_window_of(&[away], 9, parks), "a window of another Desktop");
+        assert!(!visible_window_of(std::slice::from_ref(&shown), 8, parks), "another app's");
+        let panel = CgWindow { layer: 3, ..shown };
+        assert!(!visible_window_of(&[panel], 9, parks), "not a window's layer");
+    }
+
+    #[test]
     fn a_click_is_short_still_and_on_the_item_with_no_modifier() {
         let t0 = Instant::now();
         let press = DockPress {
             item: DockItem { path: "/Applications/Example.app".into(), frame: Rect::new(500.0, 1110.0, 60.0, 60.0) },
             at: Point::new(530.0, 1140.0),
             when: t0,
+            prediction: (),
         };
         let ms = |n| t0 + Duration::from_millis(n);
         assert!(is_click(&press, Point::new(531.0, 1141.0), ms(120), false));

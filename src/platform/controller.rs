@@ -462,7 +462,9 @@ pub struct Controller {
     /// The held window's Desktop, arranged before it was recognized ([`arrival`]).
     ahead: Option<arrival::AheadSent>,
     /// A left mouse-down on an application item of the Dock, until its mouse-up.
-    dock_press: Option<super::dock::DockPress>,
+    dock_press: Option<super::dock::DockPress<arrival::Prediction>>,
+    /// The Dock's pid, while it runs.
+    dock_pid: Option<i32>,
     /// While set, a batch leaves the strip snapshot for later (`strip_dirty`): an arrival
     /// hands the strip one snapshot, in its final order.
     defer_present: bool,
@@ -580,6 +582,7 @@ impl Controller {
             focus_replay: FocusReplay::default(),
             ahead: None,
             dock_press: None,
+            dock_pid: None,
             defer_present: false,
             absent: HashMap::new(),
             elsewhere: HashMap::new(),
@@ -1241,7 +1244,7 @@ impl Controller {
                 if self.unplaced.contains(&id) {
                     self.on_found(ob, id);
                 }
-                if self.echoes.is_window_echo(id, now) {
+                if self.echoes.is_window_echo(id, now) && !self.focus_beats_echo(ob, id) {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
@@ -1464,8 +1467,11 @@ impl Controller {
         match event.kind {
             InputKind::MouseDown => {
                 tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
-                // A press on a Dock item: its click may take the user to another Desktop.
-                self.dock_pressed(event.at, now);
+                // One window list for the press: the Dock's bar and the wallpaper are looked
+                // up in it. A press on a Dock item: its click may take the user to another
+                // Desktop.
+                let list = windows::list_windows();
+                self.dock_pressed(ob, &list, event.at, now);
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
@@ -1481,7 +1487,7 @@ impl Controller {
                     tracing::debug!("click during a transition, on an arriving window");
                     false
                 } else {
-                    self.mouse_down(ob, event.at, event.clicks)
+                    self.mouse_down(ob, &list, event.at, event.clicks)
                 };
                 if !wallpaper && self.desktop_echo.user_acted() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
@@ -1492,7 +1498,7 @@ impl Controller {
             }
             InputKind::MouseUp => {
                 let modifiers = event.cmd || event.shift || event.other_modifiers;
-                self.dock_released(ob, event.at, modifiers, now);
+                let _ = self.dock_released(ob, event.at, modifiers, now);
                 self.press = None;
                 self.focus_after_press_done(ob);
                 let Some(drag) = self.drag.take() else { return };
@@ -2273,7 +2279,7 @@ impl Controller {
     /// Stage Manager"; a double click is one click). True when it was a wallpaper click,
     /// whoever reveals: Finder's activation and focus that follow are its echo
     /// ([`DesktopEcho`]) either way.
-    pub fn mouse_down(&mut self, ob: &mut Observer, p: Point, clicks: i64) -> bool {
+    pub fn mouse_down(&mut self, ob: &mut Observer, list: &[windows::CgWindow], p: Point, clicks: i64) -> bool {
         if self.model.is_none() || self.frozen() {
             return false;
         }
@@ -2283,7 +2289,7 @@ impl Controller {
         // Our own windows (the strip below windows, the motion overlay above them) never
         // receive other apps' clicks, so they never hide the wallpaper.
         let own = std::process::id() as i32;
-        let list: Vec<_> = windows::list_windows().into_iter().filter(|w| w.pid != own).collect();
+        let list: Vec<_> = list.iter().filter(|w| w.pid != own).cloned().collect();
         if !desktop::is_wallpaper_click(&list, p) {
             return false;
         }

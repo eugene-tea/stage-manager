@@ -35,6 +35,7 @@ pub mod names {
     pub const RAISE: &str = "AXRaise";
     pub const FOCUSED_APPLICATION: &str = "AXFocusedApplication";
     pub const CHILDREN: &str = "AXChildren";
+    pub const PARENT: &str = "AXParent";
     pub const URL: &str = "AXURL";
     pub const ROLE_DOCK_ITEM: &str = "AXDockItem";
     pub const SUBROLE_APPLICATION_DOCK_ITEM: &str = "AXApplicationDockItem";
@@ -406,6 +407,11 @@ impl AxElement {
         let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
         // SAFETY: the Copy rule hands us ownership of one reference.
         Ok(AxElement(unsafe { CFRetained::from_raw(ptr) }))
+    }
+
+    /// `AXParent`.
+    pub fn parent(&self) -> AxResult<AxElement> {
+        self.element_attr(names::PARENT)
     }
 
     /// `AXChildren`.

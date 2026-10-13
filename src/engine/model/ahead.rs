@@ -111,18 +111,12 @@ impl Model {
         ax_focused: Option<WindowId>,
         z_order: &[WindowId],
     ) -> Result<WindowId, &'static str> {
-        if !self.options.settings.switch_to_app_space {
-            return Err("\"switch to a Space with open windows for the application\" is off");
-        }
+        self.dock_gates(pid)?;
         if facts.hidden {
             return Err("the app is hidden");
         }
         if facts.unplaced {
             return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
-        }
-        let mine: Vec<&super::WindowState> = self.windows.values().filter(|w| w.meta.pid == pid).collect();
-        if mine.iter().any(|w| w.sticky || self.is_shown_space(w.space)) {
-            return Err("the app has a window on the Desktop shown");
         }
         let elsewhere = |id: WindowId| {
             self.resolve_standard(id)
@@ -130,13 +124,27 @@ impl Model {
                 .filter(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !self.is_shown_space(w.space))
                 .map(|w| w.meta.id)
         };
-        if !mine.iter().any(|w| w.meta.role == WindowRole::Standard) {
-            return Err("the app has no managed window");
-        }
         ax_focused
             .and_then(elsewhere)
             .or_else(|| z_order.iter().find_map(|id| elsewhere(*id)))
             .ok_or("none of the app's windows is in the window server's order")
+    }
+
+    /// The part of [`Model::dock_arrival`] the model alone decides, asked before anything
+    /// costs a query (a click on the Desktop shown is the common case): the setting on, a
+    /// managed window of app `pid`, none on a Desktop shown (or on every Desktop).
+    pub fn dock_gates(&self, pid: Pid) -> Result<(), &'static str> {
+        if !self.options.settings.switch_to_app_space {
+            return Err("\"switch to a Space with open windows for the application\" is off");
+        }
+        let mine: Vec<&super::WindowState> = self.windows.values().filter(|w| w.meta.pid == pid).collect();
+        if mine.iter().any(|w| w.sticky || self.is_shown_space(w.space)) {
+            return Err("the app has a window on the Desktop shown");
+        }
+        if !mine.iter().any(|w| w.meta.role == WindowRole::Standard) {
+            return Err("the app has no managed window");
+        }
+        Ok(())
     }
 
     /// The predicted Desktop arrived with the stage arranged ahead still active: raises its

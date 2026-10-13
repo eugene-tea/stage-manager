@@ -577,7 +577,7 @@ planned steps (hands-free):
               no focus), the window server's bounds read (all Desktops), then put back; says whether macOS
               carries out moves on a Desktop not shown (round 6T); no Desktop 1 window may show meanwhile
   activation  on Desktop 2, twice, the window server sampled every 30 ms for 3 s each: (1) Alpha's Dock item
-              (ctl debug-dock-click: fed to the app as a click, then AXPress), Alpha 1 waiting parked in an
+              (ctl debug-dock-click: the Dock's hit-test at the item, as a real click, then AXPress), Alpha 1 parked in an
               inactive stage of Desktop 1: Desktop 1 comes up with Alpha 1's stage, the path is dock-click and
               Fixture 1-2 (the stage left) never show once Desktop 1 is on screen, not even during the slide;
               then ctl switch to Desktop 1's Fixture stage, ctl debug-space <toward>; (2) open Alpha (the
@@ -939,9 +939,9 @@ def activation_to_desktop_1(d1, d2):
     arriving Desktop at the Dock click. Hands-free it runs twice, the window server sampled
     every 30 ms from the activation for 3 s each time:
 
-    - **Dock click** (`ctl debug-dock-click`: Alpha's real Dock item, fed to the app as a
-      click on it, then pressed with AXPress, which activates the app as a click does, the
-      Dock auto-hidden or not): the timeline's path is `dock-click` and Fixture 1-2 (the
+    - **Dock click** (`ctl debug-dock-click`: Alpha's real Dock item, hit-tested at its
+      center and handed through the press and release path as a real click is, then pressed
+      with AXPress, which activates the app as a click does): the timeline's path is `dock-click` and Fixture 1-2 (the
       stage Desktop 1 was left with) never show out of the park zone once Desktop 1 is on
       screen, not even during the slide.
     - **`open`** (no click: the 6T fallback at the notice): once the arrangement is sent,

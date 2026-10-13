@@ -93,6 +93,9 @@ impl Trigger {
     }
 }
 
+/// A Dock click's prediction: the app and the window macOS will show, or why none.
+pub(super) type Prediction = Result<(i32, WindowId), &'static str>;
+
 /// A Desktop arranged ahead and not recognized yet.
 #[derive(Debug, Clone)]
 pub(super) struct AheadSent {
@@ -208,6 +211,15 @@ fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration,
     }
 }
 
+/// True when a focus (of a window of app `pid`, the standard window it is or follows
+/// `resolved`) that our own moves would make an echo is the user's word all the same: an
+/// arrangement stands for `window` of app `ahead_pid`, and the focus names another known
+/// window of that app (macOS shows another window than predicted). The predicted window's
+/// own focus, another app's, or an unknown window's stay echoes.
+fn focus_beats_echo(window: WindowId, ahead_pid: i32, pid: Option<i32>, resolved: Option<WindowId>) -> bool {
+    pid == Some(ahead_pid) && resolved.is_some_and(|r| r != window)
+}
+
 /// True when forgetting a held focus also undoes the arrangement: never while a Space change
 /// settles (nobody acts on the Desktop shown then; stage commands are refused).
 fn forget_undoes(pending: bool) -> bool {
@@ -235,6 +247,20 @@ impl Controller {
         let Some(sent) = &self.ahead else { return false };
         let m = self.model.as_ref();
         contradicts(self.focus_replay.peek(now), sent.ahead.window, sent.pid, |id| m.and_then(|m| m.resolve_standard(id)))
+    }
+
+    /// True when a focus of window `id`, within the echo window of an arrangement's own
+    /// moves, is still the user's word ([`focus_beats_echo`]): macOS focused another known
+    /// window of the predicted window's app (its key window changed since the click).
+    pub(super) fn focus_beats_echo(&self, ob: &Observer, id: u32) -> bool {
+        let Some(sent) = &self.ahead else { return false };
+        let pid = ob.window(id).map(|w| w.pid);
+        let resolved = self.model.as_ref().and_then(|m| m.resolve_standard(WindowId(id)));
+        let beats = focus_beats_echo(sent.ahead.window, sent.pid, pid, resolved);
+        if beats {
+            tracing::debug!(id, predicted = sent.ahead.window.0, "a focus of another window of the predicted app, not an echo");
+        }
+        beats
     }
 
     /// True when a held window focus should survive an activation of app `pid` that changed
@@ -364,39 +390,67 @@ impl Controller {
         true
     }
 
-    /// A left mouse-down at `p`: over an application item of the Dock, the press is kept
-    /// for its mouse-up ([`dock::is_click`]).
-    pub(super) fn dock_pressed(&mut self, p: crate::engine::geometry::Point, now: Instant) {
+    /// A left mouse-down at `p` (`list`: the window list read for it): over the Dock's bar,
+    /// the application item there is hit-tested and its click's prediction worked out now
+    /// (the app's state does not change during a press), kept for the mouse-up
+    /// ([`Self::dock_released`]). Anywhere else this costs the bar test on `list` only.
+    pub(super) fn dock_pressed(&mut self, ob: &Observer, list: &[CgWindow], p: crate::engine::geometry::Point, now: Instant) {
         self.dock_press = None;
         if self.model.is_none() || self.frozen() {
             return;
         }
-        let Some(dock) = dock::dock_pid() else { return };
-        if !dock::dock_under(&windows::list_windows(), p, dock) {
+        let Some(dock) = self.dock_pid(list) else { return };
+        if !dock::dock_under(list, p, dock) {
             return;
         }
-        let item = dock::item_at(dock, p);
-        tracing::debug!(x = p.x, y = p.y, item = ?item.as_ref().map(|i| &i.path), "dock: pressed");
-        self.dock_press = item.map(|item| DockPress { item, at: p, when: now });
+        match dock::item_at(dock, p) {
+            Ok((_, item)) => self.press_item(ob, list, item, p, now),
+            Err(found) => tracing::info!(x = p.x, y = p.y, found, "dock: pressed, but the hit-test found no application item"),
+        }
+    }
+
+    /// The Dock's pid: the one cached while it owns a window in `list`, else looked up (the
+    /// Dock relaunched).
+    fn dock_pid(&mut self, list: &[CgWindow]) -> Option<i32> {
+        if let Some(pid) = self.dock_pid.filter(|pid| list.iter().any(|w| w.pid == *pid)) {
+            return Some(pid);
+        }
+        self.dock_pid = dock::dock_pid();
+        self.dock_pid
+    }
+
+    /// A press on `item` at `p`: its click's prediction, kept with the press.
+    fn press_item(&mut self, ob: &Observer, list: &[CgWindow], item: DockItem, p: crate::engine::geometry::Point, now: Instant) {
+        let prediction = self.dock_prediction(ob, list, &item);
+        tracing::debug!(
+            x = p.x,
+            y = p.y,
+            path = item.path,
+            prediction = ?prediction.map(|(_, w)| w.0),
+            took_ms = ms(now, Instant::now()),
+            "dock: pressed"
+        );
+        self.dock_press = Some(DockPress { item, at: p, when: now, prediction });
     }
 
     /// A left mouse-up at `p` (`modifiers`: any of ⌘⌥⌃⇧ held): a click on the Dock item
-    /// pressed goes to [`Self::dock_clicked`].
-    pub(super) fn dock_released(&mut self, ob: &Observer, p: crate::engine::geometry::Point, modifiers: bool, now: Instant) {
-        let Some(press) = self.dock_press.take() else { return };
+    /// pressed has its prediction arranged ([`Self::dock_clicked`]).
+    pub(super) fn dock_released(&mut self, ob: &Observer, p: crate::engine::geometry::Point, modifiers: bool, now: Instant) -> Option<WindowId> {
+        let press = self.dock_press.take()?;
         if dock::is_click(&press, p, now, modifiers) {
-            self.dock_clicked(ob, &press.item, now);
+            self.dock_clicked(ob, &press, now)
         } else {
             tracing::debug!(path = press.item.path, held_ms = ms(press.when, now), modifiers, "dock: a press, not a click; no prediction");
+            None
         }
     }
 
-    /// A click on `item` (an application item of the Dock), at `clicked`: when macOS will
-    /// take the user to another Desktop for it, that Desktop is arranged now
-    /// ([`crate::engine::model::Model::dock_arrival`]). Returns the window predicted.
-    pub(super) fn dock_clicked(&mut self, ob: &Observer, item: &DockItem, clicked: Instant) -> Option<WindowId> {
+    /// A click on a Dock item (`press`, let go at `released`): when macOS will take the user
+    /// to another Desktop for it (the prediction made at the press), that Desktop is
+    /// arranged now. Returns the window predicted.
+    fn dock_clicked(&mut self, ob: &Observer, press: &DockPress<Prediction>, released: Instant) -> Option<WindowId> {
         let started = Instant::now();
-        let why = match self.dock_prediction(ob, item) {
+        let why = match press.prediction {
             Ok((pid, window)) => {
                 if self.frozen() {
                     "a Space change is settling"
@@ -410,10 +464,12 @@ impl Controller {
                     if let Some(space) = self.ahead_space() {
                         self.present_away(space);
                     }
+                    let done = Instant::now();
                     tracing::info!(
-                        path = item.path,
+                        path = press.item.path,
                         window = window.0,
-                        since_click_ms = ms(clicked, Instant::now()),
+                        since_click_ms = ms(press.when, done),
+                        since_release_ms = ms(released, done),
                         "dock: the Desktop the click goes to is arranged"
                     );
                     return Some(window);
@@ -423,13 +479,21 @@ impl Controller {
             }
             Err(why) => why,
         };
-        tracing::info!(path = item.path, why, since_click_ms = ms(clicked, Instant::now()), "dock: no prediction");
+        let done = Instant::now();
+        tracing::info!(
+            path = press.item.path,
+            why,
+            since_click_ms = ms(press.when, done),
+            since_release_ms = ms(released, done),
+            "dock: no prediction"
+        );
         None
     }
 
     /// The app a Dock item is for and the window macOS will show for it on another
-    /// Desktop, or why there is no prediction.
-    fn dock_prediction(&self, ob: &Observer, item: &DockItem) -> Result<(i32, WindowId), &'static str> {
+    /// Desktop, or why there is no prediction: the model's gates and the window list
+    /// (`list`) first, the app asked (bounded) only when they pass.
+    fn dock_prediction(&self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
         let m = self.model.as_ref().ok_or("not managing")?;
         let bundle = dock::bundle_id_at(&item.path).ok_or("the item's bundle has no id")?;
         let pid = match ob.pids_with_bundle(&bundle)[..] {
@@ -437,12 +501,18 @@ impl Controller {
             [pid] => pid,
             _ => return Err("several instances of the app run"),
         };
-        let app = AxElement::application(pid);
-        let hidden = app.bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()).unwrap_or(true);
-        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
-        let z: Vec<WindowId> = windows::list_windows().iter().filter(|w| w.pid == pid && w.layer == 0).map(|w| WindowId(w.id)).collect();
+        m.dock_gates(pid)?;
+        let main = *m.main_display();
+        if dock::visible_window_of(list, pid, |r| main.parks(r)) {
+            return Err("the app has a window on screen here (the window server's list)");
+        }
+        if self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid)) {
+            return Err("the app has windows not placed (minimized, or on a Desktop not visited)");
+        }
+        let hidden = AxElement::application(pid).bounded(QUERY_AX_TIMEOUT_SECONDS, |a| a.is_hidden()).unwrap_or(true);
+        let z: Vec<WindowId> = list.iter().filter(|w| w.pid == pid && w.layer == 0).map(|w| WindowId(w.id)).collect();
         let focused = focused_window_of(pid);
-        let window = m.dock_arrival(pid, AppFacts { hidden, unplaced }, focused, &z)?;
+        let window = m.dock_arrival(pid, AppFacts { hidden, unplaced: false }, focused, &z)?;
         tracing::debug!(bundle, pid, ax_focused = ?focused.map(|f| f.0), window = window.0, "dock: the window macOS will show");
         Ok((pid, window))
     }
@@ -492,6 +562,10 @@ impl Controller {
         );
         if !hit {
             self.keep_registered(ob, &actions);
+            if sent.trigger == Trigger::DockClick {
+                // Its pane drew the prediction: it shows the Desktop as it is again.
+                self.present_away(sent.ahead.space);
+            }
         }
         (actions, (hit && present).then_some(sent.ahead.window))
     }
@@ -555,23 +629,34 @@ impl Controller {
         }
     }
 
-    /// `debug-dock-click BUNDLE` (test only): the Dock item of a `STAGE_MANAGER_ONLY` app
-    /// goes through [`Self::dock_clicked`] exactly as a click on it does, then is pressed
-    /// (`AXPress`, which activates the app as a click does, the Dock auto-hidden or not).
+    /// `debug-dock-click BUNDLE` (test only): the Dock item of a `STAGE_MANAGER_ONLY` app is
+    /// found (its frame, from the Dock's lists), then clicked the way a real click goes: the
+    /// hit-test at its center ([`dock::item_at`]), the prediction at the press, the
+    /// arrangement at the release; then the item the hit-test found is pressed (`AXPress`,
+    /// which activates the app as a click does, the Dock auto-hidden or not).
     pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
+        use serde_json::json;
         let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
         if !only.split(',').any(|b| b.trim() == bundle) {
-            return serde_json::json!({ "ok": false, "error": format!("{bundle} is not on the STAGE_MANAGER_ONLY list") });
+            return json!({ "ok": false, "error": format!("{bundle} is not on the STAGE_MANAGER_ONLY list") });
         }
-        let Some(dock) = dock::dock_pid() else { return serde_json::json!({ "ok": false, "error": "the Dock does not run" }) };
-        let Some((element, item)) = dock::item_for_bundle(dock, bundle) else {
-            return serde_json::json!({ "ok": false, "error": format!("no Dock item for {bundle}") });
+        let list = windows::list_windows();
+        let Some(dock) = self.dock_pid(&list) else { return json!({ "ok": false, "error": "the Dock does not run" }) };
+        let Some((_, listed)) = dock::item_for_bundle(dock, bundle) else {
+            return json!({ "ok": false, "error": format!("no Dock item for {bundle}") });
         };
-        let clicked = Instant::now();
-        let predicted = self.dock_clicked(ob, &item, clicked);
+        let at = crate::engine::geometry::Point::new(listed.frame.x + listed.frame.w / 2.0, listed.frame.y + listed.frame.h / 2.0);
+        let (element, item) = match dock::item_at(dock, at) {
+            Ok(hit) if hit.1.path == listed.path => hit,
+            Ok((_, other)) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
+            Err(found) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {found}") }),
+        };
+        let pressed_at = Instant::now();
+        self.press_item(ob, &list, item, at, pressed_at);
+        let predicted = self.dock_released(ob, at, false, Instant::now());
         let pressed = element.bounded(QUERY_AX_TIMEOUT_SECONDS * 4.0, |e| e.perform_action(names::PRESS));
         tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
-        serde_json::json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })
+        json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })
     }
 }
 
@@ -682,6 +767,15 @@ mod tests {
         assert_eq!(expire_step(dock, true, false, ms(1500), true), None, "never while a change settles");
         assert!(expire_step(Trigger::Notice, false, true, ms(10), true).is_some(), "the hold is gone");
         assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), false), None);
+    }
+
+    #[test]
+    fn only_another_window_of_the_predicted_app_beats_the_echo() {
+        let b = WindowId(1);
+        assert!(focus_beats_echo(b, 10, Some(10), Some(WindowId(2))), "macOS shows window C, not B");
+        assert!(!focus_beats_echo(b, 10, Some(10), Some(b)), "B's own focus: an echo");
+        assert!(!focus_beats_echo(b, 10, Some(20), Some(WindowId(5))), "another app's window: an echo");
+        assert!(!focus_beats_echo(b, 10, Some(10), None), "an unknown window of the app");
     }
 
     #[test]
