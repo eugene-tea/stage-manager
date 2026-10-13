@@ -12,7 +12,9 @@
 //!
 //! - The predicted Desktop arrives: [`Model::finish_ahead`] raises the stage's windows and
 //!   focuses the window (they are on the Desktop shown by then). Nothing moves at the
-//!   arrival: the windows are already where the arrival would have put them.
+//!   arrival: the windows are already where the arrival would have put them. When the
+//!   window is gone from its stage by then (closed, moved), the stage that was active comes
+//!   back instead.
 //! - Another Desktop arrives, the user acts on the Desktop shown, or another focus is held
 //!   instead: [`Model::undo_ahead`] gives the Desktop back its previous stage, its key
 //!   window, its strip slots and its recency. A Desktop shown by then is left as it is
@@ -23,7 +25,7 @@
 //! ([`Model::arrive`]: a parked window found shown is parked again, a shown one found parked
 //! is brought back) covers a move macOS did not carry out on a Desktop not shown.
 
-use super::{Action, Home, Model, SpaceId, StageId, WindowId};
+use super::{Action, Home, Model, Observation, SpaceId, StageId, WindowId};
 
 /// A stage switch made on a Desktop before it was recognized, and what undoes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,11 +50,13 @@ impl Model {
     /// Makes the stage of window `id` (or of the window a child of it follows) the active
     /// stage of its Desktop, which no display shows now, with `id` as its key window: the
     /// stage active there is parked, `id`'s stage brought back (no raise, no focus: nothing
-    /// acts on a Desktop not shown but moves). `None`, changing nothing, when there is
+    /// acts on a Desktop not shown but moves). `obs`, when the Desktop is already on screen
+    /// (the Space change notice), saves the stage left as a switch does: its windows' order
+    /// as the window list shows them and its front window as its key. `None`, changing nothing, when there is
     /// nothing to arrange or it could not be undone: an unknown, pinned or sticky window, a
     /// Desktop shown now, a stage already active, a desktop reveal there, or a stage active
     /// there that holds no window (leaving it would drop it).
-    pub fn arrange_ahead(&mut self, id: WindowId) -> Option<(Ahead, Vec<Action>)> {
+    pub fn arrange_ahead(&mut self, id: WindowId, obs: Option<&Observation>) -> Option<(Ahead, Vec<Action>)> {
         let window = self.resolve_standard(id)?;
         let w = self.windows.get(&window)?;
         let Home::Stage(stage) = w.home else { return None };
@@ -77,22 +81,30 @@ impl Model {
         if let Some(s) = self.stage_mut(stage) {
             s.key = Some(window);
         }
-        let mut actions = self.switch_in(space, previous, stage, None);
+        let mut actions = self.switch_in(space, previous, stage, obs);
         actions.retain(|a| !matches!(a, Action::Raise { .. } | Action::Focus { .. }));
         Some((ahead, actions))
     }
 
     /// The predicted Desktop arrived with the stage arranged ahead still active: raises its
     /// windows back to front and focuses the window the user went there for (on the Desktop
-    /// shown now). Nothing when the Desktop is not shown or its active stage changed since.
-    pub fn finish_ahead(&self, ahead: &Ahead) -> Vec<Action> {
+    /// shown now). When that window is no longer in the stage (closed or moved meanwhile), the
+    /// stage that was active comes back instead, with its strip slots, as a switch does.
+    /// Nothing when the Desktop is not shown or its active stage changed since.
+    pub fn finish_ahead(&mut self, ahead: &Ahead) -> Vec<Action> {
         if !self.is_shown_space(ahead.space) || self.active.get(&ahead.space) != Some(&ahead.stage) {
             return Vec::new();
         }
-        let mut actions: Vec<Action> = self.front_order(ahead.stage).into_iter().map(|id| Action::Raise { id }).collect();
-        if self.stage(ahead.stage).is_some_and(|s| s.windows.contains(&ahead.window)) {
-            actions.push(Action::Focus { id: ahead.window });
+        if !self.stage(ahead.stage).is_some_and(|s| s.windows.contains(&ahead.window)) {
+            if self.stage(ahead.previous).is_none_or(|s| s.space != ahead.space) {
+                return Vec::new();
+            }
+            let actions = self.switch_in(ahead.space, ahead.stage, ahead.previous, None);
+            self.restore_slots(ahead);
+            return actions;
         }
+        let mut actions: Vec<Action> = self.front_order(ahead.stage).into_iter().map(|id| Action::Raise { id }).collect();
+        actions.push(Action::Focus { id: ahead.window });
         actions
     }
 
@@ -118,13 +130,18 @@ impl Model {
         if let Some(s) = self.stage_mut(ahead.previous) {
             s.last_active = ahead.recency.0;
         }
-        let now: Vec<StageId> = self.slots.get(&space).cloned().unwrap_or_default();
+        self.restore_slots(ahead);
+        actions
+    }
+
+    /// The Desktop's strip slots as they were before `ahead`, when the same stages fill them.
+    fn restore_slots(&mut self, ahead: &Ahead) {
+        let now: Vec<StageId> = self.slots.get(&ahead.space).cloned().unwrap_or_default();
         let same = |a: &[StageId], b: &[StageId]| a.len() == b.len() && a.iter().all(|s| b.contains(s));
         if same(&now, &ahead.slots) {
-            self.slots.insert(space, ahead.slots.clone());
+            self.slots.insert(ahead.space, ahead.slots.clone());
         }
         self.normalize_slots();
-        actions
     }
 
     /// A stage's windows in the order a switch raises them: back to front, each followed by

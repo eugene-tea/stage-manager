@@ -288,8 +288,13 @@ Ours:
   held window's stage goes out **at the notice**, as soon as the window server lists the
   window on screen (its Desktop is the one sliding in), before the window lists are read
   again; the recognition then finds it arranged (nothing moves), raises its windows and
-  focuses the window; the arriving Desktop's strip is redrawn at the notice too, in its
-  final order. Without a held window the arrival's switch is part of the arrival's own
+  focuses the window (that window counts as the focused one then, whatever a late
+  Accessibility answer says; gone meanwhile, the stage that was there comes back); the
+  arriving Desktop's strip is redrawn at the notice too, in its final order. The stage
+  left is saved as a switch saves it (the window list's order, its front window as key).
+  A focus whose event comes after the notice: the app is asked for its focused window at
+  the notice (50 ms Accessibility timeout); a focus held while a change settles is
+  arranged for as soon as the window server lists its window. Without a held window the arrival's switch is part of the arrival's own
   batch, and the strip gets one snapshot for it. Either way the arriving strip is laid out
   at once (no glide, no fade). Whether moves of a Desktop's windows sent before the slide (at the
   focus) show during it depends on whether macOS carries out moves on a Desktop not shown;
@@ -297,7 +302,8 @@ Ours:
   from Desktop 2) and samples the window server through the slide. The arrangement at the
   focus (`STAGE_MANAGER_ARRANGE_AT_FOCUS=1`, off by default) waits for that proof. A wrong
   prediction (another Desktop recognized, the user acting on the Desktop shown, another
-  focus held, a full-screen Space, no Space change within the hold) gives the Desktop back
+  known window or another app focused, a full-screen Space, no Space change within the
+  hold, the window not on screen at the notice) gives the Desktop back
   its previous stage, slots and recency; windows brought back on a Desktop not shown stay
   in the safety registry until seen there.
 - Card clicks, hotkeys and ⌘Tab focus a window by raising it and making it main through

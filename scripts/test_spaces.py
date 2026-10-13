@@ -1041,12 +1041,26 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids):
     slide_from = d1_on[0] if d1_on else None
     slide_to = max((t for t in d2_on if slide_from and t >= slide_from), default=None)
     stale = [x["t"] for x in samples if any(w["id"] in left and shown(w) for w in x["windows"])]
+    if ahead:
+        path = f"6T: arranged ahead at the {trigger}"
+    elif switched:
+        path = "6R fallback: switched at the recognition"
+    else:
+        path = "no switch logged"
     say(f"    timeline from the activation: focus {rel(focus)}, notice {rel(notice)}, arranged "
-        f"{rel(sent)} ({'ahead, at the ' + trigger if ahead else 'with the arrival'}), recognized {rel(recognized)}")
+        f"{rel(sent)}, recognized {rel(recognized)}; path: {path}")
     say(f"    window server ({len(samples)} looks, every ~30 ms): Desktop 1's windows on screen from {rel(slide_from)}, "
         f"Desktop 2's until {rel(slide_to)}; the stage left shown out of the park zone at "
         f"{[rel(t) for t in stale if slide_from and t >= slide_from][:12]}")
     check(sent is not None, "the app's log says when the arrival's arrangement was sent")
+    # Nothing below may pass for want of looking: the sampler saw the slide and the windows.
+    check(slide_from is not None, "the window server was seen showing Desktop 1 during the 3 s sampled")
+    last = samples[-1]["windows"] if samples else []
+    check(any(w["id"] in left for w in last), "Fixture 1-2 are listed at the last look (the stage left was looked at)")
+    if focus is not None and notice is not None and focus <= notice:
+        check(ahead is not None, f"the focus came before the notice: arranged ahead (6T), not at the recognition ({path})")
+    elif ahead is None:
+        say(f"    (no focus before the notice in the log: {path})")
     if sent is not None:
         late = [t for t in stale if t >= sent + 0.05]
         check(not late, "once the arrangement was sent, the stage Desktop 1 was left with never shows "
@@ -1055,7 +1069,6 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids):
         during = [t for t in stale if t >= slide_from]
         check(not during, "arranged at the focus: the stage left never shows, not even during the slide"
               + ("" if not during else f": {[rel(t) for t in during][:8]}"))
-    last = samples[-1]["windows"] if samples else []
     check(any(w["id"] == alpha_id and shown(w) for w in last), "Alpha 1 on screen out of the park zone at the last look")
     window = [line for t, line in events if t <= t_open + 3.0]
     ghosts = [line for line in window if "transition: " in line or "transition covered" in line

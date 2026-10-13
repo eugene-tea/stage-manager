@@ -1896,7 +1896,8 @@ impl Controller {
         let after = m.current_space(main.id);
         tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
-        actions.extend(self.settle_ahead(ob, after, Instant::now()));
+        let (more, predicted) = self.settle_ahead(ob, after, Instant::now());
+        actions.extend(more);
         // One batch and one strip snapshot for the arrival: the strip of the Desktop shown
         // takes over in its final order, never first with the stage left active.
         self.defer_present = true;
@@ -1904,7 +1905,7 @@ impl Controller {
         self.pin_floats(ob, &arrivals);
         // Arriving through an app (Dock, ⌘Tab, an activation) whose window waits in a stage
         // here: show it, as Apple's does, at once (the Desktop's slide is the motion).
-        self.bring_focus_forward(ob, "arrival");
+        self.bring_focus_forward(ob, "arrival", predicted);
         self.defer_present = false;
         self.present();
         self.mark_dirty();
@@ -1914,11 +1915,16 @@ impl Controller {
     /// focused window now, and the focus or activation held meanwhile is replayed
     /// ([`Model::bring_focus_forward`]); its stage comes at once, the Desktop's slide having
     /// just shown it (Apple's shows the Desktop with that stage already active).
-    fn bring_focus_forward(&mut self, ob: &mut Observer, why: &str) {
+    /// `predicted`: the window a Desktop arranged ahead came for, counted as the focused one
+    /// (Accessibility may still name the previous app's window, in the stage parked ahead).
+    fn bring_focus_forward(&mut self, ob: &mut Observer, why: &str, predicted: Option<WindowId>) {
         let now = Instant::now();
         let held_at = self.focus_replay.came(now);
         let held = self.focus_replay.take(now);
         let mut obs = self.observe(ob);
+        if predicted.is_some() {
+            obs.focused = predicted;
+        }
         // The frontmost app's focused window asked now; when the system-wide answer fails
         // (an app busy with the Space change times out), the held app's own.
         if obs.focused.is_none()
@@ -1978,7 +1984,7 @@ impl Controller {
                 // its window is on this Desktop after all. (One whose Desktop is not shown
                 // stays held for its arrival: the check can fall between its focus and the
                 // Space change.)
-                self.bring_focus_forward(ob, "a wait ended");
+                self.bring_focus_forward(ob, "a wait ended", None);
             }
         }
         // A change between a Desktop and a full-screen Space the notification missed is
@@ -2335,11 +2341,12 @@ impl Controller {
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
         self.flush_pending(ob);
-        self.forget_held(ob);
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
+            // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
             return;
         }
+        self.forget_held(ob);
         let _ = match command {
             HotkeyCommand::SwitchTo(n) => self.switch(ob, n, true),
             HotkeyCommand::SendTo(n) => self.send(ob, None, Target::Number(n), true),
@@ -2378,17 +2385,18 @@ impl Controller {
             return;
         }
         self.flush_pending(ob);
-        self.forget_held(ob);
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
         let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
         if self.frozen() {
+            // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
             if local_edit {
                 self.present();
             }
             return;
         }
+        self.forget_held(ob);
         if let StripEvent::CardMoved { stage, before } = event {
             let Some(m) = self.model.as_mut() else { return };
             counters::bump(Count::Reorder);

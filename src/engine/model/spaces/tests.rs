@@ -1007,7 +1007,7 @@ mod arranged_ahead {
         // The notice: Desktop 1 slides in (macOS lists its windows), the model still says 2.
         mac.shown = 0;
         mac.focused = Some(w(1));
-        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
         assert_eq!((ahead.window, ahead.stage, ahead.previous), (w(1), editor, browser));
         assert!(!raises_or_focus(&actions), "moves only: {actions:?}");
         assert_eq!(actions.last(), Some(&Action::StateChanged));
@@ -1029,7 +1029,7 @@ mod arranged_ahead {
     #[test]
     fn arranged_at_the_focus_it_moves_only_the_predicted_desktops_windows() {
         let (mut mac, editor, _) = editor_on_both();
-        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
         mac.run(actions);
         assert!(!raises_or_focus(&mac.elsewhere), "never a raise or focus on a Desktop not shown: {:?}", mac.elsewhere);
         let touched: Vec<WindowId> = mac
@@ -1057,7 +1057,7 @@ mod arranged_ahead {
         let space = mac.m.space_of(w(1)).expect("space");
         let slots = mac.m.slots[&space].clone();
         let key = mac.m.stage(editor).and_then(|s| s.key);
-        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
         mac.run(actions);
         // macOS stays on Desktop 2 (or another focus comes): undone.
         let undo = mac.m.undo_ahead(&ahead);
@@ -1085,7 +1085,7 @@ mod arranged_ahead {
         for predicted in [true, false] {
             let (mut mac, editor, browser) = editor_on_both();
             mac.still_elsewhere = true;
-            let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+            let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
             mac.run(actions);
             assert!(mac.parked(1) && !mac.parked(2), "nothing moved");
             if !predicted {
@@ -1109,7 +1109,7 @@ mod arranged_ahead {
     fn another_desktop_arriving_undoes_it_and_a_shown_desktop_is_left_as_it_is() {
         // Arranged for Desktop 1, but Desktop 2 is recognized (the slide went elsewhere).
         let (mut mac, _, browser) = editor_on_both();
-        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
         mac.run(actions);
         let at = arrival(&mut mac, Some(&ahead), None);
         let off: Vec<&Action> =
@@ -1120,7 +1120,7 @@ mod arranged_ahead {
 
         // Arrived as predicted: undoing then changes nothing (what shows is right).
         let (mut mac, editor, _) = editor_on_both();
-        let (ahead, actions) = mac.m.arrange_ahead(w(1)).expect("arranged");
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
         mac.run(actions);
         mac.shown = 0;
         mac.focused = Some(w(1));
@@ -1137,17 +1137,122 @@ mod arranged_ahead {
     }
 
     #[test]
+    fn arranged_at_the_notice_the_stage_left_keeps_the_order_the_user_left_it_in() {
+        // Desktop 1's browser stage holds two windows; the user brought window 6 to its front
+        // before leaving. At the notice the window list shows that order: it is saved.
+        let mut mac = two_desktops();
+        mac.put(0, 6, 20, "com.example.browser", "Other wiki");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        assert_eq!(mac.m.stage_of(w(6)), Some(browser), "one stage per app");
+        mac.click(browser);
+        assert_eq!(mac.m.stage(browser).and_then(|s| s.key), Some(w(2)), "window 2 is its key so far");
+        mac.focused = Some(w(3));
+        mac.go(1);
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        let obs = Observation { frames: Default::default(), z_order: vec![w(6), w(2), w(1)], focused: None };
+        let (_, actions) = mac.m.arrange_ahead(w(1), Some(&obs)).expect("arranged");
+        mac.run(actions);
+        let st = mac.m.stage(browser).expect("browser stage");
+        assert_eq!(st.key, Some(w(6)), "the front window as the user left it is the key");
+        assert_eq!(st.windows.first(), Some(&w(6)));
+        assert!(mac.parked(2) && mac.parked(6));
+    }
+
+    #[test]
+    fn at_the_arrival_the_prediction_beats_a_stale_ax_answer() {
+        // AX still names the browser's window (the stage parked ahead) at the recognition.
+        let (mut mac, editor, browser) = editor_on_both();
+        mac.shown = 0;
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
+        mac.run(actions);
+        mac.arrive();
+        let fin = mac.m.finish_ahead(&ahead);
+        mac.run(fin);
+        let held = Some(Wanted::Window { id: w(1), pid: 10 });
+        // Taken at its word, AX would switch back to the stage parked ahead:
+        let mut stale = mac.m.clone();
+        let obs = Observation { focused: Some(w(2)), ..mac.obs() };
+        stale.bring_focus_forward(Some(w(2)), held, &obs);
+        assert_eq!(stale.main_active_stage(), Some(browser), "the hazard the controller avoids");
+        // The controller asks with the predicted window as the focused one: nothing changes.
+        let obs = Observation { focused: Some(w(1)), ..mac.obs() };
+        assert!(mac.m.bring_focus_forward(Some(w(1)), held, &obs).is_empty());
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+    }
+
+    #[test]
+    fn the_window_gone_before_the_arrival_brings_back_the_stage_that_was_there() {
+        let (mut mac, _, browser) = editor_on_both();
+        let space = mac.m.space_of(w(1)).expect("space");
+        let slots = mac.m.slots[&space].clone();
+        mac.shown = 0;
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
+        mac.run(actions);
+        // The editor's window closes during the slide.
+        let a = mac.m.remove_window(w(1));
+        mac.run(a);
+        mac.wins.remove(&1);
+        mac.focused = None;
+        mac.arrive();
+        let fin = mac.m.finish_ahead(&ahead);
+        assert!(!moves(&fin).is_empty());
+        mac.run(fin);
+        assert_eq!(mac.m.main_active_stage(), Some(browser));
+        assert!(!mac.parked(2));
+        assert_eq!(mac.m.slots[&space].iter().filter(|s| slots.contains(s)).count(), mac.m.slots[&space].len());
+        consistent(&mac);
+    }
+
+    #[test]
+    fn a_childs_focus_arranges_its_parents_stage() {
+        let mut mac = two_desktops();
+        let mut dialog = child(7, 10, Some(1));
+        dialog.frame = Rect::new(300.0, 200.0, 300.0, 200.0);
+        mac.wins.insert(7, (Some(0), dialog.frame, dialog));
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let editor = mac.m.stage_of(w(1)).expect("editor stage");
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        assert!(mac.parked(1) && mac.parked(7), "the dialog waits with its window");
+        mac.focused = Some(w(3));
+        mac.go(1);
+        let (ahead, actions) = mac.m.arrange_ahead(w(7), None).expect("arranged for the dialog's window");
+        assert_eq!((ahead.window, ahead.stage), (w(1), editor));
+        mac.run(actions);
+        assert!(!mac.parked(1) && !mac.parked(7) && mac.parked(2));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn an_undo_changes_nothing_once_the_stage_left_is_gone() {
+        let (mut mac, editor, _) = editor_on_both();
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
+        mac.run(actions);
+        // The browser quits meanwhile: its (parked) stage goes.
+        let a = mac.m.remove_window(w(2));
+        mac.run(a);
+        mac.wins.remove(&2);
+        assert!(mac.m.undo_ahead(&ahead).is_empty());
+        assert_eq!(mac.m.active_stage_in(ahead.space), Some(editor), "the window arranged for stays shown");
+        consistent(&mac);
+    }
+
+    #[test]
     fn nothing_is_arranged_when_there_is_nothing_to_arrange_or_undo() {
         let (mut mac, _, browser) = editor_on_both();
-        assert!(mac.m.arrange_ahead(w(3)).is_none(), "a window of the Desktop shown");
-        assert!(mac.m.arrange_ahead(w(2)).is_none(), "a window whose stage is already active there");
-        assert!(mac.m.arrange_ahead(w(99)).is_none(), "an unknown window");
+        assert!(mac.m.arrange_ahead(w(3), None).is_none(), "a window of the Desktop shown");
+        assert!(mac.m.arrange_ahead(w(2), None).is_none(), "a window whose stage is already active there");
+        assert!(mac.m.arrange_ahead(w(99), None).is_none(), "an unknown window");
         // The stage active there holds no window: leaving it would drop it, nothing to undo to.
         let space = mac.m.space_of(w(1)).expect("space");
         let empty = mac.m.create_stage(space, None);
         mac.m.active.insert(space, empty);
-        assert!(mac.m.arrange_ahead(w(1)).is_none());
+        assert!(mac.m.arrange_ahead(w(1), None).is_none());
         mac.m.active.insert(space, browser);
-        assert!(mac.m.arrange_ahead(w(1)).is_some());
+        assert!(mac.m.arrange_ahead(w(1), None).is_some());
     }
 }
