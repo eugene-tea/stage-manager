@@ -186,6 +186,9 @@ pub(super) struct Verify {
     /// The arrival's check's ticks since its time was up, this one counted
     /// ([`tail_past_ceiling`], R15 1).
     over_ticks: u32,
+    /// When the first counted tick ran: the time ceiling counts from it, not from the time
+    /// up, so a late first tick (a full round just before) costs no later tick (R15 3).
+    over_since: Option<Instant>,
     /// The stage arranged on its Desktop: the check ends once it is not the active one there
     /// or a switch touched it ([`Model::ahead_holds`], R13 1).
     mark: AheadMark,
@@ -299,7 +302,8 @@ fn send_round(due: &[usize], mut send: impl FnMut(usize) -> bool) -> Vec<usize> 
 }
 
 /// True when the arrival's check, its time up, may not go on: past its `over_ticks`-th tick
-/// since (the first counted 1, then [`TAIL_OVER_TICKS`] more) or [`TAIL_OVER_FOR`] past it.
+/// since (the first counted 1, then [`TAIL_OVER_TICKS`] more) or [`TAIL_OVER_FOR`] past the
+/// first counted tick.
 fn tail_past_ceiling(over_ticks: u32, past: Duration) -> bool {
     // The time-up round itself always goes; a slow app's rounds take their cap plus a tick
     // each, so the time ceiling leaves room for every counted tick (R15 review).
@@ -969,6 +973,7 @@ impl Controller {
             told: false,
             tail: None,
             over_ticks: 0,
+            over_since: None,
             mark,
             moves: expected,
         });
@@ -1169,7 +1174,7 @@ impl Controller {
         if over {
             v.over_ticks += 1;
         }
-        let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(until));
+        let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(*v.over_since.get_or_insert(now)));
         let listed = |id: u32| list.iter().find(|w| w.id == id);
         let seen: Vec<Option<Seen>> =
             v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), main.frame, |r| main.parks(r)))).collect();
