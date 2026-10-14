@@ -29,6 +29,7 @@ use super::apps::{AppEvent, AppInfo};
 use super::ax::{AxElement, AxError, AxObserver, AxResult, names, notifications as n};
 use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
+use crate::engine::busy_apps::Reply;
 use crate::engine::geometry::Rect;
 
 /// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
@@ -523,25 +524,24 @@ impl Observer {
         out
     }
 
-    /// True when the window is minimized now (asked through AX), **or AX cannot tell** (a
-    /// hung app at the timeout, an element going away): both callers ask "is it off screen
-    /// for a reason?", and an unknown answer must never count a window as gone from its
-    /// Space (the review's L4). A window without the attribute is not minimized.
-    pub fn is_minimized_now(&self, id: u32) -> bool {
-        self.windows.get(&id).is_some_and(|w| unknown_is_true(w.element.is_minimized()))
+    /// Whether the window is minimized now, asked through AX ([`Reply`]: a timeout and any
+    /// other "cannot tell" kept apart, [`crate::engine::busy_apps`]). A window without the
+    /// attribute, or not tracked, is not minimized. Callers ask "is it off screen for a
+    /// reason?", and an unknown answer must never count a window as gone from its Space (the
+    /// review's L4).
+    pub fn minimized_reply(&self, id: u32) -> Reply {
+        self.windows.get(&id).map_or(Reply::No, |w| reply(w.element.is_minimized()))
     }
 
-    /// True when the window is in full screen now (on its own Space; asked through AX, which
-    /// still reaches a tracked window off the shown Space for the apps measured; false when
-    /// AX cannot tell).
-    pub fn is_fullscreen_now(&self, id: u32) -> bool {
-        self.windows.get(&id).is_some_and(|w| w.element.is_fullscreen().unwrap_or(false))
+    /// Whether the window is in full screen now (on its own Space; asked through AX, which
+    /// still reaches a tracked window off the shown Space for the apps measured).
+    pub fn fullscreen_reply(&self, id: u32) -> Reply {
+        self.windows.get(&id).map_or(Reply::No, |w| reply(w.element.is_fullscreen()))
     }
 
-    /// True when app `pid` is hidden now (⌘H; asked through AX), or AX cannot tell (as
-    /// [`Self::is_minimized_now`]).
-    pub fn app_hidden_now(&self, pid: i32) -> bool {
-        self.observed.get(&pid).is_some_and(|a| unknown_is_true(a.element.is_hidden()))
+    /// Whether app `pid` is hidden now (⌘H; asked through AX).
+    pub fn app_hidden_reply(&self, pid: i32) -> Reply {
+        self.observed.get(&pid).map_or(Reply::No, |a| reply(a.element.is_hidden()))
     }
 
     /// Handles one AX notification for app `pid`.
@@ -760,15 +760,20 @@ fn cg_lookup() -> HashMap<u32, CgWindow> {
     windows::list_windows().into_iter().map(|w| (w.id, w)).collect()
 }
 
-/// An AX yes/no answer where "cannot tell" (timeout, invalid element) reads as yes; a missing
-/// attribute reads as no.
-fn unknown_is_true(answer: AxResult<bool>) -> bool {
+/// An AX yes/no answer as a [`Reply`]: a missing attribute reads as no; the timeout (the app
+/// did not answer: `CannotComplete`) and any other error kept apart.
+fn reply(answer: AxResult<bool>) -> Reply {
     match answer {
-        Ok(v) => v,
-        Err(e) if e == AxError::NO_VALUE || e == AxError::ATTRIBUTE_UNSUPPORTED => false,
+        Ok(true) => Reply::Yes,
+        Ok(false) => Reply::No,
+        Err(e) if e == AxError::NO_VALUE || e == AxError::ATTRIBUTE_UNSUPPORTED => Reply::No,
+        Err(e) if e == AxError::CANNOT_COMPLETE => {
+            tracing::debug!("AX: the app did not answer in time; left alone a moment");
+            Reply::TimedOut
+        }
         Err(e) => {
-            tracing::debug!("AX cannot tell ({e}); counted as off screen for a reason");
-            true
+            tracing::debug!("AX cannot tell ({e})");
+            Reply::CannotTell
         }
     }
 }
@@ -786,13 +791,13 @@ mod tests {
     }
 
     #[test]
-    fn an_ax_answer_that_cannot_tell_counts_as_a_reason() {
-        assert!(unknown_is_true(Ok(true)));
-        assert!(!unknown_is_true(Ok(false)));
-        assert!(!unknown_is_true(Err(AxError::NO_VALUE)));
-        assert!(!unknown_is_true(Err(AxError::ATTRIBUTE_UNSUPPORTED)));
-        assert!(unknown_is_true(Err(AxError::CANNOT_COMPLETE)));
-        assert!(unknown_is_true(Err(AxError::Api(-25202))));
+    fn ax_answers_keep_a_timeout_apart_from_cannot_tell() {
+        assert_eq!(reply(Ok(true)), Reply::Yes);
+        assert_eq!(reply(Ok(false)), Reply::No);
+        assert_eq!(reply(Err(AxError::NO_VALUE)), Reply::No);
+        assert_eq!(reply(Err(AxError::ATTRIBUTE_UNSUPPORTED)), Reply::No);
+        assert_eq!(reply(Err(AxError::CANNOT_COMPLETE)), Reply::TimedOut);
+        assert_eq!(reply(Err(AxError::Api(-25202))), Reply::CannotTell);
     }
 
     #[test]

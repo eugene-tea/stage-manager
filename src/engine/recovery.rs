@@ -10,12 +10,13 @@
 //!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
 //!   show on another display either (so a window on a second display to the bottom-right of
 //!   the main one is left alone);
-//! - a stranded window goes back to its frame from `state.json` (any Space; exact bundle ID + title
-//!   first, then bundle ID only, each saved window used once), else it is centered; the
+//! - a stranded window goes back to its frame from `state.json` (any Space; the same window
+//!   id first, then exact bundle ID + title, then bundle ID only when one candidate is left,
+//!   each saved window used once: [`super::window_match`]), else it is centered; the
 //!   result is always clamped onto the visible frame and never in a park zone; a saved
 //!   window we had fitted clear of the strip goes back to its pre-fit frame instead;
-//! - a window that is not stranded but still sits exactly where we fitted it (exact bundle ID
-//!   and title, live frame equal to the saved one) goes back to its saved pre-fit frame, so
+//! - a window that is not stranded but still sits exactly where we fitted it (its saved
+//!   window matched, live frame equal to the saved one) goes back to its saved pre-fit frame, so
 //!   a crash never leaves a window narrowed.
 //!
 //! The guardian's watch after its scan ([`super::guard_watch`]) works from the windows the
@@ -26,12 +27,15 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
 use super::park::{Corner, PARK_MARGIN, Slivers, choose_corner, clamp_to_visible, is_parked_in_at_with};
-use super::persist::{SavedRole, StateFile};
+use super::persist::{SavedRole, SavedWindow, StateFile};
 use super::stage_area::same_frame;
+use super::window_match::{Key, match_windows};
 
 /// A window the scan saw.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveWindow {
+    /// Its `CGWindowID`, when known: matched first against the saved window ids.
+    pub id: Option<u32>,
     /// The owning app's bundle ID (empty when unknown).
     pub bundle_id: String,
     /// The window title.
@@ -148,71 +152,42 @@ pub fn plan(
     plan_sourced(windows, state, displays).into_iter().map(|(i, f, _)| (i, f)).collect()
 }
 
-/// [`plan`], with where each frame comes from.
+/// [`plan`], with where each frame comes from. Saved windows are matched by
+/// [`match_windows`]: the same window id first (ids in `state` must be this session's, as
+/// [`StateFile::for_session`] leaves them), then the app and exact title, then the app alone
+/// only when one candidate is left on both sides; every live window takes part, so a window
+/// still on screen keeps its own saved frame.
 pub fn plan_sourced(
     windows: &[LiveWindow],
     state: Option<&StateFile>,
     displays: &ScanDisplays,
 ) -> Vec<(usize, Rect, FrameSource)> {
-    let saved: Vec<(&str, &str, Rect, Option<Rect>)> = state
-        .map(|s| {
-            s.all_stages()
-                .flat_map(|st| st.windows.iter())
-                .filter(|w| w.role == SavedRole::Standard)
-                .map(|w| (w.bundle_id.as_str(), w.title.as_str(), w.frame, w.original))
-                .collect()
-        })
+    let saved: Vec<&SavedWindow> = state
+        .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).filter(|w| w.role == SavedRole::Standard).collect())
         .unwrap_or_default();
     // An app with a window in state.json is one we manage: a sliver of its counts (L3).
     let known = |w: &LiveWindow| {
-        if !w.bundle_id.is_empty() && saved.iter().any(|(b, ..)| *b == w.bundle_id) { Known::Managed } else { Known::Unknown }
+        if !w.bundle_id.is_empty() && saved.iter().any(|s| s.bundle_id == w.bundle_id) { Known::Managed } else { Known::Unknown }
     };
-    let stranded: Vec<usize> = windows
-        .iter()
-        .enumerate()
-        .filter(|(_, w)| is_stranded(w.frame, displays, known(w)))
-        .map(|(i, _)| i)
-        .collect();
-    let mut used = vec![false; saved.len()];
-    let mut target: Vec<Option<Rect>> = vec![None; stranded.len()];
-    let passes: [fn(&LiveWindow, &str, &str) -> bool; 2] = [
-        |w, b, t| w.bundle_id == b && w.title == t,
-        |w, b, _| !b.is_empty() && w.bundle_id == b,
-    ];
-    for pass in passes {
-        for (slot, &i) in target.iter_mut().zip(&stranded) {
-            if slot.is_some() {
-                continue;
-            }
-            let w = &windows[i];
-            if let Some(k) = saved
-                .iter()
-                .enumerate()
-                .position(|(k, (b, t, _, _))| !used[k] && pass(w, b, t))
-            {
-                used[k] = true;
-                *slot = Some(saved[k].3.unwrap_or(saved[k].2));
-            }
-        }
-    }
-    let mut out: Vec<(usize, Rect, FrameSource)> = stranded
-        .iter()
-        .zip(target)
-        .map(|(&i, saved)| {
-            let source = if saved.is_some() { FrameSource::Saved } else { FrameSource::Centered };
-            (i, safe_restore(saved.unwrap_or(windows[i].frame), displays), source)
-        })
-        .collect();
+    let stranded: Vec<bool> = windows.iter().map(|w| is_stranded(w.frame, displays, known(w))).collect();
+    let saved_keys: Vec<Key> = saved.iter().map(|s| Key { id: s.window, bundle: &s.bundle_id, title: &s.title }).collect();
+    let live_keys: Vec<Key> = windows.iter().map(|w| Key { id: w.id, bundle: &w.bundle_id, title: &w.title }).collect();
+    let matched = match_windows(&saved_keys, &live_keys, |i| stranded[i]);
+    let mut out = Vec::new();
     for (i, w) in windows.iter().enumerate() {
-        if stranded.contains(&i) {
-            continue;
-        }
-        let found = saved.iter().enumerate().find(|(k, (b, t, f, o))| {
-            !used[*k] && o.is_some() && w.bundle_id == *b && w.title == *t && same_frame(w.frame, *f)
-        });
-        if let Some((k, (_, _, _, Some(o)))) = found {
-            used[k] = true;
-            let back = if displays.parks(*o) { clamp_to_visible(*o, displays.visible) } else { *o };
+        let found = matched[i].map(|(k, _)| saved[k]);
+        if stranded[i] {
+            let (frame, source) = match found {
+                Some(s) => (s.original.unwrap_or(s.frame), FrameSource::Saved),
+                None => (w.frame, FrameSource::Centered),
+            };
+            out.push((i, safe_restore(frame, displays), source));
+        } else if let Some(s) = found
+            && let Some(o) = s.original
+            && same_frame(w.frame, s.frame)
+        {
+            // Still exactly where we fitted it: back to its pre-fit frame.
+            let back = if displays.parks(o) { clamp_to_visible(o, displays.visible) } else { o };
             out.push((i, back, FrameSource::Saved));
         }
     }
@@ -327,6 +302,7 @@ mod tests {
 
     fn live(bundle: &str, title: &str, frame: Rect) -> LiveWindow {
         LiveWindow {
+            id: None,
             bundle_id: bundle.into(),
             title: title.into(),
             frame,
@@ -420,6 +396,44 @@ mod tests {
         );
         assert_eq!(p[2].0, 2);
         assert!(!is_parked(p[2].1, MAIN));
+    }
+
+    /// Grok High 2 (1.1.0): two stranded windows of one app whose titles changed keep their
+    /// own frames when their ids were saved (this session's), whatever the saved order.
+    #[test]
+    fn stranded_windows_are_found_by_window_id_first() {
+        let (a, b) = (Rect::new(10.0, 40.0, 300.0, 200.0), Rect::new(200.0, 150.0, 500.0, 400.0));
+        let mut first = saved("com.example.a", "Draft", a);
+        first.window = Some(41);
+        let mut second = saved("com.example.a", "Notes", b);
+        second.window = Some(42);
+        let st = state(vec![first, second]);
+        let mut x = live("com.example.a", "Renamed", parked(500.0, 400.0));
+        x.id = Some(42);
+        let mut y = live("com.example.a", "", parked(300.0, 200.0));
+        y.id = Some(41);
+        let p = plan_sourced(&[x, y], Some(&st), &displays());
+        assert_eq!(p, vec![(0, b, FrameSource::Saved), (1, a, FrameSource::Saved)]);
+    }
+
+    /// Grok High 2: without ids or titles to tell them apart, two stranded windows of one app
+    /// are centered, never handed each other's (or a window on screen's) frame.
+    #[test]
+    fn app_alone_never_guesses_between_windows() {
+        let (a, b) = (Rect::new(10.0, 40.0, 300.0, 200.0), Rect::new(200.0, 150.0, 500.0, 400.0));
+        let st = state(vec![saved("com.example.a", "Draft", a), saved("com.example.a", "Notes", b)]);
+        let ws = [live("com.example.a", "One", parked(500.0, 400.0)), live("com.example.a", "Two", parked(300.0, 200.0))];
+        let p = plan_sourced(&ws, Some(&st), &displays());
+        assert!(p.iter().all(|x| x.2 == FrameSource::Centered), "{p:?}");
+        // One window on screen holds its own entry (by title): the stranded one has the one
+        // candidate left, its own.
+        let ws = [live("com.example.a", "Draft", a), live("com.example.a", "Renamed", parked(500.0, 400.0))];
+        let p = plan_sourced(&ws, Some(&st), &displays());
+        assert_eq!(p, vec![(1, b, FrameSource::Saved)]);
+        // One window on screen not in state.json at all: two saved entries left, centered.
+        let ws = [live("com.example.a", "New", Rect::new(50.0, 60.0, 400.0, 300.0)), live("com.example.a", "Renamed", parked(500.0, 400.0))];
+        let p = plan_sourced(&ws, Some(&st), &displays());
+        assert_eq!(p.iter().map(|x| (x.0, x.2)).collect::<Vec<_>>(), vec![(1, FrameSource::Centered)]);
     }
 
     #[test]

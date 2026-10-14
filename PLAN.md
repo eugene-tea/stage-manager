@@ -92,7 +92,9 @@ again whenever such a window shows (its Space was visited), retrying while it st
 since AX lists most apps' windows only on the shown Space. A window is done only when seen
 back (AX reads it outside the park zone, or the window server lists it on screen outside it
 in settled passes a second apart: a sliding Space can list in-between frames) or gone (not
-listed on any Space for 3 s). It never exits while one waits unless Stage Manager runs again.
+listed on any Space for 3 s), or adopted by Stage Manager running again (`ctl adopted`: in
+its model). It never exits while one waits; a new Stage Manager does not end the watch by
+itself running.
 
 ## Testing hooks
 

@@ -135,6 +135,11 @@ pub enum Release {
         /// How long it was missing.
         missing: Duration,
     },
+    /// Stage Manager runs again and reports the window adopted (in its model).
+    Adopted,
+    /// Found in the park zone (never registered) while Stage Manager runs again: the new app
+    /// judges it (it may have parked it itself).
+    Successor,
 }
 
 impl fmt::Display for Release {
@@ -152,6 +157,8 @@ impl fmt::Display for Release {
                 "gone from the window list on every Desktop for {:.1} s (closed, or its app quit)",
                 missing.as_secs_f64()
             ),
+            Self::Adopted => write!(f, "Stage Manager runs again and has adopted it"),
+            Self::Successor => write!(f, "found in the park zone, never registered; Stage Manager runs again and judges it"),
         }
     }
 }
@@ -229,6 +236,8 @@ pub struct Watch {
     on_screen: Option<BTreeSet<u32>>,
     changed_at: Option<Instant>,
     blind: bool,
+    /// Stage Manager runs again ([`Self::hand_over`]): no window found in the park zone joins.
+    successor: bool,
 }
 
 impl Watch {
@@ -303,7 +312,9 @@ impl Watch {
             if !is_stranded(l.bounds, displays, known) {
                 continue;
             }
-            if reg.is_some() || l.allowed {
+            // While Stage Manager runs again, a window in the park zone may be one it parked:
+            // only the crashed app's own registered windows join.
+            if reg.is_some() || (l.allowed && !self.successor) {
                 let fitted = reg.is_some_and(|r| r.fitted);
                 self.waiting.insert(l.id, Waiting { fitted, ..waiting(l.id, l.pid, reg.map(|r| r.restore)) });
                 events.push(Event::Joined { id: l.id, pid: l.pid, registered: reg.is_some() });
@@ -373,6 +384,43 @@ impl Watch {
         let w = self.waiting.remove(&id)?;
         let why = if moved { Release::BroughtBack { frame } } else { Release::ReadBack { frame } };
         Some(Event::LetGo { id, pid: w.pid, why })
+    }
+}
+
+impl Watch {
+    /// Stage Manager runs again (Grok M3, 1.1.0): the windows it reports `adopted` (in its
+    /// model: it brings them back, or parks them in their stage, itself) are let go, and so
+    /// is every waiting window found in the park zone that the crashed app never registered
+    /// (the new app judges those). The crashed app's registered windows the new app has not
+    /// adopted yet keep waiting: on a Desktop not shown, the new app finds them only when
+    /// that Desktop shows, and until it does the guardian still brings each back. From now on
+    /// no window found in the park zone joins the watch.
+    pub fn hand_over(&mut self, adopted: &[u32]) -> Vec<Event> {
+        self.successor = true;
+        let go: Vec<(u32, i32, Release)> = self
+            .waiting
+            .values()
+            .filter_map(|w| {
+                if adopted.contains(&w.id) {
+                    Some((w.id, w.pid, Release::Adopted))
+                } else if w.registered.is_none() {
+                    Some((w.id, w.pid, Release::Successor))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        go.into_iter()
+            .map(|(id, pid, why)| {
+                self.waiting.remove(&id);
+                Event::LetGo { id, pid, why }
+            })
+            .collect()
+    }
+
+    /// True once Stage Manager was seen running again ([`Self::hand_over`]).
+    pub fn handed_over(&self) -> bool {
+        self.successor
     }
 }
 
@@ -711,6 +759,42 @@ mod tests {
         pass(&mut w, t0, 1500, &on_desktop_2(RESTORE));
         pass(&mut w, t0, 2500, &on_desktop_2(RESTORE));
         assert!(matches!(pass(&mut w, t0, 3500, &on_desktop_2(RESTORE)), Some(Release::SeenBack { .. })));
+    }
+
+    /// Grok M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app
+    /// that answers `ping` but has not adopted the crashed app's window (it is on a Desktop
+    /// not shown, or the new app has not scanned yet) leaves it waiting; once adopted, it is
+    /// let go. Windows found in the park zone are the new app's to judge, and none joins.
+    #[test]
+    fn a_new_app_running_takes_over_only_the_windows_it_adopted() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&[
+            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false },
+            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false },
+        ]);
+        let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
+        let mut listed = on_desktop_1();
+        listed.push(at(2, parked(), true));
+        listed.push(found);
+        let events = w.observe(t0, &listed, &displays());
+        assert!(events.contains(&Event::Joined { id: 30, pid: 8, registered: false }));
+        // The new app answers but has adopted nothing yet: its launch scan is still running.
+        let events = w.hand_over(&[]);
+        assert_eq!(events, vec![Event::LetGo { id: 30, pid: 8, why: Release::Successor }], "the park-zone find is the new app's");
+        assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1, 2], "the crashed app's windows keep waiting");
+        assert!(w.handed_over());
+        // The new app adopts window 2 (on the Desktop shown); window 1 stays on Desktop 2.
+        let events = w.hand_over(&[2]);
+        assert_eq!(events, vec![Event::LetGo { id: 2, pid: 7, why: Release::Adopted }]);
+        assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1]);
+        // While the new app runs, nothing found in the park zone joins (it may have parked it).
+        let mut later = on_desktop_1();
+        later.push(Listed { id: 31, pid: 8, bounds: parked(), onscreen: true, allowed: true });
+        let events = w.observe(t0 + Duration::from_secs(1), &later, &displays());
+        assert!(!events.iter().any(|e| matches!(e, Event::Joined { .. })), "{events:?}");
+        // Desktop 2 shows and the new app finds window 1 there: let go.
+        assert_eq!(w.hand_over(&[1]), vec![Event::LetGo { id: 1, pid: 7, why: Release::Adopted }]);
+        assert!(w.is_empty());
     }
 
     #[test]
