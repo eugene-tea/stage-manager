@@ -95,9 +95,15 @@ impl Rect {
         }
     }
 
+    /// True when every value is finite (no NaN, no infinity): a frame `state.json` can
+    /// hold and the park maths can take.
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.w.is_finite() && self.h.is_finite()
+    }
+
     /// True when any value is not finite or the width or height is not positive.
     pub fn is_degenerate(&self) -> bool {
-        !(self.x.is_finite() && self.y.is_finite() && self.w.is_finite() && self.h.is_finite())
+        !self.is_finite()
             || self.w <= 0.0
             || self.h <= 0.0
     }

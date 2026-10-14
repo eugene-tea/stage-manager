@@ -57,16 +57,42 @@ fn json_round_trip() {
         Some(0),
     );
     let file = StateFile::single(s);
-    let back = StateFile::from_json(&file.to_json()).expect("parses");
+    let back = StateFile::from_json(&file.to_json().expect("encodes")).expect("parses");
     assert_eq!(back, file);
-    assert!(file.to_json().contains("\"role\": \"standard\""));
+    assert!(file.to_json().expect("encodes").contains("\"role\": \"standard\""));
+}
+
+/// Grok M1 (1.1.0): a frame that is not finite never turns into a file no load reads back
+/// (`serde_json` writes NaN as `null`); the save is refused instead, so the old file stays.
+#[test]
+fn a_non_finite_frame_is_refused_not_written() {
+    for bad in [
+        Rect::new(f64::NAN, 60.0, 500.0, 400.0),
+        Rect::new(10.0, 60.0, f64::INFINITY, 400.0),
+        Rect::new(10.0, f64::NEG_INFINITY, 500.0, 400.0),
+    ] {
+        let mut w = saved("com.example.ed", "Plan.txt", 0);
+        w.frame = bad;
+        let file = StateFile::single(state(vec![(None, vec![w])], Some(0)));
+        let err = file.to_json().expect_err("refused");
+        assert!(err.contains("not finite") && err.contains("com.example.ed"), "{err}");
+        assert!(!err.contains("Plan.txt"), "no title in the log line");
+    }
+    let mut w = saved("com.example.ed", "Plan.txt", 0);
+    w.original = Some(Rect::new(f64::NAN, 0.0, 10.0, 10.0));
+    assert!(StateFile::single(state(vec![(None, vec![w])], Some(0))).to_json().is_err(), "a pre-fit frame too");
+    // What the refusal protects against: serde_json's own answer reads back as nothing.
+    let mut w = saved("com.example.ed", "Plan.txt", 0);
+    w.frame = Rect::new(f64::NAN, 60.0, 500.0, 400.0);
+    let raw = serde_json::to_string(&StateFile::single(state(vec![(None, vec![w])], Some(0)))).unwrap_or_default();
+    assert!(StateFile::from_json(&raw).is_err(), "{raw}");
 }
 
 #[test]
 fn json_rejects_other_versions_and_garbage() {
     let mut s = StateFile::single(state(vec![], None));
     s.version = 3;
-    assert!(StateFile::from_json(&s.to_json()).is_err());
+    assert!(StateFile::from_json(&s.to_json().expect("encodes")).is_err());
     assert!(StateFile::from_json("not json").is_err());
     assert!(StateFile::from_json("{}").is_err());
 }
@@ -290,7 +316,7 @@ fn save_rematch_and_apply_rebuilds_the_same_stages() {
         &obs,
     );
     let saved = m.to_state();
-    let json = saved.to_json();
+    let json = saved.to_json().expect("encodes");
 
     // Relaunch: new window IDs, one window gone, one extra.
     let relive = vec![
@@ -617,7 +643,7 @@ fn first_start_fits_every_window_of_every_stage_and_saves_the_pre_fit_frame() {
 
     // Saved with the pre-fit frames, and matched back on the next launch.
     let state = m.to_state();
-    let json = state.to_json();
+    let json = state.to_json().expect("encodes");
     assert!(json.contains("\"original\""));
     let saved = StateFile::from_json(&json).expect("parses");
     let mut again = model_with(ModelOptions { fit: FitOptions { inset: 216.0, shrink: true }, ..ModelOptions::default() });
@@ -707,7 +733,7 @@ fn the_state_file_keeps_each_windows_id() {
     let file = m.to_state();
     let windows: Vec<Option<u32>> = file.all_stages().flat_map(|s| s.windows.iter().map(|w| w.window)).collect();
     assert_eq!(windows, [Some(42)]);
-    let back = StateFile::from_json(&file.to_json()).expect("parses");
+    let back = StateFile::from_json(&file.to_json().expect("encodes")).expect("parses");
     assert_eq!(back, file);
 }
 
@@ -749,9 +775,9 @@ fn window_ids_from_another_session_are_dropped_and_the_title_match_wins() {
 #[test]
 fn the_session_is_kept_in_the_file() {
     let file = StateFile { session: Some("boot 1 session 257".into()), ..StateFile::single(SavedSpace::default()) };
-    let json = file.to_json();
+    let json = file.to_json().expect("encodes");
     assert!(json.contains("\"session\""));
     assert_eq!(StateFile::from_json(&json).expect("parses"), file);
     let none = StateFile::single(SavedSpace::default());
-    assert!(!none.to_json().contains("session"), "absent when unknown");
+    assert!(!none.to_json().expect("encodes").contains("session"), "absent when unknown");
 }

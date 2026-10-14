@@ -1,7 +1,8 @@
 //! The ctl socket: a Unix socket (see [`paths::socket_path`]) taking one command per line
 //! and answering each with one line of JSON. `stage-manager ctl <words...>` is the client.
 //!
-//! Commands: `ping`, `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
+//! Commands: `ping`, `adopted ID…` (which of these windows the engine manages; the
+//! guardian's question), `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
 //! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`, `mark [NOTE…]` (a problem mark
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
@@ -40,6 +41,9 @@ use crate::engine::geometry::{Point, Rect};
 pub enum Command {
     /// Liveness check; answers with the pid and version.
     Ping,
+    /// Which of these window ids the engine manages (the guardian of a crashed copy asks
+    /// before it lets a window go): `{"ok":true,"adopted":[...]}`.
+    Adopted(Vec<u32>),
     /// The Space shown as the engine sees it: its synthetic id, full screen, a change still
     /// settling, and how many Space changes were handled so far.
     Space,
@@ -258,6 +262,11 @@ impl Command {
                 Ok(Self::DebugFullscreen { id, on })
             }
             ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string() }),
+            ["adopted", ids @ ..] => ids
+                .iter()
+                .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
+                .collect::<Result<Vec<u32>, String>>()
+                .map(Self::Adopted),
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
@@ -279,9 +288,11 @@ pub fn error_reply(message: &str) -> serde_json::Value {
     json!({ "ok": false, "error": message })
 }
 
-/// Binds the socket (replacing a stale one) and serves it on a background thread. Fails
-/// when another instance answers on the socket.
-pub fn serve(handler: Handler) -> std::io::Result<()> {
+/// Binds the socket (replacing a stale one). Fails when another instance answers on the
+/// socket. At launch this runs right after the single-instance claim
+/// ([`super::instance::claim`]), before anything is managed: a launch that cannot bind it
+/// does not manage windows ([`serve`] answers on it later, once the handler exists).
+pub fn bind() -> std::io::Result<UnixListener> {
     let path = paths::socket_path();
     if path.exists() {
         if request("ping", Duration::from_millis(500)).is_ok() {
@@ -292,19 +303,32 @@ pub fn serve(handler: Handler) -> std::io::Result<()> {
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("ctl socket at {}", path.display());
+    Ok(listener)
+}
+
+/// Serves the bound socket ([`bind`]) on a background thread.
+pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
     std::thread::Builder::new().name("ctl".into()).spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let handler = handler.clone();
-                    let spawned =
-                        std::thread::Builder::new().name("ctl-conn".into()).spawn(move || serve_connection(stream, &handler));
-                    if let Err(e) = spawned {
-                        tracing::warn!("ctl: cannot spawn connection thread: {e}");
+        // A panic in the accept loop or a connection must not take the app down (Fable M2):
+        // a connection that panics is dropped, the socket keeps serving.
+        let accept = || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let handler = handler.clone();
+                        let spawned = std::thread::Builder::new().name("ctl-conn".into()).spawn(move || {
+                            let _ = super::safety::guarded("a ctl connection", || serve_connection(stream, &handler));
+                        });
+                        if let Err(e) = spawned {
+                            tracing::warn!("ctl: cannot spawn connection thread: {e}");
+                        }
                     }
+                    Err(e) => tracing::warn!("ctl accept failed: {e}"),
                 }
-                Err(e) => tracing::warn!("ctl accept failed: {e}"),
             }
+        };
+        while super::safety::guarded("the ctl socket's accept loop", accept).is_none() {
+            std::thread::sleep(Duration::from_millis(500));
         }
     })?;
     Ok(())
@@ -339,7 +363,13 @@ pub fn remove_socket() {
 
 /// Sends one request line and returns the reply line.
 pub fn request(line: &str, timeout: Duration) -> std::io::Result<String> {
-    let mut stream = UnixStream::connect(paths::socket_path())?;
+    request_at(&paths::socket_path(), line, timeout)
+}
+
+/// [`request`] on the socket at `path` (the single-instance claim also asks at an earlier
+/// version's place, [`paths::legacy_socket_path`]).
+pub fn request_at(path: &std::path::Path, line: &str, timeout: Duration) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     writeln!(stream, "{line}")?;
@@ -422,6 +452,9 @@ mod tests {
     #[test]
     fn parses_known_commands() {
         assert_eq!(Command::parse("ping"), Ok(Command::Ping));
+        assert_eq!(Command::parse("adopted 4 9"), Ok(Command::Adopted(vec![4, 9])));
+        assert_eq!(Command::parse("adopted"), Ok(Command::Adopted(vec![])));
+        assert!(Command::parse("adopted x").is_err());
         assert_eq!(Command::parse("  dump \n"), Ok(Command::Dump));
         assert_eq!(Command::parse("quit"), Ok(Command::Quit));
         assert_eq!(Command::parse("state"), Ok(Command::State));

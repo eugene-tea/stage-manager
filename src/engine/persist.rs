@@ -171,9 +171,19 @@ impl StateFile {
         self.spaces.iter().flat_map(|s| s.stages.iter())
     }
 
-    /// Pretty JSON for writing to disk.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    /// Pretty JSON for writing to disk, or why it cannot be written: a frame that is not
+    /// finite (JSON has no NaN or infinity; `serde_json` writes `null`, which no load reads
+    /// back, so the whole file would be lost), or any encoding error. Never a stand-in such
+    /// as `{}`: the caller keeps the file it has.
+    pub fn to_json(&self) -> Result<String, String> {
+        if let Some(w) = self.all_stages().flat_map(|s| s.windows.iter()).find(|w| !w.frame.is_finite() || w.original.is_some_and(|o| !o.is_finite())) {
+            return Err(format!(
+                "state.json: a frame of window {} of {} is not finite; not written",
+                w.window.map_or_else(|| "?".to_string(), |id| id.to_string()),
+                if w.bundle_id.is_empty() { "an unknown app" } else { &w.bundle_id }
+            ));
+        }
+        serde_json::to_string_pretty(self).map_err(|e| format!("state.json: {e}; not written"))
     }
 
     /// Parses JSON: version 2, or version 1 read as one current Space; other versions are

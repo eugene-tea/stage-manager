@@ -102,6 +102,7 @@ mod app {
     use stage_manager::platform::ctl::{self, Command};
     use stage_manager::platform::desktop;
     use stage_manager::platform::input::{self, InputKind, InputMonitor};
+    use stage_manager::platform::instance::{self, Launch};
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
@@ -145,6 +146,10 @@ mod app {
     const TEST_ENV: &str = "STAGE_MANAGER_TEST";
 
     static QUITTING: AtomicBool = AtomicBool::new(false);
+
+    /// When this run started: `ping` says how long ago, so a launch handing off at login does
+    /// not open the Settings ([`instance::shows_settings`]).
+    static STARTED: OnceLock<Instant> = OnceLock::new();
 
     struct App {
         menu: StatusMenu,
@@ -287,7 +292,8 @@ mod app {
                     // Off the main thread: the dumps come from the WM thread.
                     let wm = self.wm.clone();
                     let spawned = std::thread::Builder::new().name("mark".into()).spawn(move || {
-                        let reply = mark_problem(&wm, "");
+                        // A panic writing the mark must not take the app down (Fable M2).
+                        let Some(reply) = safety::guarded("a problem mark", || mark_problem(&wm, "")) else { return };
                         let at = reply["at"].as_str().map(str::to_string);
                         DispatchQueue::main().exec_async(move || {
                             with_app(|app| {
@@ -398,6 +404,9 @@ mod app {
                 "pong": true,
                 "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
+                // A launch during a quit waits for it instead of handing off (the review of 8A, M1).
+                "quitting": QUITTING.load(Ordering::SeqCst),
+                "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
                 "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
             Command::Settings => {
@@ -584,6 +593,7 @@ mod app {
 
     /// Runs the menu bar app until Quit.
     pub fn run() -> ExitCode {
+        let _ = STARTED.set(Instant::now());
         logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
@@ -595,16 +605,20 @@ mod app {
             return ExitCode::FAILURE;
         };
 
-        // A generous wait: a running app slow to answer must not get a second manager
-        // beside it (no app running answers "refused" at once).
-        if ctl::request("ping", Duration::from_secs(2)).is_ok() {
-            // Opened again (`open -n`, a terminal): the running one shows its Settings, the
-            // way back when the menu bar icon is hidden. (A Finder or Spotlight launch never
-            // gets here: macOS hands it to the running app as a reopen.)
-            let shown = ctl::request("settings", Duration::from_secs(2)).is_ok();
-            tracing::info!(shown, "Stage Manager is already running; asked it to show Settings");
-            return ExitCode::SUCCESS;
+        // One copy at a time, claimed before the WM thread, the guardian or any observer
+        // starts (Fable M1, Grok High 1): the lock, a copy answering, then the socket bound.
+        match instance::claim() {
+            Launch::Manage => {}
+            Launch::HandOff | Launch::Wait => return ExitCode::SUCCESS,
+            Launch::Leave => return ExitCode::FAILURE,
         }
+        let listener = match ctl::bind() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("cannot own the ctl socket ({e}); not managing windows beside another copy");
+                return ExitCode::FAILURE;
+            }
+        };
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -686,7 +700,7 @@ mod app {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
 
-        if let Err(e) = ctl::serve(ctl_handler(wm.clone())) {
+        if let Err(e) = ctl::serve(listener, ctl_handler(wm.clone())) {
             tracing::error!("ctl socket unavailable: {e}");
         }
 

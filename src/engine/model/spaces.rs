@@ -608,16 +608,40 @@ impl Model {
                 }
             }
         }
-        // The Spaces they came from: an active stage again, or forgotten when empty.
+        // The Spaces they came from: forgotten when empty; else, when their active stage went,
+        // a fresh empty active stage (as Apple's: the Desktop left shows nothing, every stage
+        // still there keeps its card). Never one of their parked stages made active without
+        // its windows shown: no card, its app "present", ⌘-Tab doing nothing (Fable H3).
         let froms: BTreeSet<SpaceId> = whole.iter().map(|(_, from)| *from).collect();
         for from in froms {
             if self.space_is_empty(from) && !self.is_shown_space(from) {
                 self.prune_space(from);
-            } else if self.has_space(from) {
-                self.ensure_active(from);
+            } else if self.has_space(from) && !self.active.contains_key(&from) {
+                self.fresh_active(from);
             }
         }
         carried.len()
+    }
+
+    /// Makes an empty stage `space`'s active one: an unnamed empty stage of its own when it
+    /// has one (no child windows either), else a new one.
+    fn fresh_active(&mut self, space: SpaceId) -> StageId {
+        let empty = self
+            .stages
+            .iter()
+            .filter(|s| s.space == space && s.windows.is_empty() && s.name.is_none())
+            .map(|s| s.id)
+            .find(|&s| self.children_in(Home::Stage(s)).is_empty());
+        let stage = empty.unwrap_or_else(|| self.create_stage(space, None));
+        if let Some(sl) = self.slots.get_mut(&space) {
+            sl.retain(|&x| x != stage);
+        }
+        self.active.insert(space, stage);
+        let t = self.tick();
+        if let Some(s) = self.stage_mut(stage) {
+            s.last_active = t;
+        }
+        stage
     }
 
     /// Windows moved to `target` from other Spaces (each with its children) go where a

@@ -85,6 +85,7 @@ use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
 use super::{desktop, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
+use crate::engine::busy_apps::{BusyApps, OffScreen};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
@@ -660,6 +661,9 @@ pub struct Controller {
     defer_present: bool,
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
+    /// Apps that did not answer an off-screen check in time, left alone a moment (Fable H1,
+    /// [`crate::engine::busy_apps`]). A cell: the checks run from `&self` paths too.
+    busy_apps: std::cell::RefCell<BusyApps>,
     /// Managed windows showing mostly on another display than the main one: checks in a
     /// row (left alone there, the guide).
     elsewhere: HashMap<u32, u32>,
@@ -795,6 +799,7 @@ impl Controller {
             dock_seen: None,
             defer_present: false,
             absent: HashMap::new(),
+            busy_apps: std::cell::RefCell::new(BusyApps::default()),
             elsewhere: HashMap::new(),
             seen_active: HashMap::new(),
             seen_stages: None,
@@ -1851,7 +1856,8 @@ impl Controller {
 
     // ----- persistence -------------------------------------------------------------------
 
-    /// Writes `state.json` now (atomically).
+    /// Writes `state.json` now (atomically and durably, [`super::durable`]). A state that
+    /// cannot be encoded (a frame that is not finite) is not written: the file on disk stays.
     pub fn save_now(&mut self) {
         self.dirty = None;
         let Some(m) = &self.model else { return };
@@ -1859,11 +1865,15 @@ impl Controller {
         let mut file = m.to_state();
         // The window ids in it hold for this window server session only.
         file.session = session::window_session().map(str::to_string);
-        let text = file.to_json();
-        let tmp = path.with_extension("json.tmp");
+        let text = match file.to_json() {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::error!("{e}; the saved stages on disk are kept");
+                return;
+            }
+        };
         let result = std::fs::create_dir_all(paths::config_dir())
-            .and_then(|_| std::fs::write(&tmp, text))
-            .and_then(|_| std::fs::rename(&tmp, &path));
+            .and_then(|_| super::durable::replace(&path, text.as_bytes(), super::durable::Flush::Full));
         match result {
             Ok(()) => tracing::debug!("state saved to {}", path.display()),
             Err(e) => tracing::warn!("cannot save {}: {e}", path.display()),
@@ -2535,17 +2545,40 @@ impl Controller {
     /// Evidence that the Space they live on is not the one shown.
     fn absent_windows(&self, ob: &Observer, shown: &HashSet<u32>) -> Vec<WindowId> {
         let Some(m) = &self.model else { return Vec::new() };
-        let mut hidden: HashMap<i32, bool> = HashMap::new();
-        m.windows()
+        let off: Vec<(u32, i32)> = m
+            .windows()
             .filter(|w| w.meta.role == WindowRole::Standard && !w.sticky && !shown.contains(&w.meta.id.0))
             .filter(|w| ob.window(w.meta.id.0).is_some())
-            .filter(|w| {
-                !*hidden.entry(w.meta.pid).or_insert_with(|| self.counts_hidden(w.meta.pid) || ob.app_hidden_now(w.meta.pid))
+            .map(|w| (w.meta.id.0, w.meta.pid))
+            .collect();
+        let excused = self.off_screen_for_a_reason(ob, &off);
+        off.into_iter().filter(|(id, _)| !excused.contains(id)).map(|(id, _)| WindowId(id)).collect()
+    }
+
+    /// Those of `windows` (id, pid) off screen for a reason: their app hidden (ours or the
+    /// user's), minimized, in full screen, or their app too busy to tell. The app's hidden
+    /// state is asked once per app, and an app that did not answer in time is not asked
+    /// again for a moment ([`OffScreen`], Fable H1): a hung app no longer costs a timeout per
+    /// window every second on the WM thread.
+    fn off_screen_for_a_reason(&self, ob: &Observer, windows: &[(u32, i32)]) -> Vec<u32> {
+        let now = Instant::now();
+        let mut busy = self.busy_apps.borrow_mut();
+        busy.prune(now);
+        let was_busy = busy.pids(now);
+        let mut check = OffScreen::new(&mut busy, now);
+        let out: Vec<u32> = windows
+            .iter()
+            .filter(|&&(id, pid)| {
+                self.counts_hidden(pid)
+                    || check.has_reason(pid, || ob.app_hidden_reply(pid), || ob.minimized_reply(id), || ob.fullscreen_reply(id))
             })
-            .filter(|w| !ob.is_minimized_now(w.meta.id.0))
-            .filter(|w| !ob.is_fullscreen_now(w.meta.id.0))
-            .map(|w| w.meta.id)
-            .collect()
+            .map(|&(id, _)| id)
+            .collect();
+        let now_busy = busy.pids(now);
+        if now_busy.iter().any(|p| !was_busy.contains(p)) {
+            tracing::info!(apps = ?now_busy, "an app did not answer whether its windows are hidden or minimized; left alone for a moment");
+        }
+        out
     }
 
     /// The user went to another Space (`activeSpaceDidChangeNotification`): read every app's
@@ -3003,17 +3036,9 @@ impl Controller {
             .collect();
         // In full screen, a window is on a Space of its own but still this Desktop's: it is
         // not gone (it comes back here when it leaves full screen).
-        let missing: Vec<u32> = missing
-            .into_iter()
-            .filter(|&(id, pid)| {
-                ob.window(id).is_some()
-                    && !self.counts_hidden(pid)
-                    && !ob.app_hidden_now(pid)
-                    && !ob.is_minimized_now(id)
-                    && !ob.is_fullscreen_now(id)
-            })
-            .map(|(id, _)| id)
-            .collect();
+        let missing: Vec<(u32, i32)> = missing.into_iter().filter(|&(id, _)| ob.window(id).is_some()).collect();
+        let excused = self.off_screen_for_a_reason(ob, &missing);
+        let missing: Vec<u32> = missing.into_iter().map(|(id, _)| id).filter(|id| !excused.contains(id)).collect();
         if let Some(at) = self.macos_reveal_at {
             if !missing.is_empty() {
                 // macOS's own reveal slid the windows aside: they are not gone.
@@ -3620,6 +3645,12 @@ impl Controller {
         }
         match cmd {
             Command::State => self.state_json(ob),
+            // The guardian of a crashed copy: which of its waiting windows are ours now.
+            Command::Adopted(ids) => {
+                let adopted: Vec<u32> =
+                    ids.into_iter().filter(|id| self.model.as_ref().is_some_and(|m| m.window(WindowId(*id)).is_some())).collect();
+                json!({ "ok": true, "adopted": adopted })
+            }
             Command::Space => match &self.model {
                 Some(m) => json!({
                     "ok": true,
