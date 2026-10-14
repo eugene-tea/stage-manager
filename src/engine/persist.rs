@@ -1,12 +1,13 @@
 //! Persistence: `state.json` and re-matching saved windows to live ones on launch.
 //!
 //! The file keeps stages **per Space** ([`SavedSpace`], keyed by the model's synthetic
-//! [`SpaceId`]). Window IDs do not survive an app relaunch, so saved windows are matched
-//! heuristically: exact bundle ID + title first, then bundle ID only in saved order. Each
+//! [`SpaceId`]). A saved window is found again by its window id first (ids outlive our
+//! app, not the window's own app), then by exact bundle ID + title, then by bundle ID only in
+//! saved order. Each
 //! live window is used at most once; live windows that match nothing are grouped the way
 //! Apple's Stage Manager does when it is turned on: one stage per app (see
 //! [`Model::apply_launch`]). A Space is recognized by its windows: the saved Space whose
-//! windows match the ones on screen (exact bundle ID + title) is the one shown
+//! windows match the ones on screen (window id, or exact bundle ID + title) is the one shown
 //! ([`Model::arrive`]); other saved Spaces wait, untouched, for their first visit.
 //!
 //! Version 1 files (one Space) are read as a single Space.
@@ -58,6 +59,25 @@ pub struct SavedWindow {
     /// recovery scan put it back there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<Rect>,
+    /// The window's `CGWindowID` when saved. Window ids outlive our app (the windows belong to
+    /// other apps), so a restart finds the very window by it whatever its title is now; a
+    /// relaunched app's windows get new ids and are matched by bundle ID and title instead.
+    /// Absent in files written before 10-13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+}
+
+impl SavedWindow {
+    /// True when `live` is this very window: the same `CGWindowID` and the same app (an id
+    /// reused after a reboot by another app's window never matches).
+    pub fn is_window(&self, live: &WindowMeta) -> bool {
+        self.window == Some(live.id.0) && !self.bundle_id.is_empty() && self.bundle_id == live.bundle_id
+    }
+
+    /// True when `live` has this window's app and title.
+    pub fn same_title(&self, live: &WindowMeta) -> bool {
+        self.bundle_id == live.bundle_id && self.title == live.title
+    }
 }
 
 /// One saved stage.
@@ -198,28 +218,32 @@ pub struct LaunchHints {
     pub frontmost: Option<Pid>,
 }
 
-/// How many live standard windows match a saved standard window of `space` exactly (bundle
-/// ID and title, each saved window used once): the evidence that `space` is on screen.
+/// How many live standard windows match a saved standard window of `space` exactly (the
+/// same window id, else the same bundle ID and title; each window on either side used once):
+/// the evidence that `space` is on screen.
 pub fn exact_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
-    let mut used: HashSet<WindowId> = HashSet::new();
-    let mut n = 0;
-    for sw in space
+    let saved: Vec<&SavedWindow> = space
         .stages
         .iter()
         .flat_map(|s| s.windows.iter())
         .filter(|w| w.role == SavedRole::Standard)
-    {
-        if let Some(l) = live.iter().find(|l| {
-            l.role == WindowRole::Standard
-                && !used.contains(&l.id)
-                && l.bundle_id == sw.bundle_id
-                && l.title == sw.title
-        }) {
-            used.insert(l.id);
-            n += 1;
+        .collect();
+    let standard: Vec<&WindowMeta> = live.iter().filter(|l| l.role == WindowRole::Standard).collect();
+    let mut used: HashSet<WindowId> = HashSet::new();
+    let mut matched = vec![false; saved.len()];
+    let passes: [fn(&SavedWindow, &WindowMeta) -> bool; 2] = [SavedWindow::is_window, SavedWindow::same_title];
+    for pass in passes {
+        for (done, sw) in matched.iter_mut().zip(&saved) {
+            if *done {
+                continue;
+            }
+            if let Some(l) = standard.iter().find(|l| !used.contains(&l.id) && pass(sw, l)) {
+                used.insert(l.id);
+                *done = true;
+            }
         }
     }
-    n
+    matched.iter().filter(|m| **m).count()
 }
 
 /// How many live standard windows match a saved standard window of `space` by bundle ID
@@ -243,8 +267,8 @@ pub fn bundle_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
     n
 }
 
-/// Places live standard windows into one saved Space's stages: exact bundle + title first,
-/// then bundle only, both in saved order (stage order, then front to back). Each live window
+/// Places live standard windows into one saved Space's stages: the same window id first,
+/// then exact bundle + title, then bundle only, each in saved order (stage order, then front to back). Each live window
 /// is used at most once. Child windows on either side are left out; they follow their
 /// parents.
 pub fn rematch(state: &SavedSpace, live: &[WindowMeta]) -> Assignment {
@@ -264,8 +288,9 @@ pub fn rematch(state: &SavedSpace, live: &[WindowMeta]) -> Assignment {
     }
     let mut used: HashSet<WindowId> = HashSet::new();
     let mut matched: Vec<Option<WindowId>> = vec![None; saved.len()];
-    let passes: [fn(&SavedWindow, &WindowMeta) -> bool; 2] = [
-        |s, l| s.bundle_id == l.bundle_id && s.title == l.title,
+    let passes: [fn(&SavedWindow, &WindowMeta) -> bool; 3] = [
+        SavedWindow::is_window,
+        SavedWindow::same_title,
         |s, l| s.bundle_id == l.bundle_id,
     ];
     for pass in passes {
@@ -339,6 +364,7 @@ impl Model {
                     WindowRole::Child { .. } => SavedRole::Child,
                 },
                 original: w.original,
+                window: Some(id.0),
             })
         };
         let mut spaces = Vec::new();

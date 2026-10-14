@@ -1367,3 +1367,281 @@ mod arranged_ahead {
         assert!(mac.m.arrange_ahead(w(1), None).is_some());
     }
 }
+
+/// Desktop identity across restarts and Desktops sliding (round 6Y, 10-13): made-up apps and
+/// titles standing for the owner's two Desktops.
+mod identity {
+    use super::*;
+
+    /// Desktop 0 (his "Desktop 2"): five apps, a stage each. Desktop 1: seven other windows
+    /// (more than Desktop 0, as his 11 against 7).
+    fn his_desktops() -> Mac {
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 3, 30, "com.example.chat", "Team");
+        mac.put(0, 4, 40, "com.example.mail", "Inbox");
+        mac.put(0, 5, 50, "com.example.terminal", "Shell");
+        mac.put(1, 11, 10, "com.example.editor", "Home notes");
+        mac.put(1, 12, 60, "com.example.calendar", "Week");
+        mac.put(1, 13, 70, "com.example.git", "Repo");
+        mac.put(1, 14, 80, "com.example.messages", "Family");
+        mac.put(1, 15, 90, "com.example.notes", "List");
+        mac.put(1, 16, 91, "com.example.music", "Player");
+        mac.put(1, 17, 92, "com.example.photos", "Album");
+        mac
+    }
+
+    /// The stages of a Space as sets of window ids, in creation order.
+    fn grouping(mac: &Mac, space: SpaceId) -> Vec<Vec<u32>> {
+        mac.m.stages_in(space).map(|s| s.windows.iter().map(|x| x.0).collect()).filter(|v: &Vec<u32>| !v.is_empty()).collect()
+    }
+
+    /// An arrival whose window list shows the windows of every Desktop in `desks` (a
+    /// Desktop sliding out beside the one sliding in), nothing counted missing.
+    fn arrive_seeing(mac: &mut Mac, desks: &[usize]) -> Vec<Action> {
+        let live: Vec<WindowMeta> = mac
+            .wins
+            .values()
+            .filter(|(d, _, _)| d.is_some_and(|d| desks.contains(&d)))
+            .map(|(_, f, m)| WindowMeta { frame: *f, ..m.clone() })
+            .collect();
+        let hints = LaunchHints { z_order: live.iter().map(|m| m.id).collect(), frontmost: None };
+        let a = mac.m.arrive(MAIN, &live, &[], &hints);
+        mac.run(a)
+    }
+
+    /// The owner's 10-13 run: both Desktops saved, a relaunch on Desktop 0, which keeps its
+    /// stages; returns the Mac after the relaunch with Desktop 0 recognized.
+    fn relaunched() -> (Mac, SpaceId, SpaceId, Vec<Vec<u32>>) {
+        let mut mac = his_desktops();
+        mac.focused = Some(w(14));
+        mac.go(1);
+        let d1 = mac.space();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        let before = grouping(&mac, d0);
+        assert_eq!(before.len(), 5, "a stage per app on Desktop 0");
+        let json = mac.m.to_state().to_json();
+        // Relaunch: the windows keep their ids (they are other apps' windows).
+        let saved = StateFile::from_json(&json).expect("parses");
+        let mut again = his_desktops();
+        again.m.restore_spaces(saved.spaces);
+        again.focused = Some(w(1));
+        again.go(0);
+        assert_eq!(again.space(), d0, "Desktop 0 recognized at launch");
+        assert_eq!(grouping(&again, d0), before, "with its stages");
+        (again, d0, d1, before)
+    }
+
+    #[test]
+    fn a_desktop_sliding_out_beside_the_one_arriving_keeps_its_stages_and_its_id() {
+        // 16:40:37: the list read at the notice held Desktop 0's 7 known windows and Desktop
+        // 1's 11 first-seen ones; Desktop 1 (saved) won and Desktop 0's windows were taken
+        // as moved into it; 0.3 s later Desktop 0 alone got a new id, its windows in one stage.
+        let (mut mac, d0, d1, before) = relaunched();
+        let strip_before = mac.m.strip_slots(MAIN);
+        assert!(mac.m.shows_two_desktops(MAIN, &{
+            let mut l = mac.live();
+            l.extend(mac.wins.values().filter(|(d, _, _)| *d == Some(1)).map(|(_, _, m)| m.clone()));
+            l
+        }, &[]));
+        mac.shown = 1;
+        arrive_seeing(&mut mac, &[0, 1]);
+        assert_eq!(mac.space(), d1, "the saved Desktop 1 is rebuilt from its first-seen windows");
+        assert_eq!(mac.m.last_arrival().beside, vec![d0.0], "Desktop 0 is still on screen beside it");
+        assert_eq!(mac.m.last_arrival().moved, 0);
+        for id in 1..=5 {
+            assert_eq!(mac.m.space_of(w(id)), Some(d0), "window {id} stays Desktop 0's");
+        }
+        assert_eq!(grouping(&mac, d0), before, "Desktop 0's stages untouched");
+        // The slide over: Desktop 0's windows alone.
+        mac.shown = 0;
+        mac.arrive();
+        assert_eq!(mac.space(), d0, "Desktop 0 keeps its id");
+        assert_eq!(grouping(&mac, d0), before, "and its stages");
+        assert_eq!(mac.m.strip_slots(MAIN), strip_before, "and its strip");
+        assert_eq!(mac.m.spaces().len(), 2, "no third Desktop");
+        // Saved again: two Desktops, each with its own stages.
+        let file = mac.m.to_state();
+        assert_eq!(file.spaces.len(), 2);
+        assert!(file.spaces.iter().any(|s| s.id == d0.0 && s.stages.iter().filter(|st| !st.windows.is_empty()).count() == 5));
+    }
+
+    #[test]
+    fn windows_beside_the_desktop_arriving_count_as_moved_only_at_the_second_arrival() {
+        // A real move of most of a Desktop's windows (Mission Control, one by one): the same
+        // windows of another Desktop stay on screen, the platform arrives again a settle
+        // later, and they are taken as moved then.
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 3, 30, "com.example.chat", "Team");
+        mac.put(1, 4, 40, "com.example.mail", "Inbox");
+        mac.put(1, 5, 50, "com.example.terminal", "Shell");
+        mac.put(1, 6, 60, "com.example.calendar", "Week");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        mac.focused = Some(w(4));
+        mac.go(1);
+        let d1 = mac.space();
+        for id in [1, 2] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(1);
+        }
+        mac.arrive();
+        assert_eq!(mac.space(), d1);
+        assert_eq!(mac.m.space_of(w(1)), Some(d0), "first sight: maybe a Desktop sliding out");
+        mac.arrive();
+        assert_eq!(mac.space(), d1);
+        assert_eq!(mac.m.space_of(w(1)), Some(d1), "seen again: moved here");
+        assert_eq!(mac.m.space_of(w(2)), Some(d1));
+        assert!(!mac.parked(1) && !mac.parked(2), "shown, never parked");
+        assert_eq!(mac.m.stage_of(w(1)), mac.m.main_active_stage(), "in front");
+        assert_eq!(mac.m.space_of(w(3)), Some(d0), "the window left behind stays");
+    }
+
+    #[test]
+    fn whole_stages_moving_to_a_desktop_without_windows_are_carried_over() {
+        // A known Desktop's windows show under a new id (its other windows missing): every
+        // stage that moved whole keeps its grouping, order and active stage; none collapses
+        // into one.
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 7, 20, "com.example.browser", "Work docs");
+        mac.put(0, 3, 30, "com.example.chat", "Team");
+        mac.put(0, 4, 40, "com.example.mail", "Inbox");
+        mac.put(0, 5, 50, "com.example.terminal", "Shell");
+        mac.put(0, 6, 60, "com.example.calendar", "Week");
+        mac.put(0, 8, 70, "com.example.notes", "List");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        let browser = mac.m.stage_of(w(2)).expect("stage");
+        let chat = mac.m.stage_of(w(3)).expect("stage");
+        assert_eq!(mac.m.stage_of(w(7)), Some(browser), "the browser's two windows share a stage");
+        let order: Vec<StageId> = mac.m.strip_slots(MAIN).into_iter().filter(|s| [browser, chat].contains(s)).collect();
+        // Mail, terminal and calendar go to a Desktop not shown: Desktop 0 no longer looks
+        // like itself (as many windows missing as on screen).
+        for id in [4, 5, 6, 8] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(2);
+        }
+        mac.arrive();
+        let new = mac.space();
+        assert_ne!(new, d0, "not recognized: a new id");
+        assert_eq!(mac.m.last_arrival().carried, 3);
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "the active stage stays active");
+        assert_eq!(mac.m.stage_of(w(2)), Some(browser));
+        assert_eq!(mac.m.stage_of(w(7)), Some(browser), "grouping kept");
+        assert_eq!(mac.m.stage_of(w(3)), Some(chat));
+        assert_eq!(mac.m.stages_in(new).count(), 3, "three stages, not one");
+        assert_eq!(mac.m.strip_slots(MAIN), order, "strip order kept");
+        assert!(!mac.parked(1) && mac.parked(2) && mac.parked(7) && mac.parked(3), "shown and parked as before");
+        assert_eq!(mac.m.space_of(w(4)), Some(d0), "the others stay with their Desktop");
+    }
+
+    /// Desktop 1 (his app's Space 3): Messages alone in a stage, parked; Desktop 0: the
+    /// browser active, an editor in the strip.
+    fn messages_on_desktop_1() -> (Mac, SpaceId, StageId) {
+        let mut mac = Mac::new();
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(1, 14, 80, "com.example.messages", "Family");
+        mac.put(1, 11, 10, "com.example.editor", "Home notes");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        let d0 = mac.space();
+        let browser = mac.m.stage_of(w(2)).expect("stage");
+        assert_eq!(mac.m.main_active_stage(), Some(browser));
+        mac.focused = Some(w(11));
+        mac.go(1);
+        assert!(mac.parked(14), "Messages waits in Desktop 1's strip");
+        (mac, d0, browser)
+    }
+
+    #[test]
+    fn a_window_moved_here_in_mission_control_shows_in_a_stage_of_its_own() {
+        // 16:49 (mc-move.log): Messages dragged in Mission Control from Desktop 1 to Desktop
+        // 0; the arrival filed it into the browser's (active) stage, and the next switch
+        // parked it with the browser.
+        let (mut mac, d0, browser) = messages_on_desktop_1();
+        mac.wins.get_mut(&14).expect("window").0 = Some(0);
+        mac.focused = None;
+        mac.go(0);
+        assert_eq!(mac.space(), d0);
+        assert_eq!(mac.m.last_arrival().moved, 1, "a move");
+        let stage = mac.m.stage_of(w(14)).expect("stage");
+        assert_ne!(stage, browser, "not filed with the browser");
+        assert_eq!(mac.m.stage(stage).map(|s| s.windows.clone()), Some(vec![w(14)]), "a stage of its own");
+        assert_eq!(mac.m.main_active_stage(), Some(stage), "shown in front");
+        assert!(!mac.parked(14), "never parked");
+        assert!(mac.parked(2), "the browser's stage went to the strip");
+        assert!(mac.strip().contains(&vec![2]));
+        // The next switch leaves Messages in its own card.
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        mac.click(editor);
+        assert!(mac.strip().contains(&vec![14]), "its own card: {:?}", mac.strip());
+        assert_eq!(mac.m.stage_of(w(2)), Some(browser));
+        assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+    }
+
+    #[test]
+    fn a_window_moved_here_joins_the_active_stage_holding_its_app() {
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(1, 11, 10, "com.example.editor", "Home notes");
+        mac.put(1, 4, 40, "com.example.mail", "Inbox");
+        mac.put(1, 5, 50, "com.example.terminal", "Shell");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        mac.focused = Some(w(4));
+        mac.go(1);
+        // Desktop 1's editor window dragged to Desktop 0, where the editor's stage is active.
+        mac.wins.get_mut(&11).expect("window").0 = Some(0);
+        mac.focused = None;
+        mac.go(0);
+        assert_eq!(mac.space(), d0);
+        assert_eq!(mac.m.stage_of(w(11)), Some(editor), "with its app's window, in front");
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert!(!mac.parked(11) && !mac.parked(1));
+    }
+
+    #[test]
+    fn a_restart_finds_each_desktops_windows_by_id_whatever_their_titles() {
+        // Titles change all day (editors, browsers): a restart recognizes each Desktop and
+        // rebuilds its stages by the windows' ids, on its first visit too.
+        let mut mac = his_desktops();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        mac.focused = Some(w(12));
+        mac.go(1);
+        let d1 = mac.space();
+        let groups0 = grouping(&mac, d0);
+        let groups1 = grouping(&mac, d1);
+        let active1 = mac.active();
+        let json = mac.m.to_state().to_json();
+        assert!(json.contains("\"window\": 14"), "window ids are saved");
+        let mut again = his_desktops();
+        for (_, _, m) in again.wins.values_mut() {
+            m.title = format!("{} (changed)", m.title);
+        }
+        again.m.restore_spaces(StateFile::from_json(&json).expect("parses").spaces);
+        again.focused = Some(w(1));
+        again.go(0);
+        assert_eq!(again.space(), d0);
+        assert_eq!(grouping(&again, d0), groups0);
+        again.go(1);
+        assert_eq!(again.space(), d1, "Desktop 1 recognized on its first visit");
+        assert_eq!(again.m.last_arrival().rebuilt, Some(d1.0));
+        assert_eq!(grouping(&again, d1), groups1);
+        assert_eq!(again.active(), active1, "its saved active stage");
+        assert_eq!(again.m.unvisited_saved_spaces(), 0);
+    }
+}

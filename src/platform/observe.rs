@@ -232,6 +232,11 @@ impl Observer {
         Some(w.frame)
     }
 
+    /// True when app `pid` is observed (allowed and answering, not ours).
+    pub fn observes(&self, pid: i32) -> bool {
+        self.observed.contains_key(&pid)
+    }
+
     /// The `STAGE_MANAGER_ONLY` filter in force.
     pub fn only(&self) -> Option<&HashSet<String>> {
         self.only.as_ref()
