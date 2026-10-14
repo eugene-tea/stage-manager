@@ -7,8 +7,7 @@
 
 <h1 align="center">Stage Manager</h1>
 
-<p align="center">Everything Apple should have done to Stage Manager three or four years ago,
-done now, and done the Apple way.</p>
+<p align="center">Window management, improved.</p>
 
 <p align="center"><a href="https://github.com/eugene-tea/stage-manager/releases/latest"><b>Download</b></a>
 · signed and notarized · macOS 14 Sonoma or later</p>
