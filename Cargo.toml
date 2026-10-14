@@ -2,6 +2,8 @@
 name = "stage-manager"
 version = "1.1.0"
 edition = "2024"
+# The oldest Rust that builds it (let chains); rust-toolchain.toml pins the one used.
+rust-version = "1.88"
 description = "A floating-window stage manager for macOS"
 license = "MIT"
 publish = false

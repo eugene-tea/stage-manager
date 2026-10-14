@@ -110,15 +110,17 @@ impl Job {
         )
     }
 
-    /// The picture's file name (never the folders: they name the user).
+    /// The picture's file name for the log (never the folders: they name the user; see
+    /// [`file_name`]).
     pub fn file_name(&self) -> String {
         file_name(&self.path)
     }
 }
 
-/// The last component of `path`.
+/// The last component of `path` as a log line may show it: Apple's pictures by name, the
+/// user's own hashed unless `[log] titles` is on ([`crate::logbook::titles::picture_name`]).
 pub fn file_name(path: &str) -> String {
-    Path::new(path).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    crate::logbook::titles::picture_name(path, super::logging::titles_shown())
 }
 
 /// Reads [`Wall`]s, keeping what only changes with a file (settings, picture facts, zone).

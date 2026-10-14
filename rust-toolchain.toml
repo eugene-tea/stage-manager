@@ -1,0 +1,8 @@
+# The Rust that builds and checks Stage Manager (rustup installs it on the first cargo run
+# here). The code needs 1.88 or later (`rust-version` in Cargo.toml); this is the version the
+# releases and CI use. Raise it on purpose, with `make check` clean.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy"]
+profile = "minimal"
+targets = ["aarch64-apple-darwin"]

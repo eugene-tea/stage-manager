@@ -2,8 +2,10 @@
 //! [`crate::logbook`] for the line format), shared by the app, its guardian and one-shot
 //! commands, each line tagged with its process.
 //!
-//! - **Level:** `[log] level` (default `debug`: every decision the app makes, no per-move or
-//!   per-frame lines), live on config reload; `RUST_LOG` overrides it.
+//! - **Level:** `[log] level` (default `info`: the main events; `debug` adds every decision
+//!   the app makes), live on config reload; `RUST_LOG` overrides it.
+//! - **Titles:** window titles are written as a short hash unless `[log] titles` is on
+//!   ([`title`], [`crate::logbook::titles`]); a problem mark's state dumps the same.
 //! - **Ring:** the last [`RING_KEEP`] of lines at `trace` stay in memory for a problem mark
 //!   ([`write_mark`]), whatever the file's level.
 //! - **Limits:** a day's file past `[log] max_mb_per_day` takes only warnings, errors, marks
@@ -84,6 +86,8 @@ struct Book {
     env_override: bool,
     /// The config's level is `debug` or `trace` (the menu's Mark a Problem shows).
     verbose: AtomicBool,
+    /// `[log] titles`: window titles are written as they are.
+    titles: AtomicBool,
     ring_filter: Targets,
     ring: Mutex<Ring>,
     max_day: AtomicU64,
@@ -200,15 +204,36 @@ pub fn apply_config(config: &LogConfig) {
         *f = targets(config.level.directives());
     }
     b.verbose.store(verbose(config), Ordering::Relaxed);
+    b.titles.store(config.titles, Ordering::Relaxed);
     b.max_day.store(config.max_mb_per_day.saturating_mul(MB), Ordering::Relaxed);
     b.max_total.store(config.max_mb_total.saturating_mul(MB), Ordering::Relaxed);
     b.days.store(config.days, Ordering::Relaxed);
 }
 
-/// True while the log is verbose (`[log] level` debug or trace, the trial default): the
-/// status menu shows Mark a Problem.
+/// True while the log is verbose (`[log] level` debug or trace): the status menu shows Mark
+/// a Problem.
 pub fn verbose_now() -> bool {
     BOOK.get().is_some_and(|b| b.verbose.load(Ordering::Relaxed))
+}
+
+/// A window title as a log line may show it: as it is with `[log] titles` on, else a short
+/// hash (see [`crate::logbook::titles`]).
+pub fn title(title: &str) -> String {
+    crate::logbook::titles::title(title, titles_shown())
+}
+
+/// `[log] titles` is on in this process.
+pub fn titles_shown() -> bool {
+    BOOK.get().is_some_and(|b| b.titles.load(Ordering::Relaxed))
+}
+
+/// A state dump for a problem mark, pretty-printed, its window titles hashed unless
+/// `[log] titles` is on.
+pub fn mark_section(mut dump: serde_json::Value) -> String {
+    if !titles_shown() {
+        crate::logbook::titles::redact_titles(&mut dump);
+    }
+    serde_json::to_string_pretty(&dump).unwrap_or_default()
 }
 
 impl Book {
@@ -220,6 +245,7 @@ impl Book {
             file: RwLock::new(file),
             env_override: false,
             verbose: AtomicBool::new(verbose(config)),
+            titles: AtomicBool::new(config.titles),
             ring_filter: targets(RING_DIRECTIVES),
             ring: Mutex::new(Ring::new(RING_KEEP, RING_MAX)),
             max_day: AtomicU64::new(config.max_mb_per_day.saturating_mul(MB)),

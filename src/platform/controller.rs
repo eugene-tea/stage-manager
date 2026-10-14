@@ -1851,7 +1851,8 @@ impl Controller {
 
     // ----- persistence -------------------------------------------------------------------
 
-    /// Writes `state.json` now (atomically).
+    /// Writes `state.json` now (atomically; readable by the user only, in a private folder:
+    /// [`crate::private_files`]).
     pub fn save_now(&mut self) {
         self.dirty = None;
         let Some(m) = &self.model else { return };
@@ -1861,8 +1862,8 @@ impl Controller {
         file.session = session::window_session().map(str::to_string);
         let text = file.to_json();
         let tmp = path.with_extension("json.tmp");
-        let result = std::fs::create_dir_all(paths::config_dir())
-            .and_then(|_| std::fs::write(&tmp, text))
+        let result = crate::private_files::ensure_dir(&paths::config_dir())
+            .and_then(|_| crate::private_files::write(&tmp, text.as_bytes()))
             .and_then(|_| std::fs::rename(&tmp, &path));
         match result {
             Ok(()) => tracing::debug!("state saved to {}", path.display()),
@@ -3574,6 +3575,8 @@ impl Controller {
         }
         if self.model.is_some() && !safety::quit_requested() {
             self.refresh_dock_bar(now);
+            // The inert-slivers tap judges presses on this list, never reading it itself.
+            super::sliver_tap::refresh();
             // A wallpaper click's hold over: the patch is planned again (it stays hidden while
             // Show Desktop is listed; back if macOS showed none).
             if self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) >= PATCH_REVEAL_HOLD) {

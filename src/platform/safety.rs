@@ -271,7 +271,7 @@ fn write_parked_file(listed: &[Registered]) {
         let tmp = path.with_extension("json.tmp");
         serde_json::to_vec(&file)
             .map_err(std::io::Error::other)
-            .and_then(|bytes| std::fs::write(&tmp, bytes))
+            .and_then(|bytes| crate::private_files::write(&tmp, &bytes))
             .and_then(|()| std::fs::rename(&tmp, &path))
     };
     match result {

@@ -147,7 +147,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
-| `log.level` | `"debug"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "debug" (the default for now) records every decision, "info" only the main ones. |
+| `log.level` | `"info"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "info" the main events, "debug" every decision (and shows Mark a Problem in the menu). |
+| `log.titles` | `false` | true or false | Write window titles into the log and problem marks, for debugging; off, a short hash stands in for each. |
 | `log.days` | `14` | whole number, 1 to 365 | Day files older than this many days are deleted. |
 | `log.max_mb_per_day` | `100` | whole number, 1 to 10000 | A day's file this big takes only warnings, errors, marks and counts from then on. |
 | `log.max_mb_total` | `500` | whole number, 1 to 100000 | The log folder's cap: the oldest days go first, never today's. |

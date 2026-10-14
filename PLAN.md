@@ -124,9 +124,12 @@ Each milestone ends with a commit and a manual test checklist; `cargo test` and
 The owner runs a trial week on the daily log (`docs/DEVELOPMENT.md`, "Logs")
 before the first public release. Before that release:
 
-- [ ] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
-  Problem by default (it shows only while the level is `debug` or `trace`).
-- [ ] Decide which window titles the log keeps (all, none, or hashed) and say so in the guide.
+- [x] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
+  Problem by default (it shows only while the level is `debug` or `trace`). Done after
+  1.1.0: `"info"`.
+- [x] Decide which window titles the log keeps (all, none, or hashed) and say so in the guide.
+  Hashed (a short FNV-1a code), titles as they are only with `[log] titles = true`; marks'
+  state dumps the same; said in the guide's "Updates and privacy".
 - [ ] Revisit the caps (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against the
   trial's real volume (`stage-manager log summary` for each day).
 

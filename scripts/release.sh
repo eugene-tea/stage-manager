@@ -7,6 +7,10 @@
 #                   else (build, bundle, DMG, cask) runs, so the flow can be checked without
 #                   a certificate. The dry-run DMG holds an unsigned app: never publish it.
 #
+# The release builds exactly the committed tree: it refuses uncommitted or untracked files
+# (a dry run only warns), builds with --locked (Cargo.lock as committed) and the toolchain
+# rust-toolchain.toml pins, and writes "~" for the home folder into the binary's debug paths.
+#
 # Output: target/release/Stage-Manager.dmg (the name never changes; the release tag carries
 # the version), a versioned copy beside it, and target/release/stage-manager.rb, the Homebrew
 # cask with this DMG's version and sha256. One-time setup and the upload: docs/RELEASING.md.
@@ -35,12 +39,24 @@ if [ "$DRY_RUN" != 1 ]; then
     *) fail "DEVELOPER_ID must be a \"Developer ID Application: …\" identity (or its SHA-1)" ;;
   esac
 fi
+DIRTY="$(git status --porcelain --untracked-files=normal)"
+if [ -n "$DIRTY" ]; then
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "warning: uncommitted or untracked files (a real release refuses them):" >&2
+    echo "$DIRTY" >&2
+  else
+    echo "$DIRTY" >&2
+    fail "the tree has uncommitted or untracked files: commit or stash them; a release builds the committed tree only"
+  fi
+fi
 IDENTITY="${DEVELOPER_ID:-Developer ID Application: (dry run)}"
 PROFILE="${NOTARY_PROFILE:-(dry run)}"
 plutil -lint -s "$ENTITLEMENTS"
 
-# A fresh bundle: never re-sign a bundle the local identity signed.
-nice -n 18 cargo build --release
+# A fresh bundle: never re-sign a bundle the local identity signed. The binary's debug paths
+# (backtraces) name the home folder as "~", not the account.
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$HOME=~"
+nice -n 18 cargo build --release --locked
 scripts/bundle.sh app
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 echo "Releasing Stage Manager $VERSION"

@@ -6,8 +6,8 @@ publishing a release is in [RELEASING.md](RELEASING.md).
 
 ## Requirements
 
-- macOS 14 or later
-- Rust (edition 2024)
+- A Mac with Apple silicon (the app is built for arm64 only), macOS 14 or later
+- Rust: `rust-toolchain.toml` pins the version (rustup installs it on the first build)
 - Xcode command-line tools (`swiftc` builds the test fixture)
 - The local signing identity (below)
 
@@ -115,7 +115,11 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 ## The ctl socket
 
 The running app listens on `$TMPDIR/stage-manager.sock` (or in `$STAGE_MANAGER_HOME`): one
-command per line, one line of JSON per reply. The same binary is the client:
+command per line, one line of JSON per reply. The same binary is the client. The socket is
+the user's only (`0600`), and the app serves every command only to its own binary: the same
+file, or one signed as it is (another copy of the bundle, signed with the same identity).
+Any other program, `target/debug/stage-manager` (ad hoc signed) included, gets `ping` and
+`settings` only:
 
 ```sh
 B="target/Stage Manager.app/Contents/MacOS/stage-manager"
@@ -157,15 +161,19 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
 ## Logs
 
 The app, its guardian process and one-shot commands write one file per local day to
-`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`. `[log] level` is `debug` for now, which records
-every decision the app makes. Day files are capped in size and kept 14 days.
+`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`. `[log] level` is `info` by default (the main
+events); `debug` records every decision the app makes and shows **Mark a Problem** in the
+menu. Day files are capped in size and kept 14 days.
 
 - `stage-manager log summary [DATE|yesterday]` prints a day's counts, runs, marks, and every
   warning and error, deduplicated: short enough to paste.
 - `stage-manager mark ["note"]` (or **Mark a Problem** in the menu) writes a marked block
   with the app's state and the last 30 seconds of detailed lines.
 
-Logs contain window titles. Never commit one.
+Window titles go into the log, and into a mark's state dumps, as a short hash
+(`#1a2b3c4d`, the same for the same title in every process) unless `[log] titles = true`;
+lines name windows by id, pid and bundle id. `ctl dump` and `ctl state` still answer with
+titles. Logs still name your apps and your stages: never commit one.
 
 ## Configuration keys
 
