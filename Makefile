@@ -11,7 +11,7 @@ CARGO   := nice -n 18 cargo
 APP     := target/Stage Manager.app
 FIXTURE := target/SM Fixture.app
 
-.PHONY: build bundle sign dev run install fixture check icon dmg-art dmg release
+.PHONY: build bundle sign dev run install fixture check icon dmg-art social-art dmg release
 
 ## build: cargo build --release
 build:
@@ -52,6 +52,10 @@ icon:
 ## dmg-art: re-render the DMG window background from art/dmg.py + art/dmg/text.json (headless Chrome)
 dmg-art:
 	scripts/dmg-art.sh
+
+## social-art: re-render the info page's link-preview card from art/social.py (headless Chrome)
+social-art:
+	scripts/social-art.sh
 
 ## dmg: the installer DMG of the locally signed app -> target/release/Stage-Manager.dmg (not for publishing)
 dmg: sign

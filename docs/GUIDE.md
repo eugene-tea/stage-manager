@@ -1,958 +1,261 @@
-# Stage Manager — the guide
+# Stage Manager — user guide
 
-A floating-window stage manager for macOS: Apple's Stage Manager strip and floating windows,
-plus rules, hotkeys, named stages, pinning, placement and persistence. See `PLAN.md`.
+## What it is
 
-Status: milestones 1–6 (skeleton, observation, stages with hotkeys and safety, rules and
-placement, the strip, persistence) plus Apple's default behavior (first start, new windows,
-drag and drop, ⌘M, the card's app icon, One at a Time), Shift sugar, and a strip measured
-against Apple's on a laptop and a 5K display. **Out of the box it looks and behaves like
-Apple's Stage Manager**; every extension is off until `config.toml` turns it on, and every
-look and behavior is a config key (below). The app keeps stages of floating windows on every
-Space (Desktop), each with its own stages and strip, as Apple's does: switching parks the
-stage you leave in the bottom-right corner and restores the target's frames and z-order
-exactly; the strip on the left shows the Space's other stages as cards.
+Stage Manager is a replacement for the Stage Manager built into macOS. Out of the box it
+looks and works like Apple's: your recent groups of windows wait as cards in a strip on the
+left, and the windows you are using float in the middle, at the size and place you gave
+them. On top of that it adds a few things Apple's lacks, such as merging stages, rules for
+new windows and keyboard shortcuts. Each extra stays out of sight until you use it, and
+everything can be changed in one config file.
 
-Everything works by mouse, the Dock and ⌘Tab, the way Apple's Stage Manager does. Hotkeys
-are an optional extra (off by default); nothing needs one.
+## Install
 
-## Build
+You need macOS 14 Sonoma or later.
 
-Requirements: macOS 14+, Rust (edition 2024), Xcode command-line tools (`swiftc` for the
-fixture), and the signing identity below.
+1. Download `Stage-Manager.dmg` from the
+   [latest release](https://github.com/eugene-tea/stage-manager/releases/latest).
+2. Open it and drag **Stage Manager** into **Applications**.
+3. Open Stage Manager from Applications.
 
-```sh
-scripts/make-cert.sh   # once: creates "Stage Manager Local Signing" in the login keychain
-make run               # build, bundle, sign, launch, stream the log; Ctrl-C quits the app
-```
+## First launch
 
-The first signing with a new key makes macOS ask whether codesign may use it: choose
-**Always Allow**. Until then `make sign` waits on that dialog (it gives up after
-`SIGN_TIMEOUT` seconds, default 300).
+A welcome window walks you through three things. Each row turns into a green check mark as
+soon as it is done, and you never need to restart the app.
 
-### Makefile targets
+1. **Turn off Apple's Stage Manager.** The two cannot run together. Click **Turn Off** and
+   Stage Manager does it for you. Until Apple's is off, Stage Manager waits and moves
+   nothing.
+2. **Accessibility — required.** This lets Stage Manager move, hide and bring back your
+   windows. Click **Allow…**, then turn Stage Manager on in System Settings → Privacy &
+   Security → Accessibility.
+3. **Screen Recording — optional.** This shows live pictures of your windows on the cards
+   and while stages switch. Without it, cards show plain window shapes with the app's icon.
+   It is in System Settings → Privacy & Security → Screen & System Audio Recording.
 
-| Target         | What it does |
-|----------------|--------------|
-| `make build`   | `cargo build --release` |
-| `make bundle`  | assembles `target/Stage Manager.app` (`LSUIElement`, bundle ID `dev.eugene.stagemanager`, version from `Cargo.toml`) |
-| `make sign`    | signs the bundle by SHA-1 with "Stage Manager Local Signing" (hardened runtime, no timestamp); fails pointing at `scripts/make-cert.sh` when the identity is missing; never ad-hoc |
-| `make dev`     | `sign`, then copies the app to `~/Library/Application Support/Stage Manager Dev/` (`scripts/dev-app.sh`). macOS asks for screen access once per app location, so dev runs and tests always launch from there, whichever worktree built them |
-| `make run`     | `sign`, copies the app to the dev location, then launches it through LaunchServices (`open -n`) and tails today's log (`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`) from this run's first line; Ctrl-C sends `ctl quit` (SIGTERM as a fallback) |
-| `make install` | copies the signed app to `~/Applications` |
-| `make fixture` | builds and signs `target/SM Fixture.app` (test windows, below) |
-| `make check`   | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
-| `make icon`    | regenerates the app icon (`art/icon.py` → Icon Composer document → `actool`); needs Xcode 26+, outputs committed |
-| `make dmg-art` | re-renders the DMG window background from `art/dmg.py` and `art/dmg/text.json` (headless Chrome) |
-| `make dmg`     | `sign`, then `target/release/Stage-Manager.dmg` of the locally signed app (layout check, not for publishing) |
-| `make release` | the public DMG: Developer ID signed, notarized, stapled, plus the Homebrew cask; see [RELEASING.md](RELEASING.md) |
+Stage Manager never needs Input Monitoring. It records nothing you type.
 
-`make run` passes `RUST_LOG` (overrides `[log] level`), `STAGE_MANAGER_NO_PROMPT`,
-`STAGE_MANAGER_ONLY`, `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST`
-through to the app when they are set.
+If you close the welcome window early, the menu bar icon's menu keeps reminding you what is
+missing, with an **Allow…** item for each.
 
-Why LaunchServices: a binary started straight from a terminal has its TCC grants checked
-against the terminal. Launched with `open`, macOS checks the bundle's own signature.
+Stage Manager also adds itself to your login items the first time it runs from
+Applications, so it starts when you log in. You can turn that off in Settings.
 
-## Permissions (approvals)
+## How it works
 
-The exact texts for the outside world (the DMG, the info page) are in `docs/APPROVALS.md`.
+### Stages
 
-- **Accessibility** (required) — observing and moving windows. Without it the app runs,
-  says so in the menu, and starts observing within a second of the grant (no relaunch).
-  The input monitor's key-downs and the test-only posted events ride on it too.
-- **Screen Recording** (optional) — strip thumbnails and switch-animation snapshots
-  (ScreenCaptureKit). Without it, cards draw plain window shapes with the app's icon and
-  switches move plain ghosts. The strip also asks through `SCShareableContent`, which is what
-  lists the app in System Settings on recent macOS. `[strip] capture = false` turns window
-  pictures off: then Screen Recording is never asked for.
-- **Input Monitoring** — not needed: no event tap and no HID access. Mouse events come from
-  an `NSEvent` global monitor (no grant), key-downs from the same monitor under
-  Accessibility, hotkeys from Carbon's `RegisterEventHotKey` (no grant).
+A stage is a group of windows you use together. Only one stage is on screen at a time. The
+others wait as cards in the strip on the left. When you first start, every app with windows
+gets a stage of its own, just as when you turn on Apple's Stage Manager.
 
-**No system prompt at launch.** The **welcome window** asks instead: it shows at the first
-launch, and at any launch while Accessibility is missing or Apple's Stage Manager is on. One
-row per approval (what it is for; a green check mark once allowed, else **Allow…**, which
-asks macOS to list the app and opens the right Privacy pane), a row to turn Apple's Stage
-Manager off while it is on, **Open Settings…** and **Later** / **Done**. Rows update live as
-approvals land; once everything is in place it says "Stage Manager is all set". While any
-approval is missing the menu also starts with "Stage Manager needs … access" and
-"Allow …"; both go once everything is granted. `STAGE_MANAGER_NO_PROMPT` (test runs) shows
-no welcome.
+Your windows keep their own size and position. Stage Manager never resizes or tiles them,
+and when you come back to a stage, every window is exactly where you left it.
 
-macOS may also show its own screen-access alert ("… is requesting to bypass the system
-private window picker and directly access your screen and audio"); see Known limitations.
-If macOS refuses a capture as not permitted, the app stops capturing (plain cards and
-ghosts), says so once in the log, tries again after 10 minutes (doubling up to 2 hours),
-and "Allow Screen Recording…" shows in the menu; clicking it tries again at once.
+### The strip
 
-The stable signature keeps the grants across rebuilds. Its designated requirement is
-`identifier "dev.eugene.stagemanager" and certificate leaf = H"<sha1>"`; check with
-`codesign -d -r- "target/Stage Manager.app"`.
+Each card shows the stage's windows in miniature, with the app's icon in the corner. The
+strip sits below your windows: when a window covers it, it slides away. Rest the pointer at
+the left edge of the screen to bring it back.
 
-## macOS settings
+### Switching
 
-Apple's `com.apple.WindowManager` preferences are the source of truth wherever they exist
-(`AppWindowGroupingBehavior`, `AutoHide`, `HideDesktop`, `GloballyEnabled`,
-`StageManagerHideWidgets`, `StandardHideWidgets`, `EnableStandardClickToShowDesktop`). The
-app re-reads them every second and logs changes. Settings changes two of them on a click,
-the same keys Apple's own Customize sheet writes: "Show recent apps" (`AutoHide`) and "Show
-windows from an application" (`AppWindowGroupingBehavior`); "Click wallpaper to reveal
-desktop" is never written (Settings opens Desktop & Dock for it).
+You can switch stages the same ways as with Apple's Stage Manager:
 
-### Apple's Stage Manager on: the app stands down
+- Click a card.
+- Press ⌘-Tab to an app whose windows are in another stage.
+- Click the app in the Dock.
+- Click a card's app icon to bring every window of that app, from all stages.
 
-Both cannot run. While `GloballyEnabled` is 1 (at launch, or turned on from Control Center
-while the app runs) the app **stands down**: every parked window comes back through the
-quit path (the controller's unpark, then the registry and a recovery scan), the stages
-saved before (`state.json`) are dropped at once (Apple's arranges the windows from now on,
-so a quit, crash or logout while standing down leaves nothing stale for the next launch),
-the strip hides on every Desktop, observation stops, and no click, drag, hotkey or Space
-change arranges anything. A window of another Space that Accessibility cannot reach stays
-on record (held in the safety registry and the guardian's parked file, beside whatever a
-later controller parks) and is tried again at every Space change, through the resume,
-until it is back. When Apple's turns off, the app starts afresh from the windows on
-screen, as a first start does, with the last displays and settings. The state machine and
-its release and resume plans are `engine::stand_down`; the WM thread carries them out.
+The stage you leave takes the card's place in the strip.
 
-- **At launch while it is on:** the welcome window shows, with a row for it ("Stage Manager
-  takes over from it, so Apple's must be off.") and **Turn Off**.
-- **Turned on while the app runs:** no window pops up; the menu shows **Turn Off Apple's
-  Stage Manager** at the top.
-- **Settings → Stage Manager** shows its state, with **Turn Off** while it is on.
-- **Turning it off** (only on one of those clicks) writes `GloballyEnabled = false` to
-  `com.apple.WindowManager` with CFPreferences, synchronizes, and checks 2 s later that it
-  stopped: the key reads back 0 and Apple's `WindowManager` process shows no more on-screen
-  windows than before (`CGWindowListCopyWindowInfo`; its strip's cards are its windows).
-  Otherwise System Settings → Desktop & Dock opens with a one-line hint. Unit tests and
-  test runs never write it; `scripts/test-apple-stage-manager.sh` (only with
-  `SM_TEST_TOGGLE_APPLE_SM=1`, the owner's to run) toggles it live and restores his value on
-  every exit.
+### New windows
 
-## Using it
+A new window joins its app's stage. If the app is not on screen yet, it gets a stage of its
+own. Sheets and dialogs always stay with their window.
 
-Apple's Stage Manager is the baseline; everything below works without a keyboard shortcut.
+### Desktops
 
-- **First start.** With no saved stages, every app with windows becomes its own stage, as
-  when Apple's Stage Manager is turned on: with "Show windows from an application: All at
-  Once" (System Settings → Desktop & Dock) one stage per app holding all its windows; with
-  "One at a Time" one stage per window. The frontmost app's stage is shown; the others go
-  to the strip, most recently used at the top. Later launches restore the saved stages
-  (below); apps that were not saved get their own stages the same way. (`[reveal]
-  launch_reveal = true` shows a strip a window covers for a moment at launch; Apple does
-  not.)
-- **Windows keep their frames**, as with Apple's: turning Stage Manager on moves or resizes
-  nothing, and switching brings every window back at exactly its own frame, even where it
-  overlaps the strip; the strip simply stays hidden while a window of the current stage
-  covers it, and the pointer resting at the left edge brings it back. `[windows] fit =
-  "move"` (or `"narrow"`) keeps placed windows clear of the strip instead; quit then gives
-  every window back its exact earlier frame.
-- **The strip looks like Apple's on every display**: cards at x = 15 pt, each window drawn
-  at one scale (a window as tall as the visible screen becomes a 161 pt card), turned in
-  perspective toward the screen's middle, 29.5 pt apart, the app icon on the bottom-left
-  corner, 5 cards at 1130 pt of visible height and 6 at 1410 pt. Every number is a key in
-  `[strip]`, `[cards]`, `[icons]`, `[motion]` and `[reveal]`.
-- **Stages.** Every window belongs to one stage (or is pinned). Only the active stage is
-  shown; the others are parked in the bottom-right corner (another corner when a second
-  display sits beyond it, below "Display arrangement"; a sliver stays visible; macOS
-  keeps part of every window onscreen: 32 pt of title bar above the Dock when the Dock sits
-  at the bottom). Clicking a card, clicking a parked sliver, ⌘Tab or
-  a Dock click on an app whose windows sit in another stage switches to that stage.
-- **New windows** follow Apple by default (`action = "native"`): a window of an app already
-  on the current stage joins it; a window of an app that sits in another stage joins that
-  stage and brings it forward; a newly opened app (or one whose windows were all closed)
-  gets a stage of its own, and the stage you leave goes to the strip. With "One at a Time",
-  a new window of an app that is not on the current stage opens a stage of its own (the
-  app's newest window, shown alone). Rules in `config.toml` (below) can send named apps
-  elsewhere. Sheets, dialogs and panels follow their parent.
-- **Switching moves like Apple's** (`[animation]`): the card you press eases back a little
-  at once, and on the release the windows you leave shrink into their card's slot and the
-  stage you pick grows from its card to its frames, on Apple's spring as measured (99 % by
-  about 400 ms). Live windows cannot be scaled, so snapshots of them move in a
-  click-through layer above everything while the real windows jump behind them; a click or
-  key press during the motion brings the windows in at once. The same goes for the desktop
-  reveal, ⌘M and drops. `[animation] speed` makes every animation faster or slower (2 is
-  twice as fast); `speed = 0` or `enabled = false` makes everything jump.
-- **The strip sits below windows**, as Apple's does: a window moved or dragged over it
-  covers it (and the strip slides away while one overlaps). It comes above windows only
-  while you drag a window or a card over it, or when the left edge reveals it over a
-  window. `[strip] level = "above_windows"` keeps it on top.
-- **Drag a card into the main area** to bring its windows into the current stage: press a
-  card and move; a copy of its front window follows the pointer and grows to the window's
-  size as it leaves the strip. Let go anywhere in the main area: the windows join the
-  current stage and the front one lands where you dropped it (title bar under the pointer).
-  Let go over the strip to cancel. A plain click still switches.
-- **Drag a card up or down** within the strip to give it another slot (an extension, on
-  because it is invisible until used; `[strip] reorder`): the card follows the pointer, the
-  others make room, and the order stays (also across relaunches).
-- **Drop a card onto another card** to merge the two stages (an extension: Apple's strip
-  draws a similar stacked card but never merges; on because it is invisible until used;
-  `[strip] merge_on_drop`). Hold the dragged card over the middle of another card (the
-  middle half of its height, `[drag] merge_zone`): that card grows a little and shows the
-  dragged card's windows stacked behind its own, as the merged card will look, and the gap
-  closes; above or below that middle the cards open a gap and the drop reorders as before.
-  Let go over the middle: the dragged card goes into the other one, which keeps its slot,
-  and the cards below close up (a stage out of view may take the freed slot). Nothing moves
-  on screen; the windows come with that card when you pick it. **To undo**, pick the merged
-  card and drag a window out of it onto the strip: it becomes a stage of its own again.
-- **Drag a window onto the strip** (by its title bar) to give it a stage of its own: once
-  the pointer is over the strip column, the strip comes above windows, a card-sized picture
-  of the window, turned like a card, follows the pointer, and the cards open a gap where
-  the pointer is. Let go: the window leaves the current stage, its picture shrinks into
-  that gap and becomes its card, and it comes back where it was before the drag when you
-  switch to it.
-- **Hold Shift to bring things here** instead of going there (`[sugar] shift_brings_here`,
-  on by default):
-  - open an app with Shift held (Dock click, Finder double-click, Spotlight Shift-Return,
-    Launchpad): its new window joins the current stage instead of opening a new one;
-  - Shift-click an app in the Dock whose windows sit in another stage: its windows come to
-    the current stage (all of them, or the most recent one with "One at a Time");
-  - Shift-click a card: its windows come to the current stage.
+Each Desktop (Space) has its own stages and its own strip, as with Apple's. Clicking a card
+never changes the Desktop. When ⌘-Tab or the Dock takes you to another Desktop, its stage is
+ready when it arrives. Full-screen apps have no strip. Mission Control hides the strip, just
+as it hides Apple's.
 
-  The app switcher is never affected: ⌘Tab and ⌘⇧Tab (which cycles backward) always switch
-  stages, as Apple's do.
-- **⌘M** (or the yellow button) sends the window to the strip as a card of its own, as
-  Apple's does, instead of the Dock (`[windows] minimize_to_strip`; macOS may show its
-  restore animation toward the corner for a moment).
-- **Click a card's app icon** to switch to that card with every window of the app, also the
-  ones sitting in other stages of the Space.
-- **Spaces (Desktops).** Every Space has its own Stage Manager, as Apple's does: its own
-  stages, active stage and strip, listing only that Space's windows. The same app can have
-  stages on several Spaces (VS Code at work on Desktop 1 and at home on Desktop 2), each
-  holding only that Space's windows. Clicking a card never changes the Space. Going to a
-  Space shows its strip (the first visit after launch groups its windows one stage per app,
-  or as saved); a Dock click or ⌘Tab to an app may switch Spaces the way macOS's own
-  setting says ("When switching to an application, switch to a Space with open windows for
-  the application", Desktop & Dock → Mission Control); we never fight it. When that lands
-  on a window waiting in another stage of the other Desktop, the Desktop comes with that
-  window's stage active, at once: no switch animation (the Desktop's slide is the motion), its
-  strip already in its final order. A click on the app's Dock item arranges that Desktop
-  before it slides in (when macOS will switch for it: the app has no window on the Desktop
-  shown, its windows are all placed and it is not hidden); ⌘Tab and other activations are
-  arranged when macOS reports the Space change, at the end of the slide. A window moved to
-  another Space (Mission Control, or dragged across) leaves its stage and shows there in
-  front: with its app's windows when the active stage holds one, else in a stage of its
-  own (the stage shown goes to the strip); it is never parked or filed with another app's
-  windows. A window on every Space ("Assign To: All Desktops") is treated as pinned.
-  Full-screen apps are Spaces of their own: no strip there; entering or leaving full screen
-  keeps the Desktop's stages (a Space change during macOS's full-screen animation waits for
-  it to settle). Stage numbers (hotkeys, `ctl switch N`) count the current Space's stages.
-  Mission Control, App Exposé and Show Desktop hide the strip (and every other panel of
-  ours) as they hide Apple's; it is back on the same Desktop when they end. While one shows,
-  and for a second after it closes, no Space is inferred from the window list (App Exposé
-  lists the app's windows of other Desktops on screen); a Desktop clicked in Mission Control
-  is recognized once Mission Control has closed.
-- **One at a Time** (System Settings → Desktop & Dock): an app's waiting windows share one
-  card; clicking it again opens the app's next window.
-- **Click the wallpaper** to reveal the desktop (the active stage goes into the strip);
-  click again to bring it back; a double click counts as one click. This follows System
-  Settings → Desktop & Dock → "Click wallpaper to reveal desktop": with **Only in Stage
-  Manager** we reveal; with **Always** (macOS's default: an unset
-  `EnableStandardClickToShowDesktop` means Always), macOS itself moves every window aside
-  and we move nothing, so the two never run together. Either way Finder's activation that
-  follows the click never switches stages.
-- **Quit** (the menu, ⌘Q in Settings, or a quit from the system such as logging out) brings
-  every parked window back first, and every window we narrowed or moved clear of the strip
-  back to its earlier frame. A logout is never cancelled: if the quit cannot run at that
-  instant the app answers "later" and tries again every 200 ms; after 5 s it unparks from
-  the registry and lets macOS go on.
+A window you move to another Desktop (in Mission Control, say) goes where a new window of
+its app would open there: with that app's windows if it has a stage on that Desktop, else in
+a stage of its own, shown in front. Move windows of several apps at once and each app gets
+its own stage; the front one is shown and the rest wait in the strip.
 
-## The menu bar icon and its menu
+### Drag and drop
 
-The icon is on by default (`[app] show_menu_bar_icon`; Apple's Stage Manager has none, the
-owner's word 10-13). Its menu, in Apple's menu-bar-app order:
+- **Drag a card into the middle** to bring its windows into the stage you are in.
+- **Drag a window onto the strip** by its title bar to give it a stage of its own.
+- **Drag a card up or down** to move it to another place in the strip.
+- **Drop a card onto another card** to merge the two stages. To split them again, open the
+  merged stage and drag a window onto the strip.
 
-1. While something is missing: "Stage Manager needs Accessibility access" with "Allow
-   Accessibility…", the same for Screen Recording (only while window pictures are on),
-   "Turn Off Apple's Stage Manager" while Apple's is on, and the config file's error.
-2. **About Stage Manager**, **Check for Updates…** (while a check runs, a click waits for it
-   and shows its result)
-3. **Settings…** (⌘, shown; no action needs a shortcut)
-4. **Mark a Problem** while the log is verbose (the trial week)
-5. **Quit Stage Manager**
+Shift-click a card to bring its windows into the current stage without leaving it. Hold
+Shift while you open an app, or Shift-click it in the Dock, to bring it here too.
 
-**Without the icon** the app runs with no indicator at all. Opening Stage Manager again
-(Finder, Spotlight, Launchpad, `open`) shows its Settings window: macOS hands the launch to
-the running app (`applicationShouldHandleReopen`), and a second process started another way
-(`open -n`, a terminal) asks the running one over the ctl socket (`ctl settings`) and exits.
+### ⌘M and the wallpaper
+
+⌘M (or the yellow window button) sends a window to the strip as a card of its own, not to
+the Dock.
+
+Clicking the wallpaper shows the desktop and clicking it again brings your stage back. This
+follows macOS's own setting in System Settings → Desktop & Dock → "Click wallpaper to reveal
+desktop".
+
+### The clean corner
+
+To hide a stage, Stage Manager moves its windows into the bottom-right corner of the
+screen. macOS always keeps a thin edge of each window on screen. Stage Manager makes those
+edges ignore clicks and covers them with a matching piece of your wallpaper, so the corner
+looks empty. If another display sits beyond that corner, a free corner is used instead.
 
 ## Settings
 
-One window in the look of System Settings (a grouped form, standard controls). Every change
-applies at once and is written to `config.toml` keeping its comments: a key changed from
-its default is uncommented in place (`key = value`), and set back to its default it is
-commented out again, so the file keeps holding no live values for defaults (`config::edit`,
-`toml_edit` for keys written another way). A file edited elsewhere (an agent, an editor)
-shows in the open window within a second.
+Open Settings from the menu bar icon. If you hid the icon, open Stage Manager again from
+Applications and Settings appears.
 
-- **General:** Launch at login · Show menu bar icon ("To open Settings again, open Stage
-  Manager from Applications.") · Check for updates automatically · the version with
-  **Check for Updates…**.
-- **Stage Manager** (Apple's Customize sheet): Apple's Stage Manager (state, **Turn Off**) ·
-  Show recent apps in Stage Manager · Show windows from an application (All at Once / One at
-  a Time) · Click wallpaper to reveal desktop (shown; **Desktop & Dock Settings…** opens
-  System Settings, never written).
-- **Extras:** Merge stages by dropping a card on a card (`[strip] merge_on_drop`) · Hold Shift
-  to bring apps to the current stage (`[sugar] shift_brings_here`) · Keep windows clear of
-  the strip (`[windows] fit`) · Keyboard shortcuts (`[hotkeys] enabled`) · Animation speed
-  (`[animation] speed`: a slider from Slower through Native, Apple's 1, to Faster, stopping
-  at 0.25, 0.33, 0.5, 0.75, 1, 1.5, 2, 3, 4; disabled while `[animation] enabled = false` or
-  `speed = 0`).
-- **Advanced:** "Every option lives in a config file." with **Reveal in Finder** and **Open
-  Config File…**, the file's error if it has one, and "The easiest way to change anything
-  else is to ask an AI agent (Claude Code, Codex, …) to do it." with **Copy Instructions for
-  Agents**: a short prompt naming `docs/AGENTS.md` on GitHub, the config file's path and the
-  `config check` command, ending "What I want: " for the user's ask.
+- **General:** start at login, show the menu bar icon, check for updates.
+- **Stage Manager:** the same options as Apple's Stage Manager — show recent apps, and show
+  an app's windows all at once or one at a time. These are macOS's own settings, so they
+  stay in step with System Settings.
+- **Extras:** merging stages by dropping cards, Shift to bring apps here, keeping windows
+  clear of the strip, keyboard shortcuts, and animation speed.
+- **Advanced:** the config file, and help for asking an AI assistant to change it.
 
-`stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate
-[--dark|--light] [--png FILE]` opens one of these windows alone (no WM thread, no event
-monitor, no Accessibility, no login item, built-in defaults, nothing written), or draws it
-into a PNG in-process (`cacheDisplayInRect`, never a screen capture; an undisplayed window
-draws as inactive, so switches that are on show grey) and exits.
+Changes apply at once.
 
-## About and updates
+## The config file
 
-**About Stage Manager** is AppKit's standard panel: the icon, name, version and build
-(`CFBundleShortVersionString` from `Cargo.toml`, `CFBundleVersion` the commit count), "By
-eugene-tea" linked to <https://eugene-tea.github.io/stage-manager/>, and "Source code on
-GitHub".
+Every option lives in one file:
 
-**Updates** come from GitHub Releases: `GET
-https://api.github.com/repos/eugene-tea/stage-manager/releases/latest` through an ephemeral
-`NSURLSession` (no cookies, no cache, a generic user agent; nothing about the user is sent).
-The version is the tag (`vX.Y.Z`, the `v` stripped), compared as semver. No release yet
-(404) counts as up to date.
-
-- A newer one: "A new version of Stage Manager is available" / "Stage Manager X is
-  available — you have Y." with **Download** (opens the release's `Stage-Manager.dmg`, else
-  its page), **Later** and **Skip This Version** (automatic checks stay quiet about it).
-  From an automatic check the alert comes up above other windows without activating the
-  app: the keyboard focus stays where the user is typing. From a manual check it comes to
-  the front.
-- Nothing newer (a manual check only): "You're up to date".
-- A failure: a plain alert for a manual check, one quiet log line for an automatic one.
-- Automatic checks (`[app] check_for_updates`, on by default): 30 s after launch, then
-  hourly, running only when a day has passed since the last one that reached GitHub
-  (`app-state.json`). Never in test runs (`STAGE_MANAGER_NO_PROMPT` or `STAGE_MANAGER_HOME`).
-
-Alerts never block: they show as ordinary windows (`runModal` would stop the main run
-loop's timers while one waits). A check that gets no answer counts as failed after 25 s.
-
-The checks assume nothing about the signature: a Developer ID signed and notarized DMG and a
-locally signed build behave the same.
-
-## Launch at login
-
-`SMAppService.mainApp` (System Settings → General → Login Items lists the app itself).
-`[app] launch_at_login` is on by default: an installed copy registers at its first launch
-(once; `app-state.json` remembers), and from then on the Settings switch (or an edit of the
-key) registers or unregisters it. The switch shows the real state: turned off in Login
-Items it shows off; "requires approval" shows a note and **Login Items…**.
-
-Only an installed copy ever registers: the bundle directly in `/Applications` or
-`~/Applications`, not translocated, not under `target/`, not the dev copy
-(`~/Library/Application Support/Stage Manager Dev/`), and neither `STAGE_MANAGER_HOME` nor
-`STAGE_MANAGER_NO_LOGIN_ITEM` set (`platform::login_item::gate`, unit tested). Tests never
-add a login item. Elsewhere the switch is disabled with "Available when Stage Manager runs
-from Applications."
-
-## Notes for AI agents
-
-`docs/AGENTS.md` is the guide for an agent configuring the app (where the config lives, how
-changes apply, how to check the file, how to read state and logs, what never to do).
-
-### Hotkeys (optional, off by default)
-
-Nothing needs a hotkey: every action above works by mouse, the Dock and ⌘Tab, and Apple's
-Stage Manager has none. They are off by default because global hotkeys take key combinations
-other apps may use; `[hotkeys] enabled = true` turns them on. Set any of them to `""` to
-leave that one out.
-
-| Default | Does | Config key |
-|---------|------|------------|
-| ⌃⌥1 … ⌃⌥9 | switch to stage N | `switch` |
-| ⌃⌥⇧1 … ⌃⌥⇧9 | send the focused window to stage N (N = count + 1 makes a stage) | `send` |
-| ⌃⌥N | send the focused window to a new stage | `new_stage` |
-| ⌃⌥P | pin / unpin the focused window (shown on every stage) | `toggle_pin` |
-| ⌃⌥S | show / hide the strip | `toggle_strip` |
-
-Hotkeys are Carbon `RegisterEventHotKey` registrations, re-registered when the config
-changes; one another app already holds is logged and skipped.
-
-## Configuration
-
-`~/.config/stage-manager/config.toml` (or `$STAGE_MANAGER_HOME/config.toml`), re-read within
-a second of every save (also `ctl reload`; Settings writes keys for you). Look and motion
-keys apply to the strip live. A bad value keeps the last good config (the error shows in the
-menu and the log); unknown keys and out-of-range numbers only warn (numbers are clamped).
-Apple's own Stage Manager settings are read live from `com.apple.WindowManager` and never
-repeated here.
-
-**The file holds no live values.** The first run writes every key commented out with its
-built-in default and a one-line explanation; the defaults themselves live in the app, so a
-new default reaches you without touching your file. Uncomment a line to change it. A file
-byte-identical to the default file of an earlier version (never edited) is replaced with
-today's at launch, and the log says so; any other file is left alone.
-
-```sh
-B="target/Stage Manager.app/Contents/MacOS/stage-manager"
-"$B" config --print-defaults        # the commented default file
-"$B" config --explain cards.tilt    # one key: what it does, type, range, default
-"$B" config check [file]            # validate a file (default: the real one); errors name their line
-"$B" config --reference             # the table below
+```text
+~/.config/stage-manager/config.toml
 ```
 
-Every key (generated from the same table as the file; a test keeps this copy in sync):
+Open it from Settings → Advanced → **Open Config File…**. Every option is listed there,
+switched off with a `#` and showing its default value, with a short explanation above it.
+To change one, remove the `#` and edit the value. To go back to the default, put the `#`
+back. Changes apply within a second of saving.
 
-| Key | Default | Values | What it does |
-|---|---|---|---|
-| `app.launch_at_login` | `true` | true or false | Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers. |
-| `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none; on by the owner's word). Without it, open Stage Manager again from Applications to reach Settings. |
-| `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
-| `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
-| `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
-| `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
-| `strip.merge_on_drop` | `true` | true or false | Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used). |
-| `strip.show_active` | `false` | true or false | Also show the active stage as a card (fixed order only; Apple never does). |
-| `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
-| `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
-| `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
-| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area a window must cover to hide the strip. |
-| `strip.capacity` | `0` | whole number, 0 to 30 | Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt). |
-| `strip.capacity_pitch` | `190.0` | number, 20 to 2000 | With capacity = 0: room per card, in points of visible height. |
-| `strip.capacity_margin` | `60.0` | number, 0 to 2000 | With capacity = 0: visible height kept free above and below the cards. |
-| `strip.capacity_min` | `3` | whole number, 1 to 30 | With capacity = 0: never fewer cards than this. |
-| `strip.capacity_max` | `9` | whole number, 1 to 30 | With capacity = 0: never more cards than this. |
-| `strip.scale` | `1.0` | number, 0.25 to 4 | Multiplies every strip length (cards, gaps, icons, width). Apple: 1. |
-| `strip.scale_to_display` | `false` | true or false | Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not. |
-| `strip.thumbnail_interval_ms` | `1500` | whole number, 250 to 60000 | How often thumbnails are refreshed, in milliseconds. |
-| `strip.thumbnail_resolution` | `2.0` | number, 0.5 to 4 | Thumbnails are captured at this multiple of their drawn size. |
-| `strip.capture` | `true` | true or false | Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture. |
-| `cards.x` | `15.0` | number, -100 to 400 | Left edge of every card, from the screen's left edge. |
-| `cards.full_height` | `161.0` | number, 10 to 1000 | A window as tall as the visible screen becomes a card this tall; every window gets the same scale. |
-| `cards.min_height` | `97.0` | number, 0 to 1000 | Small windows are drawn at least this tall. |
-| `cards.max_width` | `0.0` | number, 0 to 2000 | Widest card before the turn; 0 = as wide as a card of the whole screen. |
-| `cards.gap` | `29.5` | number, 0 to 500 | Space between cards. The column is centered on the visible screen. |
-| `cards.tilt` | `"auto"` | "auto" or a number, 0 to 85 | Turn of each card in degrees; "auto" is Apple's for the screen (44.2 at 1800 pt wide, 47.9 at 2560). |
-| `cards.perspective` | `"auto"` | "auto" or a number, 50 to 50000 | Eye distance in points; "auto" is Apple's for the screen (1346 at 1800 pt wide, 2260 at 2560). |
-| `cards.perspective_x` | `15.0` | number, -3000 to 3000 | The eye's horizontal position, from the screen's left edge. |
-| `cards.perspective_y` | `0.0` | number, -3000 to 3000 | The eye's height, from the screen's vertical middle (down is positive). |
-| `cards.corner_radius` | `4.0` | number, 0 to 60 | Corner radius of each window's thumbnail. |
-| `cards.border_width` | `0.5` | number, 0 to 10 | Width of the thin edge around each thumbnail. |
-| `cards.border_color` | `"#ffffff2e"` | color "#rrggbb" or "#rrggbbaa" | Color of that edge. |
-| `cards.shadow_radius` | `4.0` | number, 0 to 100 | Blur radius of each thumbnail's shadow. |
-| `cards.shadow_opacity` | `0.4` | number, 0 to 1 | Opacity of that shadow. |
-| `cards.shadow_offset_x` | `0.0` | number, -100 to 100 | Horizontal offset of that shadow. |
-| `cards.shadow_offset_y` | `2.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
-| `cards.shadow_color` | `"#000000"` | color "#rrggbb" or "#rrggbbaa" | Color of that shadow. |
-| `cards.max_windows` | `3` | whole number, 1 to 8 | Most windows drawn on one card. |
-| `cards.stack_dx` | `17.0` | number, -200 to 200 | Windows of one app step this far right toward the front one (the one behind peeks out on the left). |
-| `cards.behind_scale` | `1.0` | number, 0.3 to 1 | Each window behind another of the same app is drawn this much smaller. |
-| `cards.second_app_dx` | `68.0` | number, -300 to 300 | A second app's window sits this far right of the first. |
-| `cards.second_app_dy` | `14.0` | number, -300 to 300 | ...and this far up. |
-| `cards.hover_scale` | `1.06` | number, 1 to 2 | The card under the pointer grows by this factor, about its center. |
-| `cards.hover_ms` | `210` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, eased out, in milliseconds (Apple's, measured: 208 growing, 220 shrinking). |
-| `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
-| `cards.press_ms` | `100` | whole number, 0 to 3000 | How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100). |
-| `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, in milliseconds (not measured on Apple's). |
-| `icons.size` | `38.0` | number, 0 to 300 | Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons. |
-| `icons.center_dx` | `10.5` | number, -300 to 300 | The icon's center, right of the card's bottom-left corner (its leftmost window's). |
-| `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom-left corner (up is negative). |
-| `icons.step` | `36.0` | number, 0 to 300 | A second app's icon sits this far right of the first. |
-| `icons.max` | `3` | whole number, 0 to 10 | Most icons on one card. |
-| `icons.shadow_radius` | `4.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
-| `icons.shadow_opacity` | `0.3` | number, 0 to 1 | Opacity of the icon's shadow. |
-| `icons.shadow_offset_y` | `2.0` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
-| `motion.spring_stiffness` | `289.0` | number, 1 to 10000 | Spring stiffness of cards gliding to new slots (a switch's swap, a reorder, a drop making room). Apple's, measured: 289 (99 % by about 375 ms). |
-| `motion.spring_damping` | `34.0` | number, 0 to 1000 | Spring damping of the cards' glide (34 with stiffness 289 and mass 1: critically damped, no overshoot). |
-| `motion.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the cards' glide. |
-| `motion.slide_stiffness` | `282.0` | number, 1 to 10000 | Spring stiffness of the strip sliding out and back in (auto-hide, a window over it). Apple's, measured: 282 (99 % by about 400 ms). |
-| `motion.slide_damping` | `33.6` | number, 0 to 1000 | Spring damping of the slide (33.6 with stiffness 282 and mass 1: critically damped). |
-| `motion.slide_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the slide. |
-| `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides. |
-| `reveal.edge_width` | `2.0` | number, 0 to 100 | The pointer within this many points of the left edge counts as at the edge. |
-| `reveal.delay_ms` | `250` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back. |
-| `reveal.hide_delay_ms` | `500` | whole number, 0 to 10000 | A strip brought back hides again this long after the pointer leaves it. |
-| `reveal.poll_ms` | `60` | whole number, 10 to 1000 | How often the pointer is checked while the strip is hidden. |
-| `reveal.edge_tab` | `false` | true or false | Show a slim tab at the left edge while a window hides the strip (an extension). |
-| `reveal.launch_reveal` | `false` | true or false | Show a covered strip for a moment at launch (an extension). |
-| `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |
-| `drag.threshold` | `5.0` | number, 0 to 100 | A press that moves farther than this (points, at least 5) drags the card; less is a click. |
-| `drag.merge_zone` | `0.5` | number, 0 to 1 | With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards. |
-| `drag.grow_distance` | `260.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance. |
-| `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
-| `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip. |
-| `drag.merge_ms` | `200` | whole number, 0 to 3000 | How long a card dropped onto another takes to shrink into it and fade, in milliseconds (an extension; Apple's has no merge). |
-| `animation.enabled` | `true` | true or false | Animate as Apple does: switches, the desktop reveal, Cmd-M and drops, and the strip's slides, glides, hover and press. false: everything jumps. |
-| `animation.speed` | `1.0` | number, 0 to 4 | Speed of every animation: 1 is Apple's, 2 twice as fast, 0.5 half as fast (0.25 to 4); 0 is no animation, as enabled = false. It multiplies every spring and duration of [animation], [motion], [cards] and [drag]. |
-| `animation.spring_stiffness` | `272.0` | number, 1 to 10000 | Spring stiffness of the windows' motion in a switch, the desktop reveal, Cmd-M and drops. Apple's, measured: 272 (99 % by about 400 ms). |
-| `animation.spring_damping` | `33.0` | number, 0 to 1000 | Spring damping of the windows' motion (33 with stiffness 272 and mass 1: critically damped, no overshoot). |
-| `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the windows' motion. |
-| `animation.unpark_at` | `0.99` | number, 0.5 to 1 | An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 400 ms). |
-| `animation.cover_ms` | `20` | whole number, 0 to 500 | Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first. |
-| `animation.corner_radius` | `0.0` | number, 0 to 60 | Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius). |
-| `animation.shadow_radius` | `24.0` | number, 0 to 100 | Blur radius of a moving snapshot's shadow. |
-| `animation.shadow_opacity` | `0.35` | number, 0 to 1 | Opacity of that shadow. |
-| `animation.shadow_offset_y` | `10.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
-| `animation.snapshot_interval_ms` | `2000` | whole number, 0 to 60000 | How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip. |
-| `animation.snapshot_cache_mb` | `512` | whole number, 16 to 8192 | Most memory kept for full-size window snapshots; the oldest go first. |
-| `animation.activation_grows` | `false` | true or false | Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click; false brings them to their frames at once (macOS has already raised them in the park corner, so waiting shows them there). |
-| `windows.fit` | `"off"` | "off", "move", "narrow" | Keep placed windows clear of the strip: "move" right just enough, "narrow" also too-wide ones. Apple: "off". |
-| `windows.fit_margin` | `16.0` | number, 0 to 500 | With fit: room kept between the strip column and the windows. |
-| `windows.minimize_to_strip` | `true` | true or false | Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock. |
-| `windows.focus_echo_ms` | `700` | whole number, 0 to 10000 | Focus changes this soon after we moved a window are taken as our own and never switch stages. |
-| `windows.park_inside` | `1.0` | number, -10000 to 32 | Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it. |
-| `windows.park_drop` | `-1.0` | number, -32 to 10000 | How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it. |
-| `windows.hide_parked_apps` | `false` | true or false | An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default. |
-| `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture), so the corner is clean as Apple's; it steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. |
-| `windows.corner_patch_reach` | `60.0` | number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow. |
-| `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
-| `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
-| `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
-| `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |
-| `hotkeys.enabled` | `false` | true or false | Register the hotkeys below. |
-| `hotkeys.switch` | `"ctrl+alt+{n}"` | hotkey with {n} for the digits 1-9, or "" for none | Switch to stage N. |
-| `hotkeys.send` | `"ctrl+alt+shift+{n}"` | hotkey with {n} for the digits 1-9, or "" for none | Send the focused window to stage N (N = count + 1 makes a stage). |
-| `hotkeys.new_stage` | `"ctrl+alt+n"` | hotkey such as "ctrl+alt+n", or "" for none | Send the focused window to a new stage. |
-| `hotkeys.toggle_pin` | `"ctrl+alt+p"` | hotkey such as "ctrl+alt+n", or "" for none | Pin or unpin the focused window (shown on every stage). |
-| `hotkeys.toggle_strip` | `"ctrl+alt+s"` | hotkey such as "ctrl+alt+n", or "" for none | Show or hide the strip. |
-| `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
-| `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
-| `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
-| `log.level` | `"debug"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "debug" (the trial default) records every decision, "info" only the main ones. |
-| `log.days` | `14` | whole number, 1 to 365 | Day files older than this many days are deleted. |
-| `log.max_mb_per_day` | `100` | whole number, 1 to 10000 | A day's file this big takes only warnings, errors, marks and counts from then on. |
-| `log.max_mb_total` | `500` | whole number, 1 to 100000 | The log folder's cap: the oldest days go first, never today's. |
+If you make a mistake, Stage Manager keeps your last working settings and shows the error in
+its menu and in Settings.
 
-**Animations.** Every motion has its timing here, Apple's measured value by default
-(10-12, the laptop session: window bounds at ~120 Hz while the owner used Apple's Stage
-Manager; `docs/UX-SPEC.md`, "Transitions"), and `[animation] speed` multiplies them all
-(springs keep their shape and run `speed` times as fast; durations are divided by it).
-Changes apply live.
+**The easy way: ask an AI assistant.** In Settings → Advanced, click **Copy Instructions for
+Agents** and paste them into Claude Code, Codex or a similar tool, followed by what you want.
+The assistant reads [the notes for AI agents](AGENTS.md) and makes the change for you.
 
-| Animation | Keys | Default (Apple's, measured) |
-|---|---|---|
-| Stage switch: windows shrink into / grow from their cards | `animation.spring_*`, `animation.unpark_at` | stiffness 272, damping 33 (ω 16.5: 99 % at ~400 ms) |
-| Desktop reveal (wallpaper click), ⌘M to the strip, a window dropped on the strip landing, a card dragged out landing | `animation.spring_*` | as the switch |
-| Cards gliding to new slots (a switch's swap, a reorder, a drop or a dragged window making room, a merge preview closing the gap) | `motion.spring_*` | stiffness 289, damping 34 (ω 17.0: 99 % at ~375 ms) |
-| The strip sliding out and back in (auto-hide, a window over it, the edge reveal) | `motion.slide_*`, `motion.slide_distance` | stiffness 282, damping 33.6 (ω 16.8: 99 % at ~400 ms), 286 pt |
-| Hover growth and its undoing; a merge target growing | `cards.hover_ms`, `cards.hover_scale` | 210 ms eased out, 6 % |
-| Press on a card | `cards.press_ms`, `cards.press_scale` | 100 ms eased out, to 0.987 of the resting size |
-| A new card (or a merge preview's windows) fading in | `cards.fade_ms` | 200 ms (not measured) |
-| A card dropped on a card shrinking into it | `drag.merge_ms` | 200 ms (an extension) |
-| Edge tab, drag ghosts, the moving snapshots' arrival and removal | none | at once, no fade (Apple shows none of these) |
-| A Desktop arriving (its strip, and the stage of the window a Dock click or ⌘Tab went there for) | none | at once: the Desktop's own slide is the motion |
+A few useful examples:
 
-When the strip slides back in, after how long it hides again, and the edge's dwell are
-`[reveal]` delays, not animations: `speed` leaves them alone, as it does `cover_ms` and the
-snapshot intervals.
+```toml
+[hotkeys]
+enabled = true          # ⌃⌥1–9 switch stages, ⌃⌥⇧1–9 send the front window there,
+                        # ⌃⌥N new stage, ⌃⌥P pin a window to every stage, ⌃⌥S show/hide the strip
 
-`cards.tilt` and `cards.perspective` default to `"auto"`: Apple's values for the display,
-measured on a 1800 pt wide laptop (44.2°, 1346 pt) and a 2560 pt wide 5K display (47.9°,
-2260 pt), linear between them and held outside. `[[rule]]` tables (new-window rules) are
-documented by example at the end of the file:
+[windows]
+fit = "move"            # keep windows clear of the strip ("narrow" also narrows wide ones)
+
+[animation]
+speed = 1.5             # faster animations; 0 turns them off
+
+[strip]
+show_numbers = true     # number each card (handy with the shortcuts)
+```
+
+Rules decide where new windows go. Each rule names an app by its bundle ID. To find an app's
+bundle ID, run `osascript -e 'id of app "Notes"'` in Terminal.
 
 ```toml
 [[rule]]
-app = "com.example.chat"      # a bundle ID, or "*"
-title = "^Scratch"            # optional regular expression
-action = "stage:Chat"         # see [defaults] action
-placement = "center"          # see [defaults] placement
+app = "com.apple.Notes"
+action = "float"        # Notes stays on screen in every stage
+
+[[rule]]
+app = "com.apple.Terminal"
+action = "stage:Work"   # Terminal windows go to a stage called Work
+placement = "center"    # and open centered on the screen
 ```
 
-Rules are checked in order for each new standard window; existing windows at launch keep
-their stage from `state.json` (or join the active stage), except that a matching `ignore`
-leaves them unmanaged and `float` pins them.
+Every option, with its values and default, is in the
+[configuration reference](CONFIG.md).
 
-## Persistence
+## Updates and privacy
 
-`state.json` next to the config is written about 500 ms after every change, per Space (each
-with a synthetic id; macOS has no public one): stages in order, their windows (window id,
-bundle ID, title, frame, front-to-back position, key window, pinned), the active stage and
-the strip slots. Window ids outlive a restart of Stage Manager (the windows are other apps'),
-so a restart finds each window by its id whatever its title is now; a relaunched app's
-windows are matched by bundle ID + title. At launch, after the recovery scan, the Space
-shown is recognized by its windows (window id or exact bundle ID + title; with no match,
-the Space shown when saved), its windows are matched to it (window id, then exact bundle ID
-+ title, then bundle ID alone), the stages are rebuilt, the
-saved active stage is shown and the others are parked. Windows that match nothing get stages
-the way a first start does. Every other saved Space is rebuilt the same way the first time
-you go there (macOS lists most apps' windows of a Space only while it shows), and is saved
-again untouched until then. Version 1 files (one Space) are read as one Space.
+Stage Manager checks GitHub for a new version once a day and asks before downloading
+anything. Nothing about you or your Mac is sent. You can turn the check off in Settings, and
+**Check for Updates…** in the menu works either way. This check is the app's only network
+use.
 
-While the screen is locked (or the login session is not on the console), Accessibility
-lists no window: a launch then waits to build its stages until it unlocks, a running app
-infers nothing from the window list and does not write `state.json` until then, and a
-Space change is recognized after the unlock. Accessibility listing none of the windows the
-window server shows on screen (three or more) holds a launch or an arrival the same way,
-for at most 10 s.
+Nothing about your windows leaves your Mac. Stage Manager keeps a daily log in
+`~/Library/Logs/Stage Manager`, which includes window titles to help find problems. Only
+your user account can read it, logs are deleted after 14 days, and nothing sends them
+anywhere.
 
-## Safety: no window stays parked
+## Uninstall
 
-1. A **registry** of every parked window (AX element + clamped restore frame), synced around
-   every batch of window moves. A parked window keeps its entry while Accessibility has
-   lost it (revoked, say); while Accessibility is off, clicks and hotkeys wait, and when it
-   comes back the Space is recognized again and every window is checked against the model.
-2. **Quit** (menu, `ctl quit`) unparks through the WM thread, then the registry, then a scan.
-   A batch of moves under way when Quit comes skips its parks, raises and focus but still
-   brings back every window it was showing.
-3. A **panic hook** unparks from the registry (a scan if it is busy) and exits; panics on the
-   WM thread are caught and the registry resynced instead.
-4. **SIGTERM / SIGINT / SIGHUP** go through a self-pipe to a watcher that quits cleanly
-   (forcing the unpark itself if the main thread hangs); SIGABRT gets a best-effort unpark.
-5. A **guardian** process (`stage-manager --guardian <pid>`) waits for the app with kqueue
-   and runs the recovery scan unless the app wrote its clean-exit marker (`kill -9`, crash).
-   It knows the parked windows and the main display's visible frame from the registry's
-   copy on disk (`.parked-<pid>.json` in the config directory). While a window stays stranded on another Space (Accessibility reaches
-   most apps' windows only on the Space shown), it watches the window list every 0.5 s and
-   moves the window back as soon as it shows (you went to its Space), retrying while it
-   stays shown. A window is done only once the guardian has seen it back (read through
-   Accessibility outside the park zone, or listed on screen outside it in settled passes a
-   second apart; a Space sliding in can list a window at an in-between frame) or gone (not
-   listed on any Space for 3 s of passes that listed something: a listing with no window on
-   screen, as during another user's session or at the login window, counts for nothing); it
-   never exits while one waits, unless Stage Manager runs again. A window we had fitted
-   clear of the strip is back only at its pre-fit frame. Its log says what it waits for,
-   every change, and why each window was let go.
-6. The **recovery scan** at launch and in the guardian: every window of every managed app
-   stranded in the park zone goes back to its `state.json` frame, or is centered.
-7. Every restore frame is **clamped** onto the visible screen.
+1. Turn off **Launch at login** in Settings.
+2. Choose **Quit Stage Manager** from its menu. Every window it was hiding comes back first.
+3. Drag Stage Manager from Applications to the Trash.
+4. Optionally, delete `~/.config/stage-manager` (your settings and saved stages) and
+   `~/Library/Logs/Stage Manager`, and remove Stage Manager from the Accessibility and
+   Screen Recording lists in System Settings → Privacy & Security.
 
-"In the park zone" is one test everywhere (the model, the scan, the guardian, the quit
-check): the corner of the display's full frame or of its visible frame, because macOS keeps
-a parked window's title bar above a Dock at the bottom; it holds for a Dock at the bottom,
-left or right, auto-hidden, on any display.
+With Homebrew, `brew uninstall --zap --cask stage-manager` does steps 2 to 4 except the
+Privacy & Security lists.
 
-**Display arrangement.** A window parked against a side of the main display where another
-display sits would land, whole, on that display (macOS lets windows span displays). So the
-park corner follows Displays → Arrange: bottom-right when no display lies beyond it, else
-the first free one of bottom-left, top-right, top-left (top corners hide the body off the
-side; macOS keeps the title bar below the menu bar); when every corner has a display beyond
-it, the one overlapping least, with a warning in the log. The main display's line in the log
-names the corner. The model's park test uses the chosen corner; the safety paths (recovery
-scan, guardian, quit check) also accept bottom-right and every corner used since launch
-(the parked file lists them), so a window parked before the arrangement changed is never
-missed. When the corner changes, the shown Desktop's parked windows move to the new one at
-once, other Desktops' when they show. When the main display changes size, its parked
-windows are parked again at the new corner (those of other Desktops when their Desktop
-shows); when it changes identity (docking or undocking moves the menu bar), the stages, the
-active stage and the strip stay as they were.
+You can then turn Apple's Stage Manager back on from Control Center.
 
-Every Space counts: the registry holds parked windows of every Space (their AX elements
-were taken while their Space showed), and Quit is clean only when the window server lists
-no managed app's window in the park zone on any Space; otherwise the guardian takes over.
+## Troubleshooting
 
-## Daily log and problem marks
+**Nothing happens.** Look at the menu bar icon's menu. Stage Manager says there if it needs
+Accessibility, or if Apple's Stage Manager is on. While Apple's is on, Stage Manager steps
+aside and leaves your windows alone.
 
-The app, its guardian and one-shot commands write one file per local day,
-`~/Library/Logs/Stage Manager/YYYY-MM-DD.log`, switching to the next file at local midnight
-while running. Every line has the local time to the millisecond, the UTC offset and the
-process:
+**Cards show plain shapes instead of window pictures.** Screen Recording is off or macOS
+refused it. Choose **Allow Screen Recording…** from the menu.
 
-```text
-2026-10-12 15:04:05.123 +02:00 app[6612] INFO  platform::controller: card clicked stage=7 number=2 shift=false
-2026-10-12 15:04:05.130 +02:00 app[6612] INFO  platform::controller: stage switch from=1 to=2 stage=7
-2026-10-12 16:00:00.251 +02:00 app[6612] COUNT counts kind=hour since=09:12 switches=41 card_clicks=17 …
-```
+**macOS asks whether Stage Manager may "bypass the system private window picker".** Since
+macOS 15, macOS shows this for every app that takes pictures of windows directly. Choose
+**Allow**. It comes back about once a month, and once whenever the app is moved to a new
+place.
 
-- **Level** (`[log] level`, default `"debug"` for the trial): every decision the app makes
-  (window events, new windows and their rule, stage switches and new stages, card clicks,
-  drags and drops, reorders, Space changes, full screen, captures starting to fail or working
-  again, recoveries), never per-move or per-frame lines (those are `trace`). Changes apply on
-  config reload; `RUST_LOG` overrides it.
-- **Limits:** a day's file is capped at `[log] max_mb_per_day` (100 MB): past it, only
-  warnings, errors, marks and counts are written, after one line saying so. Day files older
-  than `[log] days` (14) are deleted, and the oldest days go first while the folder is over
-  `[log] max_mb_total` (500 MB); today's file never. Checked at launch and every hour. The
-  earlier single `stage-manager.log` (and `.log.1`) is deleted by the same age rule.
-- **Counts:** the app counts switches, card clicks, drops, reorders, new windows, new
-  stages, Space changes, full-screen entries, captures ok and failed, recoveries, warnings,
-  errors and panics, and writes them as a `COUNT` line every hour, at midnight (into the day
-  that ends) and at quit.
-- **Mark a Problem** (status menu, shown while the level is `debug` or `trace`), or
-  `stage-manager mark ["note"]` from a terminal: writes a delimited block with the local
-  time and the note, then `ctl state` and `ctl dump` (Spaces, stages, windows, frames, strip
-  panels; or that the WM thread did not answer) and the last 30 s of lines at `trace` kept
-  in memory, whatever the file's level. With the app not running, `mark` writes the time and
-  note alone. The menu item then shows when the last mark went in.
-- **Reading a day:** `stage-manager log summary [YYYY-MM-DD|yesterday]` prints the day's
-  counts (the last `COUNT` line of each app run, added up), the runs and unclean exits,
-  every mark with its line number, and every warning and error deduplicated (numbers folded,
-  with how often and when), short enough to paste. `stage-manager log path [DATE]` prints
-  the file.
+**Thin window edges show in the corner.** The wallpaper patch steps aside when it cannot
+match your wallpaper exactly: video and aerial wallpapers, shuffled or Photos wallpapers,
+the Center and Tile placements, or a desktop icon in the corner. A desktop widget in that
+corner may be covered by the patch. You can turn the patch off with `[windows] corner_patch
+= false`.
 
-**Privacy:** the log stays on this Mac. Window titles and app bundle IDs appear in it (they
-help debugging), so the files are readable by their owner only; nothing sends them anywhere,
-and no log is ever committed to this repository.
+**A window seems lost.** Quit Stage Manager from its menu: every hidden window comes back.
+If the app crashed, a small helper process brings the windows back by itself, and the next
+launch checks the corner again.
 
-A working day at the default level should come to roughly 1 to 3 MB (about 7 000 to 20 000
-lines; the measurement is in `PLAN.md`, "Before public release"), far under the day's cap.
+Some limits to know about:
 
-## Environment
+- Only the main display is managed. Windows on other displays are left alone.
+- Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
+  jump when the motion ends. Card pictures refresh every 1.5 seconds rather than live.
+- With ⌘M, macOS may show a short animation toward the corner.
+- After ⌘-Tab to another Desktop, its stage is set up once the Desktop has slid in. (A Dock
+  click sets it up before.)
+- An empty Desktop is forgotten when you leave it. A Desktop whose windows are all hidden or
+  minimized looks new until one of them shows again.
+- After you restart your Mac or log in again, and when an app is relaunched, windows are
+  matched to their stages by title. Two windows of one app with the same title may swap
+  stages.
+- Keyboard shortcuts use US key positions.
+- With "Click wallpaper to reveal desktop: Only in Stage Manager", a click on a desktop icon
+  also counts as a wallpaper click.
 
-| Variable | Effect |
-|----------|--------|
-| `RUST_LOG` | log filter (`target=level` directives); overrides `[log] level` |
-| `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone (default `~/Library/Logs/Stage Manager`, or `STAGE_MANAGER_HOME`) |
-| `STAGE_MANAGER_NO_PROMPT` | no permission dialogs, no welcome window, no prompts and no automatic update check (test runs) |
-| `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item |
-| `SM_TEST_TOGGLE_APPLE_SM` | `1`: a test run (`STAGE_MANAGER_HOME`) may write `com.apple.WindowManager` (the owner's live stand-down test only) |
-| `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: observe and manage only these apps (the recovery scan too) |
-| `STAGE_MANAGER_HOME` | one directory for config, `state.json`, the ctl socket and the log (test runs) |
-| `STAGE_MANAGER_TEST` | enables test-only ctl commands (`debug-*`) and `debug-post-space` |
-| `STAGE_MANAGER_NO_CAPTURE` | window captures off whatever `[strip] capture` says (test runs): no ScreenCaptureKit call, plain cards and ghosts |
+**Reporting a problem.** Choose **Mark a Problem** in the menu right after something goes
+wrong. It writes a note with the app's state into the day's log. Then open an issue on
+[GitHub](https://github.com/eugene-tea/stage-manager/issues) and describe what happened.
+Read the log before attaching it, since it contains your window titles.
 
-## ctl socket
+## More
 
-The app listens on `$TMPDIR/stage-manager.sock` (or `$STAGE_MANAGER_HOME/stage-manager.sock`;
-a home path too long for a socket gets a hashed name in `$TMPDIR`), one command per line, one
-line of JSON per reply. The same binary is the client (set the same `STAGE_MANAGER_HOME`):
-
-| Command | Does |
-|---------|------|
-| `ping` | `{"ok":true,"pong":true,"pid":…,"version":…,"apple_stage_manager_on":…}` |
-| `settings` | show the Settings window (a second launch hands off with this) |
-| `space` | the Space shown as the engine sees it: synthetic id, full screen, a change still settling, Space changes so far, the overview showing (Mission Control or App Exposé, Show Desktop) and whether Space inference waits for it |
-| `dump` | observed apps and windows (says so when Accessibility is missing), and `spaces`: each Space's synthetic id, display, whether it shows, its active stage and stage ids (no titles), plus windows waiting to show and saved Spaces not visited yet |
-| `state` | stages (with their Space), windows, restore and live frames, parked flags, strip, the Space shown, config error |
-| `switch N` | switch to stage N (of the Space shown) |
-| `send N [ID]` | send a window (default: the focused one) to stage N of its Space |
-| `new [ID]` | send a window to a new stage |
-| `pin [ID]` | pin or unpin a window |
-| `merge N` | move stage N's windows into the active stage (a shift-click on its card) |
-| `reveal` | reveal the desktop / bring the stage back (a wallpaper click) |
-| `unpark-all` | bring every parked window back (the stages stay; a safety command) |
-| `reload` | re-read `config.toml` |
-| `mark [NOTE…]` | write a problem mark into the day's log (`stage-manager mark` is the client); answers its time and file |
-| `quit` | unpark everything and quit |
-| `debug-panic` | panic on the main thread (only with `STAGE_MANAGER_TEST=1`; a safety drill) |
-| `debug-click X Y [shift]` | click at a global point (only with `STAGE_MANAGER_TEST=1`; refused unless our own window or a `STAGE_MANAGER_ONLY` app's window is topmost there; the refusal lists our own windows) |
-| `debug-hover X Y MS` | move the pointer to a global point and rest there (the strip's edge reveal; only with `STAGE_MANAGER_TEST=1`, same guard); the next synthetic click or drag puts the pointer back |
-| `debug-drag X1 Y1 X2 Y2 [X Y …] [shift]` | a left-button drag through the points (only with `STAGE_MANAGER_TEST=1`; refused unless our own or a `STAGE_MANAGER_ONLY` app's window is topmost at every point of the path); the pointer goes back |
-| `debug-dock-click BUNDLE` | the Dock item of a `STAGE_MANAGER_ONLY` app, clicked the way a real click goes through the app (the Dock's hit-test at the item's center, the prediction at the press, the arrangement at the release), then pressed (`AXPress`, which activates the app as a click does); an auto-hidden Dock is shown first by moving the pointer to its screen edge (a move, no click; the pointer goes back after); answers with the window predicted, or what the hit-test found instead (only with `STAGE_MANAGER_TEST=1`) |
-| `debug-frame ID X Y W H [only]` | set a shown managed window's frame and bring it to the front (only with `STAGE_MANAGER_TEST=1`); with `only`, set the frame and nothing else, for a window shown in its stage on any Desktop, the one shown or not (the Spaces check's probe; answers with the frame AX reads back) |
-| `debug-space left\|right [numpad]` | type "Move left/right a space" (the shortcut from Keyboard Shortcuts, posted at the HID tap) and answer once the engine has handled the Space change, or after 6 s with `"changed":false` (only with `STAGE_MANAGER_TEST=1`); `stage-manager debug-post-space left\|right` launched with `open -n` does the same once while the app is down |
-| `debug-expose mission-control\|app-windows\|show-desktop\|escape` | type Mission Control's own shortcut ("Mission Control", "Application windows", "Show Desktop" from Keyboard Shortcuts, posted at the HID tap), or Escape to leave; never changes the Desktop (only with `STAGE_MANAGER_TEST=1`) |
-| `debug-fullscreen ID on\|off` | put a `STAGE_MANAGER_ONLY` app's standard window in or out of full screen through Accessibility (`AXFullScreen`, else its full-screen button); any other window is refused (only with `STAGE_MANAGER_TEST=1`) |
-
-```sh
-B="target/Stage Manager.app/Contents/MacOS/stage-manager"
-"$B" ctl state | jq '.stages'
-"$B" probe-windows dev.eugene.stagemanager.fixture   # the window server's view of an app
-"$B" probe-screen                                    # windows covering the display (full screen; overlays: Mission Control)
-"$B" probe-patch                                     # what the corner patch would show, from the wallpaper's file -> /tmp/stage-manager-patch.png
-```
-
-Exit status: 0 on `"ok":true`, 1 on an error reply, 2 when the app is not reachable.
-
-## Test script
-
-`scripts/test-stages.sh [m3] [safety] [m4] [m6] [strip] [native] [visible] [parity] [motion] [expose] [capture]` builds the app and private
-fixtures (`target/SM Fixture Stages.app`, bundle ID `dev.eugene.stagemanager.fixture.stages`,
-plus `SM Fixture Stages A/B/C.app` with IDs `….stages.a/.b/.c` for the native phase;
-`SM_FIXTURE_ID` picks another base ID, so runs never collide) and checks, against `ctl state` and the window
-server (`probe-windows`): stages from `send`, exact restore frames (±1 pt) and z-order across
-switches, parked windows in the corner, merge, pin, reveal, child windows following their
-parent; the safety drills (`ctl quit`, SIGTERM, SIGINT, a panic, `kill -9` with the guardian,
-`kill -9` while a parked window's Desktop is not shown, emulated by the fixture ordering its
-parked windows out on SIGWINCH and in on SIGINFO: the guardian waits, says so and brings it
-back once it shows, `kill -9` of app and guardian then a relaunch), each ending with every
-fixture window onscreen; rules (`new`, `float` + `center`, `cascade`), hot reload and a bad config; and
-persistence across a relaunch of the app and of the fixture; and a click and a shift-click
-on a real strip card (switch, merge); and Apple's defaults with three fixture apps (first
-start one stage per app, frontmost active, strip in recency order; a new app's window opens a
-new stage; a new window of a parked app's stage switches there; a new window of the active
-app joins; a Shift launch joins the current stage; a Shift activation brings an app's windows
-here; a card dragged into the main area merges and lands at the drop point; a window dragged
-onto the strip gets a stage of its own and keeps its pre-drag frame); Apple's frames by
-default (nothing moved or resized at first start, on switches or at quit, no edge tab, no
-launch reveal, no hotkey) and, with `[windows] fit` turned on in the test's own config,
-windows kept clear of the strip and given back their exact frames at quit; the generated
-config with no live values, ⌘M sending a window to the strip (the fixture minimizes a
-window on SIGUSR2) and a click on a card's app icon bringing every window of the app; and
-motion: the strip below windows (layer -1), lifted (layer 3) with the dragged window's card in
-the motion overlay while a window is dragged over it, the window dropped above the first card
-taking that slot, a card dropped on the middle of another card merging the two stages (one
-card fewer, the target's stage holding both, nothing unparked) and one dropped in a gap
-reordering as before, a card dragged to the top keeping its slot across a relaunch, an animated
-card click ending with every frame exact, and `level = "above_windows"`, all over an
-unmanaged fixture backdrop (an `ignore` rule) so whatever else covers the strip column, the
-drags pass over our windows and the fixtures only, with the strip reached for the reorder and
-the click the way a person does when a window covers it (the pointer resting at the left
-edge); and expose: Mission Control and App Exposé typed through the app (`ctl debug-expose`,
-never a Desktop change) with every strip pane `Transient`, the window server no longer
-listing the strip on screen while they show, and after Escape
-the strip back on the same Desktop, drawn as before, with a working card click. `ctl state` lists the drawn cards' frames (`strip_cards`), the strip panel's state
-(`strip_panel`) for these drags, and every Desktop's strip panel (`strip_panels`: its Space,
-whether it is the active one, ordered in, on the Space shown, slid in, its collection behavior bits); and capture: real
-thumbnails and switch snapshots arrive (`ctl state`'s `capture`: mode, gate, images
-delivered) and a quit with captures running is clean. Every app run's log is kept as `stage-manager.run-NN.log` in
-the test home (renamed from the day's `YYYY-MM-DD.log`; the guardian writes on into its run's file). `scripts/test-stages.sh spaces`
-is the guided two-Desktop check (`scripts/test_spaces.py`; a person switches Desktops).
-`scripts/test-stages.sh spaces --auto` (or `SM_AUTO=1`) runs it hands-free on an unlocked, untouched Mac: the screen really switches between the start Desktop and its neighbour (right, else left) several times and a fixture window goes full screen and back twice, the display is kept awake meanwhile, the by-eye questions become screenshots in `$SM_SHOTS` (default the test home), Mission Control and App Exposé are shown and left on Desktop 2 (each Desktop's pane must stay on its own Desktop), a Desktop change it did not ask for stops it, and it ends back on the start Desktop with no window parked; `--dry-run` prints the preflight and the steps only.
-Tests that need an extension turn it on in their own `config.toml`. Synthetic clicks and
-drags are posted only where our own or a fixture's windows are topmost along the whole path,
-and the pointer is put back. Apple's own Stage Manager must be off for the window-position
-checks: while it is on it scales inactive apps' windows into its own strip. Every run uses
-`STAGE_MANAGER_HOME` (default a new `/tmp/sm-test.*`, or `TEST_HOME`) and
-`STAGE_MANAGER_ONLY` set to the fixtures. The fixture comes to the front during switches;
-the previously frontmost app is activated again at the end. `SKIP_BUILD=1` skips the build.
-
-Window captures are off in every app run (`STAGE_MANAGER_NO_CAPTURE=1`; cards and switch
-ghosts are drawn plain) except the `capture` phase's single launch, so **only the `capture`
-phase may raise macOS's screen-access alert**, and only on the first run from a new app path
-(the fixed dev copy is approved once; see Known limitations). Every phase of
-`scripts/test-stages.sh spaces` runs with captures off. A run ends with the number of
-screen-access alerts macOS showed meanwhile (from replayd's log, any app).
-
-## Known limitations
-
-- Apple's own Stage Manager must be off while this app runs (both move windows).
-- Main display only; other displays are left alone: a window that shows mostly on another
-  display is not managed (a managed window moved there is let go after two checks, a
-  second apart, and comes back as a new window when moved back).
-- Moving windows are snapshots (Apple moves the live windows): a full-size snapshot of
-  each shown window is refreshed every 2 s (`[animation] snapshot_interval_ms`) and when the
-  pointer reaches a card, so content that changed since may jump when the motion ends. A
-  window dragged over the strip keeps its full size under its card-sized picture (Apple
-  shrinks the window itself). A dragged card's ghost is a snapshot of its front window.
-- Spaces are told apart by their windows (no public API names them): an empty Desktop is
-  forgotten when you leave it, and a Desktop whose windows are all hidden or minimized is
-  taken for a new one until one of them shows (then it is recognized). Each Space's strip
-  appears once the Space has slid in (Apple's slides in with it). The first visit to a
-  Space after launch parks its windows into stages, one per app (or as saved).
-- Shift sugar reads the modifier at the user's triggering click or key press: a newly
-  opened app's first window counts within 10 s of a Shift-held click or key press (unless
-  another click or key press came after it), an activation within 2 s; or Shift held at the
-  moment. A slow app launched with Shift may miss the 10 s window.
-- Parked windows leave a sliver in the park corner (bottom-right unless another display
-  sits beyond it). The other corners are unmeasured: that macOS keeps the asked-for `x` off
-  the left side as it does off the right is assumed, not seen.
-- The corner patch (`[windows] corner_patch`, on by default) draws the wallpaper from its
-  file over the slivers. It steps aside for video and aerial wallpapers, shuffles and Photos,
-  a dynamic picture whose Light/Dark/Automatic/Dynamic choice it cannot read, a solar
-  picture near a frame change (the sun is placed by the time zone, not your location), the
-  Center and Tile placements and Fit with no fill colour (not checked against the screen
-  yet), while a desktop icon lies under it, and while Finder's icons cannot be read. A
-  dynamic picture's frame change cuts where macOS crossfades, and the patch hides for a
-  moment after a Desktop switch or a Light/Dark change. Desktop widgets' places are not
-  public: one in the corner would be covered. `stage-manager probe-patch` writes what it would show to
-  `/tmp/stage-manager-patch.png`.
-- ⌘M: the window is parked, then un-minimized there, so macOS may show a short restore
-  animation toward the bottom-right corner (Apple's window shrinks into the strip).
-- Thumbnails are stills refreshed every 1.5 s (Apple's cards are live).
-- **macOS's screen-access alert.** Since macOS 15, an app that captures windows with
-  ScreenCaptureKit directly (not through Apple's content picker, which asks the user to pick
-  what to share and does not suit a strip of every window) gets an alert from replayd: "…
-  is requesting to bypass the system private window picker and directly access your screen
-  and audio" [Allow] [Open System Settings], and again about monthly. What replayd's log
-  showed on the development Mac (36 alerts in 8 hours of test runs, 10-12):
-  - Approvals are kept per **app path** (one entry per bundle URL in replayd's
-    `ScreenCaptureApprovals.plist`): the first capture from a new location alerts once (4 of
-    the 36: three worktrees' `target/` copies and the fixed dev copy). A rebuild or a
-    fresh copy at an approved path did not alert again (the dev copy was replaced on every
-    test run after its first alert), so it is not per code signature hash nor per process.
-    The entry's `kScreenCapturePrivacyHintPolicy` is 2592000 s: the monthly reminder.
-  - The other 32 came from **a process that exited with a capture in flight**. replayd
-    checks a capture's approval after answering it; for a pid that has just exited it logs
-    "Error resolving binary path and audit token", cannot match the approved path, and
-    alerts for an app that is gone: one alert per capture in flight (two at once when both
-    capturers were mid-round), which is how they stacked on test quits and drills.
-  - So the app now waits for its captures in flight before it exits (Quit, SIGTERM/SIGINT,
-    a panic; up to 2 s), the first capture of a process goes alone and nothing else is
-    issued until it answers, and test runs keep captures off but for one launch. A
-    `kill -9` while a capture is in flight can still raise one alert.
-- A dialog or panel's parent is a guess: the app's frontmost standard window at the time.
-- New windows are matched to rules by their title when they appear; an app that sets the
-  title later is matched with the early title.
-- Hotkeys use US-layout key positions.
-- Wallpaper clicks are detected with a global mouse monitor and a window-list hit test, so
-  a click on a Finder desktop icon also counts as a wallpaper click.
-- Persistence matches windows by bundle ID and title; two windows with the same title in one
-  app may swap stages after a relaunch.
-
-## Strip demo
-
-`stage-manager strip-demo` runs the strip panel alone, fed by a made-up snapshot built from
-the live window list every second (no Accessibility; it never moves a window): one stage per
-app, as Apple's "All at Once" (so it compares like for like with Apple's strip), and the
-stage holding the frontmost window is "active" (its frames drive auto-hide). Clicks are
-logged. Its look comes from the built-in defaults, or
-from `$STAGE_MANAGER_HOME/config.toml` when that is set (re-read when saved, never written).
-
-```sh
-make fixture && open -n -g "target/SM Fixture.app" --args --windows 7 --background
-open -n "$HOME/Library/Application Support/Stage Manager Dev/Stage Manager.app" --stderr /tmp/strip-demo.log \
-  --env STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture --env STAGE_MANAGER_DEMO_NUMBERS=1 \
-  --args strip-demo
-```
-
-| Variable | Effect |
-|----------|--------|
-| `STAGE_MANAGER_ONLY` | show only these apps (their offscreen windows too) |
-| `STAGE_MANAGER_DEMO_LAYOUT=chunks` | stages of 1, 2 and 3 windows per app, the first two apps sharing a card (stacks) |
-| `STAGE_MANAGER_DEMO_NUMBERS=1` | number badges on cards |
-| `STAGE_MANAGER_DEMO_AUTOHIDE=0\|1` | override Apple's `AutoHide` (hide recent apps) |
-| `STAGE_MANAGER_THUMBNAIL_MS` | thumbnail refresh interval (default: the config's) |
-| `STAGE_MANAGER_DEMO_MOTION=1` | a card click plays the switch animation with snapshots of the windows involved (no window moves, so the snapshots land over the real ones) |
-
-Built with `cargo build --release --features debug-render`, the demo can also draw the strip
-offscreen with Core Animation's renderer, so the look can be checked while the screen is
-locked or without Screen Recording (thumbnails then stay blank):
-
-| Variable | Effect |
-|----------|--------|
-| `STAGE_MANAGER_DEMO_RENDER=<file>` | after 2.5 s, write the strip (slid in, 2 px per pt) to `<file>` as a `BGRA <w> <h>` line plus raw rows, and quit |
-| `STAGE_MANAGER_DEMO_SCREEN=<w>x<h>+<menu bar>` | lay the strip out for another screen, for example `1800x1169+39` |
-| `STAGE_MANAGER_DEMO_FAKE=<bundle id>:<w>x<h>;…` | made-up windows instead of the live list, front to back (the first is active) |
-
-## Fixture app
-
-`make fixture` builds `target/SM Fixture.app` (bundle ID `dev.eugene.stagemanager.fixture`):
-N standard windows titled "Fixture 1…N", each a distinct flat color with its title drawn
-large, at distinct frames, plus an optional utility panel "Fixture Panel".
-
-```sh
-open -n "target/SM Fixture.app" --args --windows 3 --panel
-open -n -g "target/SM Fixture.app" --args --background   # no activation, windows ordered back
-STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 make run
-```
-
-Options also come from the environment: `FIXTURE_WINDOWS`, `FIXTURE_PANEL=1`,
-`FIXTURE_BACKGROUND=1`, `FIXTURE_TITLE` (title prefix, also `--title T`). `kill -USR1` opens
-one more window, ordered front without activating the app; `kill -USR2` minimizes one. Automated runs that manage windows must use `STAGE_MANAGER_ONLY`
-limited to the fixture.
-
-## Layout
-
-- `src/engine`, `src/config.rs` — pure Rust engine and configuration (unit tested);
-  `src/config/schema.rs` lists every key with its type, range, default and doc line;
-  `src/config/edit.rs` writes one key keeping the file's comments; `engine::stand_down` is
-  the stand-down state machine.
-- `src/updates.rs`, `src/app_state.rs` — pure: versions, the release JSON, when to check;
-  what the app remembers about itself (`app-state.json`).
-- `src/logbook` — the daily log, pure Rust (unit tested): local dates and stamps, the day's
-  file with its cap, retention, the event counters, the ring of recent lines, marks and
-  `log summary`; `platform::logging` is its tracing layer.
-- `src/platform` — macOS glue: `ax` (AXUIElement / AXObserver wrappers), `wm_thread` (the
-  thread that owns every AX call), `observe` (observed apps and windows), `controller` (the
-  engine on the WM thread: observations in, actions out, strip snapshots, `state.json`),
-  `safety` (registry and its parked file, panic hook, signals, recovery scan), `guardian`
-  (the guardian process), `hotkeys` (Carbon),
-  `desktop` (displays, wallpaper clicks), `input` (the global mouse and key monitor, live
-  modifiers, the Shift sugar's trigger record, test-only synthetic input), `capture` (ScreenCaptureKit thumbnails on a worker
-  thread), `windows` (CGWindowList), `apps` (NSWorkspace), `permissions`,
-  `native_settings` (also its click-only writes), `ctl`, `logging`, `paths`, `login_item`
-  (SMAppService and its gate), `update_check` (NSURLSession).
-- `src/ui` — status item and menu; the strip: `strip` (NSPanel, CALayer cards, hover,
-  clicks, level, card drag, reorder and merge, the gap for window drags, slide), `strip_motion`
-  (full-size snapshots, transitions, the dragged window's card), `overlay` (the
-  click-through motion layer above everything), `motion_math` (pure: spring timing, planes,
-  drop spots, snapshot budget), `strip_layout` (pure geometry and tilt), `strip_visibility`
-  (pure auto-hide and edge reveal), `strip_model` (the controller contract), `strip_demo`;
-  the app's own windows: `shell` (About, Settings, welcome, updates, login item, Apple's
-  Stage Manager), `settings_window`, `welcome`, `about`, `alert` (non-blocking NSAlert),
-  `app_menu` (delegate, reopen, the hidden main menu), `form` (the grouped-form toolkit and
-  the PNG render), `preview`.
-- `scripts/` — signing identity, bundling, signing, run, fixture, `test-stages.sh`,
-  `test-apple-stage-manager.sh` (opt-in, the owner's).
+- [Configuration reference](CONFIG.md): every option.
+- [Design notes](UX-SPEC.md): how Stage Manager matches Apple's and where it differs.
+- [Development](DEVELOPMENT.md): building, testing and releasing.

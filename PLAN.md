@@ -121,7 +121,7 @@ Each milestone ends with a commit and a manual test checklist; `cargo test` and
 
 ## Before public release
 
-The owner runs a trial week on the daily log (`docs/GUIDE.md`, "Daily log and problem marks")
+The owner runs a trial week on the daily log (`docs/DEVELOPMENT.md`, "Logs")
 before the first public release. Before that release:
 
 - [ ] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
@@ -158,4 +158,5 @@ Known gaps a review found and the owner accepted as rare, left as they are:
 
 Multi-monitor beyond the main display (the model keys stages by display), fullscreen windows
 (ignored). (Switch animations, drawn with snapshots, and drag and drop came later; see
-`docs/UX-SPEC.md`.)
+`docs/UX-SPEC.md`; its measurement record of Apple's Stage Manager is that file as of
+commit 20665a3.)
