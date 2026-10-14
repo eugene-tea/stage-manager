@@ -64,6 +64,10 @@ const EXIT_WAIT: Duration = Duration::from_secs(90);
 const CONFIRM_WAIT: Duration = Duration::from_secs(45);
 /// How long the helper waits for an unconfirmed new app to quit.
 const STOP_WAIT: Duration = Duration::from_secs(45);
+/// How long the helper waits for it to go after a kill.
+const KILL_WAIT: Duration = Duration::from_secs(5);
+/// How often the download's size is looked at while it arrives.
+const DOWNLOAD_POLL: Duration = Duration::from_millis(100);
 /// The disk image's identifier (`scripts/release.sh` signs it with `-i`).
 const DMG_IDENTIFIER_SUFFIX: &str = ".dmg";
 /// The note the helper leaves when an update did not go in, read at the next launch.
@@ -150,7 +154,9 @@ fn verify_signature(path: &Path, requirement: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(text.trim().lines().last().unwrap_or("codesign refused it").to_string()) }
 }
 
-/// `spctl --assess --type execute -vv`: Gatekeeper's view of an app.
+/// `spctl --assess --type execute -vv`: Gatekeeper's view of an app. The release staples the
+/// notarization ticket to the app itself (`scripts/release.sh`), so this holds offline too;
+/// an unstapled app would need Apple's servers to be reachable.
 fn assess(path: &Path) -> Assessment {
     match tool("/usr/sbin/spctl", &[os("--assess"), os("--type"), os("execute"), os("-vv"), path.as_os_str()], TOOL_TIMEOUT) {
         Ok((ok, text)) => self_update::parse_spctl(&text, ok),
@@ -369,14 +375,28 @@ fn download(url: &str, dest: &Path, size_hint: Option<u64>) -> Result<(), String
     let task = unsafe { session.downloadTaskWithRequest_completionHandler(&request, &handler) };
     task.resume();
     session.finishTasksAndInvalidate();
+    // The size cap holds while the image arrives (review 8C #8): what came so far, or what the
+    // server announced, past MAX_DMG_BYTES cancels the task at once.
     let wait = Duration::from_secs_f64(DOWNLOAD_TIMEOUT_SECS + 15.0);
-    match rx.recv_timeout(wait) {
-        Ok(r) => r,
-        Err(_) => {
-            task.cancel();
-            Err("the download did not finish".into())
+    let start = Instant::now();
+    let stopped = loop {
+        match rx.recv_timeout(DOWNLOAD_POLL) {
+            Ok(r) => return r,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break "the download ended without an answer",
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-    }
+        if updates::download_too_large(task.countOfBytesReceived(), task.countOfBytesExpectedToReceive()) {
+            break "the disk image is too large";
+        }
+        if start.elapsed() > wait {
+            break "the download did not finish";
+        }
+    };
+    task.cancel();
+    // The cancelled task's handler ends with an error; wait for it so nothing lands in `dest`
+    // after this returns.
+    let _ = rx.recv_timeout(Duration::from_secs(5));
+    Err(stopped.into())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -567,6 +587,38 @@ pub fn open_disk_image(dmg: &Path) {
     }
 }
 
+/// Removes a ready update's staged copy (an install that will not happen now): its working
+/// folder beside the installed app goes, off the main thread.
+pub fn discard(p: &Prepared) {
+    let Some(work) = p.helper.staged.parent().filter(|w| w.file_name().is_some_and(|n| n == self_update::WORK_DIR)) else { return };
+    let work = work.to_path_buf();
+    let _ = std::thread::Builder::new().name("update-discard".into()).spawn(move || match remove_any(&work) {
+        Ok(()) => tracing::info!("update: the staged copy is removed"),
+        Err(e) => tracing::warn!("update: cannot remove {}: {e}", work.display()),
+    });
+}
+
+/// At launch, off the main thread: removes a working folder an earlier update left beside
+/// this app (the app quit while an update waited, or a helper was killed), unless an update
+/// helper runs now (the folder is its own until it ends).
+pub fn clean_stale_work() {
+    let _ = std::thread::Builder::new().name("update-clean".into()).spawn(|| {
+        let Ok(target) = self_update::install_target(&own_bundle(), true) else { return };
+        let Some((work, _)) = self_update::staging_paths(&target) else { return };
+        if std::fs::symlink_metadata(&work).is_err() {
+            return;
+        }
+        if processes(|_, argv| self_update::is_update_helper(argv)).next().is_some() {
+            tracing::info!("update: an installer helper runs; its working folder stays");
+            return;
+        }
+        match remove_any(&work) {
+            Ok(()) => tracing::info!("update: removed a working folder an earlier update left behind"),
+            Err(e) => tracing::warn!("update: cannot remove {}: {e}", work.display()),
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------------------
 // Hand-off
 
@@ -635,34 +687,84 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
 }
 
-/// Processes whose executable is `exe`.
-fn pids_of(exe: &Path) -> Vec<i32> {
-    let mut pids = vec![0i32; 8192];
-    // SAFETY: the buffer holds `pids.len()` ints and its size in bytes is passed.
-    let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * size_of::<i32>()) as i32) };
-    if n <= 0 {
-        return Vec::new();
-    }
-    pids.truncate(n as usize);
-    pids.into_iter()
-        .filter(|&pid| pid > 0 && pid as u32 != std::process::id())
-        .filter(|&pid| {
-            let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-            // SAFETY: the buffer is PROC_PIDPATHINFO_MAXSIZE bytes long.
-            let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-            len > 0 && Path::new(std::ffi::OsStr::from_bytes(&buf[..len as usize])) == exe
-        })
-        .collect()
+/// A process's executable.
+fn exe_of(pid: i32) -> Option<PathBuf> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the buffer is PROC_PIDPATHINFO_MAXSIZE bytes long.
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (len > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len as usize])))
 }
 
-/// A process's parent.
-fn parent_of(pid: i32) -> Option<i32> {
+/// A process's arguments (`sysctl KERN_PROCARGS2`; this user's processes only).
+fn argv_of(pid: i32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a size query (null buffer) for a valid three-word name.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: the buffer holds `size` bytes, which is passed.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    self_update::parse_procargs2(&buf)
+}
+
+/// When a process started (seconds since 1970).
+fn started_at(pid: i32) -> Option<u64> {
     // SAFETY: a zeroed proc_bsdinfo is valid; proc_pidinfo fills at most its size.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_bsdinfo>() as i32;
     // SAFETY: as above.
     let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-    (n == size).then_some(info.pbi_ppid as i32)
+    (n == size).then_some(info.pbi_start_tvsec)
+}
+
+/// Other processes running the app's executable (`…/Contents/MacOS/stage-manager`, from any
+/// bundle) that `keep(exe, argv)` accepts.
+fn processes(keep: impl Fn(&Path, &[String]) -> bool) -> impl Iterator<Item = i32> {
+    let mut pids = vec![0i32; 8192];
+    // SAFETY: the buffer holds `pids.len()` ints and its size in bytes is passed.
+    let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * size_of::<i32>()) as i32) };
+    pids.truncate(usize::try_from(n).unwrap_or(0).min(pids.len()));
+    pids.into_iter().filter(move |&pid| {
+        pid > 0
+            && pid as u32 != std::process::id()
+            && exe_of(pid).is_some_and(|exe| {
+                exe.ends_with("Contents/MacOS/stage-manager") && argv_of(pid).is_some_and(|argv| keep(&exe, &argv))
+            })
+    })
+}
+
+/// Restores the signals the helper ignored while it renamed bundles.
+struct SignalsIgnored(Vec<(libc::c_int, libc::sighandler_t)>);
+
+impl SignalsIgnored {
+    /// Ignores SIGTERM, SIGHUP and SIGINT until dropped: a logout or a stray signal cannot stop
+    /// the helper halfway through an exchange (review 8C #5). SIGKILL still can (it cannot be
+    /// caught); the next launch then removes what is left in the working folder.
+    fn now() -> Self {
+        Self(
+            [libc::SIGTERM, libc::SIGHUP, libc::SIGINT]
+                .into_iter()
+                // SAFETY: SIG_IGN for a catchable signal; the previous handler is kept to restore.
+                .map(|sig| (sig, unsafe { libc::signal(sig, libc::SIG_IGN) }))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for SignalsIgnored {
+    fn drop(&mut self) {
+        for &(sig, previous) in &self.0 {
+            if previous != libc::SIG_ERR {
+                // SAFETY: puts back the handler `signal` returned for this signal.
+                unsafe { libc::signal(sig, previous) };
+            }
+        }
+    }
 }
 
 /// The helper's real operations.
@@ -670,24 +772,61 @@ struct RealSwap {
     args: HelperArgs,
     /// The new app's process, once it answered.
     new_pid: Option<u32>,
+    /// When the helper opened the app (seconds since 1970, a second early): an instance found
+    /// without an answer must have started since.
+    launched_at: Option<u64>,
 }
 
 impl RealSwap {
     fn exe(&self) -> PathBuf {
         self.args.target.join("Contents/MacOS/stage-manager")
     }
+
+    /// The app the helper opened: the one that answered, else the app instances (no
+    /// subcommand: never the user's CLI, the guardian or a helper) of the installed
+    /// executable started since the launch (review 8C #7).
+    fn launched_pids(&self) -> Vec<i32> {
+        if let Some(p) = self.new_pid {
+            return vec![p as i32];
+        }
+        let Some(since) = self.launched_at else { return Vec::new() };
+        let exe = self.exe();
+        processes(|e, argv| e == exe && self_update::is_app_instance(argv))
+            .filter(|&pid| pid as u32 != self.args.pid && started_at(pid).is_some_and(|t| t >= since))
+            .collect()
+    }
+}
+
+/// Sends `sig` to each of `pids`, then waits up to `wait` for them to go. Returns whether
+/// they all went.
+fn signal_and_wait(pids: &[i32], sig: libc::c_int, wait: Duration) -> bool {
+    for &pid in pids {
+        if alive(pid as u32) {
+            // SAFETY: a plain signal to the instance the helper opened.
+            unsafe { libc::kill(pid, sig) };
+        }
+    }
+    let start = Instant::now();
+    while pids.iter().any(|&p| alive(p as u32)) {
+        if start.elapsed() >= wait {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    true
 }
 
 impl SwapOps for RealSwap {
     fn verify_staged(&mut self) -> Result<(), String> {
         verify_signature(&self.args.staged, &self.args.requirement)?;
         match plist_value(&self.args.staged, "CFBundleShortVersionString") {
-            Some(v) if v == self.args.version => Ok(()),
+            Some(v) if self_update::same_version(&v, &self.args.version) => Ok(()),
             other => Err(format!("the staged copy's version is {other:?}, not {}", self.args.version)),
         }
     }
 
     fn exchange(&mut self) -> Result<(), String> {
+        let _signals = SignalsIgnored::now();
         let (a, b) = (&self.args.target, &self.args.staged);
         let (ca, cb) = (
             CString::new(a.as_os_str().as_bytes()).map_err(|e| e.to_string())?,
@@ -705,6 +844,9 @@ impl SwapOps for RealSwap {
     }
 
     fn launch(&mut self) -> Result<(), String> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        self.launched_at = Some(now.saturating_sub(1));
+        self.new_pid = None;
         let mut open = Command::new("/usr/bin/open");
         open.arg("-n");
         for var in self_update::relaunch_env(std::env::vars()) {
@@ -721,7 +863,8 @@ impl SwapOps for RealSwap {
                 && let Ok(v) = serde_json::from_str::<serde_json::Value>(&reply)
             {
                 let pid = v["pid"].as_u64().map(|p| p as u32);
-                if v["version"].as_str() == Some(self.args.version.as_str()) && pid.is_some_and(|p| p != self.args.pid) {
+                let version_ok = v["version"].as_str().is_some_and(|v| self_update::same_version(v, &self.args.version));
+                if version_ok && pid.is_some_and(|p| p != self.args.pid) {
                     self.new_pid = pid;
                     return Ok(());
                 }
@@ -731,24 +874,21 @@ impl SwapOps for RealSwap {
         Err(format!("the new version did not answer within {} s", CONFIRM_WAIT.as_secs()))
     }
 
-    fn stop_launched(&mut self) {
-        // Its own quit path (SIGTERM) brings back any window it parked. Its guardian (the
-        // same executable, its child) is left to watch it exit.
-        let pids: Vec<i32> = match self.new_pid {
-            Some(p) => vec![p as i32],
-            None => {
-                let all = pids_of(&self.exe());
-                all.iter().copied().filter(|p| !parent_of(*p).is_some_and(|pp| all.contains(&pp))).collect()
-            }
-        };
-        for &pid in &pids {
-            // SAFETY: a plain signal to a process we found by its executable path.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
+    fn stop_launched(&mut self) -> bool {
+        // Its own quit path (SIGTERM) brings back any window it parked; one that ignores it is
+        // killed (review 8C #2), and its guardian (its child, `--guardian`, never signalled
+        // here) brings the windows back after it. Survivors: the caller undoes nothing.
+        let pids = self.launched_pids();
+        tracing::info!(?pids, "updater: stopping the new version that did not answer");
+        if signal_and_wait(&pids, libc::SIGTERM, STOP_WAIT) {
+            return true;
         }
-        let start = Instant::now();
-        while pids.iter().any(|&p| alive(p as u32)) && start.elapsed() < STOP_WAIT {
-            std::thread::sleep(Duration::from_millis(200));
+        tracing::warn!(?pids, "updater: the new version ignored the quit; killing it");
+        let gone = signal_and_wait(&pids, libc::SIGKILL, KILL_WAIT);
+        if !gone {
+            tracing::error!(?pids, "updater: the new version is still running");
         }
+        gone
     }
 
     fn remove_old(&mut self) -> Result<(), String> {
@@ -774,11 +914,16 @@ pub fn run_helper(args: &[String]) -> ExitCode {
         if start.elapsed() > EXIT_WAIT {
             tracing::error!("updater: the app did not quit; nothing replaced");
             let _ = remove_any(args.staged.parent().unwrap_or(&args.staged));
+            let current = plist_value(&args.target, "CFBundleShortVersionString").unwrap_or_default();
+            let _ = std::fs::write(
+                note_path(),
+                format!("Stage Manager {} could not be installed (the app did not quit in time), so you still have {current}.", args.version),
+            );
             return ExitCode::FAILURE;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let mut ops = RealSwap { args: args.clone(), new_pid: None };
+    let mut ops = RealSwap { args: args.clone(), new_pid: None, launched_at: None };
     let outcome = self_update::run_swap(&mut ops);
     let current = || plist_value(&args.target, "CFBundleShortVersionString").unwrap_or_default();
     match &outcome {
@@ -794,10 +939,15 @@ pub fn run_helper(args: &[String]) -> ExitCode {
         }
         SwapOutcome::RollbackFailed { step, why, undo } => {
             tracing::error!(?step, why, undo, "updater: not installed, and the old version could not be put back");
-            let _ = std::fs::write(
-                note_path(),
-                format!("Stage Manager {} may not have installed cleanly ({why}). If something is wrong, download it again from GitHub.", args.version),
-            );
+            let note = if undo == self_update::NEW_APP_STILL_RUNS {
+                format!(
+                    "Stage Manager {} did not answer after it was installed ({why}) and would not quit, so it was left in place. If something is wrong, quit it and download it again from GitHub.",
+                    args.version
+                )
+            } else {
+                format!("Stage Manager {} may not have installed cleanly ({why}). If something is wrong, download it again from GitHub.", args.version)
+            };
+            let _ = std::fs::write(note_path(), note);
         }
     }
     if matches!(outcome, SwapOutcome::Installed | SwapOutcome::InstalledOldLeft(_)) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
@@ -825,5 +975,19 @@ mod tests {
         assert_eq!(ALLOW_LOCAL_TRUST, cfg!(feature = "update-test"));
         let release_flags = include_str!("../../scripts/release.sh");
         assert!(!release_flags.contains("update-test"), "the release is never built with the test hooks");
+    }
+
+    /// Review 8C #1: the app itself is notarized and stapled before the DMG is built around
+    /// it, so `spctl` accepts an update offline.
+    #[test]
+    fn the_release_staples_the_app_before_the_disk_image() {
+        let script = include_str!("../../scripts/release.sh");
+        let at = |needle: &str| script.find(needle).unwrap_or_else(|| panic!("release.sh: {needle}"));
+        let app_notarized = at("notarize \"$APP_ZIP\"");
+        let app_stapled = at("stapler staple \"$APP\"");
+        let dmg_built = at("scripts/dmg.sh \"$APP\"");
+        let dmg_notarized = at("notarize \"$DMG\"");
+        let dmg_stapled = at("stapler staple \"$DMG\"");
+        assert!(app_notarized < app_stapled && app_stapled < dmg_built && dmg_built < dmg_notarized && dmg_notarized < dmg_stapled);
     }
 }

@@ -262,6 +262,9 @@ impl Shell {
         if self.config.app.check_for_updates && unattended_allowed() {
             updater::warm();
         }
+        // A staged copy an earlier update left beside the app (it quit while an update
+        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6).
+        updater::clean_stale_work();
         let note = RcBlock::new(|_t: NonNull<NSTimer>| show_update_note());
         // SAFETY: the blocks run on the main run loop, which keeps the timers; we keep them too.
         unsafe {
@@ -712,31 +715,27 @@ fn prepared(release: Release, result: Result<Prepared, PrepareError>) {
         }
         Err(PrepareError::Failed(why)) => {
             tracing::warn!(version = %release.version, "update: not installed: {why}");
-            // An automatic install that failed may fail again tomorrow: it can be skipped.
-            let mut buttons = vec!["Download".to_string()];
-            if !asked {
-                buttons.push("Skip This Version".into());
-            }
-            buttons.push("OK".into());
-            let cancel = Some(buttons.len() - 1);
-            alert::show(
-                mtm,
-                AlertSpec {
-                    key: "update",
-                    title: format!("Stage Manager {} couldn't be installed", release.version),
-                    text: install_failed_text(&why, &current),
-                    buttons,
-                    cancel,
-                    warning: true,
-                    activate: asked,
-                },
-                move |b| match (b, asked) {
-                    (0, _) => open_url(release.download_url()),
-                    (1, false) => skip_version(&release.version),
-                    _ => {}
-                },
-            );
+            // No Skip This Version here (review 8C #1): a failure may be a network blip, and
+            // it must not silence the release; the next daily check offers it again.
+            alert::show(mtm, install_failed_spec(&release, &why, &current, asked), move |b| {
+                if b == 0 {
+                    open_url(release.download_url());
+                }
+            });
         }
+    }
+}
+
+/// The alert when a download or verification failed: Download or OK, never Skip This Version.
+pub fn install_failed_spec(release: &Release, why: &str, current: &updates::Version, asked: bool) -> AlertSpec {
+    AlertSpec {
+        key: "update",
+        title: format!("Stage Manager {} couldn't be installed", release.version),
+        text: install_failed_text(why, current),
+        buttons: vec!["Download".into(), "OK".into()],
+        cancel: Some(1),
+        warning: true,
+        activate: asked,
     }
 }
 
@@ -762,8 +761,10 @@ fn install_if_quiet() {
         Install::Ready { asked, .. } => {
             if !*asked && !(s.config.app.install_updates && s.config.app.check_for_updates) {
                 // Automatic installs were turned off while it waited.
-                if let Install::Ready { timer, .. } = std::mem::replace(&mut s.install, Install::Idle) {
+                if let Install::Ready { timer, prepared, .. } = std::mem::replace(&mut s.install, Install::Idle) {
                     timer.invalidate();
+                    // Its staged copy goes too (review 8C #6).
+                    updater::discard(&prepared);
                 }
                 tracing::info!("update: automatic install turned off; not installing");
                 return None;
@@ -921,6 +922,13 @@ mod tests {
         let failed = install_failed_text("its code signature is not valid or not ours: x.", &old);
         assert!(failed.starts_with("Its code signature"));
         assert!(failed.contains("Nothing was changed: you still have Stage Manager 1.0.0."));
+        // Review 8C #1: a failed install (maybe a network blip) never offers to skip the release.
+        for asked in [true, false] {
+            let f = install_failed_spec(&r, "the download did not finish", &old, asked);
+            assert_eq!(f.buttons, vec!["Download", "OK"], "asked: {asked}");
+            assert_eq!(f.cancel, Some(1));
+            assert_eq!(f.activate, asked);
+        }
         assert!(o.activate, "the spec activates; an automatic offer turns it off");
         assert_eq!(turn_off_wait(), Duration::from_secs(2));
     }

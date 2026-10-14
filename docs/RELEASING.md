@@ -55,11 +55,14 @@ self-signed identity (`scripts/sign.sh`).
    - builds and bundles a fresh app;
    - signs it with the Developer ID: hardened runtime, secure timestamp,
      `packaging/entitlements.plist` (empty: the app needs no entitlements; the file says why);
+   - notarizes the app on its own (a zip of it, `xcrun notarytool submit --keychain-profile …
+     --wait`) and staples the ticket to the bundle (`xcrun stapler staple`, then `validate`):
+     installed copies verify an update with `spctl` before installing it, and a stapled app
+     passes without reaching Apple, so an update never fails on a flaky network;
    - builds `target/release/Stage-Manager.dmg` (`scripts/dmg.sh`, dmgbuild, no Finder
-     scripting) and signs it;
-   - submits it with `xcrun notarytool submit --keychain-profile … --wait` and, when Apple
-     accepts it, staples the ticket (`xcrun stapler staple`) and validates it; on rejection it
-     prints the notary log;
+     scripting) around the stapled app and signs it;
+   - submits the DMG the same way and staples its ticket too; on any rejection it prints the
+     notary log and stops;
    - checks Gatekeeper: `spctl -a -t open --context context:primary-signature -vv` on the DMG
      and `spctl -a -t exec -vv` on the app;
    - copies the DMG to `Stage-Manager-X.Y.Z.dmg` for your archive, and writes and prints the
@@ -85,8 +88,9 @@ self-signed identity (`scripts/sign.sh`).
 **What every release must keep, or installed copies cannot update themselves:** the asset
 named `Stage-Manager.dmg` on the release; the same Developer ID team (the running app reads
 its own team and designated requirement and the new app must match both); the bundle ID
-`dev.eugene.stagemanager`; the DMG signed with `-i dev.eugene.stagemanager.dmg`; notarized;
-a higher version. The first lines of the release notes show in the update alert (up to six
+`dev.eugene.stagemanager`; the DMG signed with `-i dev.eugene.stagemanager.dmg`; the app
+notarized with its ticket stapled (`make release` does both); a higher version, and a release
+version: a tag with a pre-release part (`v1.3.0-rc.1`) is never offered or installed. The first lines of the release notes show in the update alert (up to six
 lines, Markdown reduced to plain text), so lead with what users will notice.
 
 The tag, the release, the tap and the Pages deploy are public: each one only on the owner's

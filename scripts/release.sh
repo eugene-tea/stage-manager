@@ -1,5 +1,6 @@
 #!/bin/bash
-# `make release`: the public DMG, Developer ID signed and notarized.
+# `make release`: the public DMG, Developer ID signed and notarized: the app is notarized and
+# stapled on its own first, then the DMG that holds it.
 #
 #   DEVELOPER_ID    the signing identity: "Developer ID Application: Name (TEAMID)" or its SHA-1
 #   NOTARY_PROFILE  the notarytool keychain profile (xcrun notarytool store-credentials …)
@@ -45,27 +46,43 @@ scripts/bundle.sh app
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 echo "Releasing Stage Manager $VERSION"
 
+# Submits $1 to Apple's notary service and waits; on rejection prints the log and stops.
+notarize() {
+  local file="$1" json="$OUT/notary-$(basename "$1").json"
+  if [ "$DRY_RUN" = 1 ]; then
+    run xcrun notarytool submit "$file" --keychain-profile "$PROFILE" --wait --output-format json
+    return
+  fi
+  xcrun notarytool submit "$file" --keychain-profile "$PROFILE" --wait --output-format json | tee "$json"
+  local status id
+  status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$json")"
+  if [ "$status" != "Accepted" ]; then
+    id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$json")"
+    echo "error: notarization of $(basename "$file") ${status:-failed}. The log:" >&2
+    [ -n "$id" ] && xcrun notarytool log "$id" --keychain-profile "$PROFILE" >&2
+    exit 1
+  fi
+}
+
 # The app: hardened runtime, secure timestamp, the (empty) entitlements.
 run codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" -s "$IDENTITY" "$APP"
 run codesign --verify --strict --deep --verbose=2 "$APP"
 
+# Notarize the app itself and staple its ticket to the bundle, so Gatekeeper (and an
+# installed copy verifying this one as an update) accepts it offline, without asking Apple.
+APP_ZIP="$OUT/Stage-Manager-notarize.zip"
+mkdir -p "$OUT"
+rm -f "$APP_ZIP"
+ditto -c -k --keepParent "$APP" "$APP_ZIP"
+notarize "$APP_ZIP"
+rm -f "$APP_ZIP"
+run xcrun stapler staple "$APP"
+run xcrun stapler validate "$APP"
+
+# The DMG holds the stapled app; it is signed, notarized and stapled too.
 scripts/dmg.sh "$APP"
 run codesign --force --timestamp -i dev.eugene.stagemanager.dmg -s "$IDENTITY" "$DMG"
-
-# Notarize the DMG (it covers the app inside), then staple the ticket to it.
-NOTARY_JSON="$OUT/notary.json"
-if [ "$DRY_RUN" = 1 ]; then
-  run xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --output-format json
-else
-  xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --output-format json | tee "$NOTARY_JSON"
-  STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$NOTARY_JSON")"
-  if [ "$STATUS" != "Accepted" ]; then
-    ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$NOTARY_JSON")"
-    echo "error: notarization ${STATUS:-failed}. The log:" >&2
-    [ -n "$ID" ] && xcrun notarytool log "$ID" --keychain-profile "$PROFILE" >&2
-    exit 1
-  fi
-fi
+notarize "$DMG"
 run xcrun stapler staple "$DMG"
 run xcrun stapler validate "$DMG"
 

@@ -31,6 +31,13 @@ pub const ASSET_PREFIX: &str = "https://github.com/eugene-tea/stage-manager/rele
 pub const DOWNLOAD_HOSTS: &[&str] = &["github.com", "release-assets.githubusercontent.com"];
 /// The largest disk image accepted (the real one is a few MB).
 pub const MAX_DMG_BYTES: u64 = 200 * 1024 * 1024;
+
+/// Whether a download under way is over [`MAX_DMG_BYTES`]: what arrived so far, or what the
+/// server announced (`expected`; negative when unknown). It is cancelled at once then.
+pub fn download_too_large(received: i64, expected: i64) -> bool {
+    let over = |n: i64| u64::try_from(n).is_ok_and(|n| n > MAX_DMG_BYTES);
+    over(received) || over(expected)
+}
 /// The release notes in the update alert: at most this many lines …
 const NOTES_LINES: usize = 6;
 /// … and this many characters.
@@ -70,6 +77,11 @@ impl Version {
             return None;
         }
         Some(Self { major, minor, patch, pre })
+    }
+
+    /// Whether it has a pre-release part (`1.3.0-rc.1`); updates only ever install releases.
+    pub fn is_pre_release(&self) -> bool {
+        !self.pre.is_empty()
     }
 }
 
@@ -180,8 +192,8 @@ pub fn page_allowed(url: &str) -> bool {
     url.strip_prefix(REPO_URL).is_some_and(|rest| rest.starts_with('/')) && https_host(url).as_deref() == Some("github.com")
 }
 
-/// Parses `releases/latest`'s JSON. Drafts, pre-releases and tags that are no version are
-/// refused.
+/// Parses `releases/latest`'s JSON. Drafts, pre-releases (GitHub's flag, or a pre-release
+/// part in the tag, such as `v1.3.0-rc.1`) and tags that are no version are refused.
 pub fn parse_release(json: &str) -> Result<Release, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("not JSON: {e}"))?;
     if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) {
@@ -189,6 +201,9 @@ pub fn parse_release(json: &str) -> Result<Release, String> {
     }
     let tag = v["tag_name"].as_str().ok_or("no tag_name")?.to_string();
     let version = Version::parse(&tag).ok_or_else(|| format!("tag {tag:?} is not a version"))?;
+    if version.is_pre_release() {
+        return Err(format!("tag {tag:?} is a pre-release"));
+    }
     let page = v["html_url"].as_str().filter(|u| page_allowed(u)).unwrap_or(RELEASES_URL).to_string();
     // The release's disk image is always `Stage-Manager.dmg` under this repository; no other
     // asset, name or host is ever offered (review: Grok Medium 6, Fable L2).
@@ -371,6 +386,12 @@ mod tests {
         assert!(parse_release(r#"{"tag_name":"nightly"}"#).is_err());
         assert!(parse_release(r#"{"tag_name":"v2.0.0","draft":true}"#).is_err());
         assert!(parse_release(r#"{"tag_name":"v2.0.0","prerelease":true}"#).is_err());
+        for tag in ["v2.0.0-rc.1", "2.0.0-beta", "v2.0-alpha.3+build.7"] {
+            let json = format!(r#"{{"tag_name":"{tag}","prerelease":false}}"#);
+            assert!(parse_release(&json).is_err(), "{tag}: a pre-release tag is refused even when not flagged");
+            assert!(matches!(outcome(&v("1.0.0"), 200, &json), Outcome::Failed(_)), "{tag}: never offered");
+        }
+        assert!(parse_release(r#"{"tag_name":"v2.0.0+build.7"}"#).is_ok(), "build metadata is no pre-release");
         assert!(parse_release("<html>").is_err());
         let odd = parse_release(r#"{"tag_name":"v2.0.0","html_url":"javascript:alert(1)"}"#).expect("parses");
         assert_eq!(odd.page, RELEASES_URL, "only https pages are opened");
@@ -444,6 +465,18 @@ mod tests {
         assert!(page_allowed("https://github.com/eugene-tea/stage-manager/releases/tag/v1.2.0"));
         assert!(!page_allowed("https://github.com/eugene-tea/stage-manager-evil/releases"));
         assert!(!page_allowed("https://github.com/eugene-tea/stage-manager"), "a page under it, not the bare repo URL");
+    }
+
+    /// Review 8C #8: the size cap holds while the image arrives, not only once it is on disk.
+    #[test]
+    fn a_download_past_the_cap_is_too_large_while_it_arrives() {
+        let max = MAX_DMG_BYTES as i64;
+        assert!(!download_too_large(0, -1), "nothing yet, size unknown");
+        assert!(!download_too_large(max, max), "exactly the cap is fine");
+        assert!(download_too_large(max + 1, -1), "past the cap while receiving, size unknown");
+        assert!(download_too_large(1024, max + 1), "announced too large: cancelled before it arrives");
+        assert!(!download_too_large(1024, 7_340_032));
+        assert!(!download_too_large(-1, -1));
     }
 
     #[test]

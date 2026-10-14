@@ -248,6 +248,8 @@ pub enum Rejection {
     NotNotarized(Option<String>),
     /// No readable version.
     NoVersion,
+    /// A pre-release version (`1.3.0-rc.1`): updates only ever install releases.
+    PreRelease(String),
     /// Not newer than the running app.
     NotNewer(String),
 }
@@ -261,9 +263,16 @@ impl std::fmt::Display for Rejection {
             Rejection::Team(t) => write!(f, "it is signed by another developer team ({t:?})"),
             Rejection::NotNotarized(s) => write!(f, "Gatekeeper did not accept it as notarized ({s:?})"),
             Rejection::NoVersion => write!(f, "it has no version"),
+            Rejection::PreRelease(v) => write!(f, "its version {v} is a pre-release"),
             Rejection::NotNewer(v) => write!(f, "its version {v} is not newer than this one"),
         }
     }
+}
+
+/// Whether two version texts name the same version, compared parsed (`1.2` and `1.2.0` are
+/// one version; build metadata is ignored). Text that is no version never matches.
+pub fn same_version(a: &str, b: &str) -> bool {
+    matches!((Version::parse(a), Version::parse(b)), (Some(x), Some(y)) if x.cmp(&y) == std::cmp::Ordering::Equal)
 }
 
 /// Whether `c` may replace the running app (version `current`) under `trust`.
@@ -288,6 +297,9 @@ pub fn judge(trust: &Trust, c: &Candidate, current: &Version) -> Result<Version,
     }
     let text = c.version.as_deref().ok_or(Rejection::NoVersion)?;
     let version = Version::parse(text).ok_or(Rejection::NoVersion)?;
+    if version.is_pre_release() {
+        return Err(Rejection::PreRelease(version.to_string()));
+    }
     if version <= *current {
         return Err(Rejection::NotNewer(version.to_string()));
     }
@@ -363,7 +375,9 @@ impl HelperArgs {
         if target.file_name().is_none_or(|n| n != APP_NAME) {
             return Err("the target is not Stage Manager.app".into());
         }
-        Version::parse(version).ok_or("bad version")?;
+        if Version::parse(version).is_none_or(|v| v.is_pre_release()) {
+            return Err("bad version".into());
+        }
         if requirement.is_empty() {
             return Err("no requirement".into());
         }
@@ -413,8 +427,9 @@ pub trait SwapOps {
     fn launch(&mut self) -> Result<(), String>;
     /// Waits for the app just opened to answer with the expected version.
     fn confirm(&mut self) -> Result<(), String>;
-    /// Stops an app opened from the installed path that did not confirm.
-    fn stop_launched(&mut self);
+    /// Stops the app the helper opened from the installed path that did not confirm (its quit
+    /// path first, then a kill). Returns whether it is gone: `false` when it still runs.
+    fn stop_launched(&mut self) -> bool;
     /// Removes the old app (at the staged path after the exchange) and the working folder.
     fn remove_old(&mut self) -> Result<(), String>;
 }
@@ -432,8 +447,14 @@ pub enum SwapOutcome {
     RollbackFailed { step: Step, why: String, undo: String },
 }
 
+/// What [`SwapOutcome::RollbackFailed`]'s `undo` says when the unconfirmed new app would not
+/// stop: the old app is not put back under a running one.
+pub const NEW_APP_STILL_RUNS: &str = "the new version did not stop, so the old one was not put back under it";
+
 /// Runs the swap: verify, exchange, launch, confirm, then remove the old app. A failure at
-/// any step before the old app is removed puts it back (undoing the exchange) and opens it.
+/// any step before the old app is removed puts it back (undoing the exchange) and opens it;
+/// except when the unconfirmed new app cannot be stopped: then nothing is undone under it
+/// (review 8C #2).
 pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
     if let Err(why) = ops.verify_staged() {
         return SwapOutcome::RolledBack { step: Step::Verify, why, relaunched: ops.launch() };
@@ -443,10 +464,15 @@ pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
     }
     let failed = match ops.launch() {
         Err(why) => Some((Step::Launch, why)),
-        Ok(()) => ops.confirm().err().map(|why| {
-            ops.stop_launched();
-            (Step::Confirm, why)
-        }),
+        Ok(()) => match ops.confirm() {
+            Ok(()) => None,
+            Err(why) => {
+                if !ops.stop_launched() {
+                    return SwapOutcome::RollbackFailed { step: Step::Confirm, why, undo: NEW_APP_STILL_RUNS.into() };
+                }
+                Some((Step::Confirm, why))
+            }
+        },
     };
     if let Some((step, why)) = failed {
         return match ops.exchange() {
@@ -489,6 +515,41 @@ pub fn exchange_by_renames(
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Processes
+
+/// A process's arguments from `sysctl(KERN_PROCARGS2)`'s buffer: `argc` (a native-endian
+/// `i32`), the executable path, NUL padding, then `argc` NUL-terminated words (the
+/// environment follows; it is not read). `None` when the buffer is short or malformed.
+pub fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+    let argc = usize::try_from(argc).ok().filter(|&n| n > 0 && n < 4096)?;
+    let rest = &buf[4..];
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    let mut tail = &rest[path_end..];
+    tail = &tail[tail.iter().position(|&b| b != 0)?..];
+    let mut out = Vec::with_capacity(argc);
+    for _ in 0..argc {
+        // Every word ends in a NUL; a buffer that stops short is malformed.
+        let end = tail.iter().position(|&b| b == 0)?;
+        out.push(String::from_utf8_lossy(&tail[..end]).into_owned());
+        tail = &tail[end + 1..];
+    }
+    Some(out)
+}
+
+/// Whether a process running the app's executable with these arguments is the app itself:
+/// no subcommand (`ctl`, `--guardian`, `--update-helper`, …), at most the `-psn_…` word older
+/// LaunchServices adds. The user's CLI and the app's own helpers are never the app.
+pub fn is_app_instance(argv: &[String]) -> bool {
+    !argv.is_empty() && argv[1..].iter().all(|a| a.starts_with("-psn_"))
+}
+
+/// Whether these arguments are the update helper's (`<exe> --update-helper …`).
+pub fn is_update_helper(argv: &[String]) -> bool {
+    argv.get(1).is_some_and(|a| a == "--update-helper")
 }
 
 #[cfg(test)]
@@ -608,11 +669,59 @@ Runtime Version=26.0.0";
         c.version = None;
         assert_eq!(judge(&t, &c, &now), Err(Rejection::NoVersion));
 
-        for older in ["1.1.0", "1.0.9", "1.1.0-rc.1"] {
+        for older in ["1.1.0", "1.0.9", "1.1"] {
             let mut c = good();
             c.version = Some(older.into());
             assert!(matches!(judge(&t, &c, &now), Err(Rejection::NotNewer(_))), "{older}");
         }
+
+        // Review 8C #3: a pre-release never installs, even one newer than this version.
+        for pre in ["1.2.0-rc.1", "2.0.0-beta", "1.1.0-rc.1"] {
+            let mut c = good();
+            c.version = Some(pre.into());
+            assert!(matches!(judge(&t, &c, &now), Err(Rejection::PreRelease(_))), "{pre}");
+        }
+    }
+
+    /// Review 8C #4: the staged copy's and the new app's versions are compared parsed.
+    #[test]
+    fn versions_match_parsed_not_as_text() {
+        assert!(same_version("1.2.0", "1.2.0"));
+        assert!(same_version("1.2", "1.2.0"), "Info.plist may leave out the patch");
+        assert!(same_version("v1.2.0", "1.2.0+build.3"));
+        assert!(!same_version("1.2.0", "1.2.1"));
+        assert!(!same_version("1.2.0", "1.2.0-rc.1"));
+        assert!(!same_version("1.2.0", "garbage") && !same_version("", ""));
+    }
+
+    /// Review 8C #7: only the app itself is stopped, never the user's CLI or its helpers.
+    #[test]
+    fn process_arguments_parse_and_only_the_app_is_the_app() {
+        let words = |argv: &[&str]| argv.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let buf = |argc: i32, path: &str, argv: &[&str]| {
+            let mut b = argc.to_ne_bytes().to_vec();
+            b.extend_from_slice(path.as_bytes());
+            b.extend_from_slice(&[0, 0, 0]);
+            for a in argv {
+                b.extend_from_slice(a.as_bytes());
+                b.push(0);
+            }
+            b.extend_from_slice(b"HOME=/Users/me\0");
+            b
+        };
+        let exe = "/Applications/Stage Manager.app/Contents/MacOS/stage-manager";
+        assert_eq!(parse_procargs2(&buf(1, exe, &[exe])), Some(words(&[exe])));
+        assert_eq!(parse_procargs2(&buf(3, exe, &[exe, "ctl", "ping"])), Some(words(&[exe, "ctl", "ping"])));
+        assert_eq!(parse_procargs2(&buf(3, exe, &[exe])), None, "fewer words than argc");
+        assert_eq!(parse_procargs2(&buf(0, exe, &[])), None);
+        assert_eq!(parse_procargs2(&[1, 0]), None);
+        assert!(is_app_instance(&words(&[exe])));
+        assert!(is_app_instance(&words(&[exe, "-psn_0_12345"])));
+        for other in [&[exe, "ctl", "ping"][..], &[exe, "--guardian", "42"], &[exe, "--update-helper", "1"], &[exe, "log", "path"], &[]] {
+            assert!(!is_app_instance(&words(other)), "{other:?}");
+        }
+        assert!(is_update_helper(&words(&[exe, "--update-helper", "42"])));
+        assert!(!is_update_helper(&words(&[exe])) && !is_update_helper(&words(&[exe, "ctl", "--update-helper"])));
     }
 
     #[test]
@@ -676,6 +785,9 @@ Runtime Version=26.0.0";
         let mut bad = a.to_args();
         bad[0] = "1".into();
         assert!(HelperArgs::parse(&bad).is_err());
+        let mut bad = a.to_args();
+        bad[3] = "1.2.0-rc.1".into();
+        assert!(HelperArgs::parse(&bad).is_err(), "never a pre-release");
         assert!(HelperArgs::parse(&a.to_args()[..4]).is_err());
     }
 
@@ -691,6 +803,8 @@ Runtime Version=26.0.0";
         fail_exchange_from: Option<usize>,
         exchanges: usize,
         confirm_new_only: bool,
+        /// The unconfirmed new app ignores being stopped.
+        unstoppable: bool,
     }
 
     impl Fake {
@@ -704,6 +818,7 @@ Runtime Version=26.0.0";
                 fail_exchange_from: None,
                 exchanges: 0,
                 confirm_new_only: true,
+                unstoppable: false,
             }
         }
     }
@@ -734,8 +849,11 @@ Runtime Version=26.0.0";
             let ok = self.running == Some("new") || !self.confirm_new_only;
             if self.fail == Some(Step::Confirm) || !ok { Err("no answer".into()) } else { Ok(()) }
         }
-        fn stop_launched(&mut self) {
-            self.running = None;
+        fn stop_launched(&mut self) -> bool {
+            if !self.unstoppable {
+                self.running = None;
+            }
+            self.running.is_none()
         }
         fn remove_old(&mut self) -> Result<(), String> {
             if self.fail == Some(Step::RemoveOld) {
@@ -787,6 +905,18 @@ Runtime Version=26.0.0";
         let out = run_swap(&mut f);
         assert!(matches!(out, SwapOutcome::RollbackFailed { step: Step::Confirm, .. }), "{out:?}");
         assert_eq!(f.running, Some("new"), "the new app is opened rather than none");
+    }
+
+    /// Review 8C #2: a new app that will not stop is not swapped out from under itself.
+    #[test]
+    fn an_unstoppable_new_app_is_left_in_place_and_said_so() {
+        let mut f = Fake::new(Some(Step::Confirm));
+        f.unstoppable = true;
+        let out = run_swap(&mut f);
+        assert!(matches!(&out, SwapOutcome::RollbackFailed { step: Step::Confirm, undo, .. } if undo == NEW_APP_STILL_RUNS), "{out:?}");
+        assert_eq!(f.exchanges, 1, "no undo under a running app");
+        assert_eq!((f.target, f.staged, f.running), (Some("new"), Some("old"), Some("new")));
+        assert_eq!(f.launched, vec!["new"], "the old app is not opened beside it");
     }
 
     /// A fake folder for the three-rename exchange, failing at the nth rename.
