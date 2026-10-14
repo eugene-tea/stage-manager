@@ -115,14 +115,16 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 ## The ctl socket
 
 The running app listens on `$TMPDIR/stage-manager.sock` (or in `$STAGE_MANAGER_HOME`): one
-command per line, one line of JSON per reply. The same binary is the client. The socket is
-the user's only (`0600`), and the app serves every command only to its own binary: the same
-file, or one signed as it is (another copy of the bundle, signed with the same identity).
-Any other program, `target/debug/stage-manager` (ad hoc signed) included, gets `ping` and
-`settings` only:
+command per line, one line of JSON per reply. The running copy's own binary is the client.
+The socket is the user's only (`0600`), and the app serves every command only to code signed
+as it is, judged by the connection's audit token: its own binary, or another copy of the
+bundle signed with the same identity. Any other program, `target/debug/stage-manager` (ad
+hoc signed) included, gets `ping` and `settings` only, and the refusal names the binary that
+would be served. Use the binary of the copy that runs:
 
 ```sh
-B="target/Stage Manager.app/Contents/MacOS/stage-manager"
+B=stage-manager                                              # the Homebrew install (its symlink)
+B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # the dev app (make run)
 "$B" ctl state | jq '.stages'
 ```
 
@@ -171,7 +173,9 @@ menu. Day files are capped in size and kept 14 days.
   with the app's state and the last 30 seconds of detailed lines.
 
 Window titles go into the log, and into a mark's state dumps, as a short hash
-(`#1a2b3c4d`, the same for the same title in every process) unless `[log] titles = true`;
+(`#1a2b3c4d`, the same for the same title in every process on this Mac: it is keyed with a
+random key made once and kept owner-only in the config folder, `title-key`, so a guessed
+title cannot be confirmed from a log alone) unless `[log] titles = true`;
 lines name windows by id, pid and bundle id. `ctl dump` and `ctl state` still answer with
 titles. Logs still name your apps and your stages: never commit one.
 

@@ -24,9 +24,10 @@
 //! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
 //! never wider even for an instant) in a folder only the user can enter. Each connection's
 //! peer is checked before any command is served: another account is refused; every command
-//! needs the app's own binary (`LOCAL_PEERPID`: the same executable path; else
-//! `LOCAL_PEERTOKEN`: code signed as the app is, [`super::code_sign`]), as the `ctl` and
-//! `mark` clients, the guardian and the scripted checks are; any other process of the user
+//! needs the app's own code, judged by the peer's audit token (`LOCAL_PEERTOKEN`: code
+//! signed as the app is, [`super::code_sign`]; never by its pid or path, which a process that
+//! exits can hand to another), as the `ctl` and `mark` clients, the guardian and the scripted
+//! checks are when they run the app's binary; any other process of the user
 //! gets only `ping` and `settings` (a second copy's launch check and hand-off). That keeps a
 //! script or app without Accessibility from borrowing the app's; it is no wall against a
 //! process of the same user, which can run this binary as a client itself. Lines longer than
@@ -300,8 +301,8 @@ pub const MAX_LINE: usize = 64 * 1024;
 /// Who is on the other end of a connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Peer {
-    /// A process of this user running this very binary, or one signed as it is: every
-    /// command.
+    /// A process of this user running code signed as this app is (this very binary, or
+    /// another copy of the app): every command.
     Ours,
     /// Another process of this user: `ping` and `settings` only.
     SameUser,
@@ -310,21 +311,13 @@ pub enum Peer {
 }
 
 impl Peer {
-    /// Judges a peer from its user id and executable path against ours (`None`: unreadable);
-    /// `signed_like_us` (a code-signing check, asked only for another path) settles the rest.
-    pub fn judge(
-        peer_uid: Option<u32>,
-        own_uid: u32,
-        peer_exe: Option<&Path>,
-        own_exe: Option<&Path>,
-        signed_like_us: impl FnOnce() -> bool,
-    ) -> Self {
+    /// Judges a peer from its user id against ours (`None`: unreadable) and
+    /// `signed_like_us`, the code-signing check of its audit token (asked only of a process
+    /// of this user; false on any error).
+    pub fn judge(peer_uid: Option<u32>, own_uid: u32, signed_like_us: impl FnOnce() -> bool) -> Self {
         match peer_uid {
-            Some(uid) if uid == own_uid => match (peer_exe, own_exe) {
-                (Some(theirs), Some(ours)) if theirs == ours => Self::Ours,
-                _ if signed_like_us() => Self::Ours,
-                _ => Self::SameUser,
-            },
+            Some(uid) if uid == own_uid && signed_like_us() => Self::Ours,
+            Some(uid) if uid == own_uid => Self::SameUser,
             _ => Self::Stranger,
         }
     }
@@ -355,15 +348,16 @@ fn exe_of(pid: libc::pid_t) -> Option<PathBuf> {
     Some(std::fs::canonicalize(&path).unwrap_or(path))
 }
 
-/// This process's executable, read once (at [`serve`]) the way peers' are.
+/// This process's executable, read once the way peers' are: named in the refusal reply.
 fn own_exe() -> Option<&'static Path> {
     static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
     // SAFETY: getpid has no preconditions.
     OWN.get_or_init(|| exe_of(unsafe { libc::getpid() })).as_deref()
 }
 
-/// The connection's peer: its user (`getpeereid`), its executable (`LOCAL_PEERPID`) and,
-/// for another path, its code signature (`LOCAL_PEERTOKEN`).
+/// The connection's peer: its user (`getpeereid`) and its code signature, read through its
+/// audit token (`LOCAL_PEERTOKEN`); its pid (`LOCAL_PEERPID`) and executable only for the
+/// log.
 fn peer_of(stream: &UnixStream) -> (Peer, Option<libc::pid_t>, Option<PathBuf>) {
     let fd = stream.as_raw_fd();
     let (mut uid, mut gid) = (0, 0);
@@ -389,7 +383,7 @@ fn peer_of(stream: &UnixStream) -> (Peer, Option<libc::pid_t>, Option<PathBuf>) 
     };
     // SAFETY: getuid has no preconditions and cannot fail.
     let own_uid = unsafe { libc::getuid() };
-    (Peer::judge(uid, own_uid, exe.as_deref(), own_exe(), signed_like_us), pid, exe)
+    (Peer::judge(uid, own_uid, signed_like_us), pid, exe)
 }
 
 /// Binds the socket at `path` owner-only: created under a umask that leaves no window in
@@ -420,8 +414,8 @@ pub fn serve(handler: Handler) -> std::io::Result<()> {
         std::fs::remove_file(&path)?;
     }
     let listener = bind_private(&path)?;
-    if own_exe().is_none() {
-        tracing::warn!("ctl: cannot read this app's own path; clients are judged by their code signature alone");
+    if !super::code_sign::own_requirement_known() {
+        tracing::warn!("ctl: cannot read this app's own code signature; every client gets only ping and settings");
     }
     tracing::info!("ctl socket at {}", path.display());
     std::thread::Builder::new().name("ctl".into()).spawn(move || {
@@ -471,7 +465,7 @@ fn serve_connection(stream: UnixStream, handler: &Handler) {
                     let name = exe.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
                     tracing::warn!(?pid, program = ?name, "ctl: a command from a program that is not Stage Manager refused");
                 }
-                error_reply("only Stage Manager's own binary may send this command (ping and settings are open)")
+                error_reply(&refusal(own_exe()))
             }
             Ok(cmd) => {
                 tracing::debug!("ctl: {line}");
@@ -483,6 +477,17 @@ fn serve_connection(stream: UnixStream, handler: &Handler) {
             break;
         }
     }
+}
+
+/// The reply to a command refused to a program that is not the app: it names the binary
+/// that would be served (`own`, this process's), so a script can switch to it. Only ever sent
+/// to a process of the same user.
+fn refusal(own: Option<&Path>) -> String {
+    let use_this = match own {
+        Some(path) => format!("run \"{}\"", path.display()),
+        None => "run the running app's own binary".to_string(),
+    };
+    format!("only Stage Manager's own binary may send this command (ping and settings are open): {use_this} ctl …")
 }
 
 /// The next line (without its newline); `None` at the end of the stream (or a read error);
@@ -678,19 +683,12 @@ mod tests {
     }
 
     #[test]
-    fn only_our_own_binary_gets_more_than_ping_and_settings() {
-        let ours = Path::new("/Applications/Stage Manager.app/Contents/MacOS/stage-manager");
-        let copy = Path::new("/Users/someone/Downloads/Stage Manager.app/Contents/MacOS/stage-manager");
-        let other = Path::new("/usr/bin/python3");
-        let unsigned = || false;
-        let never_asked = || -> bool { panic!("the path settles it") };
-        assert_eq!(Peer::judge(Some(501), 501, Some(ours), Some(ours), never_asked), Peer::Ours);
-        assert_eq!(Peer::judge(Some(501), 501, Some(copy), Some(ours), || true), Peer::Ours, "another copy, signed as we are");
-        assert_eq!(Peer::judge(Some(501), 501, Some(other), Some(ours), unsigned), Peer::SameUser);
-        assert_eq!(Peer::judge(Some(501), 501, None, Some(ours), unsigned), Peer::SameUser, "a peer gone before it was read");
-        assert_eq!(Peer::judge(Some(501), 501, Some(ours), None, unsigned), Peer::SameUser, "our own path unknown");
-        assert_eq!(Peer::judge(Some(0), 501, Some(ours), Some(ours), || true), Peer::Stranger, "another account, root too");
-        assert_eq!(Peer::judge(None, 501, Some(ours), Some(ours), || true), Peer::Stranger);
+    fn only_our_own_code_gets_more_than_ping_and_settings() {
+        let never_asked = || -> bool { panic!("another account is never checked further") };
+        assert_eq!(Peer::judge(Some(501), 501, || true), Peer::Ours, "this binary or a copy signed as it is");
+        assert_eq!(Peer::judge(Some(501), 501, || false), Peer::SameUser, "signed otherwise, unsigned, or gone");
+        assert_eq!(Peer::judge(Some(0), 501, never_asked), Peer::Stranger, "another account, root too");
+        assert_eq!(Peer::judge(None, 501, never_asked), Peer::Stranger, "unreadable");
         for cmd in [Command::Ping, Command::Settings] {
             assert!(Peer::SameUser.may(&cmd) && Peer::Ours.may(&cmd) && !Peer::Stranger.may(&cmd));
         }
@@ -698,6 +696,15 @@ mod tests {
             assert!(!Peer::SameUser.may(&cmd), "{cmd:?}");
             assert!(Peer::Ours.may(&cmd), "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn a_refusal_names_the_binary_that_would_be_served() {
+        let ours = Path::new("/Applications/Stage Manager.app/Contents/MacOS/stage-manager");
+        let reply = refusal(Some(ours));
+        assert!(reply.contains("ping and settings are open"), "{reply}");
+        assert!(reply.contains("run \"/Applications/Stage Manager.app/Contents/MacOS/stage-manager\" ctl"), "{reply}");
+        assert!(refusal(None).contains("the running app's own binary"));
     }
 
     #[test]

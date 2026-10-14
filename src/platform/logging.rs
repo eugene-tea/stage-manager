@@ -5,7 +5,8 @@
 //! - **Level:** `[log] level` (default `info`: the main events; `debug` adds every decision
 //!   the app makes), live on config reload; `RUST_LOG` overrides it.
 //! - **Titles:** window titles are written as a short hash unless `[log] titles` is on
-//!   ([`title`], [`crate::logbook::titles`]); a problem mark's state dumps the same.
+//!   ([`title`], [`crate::logbook::titles`]); a problem mark's state dumps the same. The
+//!   hash's key is this install's, kept owner-only in the config folder ([`title_key`]).
 //! - **Ring:** the last [`RING_KEEP`] of lines at `trace` stay in memory for a problem mark
 //!   ([`write_mark`]), whatever the file's level.
 //! - **Limits:** a day's file past `[log] max_mb_per_day` takes only warnings, errors, marks
@@ -174,6 +175,7 @@ pub fn init(process: Process) {
         return;
     }
     let _ = tracing_subscriber::registry().with(BookLayer).try_init();
+    title_key();
     if env.is_some() && env_filter.is_none() {
         tracing::warn!("RUST_LOG={env:?} is not a list of target=level directives; using [log] level");
     }
@@ -188,6 +190,24 @@ pub fn init(process: Process) {
         );
         prune(now().date);
         spawn_ticker();
+    }
+}
+
+/// Hands the title hash this install's key (made the first time, [`crate::logbook::titles::KEY_FILE`]
+/// in the config folder), so every process hashes a title the same way. Without it (the
+/// folder unwritable) the hashes hold within this process only.
+fn title_key() {
+    let random = || {
+        let mut key = [0u8; 16];
+        // SAFETY: `key` is writable for its length; arc4random_buf cannot fail.
+        unsafe { libc::arc4random_buf(key.as_mut_ptr().cast(), key.len()) };
+        key
+    };
+    match crate::logbook::titles::load_or_create_key(&paths::config_dir(), random) {
+        Ok(key) => {
+            crate::logbook::titles::set_key(key);
+        }
+        Err(e) => tracing::warn!("log: cannot read or keep the title hash's key ({e}); titles hash differently in each process"),
     }
 }
 

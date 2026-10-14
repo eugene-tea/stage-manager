@@ -9,15 +9,17 @@
 //!
 //! The callback only does rectangle tests on what the WM thread publishes, read with a
 //! `try_lock`, never waiting: the corner zones and the parked windows ([`publish`]), and the
-//! on-screen windows near the zones, read every WM tick ([`refresh`], [`Seen`]). A press
+//! on-screen windows near the zones, from the list the WM tick reads ([`refresh`], [`Seen`]). A press
 //! outside every zone (nearly all) passes after a few rectangle tests; one inside a zone is
 //! judged on the published list while it is fresh, and passes when it is not (the WM thread
 //! busy). Nothing in the callback asks the window server or writes the log: what it decided
 //! is noted in memory and logged by the WM thread at its next tick. A swallowed press
 //! swallows its drags and its release ([`PressGate`]). A tap macOS switched off for a
 //! timeout is switched on again at once; one switched off by user input (secure input, a
-//! password field) stays off for the rest of the run: slivers are pressable again, the safe
-//! way to fail. A window not parked that covers a whole zone takes every press there (the
+//! password field) stays off while secure input is on: slivers are pressable meanwhile, the
+//! safe way to fail. The WM tick asks macOS whether secure input is still on
+//! (`IsSecureEventInputEnabled`) and switches the tap on again once it is not
+//! ([`back_on`]). A window not parked that covers a whole zone takes every press there (the
 //! tap passes them); if it lets clicks through (an overlay), the slivers under it stay
 //! pressable: noted in the log once ([`zone_owner`]).
 
@@ -25,14 +27,14 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 
-use super::windows;
+use super::windows::CgWindow;
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::sliver::{Button, Listed, Press, PressGate, Seen, Shield, near_zones, zone_owner};
 
@@ -43,7 +45,8 @@ static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
 /// Most notes kept between two WM ticks.
 const NOTES_MAX: usize = 64;
-/// macOS switched the tap off for user input: it stays off (noted once).
+/// macOS switched the tap off for user input: it stays off until secure input ends (noted
+/// once each time).
 static OFF_BY_INPUT: AtomicBool = AtomicBool::new(false);
 /// Only the tap thread uses it.
 static GATE: Mutex<PressGate> = Mutex::new(PressGate::new());
@@ -147,8 +150,20 @@ fn press_of(t: CGEventType) -> Option<Press> {
 }
 
 /// The window server's on-screen windows, front to back, as the hit test needs them.
-fn listed() -> Vec<Listed> {
-    windows::on_screen().into_iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect()
+fn listed(list: &[CgWindow]) -> Vec<Listed> {
+    list.iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect()
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    /// Whether some process has secure event input on (a password field): public HIToolbox.
+    fn IsSecureEventInputEnabled() -> u8;
+}
+
+/// Whether secure event input is on now.
+fn secure_input_on() -> bool {
+    // SAFETY: no arguments; callable from any thread.
+    unsafe { IsSecureEventInputEnabled() != 0 }
 }
 
 /// What the callback decided, logged later by the WM thread.
@@ -164,7 +179,7 @@ enum Note {
     ZoneOwner { owner: Listed, zone: Rect },
     /// macOS switched the tap off for a timeout; it is on again.
     OnAgain,
-    /// macOS switched the tap off for user input; it stays off.
+    /// macOS switched the tap off for user input; it stays off while secure input is on.
     OffByInput,
 }
 
@@ -184,17 +199,62 @@ fn on_again_after(kind: CGEventType) -> bool {
     kind == CGEventType::TapDisabledByTimeout
 }
 
-/// From the WM thread's tick: reads the on-screen windows near the zones for the callback
-/// (only while the shield is on, a window is parked and the tap runs), then logs what the
-/// callback noted since the last tick.
-pub fn refresh() {
-    let zones = match SHIELD.lock() {
+/// The corner zones while the callback judges presses on a window list: the shield is on, a
+/// window is parked and the tap runs.
+fn judged_zones() -> Option<Vec<Rect>> {
+    if !STARTED.load(Ordering::SeqCst) {
+        return None;
+    }
+    match SHIELD.lock() {
         Ok(s) => s.as_ref().filter(|s| s.on && !s.parked.is_empty()).map(|s| s.zones.clone()),
         Err(_) => None,
-    };
-    let seen = zones.filter(|_| STARTED.load(Ordering::SeqCst)).map(|zones| Seen { at: Instant::now(), windows: near_zones(listed(), &zones) });
+    }
+}
+
+/// Whether [`refresh`] needs the window server's on-screen list this tick.
+pub fn wants_list() -> bool {
+    judged_zones().is_some()
+}
+
+/// The least time between two switches on after user input: should macOS keep switching the
+/// tap off without secure input on, the log takes a line every few seconds, not every tick.
+const BACK_ON_EVERY: Duration = Duration::from_secs(5);
+
+/// When the WM tick last switched the tap on after user input.
+static BACK_ON_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Whether a tap macOS switched off for user input goes on again: once secure input is off,
+/// and not sooner than [`BACK_ON_EVERY`] after the last time.
+fn back_on(off_by_input: bool, last: Option<Instant>, now: Instant, secure_input: impl FnOnce() -> bool) -> bool {
+    off_by_input && last.is_none_or(|t| now.saturating_duration_since(t) >= BACK_ON_EVERY) && !secure_input()
+}
+
+/// From the WM thread's tick: hands the callback the on-screen windows near the zones from
+/// `list`, the tick's own read of the window server's list (`None` when [`wants_list`] said
+/// no: the callback then passes presses unjudged), switches a tap that macOS switched off for
+/// user input on again once secure input is over, then logs what the callback noted since the
+/// last tick.
+pub fn refresh(list: Option<&[CgWindow]>) {
+    let seen = judged_zones()
+        .zip(list)
+        .map(|(zones, list)| Seen { at: Instant::now(), windows: near_zones(listed(list), &zones) });
     if let Ok(mut s) = SEEN.lock() {
         *s = seen;
+    }
+    let now = Instant::now();
+    let last = BACK_ON_AT.lock().map(|t| *t).unwrap_or(None);
+    if back_on(OFF_BY_INPUT.load(Ordering::Relaxed), last, now, secure_input_on) {
+        let port = PORT.load(Ordering::SeqCst);
+        // SAFETY: the port is kept alive by the tap thread while its run loop runs (stored
+        // before it starts, cleared after it ends; it runs for the life of the process).
+        if let Some(port) = unsafe { port.as_ref() } {
+            CGEvent::tap_enable(port, true);
+            OFF_BY_INPUT.store(false, Ordering::Relaxed);
+            if let Ok(mut t) = BACK_ON_AT.lock() {
+                *t = Some(now);
+            }
+            tracing::info!("inert slivers: secure input is over; the event tap is on again");
+        }
     }
     let notes = NOTES.lock().map(|mut n| std::mem::take(&mut *n)).unwrap_or_default();
     for n in notes {
@@ -216,7 +276,7 @@ fn log_note(n: Note) {
         ),
         Note::OnAgain => tracing::debug!("inert slivers: the tap was switched off by macOS (a timeout); on again"),
         Note::OffByInput => tracing::info!(
-            "inert slivers: macOS switched the tap off for user input (secure input); it stays off, parked windows' edges are pressable until the next launch"
+            "inert slivers: macOS switched the tap off for user input (secure input); parked windows' edges are pressable until secure input is over"
         ),
     }
 }
@@ -317,6 +377,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tap_off_for_user_input_comes_back_once_secure_input_is_over() {
+        let now = Instant::now();
+        assert!(back_on(true, None, now, || false), "off for input, secure input over: on again");
+        assert!(!back_on(true, None, now, || true), "secure input still on: stays off");
+        let never_asked = || -> bool { panic!("not asked") };
+        assert!(!back_on(false, None, now, never_asked), "a tap not off for input");
+        let just = now.checked_sub(Duration::from_secs(1));
+        assert!(!back_on(true, just, now, never_asked), "switched on a moment ago: waits");
+        let a_while = now.checked_sub(BACK_ON_EVERY);
+        assert!(back_on(true, a_while, now, || false) || a_while.is_none(), "after the wait, on again");
+    }
+
+    #[test]
     fn notes_are_bounded_and_never_wait() {
         let before = NOTES.lock().map(|n| n.len()).unwrap_or(0);
         for _ in 0..(NOTES_MAX + 10) {
@@ -357,7 +430,7 @@ mod tests {
         let rounds = 50;
         let mut count = 0;
         for _ in 0..rounds {
-            count += listed().len();
+            count += listed(&super::super::windows::on_screen()).len();
         }
         let list_us = started.elapsed().as_micros() / rounds;
         println!("cheap test: {cheap_ns} ns a press ({hits} in zone); window list: {list_us} µs a read ({} windows)", count / rounds as usize);
