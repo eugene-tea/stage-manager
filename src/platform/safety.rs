@@ -629,7 +629,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
 /// waits a bounded moment for its unpark ([`abort_wait`]: atomics and `nanosleep` only),
 /// then finishes the abort; the guardian takes over at the exit.
 extern "C" fn on_abort(sig: libc::c_int) {
-    if !ABORTING.swap(true, Ordering::SeqCst) {
+    if !ABORTING.swap(true, Ordering::SeqCst) && waits_for_watcher(SIGNAL_PIPE.load(Ordering::SeqCst)) {
         on_signal(sig);
         abort_wait(|| ABORT_UNPARKED.load(Ordering::SeqCst), ABORT_WAIT, ABORT_STEP, nanosleep);
     }
@@ -639,6 +639,13 @@ extern "C" fn on_abort(sig: libc::c_int) {
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);
     }
+}
+
+/// Whether an abort waits for the signal watcher: only when it runs (`pipe`, the watcher's
+/// self-pipe, is set once it started and cleared if it stops; the review of 8A, L3).
+/// Otherwise nothing would set the flag the handler waits for.
+fn waits_for_watcher(pipe: libc::c_int) -> bool {
+    pipe >= 0
 }
 
 /// Waits until `done` or `max` has passed, in `step`s through `sleep` (counted, never a
@@ -701,7 +708,6 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
         libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
         libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
-    SIGNAL_PIPE.store(write_fd, Ordering::SeqCst);
     std::thread::Builder::new().name("signals".into()).spawn(move || {
         loop {
             let mut byte = 0u8;
@@ -718,7 +724,12 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
                 break;
             }
         }
+        // No watcher from here on: an abort no longer waits for one.
+        SIGNAL_PIPE.store(-1, Ordering::SeqCst);
+        tracing::warn!("the signal watcher stopped");
     })?;
+    // Set once the watcher runs ([`waits_for_watcher`]).
+    SIGNAL_PIPE.store(write_fd, Ordering::SeqCst);
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         install_handler(sig, on_signal)?;
     }
@@ -1032,6 +1043,13 @@ mod tests {
         .join();
         std::panic::set_hook(prev);
         assert_eq!(joined.ok(), Some((Some(true), None, false)));
+    }
+
+    /// The review of 8A, L3: no watcher, no wait.
+    #[test]
+    fn an_abort_waits_only_for_a_running_watcher() {
+        assert!(!waits_for_watcher(-1), "never started, or stopped");
+        assert!(waits_for_watcher(7));
     }
 
     /// Fable M3: the abort handler's wait is bounded, whether the watcher answers or not.

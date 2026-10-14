@@ -114,7 +114,8 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 
 ## The ctl socket
 
-The running app listens on `$TMPDIR/stage-manager.sock` (or in `$STAGE_MANAGER_HOME`): one
+The running app listens on `~/.config/stage-manager/stage-manager.sock` (or in
+`$STAGE_MANAGER_HOME`; up to 1.1.0 it was `$TMPDIR/stage-manager.sock`): one
 command per line, one line of JSON per reply. The same binary is the client:
 
 ```sh

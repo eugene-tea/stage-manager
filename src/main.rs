@@ -147,6 +147,10 @@ mod app {
 
     static QUITTING: AtomicBool = AtomicBool::new(false);
 
+    /// When this run started: `ping` says how long ago, so a launch handing off at login does
+    /// not open the Settings ([`instance::shows_settings`]).
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+
     struct App {
         menu: StatusMenu,
         wm: WmHandle,
@@ -400,6 +404,9 @@ mod app {
                 "pong": true,
                 "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
+                // A launch during a quit waits for it instead of handing off (the review of 8A, M1).
+                "quitting": QUITTING.load(Ordering::SeqCst),
+                "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
                 "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
             Command::Settings => {
@@ -586,6 +593,7 @@ mod app {
 
     /// Runs the menu bar app until Quit.
     pub fn run() -> ExitCode {
+        let _ = STARTED.set(Instant::now());
         logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");

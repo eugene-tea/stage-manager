@@ -94,12 +94,16 @@ back (AX reads it outside the park zone, or the window server lists it on screen
 in settled passes a second apart: a sliding Space can list in-between frames) or gone (not
 listed on any Space for 3 s), or adopted by Stage Manager running again (`ctl adopted`: in
 its model). It never exits while one waits; a new Stage Manager does not end the watch by
-itself running.
+itself running. The guardian and the new app moving the same window at once is benign: the
+guardian only ever moves a window out of the park zone, never into it, so the worst case is a
+window shown that the new app meant to keep parked (until its next switch), never one left
+parked; and it lets go of each window at its next pass once the new app reports it adopted.
 
 ## Testing hooks
 
 - `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).
-- **ctl socket** (`$TMPDIR/stage-manager.sock`, line protocol): `switch N`, `send N`, `new`,
+- **ctl socket** (`~/.config/stage-manager/stage-manager.sock`, line protocol; not
+  `$TMPDIR`, which macOS prunes, like the single-instance lock beside it): `switch N`, `send N`, `new`,
   `pin`, `dump` (with a `spaces` section), `unpark-all`. The `stage-manager ctl ...` subcommand talks to it. This lets
   milestones be checked by script, not just by hand.
 - `STAGE_MANAGER_ONLY=<bundle ids>` limits management to listed apps, so automated runs touch

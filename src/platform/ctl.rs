@@ -363,7 +363,13 @@ pub fn remove_socket() {
 
 /// Sends one request line and returns the reply line.
 pub fn request(line: &str, timeout: Duration) -> std::io::Result<String> {
-    let mut stream = UnixStream::connect(paths::socket_path())?;
+    request_at(&paths::socket_path(), line, timeout)
+}
+
+/// [`request`] on the socket at `path` (the single-instance claim also asks at an earlier
+/// version's place, [`paths::legacy_socket_path`]).
+pub fn request_at(path: &std::path::Path, line: &str, timeout: Duration) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     writeln!(stream, "{line}")?;
