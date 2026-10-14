@@ -63,6 +63,9 @@ anywhere outside this conversation.
 - `"$B" log summary` (or `log summary yesterday`) gives the day's counts, warnings and
   errors, short enough to read whole; `"$B" log path` prints today's file.
 - Config problems appear as `config: …` lines.
+- The default `[log] level = "info"` keeps the main events; `"debug"` keeps every decision.
+  Window titles appear as `#` and eight hex digits (a hash) unless `[log] titles = true`;
+  turn either on only while debugging, with the user's agreement, and back off after.
 
 ## Settings that are not in the file
 

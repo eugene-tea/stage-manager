@@ -17,6 +17,7 @@ cask "stage-manager" do
 
   auto_updates true
   depends_on macos: :sonoma
+  depends_on arch: :arm64
 
   app "Stage Manager.app"
   binary "#{appdir}/Stage Manager.app/Contents/MacOS/stage-manager"

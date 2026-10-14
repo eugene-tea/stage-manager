@@ -7,6 +7,8 @@
 //! - `stage-manager log summary [DATE]` prints a day's counts, marks, warnings and errors;
 //!   `log path [DATE]` prints its file.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
+//! - `stage-manager --update-helper <pid> <app> <staged> <version> <requirement>` installs a
+//!   verified update once the app at `pid` has quit (the app starts it; `platform::updater`).
 //! - `stage-manager config check [file] | --print-defaults | --explain <section.key> |
 //!   --reference` validates a file (errors with line numbers), prints the commented default
 //!   config, explains a key, or prints the configuration table of `docs/CONFIG.md`.
@@ -50,6 +52,8 @@ fn main() -> ExitCode {
         }
         #[cfg(target_os = "macos")]
         Some("--guardian") => stage_manager::platform::guardian::run(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("--update-helper") => stage_manager::platform::updater::run_helper(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-windows") => app::probe_windows(&args[2..]),
         #[cfg(target_os = "macos")]
@@ -102,6 +106,7 @@ mod app {
     use stage_manager::platform::ctl::{self, Command};
     use stage_manager::platform::desktop;
     use stage_manager::platform::input::{self, InputKind, InputMonitor};
+    use stage_manager::platform::instance::{self, Launch};
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
@@ -145,6 +150,10 @@ mod app {
     const TEST_ENV: &str = "STAGE_MANAGER_TEST";
 
     static QUITTING: AtomicBool = AtomicBool::new(false);
+
+    /// When this run started: `ping` says how long ago, so a launch handing off at login does
+    /// not open the Settings ([`instance::shows_settings`]).
+    static STARTED: OnceLock<Instant> = OnceLock::new();
 
     struct App {
         menu: StatusMenu,
@@ -287,7 +296,8 @@ mod app {
                     // Off the main thread: the dumps come from the WM thread.
                     let wm = self.wm.clone();
                     let spawned = std::thread::Builder::new().name("mark".into()).spawn(move || {
-                        let reply = mark_problem(&wm, "");
+                        // A panic writing the mark must not take the app down (Fable M2).
+                        let Some(reply) = safety::guarded("a problem mark", || mark_problem(&wm, "")) else { return };
                         let at = reply["at"].as_str().map(str::to_string);
                         DispatchQueue::main().exec_async(move || {
                             with_app(|app| {
@@ -364,6 +374,8 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        // An update ready to install: its helper waits for this process to exit (8C).
+        stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the
         // counts, so the captures it waits for are in them.
         capture::quiesce(CAPTURE_QUIESCE);
@@ -377,11 +389,11 @@ mod app {
 
     /// Writes a problem mark: the note, `ctl state` and `ctl dump` (each, or that the WM
     /// thread did not answer: a hung WM thread is worth marking too) and the recent detailed
-    /// lines. Runs off the main thread.
+    /// lines, window titles hashed unless `[log] titles` is on. Runs off the main thread.
     fn mark_problem(wm: &WmHandle, note: &str) -> serde_json::Value {
         let ask = |cmd: Command| {
             wm.ctl(cmd, MARK_DUMP_WAIT)
-                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                .map(logging::mark_section)
                 .unwrap_or_else(|| "the WM thread did not answer".to_string())
         };
         let sections = [("state", ask(Command::State)), ("dump", ask(Command::Dump))];
@@ -398,6 +410,9 @@ mod app {
                 "pong": true,
                 "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
+                // A launch during a quit waits for it instead of handing off (the review of 8A, M1).
+                "quitting": QUITTING.load(Ordering::SeqCst),
+                "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
                 "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
             Command::Settings => {
@@ -428,6 +443,18 @@ mod app {
                 // The menu's path: the action runs while the app state is borrowed.
                 DispatchQueue::main().exec_async(|| with_app(|app| app.on_menu(MenuAction::Quit)));
                 json!({ "ok": true, "quitting": true })
+            }
+            Command::DebugUpdate => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-update needs STAGE_MANAGER_TEST=1");
+                }
+                #[cfg(feature = "update-test")]
+                {
+                    DispatchQueue::main().exec_async(stage_manager::ui::shell::debug_install);
+                    json!({ "ok": true, "checking": true })
+                }
+                #[cfg(not(feature = "update-test"))]
+                ctl::error_reply("debug-update needs a build with the update-test feature")
             }
             Command::DebugPanic => {
                 if std::env::var_os(TEST_ENV).is_none() {
@@ -584,6 +611,7 @@ mod app {
 
     /// Runs the menu bar app until Quit.
     pub fn run() -> ExitCode {
+        let _ = STARTED.set(Instant::now());
         logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
@@ -595,16 +623,20 @@ mod app {
             return ExitCode::FAILURE;
         };
 
-        // A generous wait: a running app slow to answer must not get a second manager
-        // beside it (no app running answers "refused" at once).
-        if ctl::request("ping", Duration::from_secs(2)).is_ok() {
-            // Opened again (`open -n`, a terminal): the running one shows its Settings, the
-            // way back when the menu bar icon is hidden. (A Finder or Spotlight launch never
-            // gets here: macOS hands it to the running app as a reopen.)
-            let shown = ctl::request("settings", Duration::from_secs(2)).is_ok();
-            tracing::info!(shown, "Stage Manager is already running; asked it to show Settings");
-            return ExitCode::SUCCESS;
+        // One copy at a time, claimed before the WM thread, the guardian or any observer
+        // starts (Fable M1, Grok High 1): the lock, a copy answering, then the socket bound.
+        match instance::claim() {
+            Launch::Manage => {}
+            Launch::HandOff | Launch::Wait => return ExitCode::SUCCESS,
+            Launch::Leave => return ExitCode::FAILURE,
         }
+        let listener = match ctl::bind() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("cannot own the ctl socket ({e}); not managing windows beside another copy");
+                return ExitCode::FAILURE;
+            }
+        };
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -686,7 +718,7 @@ mod app {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
 
-        if let Err(e) = ctl::serve(ctl_handler(wm.clone())) {
+        if let Err(e) = ctl::serve(listener, ctl_handler(wm.clone())) {
             tracing::error!("ctl socket unavailable: {e}");
         }
 
@@ -723,6 +755,7 @@ mod app {
             set_menu_icon: |visible| with_app(|app| app.menu.set_visible(visible)),
             refresh_menu: || with_app(|app| app.refresh_menu()),
             poll_now: || with_app(App::poll),
+            quit,
         };
         let raw = native_settings::current();
         shell::install(mtm, wm.clone(), hooks, permissions, raw);

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.0 — 2026-10-13
+
+- Automatic updates: Stage Manager downloads a new version from GitHub, checks that it is
+  signed by its developer and notarized by Apple, brings your windows back, replaces itself
+  and relaunches. It asks first; Settings can make it install on its own.
+- Only one copy manages your windows; launching it again opens the running copy's Settings.
+- Safer quits and crashes: a crash can no longer leave the app hanging with windows in the
+  corner, a busy app no longer slows switching, and the saved stages are never lost to a
+  failed save.
+- Privacy: the log no longer records window titles (only a short code), and Stage Manager's
+  files are readable by you only.
+- The clean corner stays inert after you type a password.
+- Apple silicon Macs only (said on the page and in Homebrew).
+
 ## 1.1.0 — 2026-10-13
 
 - Desktops keep their stages across restarts, and when you move windows between Desktops.

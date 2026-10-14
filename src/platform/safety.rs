@@ -7,7 +7,8 @@
 //! 3. **Panic hook**: outside the WM thread's guarded sections a panic unparks from the
 //!    registry (`try_lock`; a recovery scan when it is busy) and exits.
 //! 4. **Signals**: SIGTERM, SIGINT and SIGHUP go through a self-pipe to a watcher thread that
-//!    quits cleanly; SIGABRT gets a best-effort unpark in the handler itself.
+//!    quits cleanly; SIGABRT wakes the watcher for a short best-effort unpark, the handler
+//!    itself doing only async-signal-safe things (a write, atomics, a bounded sleep).
 //! 5. **Guardian** ([`super::guardian`]): `stage-manager --guardian <pid>`, spawned at launch,
 //!    runs the recovery scan when the app dies without its clean-exit marker, then waits for
 //!    every window still parked on a Space not shown and brings each back once its Space
@@ -252,7 +253,8 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
 static PARKED_WRITTEN: Mutex<Option<ParkedFile>> = Mutex::new(None);
 
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
-/// main display's visible frame, written atomically; removed when the registry is empty.
+/// main display's visible frame, written atomically and flushed to disk before the rename
+/// ([`super::durable`]); removed when the registry is empty.
 fn write_parked_file(listed: &[Registered]) {
     let hidden = hidden_now();
     let empty = listed.is_empty() && hidden.is_empty();
@@ -268,11 +270,9 @@ fn write_parked_file(listed: &[Registered]) {
             _ => Ok(()),
         }
     } else {
-        let tmp = path.with_extension("json.tmp");
         serde_json::to_vec(&file)
             .map_err(std::io::Error::other)
-            .and_then(|bytes| std::fs::write(&tmp, bytes))
-            .and_then(|()| std::fs::rename(&tmp, &path))
+            .and_then(|bytes| super::durable::replace(&path, &bytes, super::durable::Flush::Fast))
     };
     match result {
         Ok(()) => *written = Some(file),
@@ -604,6 +604,14 @@ pub fn install_panic_hook() {
 
 static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
 static ABORTING: AtomicBool = AtomicBool::new(false);
+/// Set by the signal watcher once its unpark for an abort is done.
+static ABORT_UNPARKED: AtomicBool = AtomicBool::new(false);
+
+/// How long the SIGABRT handler waits for the signal watcher's unpark before it lets the
+/// abort finish (the guardian covers whatever is left).
+const ABORT_WAIT: Duration = Duration::from_millis(1500);
+/// The handler's wait step.
+const ABORT_STEP: Duration = Duration::from_millis(10);
 
 extern "C" fn on_signal(sig: libc::c_int) {
     let fd = SIGNAL_PIPE.load(Ordering::Relaxed);
@@ -614,18 +622,59 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
+/// SIGABRT (a double panic, a C abort): async-signal-safe only (Fable M3, Grok High 3). It
+/// never locks, allocates, logs or calls Accessibility, which could deadlock on a lock the
+/// aborting thread holds and keep a dying process alive (answering `ping`, blocking every
+/// relaunch, the guardian never woken). It wakes the signal watcher through the self-pipe,
+/// waits a bounded moment for its unpark ([`abort_wait`]: atomics and `nanosleep` only),
+/// then finishes the abort; the guardian takes over at the exit.
 extern "C" fn on_abort(sig: libc::c_int) {
-    if !ABORTING.swap(true, Ordering::SeqCst) {
-        // Best effort only: not async-signal-safe, but the process is dying anyway and the
-        // guardian covers whatever this misses.
-        let _ = unpark_registry(Duration::from_millis(100), Duration::ZERO);
+    if !ABORTING.swap(true, Ordering::SeqCst) && waits_for_watcher(SIGNAL_PIPE.load(Ordering::SeqCst)) {
+        on_signal(sig);
+        abort_wait(|| ABORT_UNPARKED.load(Ordering::SeqCst), ABORT_WAIT, ABORT_STEP, nanosleep);
     }
     // SAFETY: restoring the default action and re-raising is the documented way to finish
-    // an abort from a handler.
+    // an abort from a handler; both are async-signal-safe.
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);
     }
+}
+
+/// Whether an abort waits for the signal watcher: only when it runs (`pipe`, the watcher's
+/// self-pipe, is set once it started and cleared if it stops; the review of 8A, L3).
+/// Otherwise nothing would set the flag the handler waits for.
+fn waits_for_watcher(pipe: libc::c_int) -> bool {
+    pipe >= 0
+}
+
+/// Waits until `done` or `max` has passed, in `step`s through `sleep` (counted, never a
+/// clock read: what a signal handler may do). True when `done`.
+fn abort_wait(done: impl Fn() -> bool, max: Duration, step: Duration, mut sleep: impl FnMut(Duration)) -> bool {
+    let steps = (max.as_nanos() / step.as_nanos().max(1)).max(1);
+    for _ in 0..steps {
+        if done() {
+            return true;
+        }
+        sleep(step);
+    }
+    done()
+}
+
+/// `nanosleep(2)`, which is async-signal-safe (`std::thread::sleep` makes no such promise).
+fn nanosleep(d: Duration) {
+    let ts = libc::timespec { tv_sec: d.as_secs() as libc::time_t, tv_nsec: libc::c_long::from(d.subsec_nanos() as i32) };
+    // SAFETY: a valid timespec; the remainder is not wanted.
+    unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
+}
+
+/// The signal watcher's side of an abort (an ordinary thread, so it may lock and log): the
+/// registry's best-effort unpark, a short one; then the handler may finish the abort. A lock
+/// held by the aborting thread only makes this wait out the handler's bound.
+fn unpark_for_abort() {
+    let r = unpark_registry(Duration::from_millis(100), Duration::ZERO);
+    ABORT_UNPARKED.store(true, Ordering::SeqCst);
+    tracing::error!(restored = r.map(|r| r.restored), failed = r.map(|r| r.failed), "SIGABRT: the registry unparked from the signal watcher; the guardian covers the rest");
 }
 
 fn install_handler(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> std::io::Result<()> {
@@ -644,7 +693,8 @@ fn install_handler(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) -> std
 }
 
 /// Routes SIGTERM, SIGINT and SIGHUP through a self-pipe to a watcher thread that calls
-/// `on_quit(signal)`; installs the best-effort SIGABRT handler.
+/// `on_quit(signal)`; SIGABRT goes through the same pipe to the watcher's short unpark while
+/// the handler waits a bounded moment ([`on_abort`]).
 pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<()> {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: `fds` has room for the two descriptors.
@@ -658,13 +708,14 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
         libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
         libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
-    SIGNAL_PIPE.store(write_fd, Ordering::SeqCst);
     std::thread::Builder::new().name("signals".into()).spawn(move || {
         loop {
             let mut byte = 0u8;
             // SAFETY: reading one byte into a valid buffer.
             let n = unsafe { libc::read(read_fd, (&mut byte as *mut u8).cast(), 1) };
-            if n == 1 {
+            if n == 1 && i32::from(byte) == libc::SIGABRT {
+                unpark_for_abort();
+            } else if n == 1 {
                 tracing::info!(signal = byte, "signal received; quitting");
                 on_quit(i32::from(byte));
             } else if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
@@ -673,7 +724,12 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
                 break;
             }
         }
+        // No watcher from here on: an abort no longer waits for one.
+        SIGNAL_PIPE.store(-1, Ordering::SeqCst);
+        tracing::warn!("the signal watcher stopped");
     })?;
+    // Set once the watcher runs ([`waits_for_watcher`]).
+    SIGNAL_PIPE.store(write_fd, Ordering::SeqCst);
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         install_handler(sig, on_signal)?;
     }
@@ -760,11 +816,12 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
             if w.role().ok().as_deref() != Some(names::ROLE_WINDOW) {
                 continue;
             }
-            if !scope.skip.is_empty() && w.window_id().is_ok_and(|id| scope.skip.contains(&id)) {
+            let id = w.window_id().ok();
+            if id.is_some_and(|id| scope.skip.contains(&id)) {
                 continue;
             }
             let Ok(frame) = w.frame() else { continue };
-            live.push(LiveWindow { bundle_id: bundle.clone().unwrap_or_default(), title: w.title().unwrap_or_default(), frame });
+            live.push(LiveWindow { id, bundle_id: bundle.clone().unwrap_or_default(), title: w.title().unwrap_or_default(), frame });
             elements.push(w);
         }
     }
@@ -792,11 +849,14 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
     (report, unanswered)
 }
 
-/// `state.json`, when it can be read.
+/// `state.json`, when it can be read; its window ids only when it was written in this
+/// window server session ([`StateFile::for_session`]: after a reboot or a new login an id
+/// names another window), so the scans match by id first only when the id still means
+/// the same window.
 fn read_state(what: &str) -> Option<StateFile> {
     let text = std::fs::read_to_string(paths::state_file()).ok()?;
     match StateFile::from_json(&text) {
-        Ok(s) => Some(s),
+        Ok(s) => Some(s.for_session(super::session::window_session()).0),
         Err(e) => {
             tracing::warn!("{what}: {e}");
             None
@@ -917,7 +977,7 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         };
         // The title only matters for a state.json match (no registry frame).
         let title = if entry.is_none() { element.title().unwrap_or_default() } else { String::new() };
-        let live = LiveWindow { bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
+        let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
         let (frame, source) = leftovers::leftover_frame(entry.as_ref().map(|e| e.restore), &live, state, &displays);
         let known = ours.known(w.id, bundle.as_deref());
         let mut result = set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now()));
@@ -967,6 +1027,47 @@ mod tests {
         std::panic::set_hook(prev);
         assert_eq!(r, None);
         assert!(!GUARDED.with(Cell::get), "flag reset after a panic");
+    }
+
+    /// Fable M2: a helper thread's body runs guarded, so its panic is caught on that thread
+    /// (the panic hook neither unparks nor exits) and the feature degrades instead.
+    #[test]
+    fn a_guarded_thread_survives_its_panic() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let joined = std::thread::spawn(|| {
+            let inside = guarded("a helper", || GUARDED.with(Cell::get));
+            let after = guarded("a helper", || -> u32 { panic!("boom") });
+            (inside, after, GUARDED.with(Cell::get))
+        })
+        .join();
+        std::panic::set_hook(prev);
+        assert_eq!(joined.ok(), Some((Some(true), None, false)));
+    }
+
+    /// The review of 8A, L3: no watcher, no wait.
+    #[test]
+    fn an_abort_waits_only_for_a_running_watcher() {
+        assert!(!waits_for_watcher(-1), "never started, or stopped");
+        assert!(waits_for_watcher(7));
+    }
+
+    /// Fable M3: the abort handler's wait is bounded, whether the watcher answers or not.
+    #[test]
+    fn the_abort_wait_is_bounded() {
+        let slept = std::cell::Cell::new(Duration::ZERO);
+        let sleep = |d: Duration| slept.set(slept.get() + d);
+        assert!(!abort_wait(|| false, ABORT_WAIT, ABORT_STEP, sleep), "never done: gives up");
+        assert_eq!(slept.get(), ABORT_WAIT, "after the bound, not later");
+        slept.set(Duration::ZERO);
+        let calls = std::cell::Cell::new(0);
+        let done = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 3
+        };
+        assert!(abort_wait(done, ABORT_WAIT, ABORT_STEP, sleep));
+        assert_eq!(slept.get(), ABORT_STEP * 3, "returns as soon as the unpark is done");
+        nanosleep(Duration::from_millis(1));
     }
 
     #[test]

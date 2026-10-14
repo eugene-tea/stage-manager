@@ -14,9 +14,15 @@
 //!    window server lists it on screen (the user went there): looked at every [`POLL`],
 //!    retried while it stays shown. Every change in how a waiting window looks is logged,
 //!    and why each one is let go.
-//! 3. It never exits while a window still waits, unless Stage Manager runs again (the new
-//!    app owns every window then) or it is told to stop (SIGTERM, SIGINT, SIGHUP: one last
-//!    scan first). A panic inside a pass is logged and the watch goes on.
+//! 3. It never exits while a window still waits, or it is told to stop (SIGTERM, SIGINT,
+//!    SIGHUP: one last scan first). When Stage Manager runs again, the guardian asks it which
+//!    waiting windows it has adopted (`ctl adopted`) and lets those go
+//!    ([`Watch::hand_over`]); the crashed app's other windows keep waiting (the new app finds
+//!    a window on another Desktop only once that Desktop shows), and windows found in the
+//!    park zone are the new app's. An earlier version that cannot say takes over every
+//!    window, as before. One that stays busy (no answer) for [`BUSY_CAP`] while a waiting
+//!    window shows is taken as having adopted nothing. A panic inside a pass is logged and
+//!    the watch goes on.
 
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
@@ -47,6 +53,16 @@ const SLOW_RETRY: Duration = Duration::from_secs(5);
 
 /// How long after moving windows the window server's list is trusted again.
 const SETTLE: Duration = Duration::from_millis(300);
+
+/// How often the guardian asks a running Stage Manager what it adopted while no waiting
+/// window shows.
+const ASK_EVERY: Duration = Duration::from_secs(3);
+
+/// How long a running Stage Manager may stay busy (consecutive [`Successor::Busy`] answers)
+/// while a waiting window shows before the guardian treats it as having adopted nothing and
+/// brings the crashed copy's registered windows back itself (the review of 8A, M2): a hung
+/// successor must not keep them parked.
+const BUSY_CAP: Duration = Duration::from_secs(30);
 
 /// A stop signal received while watching (0: none).
 static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -170,6 +186,8 @@ fn watch(registered: &[Registered]) {
     let mut w = Watch::new(registered);
     let mut reported: Option<Vec<(u32, bool)>> = None;
     let mut attempts: HashMap<u32, Attempts> = HashMap::new();
+    let mut asked: Option<Instant> = None;
+    let mut busy = BusyStreak::default();
     loop {
         let sig = STOP_SIGNAL.load(Ordering::SeqCst);
         if sig != 0 {
@@ -178,7 +196,7 @@ fn watch(registered: &[Registered]) {
             tracing::warn!(restored = r.restored, failed = r.failed, "guardian: stopped");
             return;
         }
-        let pass = guarded("the guardian's watch", || watch_pass(&mut w, &mut reported, &mut attempts));
+        let pass = guarded("the guardian's watch", || watch_pass(&mut w, &mut reported, &mut attempts, &mut asked, &mut busy));
         if matches!(pass, Some(Pass::Done)) {
             return;
         }
@@ -189,7 +207,13 @@ fn watch(registered: &[Registered]) {
 /// One look at the window list: done when nothing waits; otherwise logs what changed and
 /// reaches every waiting window on screen through Accessibility (moving it back when it is
 /// still parked).
-fn watch_pass(w: &mut Watch, reported: &mut Option<Vec<(u32, bool)>>, attempts: &mut HashMap<u32, Attempts>) -> Pass {
+fn watch_pass(
+    w: &mut Watch,
+    reported: &mut Option<Vec<(u32, bool)>>,
+    attempts: &mut HashMap<u32, Attempts>,
+    asked: &mut Option<Instant>,
+    busy: &mut BusyStreak,
+) -> Pass {
     let displays = safety::scan_displays();
     let now = Instant::now();
     for e in w.observe(now, &listed_windows(), &displays) {
@@ -199,10 +223,46 @@ fn watch_pass(w: &mut Watch, reported: &mut Option<Vec<(u32, bool)>>, attempts: 
         tracing::info!("guardian: no window is left waiting; done");
         return Pass::Done;
     }
-    if ctl::request("ping", Duration::from_millis(500)).is_ok() {
-        let ids: Vec<u32> = w.waiting().map(|x| x.id).collect();
-        tracing::info!(windows = ?ids, "guardian: Stage Manager runs again and takes over these windows");
-        return Pass::Done;
+    let ids: Vec<u32> = w.waiting().map(|x| x.id).collect();
+    // Asked every pass while a waiting window shows (it may be moved now), else every
+    // ASK_EVERY: a window on a Desktop never visited keeps the guardian waiting for long.
+    let shows = w.waiting().any(|x| x.look.is_some_and(|l| l.shown()));
+    let due = shows || asked.is_none_or(|t| now.duration_since(t) >= ASK_EVERY);
+    let answer = if due {
+        *asked = Some(now);
+        busy.note(successor(&ids), shows, now)
+    } else {
+        Successor::None
+    };
+    match answer {
+        Successor::None => {}
+        Successor::Older => {
+            tracing::info!(windows = ?ids, "guardian: an earlier Stage Manager runs again (it cannot say what it adopted) and takes over these windows");
+            return Pass::Done;
+        }
+        Successor::Busy => {
+            // It runs but does not answer yet (its launch scan): nothing moves this pass, so
+            // the guardian never fights it over a window.
+            if !w.handed_over() {
+                tracing::info!("guardian: Stage Manager runs again; watching until it adopts each window");
+            }
+            for e in w.hand_over(&[]) {
+                log_event(&e);
+            }
+            return if w.is_empty() { Pass::Done } else { Pass::Wait };
+        }
+        Successor::Adopted(adopted) => {
+            if !w.handed_over() {
+                tracing::info!("guardian: Stage Manager runs again; watching until it adopts each window");
+            }
+            for e in w.hand_over(&adopted) {
+                log_event(&e);
+            }
+            if w.is_empty() {
+                tracing::info!("guardian: Stage Manager runs again and has adopted every window; done");
+                return Pass::Done;
+            }
+        }
     }
     let now_state: Vec<(u32, bool)> = w.waiting().map(|x| (x.id, x.look.is_some_and(|l| l.shown()))).collect();
     if reported.as_ref() != Some(&now_state) {
@@ -216,6 +276,88 @@ fn watch_pass(w: &mut Watch, reported: &mut Option<Vec<(u32, bool)>>, attempts: 
         return Pass::Done;
     }
     Pass::Wait
+}
+
+/// Whether Stage Manager runs again, and which of the waiting windows it has adopted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Successor {
+    /// Nothing answers on the socket.
+    None,
+    /// It is there but did not answer in time (busy with its launch).
+    Busy,
+    /// An earlier version: it does not know `adopted`.
+    Older,
+    /// These of the ids asked about are in its model.
+    Adopted(Vec<u32>),
+}
+
+/// Asks a running Stage Manager which of `ids` it has adopted (`ctl adopted`).
+fn successor(ids: &[u32]) -> Successor {
+    let words: Vec<String> = std::iter::once("adopted".to_string()).chain(ids.iter().map(u32::to_string)).collect();
+    match ctl::request(&words.join(" "), Duration::from_millis(500)) {
+        Ok(reply) => successor_from_reply(&reply),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Successor::Busy,
+        Err(_) => Successor::None,
+    }
+}
+
+/// Error replies to `adopted` that mean "running, but nothing adopted yet" (the review of
+/// 8A, L1): the ctl server's word when the WM thread is busy (its launch scan, a slow app;
+/// `main.rs`) and the engine's when it manages no window yet (Accessibility missing;
+/// `controller.rs`, `not_managing`).
+const NOTHING_ADOPTED: [&str; 2] =
+    ["WM thread did not answer", "not managing windows yet (Accessibility missing or observation not started)"];
+
+/// A reply to `adopted` as a [`Successor`]: the list it adopted; an earlier version's
+/// "unknown command"; one of the [`NOTHING_ADOPTED`] errors. Anything else (another error, an
+/// unreadable reply) is [`Successor::Busy`]: nothing moves, and [`BUSY_CAP`] bounds it.
+fn successor_from_reply(reply: &str) -> Successor {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(reply) else { return Successor::Busy };
+    let ok = v.get("ok").and_then(serde_json::Value::as_bool);
+    if ok == Some(true)
+        && let Some(list) = v.get("adopted").and_then(serde_json::Value::as_array)
+    {
+        return Successor::Adopted(list.iter().filter_map(|x| x.as_u64()).filter_map(|x| u32::try_from(x).ok()).collect());
+    }
+    match (ok, v.get("error").and_then(serde_json::Value::as_str)) {
+        (Some(false), Some(e)) if e.starts_with("unknown command: adopted") => Successor::Older,
+        (Some(false), Some(e)) if NOTHING_ADOPTED.contains(&e) => Successor::Adopted(Vec::new()),
+        _ => Successor::Busy,
+    }
+}
+
+/// Consecutive [`Successor::Busy`] answers (the review of 8A, M2).
+#[derive(Debug, Default)]
+struct BusyStreak {
+    /// The first Busy answer of the streak.
+    since: Option<Instant>,
+    /// The cap was logged for this streak.
+    capped: bool,
+}
+
+impl BusyStreak {
+    /// The answer to act on. A Busy answer stays Busy until the streak has lasted
+    /// [`BUSY_CAP`] and a waiting window `shows`; then it is `Adopted([])` (nothing adopted:
+    /// the guardian brings the registered windows back; windows found in the park zone were
+    /// let go at the first hand-over). Any other answer ends the streak.
+    fn note(&mut self, answer: Successor, shows: bool, now: Instant) -> Successor {
+        if answer != Successor::Busy {
+            *self = Self::default();
+            return answer;
+        }
+        let since = *self.since.get_or_insert(now);
+        if !shows || now.duration_since(since) < BUSY_CAP {
+            return Successor::Busy;
+        }
+        if !self.capped {
+            self.capped = true;
+            tracing::warn!(
+                busy_s = now.duration_since(since).as_secs(),
+                "guardian: Stage Manager runs again but has not answered for a long time; bringing the waiting windows back"
+            );
+        }
+        Successor::Adopted(Vec::new())
+    }
 }
 
 /// Every waiting window listed on screen, through Accessibility: one already outside the
@@ -439,6 +581,60 @@ fn poll_for_exit(pid: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_apps_answer_says_what_it_adopted() {
+        assert_eq!(successor_from_reply(r#"{"ok":true,"adopted":[4,9]}"#), Successor::Adopted(vec![4, 9]));
+        assert_eq!(successor_from_reply(r#"{"ok":true,"adopted":[]}"#), Successor::Adopted(vec![]));
+        assert_eq!(successor_from_reply(r#"{"ok":false,"error":"unknown command: adopted 4"}"#), Successor::Older);
+        assert_eq!(
+            successor_from_reply(r#"{"ok":false,"error":"WM thread did not answer"}"#),
+            Successor::Adopted(vec![]),
+            "busy: nothing adopted yet"
+        );
+        assert_eq!(successor_from_reply("garbage"), Successor::Busy);
+    }
+
+    /// The review of 8A, L1: only the known errors are answers; any other is Busy (bounded).
+    #[test]
+    fn only_known_errors_count_as_answers() {
+        for e in NOTHING_ADOPTED {
+            let reply = serde_json::json!({ "ok": false, "error": e }).to_string();
+            assert_eq!(successor_from_reply(&reply), Successor::Adopted(vec![]), "{e}");
+        }
+        for reply in [
+            r#"{"ok":false,"error":"not allowed"}"#,
+            r#"{"ok":false,"error":"WM thread did not answer in time"}"#,
+            r#"{"ok":false,"error":"unknown command: tile"}"#,
+            r#"{"ok":false}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":false,"adopted":[4]}"#,
+        ] {
+            assert_eq!(successor_from_reply(reply), Successor::Busy, "{reply}");
+        }
+    }
+
+    /// The review of 8A, M2: a successor busy for [`BUSY_CAP`] while a waiting window shows
+    /// is taken as having adopted nothing; any answer starts the count again.
+    #[test]
+    fn a_hung_successor_is_capped() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut b = BusyStreak::default();
+        assert_eq!(b.note(Successor::Busy, true, s(0)), Successor::Busy);
+        assert_eq!(b.note(Successor::Busy, true, s(29)), Successor::Busy);
+        assert_eq!(b.note(Successor::Busy, true, s(30)), Successor::Adopted(vec![]));
+        assert_eq!(b.note(Successor::Busy, false, s(31)), Successor::Busy, "nothing shows: nothing to move");
+        assert_eq!(b.note(Successor::Busy, true, s(32)), Successor::Adopted(vec![]), "still the same streak");
+        assert_eq!(b.note(Successor::Adopted(vec![4]), true, s(33)), Successor::Adopted(vec![4]));
+        assert_eq!(b.note(Successor::Busy, true, s(34)), Successor::Busy, "a new streak");
+        assert_eq!(b.note(Successor::None, true, s(40)), Successor::None);
+        assert_eq!(b.note(Successor::Busy, true, s(70)), Successor::Busy, "nothing answered between: a new streak");
+        // Busy while nothing showed counts: a window shown after the cap comes back at once.
+        let mut b = BusyStreak::default();
+        assert_eq!(b.note(Successor::Busy, false, s(0)), Successor::Busy);
+        assert_eq!(b.note(Successor::Busy, true, s(45)), Successor::Adopted(vec![]));
+    }
 
     #[test]
     fn retries_are_fast_then_slow() {

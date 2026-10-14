@@ -48,7 +48,11 @@ pub fn finder_icons() -> Option<DesktopIcons> {
 pub fn start_read() -> Option<mpsc::Receiver<Option<DesktopIcons>>> {
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new().name("finder-desktop-icons".into()).spawn(move || {
-        let _ = tx.send(finder_icons());
+        // A panic here must not take the app down (Fable M2): the icons are unknown, so the
+        // patch stays off, and the read is tried again later.
+        let read = super::safety::guarded("the read of Finder's desktop icons", finder_icons)
+            .unwrap_or(Some(DesktopIcons::Unexpected("the read panicked")));
+        let _ = tx.send(read);
     });
     match spawned {
         Ok(_) => Some(rx),

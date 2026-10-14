@@ -92,12 +92,18 @@ again whenever such a window shows (its Space was visited), retrying while it st
 since AX lists most apps' windows only on the shown Space. A window is done only when seen
 back (AX reads it outside the park zone, or the window server lists it on screen outside it
 in settled passes a second apart: a sliding Space can list in-between frames) or gone (not
-listed on any Space for 3 s). It never exits while one waits unless Stage Manager runs again.
+listed on any Space for 3 s), or adopted by Stage Manager running again (`ctl adopted`: in
+its model). It never exits while one waits; a new Stage Manager does not end the watch by
+itself running. The guardian and the new app moving the same window at once is benign: the
+guardian only ever moves a window out of the park zone, never into it, so the worst case is a
+window shown that the new app meant to keep parked (until its next switch), never one left
+parked; and it lets go of each window at its next pass once the new app reports it adopted.
 
 ## Testing hooks
 
 - `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).
-- **ctl socket** (`$TMPDIR/stage-manager.sock`, line protocol): `switch N`, `send N`, `new`,
+- **ctl socket** (`~/.config/stage-manager/stage-manager.sock`, line protocol; not
+  `$TMPDIR`, which macOS prunes, like the single-instance lock beside it): `switch N`, `send N`, `new`,
   `pin`, `dump` (with a `spaces` section), `unpark-all`. The `stage-manager ctl ...` subcommand talks to it. This lets
   milestones be checked by script, not just by hand.
 - `STAGE_MANAGER_ONLY=<bundle ids>` limits management to listed apps, so automated runs touch
@@ -124,9 +130,12 @@ Each milestone ends with a commit and a manual test checklist; `cargo test` and
 The owner runs a trial week on the daily log (`docs/DEVELOPMENT.md`, "Logs")
 before the first public release. Before that release:
 
-- [ ] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
-  Problem by default (it shows only while the level is `debug` or `trace`).
-- [ ] Decide which window titles the log keeps (all, none, or hashed) and say so in the guide.
+- [x] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
+  Problem by default (it shows only while the level is `debug` or `trace`). Done after
+  1.1.0: `"info"`.
+- [x] Decide which window titles the log keeps (all, none, or hashed) and say so in the guide.
+  Hashed (a short FNV-1a code), titles as they are only with `[log] titles = true`; marks'
+  state dumps the same; said in the guide's "Updates and privacy".
 - [ ] Revisit the caps (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against the
   trial's real volume (`stage-manager log summary` for each day).
 

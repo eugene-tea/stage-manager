@@ -64,6 +64,7 @@ fn preview_change(change: settings_window::Change) {
             C::LaunchAtLogin(on) => values.login = if on { LoginStatus::On } else { LoginStatus::Off },
             C::MenuBarIcon(on) => values.app.show_menu_bar_icon = on,
             C::AutoUpdates(on) => values.app.check_for_updates = on,
+            C::InstallUpdates(on) => values.app.install_updates = on,
             C::ShowRecentApps(on) => values.show_recent_apps = on,
             C::AllAtOnce(all) => values.all_at_once = all,
             C::MergeOnDrop(on) => values.merge_on_drop = on,
@@ -119,8 +120,11 @@ fn make(mtm: MainThreadMarker, which: &str, drawn: bool) -> Option<Retained<NSWi
                 tag: String::new(),
                 page: updates::RELEASES_URL.into(),
                 dmg: None,
+                dmg_size: None,
+                notes: "## What's new\n\n- Updates install themselves: Install and Relaunch\n- Windows come back before the relaunch".into(),
             };
-            alert::build(mtm, shell::offer_spec(&release, &current), |b| tracing::info!(b, "preview: update button"))
+            let target = Ok(std::path::PathBuf::from("/Applications/Stage Manager.app"));
+            alert::build(mtm, shell::offer_spec(&release, &current, &target), |b| tracing::info!(b, "preview: update button"))
         }
         "uptodate" => {
             let (title, text) = updates::up_to_date_text(&current);

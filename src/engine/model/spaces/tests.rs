@@ -433,7 +433,7 @@ fn state_is_saved_per_desktop_and_rebuilt_on_each_first_visit() {
     assert_eq!(file.spaces.len(), 2);
     assert_eq!(file.spaces.iter().filter(|s| s.current).count(), 1);
     assert_eq!(file.spaces.iter().find(|s| s.current).map(|s| s.id), Some(d2.0));
-    let json = file.to_json();
+    let json = file.to_json().expect("encodes");
 
     // Relaunch on Desktop 1 with new window ids; Desktop 2's windows are not listed yet.
     let saved = StateFile::from_json(&json).expect("parses");
@@ -1423,7 +1423,7 @@ mod identity {
         let d0 = mac.space();
         let before = grouping(&mac, d0);
         assert_eq!(before.len(), 5, "a stage per app on Desktop 0");
-        let json = mac.m.to_state().to_json();
+        let json = mac.m.to_state().to_json().expect("encodes");
         // Relaunch: the windows keep their ids (they are other apps' windows).
         let saved = StateFile::from_json(&json).expect("parses");
         let mut again = his_desktops();
@@ -1629,7 +1629,7 @@ mod identity {
         let groups0 = grouping(&mac, d0);
         let groups1 = grouping(&mac, d1);
         let active1 = mac.active();
-        let json = mac.m.to_state().to_json();
+        let json = mac.m.to_state().to_json().expect("encodes");
         assert!(json.contains("\"window\": 14"), "window ids are saved");
         let mut again = his_desktops();
         for (_, _, m) in again.wins.values_mut() {
@@ -1817,5 +1817,175 @@ mod identity {
         assert!(!mac.m.shows_two_desktops(MAIN, &with(1), &[]), "one of seven saved windows");
         assert!(mac.m.shows_two_desktops(MAIN, &with(2), &[]), "two");
         assert!(mac.m.shows_two_desktops(MAIN, &with(7), &[]));
+    }
+}
+
+/// Fable H3 (1.1.0): the shown stage carried to a new Desktop in Mission Control leaves the
+/// old Desktop a fresh empty active stage; its parked stage keeps its card, and ⌘-Tab to its
+/// app brings it.
+#[test]
+fn the_desktop_left_by_its_shown_stage_keeps_every_card() {
+    let mut mac = two_desktops();
+    mac.focused = Some(w(1));
+    mac.go(0);
+    let d1 = mac.space();
+    let browser = mac.m.stage_of(w(2)).expect("stage");
+    assert!(mac.parked(2), "the browser waits in the strip");
+    // The editor (shown) dragged to a Desktop never visited, then the user goes there.
+    mac.wins.get_mut(&1).expect("window").0 = Some(1);
+    mac.go(1);
+    assert_ne!(mac.m.space_of(w(1)), Some(d1), "the editor's stage went with it");
+    let left = mac.m.active_stage_in(d1).expect("Desktop 1 keeps an active stage");
+    assert_ne!(left, browser, "never the parked stage, whose windows stay in the corner");
+    assert!(mac.m.stage(left).is_some_and(|s| s.windows.is_empty()), "an empty one, as Apple's");
+    assert!(mac.m.slots.get(&d1).is_some_and(|s| s.contains(&browser)), "the browser keeps its card");
+    // Back on Desktop 1: an empty screen, the browser's card, and ⌘-Tab to it works.
+    mac.focused = None;
+    mac.go(0);
+    assert_eq!(mac.space(), d1);
+    assert_eq!(mac.strip(), vec![vec![2]]);
+    assert!(mac.parked(2));
+    let obs = mac.obs();
+    let a = mac.m.app_activated(20, &obs);
+    mac.run(a);
+    assert_eq!(mac.m.main_active_stage(), Some(browser), "⌘-Tab brings the browser's stage");
+    assert!(!mac.parked(2));
+}
+
+/// Fable's section 4, test 1: random moves of windows between Desktops (Mission Control),
+/// Desktop changes, new windows, card clicks and app activations; after each step every
+/// Desktop has an active stage of its own, no active stage holds a parked window, every
+/// window of an inactive stage is parked, every member lives on its stage's Desktop, and
+/// every inactive stage with windows has a card (or the strip is full). It would have caught
+/// H3.
+mod invariants {
+    use super::*;
+
+    /// SplitMix64, as the single-Space property test's.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        }
+    }
+
+    const APPS: [(Pid, &str); 4] =
+        [(10, "com.example.editor"), (20, "com.example.browser"), (30, "com.example.chat"), (40, "com.example.mail")];
+
+    fn check(mac: &Mac, step: &str) {
+        let m = &mac.m;
+        let cap = m.options().strip.capacity;
+        for space in m.spaces().iter().map(|s| s.id) {
+            let active = m.active.get(&space).copied();
+            let Some(active) = active else { panic!("{step}: {space:?} has no active stage") };
+            let stage = m.stage(active).unwrap_or_else(|| panic!("{step}: active stage of {space:?} missing"));
+            assert_eq!(stage.space, space, "{step}: active stage on another Desktop");
+            for s in m.stages_in(space) {
+                let shown = s.id == active;
+                for id in &s.windows {
+                    let w = m.window(*id).unwrap_or_else(|| panic!("{step}: member {id:?} missing"));
+                    assert_eq!(w.space, space, "{step}: {id:?} not on its stage's Desktop");
+                    if w.sticky {
+                        continue;
+                    }
+                    assert_eq!(w.parked, !shown, "{step}: {id:?} parked {} in a stage {}", w.parked, if shown { "shown" } else { "waiting" });
+                }
+                if !shown && !s.windows.is_empty() {
+                    let slots = m.slots.get(&space).cloned().unwrap_or_default();
+                    assert!(slots.contains(&s.id) || slots.len() >= cap, "{step}: stage {:?} parked without a card", s.id);
+                }
+            }
+        }
+        // On the Desktop shown, the screen agrees with the model.
+        let space = mac.space();
+        for (&id, _) in mac.wins.iter().filter(|(id, _)| mac.on_screen(**id)) {
+            let Some(w) = m.window(WindowId(id)) else { continue };
+            if w.space == space && !w.sticky && w.meta.role == WindowRole::Standard {
+                assert_eq!(mac.parked(id), w.parked, "{step}: {id} on screen parked {} but model {}", mac.parked(id), w.parked);
+            }
+        }
+    }
+
+    #[test]
+    fn no_sequence_of_desktop_moves_strands_a_stage() {
+        for seed in 0..200u64 {
+            let mut rng = Rng(seed);
+            let mut mac = Mac::new();
+            let mut next = 1u32;
+            for desk in 0..3 {
+                for _ in 0..(1 + rng.below(3)) {
+                    let (pid, bundle) = APPS[rng.below(APPS.len())];
+                    mac.put(desk, next, pid, bundle, &format!("Doc {next}"));
+                    next += 1;
+                }
+            }
+            mac.focused = Some(w(1));
+            mac.go(0);
+            check(&mac, &format!("seed {seed} start"));
+            let mut log: Vec<String> = Vec::new();
+            for op in 0..40 {
+                let ids: Vec<u32> = mac.wins.keys().copied().collect();
+                match rng.below(6) {
+                    0 => {
+                        let d = rng.below(3);
+                        log.push(format!("go {d}"));
+                        mac.go(d);
+                    }
+                    1 => {
+                        // Mission Control: a window (the focused one's whole stage, or one window)
+                        // dragged to another Desktop, then the change is seen.
+                        let id = ids[rng.below(ids.len())];
+                        let d = rng.below(3);
+                        let whole = rng.below(2) == 0;
+                        let group: Vec<u32> = match mac.m.stage_of(w(id)).and_then(|s| mac.m.stage(s)) {
+                            Some(s) if whole => s.windows.iter().map(|x| x.0).collect(),
+                            _ => vec![id],
+                        };
+                        log.push(format!("move {group:?} to {d}"));
+                        for g in group {
+                            if let Some(x) = mac.wins.get_mut(&g) {
+                                x.0 = Some(d);
+                            }
+                        }
+                        mac.arrive();
+                    }
+                    2 => {
+                        let (pid, bundle) = APPS[rng.below(APPS.len())];
+                        log.push(format!("open {next}"));
+                        mac.open(next, pid, bundle);
+                        next += 1;
+                    }
+                    3 => {
+                        let cards: Vec<StageId> = mac.m.strip().iter().map(|c| c.stage).collect();
+                        if !cards.is_empty() {
+                            let s = cards[rng.below(cards.len())];
+                            log.push(format!("click {s:?}"));
+                            mac.click(s);
+                        }
+                    }
+                    4 => {
+                        let (pid, _) = APPS[rng.below(APPS.len())];
+                        log.push(format!("activate {pid}"));
+                        let obs = mac.obs();
+                        let a = mac.m.app_activated(pid, &obs);
+                        mac.run(a);
+                    }
+                    _ => {
+                        log.push("arrive".into());
+                        mac.arrive();
+                    }
+                }
+                check(&mac, &format!("seed {seed} op {op} after {log:?}"));
+            }
+        }
     }
 }

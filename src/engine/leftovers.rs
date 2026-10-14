@@ -115,7 +115,8 @@ impl LeftoverSource {
 }
 
 /// The frame a window still parked goes back to: its `registered` frame (made safe), else
-/// its `state.json` frame (exact bundle id and title first, then bundle id), else centered;
+/// its `state.json` frame (its window id first, then exact bundle id and title, then bundle
+/// id when one candidate is left: [`super::window_match`]), else centered;
 /// always on the visible frame and never in a park zone.
 pub fn leftover_frame(registered: Option<Rect>, live: &LiveWindow, state: Option<&StateFile>, displays: &ScanDisplays) -> (Rect, LeftoverSource) {
     if let Some(r) = registered {
@@ -216,7 +217,7 @@ mod tests {
     }
 
     fn live(bundle: &str, title: &str, frame: Rect) -> LiveWindow {
-        LiveWindow { bundle_id: bundle.into(), title: title.into(), frame }
+        LiveWindow { id: None, bundle_id: bundle.into(), title: title.into(), frame }
     }
 
     fn state(windows: Vec<SavedWindow>) -> StateFile {

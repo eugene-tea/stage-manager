@@ -8,7 +8,8 @@
 <h1 align="center">Stage Manager</h1>
 
 <p align="center"><a href="https://github.com/eugene-tea/stage-manager/releases/latest"><b>Download</b></a>
-· signed and notarized · macOS 14 Sonoma or later</p>
+· signed and notarized · Apple silicon, macOS 14 Sonoma or later<br>
+or <code>brew install eugene-tea/tap/stage-manager</code></p>
 
 ## What it does
 
@@ -28,7 +29,7 @@ Turn off Apple's Stage Manager (the app offers to do it), then allow **Accessibi
 which is required. **Screen Recording** is optional and puts live window pictures on the cards.
 
 Nothing about your windows leaves your Mac. The only network use is a daily update check
-on GitHub.
+on GitHub, and downloading an update from there when it installs one.
 
 ## Learn more
 

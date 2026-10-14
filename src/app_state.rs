@@ -29,14 +29,15 @@ impl AppState {
     }
 
     /// Writes `path` atomically (a temporary file renamed over it; its directory created),
-    /// logging a failure: a crash mid-write never leaves half a file.
+    /// readable by the user only ([`crate::private_files`]), logging a failure: a crash
+    /// mid-write never leaves half a file.
     pub fn save(&self, path: &Path) {
         let tmp = path.with_extension("json.tmp");
         let result = path
             .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_or(Ok(()), crate::private_files::ensure_dir)
             .and_then(|_| serde_json::to_string_pretty(self).map_err(std::io::Error::other))
-            .and_then(|text| std::fs::write(&tmp, text + "\n"))
+            .and_then(|text| crate::private_files::write(&tmp, (text + "\n").as_bytes()))
             .and_then(|_| std::fs::rename(&tmp, path));
         if let Err(e) = result {
             tracing::warn!("cannot save {}: {e}", path.display());
@@ -64,6 +65,7 @@ mod tests {
         s.save(&path);
         assert_eq!(AppState::load(&path), s);
         assert!(!path.with_extension("json.tmp").exists(), "written through a temporary file");
+        assert_eq!(crate::private_files::mode(&path).expect("mode"), 0o600, "readable by the user only");
         std::fs::write(&path, "{\"welcomed\": true}").expect("writes");
         assert_eq!(AppState::load(&path), AppState { welcomed: true, ..AppState::default() }, "missing fields default");
     }

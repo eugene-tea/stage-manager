@@ -278,15 +278,22 @@ impl AxElement {
         self.string_attr(names::TITLE)
     }
 
-    /// `AXPosition` (top-left origin).
+    /// `AXPosition` (top-left origin). A value that is not finite is an error
+    /// ([`AxError::Value`]): a garbled answer never becomes a frame.
     pub fn position(&self) -> AxResult<Point> {
         let p: CGPoint = self.value_attr(names::POSITION, AXValueType::CGPoint)?;
+        if !(p.x.is_finite() && p.y.is_finite()) {
+            return Err(AxError::Value);
+        }
         Ok(Point { x: p.x, y: p.y })
     }
 
-    /// `AXSize`.
+    /// `AXSize`. A value that is not finite is an error, as for [`Self::position`].
     pub fn size(&self) -> AxResult<Size> {
         let s: CGSize = self.value_attr(names::SIZE, AXValueType::CGSize)?;
+        if !(s.width.is_finite() && s.height.is_finite()) {
+            return Err(AxError::Value);
+        }
         Ok(Size { w: s.width, h: s.height })
     }
 
@@ -314,7 +321,7 @@ impl AxElement {
         let role = values.get(0).and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string())).ok_or(AxError::WrongType(names::ROLE))?;
         let position: Option<CGPoint> = values.get(1).and_then(|v| ax_value(&v, AXValueType::CGPoint));
         let size: Option<CGSize> = values.get(2).and_then(|v| ax_value(&v, AXValueType::CGSize));
-        let frame = position.zip(size).map(|(p, s)| Rect::new(p.x, p.y, s.width, s.height));
+        let frame = position.zip(size).map(|(p, s)| Rect::new(p.x, p.y, s.width, s.height)).filter(Rect::is_finite);
         Ok((role, frame))
     }
 

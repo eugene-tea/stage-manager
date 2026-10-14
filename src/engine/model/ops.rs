@@ -1216,7 +1216,9 @@ impl Model {
     ///   New displays get a Space with an empty active stage.
     pub fn set_displays(&mut self, displays: Vec<Display>) -> Vec<Action> {
         let mut actions = Vec::new();
-        if displays.is_empty() {
+        // A report with a frame that is not finite is garbled: every restore frame would be
+        // clamped against it.
+        if displays.is_empty() || displays.iter().any(|d| !d.frame.is_finite() || !d.visible.is_finite()) {
             return actions;
         }
         let mut before = std::mem::take(&mut self.displays);

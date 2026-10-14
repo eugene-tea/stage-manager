@@ -269,7 +269,13 @@ impl Capturer {
         let worker = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("capture".into())
-            .spawn(move || run(worker, deliver, ask));
+            .spawn(move || {
+                // A panic in a capture round must not take the app down (Fable M2): the
+                // thumbnails stop updating (the cards keep their last pictures).
+                if super::safety::guarded("the capture thread", || run(worker, deliver, ask)).is_none() {
+                    tracing::error!("window captures stopped after a panic; thumbnails stay as they are until the next launch");
+                }
+            });
         if let Err(e) = spawned {
             tracing::error!("cannot start the capture thread: {e}");
         }

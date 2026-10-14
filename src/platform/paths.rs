@@ -3,11 +3,18 @@
 //!
 //! `STAGE_MANAGER_HOME=<dir>` moves all of them into `<dir>` (test runs use a scratch
 //! directory, so they never touch the real config, state, socket or log). Without it:
-//! config and state in `~/.config/stage-manager`, the log in `~/Library/Logs/Stage Manager`,
-//! the socket in the per-user temporary directory. `STAGE_MANAGER_LOG_DIR=<dir>` moves only
-//! the log.
+//! config, state, the ctl socket and the single-instance lock in `~/.config/stage-manager`,
+//! the log in `~/Library/Logs/Stage Manager`. `STAGE_MANAGER_LOG_DIR=<dir>` moves only the
+//! log.
+//!
+//! Nothing long-lived sits in the per-user temporary directory (`$TMPDIR`, `…/T/`): macOS
+//! prunes files there that have not been accessed for a few days, and neither a held lock nor
+//! a listening socket counts as an access, so an app running for days could lose both (a
+//! second copy managing beside it; `ctl` and the guardian's question unanswered). Only a
+//! socket path too long for `sun_path` still falls back to a hashed name there.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, OsStr};
+use std::os::unix::ffi::OsStrExt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -38,17 +45,29 @@ pub fn custom_home() -> Option<PathBuf> {
     std::env::var_os(HOME_ENV).filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 
-/// The ctl socket: `$STAGE_MANAGER_HOME/stage-manager.sock`, else
-/// `$TMPDIR/stage-manager.sock`.
+/// The ctl socket: `stage-manager.sock` in [`config_dir`] (`$STAGE_MANAGER_HOME` when set).
 pub fn socket_path() -> PathBuf {
+    socket_in(&config_dir())
+}
+
+/// Where versions up to 1.1.0 bound the socket (`$TMPDIR/stage-manager.sock`; with
+/// `$STAGE_MANAGER_HOME`, the same place as now): the single-instance claim asks there too,
+/// so a launch of this version never manages beside an earlier one still running.
+pub fn legacy_socket_path() -> PathBuf {
     match custom_home() {
         Some(home) => socket_in(&home),
         None => user_temp_dir().join("stage-manager.sock"),
     }
 }
 
-/// The socket for a custom home; a path too long for `sun_path` becomes a short hashed name
-/// in the temp dir (the same for the app and the client).
+/// The single-instance lock (see [`super::instance`]): `stage-manager.lock` in
+/// [`config_dir`], holding its owner's pid.
+pub fn lock_file() -> PathBuf {
+    config_dir().join("stage-manager.lock")
+}
+
+/// The socket in `home`; a path too long for `sun_path` becomes a short hashed name in the
+/// temp dir (the same for the app and the client).
 fn socket_in(home: &Path) -> PathBuf {
     let path = home.join("stage-manager.sock");
     if path.as_os_str().len() <= MAX_SOCKET_PATH {
@@ -59,8 +78,27 @@ fn socket_in(home: &Path) -> PathBuf {
     user_temp_dir().join(format!("stage-manager-{:016x}.sock", h.finish()))
 }
 
+/// The home folder: `$HOME`, else the account's own (`getpwuid_r`), else the per-user
+/// temporary folder; never a folder every account can write to (`/tmp`).
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
+    std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from).or_else(account_home).unwrap_or_else(user_temp_dir)
+}
+
+/// The home folder of this process's account, from the user database.
+fn account_home() -> Option<PathBuf> {
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: `passwd` is plain data; all-zero is a valid value for getpwuid_r to overwrite.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is valid for the call and `buf` for the length we pass; getuid
+    // cannot fail.
+    let rc = unsafe { libc::getpwuid_r(libc::getuid(), &mut entry, buf.as_mut_ptr(), buf.len(), &mut found) };
+    if rc != 0 || found.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r succeeded: `pw_dir` points at a NUL-terminated string inside `buf`.
+    let dir = unsafe { CStr::from_ptr(entry.pw_dir) };
+    Some(PathBuf::from(OsStr::from_bytes(dir.to_bytes()))).filter(|d| d.is_absolute())
 }
 
 /// The environment variable that moves the log directory alone.
@@ -113,13 +151,29 @@ pub fn parked_file(pid: u32) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// The review of 8A, M3: macOS prunes `$TMPDIR`; the socket and the lock live with the
+    /// config (a socket path too long for `sun_path` aside).
     #[test]
-    fn socket_lives_in_the_user_temp_dir_by_default() {
-        if custom_home().is_none() {
-            let p = socket_path();
-            assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("stage-manager.sock"));
-            assert!(p.starts_with(user_temp_dir()));
+    fn socket_and_lock_live_in_the_config_dir() {
+        let short = config_dir().join("stage-manager.sock");
+        if short.as_os_str().len() <= MAX_SOCKET_PATH {
+            assert_eq!(socket_path(), short);
+        } else {
+            assert!(socket_path().starts_with(user_temp_dir()), "only a path too long for sun_path falls back");
         }
+        assert_eq!(lock_file(), config_dir().join("stage-manager.lock"));
+        if custom_home().is_none() {
+            assert_eq!(legacy_socket_path(), user_temp_dir().join("stage-manager.sock"));
+        } else {
+            assert_eq!(legacy_socket_path(), socket_path());
+        }
+    }
+
+    #[test]
+    fn the_account_home_is_known_without_home_set() {
+        let account = account_home().expect("the user database knows this account");
+        assert!(account.is_absolute());
+        assert!(!home().starts_with("/tmp"), "never the shared /tmp");
     }
 
     #[test]

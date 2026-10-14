@@ -6,6 +6,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEST="${SM_DEV_APP:-$HOME/Library/Application Support/Stage Manager Dev/Stage Manager.app}"
+# It is replaced whole (rm -rf): only ever an app bundle.
+case "$DEST" in
+  /*.app) ;;
+  *) echo "error: SM_DEV_APP must be an absolute path ending in .app, got: $DEST" >&2; exit 1 ;;
+esac
 mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST"
 ditto "target/Stage Manager.app" "$DEST"

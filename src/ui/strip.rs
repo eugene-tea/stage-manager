@@ -209,6 +209,15 @@ pub fn overlay_window() -> Option<(isize, Point)> {
     with_strip(|s| s.motion_overlay()).flatten()
 }
 
+/// Whether the strip is mid-transition or a card is being dragged (a ready update waits for
+/// neither). Busy while the strip is borrowed, too. Main thread.
+pub fn busy() -> bool {
+    STRIP.with(|s| match s.try_borrow() {
+        Ok(g) => g.as_ref().is_some_and(|s| s.card_drag.is_some() || s.transition_starting || s.motion_running()),
+        Err(_) => true,
+    })
+}
+
 /// Refreshes the full-size snapshots of the shown windows now: a switch may follow (the
 /// app switcher was opened). Main thread.
 pub fn prefetch() {

@@ -16,6 +16,7 @@ pub mod retention;
 pub mod ring;
 pub mod summary;
 pub mod time;
+pub mod titles;
 pub mod writer;
 
 use time::Stamp;

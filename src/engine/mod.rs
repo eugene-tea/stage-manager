@@ -3,6 +3,7 @@
 //! The engine compiles and tests on any OS. The platform layer feeds it observations and
 //! executes the [`model::Action`]s it returns.
 
+pub mod busy_apps;
 pub mod corner_patch;
 pub mod desktop_echo;
 pub mod displays;
@@ -25,6 +26,7 @@ pub mod sliver;
 pub mod stage_area;
 pub mod stand_down;
 pub mod wallpaper;
+pub mod window_match;
 #[cfg(test)]
 pub(crate) mod testkit;
 

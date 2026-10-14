@@ -37,6 +37,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `app.launch_at_login` | `true` | true or false | Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers. |
 | `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings. |
 | `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
+| `app.install_updates` | `false` | true or false | Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first. |
 | `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
@@ -147,7 +148,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
-| `log.level` | `"debug"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "debug" (the default for now) records every decision, "info" only the main ones. |
+| `log.level` | `"info"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "info" the main events, "debug" every decision (and shows Mark a Problem in the menu). |
+| `log.titles` | `false` | true or false | Write window titles into the log and problem marks, for debugging; off, a short hash stands in for each. |
 | `log.days` | `14` | whole number, 1 to 365 | Day files older than this many days are deleted. |
 | `log.max_mb_per_day` | `100` | whole number, 1 to 10000 | A day's file this big takes only warnings, errors, marks and counts from then on. |
 | `log.max_mb_total` | `500` | whole number, 1 to 100000 | The log folder's cap: the oldest days go first, never today's. |

@@ -653,6 +653,11 @@ impl Model {
     }
 
     fn record(&mut self, id: WindowId, frame: Rect, by_user: bool) -> bool {
+        // A frame that is not finite (a garbled Accessibility answer) never enters the
+        // model: nothing could save it (`state.json` has no NaN) or park against it.
+        if !frame.is_finite() {
+            return false;
+        }
         let Some(w) = self.windows.get(&id) else {
             return false;
         };

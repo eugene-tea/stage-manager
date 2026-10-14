@@ -524,7 +524,10 @@ fn start_render(job: Job, screen: Rect, rect: Rect, region: Rect) {
     let key = job.key();
     let spawned = std::thread::Builder::new().name("corner-patch-render".into()).spawn(move || {
         let started = Instant::now();
-        let result = picture_for(&job, screen, rect);
+        // A panic in the decoder (an odd HEIC, say) must not take the app down (Fable M2):
+        // it reads as a failed render, so the patch stays off until the picture changes.
+        let result = crate::platform::safety::guarded("the corner patch's render", || picture_for(&job, screen, rect))
+            .unwrap_or_else(|| Err("the render panicked".to_string()));
         tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: rendered");
         let scale = job.scale;
         dispatch2::DispatchQueue::main().exec_async(move || deliver(key, region, scale, result));

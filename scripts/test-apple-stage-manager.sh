@@ -22,15 +22,17 @@ APP="${SM_DEV_APP:-$HOME/Library/Application Support/Stage Manager Dev/Stage Man
 BIN="$APP/Contents/MacOS/stage-manager"
 FIXTURE="target/SM Fixture.app"
 FIX_ID="dev.eugene.stagemanager.fixture"
-HOME_DIR="$(mktemp -d /tmp/sm-apple.XXXXXX)"
-export STAGE_MANAGER_HOME="$HOME_DIR"
-
 [ -x "$BIN" ] || { echo "error: $BIN missing; run make dev" >&2; exit 1; }
 [ -d "$FIXTURE" ] || { echo "error: $FIXTURE missing; run make fixture" >&2; exit 1; }
-if "$BIN" ctl ping >/dev/null 2>&1; then
-  echo "error: a Stage Manager already answers on $HOME_DIR's socket" >&2
+# The installed app (the default socket, before STAGE_MANAGER_HOME moves it) would stand
+# down too when Apple's Stage Manager comes on: never run beside it.
+if env -u STAGE_MANAGER_HOME "$BIN" ctl ping >/dev/null 2>&1; then
+  echo "error: a Stage Manager is running (the installed app?); quit it first" >&2
   exit 1
 fi
+
+HOME_DIR="$(mktemp -d /tmp/sm-apple.XXXXXX)"
+export STAGE_MANAGER_HOME="$HOME_DIR"
 
 # The owner's value, exactly: absent, or a boolean.
 if ORIGINAL="$(defaults read "$DOMAIN" "$KEY" 2>/dev/null)"; then HAD=1; else HAD=0; ORIGINAL=""; fi

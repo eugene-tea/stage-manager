@@ -17,8 +17,13 @@
 //!    the Dock's bar, a menu bar extra or the wallpaper keep their presses.
 //! 3. **The whole gesture** ([`PressGate`]): a swallowed press swallows its drags and its
 //!    release too, button by button, so no app sees half a click.
+//!
+//! The exact test reads no window server: the WM thread publishes the on-screen windows near
+//! the zones every tick ([`Seen`], [`near_zones`]), and a press decides on that list while it
+//! is [`SEEN_FRESH`]; an older list (the WM thread busy) passes the press.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use super::geometry::{Point, Rect};
 use super::overview::DOCK_LAYER;
@@ -197,6 +202,41 @@ impl Button {
             Button::Other => 2,
         }
     }
+}
+
+/// How old the published on-screen list may be for a press to be judged on it. The WM thread
+/// publishes it every tick (a quarter of a second); older means it is busy, and a press then
+/// passes (fails open: a parked window's edge pressable for a moment, never a click lost).
+pub const SEEN_FRESH: Duration = Duration::from_secs(1);
+
+/// The on-screen windows near the zones, front to back, as the WM thread last read them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seen {
+    /// When the window server was read.
+    pub at: Instant,
+    /// The windows whose frame grown by [`GRAB_MARGIN`] meets a zone ([`near_zones`]).
+    pub windows: Vec<Listed>,
+}
+
+impl Seen {
+    /// The list, when it is fresh enough at `now` to judge a press.
+    pub fn fresh(&self, now: Instant) -> Option<&[Listed]> {
+        (now.saturating_duration_since(self.at) <= SEEN_FRESH).then_some(self.windows.as_slice())
+    }
+}
+
+/// The windows of `front_to_back` (order kept) that can matter to a press in `zones`: those
+/// whose frame grown by [`GRAB_MARGIN`] (the widest resize border counted) meets a zone.
+/// [`Shield::hits`] and [`zone_owner`] answer the same on this list as on the whole one.
+pub fn near_zones(front_to_back: impl IntoIterator<Item = Listed>, zones: &[Rect]) -> Vec<Listed> {
+    front_to_back
+        .into_iter()
+        .filter(|w| {
+            let m = GRAB_MARGIN;
+            let grown = Rect::new(w.bounds.x - m, w.bounds.y - m, w.bounds.w + 2.0 * m, w.bounds.h + 2.0 * m);
+            zones.iter().any(|z| grown.intersect(z).is_some())
+        })
+        .collect()
 }
 
 /// A mouse event the tap sees.
@@ -468,5 +508,37 @@ mod tests {
         assert!(!g.swallow(Press::Up(Button::Left), || unreachable!()));
         // A release with no press seen passes.
         assert!(!g.swallow(Press::Up(Button::Other), || unreachable!()));
+    }
+
+    #[test]
+    fn the_published_list_judges_presses_as_the_whole_list_does() {
+        let zone = corner_zone(MAIN, VISIBLE, Corner::BottomRight);
+        let shown = Listed { id: 3, pid: 103, bounds: Rect::new(200.0, 200.0, 900.0, 700.0), alpha: 1.0, layer: 0 };
+        let over = Listed { id: 4, pid: 104, bounds: Rect::new(2400.0, 1200.0, 140.0, 100.0), alpha: 1.0, layer: 0 };
+        let wallpaper = Listed { id: 5, pid: 105, bounds: MAIN, alpha: 1.0, layer: -2147483624 };
+        let all = [shown, over, sliver(7, 52.0), sliver(8, 32.0), wallpaper];
+        let near = near_zones(all, &[zone]);
+        assert_eq!(near.iter().map(|w| w.id).collect::<Vec<_>>(), vec![4, 7, 8, 5], "far windows dropped, order kept");
+        // A window ending just short of the zone, within the widest border: kept.
+        let close = Listed { id: 9, pid: 109, bounds: Rect::new(zone.x - 30.0, 1300.0, 30.0 - GRAB_MARGIN + 1.0, 50.0), alpha: 1.0, layer: 0 };
+        assert_eq!(near_zones([close], &[zone]).len(), 1);
+        let s = shield(&[7, 8]);
+        for y in (0..120).map(|i| VISIBLE.max_y() - 100.0 + f64::from(i)) {
+            for x in [zone.x, zone.x + 20.0, 2559.5] {
+                let at = Point::new(x, y);
+                assert_eq!(s.hits(&near, at, OWN), s.hits(&all, at, OWN), "{at:?}");
+            }
+        }
+        assert_eq!(zone_owner(&near, zone, OWN, &s), zone_owner(&all, zone, OWN, &s));
+    }
+
+    #[test]
+    fn a_stale_list_judges_nothing() {
+        let t0 = Instant::now();
+        let seen = Seen { at: t0, windows: vec![sliver(7, 52.0)] };
+        assert_eq!(seen.fresh(t0).map(<[Listed]>::len), Some(1));
+        assert!(seen.fresh(t0 + SEEN_FRESH).is_some());
+        assert!(seen.fresh(t0 + SEEN_FRESH + Duration::from_millis(1)).is_none(), "the WM thread is busy: the press passes");
+        assert!(seen.fresh(t0 - Duration::from_millis(5)).is_some(), "a clock read before the list is not stale");
     }
 }

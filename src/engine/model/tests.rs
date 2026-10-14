@@ -139,6 +139,30 @@ fn no_displays_falls_back_without_panicking() {
     assert!(m.main_active_stage().is_some());
 }
 
+/// Grok M1 (1.1.0): a garbled frame (NaN, infinity) never enters the model, so the next save
+/// can always be written.
+#[test]
+fn frames_that_are_not_finite_never_enter_the_model() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    let before = e.m.window(w(1)).map(|x| (x.restore, x.meta.frame));
+    for bad in [Rect::new(f64::NAN, 0.0, 500.0, 400.0), Rect::new(0.0, 0.0, f64::INFINITY, 400.0)] {
+        e.m.window_frame_changed(w(1), bad);
+        e.m.window_frame_settled(w(1), bad);
+    }
+    assert_eq!(e.m.window(w(1)).map(|x| (x.restore, x.meta.frame)), before);
+    let mut garbled = display();
+    garbled.visible = Rect::new(0.0, f64::NAN, 1440.0, 875.0);
+    assert!(e.m.set_displays(vec![garbled]).is_empty(), "a garbled display report is ignored");
+    assert_eq!(e.m.main_display().visible, display().visible);
+    // A window first seen at a garbled frame gets a real restore frame.
+    let mut odd = meta(2, 20, "com.example.b");
+    odd.frame = Rect::new(f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+    e.add(odd, RuleAction::Current);
+    assert!(e.m.window(w(2)).is_some_and(|x| x.restore.is_finite() && !x.restore.is_degenerate()));
+    assert!(e.m.to_state().to_json().is_ok(), "the save goes through");
+}
+
 // ----- adding windows ---------------------------------------------------------------------
 
 #[test]
