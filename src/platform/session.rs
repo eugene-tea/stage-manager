@@ -151,13 +151,17 @@ fn read_window_session() -> Option<String> {
     let ids = CGSessionCopyCurrentDictionary().map(|dict| {
         // SAFETY: the session dictionary maps CFString keys to CF values (checked below).
         let dict: &CFDictionary<CFString, CFType> = unsafe { &*(&*dict as *const CFDictionary).cast() };
-        let number = |key: &'static str| -> Option<i64> {
-            dict.get(&CFString::from_static_str(key))?.downcast_ref::<CFNumber>().and_then(|n| n.as_i64())
-        };
-        (number("kCGSSessionIDKey"), number("kCGSSessionAuditIDKey"))
+        let value = |key: &'static str| dict.get(&CFString::from_static_str(key));
+        let number = |key: &'static str| -> Option<i64> { value(key)?.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()) };
+        // The login session: its UUID where macOS lists one (seen on macOS 26, which lists no
+        // kCGSSessionIDKey), else the session id.
+        let id = value("CGSSessionUniqueSessionUUID")
+            .and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+            .or_else(|| number("kCGSSessionIDKey").map(|n| n.to_string()));
+        (id, number("kCGSSessionAuditIDKey").or_else(|| number("kSCSecuritySessionID")))
     });
     let (id, audit) = ids.unwrap_or((None, None));
-    let key = session_key(boot.as_deref(), id, audit);
+    let key = session_key(boot.as_deref(), id.as_deref(), audit);
     match &key {
         Some(k) if !k.contains('?') => tracing::debug!(session = %k, "window server session"),
         _ => tracing::warn!(session = ?key, "window server session only partly readable: saved window ids may be dropped at the next launch"),
@@ -167,12 +171,12 @@ fn read_window_session() -> Option<String> {
 
 /// The session string from its parts; `None` when the boot time and the session id are
 /// both unknown (nothing to tell one session from another).
-pub fn session_key(boot: Option<&str>, id: Option<i64>, audit: Option<i64>) -> Option<String> {
+pub fn session_key(boot: Option<&str>, id: Option<&str>, audit: Option<i64>) -> Option<String> {
     if boot.is_none() && id.is_none() {
         return None;
     }
-    let part = |v: Option<i64>| v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    Some(format!("boot {} session {} audit {}", boot.unwrap_or("?"), part(id), part(audit)))
+    let audit = audit.map_or_else(|| "?".to_string(), |v| v.to_string());
+    Some(format!("boot {} session {} audit {audit}", boot.unwrap_or("?"), id.unwrap_or("?")))
 }
 
 /// `kern.bootsessionuuid`: a UUID for this boot.
@@ -306,10 +310,10 @@ mod tests {
 
     #[test]
     fn the_session_key_tells_boots_and_logins_apart() {
-        let a = session_key(Some("2EA11F65-D66D-496B-94D1-84260EF970A2"), Some(257), Some(100_001));
+        let a = session_key(Some("2EA11F65-D66D-496B-94D1-84260EF970A2"), Some("257"), Some(100_001));
         assert_eq!(a.as_deref(), Some("boot 2EA11F65-D66D-496B-94D1-84260EF970A2 session 257 audit 100001"));
-        assert_ne!(a, session_key(Some("7C1B0A11-0000-4000-8000-000000000001"), Some(257), Some(100_001)), "a reboot");
-        assert_ne!(a, session_key(Some("2EA11F65-D66D-496B-94D1-84260EF970A2"), Some(257), Some(100_007)), "a new login");
+        assert_ne!(a, session_key(Some("7C1B0A11-0000-4000-8000-000000000001"), Some("257"), Some(100_001)), "a reboot");
+        assert_ne!(a, session_key(Some("2EA11F65-D66D-496B-94D1-84260EF970A2"), Some("257"), Some(100_007)), "a new login");
         assert_eq!(session_key(None, None, Some(1)), None, "nothing to tell sessions apart");
         assert!(session_key(Some("t1"), None, None).is_some());
     }
