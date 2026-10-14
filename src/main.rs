@@ -383,11 +383,11 @@ mod app {
 
     /// Writes a problem mark: the note, `ctl state` and `ctl dump` (each, or that the WM
     /// thread did not answer: a hung WM thread is worth marking too) and the recent detailed
-    /// lines. Runs off the main thread.
+    /// lines, window titles hashed unless `[log] titles` is on. Runs off the main thread.
     fn mark_problem(wm: &WmHandle, note: &str) -> serde_json::Value {
         let ask = |cmd: Command| {
             wm.ctl(cmd, MARK_DUMP_WAIT)
-                .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                .map(logging::mark_section)
                 .unwrap_or_else(|| "the WM thread did not answer".to_string())
         };
         let sections = [("state", ask(Command::State)), ("dump", ask(Command::Dump))];

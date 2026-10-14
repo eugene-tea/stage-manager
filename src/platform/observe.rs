@@ -27,6 +27,7 @@ use serde_json::json;
 
 use super::apps::{AppEvent, AppInfo};
 use super::ax::{AxElement, AxError, AxObserver, AxResult, names, notifications as n};
+use super::logging;
 use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
 use crate::engine::busy_apps::Reply;
@@ -292,8 +293,8 @@ impl Observer {
             if let Some(w) = self.windows.get(id) {
                 let zi = z.get(id).map_or_else(|| "-".to_string(), |z| z.to_string());
                 tracing::info!(
-                    "window id={} pid={} bundle={} title={:?} frame={} z={} subrole={}",
-                    w.id, w.pid, self.bundle_of(w.pid), w.title, w.frame, zi, w.subrole
+                    "window id={} pid={} bundle={} title={} frame={} z={} subrole={}",
+                    w.id, w.pid, self.bundle_of(w.pid), logging::title(&w.title), w.frame, zi, w.subrole
                 );
             }
         }
@@ -478,8 +479,8 @@ impl Observer {
     fn log_window(&self, what: &str, id: u32) {
         if let Some(w) = self.windows.get(&id) {
             tracing::info!(
-                "{what} id={} pid={} bundle={} title={:?} frame={} subrole={}",
-                w.id, w.pid, self.bundle_of(w.pid), w.title, w.frame, w.subrole
+                "{what} id={} pid={} bundle={} title={} frame={} subrole={}",
+                w.id, w.pid, self.bundle_of(w.pid), logging::title(&w.title), w.frame, w.subrole
             );
         }
     }

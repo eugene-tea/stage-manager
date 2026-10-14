@@ -21,12 +21,28 @@
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
 //! read back from a capture of our own overlay window. `space` (any time) is the Space shown
 //! as the engine sees it.
+//!
+//! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
+//! never wider even for an instant) in a folder only the user can enter. Each connection's
+//! peer is checked before any command is served: another account is refused; every command
+//! needs the app's own code, judged by the peer's audit token (`LOCAL_PEERTOKEN`: code
+//! signed as the app is, [`super::code_sign`]; never by its pid or path, which a process that
+//! exits can hand to another), as the `ctl` and `mark` clients, the guardian and the scripted
+//! checks are when they run the app's binary; any other process of the user
+//! gets only `ping` and `settings` (a second copy's launch check and hand-off). That keeps a
+//! script or app without Accessibility from borrowing the app's; it is no wall against a
+//! process of the same user, which can run this binary as a client itself. Lines longer than
+//! [`MAX_LINE`] end the connection.
 
-use std::io::{BufRead, BufReader, Write};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::json;
@@ -288,6 +304,113 @@ pub fn error_reply(message: &str) -> serde_json::Value {
     json!({ "ok": false, "error": message })
 }
 
+/// The longest command line served; a longer one ends the connection.
+pub const MAX_LINE: usize = 64 * 1024;
+
+/// Who is on the other end of a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Peer {
+    /// A process of this user running code signed as this app is (this very binary, or
+    /// another copy of the app): every command.
+    Ours,
+    /// Another process of this user: `ping` and `settings` only.
+    SameUser,
+    /// Another account, or a peer that could not be read: nothing.
+    Stranger,
+}
+
+impl Peer {
+    /// Judges a peer from its user id against ours (`None`: unreadable) and
+    /// `signed_like_us`, the code-signing check of its audit token (asked only of a process
+    /// of this user; false on any error).
+    pub fn judge(peer_uid: Option<u32>, own_uid: u32, signed_like_us: impl FnOnce() -> bool) -> Self {
+        match peer_uid {
+            Some(uid) if uid == own_uid && signed_like_us() => Self::Ours,
+            Some(uid) if uid == own_uid => Self::SameUser,
+            _ => Self::Stranger,
+        }
+    }
+
+    /// Whether this peer may run `cmd`. `ping`, `settings` and `adopted` are open to every
+    /// process of the user, so a second copy of the app (another place on disk) still finds
+    /// the running one and never becomes a second manager beside it, and a crashed copy's
+    /// guardian can hand its windows over.
+    pub fn may(self, cmd: &Command) -> bool {
+        match self {
+            Self::Ours => true,
+            // `adopted` too: a crashed copy's guardian asks it, and its binary may no longer be
+            // signed like this one (an update replaced it); it answers window ids only.
+            Self::SameUser => matches!(cmd, Command::Ping | Command::Settings | Command::Adopted(_)),
+            Self::Stranger => false,
+        }
+    }
+}
+
+/// The executable of process `pid` (`proc_pidpath`), resolved; `None` when it cannot be read
+/// (the process is gone).
+fn exe_of(pid: libc::pid_t) -> Option<PathBuf> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is writable for the length we pass.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    let path = PathBuf::from(OsString::from_vec(buf));
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// This process's executable, read once the way peers' are: named in the refusal reply.
+fn own_exe() -> Option<&'static Path> {
+    static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    // SAFETY: getpid has no preconditions.
+    OWN.get_or_init(|| exe_of(unsafe { libc::getpid() })).as_deref()
+}
+
+/// The connection's peer: its user (`getpeereid`) and its code signature, read through its
+/// audit token (`LOCAL_PEERTOKEN`); its pid (`LOCAL_PEERPID`) and executable only for the
+/// log.
+fn peer_of(stream: &UnixStream) -> (Peer, Option<libc::pid_t>, Option<PathBuf>) {
+    let fd = stream.as_raw_fd();
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: a valid socket and two valid out pointers.
+    let uid = (unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } == 0).then_some(uid);
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: a valid socket; `pid` and `len` are valid for the option's size.
+    let read = unsafe {
+        libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut len)
+    } == 0;
+    let pid = read.then_some(pid);
+    let exe = pid.and_then(exe_of);
+    let signed_like_us = || {
+        // audit_token_t: eight 32-bit words.
+        let mut token = [0u8; 32];
+        let mut len = token.len() as libc::socklen_t;
+        // SAFETY: a valid socket; `token` and `len` are valid for the option's size.
+        let read = unsafe {
+            libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERTOKEN, token.as_mut_ptr().cast(), &mut len)
+        } == 0;
+        read && len as usize == token.len() && super::code_sign::signed_like_us(&token)
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let own_uid = unsafe { libc::getuid() };
+    (Peer::judge(uid, own_uid, signed_like_us), pid, exe)
+}
+
+/// Binds the socket at `path` owner-only: in a private folder (`0700`, so no other account
+/// can reach it even before its own mode is set), then set to `0600`. No umask change: the
+/// process-wide mask would narrow files other threads create meanwhile (seen in parallel
+/// tests).
+fn bind_private(path: &Path) -> std::io::Result<UnixListener> {
+    if let Some(dir) = path.parent() {
+        crate::private_files::ensure_dir(dir)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
 /// Binds the socket (replacing a stale one). Fails when another instance answers on the
 /// socket. At launch this runs right after the single-instance claim
 /// ([`super::instance::claim`]), before anything is managed: a launch that cannot bind it
@@ -300,8 +423,10 @@ pub fn bind() -> std::io::Result<UnixListener> {
         }
         std::fs::remove_file(&path)?;
     }
-    let listener = UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let listener = bind_private(&path)?;
+    if !super::code_sign::own_requirement_known() {
+        tracing::warn!("ctl: cannot read this app's own code signature; every client gets only ping and settings");
+    }
     tracing::info!("ctl socket at {}", path.display());
     Ok(listener)
 }
@@ -336,14 +461,35 @@ pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
 
 fn serve_connection(stream: UnixStream, handler: &Handler) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let (peer, pid, exe) = peer_of(&stream);
+    if peer == Peer::Stranger {
+        tracing::warn!(?pid, "ctl: a connection from another account (or one that cannot be read) refused");
+        return;
+    }
     let Ok(mut writer) = stream.try_clone() else { return };
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
+    let mut reader = BufReader::new(stream);
+    let mut refused_noted = false;
+    loop {
+        let line = match read_line(&mut reader) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(e) => {
+                let _ = writeln!(writer, "{}", error_reply(&e));
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
         let reply = match Command::parse(&line) {
+            Ok(cmd) if !peer.may(&cmd) => {
+                if !std::mem::replace(&mut refused_noted, true) {
+                    // The program's name only: its folders may name the user.
+                    let name = exe.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+                    tracing::warn!(?pid, program = ?name, "ctl: a command from a program that is not Stage Manager refused");
+                }
+                error_reply(&refusal(own_exe()))
+            }
             Ok(cmd) => {
                 tracing::debug!("ctl: {line}");
                 handler(cmd)
@@ -354,6 +500,33 @@ fn serve_connection(stream: UnixStream, handler: &Handler) {
             break;
         }
     }
+}
+
+/// The reply to a command refused to a program that is not the app: it names the binary
+/// that would be served (`own`, this process's), so a script can switch to it. Only ever sent
+/// to a process of the same user.
+fn refusal(own: Option<&Path>) -> String {
+    let use_this = match own {
+        Some(path) => format!("run \"{}\"", path.display()),
+        None => "run the running app's own binary".to_string(),
+    };
+    format!("only Stage Manager's own binary may send this command (ping and settings are open): {use_this} ctl …")
+}
+
+/// The next line (without its newline); `None` at the end of the stream (or a read error);
+/// an error for a line longer than [`MAX_LINE`] or not UTF-8.
+fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, String> {
+    let mut buf = Vec::new();
+    match reader.take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf) {
+        Ok(0) | Err(_) => return Ok(None),
+        Ok(_) => {}
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() > MAX_LINE {
+        return Err(format!("a command line longer than {MAX_LINE} bytes"));
+    }
+    String::from_utf8(buf).map(Some).map_err(|_| "a command line that is not UTF-8".to_string())
 }
 
 /// Removes the socket file (on quit).
@@ -539,6 +712,93 @@ mod tests {
         assert!(Command::parse("send 2 x").is_err());
         assert!(Command::parse("send 2 3 4").is_err());
         assert!(Command::parse("tile").unwrap_err().contains("unknown command"));
+    }
+
+    #[test]
+    fn only_our_own_code_gets_more_than_ping_and_settings() {
+        let never_asked = || -> bool { panic!("another account is never checked further") };
+        assert_eq!(Peer::judge(Some(501), 501, || true), Peer::Ours, "this binary or a copy signed as it is");
+        assert_eq!(Peer::judge(Some(501), 501, || false), Peer::SameUser, "signed otherwise, unsigned, or gone");
+        assert_eq!(Peer::judge(Some(0), 501, never_asked), Peer::Stranger, "another account, root too");
+        assert_eq!(Peer::judge(None, 501, never_asked), Peer::Stranger, "unreadable");
+        for cmd in [Command::Ping, Command::Settings] {
+            assert!(Peer::SameUser.may(&cmd) && Peer::Ours.may(&cmd) && !Peer::Stranger.may(&cmd));
+        }
+        for cmd in [Command::Dump, Command::State, Command::Send(1, None), Command::Quit, Command::UnparkAll, Command::DebugPanic] {
+            assert!(!Peer::SameUser.may(&cmd), "{cmd:?}");
+            assert!(Peer::Ours.may(&cmd), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_binary_that_would_be_served() {
+        let ours = Path::new("/Applications/Stage Manager.app/Contents/MacOS/stage-manager");
+        let reply = refusal(Some(ours));
+        assert!(reply.contains("ping and settings are open"), "{reply}");
+        assert!(reply.contains("run \"/Applications/Stage Manager.app/Contents/MacOS/stage-manager\" ctl"), "{reply}");
+        assert!(refusal(None).contains("the running app's own binary"));
+    }
+
+    #[test]
+    fn this_test_binary_is_ours_and_its_own_peer() {
+        let (a, b) = UnixStream::pair().expect("pair");
+        let (peer, pid, exe) = peer_of(&a);
+        assert_eq!(peer, Peer::Ours, "a socket pair's peer is this very process");
+        assert_eq!(pid, Some(std::process::id() as libc::pid_t));
+        assert_eq!(exe.as_deref(), own_exe());
+        drop(b);
+    }
+
+    #[test]
+    fn a_program_signed_otherwise_is_not_ours() {
+        // macOS's own `nc` connects: same user, another path, Apple's signature, which this
+        // test binary's requirement (its own ad-hoc code) does not admit.
+        let nc = Path::new("/usr/bin/nc");
+        if !nc.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.sock");
+        let listener = UnixListener::bind(&path).expect("binds");
+        let mut child = std::process::Command::new(nc)
+            .arg("-U")
+            .arg(&path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("nc runs");
+        let (stream, _) = listener.accept().expect("accepts");
+        let (peer, pid, exe) = peer_of(&stream);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(peer, Peer::SameUser, "{pid:?} {exe:?}");
+        assert_eq!(pid, Some(child.id() as libc::pid_t));
+    }
+
+    #[test]
+    fn long_or_broken_lines_end_the_connection() {
+        let mut ok = BufReader::new(&b"ping\nstate"[..]);
+        assert_eq!(read_line(&mut ok), Ok(Some("ping".into())));
+        assert_eq!(read_line(&mut ok), Ok(Some("state".into())));
+        assert_eq!(read_line(&mut ok), Ok(None));
+        let exact = "x".repeat(MAX_LINE);
+        assert_eq!(read_line(&mut BufReader::new(exact.as_bytes())), Ok(Some(exact.clone())));
+        let long = "x".repeat(MAX_LINE + 1);
+        assert!(read_line(&mut BufReader::new(long.as_bytes())).is_err());
+        assert!(read_line(&mut BufReader::new(&b"\xff\n"[..])).is_err());
+    }
+
+    #[test]
+    fn the_socket_is_bound_owner_only_in_a_private_folder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).expect("mkdir");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = home.join("t.sock");
+        let _listener = bind_private(&path).expect("binds");
+        assert_eq!(crate::private_files::mode(&path).expect("mode"), 0o600);
+        assert_eq!(crate::private_files::mode(&home).expect("mode"), 0o700);
     }
 
     #[test]

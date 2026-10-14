@@ -48,10 +48,14 @@ self-signed identity (`scripts/sign.sh`).
 ## Each release
 
 1. Set the version in `Cargo.toml` (`version = "X.Y.Z"`); the bundle, the DMG and the cask
-   take it from there. Run `make check`.
-2. Optional: `DRY_RUN=1 make release` builds everything except the signing and notary steps,
-   which it prints. Its DMG holds an unsigned app: never publish it.
-3. `make release` (or `make release DEVELOPER_ID=… NOTARY_PROFILE=…`):
+   take it from there. Run `make check` (it also updates the version in `Cargo.lock`).
+2. Commit the bump: `Cargo.toml` and `Cargo.lock` together. `make release` builds only a
+   committed tree (it refuses uncommitted or untracked files) and with `--locked`, which
+   fails on a `Cargo.lock` that still names the old version.
+3. Optional: `DRY_RUN=1 make release` builds everything except the signing and notary steps,
+   which it prints (on a dirty tree it only warns). Its DMG holds an unsigned app: never
+   publish it.
+4. `make release` (or `make release DEVELOPER_ID=… NOTARY_PROFILE=…`):
    - builds and bundles a fresh app;
    - signs it with the Developer ID: hardened runtime, secure timestamp,
      `packaging/entitlements.plist` (empty: the app needs no entitlements; the file says why);
@@ -64,9 +68,9 @@ self-signed identity (`scripts/sign.sh`).
      and `spctl -a -t exec -vv` on the app;
    - copies the DMG to `Stage-Manager-X.Y.Z.dmg` for your archive, and writes and prints the
      Homebrew cask (`target/release/stage-manager.rb`) with the version and the DMG's sha256.
-4. Try the DMG on a clean account or Mac: open it, drag the app to Applications, launch, and
+5. Try the DMG on a clean account or Mac: open it, drag the app to Applications, launch, and
    check that no Gatekeeper warning appears.
-5. Publish (the DMG's name stays `Stage-Manager.dmg` in every release, so
+6. Publish (the DMG's name stays `Stage-Manager.dmg` in every release, so
    `https://github.com/eugene-tea/stage-manager/releases/latest/download/Stage-Manager.dmg`,
    the info page's Download button, always serves the newest):
 
@@ -75,7 +79,7 @@ self-signed identity (`scripts/sign.sh`).
      --title "Stage Manager X.Y.Z" --notes-file <release notes>.md
    ```
 
-6. Homebrew: copy `target/release/stage-manager.rb` to `Casks/stage-manager.rb` in the tap,
+7. Homebrew: copy `target/release/stage-manager.rb` to `Casks/stage-manager.rb` in the tap,
    commit (`stage-manager X.Y.Z`) and push. Check it with `brew tap eugene-tea/tap`, then
    `brew audit --cask --online eugene-tea/tap/stage-manager` and
    `brew install --cask eugene-tea/tap/stage-manager`. The cask says `auto_updates true` (the

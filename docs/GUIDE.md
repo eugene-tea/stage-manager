@@ -11,7 +11,8 @@ everything can be changed in one config file.
 
 ## Install
 
-You need macOS 14 Sonoma or later.
+You need a Mac with Apple silicon (M1 or later) and macOS 14 Sonoma or later. Intel Macs are
+not supported.
 
 1. Download `Stage-Manager.dmg` from the
    [latest release](https://github.com/eugene-tea/stage-manager/releases/latest).
@@ -49,7 +50,8 @@ soon as it is done, and you never need to restart the app.
    and while stages switch. Without it, cards show plain window shapes with the app's icon.
    It is in System Settings → Privacy & Security → Screen & System Audio Recording.
 
-Stage Manager never needs Input Monitoring. It records nothing you type.
+Stage Manager never needs Input Monitoring. It watches key presses only to notice ⌘-Tab and
+⌘-\`, and records nothing you type.
 
 If you close the welcome window early, the menu bar icon's menu keeps reminding you what is
 missing, with an **Allow…** item for each.
@@ -206,9 +208,12 @@ anything. Nothing about you or your Mac is sent. You can turn the check off in S
 use.
 
 Nothing about your windows leaves your Mac. Stage Manager keeps a daily log in
-`~/Library/Logs/Stage Manager`, which includes window titles to help find problems. Only
-your user account can read it, logs are deleted after 14 days, and nothing sends them
-anywhere.
+`~/Library/Logs/Stage Manager` to help find problems. It names windows by app and number,
+never by title: where a title matters, the log shows a short code made from it instead
+(`[log] titles = true` writes titles as they are, for debugging). Only your user account can
+read the log, logs are deleted after 14 days, and nothing sends them anywhere. Your saved
+stages in `~/.config/stage-manager` do keep window titles, to find the windows again after a
+restart, and are likewise readable by your account only.
 
 ## Uninstall
 
@@ -265,10 +270,12 @@ Some limits to know about:
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", a click on a desktop icon
   also counts as a wallpaper click.
 
-**Reporting a problem.** Choose **Mark a Problem** in the menu right after something goes
-wrong. It writes a note with the app's state into the day's log. Then open an issue on
+**Reporting a problem.** Set `[log] level = "debug"` in the config file, so the log keeps
+every decision and the menu shows **Mark a Problem**. Choose it right after something goes
+wrong: it writes a note with the app's state into the day's log. Then open an issue on
 [GitHub](https://github.com/eugene-tea/stage-manager/issues) and describe what happened.
-Read the log before attaching it, since it contains your window titles.
+The log shows window titles only as short codes, but it does name your apps; read it before
+attaching it.
 
 ## More
 

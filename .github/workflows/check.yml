@@ -1,0 +1,33 @@
+# `make check` on Apple silicon for every push and pull request: the unit tests and clippy.
+# No secrets, no signing, no release steps; nothing here launches the app or moves a window.
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # An Apple silicon runner (arm64), as the app ships.
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        # Installs the pinned version; an older rustup installs it on `rustup show` instead.
+        run: rustup toolchain install || rustup show
+      - name: Tests
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings

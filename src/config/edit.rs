@@ -57,7 +57,7 @@ pub fn set_in_file(file: &Path, path: &str, literal: &str) -> Result<bool, EditE
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(dir) = file.parent() {
-                std::fs::create_dir_all(dir).map_err(io)?;
+                crate::private_files::ensure_dir(dir).map_err(io)?;
             }
             super::default_file()
         }
@@ -68,7 +68,8 @@ pub fn set_in_file(file: &Path, path: &str, literal: &str) -> Result<bool, EditE
         return Ok(false);
     }
     let tmp = file.with_extension("toml.saving");
-    std::fs::write(&tmp, &new).map_err(io)?;
+    // Owner-only until it takes the file's own mode: never readable by others in between.
+    crate::private_files::write(&tmp, new.as_bytes()).map_err(io)?;
     if let Ok(meta) = std::fs::metadata(file) {
         let _ = std::fs::set_permissions(&tmp, meta.permissions());
     }

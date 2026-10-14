@@ -352,10 +352,10 @@ pub enum LogLevel {
     Error,
     /// Warnings and errors.
     Warn,
-    /// The main events.
-    Info,
-    /// Every decision the app makes (the trial default).
+    /// The main events (the default).
     #[default]
+    Info,
+    /// Every decision the app makes.
     Debug,
     /// Also per-move and per-frame detail.
     Trace,
@@ -367,9 +367,9 @@ impl LogLevel {
         match text {
             "error" => Self::Error,
             "warn" => Self::Warn,
-            "info" => Self::Info,
+            "debug" => Self::Debug,
             "trace" => Self::Trace,
-            _ => Self::Debug,
+            _ => Self::Info,
         }
     }
 
@@ -397,6 +397,9 @@ pub struct LogConfig {
     pub max_mb_per_day: u64,
     /// The folder's cap, in MB.
     pub max_mb_total: u64,
+    /// Window titles go into the log and problem marks as they are (for debugging); off, a
+    /// short hash stands in for each ([`crate::logbook::titles::title`]).
+    pub titles: bool,
 }
 
 impl Default for LogConfig {
@@ -411,6 +414,7 @@ fn log_config(v: &Values) -> LogConfig {
         days: v.int("log.days").clamp(1, 365) as u32,
         max_mb_per_day: v.uint("log.max_mb_per_day"),
         max_mb_total: v.uint("log.max_mb_total"),
+        titles: v.flag("log.titles"),
     }
 }
 
@@ -951,7 +955,7 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, ConfigError> {
     };
     if !path.exists() {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
+            crate::private_files::ensure_dir(dir)
                 .map_err(|e| ConfigError(format!("cannot create {}: {e}", dir.display())))?;
         }
         write(path)?;
@@ -1124,12 +1128,13 @@ mod tests {
     }
 
     #[test]
-    fn the_log_section_has_the_trial_defaults_and_parses() {
+    fn the_log_section_keeps_main_events_without_titles_by_default_and_parses() {
         let c = Config::default().log;
-        assert_eq!(c, LogConfig { level: LogLevel::Debug, days: 14, max_mb_per_day: 100, max_mb_total: 500 });
-        assert_eq!(c.level.directives(), "info,stage_manager=debug");
-        let p = parse("[log]\nlevel = \"info\"\ndays = 3\nmax_mb_per_day = 5\nmax_mb_total = 0\n");
-        assert_eq!(p.config.log, LogConfig { level: LogLevel::Info, days: 3, max_mb_per_day: 5, max_mb_total: 1 });
+        assert_eq!(c, LogConfig { level: LogLevel::Info, days: 14, max_mb_per_day: 100, max_mb_total: 500, titles: false });
+        assert_eq!(c.level.directives(), "info");
+        let p = parse("[log]\nlevel = \"debug\"\ndays = 3\nmax_mb_per_day = 5\nmax_mb_total = 0\ntitles = true\n");
+        assert_eq!(p.config.log, LogConfig { level: LogLevel::Debug, days: 3, max_mb_per_day: 5, max_mb_total: 1, titles: true });
+        assert_eq!(p.config.log.level.directives(), "info,stage_manager=debug");
         assert_eq!(p.warnings.len(), 1, "max_mb_total clamped: {:?}", p.warnings);
         assert!(Config::parse("[log]\nlevel = \"loud\"\n").is_err());
     }

@@ -47,7 +47,8 @@ pub fn replace(path: &Path, bytes: &[u8], flush: Flush) -> std::io::Result<()> {
 }
 
 fn write_flushed(tmp: &Path, bytes: &[u8], flush: Flush) -> std::io::Result<()> {
-    let mut f = File::create(tmp)?;
+    // Readable by the user only; the rename keeps the mode (`crate::private_files`).
+    let mut f = crate::private_files::create(tmp)?;
     f.write_all(bytes)?;
     match flush {
         Flush::Full => f.sync_all(),

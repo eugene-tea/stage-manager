@@ -1141,8 +1141,9 @@ impl Controller {
     /// it to the main thread when it changed. Reads the window server's on-screen list only
     /// while `[windows] corner_patch` is on; checks the patch's order in it every time (an
     /// activation raising a parked window undoes it), and has it ordered again when it was
-    /// right and is not any more.
-    fn update_patch(&mut self) {
+    /// right and is not any more. Returns the list when it read one, for the rest of the tick
+    /// ([`super::sliver_tap::refresh`]).
+    fn update_patch(&mut self) -> Option<Vec<windows::CgWindow>> {
         use crate::engine::corner_patch::{Listed, PatchFacts, order_step, ordered_right, patch_rect, steady_rect, visibility, would_be_right};
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
@@ -1158,8 +1159,9 @@ impl Controller {
         // edges, the patch then over a pushed window's edge (10-13: a lighter block in the
         // corner each time), so it hides by the plan.
         if on && !self.space_pending && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
-            return;
+            return None;
         }
+        let mut read = None;
         let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
         let plan = match &self.model {
             Some(m) if on => {
@@ -1237,6 +1239,7 @@ impl Controller {
                     self.patch_why = why;
                 }
                 let show = visible.ok();
+                read = Some(list);
                 PatchPlan { show, above: show.and(above), reorder, space }
             }
             _ => {
@@ -1250,10 +1253,11 @@ impl Controller {
             }
         };
         if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none()) {
-            return;
+            return read;
         }
         self.patch_sent = Some(plan.clone());
         notify_ui(UiUpdate::CornerPatch(plan));
+        read
     }
 
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
@@ -1856,8 +1860,9 @@ impl Controller {
 
     // ----- persistence -------------------------------------------------------------------
 
-    /// Writes `state.json` now (atomically and durably, [`super::durable`]). A state that
-    /// cannot be encoded (a frame that is not finite) is not written: the file on disk stays.
+    /// Writes `state.json` now (atomically and durably, [`super::durable`], readable by the user
+    /// only in a private folder, [`crate::private_files`]). A state that cannot be encoded (a
+    /// frame that is not finite) is not written: the file on disk stays.
     pub fn save_now(&mut self) {
         self.dirty = None;
         let Some(m) = &self.model else { return };
@@ -1872,7 +1877,7 @@ impl Controller {
                 return;
             }
         };
-        let result = std::fs::create_dir_all(paths::config_dir())
+        let result = crate::private_files::ensure_dir(&paths::config_dir())
             .and_then(|_| super::durable::replace(&path, text.as_bytes(), super::durable::Flush::Full));
         match result {
             Ok(()) => tracing::debug!("state saved to {}", path.display()),
@@ -3614,7 +3619,11 @@ impl Controller {
                 self.check_spaces(ob);
             }
             self.hide_pass(ob);
-            self.update_patch();
+            // One read of the window server's list a tick: the patch's, or the tap's own when
+            // the patch is off. The inert-slivers tap judges presses on it, never reading it
+            // itself.
+            let list = self.update_patch().or_else(|| super::sliver_tap::wants_list().then(windows::on_screen));
+            super::sliver_tap::refresh(list.as_deref());
         }
         if self.strip_dirty {
             self.present();

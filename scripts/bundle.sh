@@ -65,6 +65,11 @@ case "${1:-}" in
   fixture)
     APP="${FIXTURE_APP:-target/SM Fixture.app}"
     FIXTURE_ID="${FIXTURE_ID:-dev.eugene.stagemanager.fixture}"
+    # It is replaced whole (rm -rf): only ever an app bundle.
+    case "$APP" in
+      *.app) ;;
+      *) echo "error: FIXTURE_APP must end in .app, got: $APP" >&2; exit 1 ;;
+    esac
     rm -rf "$APP"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/sm-fixture" scripts/fixture/main.swift

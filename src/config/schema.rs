@@ -172,7 +172,8 @@ pub const SECTIONS: &[SectionDef] = &[
         name: "log",
         doc: &[
             "The daily log: ~/Library/Logs/Stage Manager/YYYY-MM-DD.log, local times. It never",
-            "leaves this Mac; window titles may appear in it. RUST_LOG overrides `level`.",
+            "leaves this Mac and keeps no window titles unless `titles` is on. RUST_LOG overrides",
+            "`level`.",
         ],
     },
 ];
@@ -348,8 +349,10 @@ pub const KEYS: &[KeyDef] = &[
     k("defaults", "placement", Kind::Placement, "\"as-is\"",
         "Where it goes: \"as-is\", \"center\", or \"cascade\" (offset from the front window)."),
     // [log]
-    k("log", "level", Kind::Choice(&["error", "warn", "info", "debug", "trace"]), "\"debug\"",
-        "How much the log keeps: \"debug\" (the default for now) records every decision, \"info\" only the main ones."),
+    k("log", "level", Kind::Choice(&["error", "warn", "info", "debug", "trace"]), "\"info\"",
+        "How much the log keeps: \"info\" the main events, \"debug\" every decision (and shows Mark a Problem in the menu)."),
+    k("log", "titles", Kind::Bool, "false",
+        "Write window titles into the log and problem marks, for debugging; off, a short hash stands in for each."),
     k("log", "days", i(1, 365), "14", "Day files older than this many days are deleted."),
     k("log", "max_mb_per_day", i(1, 10_000), "100",
         "A day's file this big takes only warnings, errors, marks and counts from then on."),
@@ -483,6 +486,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-8.toml"),
     include_str!("legacy/default-9.toml"),
     include_str!("legacy/default-10.toml"),
+    include_str!("legacy/default-11.toml"),
 ];
 
 #[cfg(test)]

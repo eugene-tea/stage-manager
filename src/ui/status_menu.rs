@@ -134,7 +134,7 @@ pub struct MenuState {
     pub apple_stage_manager_on: bool,
     /// config.toml failed to load (the last good config stays in force).
     pub config_error: Option<String>,
-    /// Show Mark a Problem (the log is verbose: the trial default).
+    /// Show Mark a Problem (the log is verbose: `[log] level` debug or trace).
     pub mark_shown: bool,
     /// When the last problem mark was written (`HH:MM:SS`).
     pub last_mark: Option<String>,
