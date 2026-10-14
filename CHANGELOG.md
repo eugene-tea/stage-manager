@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 — 2026-10-13
+
+- Desktops keep their stages across restarts, and when you move windows between Desktops.
+  A window moved to another Desktop goes where a new window of its app would open there.
+- ⌘-Tab, Dock and click switches animate again: the stage you leave shrinks into the strip
+  behind the app you switch to.
+- Quitting brings back every window from the corner, even from an app that is busy at that
+  moment; a window that cannot be reached yet is brought back as soon as it can be.
+- The strip stays in front, and stays put under the pointer, while you click through its
+  cards with windows covering it.
+- The clean corner hides during Show Desktop and comes back with Mission Control.
+- New documentation: a short user guide, a configuration reference and development notes.
+
 ## 1.0.0
 
 - **2026-10-12** — Day one of daily use. The strip matches Apple's down to the card tilt,
