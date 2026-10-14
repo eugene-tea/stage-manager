@@ -8,7 +8,8 @@
 <h1 align="center">Stage Manager</h1>
 
 <p align="center"><a href="https://github.com/eugene-tea/stage-manager/releases/latest"><b>Download</b></a>
-· signed and notarized · macOS 14 Sonoma or later</p>
+· signed and notarized · macOS 14 Sonoma or later<br>
+or <code>brew install --cask eugene-tea/tap/stage-manager</code></p>
 
 ## What it does
 

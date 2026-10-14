@@ -18,6 +18,8 @@ You need macOS 14 Sonoma or later.
 2. Open it and drag **Stage Manager** into **Applications**.
 3. Open Stage Manager from Applications.
 
+With Homebrew: `brew install --cask eugene-tea/tap/stage-manager`.
+
 ## First launch
 
 A welcome window walks you through three things. Each row turns into a green check mark as
