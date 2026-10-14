@@ -81,6 +81,11 @@ never changes the Desktop. When ⌘-Tab or the Dock takes you to another Desktop
 ready when it arrives. Full-screen apps have no strip. Mission Control hides the strip, just
 as it hides Apple's.
 
+A window you move to another Desktop (in Mission Control, say) goes where a new window of
+its app would open there: with that app's windows if it has a stage on that Desktop, else in
+a stage of its own, shown in front. Move windows of several apps at once and each app gets
+its own stage; the front one is shown and the rest wait in the strip.
+
 ### Drag and drop
 
 - **Drag a card into the middle** to bring its windows into the stage you are in.
@@ -237,8 +242,9 @@ Some limits to know about:
   click sets it up before.)
 - An empty Desktop is forgotten when you leave it. A Desktop whose windows are all hidden or
   minimized looks new until one of them shows again.
-- When an app is relaunched, its windows are matched to their stages by title. Two windows
-  of one app with the same title may swap stages.
+- After you restart your Mac or log in again, and when an app is relaunched, windows are
+  matched to their stages by title. Two windows of one app with the same title may swap
+  stages.
 - Keyboard shortcuts use US key positions.
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", a click on a desktop icon
   also counts as a wallpaper click.

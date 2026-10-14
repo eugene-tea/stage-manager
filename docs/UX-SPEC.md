@@ -168,5 +168,7 @@ Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stage
 - Not measured yet on Apple's: the edge-reveal and auto-hide delays (ours: 250 ms and
   500 ms), the hover's exact easing, a new card's fade, a Shift-click on a card holding
   several apps, the cards' shadow and corner radius, and the shadow of moving windows.
-- Where Apple places a window moved to another Desktop is unverified. Ours shows it in front
-  there: with its app's windows if the active stage holds one, else in a stage of its own.
+- Where Apple places a window moved to another Desktop is unverified. Ours places it as a
+  window of its app opening there: in that app's most recent stage on that Desktop, else a
+  stage of its own, shown in front. Several apps moved at once get a stage each; the front
+  one shows, the rest wait in the strip.
