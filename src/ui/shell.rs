@@ -641,6 +641,21 @@ fn skip_version(version: &updates::Version) {
     });
 }
 
+/// Test builds only (`update-test`, the `debug-update` ctl command): checks for an update
+/// and installs it as "Install and Relaunch" does, with no alert.
+#[cfg(feature = "update-test")]
+pub fn debug_install() {
+    update_check::check(|outcome| {
+        later(move || match outcome {
+            Outcome::Available(release) => {
+                tracing::warn!(version = %release.version, "debug-update: installing as Install and Relaunch does");
+                begin_install(release, true);
+            }
+            other => tracing::warn!(?other, "debug-update: nothing to install"),
+        })
+    });
+}
+
 /// Downloads and verifies `release`, then installs it at a quiet moment. `asked`: the user
 /// clicked Install (it goes as soon as nothing is mid-drag or mid-transition); otherwise an
 /// automatic install, which also waits for the user to be away. A click joins an install

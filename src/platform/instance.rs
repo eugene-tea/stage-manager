@@ -152,7 +152,8 @@ pub fn shows_settings(uptime: Option<Duration>) -> bool {
 fn try_lock() -> (Lock, Option<File>) {
     let path = lock_path();
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        // Private from the first launch on (the socket and state.json live here too).
+        let _ = crate::private_files::ensure_dir(dir);
     }
     let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path) {
         Ok(f) => f,

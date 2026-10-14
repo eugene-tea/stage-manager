@@ -94,6 +94,9 @@ pub enum Command {
     DebugPanic,
     /// Test only: quit the way the menu's Quit item does (from inside a menu action).
     DebugMenuQuit,
+    /// Test builds with the `update-test` feature: check for an update and install it as
+    /// "Install and Relaunch" does, with no alert (live checks of the updater).
+    DebugUpdate,
     /// A synthetic pointer move to a global point, resting there for `ms` (the strip's
     /// left-edge reveal), only where our own or a `STAGE_MANAGER_ONLY` app's window is topmost
     /// (needs `STAGE_MANAGER_TEST=1`). The next synthetic click or drag puts the pointer back
@@ -217,6 +220,7 @@ impl Command {
             ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
+            ["debug-update"] => Ok(Self::DebugUpdate),
             ["debug-drag", rest @ ..] => {
                 let (rest, hold_ms) = match rest.split_last() {
                     Some((last, r)) if last.starts_with("hold=") => {

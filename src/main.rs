@@ -444,6 +444,18 @@ mod app {
                 DispatchQueue::main().exec_async(|| with_app(|app| app.on_menu(MenuAction::Quit)));
                 json!({ "ok": true, "quitting": true })
             }
+            Command::DebugUpdate => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-update needs STAGE_MANAGER_TEST=1");
+                }
+                #[cfg(feature = "update-test")]
+                {
+                    DispatchQueue::main().exec_async(stage_manager::ui::shell::debug_install);
+                    json!({ "ok": true, "checking": true })
+                }
+                #[cfg(not(feature = "update-test"))]
+                ctl::error_reply("debug-update needs a build with the update-test feature")
+            }
             Command::DebugPanic => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-panic needs STAGE_MANAGER_TEST=1");
