@@ -1,7 +1,7 @@
 //! The Settings window: one pane in the look of System Settings, a grouped form.
 //!
-//! - **General:** launch at login, the menu bar icon, automatic update checks, the version
-//!   with Check for Updates….
+//! - **General:** launch at login, the menu bar icon, automatic update checks, installing
+//!   updates automatically, the version with Check for Updates….
 //! - **Stage Manager** (Apple's own Customize sheet): whether Apple's Stage Manager is on
 //!   (with Turn Off), "Show recent apps", "Show windows from an application", and "Click
 //!   wallpaper to reveal desktop" (read only; its button opens Desktop & Dock).
@@ -122,6 +122,7 @@ pub enum Change {
     OpenLoginItems,
     MenuBarIcon(bool),
     AutoUpdates(bool),
+    InstallUpdates(bool),
     CheckNow,
     TurnOffApple,
     ShowRecentApps(bool),
@@ -155,6 +156,7 @@ mod tag {
     pub const OPEN: isize = 15;
     pub const REVEAL: isize = 16;
     pub const COPY: isize = 17;
+    pub const INSTALL: isize = 18;
 }
 
 const FIT_TITLES: [&str; 3] = ["Off", "Move Windows", "Move and Narrow"];
@@ -165,6 +167,7 @@ struct Controls {
     login: Retained<NSSwitch>,
     icon: Retained<NSSwitch>,
     updates: Retained<NSSwitch>,
+    install: Retained<NSSwitch>,
     recent: Retained<NSSwitch>,
     grouping: Retained<NSPopUpButton>,
     merge: Retained<NSSwitch>,
@@ -207,6 +210,7 @@ fn change_for(c: &Controls, t: isize) -> Option<Change> {
         tag::LOGIN_ITEMS => Change::OpenLoginItems,
         tag::ICON => Change::MenuBarIcon(on(&c.icon)),
         tag::UPDATES => Change::AutoUpdates(on(&c.updates)),
+        tag::INSTALL => Change::InstallUpdates(on(&c.install)),
         tag::CHECK => Change::CheckNow,
         tag::TURN_OFF => Change::TurnOffApple,
         tag::RECENT => Change::ShowRecentApps(on(&c.recent)),
@@ -301,12 +305,16 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (R
     login_row.trailing.push(view(&login));
     let icon = sw(v.app.show_menu_bar_icon, tag::ICON);
     let updates = sw(v.app.check_for_updates, tag::UPDATES);
+    let install = sw(v.app.install_updates, tag::INSTALL);
+    install.setEnabled(v.app.check_for_updates);
     f.group(vec![
         login_row,
         Row::new("Show menu bar icon", Some(view(&icon)))
             .detail("To open Settings again, open Stage Manager from Applications."),
         Row::new("Check for updates automatically", Some(view(&updates)))
             .detail("Once a day, from GitHub. Nothing about you or this Mac is sent."),
+        Row::new("Install updates automatically", Some(view(&install)))
+            .detail("While you're away from the Mac; otherwise Stage Manager asks first. Your windows come back before it relaunches."),
         Row::new(&format!("Stage Manager {}", v.version), Some(view(&btn("Check for Updates…", tag::CHECK)))),
     ]);
     f.space(12.0);
@@ -380,7 +388,7 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (R
     f.footnote("Changes apply at once and are saved in the config file, keeping its comments.");
 
     let (view, height) = f.finish();
-    (view, height, Controls { login, icon, updates, recent, grouping, merge, shift, fit, hotkeys, speed, copy })
+    (view, height, Controls { login, icon, updates, install, recent, grouping, merge, shift, fit, hotkeys, speed, copy })
 }
 
 /// Opens the window (or brings it to the front) with `values`; each change goes to
@@ -451,6 +459,8 @@ pub fn apply(values: SettingsValues) {
         set_switch(&c.login, login_on(&values));
         set_switch(&c.icon, values.app.show_menu_bar_icon);
         set_switch(&c.updates, values.app.check_for_updates);
+        set_switch(&c.install, values.app.install_updates);
+        c.install.setEnabled(values.app.check_for_updates);
         set_switch(&c.recent, values.show_recent_apps);
         c.grouping.selectItemAtIndex(if values.all_at_once { 0 } else { 1 });
         set_switch(&c.merge, values.merge_on_drop);
@@ -539,7 +549,10 @@ mod tests {
     fn only_row_changes_rebuild_the_form() {
         let config = Config::default();
         let base = SettingsValues::new(&config, &RawSettings::new(), LoginStatus::On, "~/x".into(), None, "1.0.0".into());
-        let toggled = SettingsValues { merge_on_drop: false, speed: 2.0, ..base.clone() };
+        let mut app = base.app;
+        app.check_for_updates = false;
+        app.install_updates = true;
+        let toggled = SettingsValues { merge_on_drop: false, speed: 2.0, app, ..base.clone() };
         assert_eq!(base.shape(), toggled.shape(), "a switch or the slider updates in place");
         for other in [
             SettingsValues { login: LoginStatus::NeedsApproval, ..base.clone() },

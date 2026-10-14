@@ -110,6 +110,8 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item |
 | `STAGE_MANAGER_NO_CAPTURE` | window captures off, whatever the config says |
 | `STAGE_MANAGER_TEST` | enables the test-only `ctl debug-*` commands |
+| `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
+| `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
 | `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` toggle Apple's Stage Manager (it restores the setting on exit) |
 
 ## The ctl socket
@@ -183,8 +185,10 @@ one-line explanation. That table drives parsing, the commented default file, `co
 
 - `src/engine`, `src/config.rs` — the pure engine and configuration: stages, rules,
   placement, Desktops, persistence, safety decisions. Unit tested.
-- `src/logbook`, `src/updates.rs`, `src/app_state.rs` — the daily log, update checks and the
-  app's own memory, also pure.
+- `src/logbook`, `src/updates.rs`, `src/self_update.rs`, `src/app_state.rs` — the daily log,
+  update checks, update installs (what a new version must prove, the swap and its rollback)
+  and the app's own memory, also pure. `src/platform/updater.rs` downloads, verifies and
+  hands the swap to `stage-manager --update-helper` at quit.
 - `src/platform` — macOS glue: Accessibility, the window server, ScreenCaptureKit, hotkeys,
   input, displays, the WM thread, safety (registry, signals, guardian), ctl, login item.
 - `src/ui` — the menu bar item, the strip and its motion, Settings, the welcome window and

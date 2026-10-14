@@ -15,8 +15,34 @@ use crate::updates::{self, LATEST_URL, Outcome};
 /// How long a check may take.
 const TIMEOUT_SECS: f64 = 20.0;
 
+/// Test builds only: the version the check offers instead of asking GitHub.
+#[cfg(feature = "update-test")]
+pub const TEST_VERSION_ENV: &str = "STAGE_MANAGER_UPDATE_VERSION";
+
+/// Test builds only: a release of the version in [`TEST_VERSION_ENV`], when set.
+#[cfg(feature = "update-test")]
+fn test_release() -> Option<Outcome> {
+    let text = std::env::var(TEST_VERSION_ENV).ok()?;
+    let version = updates::Version::parse(&text)?;
+    let tag = format!("v{version}");
+    tracing::warn!(%version, "update check: test build, offering a local release");
+    Some(Outcome::Available(updates::Release {
+        dmg: Some(format!("{}{tag}/{}", updates::ASSET_PREFIX, updates::DMG_NAME)),
+        page: updates::RELEASES_URL.to_string(),
+        notes: "- A local test release".into(),
+        dmg_size: None,
+        version,
+        tag,
+    }))
+}
+
 /// Starts a check; `done` runs on the main thread with the outcome.
 pub fn check(done: impl FnOnce(Outcome) + Send + 'static) {
+    #[cfg(feature = "update-test")]
+    if let Some(outcome) = test_release() {
+        DispatchQueue::main().exec_async(move || done(outcome));
+        return;
+    }
     let Some(url) = NSURL::URLWithString(&NSString::from_str(LATEST_URL)) else {
         done(Outcome::Failed("bad URL".into()));
         return;

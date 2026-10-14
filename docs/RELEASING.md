@@ -78,8 +78,16 @@ self-signed identity (`scripts/sign.sh`).
 6. Homebrew: copy `target/release/stage-manager.rb` to `Casks/stage-manager.rb` in the tap,
    commit (`stage-manager X.Y.Z`) and push. Check it with `brew tap eugene-tea/tap`, then
    `brew audit --cask --online eugene-tea/tap/stage-manager` and
-   `brew install --cask eugene-tea/tap/stage-manager`. The cask says `auto_updates true` (the
-   app checks for updates itself), so `brew upgrade` leaves it to the app unless `--greedy`.
+   `brew install --cask eugene-tea/tap/stage-manager`. The cask says `auto_updates true`: the
+   app installs its own updates (Install and Relaunch, or automatically when that is on), so
+   `brew upgrade` leaves it to the app unless `--greedy`.
+
+**What every release must keep, or installed copies cannot update themselves:** the asset
+named `Stage-Manager.dmg` on the release; the same Developer ID team (the running app reads
+its own team and designated requirement and the new app must match both); the bundle ID
+`dev.eugene.stagemanager`; the DMG signed with `-i dev.eugene.stagemanager.dmg`; notarized;
+a higher version. The first lines of the release notes show in the update alert (up to six
+lines, Markdown reduced to plain text), so lead with what users will notice.
 
 The tag, the release, the tap and the Pages deploy are public: each one only on the owner's
 word.

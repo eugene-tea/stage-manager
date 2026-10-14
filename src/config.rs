@@ -423,6 +423,8 @@ pub struct AppConfig {
     pub show_menu_bar_icon: bool,
     /// Check for a newer release at most once a day.
     pub check_for_updates: bool,
+    /// Install a newer release without asking (when checks are on).
+    pub install_updates: bool,
 }
 
 impl Default for AppConfig {
@@ -736,6 +738,7 @@ impl Config {
                 launch_at_login: v.flag("app.launch_at_login"),
                 show_menu_bar_icon: v.flag("app.show_menu_bar_icon"),
                 check_for_updates: v.flag("app.check_for_updates"),
+                install_updates: v.flag("app.install_updates"),
             },
             strip: StripConfig {
                 order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
@@ -1096,7 +1099,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(
             c.app,
-            AppConfig { launch_at_login: true, show_menu_bar_icon: true, check_for_updates: true },
+            AppConfig { launch_at_login: true, show_menu_bar_icon: true, check_for_updates: true, install_updates: false },
             "the menu bar icon and launch at login are on (the owner's word, 10-13; Apple's Stage Manager has neither)"
         );
         assert_eq!(c.windows.fit, FitMode::Off, "windows keep their exact frames");

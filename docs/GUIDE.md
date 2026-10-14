@@ -134,7 +134,7 @@ looks empty. If another display sits beyond that corner, a free corner is used i
 Open Settings from the menu bar icon. If you hid the icon, open Stage Manager again from
 Applications and Settings appears.
 
-- **General:** start at login, show the menu bar icon, check for updates.
+- **General:** start at login, show the menu bar icon, check for updates, install them automatically.
 - **Stage Manager:** the same options as Apple's Stage Manager — show recent apps, and show
   an app's windows all at once or one at a time. These are macOS's own settings, so they
   stay in step with System Settings.
@@ -200,10 +200,22 @@ Every option, with its values and default, is in the
 
 ## Updates and privacy
 
-Stage Manager checks GitHub for a new version once a day and asks before downloading
-anything. Nothing about you or your Mac is sent. You can turn the check off in Settings, and
-**Check for Updates…** in the menu works either way. This check is the app's only network
-use.
+Stage Manager checks GitHub for a new version once a day. When one is out, it asks:
+**Install and Relaunch**, **Later** or **Skip This Version**. Install downloads the new
+version from GitHub and checks that it is signed by the same developer and notarized by
+Apple before anything is replaced. Then every window comes back from the corner, the new
+version takes the old one's place and opens, and your Accessibility and Screen Recording
+approvals stay. If any step fails, the old version stays (or is put back) and says why.
+
+Turn on **Install updates automatically** in Settings to skip the question: an update then
+installs while you are away from the Mac, never in the middle of a drag or a switch. You
+can turn the daily check off, and **Check for Updates…** in the menu works either way. If
+Stage Manager can't replace itself where it is (it runs from the disk image, or from a
+folder you can't write to), it offers the download instead.
+
+Nothing about you or your Mac is sent: the check asks GitHub for the newest version, and
+installing one downloads it from GitHub (macOS checks it with Apple, as it does any app you
+download). These are the app's only network use.
 
 Nothing about your windows leaves your Mac. Stage Manager keeps a daily log in
 `~/Library/Logs/Stage Manager`, which includes window titles to help find problems. Only

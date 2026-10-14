@@ -186,6 +186,8 @@ pub const KEYS: &[KeyDef] = &[
         "Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings."),
     k("app", "check_for_updates", Kind::Bool, "true",
         "Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way."),
+    k("app", "install_updates", Kind::Bool, "false",
+        "Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first."),
     // [strip]
     k("strip", "order", Kind::Choice(&["native", "fixed"]), "\"native\"",
         "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"fixed\" is creation order."),
@@ -483,6 +485,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-8.toml"),
     include_str!("legacy/default-9.toml"),
     include_str!("legacy/default-10.toml"),
+    include_str!("legacy/default-11.toml"),
 ];
 
 #[cfg(test)]
