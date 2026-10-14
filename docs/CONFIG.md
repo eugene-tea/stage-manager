@@ -37,6 +37,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `app.launch_at_login` | `true` | true or false | Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers. |
 | `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings. |
 | `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
+| `app.install_updates` | `false` | true or false | Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first. |
 | `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |

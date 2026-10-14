@@ -7,6 +7,8 @@
 //! - `stage-manager log summary [DATE]` prints a day's counts, marks, warnings and errors;
 //!   `log path [DATE]` prints its file.
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
+//! - `stage-manager --update-helper <pid> <app> <staged> <version> <requirement>` installs a
+//!   verified update once the app at `pid` has quit (the app starts it; `platform::updater`).
 //! - `stage-manager config check [file] | --print-defaults | --explain <section.key> |
 //!   --reference` validates a file (errors with line numbers), prints the commented default
 //!   config, explains a key, or prints the configuration table of `docs/CONFIG.md`.
@@ -50,6 +52,8 @@ fn main() -> ExitCode {
         }
         #[cfg(target_os = "macos")]
         Some("--guardian") => stage_manager::platform::guardian::run(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("--update-helper") => stage_manager::platform::updater::run_helper(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-windows") => app::probe_windows(&args[2..]),
         #[cfg(target_os = "macos")]
@@ -370,6 +374,8 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        // An update ready to install: its helper waits for this process to exit (8C).
+        stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the
         // counts, so the captures it waits for are in them.
         capture::quiesce(CAPTURE_QUIESCE);
@@ -737,6 +743,7 @@ mod app {
             set_menu_icon: |visible| with_app(|app| app.menu.set_visible(visible)),
             refresh_menu: || with_app(|app| app.refresh_menu()),
             poll_now: || with_app(App::poll),
+            quit,
         };
         let raw = native_settings::current();
         shell::install(mtm, wm.clone(), hooks, permissions, raw);

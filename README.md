@@ -29,7 +29,7 @@ Turn off Apple's Stage Manager (the app offers to do it), then allow **Accessibi
 which is required. **Screen Recording** is optional and puts live window pictures on the cards.
 
 Nothing about your windows leaves your Mac. The only network use is a daily update check
-on GitHub.
+on GitHub, and downloading an update from there when it installs one.
 
 ## Learn more
 

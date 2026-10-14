@@ -1,6 +1,12 @@
 //! The app's shell: everything around window management that a Mac app is expected to do.
-//! About, Settings, the welcome, update checks, launch at login, the approvals, and Apple's
-//! Stage Manager (stand down, offer to turn it off). Main thread only.
+//! About, Settings, the welcome, update checks and installs, launch at login, the approvals,
+//! and Apple's Stage Manager (stand down, offer to turn it off). Main thread only.
+//!
+//! Updates (8C): a newer release is offered as "Install and Relaunch / Later / Skip This
+//! Version" (or Download where this copy cannot replace itself). Install downloads and
+//! verifies it in the background (`platform::updater`), waits for a quiet moment (never
+//! mid-drag or mid-transition; an automatic install also waits for the user to be away),
+//! then quits through the app's quit path, which starts the installer helper last.
 //!
 //! The main thread's poll ([`poll`], every second) and config reloads ([`config_changed`])
 //! keep it current; menu clicks arrive through [`menu`]. Apple's settings have one source:
@@ -17,7 +23,8 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSWorkspace};
+use objc2_app_kit::{NSEvent, NSPasteboard, NSPasteboardTypeString, NSWorkspace};
+use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
 use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, NSURL};
 
 use super::alert::{self, AlertSpec};
@@ -33,7 +40,9 @@ use crate::platform::login_item;
 use crate::platform::native_settings::{self, RawSettings};
 use crate::platform::permissions::{self, Approval, PermissionState};
 use crate::platform::wm_thread::{WmCommand, WmHandle};
+use crate::platform::updater::{self, PrepareError, Prepared};
 use crate::platform::{capture, paths, update_check};
+use crate::self_update::{self, Moment, Refusal};
 use crate::updates::{self, Outcome, Release};
 
 /// The agent notes on GitHub (the "Copy Instructions for Agents" prompt points here).
@@ -46,6 +55,10 @@ const FIRST_CHECK_DELAY: f64 = 30.0;
 const CHECK_TICK: f64 = 3600.0;
 /// How long a turn-off of Apple's Stage Manager has to show before the fallback.
 const TURN_OFF_WAIT: f64 = 2.0;
+/// How often a ready update looks for a quiet moment.
+const QUIET_TICK: f64 = 1.0;
+/// When the note of an update that did not go in shows (after the launch settles).
+const NOTE_DELAY: f64 = 5.0;
 
 /// Calls into the app, run after the current event.
 #[derive(Clone, Copy)]
@@ -56,6 +69,18 @@ pub struct Hooks {
     pub refresh_menu: fn(),
     /// Run the app's poll now (Apple's settings were written).
     pub poll_now: fn(),
+    /// Quit through the app's quit path (every window back first): an update installs.
+    pub quit: fn(),
+}
+
+/// Where an update install stands.
+enum Install {
+    /// Nothing under way.
+    Idle,
+    /// Downloading and verifying `version`; `asked`: a click started it (or joined it).
+    Preparing { version: updates::Version, asked: bool },
+    /// Verified and staged; waiting for a quiet moment.
+    Ready { prepared: Prepared, asked: bool, timer: Retained<NSTimer> },
 }
 
 struct Shell {
@@ -72,6 +97,7 @@ struct Shell {
     /// shows then).
     update: Option<(u64, bool)>,
     update_serial: u64,
+    install: Install,
     _timers: Vec<Retained<NSTimer>>,
 }
 
@@ -181,6 +207,7 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
         capture_refused: false,
         update: None,
         update_serial: 0,
+        install: Install::Idle,
         _timers: Vec::new(),
     };
     SHELL.with(|s| *s.borrow_mut() = Some(shell));
@@ -232,10 +259,18 @@ impl Shell {
         }
         let first_check = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
         let tick = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
+        if self.config.app.check_for_updates && unattended_allowed() {
+            updater::warm();
+        }
+        // A staged copy an earlier update left beside the app (it quit while an update
+        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6).
+        updater::clean_stale_work();
+        let note = RcBlock::new(|_t: NonNull<NSTimer>| show_update_note());
         // SAFETY: the blocks run on the main run loop, which keeps the timers; we keep them too.
         unsafe {
             self._timers.push(NSTimer::scheduledTimerWithTimeInterval_repeats_block(FIRST_CHECK_DELAY, false, &first_check));
             self._timers.push(NSTimer::scheduledTimerWithTimeInterval_repeats_block(CHECK_TICK, true, &tick));
+            self._timers.push(NSTimer::scheduledTimerWithTimeInterval_repeats_block(NOTE_DELAY, false, &note));
         }
     }
 
@@ -331,6 +366,7 @@ impl Shell {
                 later(move || (hooks.set_menu_icon)(on));
             }
             Change::AutoUpdates(on) => self.write_config("app.check_for_updates", if on { "true" } else { "false" }),
+            Change::InstallUpdates(on) => self.write_config("app.install_updates", if on { "true" } else { "false" }),
             Change::CheckNow => later(|| check(true)),
             Change::TurnOffApple => later(turn_off_apple),
             Change::ShowRecentApps(on) => self.write_apple("AutoHide", i64::from(!on)),
@@ -498,7 +534,7 @@ pub fn check(manual: bool) {
 
 /// The check numbered `serial` ended (its answer, or the watchdog: whichever comes first).
 fn on_checked(serial: u64, outcome: Outcome) {
-    let Some(Some((mtm, skipped, manual))) = with(|s| {
+    let Some(Some((mtm, skipped, manual, auto_install))) = with(|s| {
         let (running, manual) = s.update?;
         if running != serial {
             return None;
@@ -508,7 +544,7 @@ fn on_checked(serial: u64, outcome: Outcome) {
             s.state.last_update_check = Some(now_secs());
             s.save_state();
         }
-        Some((s.mtm, s.state.skipped_version.clone(), manual))
+        Some((s.mtm, s.state.skipped_version.clone(), manual, s.config.app.install_updates))
     }) else {
         return;
     };
@@ -516,7 +552,11 @@ fn on_checked(serial: u64, outcome: Outcome) {
     match outcome {
         Outcome::Available(release) => {
             tracing::info!(version = %release.version, manual, "an update is available");
-            if manual || updates::worth_telling(&release, skipped.as_deref()) {
+            let worth = updates::worth_telling(&release, skipped.as_deref());
+            if !manual && worth && auto_install && updater::can_install().is_ok() {
+                // "Install updates automatically": no prompt; installed once the user is away.
+                begin_install(release, false);
+            } else if manual || worth {
                 offer(mtm, release, &current, manual);
             }
         }
@@ -550,14 +590,17 @@ fn on_checked(serial: u64, outcome: Outcome) {
     }
 }
 
-/// The update alert's spec (also the preview's).
-pub fn offer_spec(release: &Release, current: &updates::Version) -> AlertSpec {
-    let (title, text) = updates::available_text(release, current);
+/// The update alert's spec (also the preview's): Install and Relaunch when this copy can
+/// replace itself (`install` is `Ok`), else Download with the reason.
+pub fn offer_spec(release: &Release, current: &updates::Version, install: &Result<std::path::PathBuf, Refusal>) -> AlertSpec {
+    let why = install.as_ref().err().map(Refusal::sentence);
+    let (title, text) = updates::available_text(release, current, why.as_deref().map_or(Ok(()), Err));
+    let first = if install.is_ok() { "Install and Relaunch" } else { "Download" };
     AlertSpec {
         key: "update",
         title,
         text,
-        buttons: vec!["Download".into(), "Later".into(), "Skip This Version".into()],
+        buttons: vec![first.into(), "Later".into(), "Skip This Version".into()],
         cancel: Some(1),
         warning: false,
         activate: true,
@@ -568,22 +611,210 @@ pub fn offer_spec(release: &Release, current: &updates::Version) -> AlertSpec {
 /// takes the focus from what the user is doing (R8 V2): the alert comes up above other
 /// windows without activating the app, and keyboard focus stays where it was.
 fn offer(mtm: MainThreadMarker, release: Release, current: &updates::Version, manual: bool) {
-    let mut spec = offer_spec(&release, current);
+    let install = updater::can_install();
+    let mut spec = offer_spec(&release, current, &install);
     spec.activate = manual;
+    let verifiable = match &install {
+        Ok(_) => true,
+        Err(r) => r.opens_disk_image(),
+    };
     alert::show(mtm, spec, move |button| match button {
-        0 => open_url(release.download_url()),
-        2 => {
-            let v = release.version.to_string();
-            tracing::info!(version = %v, "update skipped");
-            later(move || {
-                with(|s| {
-                    s.state.skipped_version = Some(v);
-                    s.save_state();
-                });
-            });
+        0 if verifiable => {
+            let r = release.clone();
+            later(move || begin_install(r, true));
         }
+        0 => open_url(release.download_url()),
+        2 => skip_version(&release.version),
         _ => {}
     });
+}
+
+/// "Skip This Version": automatic checks stay quiet about `version` and older.
+fn skip_version(version: &updates::Version) {
+    let v = version.to_string();
+    tracing::info!(version = %v, "update skipped");
+    later(move || {
+        with(|s| {
+            s.state.skipped_version = Some(v);
+            s.save_state();
+        });
+    });
+}
+
+/// Downloads and verifies `release`, then installs it at a quiet moment. `asked`: the user
+/// clicked Install (it goes as soon as nothing is mid-drag or mid-transition); otherwise an
+/// automatic install, which also waits for the user to be away. A click joins an install
+/// already under way.
+fn begin_install(release: Release, asked: bool) {
+    let under_way = with(|s| match &mut s.install {
+        Install::Idle => {
+            s.install = Install::Preparing { version: release.version.clone(), asked };
+            None
+        }
+        Install::Preparing { version, asked: a } => {
+            *a |= asked;
+            Some(version.to_string())
+        }
+        Install::Ready { prepared, asked: a, .. } => {
+            *a |= asked;
+            Some(prepared.version.to_string())
+        }
+    });
+    match under_way {
+        Some(None) => {}
+        Some(Some(version)) => {
+            // A click joins it: it installs at the next quiet moment, not only when away.
+            tracing::info!(asked, version, "update: an install is already under way");
+            return;
+        }
+        None => return,
+    }
+    tracing::info!(version = %release.version, asked, "update: downloading and verifying");
+    let r = release.clone();
+    updater::prepare(release, move |result| later(move || prepared(r, result)));
+}
+
+/// The download and verification of `release` ended.
+fn prepared(release: Release, result: Result<Prepared, PrepareError>) {
+    let Some(Some((mtm, asked))) = with(|s| {
+        let asked = match &s.install {
+            Install::Preparing { asked, .. } => *asked,
+            _ => return None,
+        };
+        s.install = Install::Idle;
+        Some((s.mtm, asked))
+    }) else {
+        return;
+    };
+    let current = updates::current();
+    match result {
+        Ok(prepared) => {
+            let tick = RcBlock::new(|_t: NonNull<NSTimer>| install_if_quiet());
+            // SAFETY: the block runs on the main run loop, which keeps the timer; the install
+            // state keeps it too and invalidates it.
+            let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(QUIET_TICK, true, &tick) };
+            with(|s| s.install = Install::Ready { prepared, asked, timer });
+            install_if_quiet();
+        }
+        Err(PrepareError::Manual(refusal, dmg)) => {
+            tracing::info!(?refusal, "update: verified, but this copy cannot replace itself; opening the disk image");
+            updater::open_disk_image(&dmg);
+            alert::show(
+                mtm,
+                AlertSpec {
+                    key: "update",
+                    title: format!("Install Stage Manager {} from the disk image", release.version),
+                    text: refusal.sentence(),
+                    buttons: vec!["OK".into()],
+                    cancel: Some(0),
+                    warning: false,
+                    activate: asked,
+                },
+                |_| {},
+            );
+        }
+        Err(PrepareError::Failed(why)) => {
+            tracing::warn!(version = %release.version, "update: not installed: {why}");
+            // No Skip This Version here (review 8C #1): a failure may be a network blip, and
+            // it must not silence the release; the next daily check offers it again.
+            alert::show(mtm, install_failed_spec(&release, &why, &current, asked), move |b| {
+                if b == 0 {
+                    open_url(release.download_url());
+                }
+            });
+        }
+    }
+}
+
+/// The alert when a download or verification failed: Download or OK, never Skip This Version.
+pub fn install_failed_spec(release: &Release, why: &str, current: &updates::Version, asked: bool) -> AlertSpec {
+    AlertSpec {
+        key: "update",
+        title: format!("Stage Manager {} couldn't be installed", release.version),
+        text: install_failed_text(why, current),
+        buttons: vec!["Download".into(), "OK".into()],
+        cancel: Some(1),
+        warning: true,
+        activate: asked,
+    }
+}
+
+/// The text when a download or verification failed: why, and that nothing changed.
+pub fn install_failed_text(why: &str, current: &updates::Version) -> String {
+    let mut why = why.trim().trim_end_matches('.').to_string();
+    if let Some(first) = why.get(..1) {
+        why = first.to_uppercase() + &why[1..];
+    }
+    format!("{why}. Nothing was changed: you still have Stage Manager {current}. You can download the new version from GitHub instead.")
+}
+
+/// Seconds since the last keyboard, mouse or trackpad event in this login session.
+fn idle_secs() -> f64 {
+    // kCGAnyInputEventType is all ones.
+    CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType(u32::MAX))
+}
+
+/// A ready update installs when the moment allows ([`self_update::may_install_now`]): the
+/// helper is armed and the app quits through its quit path (every window back first).
+fn install_if_quiet() {
+    let Some(Some((asked, hooks))) = with(|s| match &s.install {
+        Install::Ready { asked, .. } => {
+            if !*asked && !(s.config.app.install_updates && s.config.app.check_for_updates) {
+                // Automatic installs were turned off while it waited.
+                if let Install::Ready { timer, prepared, .. } = std::mem::replace(&mut s.install, Install::Idle) {
+                    timer.invalidate();
+                    // Its staged copy goes too (review 8C #6).
+                    updater::discard(&prepared);
+                }
+                tracing::info!("update: automatic install turned off; not installing");
+                return None;
+            }
+            Some((*asked, s.hooks))
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), idle_secs: idle_secs() };
+    if !self_update::may_install_now(asked, moment) {
+        return;
+    }
+    let Some(prepared) = with(|s| match std::mem::replace(&mut s.install, Install::Idle) {
+        Install::Ready { prepared, timer, .. } => {
+            timer.invalidate();
+            Some(prepared)
+        }
+        other => {
+            s.install = other;
+            None
+        }
+    })
+    .flatten() else {
+        return;
+    };
+    tracing::info!(version = %prepared.version, asked, ?moment, "update: installing; quitting first so every window comes back");
+    updater::hand_off(&prepared);
+    later(move || (hooks.quit)());
+}
+
+/// The note an update that did not go in left behind, shown once.
+fn show_update_note() {
+    let Some(note) = updater::take_note() else { return };
+    tracing::warn!("update: {note}");
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    alert::show(
+        mtm,
+        AlertSpec {
+            key: "update",
+            title: "The update wasn't installed".into(),
+            text: note,
+            buttons: vec!["OK".into()],
+            cancel: Some(0),
+            warning: true,
+            activate: false,
+        },
+        |_| {},
+    );
 }
 
 /// Turns Apple's Stage Manager off (the user's click), then checks within about 2 s that it
@@ -680,9 +911,24 @@ mod tests {
     #[test]
     fn the_prompts_say_what_the_owner_asked() {
         let r = updates::parse_release(r#"{"tag_name":"v1.1.0","html_url":"https://github.com/eugene-tea/stage-manager/releases/tag/v1.1.0"}"#).expect("parses");
-        let o = offer_spec(&r, &updates::Version::parse("1.0.0").expect("version"));
-        assert_eq!(o.buttons, vec!["Download", "Later", "Skip This Version"]);
+        let old = updates::Version::parse("1.0.0").expect("version");
+        let o = offer_spec(&r, &old, &Ok(PathBuf::from("/Applications/Stage Manager.app")));
+        assert_eq!(o.buttons, vec!["Install and Relaunch", "Later", "Skip This Version"], "the owner's words, 10-13");
+        assert_eq!(o.cancel, Some(1), "Escape is Later");
         assert!(o.text.contains("Stage Manager 1.1.0 is available — you have 1.0.0"));
+        let local = offer_spec(&r, &old, &Err(Refusal::NotDeveloperId));
+        assert_eq!(local.buttons, vec!["Download", "Later", "Skip This Version"], "a copy that cannot replace itself downloads");
+        assert!(local.text.contains("can't install updates itself"));
+        let failed = install_failed_text("its code signature is not valid or not ours: x.", &old);
+        assert!(failed.starts_with("Its code signature"));
+        assert!(failed.contains("Nothing was changed: you still have Stage Manager 1.0.0."));
+        // Review 8C #1: a failed install (maybe a network blip) never offers to skip the release.
+        for asked in [true, false] {
+            let f = install_failed_spec(&r, "the download did not finish", &old, asked);
+            assert_eq!(f.buttons, vec!["Download", "OK"], "asked: {asked}");
+            assert_eq!(f.cancel, Some(1));
+            assert_eq!(f.activate, asked);
+        }
         assert!(o.activate, "the spec activates; an automatic offer turns it off");
         assert_eq!(turn_off_wait(), Duration::from_secs(2));
     }

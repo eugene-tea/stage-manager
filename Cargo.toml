@@ -53,6 +53,10 @@ objc2-metal = { version = "0.3", optional = true, default-features = false, feat
 # with Core Animation's offscreen renderer and quits: a visual check that works while the
 # screen is locked or without Screen Recording.
 debug-render = ["dep:objc2-metal", "objc2-quartz-core/CARenderer", "objc2-quartz-core/objc2-metal"]
+# Test builds only: `STAGE_MANAGER_UPDATE_VERSION=<x.y.z>` makes the update check offer that
+# version and `STAGE_MANAGER_UPDATE_DMG=<file>` installs it from a local disk image (no GitHub);
+# a locally signed app then trusts its own designated requirement. Release builds never have it.
+update-test = []
 
 [dev-dependencies]
 tempfile = "3"
