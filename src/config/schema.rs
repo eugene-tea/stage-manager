@@ -4,9 +4,12 @@
 //! The table is the single source for parsing and validation ([`super::Config::parse`]),
 //! for the commented file written on first run ([`default_file`]), for
 //! `stage-manager config --print-defaults` and `--explain <key>`, and for the configuration
-//! reference in `docs/GUIDE.md` ([`markdown_reference`]; a test keeps it in sync).
+//! reference in `docs/CONFIG.md` ([`markdown_reference`]; a test keeps it in sync).
 
 use std::fmt::Write as _;
+
+/// The full configuration reference on GitHub (`docs/CONFIG.md`, generated from this table).
+pub const REFERENCE_URL: &str = "https://github.com/eugene-tea/stage-manager/blob/HEAD/docs/CONFIG.md";
 
 /// A key's type and valid values.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -180,7 +183,7 @@ pub const KEYS: &[KeyDef] = &[
     k("app", "launch_at_login", Kind::Bool, "true",
         "Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers."),
     k("app", "show_menu_bar_icon", Kind::Bool, "true",
-        "Show the menu bar icon (Apple's Stage Manager has none; on by the owner's word). Without it, open Stage Manager again from Applications to reach Settings."),
+        "Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings."),
     k("app", "check_for_updates", Kind::Bool, "true",
         "Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way."),
     // [strip]
@@ -346,7 +349,7 @@ pub const KEYS: &[KeyDef] = &[
         "Where it goes: \"as-is\", \"center\", or \"cascade\" (offset from the front window)."),
     // [log]
     k("log", "level", Kind::Choice(&["error", "warn", "info", "debug", "trace"]), "\"debug\"",
-        "How much the log keeps: \"debug\" (the trial default) records every decision, \"info\" only the main ones."),
+        "How much the log keeps: \"debug\" (the default for now) records every decision, \"info\" only the main ones."),
     k("log", "days", i(1, 365), "14", "Day files older than this many days are deleted."),
     k("log", "max_mb_per_day", i(1, 10_000), "100",
         "A day's file this big takes only warnings, errors, marks and counts from then on."),
@@ -389,6 +392,7 @@ const HEADER: &str = "\
 #
 # `stage-manager config check` checks this file; `stage-manager config --explain
 # <section.key>` explains one key; `stage-manager config --print-defaults` prints this file.
+# Every key, with its values: https://github.com/eugene-tea/stage-manager/blob/HEAD/docs/CONFIG.md
 # Notes for AI agents: https://github.com/eugene-tea/stage-manager/blob/HEAD/docs/AGENTS.md
 ";
 
@@ -436,7 +440,7 @@ pub fn default_file() -> String {
 pub fn explain(path: &str) -> Option<String> {
     let d = find(path)?;
     Some(format!(
-        "[{}] {}\n  {}\n  type: {}\n  default: {}\n  applies: {}\n",
+        "[{}] {}\n  {}\n  type: {}\n  default: {}\n  applies: {}\nEvery key: {REFERENCE_URL}\n",
         d.section,
         d.key,
         d.doc,
@@ -449,7 +453,7 @@ pub fn explain(path: &str) -> Option<String> {
     ))
 }
 
-/// The configuration reference for docs/GUIDE.md: one table row per key.
+/// The configuration reference for docs/CONFIG.md: one table row per key.
 pub fn markdown_reference() -> String {
     let mut out = String::from("| Key | Default | Values | What it does |\n|---|---|---|---|\n");
     for d in KEYS {
@@ -478,6 +482,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-7.toml"),
     include_str!("legacy/default-8.toml"),
     include_str!("legacy/default-9.toml"),
+    include_str!("legacy/default-10.toml"),
 ];
 
 #[cfg(test)]
@@ -507,6 +512,7 @@ mod tests {
     fn explain_names_type_default_and_doc() {
         let e = explain("windows.fit").expect("known");
         assert!(e.contains("\"off\"") && e.contains("type:") && e.contains("Apple"));
+        assert!(e.contains(REFERENCE_URL), "explain points at the full reference");
         assert!(explain("windows.nope").is_none());
         assert!(explain("nonsense").is_none());
     }
@@ -516,5 +522,10 @@ mod tests {
         let now = default_file();
         assert!(LEGACY_DEFAULTS.iter().all(|t| *t != now));
         assert!(LEGACY_DEFAULTS.iter().all(|t| t.starts_with("# Stage Manager configuration.")));
+    }
+
+    #[test]
+    fn the_default_file_points_at_the_full_reference() {
+        assert!(default_file().contains(REFERENCE_URL));
     }
 }

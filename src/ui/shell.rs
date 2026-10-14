@@ -27,6 +27,7 @@ use super::status_menu::MenuAction;
 use super::welcome::{self, WelcomeAction};
 use super::about;
 use crate::app_state::{AppState, now_secs};
+use crate::config::schema::REFERENCE_URL;
 use crate::config::{self, Config, FitMode, edit};
 use crate::platform::login_item;
 use crate::platform::native_settings::{self, RawSettings};
@@ -109,6 +110,7 @@ pub fn agent_instructions(config_path: &str, binary: &str) -> String {
          \n\
          - Read the notes for agents first: {AGENTS_URL}\n\
          - The config file is {config_path} (TOML; every key is listed there, commented out with its default).\n\
+         - Every key with its values and default: {REFERENCE_URL}\n\
          - After editing, check it: \"{binary}\" config check\n\
          - The app reloads the file within a second; do not restart it, edit state.json or move windows.\n\
          \n\
@@ -640,6 +642,7 @@ mod tests {
     fn the_agent_prompt_points_at_the_notes_and_the_file() {
         let p = agent_instructions("/Users/me/.config/stage-manager/config.toml", "/Applications/Stage Manager.app/Contents/MacOS/stage-manager");
         assert!(p.contains(AGENTS_URL));
+        assert!(p.contains(REFERENCE_URL));
         assert!(p.contains("/Users/me/.config/stage-manager/config.toml"));
         assert!(p.contains("\"/Applications/Stage Manager.app/Contents/MacOS/stage-manager\" config check"));
         assert!(p.contains("state.json"));

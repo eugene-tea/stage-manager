@@ -1,28 +1,46 @@
-# Stage Manager
+<p align="center">
+  <picture>
+    <source srcset="docs/assets/app-icon-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="docs/assets/app-icon.png" alt="" width="128" height="128">
+  </picture>
+</p>
 
-Everything Apple should have done to Stage Manager three or four years ago, done now, and
-done the Apple way. Out of the box it looks and behaves like Apple's own. Every addition stays
-out of sight until you reach for it, and every knob lives in a config file.
+<h1 align="center">Stage Manager</h1>
 
-A macOS Stage Manager written in Rust. Its author uses it every day, and it is still in
-development. It is not affiliated with Apple.
+<p align="center">Everything Apple should have done to Stage Manager three or four years ago,
+done now, and done the Apple way.</p>
 
-Download the signed, notarized app from
-[the latest release](https://github.com/eugene-tea/stage-manager/releases/latest), or build it
-yourself: `make install` puts it in `~/Applications`. The full guide is
-[docs/GUIDE.md](docs/GUIDE.md), and the plan is [PLAN.md](PLAN.md). MIT licensed
+<p align="center"><a href="https://github.com/eugene-tea/stage-manager/releases/latest"><b>Download</b></a>
+· signed and notarized · macOS 14 Sonoma or later</p>
+
+## What it does
+
+- Looks and works like Apple's Stage Manager out of the box: the strip of stages on the
+  left, floating windows in the middle, each at the size and place you gave it.
+- Gives every Desktop its own stages and strip, and switches by click, ⌘-Tab or the Dock.
+- Merges stages when you drop one card onto another, and lets you reorder the strip.
+- Sends new windows where you want them with rules: a named stage, a new stage, or pinned to
+  every stage.
+- Offers keyboard shortcuts if you want them; nothing needs one.
+- Keeps your stages across restarts, and never leaves a window hidden, even after a crash.
+- Keeps every option in one config file, easiest changed by asking an AI assistant.
+
+## First launch
+
+Turn off Apple's Stage Manager (the app offers to do it), then allow **Accessibility**,
+which is required. **Screen Recording** is optional and puts live window pictures on the cards.
+
+Nothing about your windows leaves your Mac. The only network use is a daily update check
+on GitHub.
+
+## Learn more
+
+- [Info page](https://eugene-tea.github.io/stage-manager/)
+- [User guide](docs/GUIDE.md): install, use, settings, troubleshooting
+- [Configuration reference](docs/CONFIG.md): every option
+- [Development](docs/DEVELOPMENT.md): build, test, release
+- [Notes for AI agents](docs/AGENTS.md): for an assistant changing your settings
+- [Changelog](CHANGELOG.md)
+
+Stage Manager is an independent project, not affiliated with Apple. MIT licensed
 ([LICENSE](LICENSE)).
-
-## Progress
-
-- **2026-10-12** — Day one of daily use. The strip matches Apple's down to the card tilt,
-  and each Desktop gets its own stages and strip. Switches animate. Cards can be reordered,
-  and dropping one card on another merges the two stages. The strip hides during Mission
-  Control. Safety layers mean a window is never left hidden, not even after a crash. Logs
-  are kept per day, with a "Mark a Problem" menu item. Two full code reviews are done. The
-  trial week starts.
-- **2026-10-13** — Version 1.0.0, signed and notarized. A menu bar app with Settings, About,
-  update checks and launch at login; it stands down while Apple's Stage Manager is on. A
-  Dock click to an app on another Desktop arranges that Desktop before it slides in. The
-  parked windows' corner is clean: their slivers ignore clicks, and a patch drawn from the
-  wallpaper's own file covers them, with no screen recording.

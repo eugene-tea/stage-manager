@@ -4,7 +4,7 @@
 //! - **Spring.** Apple moves windows on a spring that starts at rest one frame after the
 //!   mouse-up: mass 1, stiffness 272, damping 33 (critically damped, ω ≈ 16.5 rad/s: 50 % at
 //!   ~100 ms, 90 % at ~235 ms, 99 % at ~400 ms from its start; fitted 10-12 to 37 windows of the
-//!   laptop session, `docs/UX-SPEC.md`, "Transitions"); cards glide at ω ≈ 17.0 and the strip
+//!   laptop session; the record: `docs/UX-SPEC.md` as of commit 20665a3, "Transitions"); cards glide at ω ≈ 17.0 and the strip
 //!   slides at ω ≈ 16.8. [`spring_progress`] gives the fraction of the way covered after `t`
 //!   seconds for any mass, stiffness and damping; [`time_to_progress`] when a fraction is first
 //!   reached (the moment an incoming window may take its place behind its growing snapshot,
