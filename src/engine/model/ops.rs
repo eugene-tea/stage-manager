@@ -207,6 +207,11 @@ impl Model {
         }
         self.windows.remove(&id);
         self.restored.remove(&id);
+        // A window gone no longer vouches for a saved Desktop.
+        for votes in self.adopt_votes.values_mut() {
+            votes.retain(|v| v.1 != id);
+        }
+        self.adopt_votes.retain(|_, v| !v.is_empty());
         if let Home::Stage(s) = home {
             if let Some(stage) = self.stage_mut(s) {
                 stage.windows.retain(|&w| w != id);

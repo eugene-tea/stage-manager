@@ -649,3 +649,154 @@ fn a_parked_voter_goes_back_to_its_saved_stage_at_its_frame() {
     assert!(m.window(w(51)).is_some_and(|x| !x.parked));
     assert_eq!(m.restored_grade(w(41)), Some(Grade::Strong));
 }
+
+#[test]
+fn after_the_restore_window_a_desktop_not_shown_when_saved_moves_no_window() {
+    // The re-review of 8E2: a vote cast during the restore window and a second window of the
+    // Desktop after it. Adopting then would move the first window, shown by Apple's rule,
+    // into a stage the user does not see. After the window a Desktop not shown when saved is
+    // never adopted by votes: nothing moves.
+    let d6 = || {
+        let mut d6 = desktop_5();
+        d6.id = 6;
+        d6.current = false;
+        d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+        d6.active_index = Some(0);
+        d6
+    };
+    let mut m = restoring(vec![d6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let here = m.current_space(MAIN);
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    assert!(m.end_restore());
+    assert!(m.adopt_votes.is_empty(), "votes count only while the window is open");
+    let stage_41 = m.stage_of(w(41));
+    let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN), here, "not taken for Desktop 6");
+    // Apple's rule only: the browser's new stage comes forward, Family's (the one Apple's
+    // rule made) becomes a card; no saved stage, no saved frame.
+    assert_eq!(m.stage_of(w(41)), stage_41, "the first window stays in its own stage: {a:?}");
+    assert!(set_frame(&a, 41).is_none());
+    assert_eq!(m.main_active_stage(), m.stage_of(w(42)));
+    assert_eq!(m.stages_in(here).count(), 2, "no saved stage rebuilt");
+    assert_eq!((m.restored_grade(w(41)), m.restored_grade(w(42))), (None, None), "Apple's rule for both");
+    assert_eq!(m.unvisited_saved_spaces(), 1, "Desktop 6 still waits");
+    // Both windows after the window: the same.
+    let mut m = restoring(vec![d6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m.end_restore();
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    let stage_41 = m.stage_of(w(41));
+    add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN), here);
+    assert_eq!(m.stage_of(w(41)), stage_41);
+    assert_eq!((m.restored_grade(w(41)), m.restored_grade(w(42))), (None, None));
+    // The Desktop shown when saved is still adopted by its window, and brought forward.
+    let mut m = restoring(vec![desktop_5(), d6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m.end_restore();
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_eq!(m.current_space(MAIN).0, 5);
+    assert_eq!(m.main_active_stage(), m.stage_of(w(21)), "switched to: {a:?}");
+    assert_eq!(m.restored_grade(w(41)), None, "Family stays by Apple's rule");
+}
+
+#[test]
+fn a_window_closed_takes_its_vote_with_it() {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    d6.active_index = Some(0);
+    let mut m = restoring(vec![d6]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    assert_eq!(m.adopt_votes.values().map(Vec::len).sum::<usize>(), 1);
+    m.remove_window(w(41));
+    assert!(m.adopt_votes.is_empty(), "the closed window's vote is gone");
+    add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_ne!(m.current_space(MAIN).0, 6, "one window alive: not enough");
+    // Family reopened: two windows alive, adopted.
+    add(&mut m, win(44, 30, CHAT, "Family", F_TEAM));
+    assert_eq!(m.current_space(MAIN).0, 6);
+    assert!(m.adopt_votes.is_empty());
+}
+
+#[test]
+fn an_empty_saved_active_stage_gives_way_at_the_restore_windows_end() {
+    // The editor's stage (active when saved) waits for its windows; Chat and the browser
+    // came back into their stages. At the window's end the screen shows no empty front
+    // stage with cards beside it: the most recent stage with windows comes forward (Apple's
+    // rule), the focused window's when there is one.
+    let saved = || {
+        let mut d = desktop_5();
+        d.stages[1].last_active = Some(5);
+        d.stages[2].last_active = Some(3);
+        d
+    };
+    let mut m = restoring(vec![saved()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    let empty = m.main_active_stage().expect("the saved active stage");
+    assert_eq!(m.stage(empty).map(|s| s.windows.len()), Some(0));
+    assert!(m.has_pending(empty));
+    assert!(m.end_restore());
+    let a = m.front_after_restore(&Observation::default());
+    assert_eq!(m.main_active_stage(), m.stage_of(w(21)), "the most recent stage with windows: {a:?}");
+    assert!(switches(&a) && !parks(&a, 21));
+    assert!(m.has_pending(empty), "the editor's stage still waits, with no card");
+    assert!(m.strip().iter().all(|c| !c.windows.is_empty()), "no empty card");
+    assert!(m.front_after_restore(&Observation::default()).is_empty(), "a front stage with windows stays");
+    // The editor's window comes later: its stage comes forward with it (after the window).
+    let a = add_focused(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.main_active_stage(), Some(empty), "{a:?}");
+
+    // The window focused decides when there is one.
+    let mut m = restoring(vec![saved()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    m.end_restore();
+    m.front_after_restore(&focused(22));
+    assert_eq!(m.main_active_stage(), m.stage_of(w(22)));
+    // Nothing anywhere else: the empty stage stays in front (nothing to show instead).
+    let mut m = restoring(vec![saved()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    m.end_restore();
+    assert!(m.front_after_restore(&Observation::default()).is_empty(), "the front stage shows a window");
+}
+
+#[test]
+fn voters_go_back_at_their_saved_frames() {
+    // A voter matched by its title, shown at another frame: adopted into the saved active
+    // stage it is moved to its saved frame, as any window back from a saved entry; a parked
+    // one keeps the saved frame for when its stage shows.
+    let d6 = |active| {
+        let mut d6 = desktop_5();
+        d6.id = 6;
+        d6.current = false;
+        d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+        d6.active_index = Some(active);
+        d6
+    };
+    let mut m = restoring(vec![d6(1)]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(41, 30, CHAT, "Family", DEFAULT));
+    let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN).0, 6);
+    assert_eq!(m.main_active_stage(), m.stage_of(w(41)), "the saved active stage");
+    assert_eq!(set_frame(&a, 41), Some(F_TEAM), "moved to its saved frame: {a:?}");
+    assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((false, F_TEAM)));
+    assert_eq!(m.restored_grade(w(41)), Some(Grade::Strong));
+    // Into an inactive stage: parked, its saved frame kept for later.
+    let mut m = restoring(vec![d6(0)]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(41, 30, CHAT, "Family", DEFAULT));
+    let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN).0, 6);
+    assert!(parks(&a, 41), "{a:?}");
+    assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((true, F_TEAM)));
+}

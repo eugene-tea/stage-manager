@@ -307,7 +307,8 @@ pub struct Model {
     /// for the Desktop shown when saved, two for another).
     pub(crate) provisional: BTreeSet<SpaceId>,
     /// Per provisional Space, the windows that matched a saved Desktop not shown when saved
-    /// (its id, the window): a second one adopts it.
+    /// (its id, the window): a second one adopts it. Only while the restore window is open
+    /// (cleared at its end); a window gone takes its vote with it.
     pub(crate) adopt_votes: HashMap<SpaceId, Vec<(u64, WindowId)>>,
     /// Windows placed from a saved entry: how sure the match was and their saved place.
     pub(crate) restored: HashMap<WindowId, Restored>,

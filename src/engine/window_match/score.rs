@@ -14,6 +14,9 @@
 //! window's frame (a browser's "Start Page" where the saved page was, Finder's ⌘N where
 //! "Downloads" was), and that window is not the saved one.
 //!
+//! A window with no title yet at the saved frame is a medium match at most
+//! ([`points::FRAME_UNTITLED`]): the frame alone, with no name to back it.
+//!
 //! **A window is parked into an inactive stage only on a strong or medium match** (the
 //! callers' rule); a low one goes only to the stage shown ([`LowRule`]), never parked, and
 //! leaves the saved window waiting (the callers keep its entry). A pick whose runner-up of
@@ -33,6 +36,10 @@ pub mod points {
     pub const TITLE: u32 = 60;
     /// The live frame is the saved one (within [`super::FRAME_TOLERANCE`]).
     pub const FRAME: u32 = 50;
+    /// The live frame is the saved one but the window has no title yet: with the app, a
+    /// medium match at most (the app may be opening a new window where the saved one was,
+    /// its name still to come).
+    pub const FRAME_UNTITLED: u32 = 40;
     /// The same fingerprint (when the titles differ; [`super::same_fingerprint`]).
     pub const FINGERPRINT: u32 = 35;
     /// The same size only (when the frames differ, or the frame is the same but the names
@@ -56,7 +63,7 @@ pub enum Grade {
     Low,
     /// A fingerprint match, or another signal pair below strong.
     Medium,
-    /// The same window, its exact title or its exact frame.
+    /// The same window, its exact title or its exact frame (a titled window).
     Strong,
 }
 
@@ -176,7 +183,7 @@ pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
     let l = live.frame;
     let frame = usable && !named_apart && frames().any(|f| near(f.x, l.x) && near(f.y, l.y) && near(f.w, l.w) && near(f.h, l.h));
     if frame {
-        points += points::FRAME;
+        points += if live.title.is_empty() { points::FRAME_UNTITLED } else { points::FRAME };
     } else if usable && frames().any(|f| near(f.w, l.w) && near(f.h, l.h)) {
         points += points::SIZE;
     }
@@ -276,7 +283,10 @@ mod tests {
         // The app alone, its size, its frame, the fingerprint, the title, the id.
         assert_eq!(pts(live(1, "com.example.a", "Other", OTHER)), Some(10));
         assert_eq!(pts(live(1, "com.example.a", "Other", Rect { x: 900.0, ..F1 })), Some(25));
-        assert_eq!(pts(live(1, "com.example.a", "", Rect { x: 101.5, ..F1 })), Some(60), "within 2 pt, no title yet");
+        assert_eq!(pts(live(1, "com.example.a", "", Rect { x: 101.5, ..F1 })), Some(50), "within 2 pt, no title yet: medium at most");
+        assert_eq!(Grade::of(50), Grade::Medium);
+        assert_eq!(pts(live(7, "com.example.a", "", F1)), Some(150), "no title, but the same window: strong");
+        assert_eq!(pts(live(1, "com.example.a", "Plan", F1)), Some(120), "the title and the frame");
         assert_eq!(pts(live(1, "com.example.a", "Other", F1)), Some(25), "another name at the frame: the size only");
         assert_eq!(pts(live(1, "com.example.a", "Plan — Edited", OTHER)), Some(45));
         assert_eq!(pts(live(1, "com.example.a", "Plan", OTHER)), Some(70));
@@ -368,8 +378,9 @@ mod tests {
         let recents = live(2, "com.example.finder", "Recents", F2);
         assert_eq!(score(&s[0], &recents).map(|x| x.points), Some(25));
         assert_eq!(assign(&s, &[recents], LowRule::default()), vec![None]);
-        // A title not known yet (empty) or the same name: the frame still counts in full.
-        assert_eq!(score(&s[0], &live(3, "com.example.finder", "", F2)).map(|x| x.points), Some(60));
+        // A title not known yet (empty): the frame counts, medium at most; the same name:
+        // in full.
+        assert_eq!(score(&s[0], &live(3, "com.example.finder", "", F2)).map(|x| x.points), Some(50));
         assert_eq!(score(&s[0], &live(3, "com.example.finder", "Downloads — Edited", F2)).map(|x| x.points), Some(95));
         // A counter of the same name ("Untitled" and "Untitled 2") is the same name.
         let s = saved("com.example.editor", "Untitled", F1, 1);

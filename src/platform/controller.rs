@@ -708,6 +708,10 @@ pub struct Controller {
     /// When the restore window closes at the latest ([`restore::WINDOW`] after the stages
     /// were built from `state.json`); `None` once closed or when there is none.
     restore_until: Option<Instant>,
+    /// The restore window ended: at the next tick a still-empty saved active stage gives way
+    /// to a stage with windows ([`Model::front_after_restore`]), after the user's action that
+    /// ended it had its say.
+    front_after_restore: bool,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -827,6 +831,7 @@ impl Controller {
             quiet_checked: Instant::now(),
             seen_times: HashMap::new(),
             restore_until: None,
+            front_after_restore: false,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -3667,6 +3672,13 @@ impl Controller {
             }
             if self.restore_until.is_some_and(|t| now >= t) {
                 self.end_restore("its five minutes are up");
+            } else if self.front_after_restore && !self.frozen() && self.pending.is_none() && self.drag.is_none() && !input::left_button_down() {
+                self.front_after_restore = false;
+                let obs = self.observe(ob);
+                if let Some(m) = self.model.as_mut() {
+                    let actions = m.front_after_restore(&obs);
+                    self.execute_animated(ob, actions);
+                }
             }
             if self.locked {
                 // Nothing is inferred from what a locked screen lists.
@@ -3689,7 +3701,8 @@ impl Controller {
 
     /// Closes the restore window (the first user action, or its time is up; see
     /// [`crate::engine::restore`]): from now on a window that goes back to an inactive stage
-    /// brings that stage forward, and no Desktop becomes provisional.
+    /// brings that stage forward, and no Desktop becomes provisional. At the next tick an
+    /// empty saved active stage with cards beside it gives way (`front_after_restore`).
     fn end_restore(&mut self, why: &str) {
         if self.restore_until.take().is_none() {
             return;
@@ -3698,6 +3711,7 @@ impl Controller {
             && m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
+            self.front_after_restore = true;
         }
     }
 

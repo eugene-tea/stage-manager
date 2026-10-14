@@ -23,7 +23,16 @@
 //! to come. After it, no Desktop becomes provisional, and a window matched to an inactive
 //! stage brings that stage forward, as Apple's rule does for an app whose windows are in
 //! another stage (the window shows because of the user: an activation, an un-minimize, a
-//! Dock click). Pending windows are matched all session either way.
+//! Dock click). Pending windows are matched all session either way. At its end a saved
+//! active stage still empty (its windows still to come) while other stages have windows gives
+//! way to the focused window's stage, else the most recent one with windows
+//! ([`crate::engine::model::Model::front_after_restore`]): never an empty front stage with
+//! cards beside it.
+//!
+//! **Accepted:** an app that opens a window by itself, with no user action, during the
+//! restore window (the first five minutes after a launch, until the first click or key
+//! press) has a window matching a saved one in an inactive stage parked there (a card),
+//! not switched to; the restore cannot tell it from the app reopening its saved windows.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

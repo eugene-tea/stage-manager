@@ -391,6 +391,19 @@ pub struct Assignment {
     pub unmatched: Vec<WindowId>,
 }
 
+/// Which frames the windows [`Model::launch_with`] places take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchFrames {
+    /// Confident matches their saved frames; the active stage's and pinned windows are
+    /// restored there (a launch that restores frames).
+    Saved,
+    /// Their live frames (a live frame in a park zone always falls back to the saved one).
+    Live,
+    /// Confident matches their saved frames, a shown one moved there; the rest untouched (an
+    /// adoption's windows).
+    Matched,
+}
+
 /// What the platform knows at launch about recency, for windows no saved stage claims.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LaunchHints {
@@ -702,6 +715,20 @@ impl Model {
         restore_frames: bool,
         hints: &LaunchHints,
     ) -> Vec<Action> {
+        let frames = if restore_frames { LaunchFrames::Saved } else { LaunchFrames::Live };
+        self.launch_with(live, assignment, frames, hints)
+    }
+
+    /// [`Model::apply_launch`] with the frames `frames` says.
+    pub(crate) fn launch_with(
+        &mut self,
+        live: &[WindowMeta],
+        assignment: &Assignment,
+        frames: LaunchFrames,
+        hints: &LaunchHints,
+    ) -> Vec<Action> {
+        let restore_frames = frames == LaunchFrames::Saved;
+        let matched_frames = frames != LaunchFrames::Live;
         let mut actions = Vec::new();
         let metas: HashMap<WindowId, &WindowMeta> = live.iter().map(|m| (m.id, m)).collect();
         let space = self.current_space(self.main_display().id);
@@ -725,7 +752,7 @@ impl Model {
             let pending = self.mark_pending(&st.pending);
             if standing.is_empty() && pending.is_empty() && Some(i) != assignment.active_index && !declared {
                 for w in members.iter().filter(|w| w.pinned) {
-                    self.insert_restored(metas[&w.id], w, Home::Pinned, restore_frames);
+                    self.insert_restored(metas[&w.id], w, Home::Pinned, matched_frames);
                 }
                 continue;
             }
@@ -740,7 +767,7 @@ impl Model {
                 } else {
                     Home::Stage(sid)
                 };
-                self.insert_restored(metas[&w.id], w, home, restore_frames);
+                self.insert_restored(metas[&w.id], w, home, matched_frames);
             }
             for w in &members {
                 self.restored.insert(w.id, super::model::Restored { grade: w.grade, z: w.z });
@@ -780,7 +807,7 @@ impl Model {
 
         // Every window of every stage clear of the strip, so restored frames already are.
         let ids: Vec<WindowId> = live.iter().map(|m| m.id).collect();
-        let fitted: Vec<WindowId> = ids.into_iter().filter(|&id| self.fit_window(id)).collect();
+        let mut fitted: Vec<WindowId> = ids.into_iter().filter(|&id| self.fit_window(id)).collect();
 
         let stage_ids: Vec<StageId> = self.stages_in(space).map(|s| s.id).collect();
         for s in stage_ids {
@@ -800,6 +827,10 @@ impl Model {
                     self.restore_window(id, &mut actions);
                 }
             }
+        }
+        if frames == LaunchFrames::Matched {
+            // A window shown at another frame than the saved one it took goes there.
+            fitted.extend(live.iter().filter(|m| self.windows.get(&m.id).is_some_and(|w| !same_frame(w.restore, m.frame))).map(|m| m.id));
         }
         for id in fitted {
             let shown = self.windows.get(&id).filter(|w| !w.parked).map(|w| w.restore);

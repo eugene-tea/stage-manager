@@ -16,8 +16,10 @@
 //!   that Desktop: its saved id, its stages rebuilt pending with their names, recency and
 //!   strip order, its active stage (unless the Space's own active stage already shows
 //!   windows). The saved Desktop shown when saved takes one such window; another takes two
-//!   (one window of a Desktop is weak evidence: macOS may reopen it anywhere), and the
-//!   windows that voted go back to their saved stages then.
+//!   while the restore window is open (one window of a Desktop is weak evidence: macOS may
+//!   reopen it anywhere), and the windows that voted go back to their saved stages (and
+//!   frames) then. After the restore window a Desktop not shown when saved is never adopted
+//!   (a vote would move a window the user sees into a stage not shown).
 //! - A Space left with only pending stages goes back to the saved Desktops waiting for a
 //!   visit ([`Model::pending_to_leftover`]); nothing pending is lost.
 
@@ -25,7 +27,7 @@ use std::collections::HashSet;
 
 use super::{Action, DisplayId, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
 use crate::engine::park::clamp_to_visible;
-use crate::engine::persist::{LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
+use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
 use crate::engine::restore::{Restore, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
@@ -78,7 +80,33 @@ impl Model {
     /// place, and a window matched to an inactive stage brings it forward. Returns true when
     /// it was open.
     pub fn end_restore(&mut self) -> bool {
+        // Votes for a Desktop not shown when saved count only while the window is open.
+        self.adopt_votes.clear();
         std::mem::replace(&mut self.restore.restoring, false)
+    }
+
+    /// At the restore window's end: a Space shown whose active stage is still empty, its
+    /// saved windows still to come, while other stages there have windows, brings one of
+    /// those forward (never an empty front stage with cards beside it): the stage of the
+    /// window focused (`obs`), else the most recently active one, as Apple's Stage Manager
+    /// shows the app in front. The empty stage keeps waiting for its windows, with no card.
+    pub fn front_after_restore(&mut self, obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let shown: Vec<SpaceId> = self.current.values().copied().collect();
+        for space in shown {
+            let Some(active) = self.active_stage_in(space) else { continue };
+            if !self.stage(active).is_some_and(|s| s.windows.is_empty()) || !self.has_pending(active) {
+                continue;
+            }
+            let with_windows = |s: &&super::Stage| s.space == space && s.id != active && !s.windows.is_empty();
+            let focused = obs.focused.and_then(|f| self.stages.iter().filter(with_windows).find(|s| s.windows.contains(&f)));
+            let Some(target) = focused.or_else(|| self.stages.iter().filter(with_windows).max_by_key(|s| s.last_active)).map(|s| s.id) else {
+                continue;
+            };
+            tracing::info!(stage = target.0, "restore: the saved active stage is still empty at the window's end; the most recent stage with windows comes forward");
+            actions.extend(self.switch_to(target, obs));
+        }
+        actions
     }
 
     /// True when stage `stage` holds pending windows.
@@ -190,19 +218,30 @@ impl Model {
             && let Some(i) = self.adoption_for(meta)
         {
             let id = self.leftovers[i].id;
-            let votes = self.adopt_votes.entry(space).or_default();
-            if !votes.contains(&(id, meta.id)) {
-                votes.push((id, meta.id));
-            }
-            let n = votes.iter().filter(|v| v.0 == id).count();
-            if self.leftovers[i].current || n >= 2 {
-                let voters: Vec<WindowId> = votes.iter().filter(|v| v.0 == id && v.1 != meta.id).map(|v| v.1).collect();
-                self.adopt_votes.remove(&space);
+            let take = if self.leftovers[i].current {
+                true
+            } else if self.restore.restoring {
+                let votes = self.adopt_votes.entry(space).or_default();
+                if !votes.contains(&(id, meta.id)) {
+                    votes.push((id, meta.id));
+                }
+                let n = votes.iter().filter(|v| v.0 == id).count();
+                if n < 2 {
+                    tracing::debug!(id = meta.id.0, desktop = id, "restore: a window of a saved Desktop not shown when saved; a second one is needed to take it");
+                }
+                n >= 2
+            } else {
+                // After the restore window a vote would move a window the user sees (the
+                // first voter) into a stage not shown: Apple's rule instead.
+                tracing::debug!(id = meta.id.0, desktop = id, "restore: a window of a saved Desktop not shown when saved, after the restore window; not adopted");
+                false
+            };
+            if take {
+                let voters: Vec<WindowId> =
+                    self.adopt_votes.remove(&space).unwrap_or_default().into_iter().filter(|v| v.0 == id && v.1 != meta.id).map(|v| v.1).collect();
                 actions.extend(self.adopt(space, i, &voters));
                 space = SpaceId(id);
                 adopted = Some(id);
-            } else {
-                tracing::debug!(id = meta.id.0, desktop = id, "restore: a window of a saved Desktop not shown when saved; a second one is needed to take it");
             }
         }
         if !self.space_has_pending(space) {
@@ -267,8 +306,9 @@ impl Model {
     /// Makes provisional Space `space` the saved Desktop `self.leftovers[index]`: its id, its
     /// stages rebuilt pending (names, recency, strip order) and its active stage unless the
     /// Space's own active stage shows windows already. `voters`: windows that matched it
-    /// earlier and went by Apple's rule; they go back to their saved stages now (a window
-    /// with children of its own stays where it is).
+    /// earlier (in the restore window) and went by Apple's rule; they go back to their saved
+    /// stages now, at their saved frames on a confident match (a window with children of its
+    /// own stays where it is).
     fn adopt(&mut self, space: SpaceId, index: usize, voters: &[WindowId]) -> Vec<Action> {
         let saved = self.leftovers.remove(index);
         let target = SpaceId(saved.id);
@@ -306,7 +346,8 @@ impl Model {
         if showing {
             assignment.active_index = None;
         }
-        actions.extend(self.apply_launch(&moved, &assignment, false, &LaunchHints::default()));
+        // Their saved frames on a confident match, as any window back from a saved entry.
+        actions.extend(self.launch_with(&moved, &assignment, LaunchFrames::Matched, &LaunchHints::default()));
         actions.retain(|a| *a != Action::StateChanged);
         tracing::info!(desktop = saved.id, stages = saved.stages.len(), voters = moved.len(), "restore: a Desktop made from an empty screen is the saved Desktop its windows belong to");
         actions

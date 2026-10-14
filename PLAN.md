@@ -162,6 +162,11 @@ Known gaps a review found and the owner accepted as rare, left as they are:
 - R15: `activation_frame` (`src/platform/controller.rs`), on a display whose only non-sticky
   shown window belongs to an app that posts no move notice, reads a horizontal-only user drag
   of that window as a Desktop slide and keeps its stale tracked frame.
+- 8E3 restore: an app that opens a window by itself, with no user action, during the first
+  5 minutes after a launch (the restore window, `src/engine/restore.rs`; it ends sooner at
+  the first click, key press, card or Dock click) has a window matching a saved window of an
+  inactive stage placed into that stage (a card, parked) rather than switched to: the
+  restore cannot tell it from the app reopening its saved windows.
 
 ## Out of scope (prototype)
 
