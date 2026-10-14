@@ -10,8 +10,13 @@
 //!   `CGSSessionScreenIsLocked` set, or `kCGSSessionOnConsoleKey` false;
 //! - Accessibility lists none of the windows the window server shows on screen for the apps
 //!   we observe, while it shows at least [`BLIND_MIN_WINDOWS`] real ones (an empty Desktop,
-//!   or one with a stray helper window, is never taken for blindness).
+//!   or one with a stray helper window, is never taken for blindness). At an arrival, after
+//!   the launch, only windows the model already knows count ([`arrival_silent`]).
+//!
+//! [`window_session`] names the window server session (boot and login) for `state.json`:
+//! window ids saved in another session are not trusted.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType};
@@ -59,6 +64,15 @@ pub fn blindness(locked: bool, server: usize, ax: usize) -> Option<Blind> {
     }
 }
 
+/// At an arrival (the screen unlocked; [`screen_locked`] is asked first): Accessibility is
+/// silent only when the window server shows windows the model already knows (`known`, counted
+/// by [`counts`]) and Accessibility lists none of them (`listed`). Windows the model has
+/// never seen say nothing: an app whose windows Accessibility does not list would otherwise
+/// hold its Desktop for the whole wait at every visit.
+pub fn arrival_silent(known: usize, listed: usize) -> bool {
+    known > 0 && listed == 0
+}
+
 /// What a launch does about building its stages ([`wait_step`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -87,15 +101,16 @@ pub fn wait_step(blind: Option<Blind>, waiting: Option<(Blind, Instant)>, now: I
     }
 }
 
-/// The real windows on screen in `list` owned by a process `observed` says we watch (not
-/// ours: the caller's filter): `(server, ax)` for [`blindness`], `ax` counting those
-/// `tracked` says Accessibility lists.
-pub fn counts(list: &[CgWindow], observed: impl Fn(i32) -> bool, tracked: impl Fn(u32) -> bool) -> (usize, usize) {
+/// The real windows on screen in `list` that `include` takes (at launch: those of a process
+/// we observe, not ours; at an arrival: those the model knows too): `(server, ax)` for
+/// [`blindness`] or [`arrival_silent`], `ax` counting those `tracked` says Accessibility
+/// lists.
+pub fn counts(list: &[CgWindow], include: impl Fn(&CgWindow) -> bool, tracked: impl Fn(u32) -> bool) -> (usize, usize) {
     let real: Vec<&CgWindow> = list
         .iter()
         .filter(|w| w.onscreen && w.layer == 0 && w.alpha > 0.0)
         .filter(|w| w.bounds.w >= REAL_WINDOW_MIN && w.bounds.h >= REAL_WINDOW_MIN)
-        .filter(|w| observed(w.pid))
+        .filter(|w| include(w))
         .collect();
     let ax = real.iter().filter(|w| tracked(w.id)).count();
     (real.len(), ax)
@@ -117,6 +132,53 @@ pub fn screen_locked() -> bool {
         value.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()).map(|n| n != 0)
     };
     flag("CGSSessionScreenIsLocked").unwrap_or(false) || flag("kCGSSessionOnConsoleKey") == Some(false)
+}
+
+/// The window server session this process runs in, as a string kept in `state.json`
+/// ([`crate::engine::persist::StateFile::session`]): the boot time (`kern.boottime`) and the
+/// login session (`CGSessionCopyCurrentDictionary`'s `kCGSSessionIDKey` and
+/// `kCGSSessionAuditIDKey`). Window ids are only unique within one: after a reboot or a new
+/// login they start over. Read once (it cannot change while the process lives); `None` when
+/// neither the boot time nor the session can be read.
+pub fn window_session() -> Option<&'static str> {
+    static SESSION: OnceLock<Option<String>> = OnceLock::new();
+    SESSION.get_or_init(read_window_session).as_deref()
+}
+
+fn read_window_session() -> Option<String> {
+    let boot = boot_time();
+    let ids = CGSessionCopyCurrentDictionary().map(|dict| {
+        // SAFETY: the session dictionary maps CFString keys to CF values (checked below).
+        let dict: &CFDictionary<CFString, CFType> = unsafe { &*(&*dict as *const CFDictionary).cast() };
+        let number = |key: &'static str| -> Option<i64> {
+            dict.get(&CFString::from_static_str(key))?.downcast_ref::<CFNumber>().and_then(|n| n.as_i64())
+        };
+        (number("kCGSSessionIDKey"), number("kCGSSessionAuditIDKey"))
+    });
+    let (id, audit) = ids.unwrap_or((None, None));
+    session_key(boot, id, audit)
+}
+
+/// The session string from its parts; `None` when the boot time and the session id are
+/// both unknown (nothing to tell one session from another).
+pub fn session_key(boot: Option<(i64, i64)>, id: Option<i64>, audit: Option<i64>) -> Option<String> {
+    if boot.is_none() && id.is_none() {
+        return None;
+    }
+    let part = |v: Option<i64>| v.map_or_else(|| "?".to_string(), |v| v.to_string());
+    let boot = boot.map_or_else(|| "?".to_string(), |(s, us)| format!("{s}.{us:06}"));
+    Some(format!("boot {boot} session {} audit {}", part(id), part(audit)))
+}
+
+/// `kern.boottime`: seconds and microseconds.
+fn boot_time() -> Option<(i64, i64)> {
+    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: `kern.boottime` is a `struct timeval`; the buffer and its size are ours.
+    let rc = unsafe {
+        libc::sysctlbyname(c"kern.boottime".as_ptr(), (&raw mut tv).cast(), &mut size, std::ptr::null_mut(), 0)
+    };
+    (rc == 0 && size == std::mem::size_of::<libc::timeval>() && tv.tv_sec > 0).then(|| (tv.tv_sec, i64::from(tv.tv_usec)))
 }
 
 #[cfg(test)]
@@ -168,11 +230,36 @@ mod tests {
             win(5, 10, 10.0, true),   // a helper window
             win(6, 99, 800.0, true),  // an app we do not observe (STAGE_MANAGER_ONLY, ours)
         ];
-        let observed = |pid: i32| pid == 10 || pid == 20;
+        let observed = |w: &CgWindow| w.pid == 10 || w.pid == 20;
         assert_eq!(counts(&list, observed, |_| false), (3, 0));
         assert_eq!(counts(&list, observed, |id| id == 3), (3, 1));
         let (server, ax) = counts(&list, observed, |_| false);
         assert_eq!(blindness(false, server, ax), Some(Blind::AxSilent));
+    }
+
+    #[test]
+    fn an_arrival_is_held_for_silence_only_over_windows_the_model_knows() {
+        let list = vec![
+            win(1, 10, 800.0, true), // known
+            win(2, 10, 800.0, true), // known
+            win(3, 20, 800.0, true), // never seen: an app whose windows Accessibility does not list
+            win(4, 20, 800.0, true),
+            win(5, 20, 800.0, true),
+        ];
+        let known = |w: &CgWindow| w.id <= 2;
+        // Accessibility lists the known windows, not the app it never listed: no wait (the
+        // whole-screen count would have held this Desktop 10 s at every visit).
+        let (k, l) = counts(&list, known, |id| id <= 2);
+        assert!(!arrival_silent(k, l));
+        // It lists none of the known ones (just unlocked, still waking): wait.
+        let (k, l) = counts(&list, known, |_| false);
+        assert_eq!((k, l), (2, 0));
+        assert!(arrival_silent(k, l));
+        // A Desktop of windows never seen: never held.
+        let (k, l) = counts(&list, |_| false, |_| false);
+        assert!(!arrival_silent(k, l));
+        // One known window listed is enough.
+        assert!(!arrival_silent(2, 1));
     }
 
     #[test]
@@ -194,5 +281,16 @@ mod tests {
     #[test]
     fn reading_the_real_session_does_not_panic() {
         let _ = screen_locked();
+        assert_eq!(window_session(), window_session(), "read once");
+    }
+
+    #[test]
+    fn the_session_key_tells_boots_and_logins_apart() {
+        let a = session_key(Some((1_760_000_000, 5)), Some(257), Some(100_001));
+        assert_eq!(a.as_deref(), Some("boot 1760000000.000005 session 257 audit 100001"));
+        assert_ne!(a, session_key(Some((1_760_090_000, 5)), Some(257), Some(100_001)), "a reboot");
+        assert_ne!(a, session_key(Some((1_760_000_000, 5)), Some(257), Some(100_007)), "a new login");
+        assert_eq!(session_key(None, None, Some(1)), None, "nothing to tell sessions apart");
+        assert!(session_key(Some((1, 0)), None, None).is_some());
     }
 }

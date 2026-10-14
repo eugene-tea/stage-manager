@@ -106,11 +106,25 @@ pub struct SavedSpace {
     pub strip_slots: Vec<usize>,
 }
 
+impl SavedSpace {
+    /// How many standard windows it saved (children follow their parents and are never
+    /// matched).
+    pub fn standard_windows(&self) -> usize {
+        self.stages.iter().flat_map(|s| s.windows.iter()).filter(|w| w.role == SavedRole::Standard).count()
+    }
+}
+
 /// The contents of `state.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateFile {
     /// Always [`STATE_VERSION`] when written.
     pub version: u32,
+    /// The window server session the saved window ids belong to (the boot and the login
+    /// session, as the platform reads them). Window ids start over after a reboot or a new
+    /// login, so ids saved in another session name other windows: [`StateFile::for_session`]
+    /// drops them at load. Absent in files written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Every Space with stages, the shown one flagged `current`.
     pub spaces: Vec<SavedSpace>,
 }
@@ -129,8 +143,27 @@ impl StateFile {
     pub fn single(space: SavedSpace) -> Self {
         Self {
             version: STATE_VERSION,
+            session: None,
             spaces: vec![space],
         }
+    }
+
+    /// The file as read in window server session `current`: saved window ids are kept only
+    /// when the file was written in that very session; otherwise (a reboot or a new login
+    /// since, a file that does not say, a session that cannot be read now) every saved
+    /// window id is dropped, so a reused id never names another window and matching falls
+    /// back to bundle ID and title. Returns how many ids were dropped too.
+    pub fn for_session(mut self, current: Option<&str>) -> (Self, usize) {
+        let same = current.is_some() && self.session.as_deref() == current;
+        let mut dropped = 0;
+        if !same {
+            for w in self.spaces.iter_mut().flat_map(|s| s.stages.iter_mut()).flat_map(|s| s.windows.iter_mut()) {
+                if w.window.take().is_some() {
+                    dropped += 1;
+                }
+            }
+        }
+        (self, dropped)
     }
 
     /// Every saved stage of every Space.
@@ -348,7 +381,8 @@ impl Model {
     /// Snapshot for `state.json`: every Space with windows, the shown one flagged `current`,
     /// plus the saved Spaces not visited yet this run (untouched). Pinned windows are saved
     /// with their Space's active stage, flagged `pinned`; children are saved with their stage
-    /// after its members.
+    /// after its members. The window server session is the platform's to stamp
+    /// ([`StateFile::session`]).
     pub fn to_state(&self) -> StateFile {
         let save = |id: WindowId, z: usize, key: bool, pinned: bool| -> Option<SavedWindow> {
             let w = self.windows.get(&id)?;
@@ -433,6 +467,7 @@ impl Model {
         }));
         StateFile {
             version: STATE_VERSION,
+            session: None,
             spaces,
         }
     }

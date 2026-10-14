@@ -24,12 +24,15 @@
 //!   [`BESIDE_ARRIVALS`] arrivals in a row (the platform arrives again a settle later while
 //!   windows of another Space stay on screen) were they really moved here.
 //! - **Moves**: a known window on screen on a Space other than its own was moved there
-//!   (Mission Control, or dragged across with the pointer): it leaves its stage and shows
-//!   here in front, as a window opening here does: in the active stage when that holds a
-//!   window of its app, else in a stage of its own made active (the active stage goes to
-//!   the strip). Never parked, never filed with another app's windows. Whole stages that
-//!   move together to a Desktop without windows of its own (a known Desktop seen under a new
-//!   id) are carried over as they are: grouping, order, names, active stage, strip order.
+//!   (Mission Control, or dragged across with the pointer): it leaves its stage and goes
+//!   where a window of its app opening here goes: the active stage when that holds a window
+//!   of its app, else the app's most recently active stage here, else a stage of its own;
+//!   never filed with another app's windows. The stage of the frontmost moved window comes
+//!   forward (the active stage goes to the strip); when windows of several apps move at
+//!   once the others wait in the strip. Whole stages that move together to a Desktop
+//!   without windows of its own (a known Desktop seen under a new id) are carried over as
+//!   they are, grouping, order, names, active stage, strip order, before any window seen
+//!   there for the first time is placed.
 //!   One that keeps showing on every Space the user goes to
 //!   ([`STICKY_HOPS`] arrivals in a row, the last back where it came from) is on every Space
 //!   (sticky): it is treated as pinned and no longer counted. Seen back where it came from
@@ -45,7 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Action, DisplayId, Home, Model, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use super::{Action, DisplayId, Home, Model, NativeTarget, Stage, StageId, WindowId, WindowMeta, WindowRole};
 use crate::engine::persist::{LaunchHints, SavedSpace, bundle_matches, exact_matches, rematch};
 
 /// A window seen on screen on a Space other than its own at this many arrivals in a row,
@@ -138,15 +141,25 @@ impl Model {
     }
 
     /// True when the windows on screen look like two Desktops at once: two or more known
-    /// Spaces with more of their windows on screen than missing, or saved Spaces matching
-    /// first-seen windows, together (the window list read while a Desktop slides in). The
-    /// platform reads the list again before it arrives. Arguments as [`Model::arrive`].
+    /// Spaces with more of their windows on screen than missing, or saved Spaces whose
+    /// windows show among the first-seen ones, together (the window list read while a
+    /// Desktop slides in). A saved Space counts as showing when at least two of its windows
+    /// match, or more than half of them: one window matching (a window of the same app and
+    /// title opened elsewhere, one carried along) is not a whole Desktop. The platform reads
+    /// the list again before it arrives. Arguments as [`Model::arrive`].
     pub fn shows_two_desktops(&self, display: DisplayId, live: &[WindowMeta], absent: &[WindowId]) -> bool {
         let display = self.known_display(display);
         let known: Vec<WindowId> = live.iter().map(|m| m.id).filter(|id| self.windows.contains_key(id)).collect();
         let arrivals: Vec<WindowMeta> = live.iter().filter(|m| !self.windows.contains_key(&m.id)).cloned().collect();
         let shown = self.scores(display, &known, absent).values().filter(|(n, _, _)| *n > 0).count();
-        let saved = self.leftovers.iter().filter(|l| exact_matches(l, &arrivals) > 0).count();
+        let saved = self
+            .leftovers
+            .iter()
+            .filter(|l| {
+                let n = exact_matches(l, &arrivals);
+                n >= 2 || 2 * n > l.standard_windows()
+            })
+            .count();
         shown + saved >= 2
     }
 
@@ -318,20 +331,25 @@ impl Model {
             .iter()
             .position(|l| SpaceId(l.id) == target)
             .map(|i| self.leftovers.remove(i));
-        // Nothing of its own and nothing new: a known Desktop seen under a new id, whose
-        // whole stages are carried over.
-        let bare = self.space_is_empty(target) && saved.is_none() && arrivals.is_empty();
+        // No window of its own and no saved stages: a known Desktop seen under a new id (or
+        // a new Desktop), whose stages that moved here whole are carried over before the
+        // windows seen here for the first time are placed.
+        let bare = self.space_is_empty(target) && saved.is_none();
         let beside = self.hold_beside(target, &all);
         self.show_space(display, target, prev);
         self.match_screen(target, live, &mut actions);
 
+        let mut moving = self.collect_moves(target, &known, &beside, &mut actions);
+        let carried = if bare { self.carry_stages(target, &mut moving, &mut actions) } else { 0 };
         if !arrivals.is_empty() || saved.is_some() {
             let empty = SavedSpace::default();
             let assignment = rematch(saved.as_ref().unwrap_or(&empty), &arrivals);
             let more = self.apply_launch(&arrivals, &assignment, false, hints);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
         }
-        let (moved, carried) = self.learn_moves(target, &known, &beside, bare, &mut actions);
+        // Windows carried with their stages are not counted as moved one by one.
+        let moved = moving.len();
+        self.move_in(target, &moving, hints, &mut actions);
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
@@ -472,20 +490,18 @@ impl Model {
         }
     }
 
-    /// Known standard windows on screen on `target` whose Space is another one: moved here,
-    /// or (seen on every Space gone to, [`STICKY_HOPS`] in a row, and now back where they
-    /// came from) on every Space. Windows of a Space in `beside` (still on screen beside this
-    /// one) stay where they are. With `bare` (`target` has no window of its own), stages
-    /// whose every window moved are carried over whole. Returns how many windows moved and
-    /// how many stages were carried.
-    fn learn_moves(
+    /// Known standard windows on screen on `target` whose Space is another one: moved here
+    /// (returned, for [`Self::carry_stages`] and [`Self::move_in`]), or (seen on every Space
+    /// gone to, [`STICKY_HOPS`] in a row, and now back where they came from) on every Space,
+    /// made sticky here. Windows of a Space in `beside` (still on screen beside this one) stay
+    /// where they are.
+    fn collect_moves(
         &mut self,
         target: SpaceId,
         known: &[WindowId],
         beside: &BTreeSet<SpaceId>,
-        bare: bool,
         actions: &mut Vec<Action>,
-    ) -> (usize, usize) {
+    ) -> Vec<WindowId> {
         let mut moving = Vec::new();
         for &id in known {
             let Some(w) = self.windows.get(&id) else { continue };
@@ -500,10 +516,7 @@ impl Model {
                 moving.push(id);
             }
         }
-        let moved = moving.len();
-        let carried = if bare { self.carry_stages(target, &mut moving, actions) } else { 0 };
-        self.move_in(target, &moving, actions);
-        (moved, carried)
+        moving
     }
 
     /// Carries every stage whose standard windows are all in `moving` to `target` (a Space
@@ -607,19 +620,23 @@ impl Model {
         carried.len()
     }
 
-    /// Windows moved to `target` from other Spaces (each with its children) show here in
-    /// front, as a window opening here does: those of an app with a window in the active
-    /// stage join it; the others go together into a new stage made active, the active stage
-    /// going to the strip (into the active stage itself when it is empty). Never parked:
-    /// a parked one is put back at its restore frame. A pinned window stays pinned.
-    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], actions: &mut Vec<Action>) {
+    /// Windows moved to `target` from other Spaces (each with its children) go where a
+    /// window of their app opening here goes ([`Model::native_target_in`]): with the app's
+    /// windows in the active stage (or pinned), else into the app's most recently active
+    /// stage on this Desktop, else into a stage of their app's own (the active stage when it
+    /// is empty). So windows of one app moved together share a stage, those of different
+    /// apps never do. The stage holding the frontmost moved window (`hints.z_order`; else
+    /// the last one a window went to) is shown, the active stage going to the strip; the
+    /// other stages moved windows went to wait in the strip, those windows parked. A pinned
+    /// window stays pinned and shown.
+    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], hints: &LaunchHints, actions: &mut Vec<Action>) {
         if ids.is_empty() {
             return;
         }
         let display = self.space_display(target);
         let active = self.ensure_active(target);
-        let active_empty = self.stage_is_empty(active);
-        let mut fresh: Option<StageId> = None;
+        // (moved window, the stage it went to), in the order they were taken.
+        let mut went: Vec<(WindowId, StageId)> = Vec::new();
         for &id in ids {
             let Some(w) = self.windows.get(&id) else { continue };
             let (from, home, pid) = (w.space, w.home, w.meta.pid);
@@ -633,13 +650,12 @@ impl Model {
                             stage.key = stage.windows.first().copied();
                         }
                     }
-                    let app_here = self
-                        .stage(active)
-                        .is_some_and(|st| st.windows.iter().any(|x| self.windows.get(x).is_some_and(|o| o.meta.pid == pid)));
-                    let dest = if active_empty || app_here {
-                        active
-                    } else {
-                        *fresh.get_or_insert_with(|| self.create_stage(target, None))
+                    // The window still counts as its old Space's here: only the app's
+                    // windows already on `target` (moved ones included) decide.
+                    let dest = match self.native_target_in(pid, target) {
+                        NativeTarget::Join(d) => d,
+                        NativeTarget::Fresh if self.stage_is_empty(active) => active,
+                        NativeTarget::Fresh => self.create_stage(target, None),
                     };
                     if let Some(stage) = self.stage_mut(dest) {
                         stage.windows.insert(0, id);
@@ -648,23 +664,56 @@ impl Model {
                     self.set_home(id, Home::Stage(dest), display);
                     self.set_space(&group, target);
                     self.drop_if_dead(s, actions);
+                    went.push((id, dest));
                 }
                 Home::Pinned => {
                     self.set_home(id, Home::Pinned, display);
                     self.set_space(&group, target);
-                }
-            }
-            for &g in &group {
-                if self.windows.get(&g).is_some_and(|w| w.parked) {
-                    self.restore_window(g, actions);
+                    for &g in &group {
+                        if self.windows.get(&g).is_some_and(|w| w.parked) {
+                            self.restore_window(g, actions);
+                        }
+                    }
                 }
             }
             self.moved_from.insert(id, from);
         }
-        if let Some(stage) = fresh {
-            // Its own stage comes forward; the one shown goes to the strip.
-            let more = self.switch_in(target, active, stage, None);
+        let Some(&(_, last)) = went.last() else { return };
+        let front = hints
+            .z_order
+            .iter()
+            .find_map(|z| went.iter().find(|(id, _)| id == z))
+            .map_or(last, |(_, d)| *d);
+        let mut waiting: Vec<StageId> = Vec::new();
+        for &(id, dest) in &went {
+            let mut group = vec![id];
+            group.extend(self.children_of(id));
+            if dest == front && front == active {
+                // Shown where it is: in front of the active stage.
+                for &g in &group {
+                    if self.windows.get(&g).is_some_and(|w| w.parked) {
+                        self.restore_window(g, actions);
+                    }
+                }
+            } else if dest != front && dest != active {
+                for &g in &group {
+                    if self.windows.get(&g).is_some_and(|w| !w.parked) {
+                        self.park_window(g, actions);
+                    }
+                }
+                if !waiting.contains(&dest) {
+                    waiting.push(dest);
+                }
+            }
+            // Else the switch below shows the front stage and parks the active one.
+        }
+        if front != active {
+            // The front stage comes forward; the one shown goes to the strip.
+            let more = self.switch_in(target, active, front, None);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+        }
+        for stage in waiting {
+            self.strip_enter(target, stage);
         }
     }
 

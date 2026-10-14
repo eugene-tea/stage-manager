@@ -1497,8 +1497,11 @@ mod identity {
         assert_eq!(mac.space(), d1);
         assert_eq!(mac.m.space_of(w(1)), Some(d1), "seen again: moved here");
         assert_eq!(mac.m.space_of(w(2)), Some(d1));
-        assert!(!mac.parked(1) && !mac.parked(2), "shown, never parked");
+        // Two apps: a stage each (6Y2 M3); the frontmost moved window's (1) comes forward.
+        assert_ne!(mac.m.stage_of(w(1)), mac.m.stage_of(w(2)), "never one stage for two apps");
+        assert!(!mac.parked(1), "shown");
         assert_eq!(mac.m.stage_of(w(1)), mac.m.main_active_stage(), "in front");
+        assert!(mac.parked(2) && mac.strip().contains(&vec![2]), "the other in the strip: {:?}", mac.strip());
         assert_eq!(mac.m.space_of(w(3)), Some(d0), "the window left behind stays");
     }
 
@@ -1643,5 +1646,176 @@ mod identity {
         assert_eq!(grouping(&again, d1), groups1);
         assert_eq!(again.active(), active1, "its saved active stage");
         assert_eq!(again.m.unvisited_saved_spaces(), 0);
+    }
+
+    #[test]
+    fn windows_of_several_apps_moved_together_get_a_stage_each_the_frontmost_shown() {
+        // 6Y2 M3: mail and the terminal dragged together to Desktop 0 in Mission Control
+        // landed in one stage. Each app gets its own; the frontmost window's comes forward.
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(1, 4, 40, "com.example.mail", "Inbox");
+        mac.put(1, 5, 50, "com.example.terminal", "Shell");
+        mac.put(1, 6, 60, "com.example.calendar", "Week");
+        mac.put(1, 7, 70, "com.example.notes", "List");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        let d0 = mac.space();
+        mac.focused = Some(w(4));
+        mac.go(1);
+        for id in [4, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(0);
+        }
+        mac.focused = Some(w(5));
+        mac.go(0);
+        assert_eq!(mac.space(), d0);
+        assert_eq!(mac.m.last_arrival().moved, 2);
+        let mail = mac.m.stage_of(w(4)).expect("stage");
+        let shell = mac.m.stage_of(w(5)).expect("stage");
+        assert_ne!(mail, shell, "a stage per app");
+        assert_eq!(mac.m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(4)]));
+        assert_eq!(mac.m.stage(shell).map(|s| s.windows.clone()), Some(vec![w(5)]));
+        assert_eq!(mac.m.main_active_stage(), Some(shell), "the frontmost moved window's stage in front");
+        assert!(!mac.parked(5), "shown");
+        assert!(mac.parked(4) && mac.parked(2), "the other app and the stage that was shown wait");
+        assert!(mac.strip().contains(&vec![4]) && mac.strip().contains(&vec![2]), "{:?}", mac.strip());
+        assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+    }
+
+    #[test]
+    fn two_windows_of_one_app_moved_together_share_a_stage() {
+        let mut mac = Mac::new();
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(1, 4, 40, "com.example.mail", "Inbox");
+        mac.put(1, 5, 40, "com.example.mail", "Draft");
+        mac.put(1, 6, 60, "com.example.calendar", "Week");
+        mac.put(1, 7, 70, "com.example.notes", "List");
+        mac.put(1, 8, 80, "com.example.chat", "Team");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        mac.focused = Some(w(6));
+        mac.go(1);
+        for id in [4, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(0);
+        }
+        mac.focused = None;
+        mac.go(0);
+        let mail = mac.m.stage_of(w(4)).expect("stage");
+        assert_eq!(mac.m.stage_of(w(5)), Some(mail));
+        assert_eq!(mac.m.main_active_stage(), Some(mail));
+        assert!(!mac.parked(4) && !mac.parked(5) && mac.parked(2));
+    }
+
+    #[test]
+    fn a_window_moved_here_joins_its_apps_stage_in_the_strip_which_comes_forward() {
+        // 6Y2 L1: as a window opening here does (`native_target`), not a stage of its own.
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(1, 11, 10, "com.example.editor", "Home notes");
+        mac.put(1, 4, 40, "com.example.mail", "Inbox");
+        mac.put(1, 5, 50, "com.example.terminal", "Shell");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        let d0 = mac.space();
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        let browser = mac.m.stage_of(w(2)).expect("stage");
+        assert_eq!(mac.m.main_active_stage(), Some(browser));
+        assert!(mac.parked(1), "the editor waits in the strip");
+        mac.focused = Some(w(4));
+        mac.go(1);
+        mac.wins.get_mut(&11).expect("window").0 = Some(0);
+        mac.focused = None;
+        mac.go(0);
+        assert_eq!(mac.space(), d0);
+        assert_eq!(mac.m.stage_of(w(11)), Some(editor), "with its app's window");
+        assert_eq!(mac.m.stage(editor).map(|s| s.windows.clone()), Some(vec![w(11), w(1)]), "in front");
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "switched to");
+        assert!(!mac.parked(11) && !mac.parked(1));
+        assert!(mac.parked(2) && mac.strip().contains(&vec![2]), "{:?}", mac.strip());
+        assert_eq!(mac.focused, Some(w(11)));
+        assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+    }
+
+    #[test]
+    fn whole_stages_are_carried_to_a_desktop_with_new_windows_too() {
+        // 6Y2 M4: a window seen for the first time on the Desktop the stages moved to no
+        // longer stops the carry; it is placed after, in a stage of its own.
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 7, 20, "com.example.browser", "Work docs");
+        mac.put(0, 3, 30, "com.example.chat", "Team");
+        mac.put(0, 4, 40, "com.example.mail", "Inbox");
+        mac.put(0, 5, 50, "com.example.terminal", "Shell");
+        mac.put(0, 6, 60, "com.example.calendar", "Week");
+        mac.put(0, 8, 70, "com.example.notes", "List");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        let browser = mac.m.stage_of(w(2)).expect("stage");
+        let chat = mac.m.stage_of(w(3)).expect("stage");
+        for id in [4, 5, 6, 8] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(2);
+        }
+        mac.put(0, 9, 95, "com.example.viewer", "Photo");
+        mac.arrive();
+        let new = mac.space();
+        assert_ne!(new, d0);
+        assert_eq!(mac.m.last_arrival().carried, 3, "carried though a window is new here");
+        assert_eq!(mac.m.last_arrival().moved, 0, "carried windows are not counted as moved (L4)");
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "the active stage stays active");
+        assert_eq!(mac.m.stage_of(w(2)), Some(browser));
+        assert_eq!(mac.m.stage_of(w(7)), Some(browser), "grouping kept");
+        assert_eq!(mac.m.stage_of(w(3)), Some(chat));
+        let viewer = mac.m.stage_of(w(9)).expect("stage");
+        assert!(![editor, browser, chat].contains(&viewer), "the new window in a stage of its own");
+        assert_eq!(mac.m.stage(viewer).map(|s| s.windows.clone()), Some(vec![w(9)]));
+        assert_eq!(mac.m.stages_in(new).count(), 4);
+        assert!(!mac.parked(1) && mac.parked(2) && mac.parked(3) && mac.parked(9));
+    }
+
+    #[test]
+    fn moved_counts_only_windows_not_carried() {
+        // 6Y2 L4: one stage carried whole (two windows) and a window whose stage stayed.
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 7, 20, "com.example.browser", "Work docs");
+        mac.put(0, 3, 30, "com.example.chat", "Team");
+        mac.put(0, 4, 30, "com.example.chat", "Random");
+        mac.put(0, 5, 50, "com.example.terminal", "Shell");
+        mac.put(0, 6, 60, "com.example.calendar", "Week");
+        mac.put(0, 8, 70, "com.example.notes", "List");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        assert_eq!(mac.m.stage_of(w(3)), mac.m.stage_of(w(4)));
+        // The browser's stage (2, 7) and one of chat's two windows (3) go to a new Desktop.
+        for id in [1, 4, 5, 6, 8] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(2);
+        }
+        mac.go(0);
+        let note = mac.m.last_arrival().clone();
+        assert_eq!(note.carried, 1, "{note:?}");
+        assert_eq!(note.moved, 1, "chat's window alone: {note:?}");
+    }
+
+    #[test]
+    fn one_window_matching_a_saved_desktop_is_not_a_second_desktop_on_screen() {
+        // 6Y2 L2: the arrival waits only when a saved Desktop really shows beside the one
+        // arriving: two of its windows, or more than half of them.
+        let (mac, _d0, _d1, _) = relaunched();
+        let desk1: Vec<WindowMeta> = mac.wins.values().filter(|(d, _, _)| *d == Some(1)).map(|(_, _, m)| m.clone()).collect();
+        assert_eq!(desk1.len(), 7);
+        let with = |n: usize| {
+            let mut l = mac.live();
+            l.extend(desk1.iter().take(n).cloned());
+            l
+        };
+        assert!(!mac.m.shows_two_desktops(MAIN, &with(1), &[]), "one of seven saved windows");
+        assert!(mac.m.shows_two_desktops(MAIN, &with(2), &[]), "two");
+        assert!(mac.m.shows_two_desktops(MAIN, &with(7), &[]));
     }
 }

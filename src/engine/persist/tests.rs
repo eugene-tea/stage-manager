@@ -710,3 +710,48 @@ fn the_state_file_keeps_each_windows_id() {
     let back = StateFile::from_json(&file.to_json()).expect("parses");
     assert_eq!(back, file);
 }
+
+#[test]
+fn window_ids_from_another_session_are_dropped_and_the_title_match_wins() {
+    // Saved before a reboot: the editor's "Plan.txt" was window 5. After the reboot id 5 is
+    // the same app's other window ("Notes.txt"), and "Plan.txt" is window 9. By the stale id
+    // window 5 would go to Plan's stage; with the session changed the titles decide.
+    let s = state(
+        vec![
+            (None, vec![saved_id("com.example.ed", "Plan.txt", 0, 5)]),
+            (None, vec![saved_id("com.example.ed", "Notes.txt", 0, 6)]),
+        ],
+        Some(0),
+    );
+    let file = StateFile { session: Some("boot 1 session 257".into()), ..StateFile::single(s) };
+    let after_reboot = [live(5, "com.example.ed", "Notes.txt"), live(9, "com.example.ed", "Plan.txt")];
+
+    let (stale, dropped) = file.clone().for_session(Some("boot 2 session 257"));
+    assert_eq!(dropped, 2);
+    assert!(stale.all_stages().flat_map(|s| s.windows.iter()).all(|w| w.window.is_none()));
+    let a = rematch(&stale.spaces[0], &after_reboot);
+    assert_eq!(ids(&a.stages[0]), [9], "Plan.txt by its title");
+    assert_eq!(ids(&a.stages[1]), [5], "Notes.txt by its title");
+
+    // The same session (a restart of our app only): the ids stand.
+    let (same, dropped) = file.clone().for_session(Some("boot 1 session 257"));
+    assert_eq!(dropped, 0);
+    let a = rematch(&same.spaces[0], &after_reboot);
+    assert_eq!(ids(&a.stages[0]), [5], "by its id");
+
+    // A file that does not say, or a session that cannot be read: no ids trusted.
+    let (unknown, dropped) = StateFile { session: None, ..file.clone() }.for_session(Some("boot 1 session 257"));
+    assert_eq!(dropped, 2);
+    assert!(unknown.all_stages().flat_map(|s| s.windows.iter()).all(|w| w.window.is_none()));
+    assert_eq!(file.for_session(None).1, 2);
+}
+
+#[test]
+fn the_session_is_kept_in_the_file() {
+    let file = StateFile { session: Some("boot 1 session 257".into()), ..StateFile::single(SavedSpace::default()) };
+    let json = file.to_json();
+    assert!(json.contains("\"session\""));
+    assert_eq!(StateFile::from_json(&json).expect("parses"), file);
+    let none = StateFile::single(SavedSpace::default());
+    assert!(!none.to_json().contains("session"), "absent when unknown");
+}
