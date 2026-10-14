@@ -224,14 +224,14 @@ mod tests {
         StateFile::single(SavedSpace {
             id: 1,
             current: true,
-            stages: vec![SavedStage { name: None, windows }],
+            stages: vec![SavedStage { name: None, windows, ..Default::default() }],
             active_index: Some(0),
-            strip_slots: vec![],
+            ..Default::default()
         })
     }
 
     fn saved(bundle: &str, title: &str, frame: Rect) -> SavedWindow {
-        SavedWindow { bundle_id: bundle.into(), title: title.into(), frame, z: 0, key: false, pinned: false, role: SavedRole::Standard, original: None, window: None }
+        SavedWindow { bundle_id: bundle.into(), title: title.into(), frame, z: 0, key: false, pinned: false, role: SavedRole::Standard, original: None, window: None, ..Default::default() }
     }
 
     // ----- the settle ------------------------------------------------------------------

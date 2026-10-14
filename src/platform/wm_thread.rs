@@ -664,8 +664,9 @@ mod tests {
             role: SavedRole::Standard,
             original: None,
             window: None,
+            ..Default::default()
         };
-        let state = StateFile::single(SavedSpace { id: 1, current: true, stages: vec![SavedStage { name: None, windows: vec![saved] }], active_index: Some(0), strip_slots: vec![] });
+        let state = StateFile::single(SavedSpace { id: 1, current: true, stages: vec![SavedStage { name: None, windows: vec![saved], ..Default::default() }], active_index: Some(0), ..Default::default() });
 
         // After the stand-down (state.json dropped, a fresh controller) nothing knows it: a
         // sliver of an unknown window is never brought back.

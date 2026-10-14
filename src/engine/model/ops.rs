@@ -29,6 +29,11 @@ impl Model {
     /// is focused in `obs`, else parks it there; `float` pins it; `ignore` leaves it
     /// unmanaged. Placement (`center`, `cascade` from the stage's front window) applies before
     /// any switch.
+    ///
+    /// Before Apple's default (`native`), a saved window still pending on this Space is looked
+    /// for ([`Model::place_from_pending`]): a confident match goes back to its saved stage and
+    /// frame, parked there when the stage is inactive, with no switch; a provisional Space
+    /// (restore mode) first becomes the saved Desktop the window belongs to.
     pub fn add_window(
         &mut self,
         meta: WindowMeta,
@@ -83,6 +88,13 @@ impl Model {
             return actions;
         }
 
+        if decision.action == RuleAction::Native && self.place_from_pending(&meta, space, &mut actions) {
+            self.normalize_slots();
+            actions.push(Action::StateChanged);
+            return actions;
+        }
+        // Adoption may have renamed the Space.
+        let space = self.current_space(display);
         let active = self.ensure_active(space);
         // (home, a stage was created for it, switch to its stage when that is inactive)
         let (home, created, follow) = match &decision.action {
@@ -188,6 +200,7 @@ impl Model {
             self.windows.remove(&c);
         }
         self.windows.remove(&id);
+        self.restored.remove(&id);
         if let Home::Stage(s) = home {
             if let Some(stage) = self.stage_mut(s) {
                 stage.windows.retain(|&w| w != id);
@@ -543,8 +556,10 @@ impl Model {
             .map_or(NativeTarget::Fresh, |s| NativeTarget::Join(s.id))
     }
 
+    /// True when a stage has no window and none pending (a stage waiting for its windows is
+    /// not an empty stage to reuse).
     pub(crate) fn stage_is_empty(&self, stage: StageId) -> bool {
-        self.stage(stage).is_some_and(|s| s.windows.is_empty())
+        self.stage(stage).is_some_and(|s| s.windows.is_empty()) && !self.has_pending(stage)
     }
 
     /// Brings app `pid`'s windows from other stages into the active stage instead of

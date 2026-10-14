@@ -18,9 +18,16 @@
 //! its own saved entry from a stranded sibling; only the windows the caller says want a frame
 //! take part in the third.
 //!
-//! Launch's own rematch ([`super::persist::rematch`]) still matches by bundle id alone in
-//! saved order: changing that is the persistence work after a restart (round 8D), which can
-//! move onto this matcher.
+//! Restoring stages ([`super::persist::rematch_on`] at an arrival, the model's pending stages
+//! for each window appearing later) uses the scored matcher instead ([`score`]): it weighs
+//! the frame and the title's fingerprint ([`fingerprint`]) too, and says how sure it is, since
+//! a match there may park a window.
+
+mod fingerprint;
+mod score;
+
+pub use fingerprint::{TITLE_RULES, TitleRule, fingerprint};
+pub use score::{AMBIGUOUS_WITHIN, FRAME_TOLERANCE, Grade, Live, LowRule, MEDIUM, Pick, STRONG, Saved, Score, assign, points, score};
 
 /// A window as the matcher sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

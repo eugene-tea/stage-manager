@@ -14,7 +14,9 @@
 //!   the launch, only windows the model already knows count ([`arrival_silent`]).
 //!
 //! [`window_session`] names the window server session (boot and login) for `state.json`:
-//! window ids saved in another session are not trusted.
+//! window ids saved in another session are not trusted, and a file from another session
+//! starts a restore. Tests simulate a new session with `STAGE_MANAGER_SESSION=<text>`,
+//! honoured only with `STAGE_MANAGER_TEST` set.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -146,7 +148,18 @@ pub fn window_session() -> Option<&'static str> {
     SESSION.get_or_init(read_window_session).as_deref()
 }
 
+/// The test-only session override: `STAGE_MANAGER_SESSION`, honoured only with
+/// `STAGE_MANAGER_TEST` set (a restart simulated without restarting the Mac).
+fn session_override(test: Option<std::ffi::OsString>, session: Option<String>) -> Option<String> {
+    test?;
+    session.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 fn read_window_session() -> Option<String> {
+    if let Some(s) = session_override(std::env::var_os("STAGE_MANAGER_TEST"), std::env::var("STAGE_MANAGER_SESSION").ok()) {
+        tracing::info!(session = %s, "window server session from STAGE_MANAGER_SESSION (test)");
+        return Some(s);
+    }
     let boot = boot_uuid().or_else(|| boot_time().map(|s| format!("t{s}")));
     let ids = CGSessionCopyCurrentDictionary().map(|dict| {
         // SAFETY: the session dictionary maps CFString keys to CF values (checked below).
@@ -306,6 +319,15 @@ mod tests {
     fn reading_the_real_session_does_not_panic() {
         let _ = screen_locked();
         assert_eq!(window_session(), window_session(), "read once");
+    }
+
+    #[test]
+    fn the_session_override_needs_the_test_switch() {
+        let on = Some(std::ffi::OsString::from("1"));
+        assert_eq!(session_override(on.clone(), Some("restore B".into())), Some("restore B".to_string()));
+        assert_eq!(session_override(None, Some("restore B".into())), None, "not outside tests");
+        assert_eq!(session_override(on.clone(), Some("  ".into())), None);
+        assert_eq!(session_override(on, None), None);
     }
 
     #[test]

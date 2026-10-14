@@ -15,16 +15,21 @@
 //! Spaces). Only the safety paths ([`Model::unpark_all`]) and the arrangement of a Desktop
 //! macOS is about to show for a window the user went to ([`Model::arrange_ahead`], moves
 //! only, undone when another Desktop comes) touch windows of a Space not shown.
+//!
+//! **Pending stages.** A saved stage whose windows are not on screen yet stays alive with
+//! no card, holding its saved windows as pending; a window its app opens later is matched
+//! against them first ([`Model::add_window`]; `pending.rs`, [`crate::engine::restore`]).
 
 mod ahead;
 mod hide;
 mod ops;
+mod pending;
 mod spaces;
 mod strip;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +39,7 @@ use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
 pub use ahead::{Ahead, AheadMark, AppFacts};
+pub use pending::{PendingNote, Restored};
 pub use spaces::{ArrivalNote, Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 
@@ -290,6 +296,21 @@ pub struct Model {
     pub(crate) beside: HashMap<SpaceId, u32>,
     /// What the last arrival did, for the log.
     pub(crate) last_arrival: spaces::ArrivalNote,
+    /// Saved windows not on screen yet, per stage, front to back: the stage stays alive with
+    /// no card until they come or are given up ([`crate::engine::restore`]).
+    pub(crate) pending: HashMap<StageId, Vec<super::persist::SavedWindow>>,
+    /// The saved strip order per Space, pending stages included, while any is pending: a
+    /// stage that comes back takes its saved place.
+    pub(crate) slot_order: HashMap<SpaceId, Vec<StageId>>,
+    /// Spaces made from an empty screen in restore mode and not adopted yet: the first window
+    /// matching a saved Desktop's with confidence makes the Space that Desktop.
+    pub(crate) provisional: BTreeSet<SpaceId>,
+    /// Windows placed from a saved entry: how sure the match was and their saved place.
+    pub(crate) restored: HashMap<WindowId, Restored>,
+    /// The restore's session and mode.
+    pub(crate) restore: super::restore::Restore,
+    /// What the last placement from a pending entry did, for the log.
+    pub(crate) last_pending: Option<PendingNote>,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -323,6 +344,12 @@ impl Model {
             hops: HashMap::new(),
             beside: HashMap::new(),
             last_arrival: spaces::ArrivalNote::default(),
+            pending: HashMap::new(),
+            slot_order: HashMap::new(),
+            provisional: BTreeSet::new(),
+            restored: HashMap::new(),
+            restore: super::restore::Restore::default(),
+            last_pending: None,
             clock: 0,
             next_stage: 1,
             options,
@@ -831,13 +858,15 @@ impl Model {
         }
     }
 
-    /// True when a stage must be kept: active, has a standard member, or is declared.
+    /// True when a stage must be kept: active, has a standard member or a pending window, or
+    /// is declared.
     pub(crate) fn stage_is_alive(&self, stage: StageId) -> bool {
         let Some(s) = self.stage(stage) else {
             return false;
         };
         self.is_active(stage)
             || !s.windows.is_empty()
+            || self.has_pending(stage)
             || s.name.as_deref().is_some_and(|n| self.is_declared(n))
     }
 
@@ -852,6 +881,7 @@ impl Model {
         }
         let leftovers = self.children_in(Home::Stage(stage));
         self.stages.retain(|s| s.id != stage);
+        self.pending.remove(&stage);
         self.revealed
             .retain(|_, r| r.from != stage && r.desktop != stage);
         if let Some(slots) = self.slots.get_mut(&space) {

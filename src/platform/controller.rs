@@ -101,6 +101,7 @@ use crate::engine::model::{
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
+use crate::engine::restore::{AppQuiet, Restore};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
@@ -696,6 +697,14 @@ pub struct Controller {
     /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
     /// a change seen by the once-a-second check sends a new snapshot.
     active_off_screen: BTreeSet<u32>,
+    /// When each app with pending windows was last busy: a quiet one's pending windows are
+    /// given up ([`crate::engine::restore`]).
+    quiet: AppQuiet,
+    /// When pending windows were last checked for giving up.
+    quiet_checked: Instant,
+    /// Each saved Space's last time shown (Unix seconds), from the loaded file and the saves
+    /// since ([`StateFile::stamp`]).
+    seen_times: HashMap<u64, u64>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -811,6 +820,9 @@ impl Controller {
             active_off_screen: BTreeSet::new(),
             macos_reveal_at: None,
             patch_reveal_hold: None,
+            quiet: AppQuiet::default(),
+            quiet_checked: Instant::now(),
+            seen_times: HashMap::new(),
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -1870,6 +1882,8 @@ impl Controller {
         let mut file = m.to_state();
         // The window ids in it hold for this window server session only.
         file.session = session::window_session().map(str::to_string);
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        file.stamp(now, &mut self.seen_times);
         let text = match file.to_json() {
             Ok(text) => text,
             Err(e) => {
@@ -1885,18 +1899,31 @@ impl Controller {
         }
     }
 
-    /// Reads `state.json`; its window ids are dropped when it was written in another window
-    /// server session (a reboot or a new login since: the ids name other windows now).
-    fn load_state() -> Option<StateFile> {
+    /// Reads `state.json`. Written in another window server session (a reboot or a new login
+    /// since: the ids name other windows now), its window ids are dropped, every saved window
+    /// is pending until it shows, and the ones pending through a whole session already are
+    /// given up ([`StateFile::start_new_session`]); the restore says which (restore mode).
+    fn load_state() -> Option<(StateFile, Restore)> {
         let path = paths::state_file();
         let text = std::fs::read_to_string(&path).ok()?;
+        let current = session::window_session();
         match StateFile::from_json(&text) {
-            Ok(s) => {
-                let (s, dropped) = s.for_session(session::window_session());
-                if dropped > 0 {
-                    tracing::info!(dropped, "state.json was written in another window server session (a reboot or a login since): its windows are matched by app and title");
+            Ok(mut s) => {
+                let restoring = !s.same_session(current);
+                if restoring {
+                    let expired = s.start_new_session();
+                    tracing::info!(
+                        pending = s.pending_windows(),
+                        expired,
+                        "restore: state.json is from another window server session (a restart or a new login); its windows go back to their stages as they show"
+                    );
                 }
-                Some(s)
+                let (s, dropped) = s.for_session(current);
+                if dropped > 0 {
+                    tracing::info!(dropped, "state.json was written in another window server session (a reboot or a login since): its windows are matched by app, title and frame");
+                }
+                let restore = Restore { session: current.unwrap_or_default().to_string(), restoring };
+                Some((s, restore))
             }
             Err(e) => {
                 tracing::warn!("{e}; starting without saved stages");
@@ -2399,10 +2426,12 @@ impl Controller {
         tracing::info!(
             live = live.len(),
             off_screen = self.unplaced.len(),
-            saved_spaces = state.as_ref().map_or(0, |s| s.spaces.len()),
+            saved_spaces = state.as_ref().map_or(0, |s| s.0.spaces.len()),
             "building stages"
         );
-        if let Some(state) = state {
+        if let Some((state, restore)) = state {
+            self.seen_times = state.seen_times();
+            model.set_restore(restore);
             model.restore_spaces(state.spaces);
         }
         if main.frame.w > 0.0 && self.screen_seen(ob, &list, main.frame) == Seen::FullScreen {
@@ -3145,6 +3174,10 @@ impl Controller {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
+        if let Some(bundle) = ob.window(id).and_then(|w| ob.bundle_id(w.pid)).map(str::to_string) {
+            // A new window: its app is not done reopening windows yet.
+            self.quiet.window(&bundle, Instant::now());
+        }
         self.flush_pending(ob);
         let list = windows::list_windows();
         let main = self.model.as_ref().map_or(Rect::default(), |m| m.main_display().frame);
@@ -3219,6 +3252,9 @@ impl Controller {
         let obs = self.observe(ob);
         if let Some(m) = self.model.as_mut() {
             let actions = m.add_window(meta, &decision, &obs);
+            if let Some(note) = m.last_pending().filter(|n| n.window.0 == id) {
+                tracing::info!(id, grade = note.grade.name(), points = note.points, parked = note.parked, adopted = ?note.adopted, "restore: back in its saved stage");
+            }
             self.execute_animated(ob, actions);
         }
     }
@@ -3611,6 +3647,10 @@ impl Controller {
                 self.update_patch();
             }
             self.expire_ahead(ob, now);
+            if now.duration_since(self.quiet_checked) >= Duration::from_secs(1) {
+                self.quiet_checked = now;
+                self.give_up_pending(ob, now);
+            }
             if self.locked {
                 // Nothing is inferred from what a locked screen lists.
             } else if self.space_pending {
@@ -3627,6 +3667,41 @@ impl Controller {
         }
         if self.strip_dirty {
             self.present();
+        }
+    }
+
+    /// Gives up the pending windows of apps running and quiet for
+    /// [`crate::engine::restore::QUIET`] (no new window): the windows were closed inside the
+    /// app's own session. An app that is not running keeps them (until a later session); one
+    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet.
+    fn give_up_pending(&mut self, ob: &mut Observer, now: Instant) {
+        let Some(m) = self.model.as_ref() else { return };
+        let bundles = m.pending_bundles();
+        if bundles.is_empty() {
+            return;
+        }
+        let waiting: HashSet<String> = self
+            .unplaced
+            .iter()
+            .filter_map(|id| ob.window(*id).and_then(|w| ob.bundle_id(w.pid)).map(str::to_string))
+            .collect();
+        for b in &bundles {
+            if ob.pids_with_bundle(b).is_empty() {
+                self.quiet.stopped(b);
+            } else {
+                self.quiet.running(b, now);
+            }
+        }
+        let settled: Vec<String> =
+            self.quiet.settled(now).into_iter().filter(|b| bundles.contains(b) && !waiting.contains(b)).collect();
+        if settled.is_empty() || self.locked || self.frozen() {
+            return;
+        }
+        let Some(m) = self.model.as_mut() else { return };
+        let (actions, dropped) = m.expire_pending(&settled);
+        if dropped > 0 {
+            tracing::info!(dropped, apps = ?settled, "restore: pending windows given up (their apps opened no window for a minute)");
+            self.execute(ob, actions);
         }
     }
 
@@ -3793,6 +3868,7 @@ impl Controller {
                     "active": m.active_stage_in(s.space) == Some(s.id),
                     "key": s.key.map(|k| k.0),
                     "windows": s.windows.iter().map(|w| w.0).collect::<Vec<_>>(),
+                    "pending": m.pending_of(s.id).len(),
                 })
             })
             .collect();
@@ -3814,6 +3890,7 @@ impl Controller {
                     "parked": w.parked,
                     "space": w.space.0,
                     "sticky": w.sticky,
+                    "restored": m.restored_grade(w.meta.id).map(|g| g.name()),
                 })
             })
             .collect();
@@ -3848,6 +3925,14 @@ impl Controller {
             "config_path": self.store.path(),
             "config_error": self.config_error,
             "registry": safety::registry_len(),
+            "restore": {
+                "restoring": m.restoring(),
+                "provisional": m.provisional_spaces().iter().map(|s| s.0).collect::<Vec<_>>(),
+                "pending": m.pending_count(),
+                "pending_unvisited": m.pending_unvisited(),
+                "saved_spaces_waiting": m.unvisited_saved_spaces(),
+                "slots": m.strip_slots(m.main_display().id).iter().filter_map(|s| m.stage_number(*s)).collect::<Vec<_>>(),
+            },
             "stages": stages,
             "windows": windows,
         })
@@ -3870,6 +3955,8 @@ impl Controller {
                     "active_stage": m.active_stage_in(s.id).map(|a| a.0),
                     "stages": m.stages_in(s.id).map(|st| st.id.0).collect::<Vec<_>>(),
                     "windows": m.windows().filter(|w| w.space == s.id).count(),
+                    "pending": m.stages_in(s.id).map(|st| m.pending_of(st.id).len()).sum::<usize>(),
+                    "provisional": m.provisional_spaces().contains(&s.id),
                 })
             })
             .collect();
