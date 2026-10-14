@@ -663,6 +663,7 @@ mod tests {
             pinned: false,
             role: SavedRole::Standard,
             original: None,
+            window: None,
         };
         let state = StateFile::single(SavedSpace { id: 1, current: true, stages: vec![SavedStage { name: None, windows: vec![saved] }], active_index: Some(0), strip_slots: vec![] });
 

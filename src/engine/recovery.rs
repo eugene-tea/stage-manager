@@ -343,6 +343,7 @@ mod tests {
             pinned: false,
             role: SavedRole::Standard,
             original: None,
+            window: None,
         }
     }
 

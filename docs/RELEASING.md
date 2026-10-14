@@ -96,5 +96,10 @@ word.
 - `make dmg-art` re-renders the DMG window's background (light and dark, 1x and 2x) from
   `art/dmg.py` and the words in `art/dmg/text.json`, with headless Chrome. Keep the words in
   step with the approvals the app asks for and honest about the network (the update check).
+- `make social-art` re-renders the info page's link-preview card,
+  `docs/assets/social-card.png` (1200 × 630), from `art/social.py` with headless Chrome. The
+  info page's Open Graph and Twitter tags point at it. GitHub's own social preview for the
+  repository cannot be set through the API: upload the same file by hand in the repository's
+  Settings → General → Social preview.
 - `make dmg` builds a DMG of the locally signed app for checking the window; it is not for
   publishing.

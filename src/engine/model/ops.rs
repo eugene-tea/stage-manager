@@ -508,7 +508,12 @@ impl Model {
     /// managed) on the Space `display` shows: see [`Model::add_window`] for `native`. The
     /// app's windows on other Spaces do not count (each Space has its own stages).
     pub fn native_target(&self, pid: Pid, display: DisplayId) -> NativeTarget {
-        let space = self.current_space(display);
+        self.native_target_in(pid, self.current_space(display))
+    }
+
+    /// [`Model::native_target`] on `space`: where a standard window of app `pid` goes when it
+    /// shows there (opened, or moved there from another Desktop).
+    pub(crate) fn native_target_in(&self, pid: Pid, space: SpaceId) -> NativeTarget {
         let active = self.active_stage_in(space);
         let app: Vec<&WindowState> = self
             .windows

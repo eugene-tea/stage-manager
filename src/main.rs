@@ -9,7 +9,7 @@
 //! - `stage-manager --guardian <pid>` is the guardian process the app spawns at launch.
 //! - `stage-manager config check [file] | --print-defaults | --explain <section.key> |
 //!   --reference` validates a file (errors with line numbers), prints the commented default
-//!   config, explains a key, or prints the guide's configuration table.
+//!   config, explains a key, or prints the configuration table of `docs/CONFIG.md`.
 //! - `stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate [--dark|--light]
 //!   [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
 //!   no Accessibility, no login item), or renders it to a PNG and exits.

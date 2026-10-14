@@ -22,10 +22,10 @@ B="/Applications/Stage Manager.app/Contents/MacOS/stage-manager"
 - **To change a key, uncomment its line and set the value.** To go back to the default,
   comment it out again (or delete it). Keep the user's other lines and comments as they are.
 - New-window rules are `[[rule]]` tables (`app` = bundle ID or `"*"`, optional `title`
-  regex, `action`, `placement`); the file ends with commented examples.
+  regex, `action`, `placement`); commented examples follow the `[defaults]` section.
 - Every key with its type, range and default: `"$B" config --print-defaults` (the
   commented file), `"$B" config --explain section.key` (one key), or the table in
-  [GUIDE.md](GUIDE.md#configuration) (generated from the same source).
+  [CONFIG.md](CONFIG.md) (generated from the same source).
 
 ## How changes apply
 

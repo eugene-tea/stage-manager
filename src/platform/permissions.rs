@@ -37,9 +37,11 @@ impl PermissionState {
 /// (observing and moving windows; the input monitor's key events and the test-only posted
 /// events ride on it too); Screen Recording is optional (window pictures for cards and
 /// switches; without it cards draw plain window shapes with the app icon); Input Monitoring
-/// is not needed (no event tap or HID access: mouse events come from an `NSEvent` global
-/// monitor, which needs no grant, key-downs from the same monitor under Accessibility, and
-/// hotkeys from Carbon's `RegisterEventHotKey`, which needs none).
+/// is not needed (no keyboard event tap and no HID access: mouse events come from an
+/// `NSEvent` global monitor, which needs no grant, key-downs from the same monitor under
+/// Accessibility, hotkeys from Carbon's `RegisterEventHotKey`, which needs none, and the one
+/// event tap, which makes parked windows' slivers ignore presses, filters mouse events only,
+/// under Accessibility).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Approval {
     Accessibility,

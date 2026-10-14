@@ -15,6 +15,7 @@ fn saved(bundle: &str, title: &str, z: usize) -> SavedWindow {
         pinned: false,
         role: SavedRole::Standard,
         original: None,
+        window: None,
     }
 }
 
@@ -631,4 +632,126 @@ fn first_start_fits_every_window_of_every_stage_and_saves_the_pre_fit_frame() {
     // A state.json without pre-fit frames still loads.
     let old = json.replace("\"original\"", "\"ignored_unknown\"");
     assert!(StateFile::from_json(&old).is_ok());
+}
+
+fn saved_id(bundle: &str, title: &str, z: usize, id: u32) -> SavedWindow {
+    SavedWindow { window: Some(id), ..saved(bundle, title, z) }
+}
+
+#[test]
+fn a_saved_window_is_found_by_its_id_before_its_title() {
+    // Two windows of one app whose titles swapped since the save (an editor's tabs): each
+    // goes back to its own stage by its id.
+    let s = state(
+        vec![
+            (None, vec![saved_id("com.example.ed", "Plan.txt", 0, 5)]),
+            (None, vec![saved_id("com.example.ed", "Notes.txt", 0, 6)]),
+        ],
+        Some(0),
+    );
+    let a = rematch(&s, &[live(6, "com.example.ed", "Plan.txt"), live(5, "com.example.ed", "Notes.txt")]);
+    assert_eq!(ids(&a.stages[0]), [5]);
+    assert_eq!(ids(&a.stages[1]), [6]);
+    assert!(a.unmatched.is_empty());
+}
+
+#[test]
+fn an_id_reused_by_another_apps_window_is_no_match() {
+    // After a reboot window ids start over: id 5 now belongs to another app.
+    let s = state(vec![(None, vec![saved_id("com.example.ed", "Plan.txt", 0, 5)])], Some(0));
+    let other = live(5, "com.example.chat", "Team");
+    assert_eq!(exact_matches(&s, std::slice::from_ref(&other)), 0);
+    let a = rematch(&s, &[other]);
+    assert!(a.stages[0].windows.is_empty());
+    assert_eq!(a.unmatched, [WindowId(5)]);
+}
+
+#[test]
+fn exact_matches_count_ids_then_titles_each_window_once() {
+    let s = state(
+        vec![(
+            None,
+            vec![
+                saved_id("com.example.ed", "Plan.txt", 0, 5),
+                saved("com.example.web", "Wiki", 1),
+                saved_id("com.example.chat", "Team", 2, 9),
+            ],
+        )],
+        Some(0),
+    );
+    let on_screen = [
+        live(5, "com.example.ed", "Something else"),
+        live(7, "com.example.web", "Wiki"),
+        live(8, "com.example.chat", "Team"),
+    ];
+    // 5 by id, 7 by title, 8 by title (the saved id 9 is gone: the app was relaunched).
+    assert_eq!(exact_matches(&s, &on_screen), 3);
+    assert_eq!(exact_matches(&s, &on_screen[..1]), 1);
+}
+
+#[test]
+fn files_written_before_window_ids_still_load_and_match_by_title() {
+    let old = r#"{"version":2,"spaces":[{"id":3,"current":true,"stages":[{"name":null,"windows":[
+        {"bundle_id":"com.example.ed","title":"Plan.txt","frame":{"x":10.0,"y":60.0,"w":500.0,"h":400.0},
+         "z":0,"key":true,"pinned":false,"role":"standard"}]}],"active_index":0}]}"#;
+    let file = StateFile::from_json(old).expect("parses");
+    let sw = &file.spaces[0].stages[0].windows[0];
+    assert_eq!(sw.window, None);
+    assert_eq!(exact_matches(&file.spaces[0], &[live(40, "com.example.ed", "Plan.txt")]), 1);
+}
+
+#[test]
+fn the_state_file_keeps_each_windows_id() {
+    let mut m = model();
+    m.add_window(live(42, "com.example.ed", "Plan.txt"), &Default::default(), &Default::default());
+    let file = m.to_state();
+    let windows: Vec<Option<u32>> = file.all_stages().flat_map(|s| s.windows.iter().map(|w| w.window)).collect();
+    assert_eq!(windows, [Some(42)]);
+    let back = StateFile::from_json(&file.to_json()).expect("parses");
+    assert_eq!(back, file);
+}
+
+#[test]
+fn window_ids_from_another_session_are_dropped_and_the_title_match_wins() {
+    // Saved before a reboot: the editor's "Plan.txt" was window 5. After the reboot id 5 is
+    // the same app's other window ("Notes.txt"), and "Plan.txt" is window 9. By the stale id
+    // window 5 would go to Plan's stage; with the session changed the titles decide.
+    let s = state(
+        vec![
+            (None, vec![saved_id("com.example.ed", "Plan.txt", 0, 5)]),
+            (None, vec![saved_id("com.example.ed", "Notes.txt", 0, 6)]),
+        ],
+        Some(0),
+    );
+    let file = StateFile { session: Some("boot 1 session 257".into()), ..StateFile::single(s) };
+    let after_reboot = [live(5, "com.example.ed", "Notes.txt"), live(9, "com.example.ed", "Plan.txt")];
+
+    let (stale, dropped) = file.clone().for_session(Some("boot 2 session 257"));
+    assert_eq!(dropped, 2);
+    assert!(stale.all_stages().flat_map(|s| s.windows.iter()).all(|w| w.window.is_none()));
+    let a = rematch(&stale.spaces[0], &after_reboot);
+    assert_eq!(ids(&a.stages[0]), [9], "Plan.txt by its title");
+    assert_eq!(ids(&a.stages[1]), [5], "Notes.txt by its title");
+
+    // The same session (a restart of our app only): the ids stand.
+    let (same, dropped) = file.clone().for_session(Some("boot 1 session 257"));
+    assert_eq!(dropped, 0);
+    let a = rematch(&same.spaces[0], &after_reboot);
+    assert_eq!(ids(&a.stages[0]), [5], "by its id");
+
+    // A file that does not say, or a session that cannot be read: no ids trusted.
+    let (unknown, dropped) = StateFile { session: None, ..file.clone() }.for_session(Some("boot 1 session 257"));
+    assert_eq!(dropped, 2);
+    assert!(unknown.all_stages().flat_map(|s| s.windows.iter()).all(|w| w.window.is_none()));
+    assert_eq!(file.for_session(None).1, 2);
+}
+
+#[test]
+fn the_session_is_kept_in_the_file() {
+    let file = StateFile { session: Some("boot 1 session 257".into()), ..StateFile::single(SavedSpace::default()) };
+    let json = file.to_json();
+    assert!(json.contains("\"session\""));
+    assert_eq!(StateFile::from_json(&json).expect("parses"), file);
+    let none = StateFile::single(SavedSpace::default());
+    assert!(!none.to_json().contains("session"), "absent when unknown");
 }

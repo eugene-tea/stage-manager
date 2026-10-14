@@ -34,7 +34,7 @@ use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
 pub use ahead::{Ahead, AheadMark, AppFacts};
-pub use spaces::{Space, SpaceId};
+pub use spaces::{ArrivalNote, Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 
 /// A process ID.
@@ -284,6 +284,12 @@ pub struct Model {
     /// Windows seen on screen on a Space other than their own at consecutive arrivals: how
     /// many in a row ([`spaces::STICKY_HOPS`] make a window sticky).
     pub(crate) hops: HashMap<WindowId, u32>,
+    /// Known Spaces found on screen beside the one an arrival chose (more of their windows
+    /// on screen than missing) at consecutive arrivals: how many in a row
+    /// ([`spaces::BESIDE_ARRIVALS`] and their windows count as moved).
+    pub(crate) beside: HashMap<SpaceId, u32>,
+    /// What the last arrival did, for the log.
+    pub(crate) last_arrival: spaces::ArrivalNote,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -315,6 +321,8 @@ impl Model {
             leftovers: Vec::new(),
             moved_from: HashMap::new(),
             hops: HashMap::new(),
+            beside: HashMap::new(),
+            last_arrival: spaces::ArrivalNote::default(),
             clock: 0,
             next_stage: 1,
             options,

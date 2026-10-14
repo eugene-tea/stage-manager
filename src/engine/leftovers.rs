@@ -230,7 +230,7 @@ mod tests {
     }
 
     fn saved(bundle: &str, title: &str, frame: Rect) -> SavedWindow {
-        SavedWindow { bundle_id: bundle.into(), title: title.into(), frame, z: 0, key: false, pinned: false, role: SavedRole::Standard, original: None }
+        SavedWindow { bundle_id: bundle.into(), title: title.into(), frame, z: 0, key: false, pinned: false, role: SavedRole::Standard, original: None, window: None }
     }
 
     // ----- the settle ------------------------------------------------------------------

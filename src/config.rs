@@ -1004,8 +1004,8 @@ impl ConfigStore {
 }
 
 /// `stage-manager config ...`: `check [file]` (or `--check`: errors and warnings with their
-/// line numbers), `--print-defaults`, `--explain <section.key>`, `--reference` (the guide's
-/// table). Returns the exit code and output.
+/// line numbers), `--print-defaults`, `--explain <section.key>`, `--reference` (the table in
+/// `docs/CONFIG.md`). Returns the exit code and output.
 pub fn command(args: &[String]) -> (i32, String) {
     match args.first().map(String::as_str) {
         Some("--print-defaults") => (0, default_file()),
@@ -1020,7 +1020,7 @@ pub fn command(args: &[String]) -> (i32, String) {
                         .filter(|p| p.contains(key.as_str()) || key.contains(p.split('.').next_back().unwrap_or("")))
                         .collect();
                     let hint = if close.is_empty() { String::new() } else { format!(" (did you mean {}?)", close.join(", ")) };
-                    (1, format!("unknown key {key:?}{hint}; keys are section.key, for example windows.fit\n"))
+                    (1, format!("unknown key {key:?}{hint}; keys are section.key, for example windows.fit\nEvery key: {}\n", schema::REFERENCE_URL))
                 }
             },
             None => (2, "usage: stage-manager config --explain <section.key>\n".into()),
@@ -1199,11 +1199,11 @@ mod tests {
     }
 
     #[test]
-    fn readme_has_the_generated_reference() {
-        let readme = include_str!("../docs/GUIDE.md");
+    fn config_md_has_the_generated_reference() {
+        let doc = include_str!("../docs/CONFIG.md");
         assert!(
-            readme.contains(&schema::markdown_reference()),
-            "docs/GUIDE.md's configuration reference is out of date: paste `stage-manager config --reference`"
+            doc.contains(&schema::markdown_reference()),
+            "docs/CONFIG.md's configuration reference is out of date: paste `stage-manager config --reference`"
         );
     }
 

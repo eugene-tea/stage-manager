@@ -1,6 +1,6 @@
 //! The strip: which stages show as cards, in which slots.
 //!
-//! Apple's strip is slot stable (measured 2026-10-12, `docs/UX-SPEC.md`, "Strip order"):
+//! Apple's strip is slot stable (measured 2026-10-12; `docs/UX-SPEC.md`, "Where we match Apple"):
 //!
 //! - Switching to a stage whose card is in the strip is a **swap**: the stage being left takes
 //!   the slot the clicked card vacated.

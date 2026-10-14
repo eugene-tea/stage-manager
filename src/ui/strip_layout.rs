@@ -2,8 +2,9 @@
 //! Points in the strip panel's own coordinates (top-left origin, `y` grows down; the panel
 //! starts at the visible frame's top-left corner).
 //!
-//! Apple's model, measured on a 1800 × 1169 pt laptop and a 5K display (`docs/UX-SPEC.md`,
-//! "Strip geometry"), with every number from `[cards]` and `[icons]` in config:
+//! Apple's model, measured on a 1800 × 1169 pt laptop and a 5K display (the measurement
+//! record: `docs/UX-SPEC.md` as of commit 20665a3, "Strip geometry"), with every number from
+//! `[cards]` and `[icons]` in config:
 //!
 //! - **Size.** Every window is scaled by one factor: `full_height` over the visible height
 //!   (161 pt: a window as tall as the visible screen becomes a 161 pt card), drawn at least
