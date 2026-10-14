@@ -1,12 +1,13 @@
 //! Persistence: `state.json` and re-matching saved windows to live ones on launch.
 //!
 //! The file keeps stages **per Space** ([`SavedSpace`], keyed by the model's synthetic
-//! [`SpaceId`]). Window IDs do not survive an app relaunch, so saved windows are matched
-//! heuristically: exact bundle ID + title first, then bundle ID only in saved order. Each
+//! [`SpaceId`]). A saved window is found again by its window id first (ids outlive our
+//! app, not the window's own app), then by exact bundle ID + title, then by bundle ID only in
+//! saved order. Each
 //! live window is used at most once; live windows that match nothing are grouped the way
 //! Apple's Stage Manager does when it is turned on: one stage per app (see
 //! [`Model::apply_launch`]). A Space is recognized by its windows: the saved Space whose
-//! windows match the ones on screen (exact bundle ID + title) is the one shown
+//! windows match the ones on screen (window id, or exact bundle ID + title) is the one shown
 //! ([`Model::arrive`]); other saved Spaces wait, untouched, for their first visit.
 //!
 //! Version 1 files (one Space) are read as a single Space.
@@ -58,6 +59,25 @@ pub struct SavedWindow {
     /// recovery scan put it back there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<Rect>,
+    /// The window's `CGWindowID` when saved. Window ids outlive our app (the windows belong to
+    /// other apps), so a restart finds the very window by it whatever its title is now; a
+    /// relaunched app's windows get new ids and are matched by bundle ID and title instead.
+    /// Absent in files written before 10-13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u32>,
+}
+
+impl SavedWindow {
+    /// True when `live` is this very window: the same `CGWindowID` and the same app (an id
+    /// reused after a reboot by another app's window never matches).
+    pub fn is_window(&self, live: &WindowMeta) -> bool {
+        self.window == Some(live.id.0) && !self.bundle_id.is_empty() && self.bundle_id == live.bundle_id
+    }
+
+    /// True when `live` has this window's app and title.
+    pub fn same_title(&self, live: &WindowMeta) -> bool {
+        self.bundle_id == live.bundle_id && self.title == live.title
+    }
 }
 
 /// One saved stage.
@@ -86,11 +106,25 @@ pub struct SavedSpace {
     pub strip_slots: Vec<usize>,
 }
 
+impl SavedSpace {
+    /// How many standard windows it saved (children follow their parents and are never
+    /// matched).
+    pub fn standard_windows(&self) -> usize {
+        self.stages.iter().flat_map(|s| s.windows.iter()).filter(|w| w.role == SavedRole::Standard).count()
+    }
+}
+
 /// The contents of `state.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateFile {
     /// Always [`STATE_VERSION`] when written.
     pub version: u32,
+    /// The window server session the saved window ids belong to (the boot and the login
+    /// session, as the platform reads them). Window ids start over after a reboot or a new
+    /// login, so ids saved in another session name other windows: [`StateFile::for_session`]
+    /// drops them at load. Absent in files written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Every Space with stages, the shown one flagged `current`.
     pub spaces: Vec<SavedSpace>,
 }
@@ -109,8 +143,27 @@ impl StateFile {
     pub fn single(space: SavedSpace) -> Self {
         Self {
             version: STATE_VERSION,
+            session: None,
             spaces: vec![space],
         }
+    }
+
+    /// The file as read in window server session `current`: saved window ids are kept only
+    /// when the file was written in that very session; otherwise (a reboot or a new login
+    /// since, a file that does not say, a session that cannot be read now) every saved
+    /// window id is dropped, so a reused id never names another window and matching falls
+    /// back to bundle ID and title. Returns how many ids were dropped too.
+    pub fn for_session(mut self, current: Option<&str>) -> (Self, usize) {
+        let same = current.is_some() && self.session.as_deref() == current;
+        let mut dropped = 0;
+        if !same {
+            for w in self.spaces.iter_mut().flat_map(|s| s.stages.iter_mut()).flat_map(|s| s.windows.iter_mut()) {
+                if w.window.take().is_some() {
+                    dropped += 1;
+                }
+            }
+        }
+        (self, dropped)
     }
 
     /// Every saved stage of every Space.
@@ -198,28 +251,32 @@ pub struct LaunchHints {
     pub frontmost: Option<Pid>,
 }
 
-/// How many live standard windows match a saved standard window of `space` exactly (bundle
-/// ID and title, each saved window used once): the evidence that `space` is on screen.
+/// How many live standard windows match a saved standard window of `space` exactly (the
+/// same window id, else the same bundle ID and title; each window on either side used once):
+/// the evidence that `space` is on screen.
 pub fn exact_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
-    let mut used: HashSet<WindowId> = HashSet::new();
-    let mut n = 0;
-    for sw in space
+    let saved: Vec<&SavedWindow> = space
         .stages
         .iter()
         .flat_map(|s| s.windows.iter())
         .filter(|w| w.role == SavedRole::Standard)
-    {
-        if let Some(l) = live.iter().find(|l| {
-            l.role == WindowRole::Standard
-                && !used.contains(&l.id)
-                && l.bundle_id == sw.bundle_id
-                && l.title == sw.title
-        }) {
-            used.insert(l.id);
-            n += 1;
+        .collect();
+    let standard: Vec<&WindowMeta> = live.iter().filter(|l| l.role == WindowRole::Standard).collect();
+    let mut used: HashSet<WindowId> = HashSet::new();
+    let mut matched = vec![false; saved.len()];
+    let passes: [fn(&SavedWindow, &WindowMeta) -> bool; 2] = [SavedWindow::is_window, SavedWindow::same_title];
+    for pass in passes {
+        for (done, sw) in matched.iter_mut().zip(&saved) {
+            if *done {
+                continue;
+            }
+            if let Some(l) = standard.iter().find(|l| !used.contains(&l.id) && pass(sw, l)) {
+                used.insert(l.id);
+                *done = true;
+            }
         }
     }
-    n
+    matched.iter().filter(|m| **m).count()
 }
 
 /// How many live standard windows match a saved standard window of `space` by bundle ID
@@ -243,8 +300,8 @@ pub fn bundle_matches(space: &SavedSpace, live: &[WindowMeta]) -> usize {
     n
 }
 
-/// Places live standard windows into one saved Space's stages: exact bundle + title first,
-/// then bundle only, both in saved order (stage order, then front to back). Each live window
+/// Places live standard windows into one saved Space's stages: the same window id first,
+/// then exact bundle + title, then bundle only, each in saved order (stage order, then front to back). Each live window
 /// is used at most once. Child windows on either side are left out; they follow their
 /// parents.
 pub fn rematch(state: &SavedSpace, live: &[WindowMeta]) -> Assignment {
@@ -264,8 +321,9 @@ pub fn rematch(state: &SavedSpace, live: &[WindowMeta]) -> Assignment {
     }
     let mut used: HashSet<WindowId> = HashSet::new();
     let mut matched: Vec<Option<WindowId>> = vec![None; saved.len()];
-    let passes: [fn(&SavedWindow, &WindowMeta) -> bool; 2] = [
-        |s, l| s.bundle_id == l.bundle_id && s.title == l.title,
+    let passes: [fn(&SavedWindow, &WindowMeta) -> bool; 3] = [
+        SavedWindow::is_window,
+        SavedWindow::same_title,
         |s, l| s.bundle_id == l.bundle_id,
     ];
     for pass in passes {
@@ -323,7 +381,8 @@ impl Model {
     /// Snapshot for `state.json`: every Space with windows, the shown one flagged `current`,
     /// plus the saved Spaces not visited yet this run (untouched). Pinned windows are saved
     /// with their Space's active stage, flagged `pinned`; children are saved with their stage
-    /// after its members.
+    /// after its members. The window server session is the platform's to stamp
+    /// ([`StateFile::session`]).
     pub fn to_state(&self) -> StateFile {
         let save = |id: WindowId, z: usize, key: bool, pinned: bool| -> Option<SavedWindow> {
             let w = self.windows.get(&id)?;
@@ -339,6 +398,7 @@ impl Model {
                     WindowRole::Child { .. } => SavedRole::Child,
                 },
                 original: w.original,
+                window: Some(id.0),
             })
         };
         let mut spaces = Vec::new();
@@ -407,6 +467,7 @@ impl Model {
         }));
         StateFile {
             version: STATE_VERSION,
+            session: None,
             spaces,
         }
     }

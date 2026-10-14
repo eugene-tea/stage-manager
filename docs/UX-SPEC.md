@@ -260,13 +260,24 @@ Ours:
   windows, parked slivers included, never another Space's) is compared with what we know.
   A known Space scores its windows on screen minus its windows missing for no visible
   reason (app not hidden, not minimized); the best positive score wins; else the saved
-  Space whose windows match by bundle ID and title; else a new Space.
+  Space whose windows match by window id or by bundle ID and title; else a new Space. A
+  known Space that scores positive but loses is a Desktop still sliding out (the list read
+  during a slide holds both Desktops' windows): its windows stay its own (they count as
+  moved only when seen so at two arrivals in a row), and right after a Space change the
+  list is read again (up to 0.6 s) while it shows two Desktops. Nothing is recognized while
+  the screen is locked or Accessibility lists none of the windows on screen.
 - `AXWindows` lists only the shown Space's windows for most apps (measured 10-12: Safari,
   Mail, VS Code, Fork, Terminal, Chrome, Messages, Telegram), so a Space's windows are found
   when it is first shown after launch; they are grouped the way turning Stage Manager on
   does (one stage per app) or as `state.json` saved them.
 - A window moved to another Space (Mission Control, or dragged across with the pointer)
-  leaves its stage and joins the current stage of the Space it shows on. A window shown on
+  leaves its stage and shows on the Space it moved to as a window opening there does: in
+  the active stage when that holds a window of its app, else in a stage of its own made
+  active (the active stage goes to the strip); never parked, never filed with another
+  app's windows (10-13: Messages dragged in Mission Control joined Safari's stage and was
+  parked with it at the next switch). Apple's exact placement here is unverified. Whole
+  stages showing under a new Space id together (a known Desktop not recognized) are carried
+  over as they are. A window shown on
   every Space ("Assign To: All Desktops") is treated as pinned, once it has shown on three
   Space changes in a row, the last back where it came from (a window moved to another
   Desktop and straight back looks the same for two, and stays an ordinary window). A

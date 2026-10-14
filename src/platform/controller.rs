@@ -83,7 +83,7 @@ use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::{desktop, logging, paths, windows};
+use super::{desktop, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
@@ -188,6 +188,24 @@ const SPACE_SETTLE: Duration = Duration::from_secs(1);
 
 /// A window counts as moved to or gone from the shown Space after this many checks in a row.
 const SPACE_CHECKS: u32 = 2;
+
+/// The window list right after a Space change notice may show two Desktops at once (the one
+/// sliding out and the one sliding in, [`Model::shows_two_desktops`]): read again for at most
+/// this long after the notice before the Desktop is recognized from it.
+const MIXED_WAIT: Duration = Duration::from_millis(600);
+
+/// Accessibility listing none of the windows on screen ([`session::Blind::AxSilent`]) holds a
+/// launch's stages and a Space change's arrival at most this long (a locked screen holds
+/// them until it unlocks).
+const AX_SILENT_MAX: Duration = Duration::from_secs(10);
+
+/// What an arrival is given ([`Controller::screen_view`]): the windows on the main screen
+/// the engine knows or waits to place, and the managed windows missing for no visible reason.
+type ScreenView = (Vec<WindowMeta>, Vec<WindowId>);
+
+/// How often the login session is asked whether the screen is locked, and a launch waiting
+/// for the Desktop to be seen looks again.
+const LOCK_POLL: Duration = Duration::from_millis(500);
 
 /// Updates for the main thread (menu and hotkeys).
 #[derive(Clone, Debug, PartialEq)]
@@ -580,6 +598,20 @@ pub struct Controller {
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
+    /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
+    /// when observation started; why and since when. Nothing is built or saved meanwhile.
+    build_wait: Option<(session::Blind, Instant)>,
+    /// The screen is locked (or the session is not on the console): no Space is inferred,
+    /// no window is counted gone, and `state.json` is not written until it unlocks.
+    locked: bool,
+    /// When the login session was last asked ([`LOCK_POLL`]).
+    lock_checked: Option<Instant>,
+    /// Since when Accessibility has listed none of the known windows on screen at a Space
+    /// change (the arrival waits at most [`AX_SILENT_MAX`]).
+    ax_silent_since: Option<Instant>,
+    /// When every app's window list was last read again while Accessibility was silent at an
+    /// arrival (at most once per [`LOCK_POLL`]).
+    ax_silent_rescan: Option<Instant>,
     /// The shown Space is a full-screen app's: no strip, no stage changes.
     fullscreen: bool,
     /// A Space change waits for a full-screen animation to settle ([`Settle`]): nothing is
@@ -739,6 +771,11 @@ impl Controller {
             patch_items: PatchItems::default(),
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
+            build_wait: None,
+            locked: false,
+            lock_checked: None,
+            ax_silent_since: None,
+            ax_silent_rescan: None,
             fullscreen: false,
             space_pending: false,
             settle: Settle::default(),
@@ -1819,7 +1856,10 @@ impl Controller {
         self.dirty = None;
         let Some(m) = &self.model else { return };
         let path = paths::state_file();
-        let text = m.to_state().to_json();
+        let mut file = m.to_state();
+        // The window ids in it hold for this window server session only.
+        file.session = session::window_session().map(str::to_string);
+        let text = file.to_json();
         let tmp = path.with_extension("json.tmp");
         let result = std::fs::create_dir_all(paths::config_dir())
             .and_then(|_| std::fs::write(&tmp, text))
@@ -1830,11 +1870,19 @@ impl Controller {
         }
     }
 
+    /// Reads `state.json`; its window ids are dropped when it was written in another window
+    /// server session (a reboot or a new login since: the ids name other windows now).
     fn load_state() -> Option<StateFile> {
         let path = paths::state_file();
         let text = std::fs::read_to_string(&path).ok()?;
         match StateFile::from_json(&text) {
-            Ok(s) => Some(s),
+            Ok(s) => {
+                let (s, dropped) = s.for_session(session::window_session());
+                if dropped > 0 {
+                    tracing::info!(dropped, "state.json was written in another window server session (a reboot or a login since): its windows are matched by app and title");
+                }
+                Some(s)
+            }
             Err(e) => {
                 tracing::warn!("{e}; starting without saved stages");
                 None
@@ -2291,6 +2339,10 @@ impl Controller {
                 for id in new {
                     self.on_found(ob, id);
                 }
+                if self.locked {
+                    // Recognized once the screen unlocks ([`Self::settle_space`]).
+                    self.space_pending = true;
+                }
                 return;
             }
             // Accessibility came back (R1-platform 9): recognize the Space again from the
@@ -2300,7 +2352,7 @@ impl Controller {
             self.unplaced.extend(new);
             if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
                 let list = windows::list_windows();
-                self.arrive_here(ob, &list, main);
+                self.arrive_here(ob, &list, main, None);
             }
             return;
         }
@@ -2312,6 +2364,9 @@ impl Controller {
         let main = displays[0];
         let mut model = Model::new(displays, options);
         let list = windows::list_windows();
+        if !self.can_build(ob, &list) {
+            return;
+        }
         // Windows on another display are left alone; they wait until they show on the main one.
         let shown = on_main_screen(&list, main.frame);
         let z = windows::z_order(&list);
@@ -2380,12 +2435,14 @@ impl Controller {
     /// No stage changes now: a full-screen app's Space shows, or a Space change waits for a
     /// full-screen animation to settle.
     fn frozen(&self) -> bool {
-        self.fullscreen || self.space_pending
+        self.fullscreen || self.space_pending || self.locked
     }
 
     /// Why stage commands are refused now, if they are ([`Self::frozen`]).
     fn frozen_reason(&self) -> Option<&'static str> {
-        if self.space_pending {
+        if self.locked {
+            Some("the screen is locked")
+        } else if self.space_pending {
             Some("a Space change is settling")
         } else if self.fullscreen {
             Some("a full-screen app's Space shows")
@@ -2534,8 +2591,12 @@ impl Controller {
     fn settle_space(&mut self, ob: &mut Observer) {
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
-        let list = windows::list_windows();
         let now = Instant::now();
+        if self.poll_lock(now, true) {
+            // Recognized once the screen unlocks (the tick tries again).
+            return;
+        }
+        let list = windows::list_windows();
         // Clicked in Mission Control (or switched there with the keyboard), the Desktop shows
         // once Mission Control has closed: until then the list holds its layout (App Exposé
         // even other Desktops' windows). The notification stays authoritative; the arrival
@@ -2570,6 +2631,10 @@ impl Controller {
                 self.present();
             }
             Verdict::Desktop => {
+                let mut view = None;
+                if self.arrival_waits(ob, &list, main, now, &mut view) {
+                    return;
+                }
                 self.space_pending = false;
                 self.fullscreen = false;
                 self.space_changed_at = Some(now);
@@ -2578,18 +2643,19 @@ impl Controller {
                 if self.focus_after_press.is_some() && !input::left_button_down() {
                     self.focus_after_press_done(ob);
                 }
-                self.arrive_here(ob, &list, main);
+                self.arrive_here(ob, &list, main, view);
             }
         }
     }
 
     /// A Desktop shows: the engine recognizes it by the windows on screen ([`Model::arrive`]),
-    /// its stages and strip come back.
-    fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display) {
+    /// its stages and strip come back. `view` is what [`Self::arrival_waits`] read from the
+    /// same `list` ([`Self::screen_view`]), when it did: the absent sweep (Accessibility asked
+    /// about every window not on screen) is not made twice.
+    fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display, view: Option<ScreenView>) {
         let Some(m) = self.model.as_ref() else { return };
         let before = m.current_space(main.id);
         let shown = on_main_screen(list, main.frame);
-        let z = windows::z_order(list);
         // Known windows' frames read fresh: the engine matches the screen to the model on
         // arrival (a parked window found shown is parked again, a shown one found parked is
         // brought back), so a frame missed by a notification must not mislead it.
@@ -2603,26 +2669,41 @@ impl Controller {
             ob.refresh_frame(id);
         }
         let Some(m) = self.model.as_ref() else { return };
-        let live: Vec<WindowMeta> = ob
-            .windows()
-            .keys()
-            .copied()
-            .filter(|id| shown.contains(id))
-            .filter(|id| self.unplaced.contains(id) || m.window(WindowId(*id)).is_some())
-            .filter_map(|id| self.meta(ob, id, &z))
-            .filter(|meta| self.allowed_by_rules(meta))
-            .collect();
+        let (live, absent) = match view {
+            Some((mut live, absent)) => {
+                // The frames just read again.
+                for meta in &mut live {
+                    if let Some(w) = ob.window(meta.id.0) {
+                        meta.frame = w.frame;
+                    }
+                }
+                (live, absent)
+            }
+            None => self.screen_view(ob, list, main),
+        };
         let arrivals: Vec<WindowMeta> = live.iter().filter(|meta| m.window(meta.id).is_none()).cloned().collect();
         for meta in &live {
             self.unplaced.remove(&meta.id.0);
         }
         let hints = launch_hints(list);
-        // Absent means off every screen: a window on another display is not missing.
-        let absent = self.absent_windows(ob, &on_screen(list));
         let Some(m) = self.model.as_mut() else { return };
         let mut actions = m.arrive(main.id, &live, &absent, &hints);
         let after = m.current_space(main.id);
-        tracing::info!(from = before.0, to = after.0, on_screen = live.len(), new = arrivals.len(), "Space changed");
+        let note = m.last_arrival();
+        // `new`: windows this run had not seen (all of a saved Desktop's on its first visit,
+        // placed into its saved stages: `rebuilt`); `moved`: known windows of another Desktop
+        // taken as moved here; `beside`: Desktops still on screen whose windows stay theirs.
+        tracing::info!(
+            from = before.0,
+            to = after.0,
+            on_screen = live.len(),
+            new = arrivals.len(),
+            rebuilt = ?note.rebuilt,
+            moved = note.moved,
+            carried = note.carried,
+            beside = ?note.beside,
+            "Space changed"
+        );
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
         let (more, predicted) = self.settle_ahead(ob, list, after, Instant::now());
@@ -2638,6 +2719,138 @@ impl Controller {
         self.defer_present = false;
         self.present();
         self.mark_dirty();
+    }
+
+    /// What an arrival on `main` is given: the windows on its screen the engine knows or
+    /// waits to place (rules applied), and the managed windows missing from every screen for
+    /// no visible reason ([`Self::absent_windows`]; a window on another display is not
+    /// missing).
+    fn screen_view(&self, ob: &Observer, list: &[windows::CgWindow], main: Display) -> ScreenView {
+        let Some(m) = self.model.as_ref() else { return (Vec::new(), Vec::new()) };
+        let shown = on_main_screen(list, main.frame);
+        let z = windows::z_order(list);
+        let live = ob
+            .windows()
+            .keys()
+            .copied()
+            .filter(|id| shown.contains(id))
+            .filter(|id| self.unplaced.contains(id) || m.window(WindowId(*id)).is_some())
+            .filter_map(|id| self.meta(ob, id, &z))
+            .filter(|meta| self.allowed_by_rules(meta))
+            .collect();
+        (live, self.absent_windows(ob, &on_screen(list)))
+    }
+
+    /// True while a settled Space change waits before the Desktop is recognized from `list`:
+    /// Accessibility lists none of the windows on screen the model knows (every app read
+    /// again at most once per [`LOCK_POLL`]; the wait at most [`AX_SILENT_MAX`]), or, less
+    /// than [`MIXED_WAIT`] after the notice, the list shows two Desktops at once
+    /// ([`Model::shows_two_desktops`]: one still sliding). A Desktop whose windows the model
+    /// does not know yet is never held for silence: Accessibility may simply not list some
+    /// app's windows, and the wait would come back at every visit. The screen view read for
+    /// the check is left in `view` for the arrival.
+    fn arrival_waits(
+        &mut self,
+        ob: &mut Observer,
+        list: &[windows::CgWindow],
+        main: Display,
+        now: Instant,
+        view: &mut Option<ScreenView>,
+    ) -> bool {
+        let Some(m) = self.model.as_ref() else { return false };
+        let (known, listed) = session::counts(
+            list,
+            |w| ob.observes(w.pid) && m.window(WindowId(w.id)).is_some(),
+            |id| ob.window(id).is_some(),
+        );
+        if session::arrival_silent(known, listed) {
+            let since = *self.ax_silent_since.get_or_insert(now);
+            if now.duration_since(since) < AX_SILENT_MAX {
+                if since == now {
+                    tracing::info!(known_on_screen = known, "Accessibility lists none of the known windows on screen; the Desktop is recognized once it does");
+                }
+                if self.ax_silent_rescan.is_none_or(|t| now.duration_since(t) >= LOCK_POLL) {
+                    self.ax_silent_rescan = Some(now);
+                    let found = ob.rescan_all();
+                    self.unplaced.extend(found);
+                }
+                return true;
+            }
+            if self.ax_silent_since.take().is_some() {
+                self.ax_silent_rescan = None;
+                tracing::warn!(known_on_screen = known, waited_s = AX_SILENT_MAX.as_secs(), "Accessibility still lists none of the known windows on screen; recognizing the Desktop from what it lists");
+            }
+            return false;
+        }
+        self.ax_silent_since = None;
+        self.ax_silent_rescan = None;
+        let since_notice = self.space_changed_at.map_or(MIXED_WAIT, |t| now.duration_since(t));
+        if since_notice < MIXED_WAIT {
+            let (live, absent) = self.screen_view(ob, list, main);
+            let two = self.model.as_ref().is_some_and(|m| m.shows_two_desktops(main.id, &live, &absent));
+            if two {
+                tracing::debug!(on_screen = live.len(), since_notice_ms = since_notice.as_millis() as u64, "the window list shows two Desktops at once (one still sliding); read again");
+                return true;
+            }
+            *view = Some((live, absent));
+        }
+        false
+    }
+
+    /// The login session asked whether the screen is locked (`force`, or [`LOCK_POLL`] since
+    /// the last time); a change is logged and resets what was counted. True while locked.
+    fn poll_lock(&mut self, now: Instant, force: bool) -> bool {
+        if !force && self.lock_checked.is_some_and(|t| now.duration_since(t) < LOCK_POLL) {
+            return self.locked;
+        }
+        self.lock_checked = Some(now);
+        let locked = session::screen_locked();
+        if locked != self.locked {
+            self.locked = locked;
+            // What was counted towards windows gone or moved is looked at afresh.
+            self.absent.clear();
+            self.foreign.clear();
+            if locked {
+                tracing::info!("the screen is locked: no Space is inferred and state.json is not written until it unlocks");
+            } else {
+                tracing::info!("the screen is unlocked: the Desktop is looked at again after a settle");
+                self.space_changed_at = Some(now);
+                self.space_checked = now;
+            }
+        }
+        locked
+    }
+
+    /// At launch: true when stages can be built from what the app sees now (`list`). While
+    /// the screen is locked, or Accessibility lists none of the windows on screen (for at
+    /// most [`AX_SILENT_MAX`]), the build waits ([`Self::build_wait`]; the tick looks again):
+    /// a Desktop recognized from nothing would leave its windows to be filed as new ones
+    /// once they show, and the Desktops saved in `state.json` would be saved again under it.
+    fn can_build(&mut self, ob: &Observer, list: &[windows::CgWindow]) -> bool {
+        let now = Instant::now();
+        let locked = self.poll_lock(now, true);
+        let (server, ax) = session::counts(list, |w| ob.observes(w.pid), |id| ob.window(id).is_some());
+        let blind = session::blindness(locked, server, ax);
+        match session::wait_step(blind, self.build_wait, now, AX_SILENT_MAX) {
+            session::Step::Wait(since) => {
+                if let Some(why) = blind.filter(|_| since == now) {
+                    tracing::info!(why = why.name(), on_screen = server, "the Desktop cannot be seen: stages are built once it can; state.json is left as it is");
+                }
+                self.build_wait = blind.map(|b| (b, since));
+                false
+            }
+            session::Step::GiveUp => {
+                tracing::warn!(on_screen = server, waited_s = AX_SILENT_MAX.as_secs(), "Accessibility still lists none of the windows on screen; building stages from what it lists");
+                self.build_wait = None;
+                true
+            }
+            session::Step::Build => {
+                if let Some((why, since)) = self.build_wait.take() {
+                    tracing::info!(was = why.name(), waited_ms = now.duration_since(since).as_millis() as u64, "the Desktop can be seen: building stages");
+                }
+                true
+            }
+        }
     }
 
     /// The window the user went to this Desktop for (or a wait ended): AX is asked for the
@@ -3332,9 +3545,23 @@ impl Controller {
             // The button came up without a mouse-up the monitor saw.
             self.focus_after_press_done(ob);
         }
+        if self.model.is_none() && self.build_wait.is_some() && !safety::quit_requested() {
+            // The launch's stages wait for the Desktop to be seen: look again now and then.
+            if self.lock_checked.is_none_or(|t| now.duration_since(t) >= LOCK_POLL) {
+                if !self.poll_lock(now, true) {
+                    ob.rescan_all();
+                }
+                self.on_started(ob);
+            }
+        }
+        if self.model.is_some() {
+            self.poll_lock(now, false);
+        }
         if let Some((first, last)) = self.dirty
             && (now.duration_since(last) >= SAVE_DEBOUNCE || now.duration_since(first) >= SAVE_MAX_DELAY)
+            && !self.locked
         {
+            // Held while the screen is locked: nothing seen then is written over the file.
             self.save_now();
         }
         if now.duration_since(self.config_checked) >= CONFIG_POLL {
@@ -3354,7 +3581,9 @@ impl Controller {
                 self.update_patch();
             }
             self.expire_ahead(ob, now);
-            if self.space_pending {
+            if self.locked {
+                // Nothing is inferred from what a locked screen lists.
+            } else if self.space_pending {
                 self.settle_space(ob);
             } else {
                 self.check_spaces(ob);
@@ -3397,6 +3626,7 @@ impl Controller {
                     "space": m.current_space(m.main_display().id).0,
                     "fullscreen": self.fullscreen,
                     "settling": self.space_pending,
+                    "locked": self.locked,
                     "changes": self.space_changes,
                     "overview": self.overview.showing().map(Overview::name),
                     "inference_frozen": self.overview.freezes(Instant::now()),
@@ -3606,6 +3836,13 @@ impl Controller {
         json!({
             "fullscreen": self.fullscreen,
             "settling": self.space_pending,
+            "locked": self.locked,
+            "last_arrival": {
+                "rebuilt": m.last_arrival().rebuilt,
+                "moved": m.last_arrival().moved,
+                "carried": m.last_arrival().carried,
+                "beside": m.last_arrival().beside,
+            },
             "unplaced_windows": self.unplaced.len(),
             "saved_spaces_not_visited": m.unvisited_saved_spaces(),
             "list": list,

@@ -230,8 +230,10 @@ Apple's Stage Manager is the baseline; everything below works without a keyboard
   before it slides in (when macOS will switch for it: the app has no window on the Desktop
   shown, its windows are all placed and it is not hidden); ⌘Tab and other activations are
   arranged when macOS reports the Space change, at the end of the slide. A window moved to
-  another Space (Mission Control, or dragged across) leaves its stage and joins the current
-  stage there. A window on every Space ("Assign To: All Desktops") is treated as pinned.
+  another Space (Mission Control, or dragged across) leaves its stage and shows there in
+  front: with its app's windows when the active stage holds one, else in a stage of its
+  own (the stage shown goes to the strip); it is never parked or filed with another app's
+  windows. A window on every Space ("Assign To: All Desktops") is treated as pinned.
   Full-screen apps are Spaces of their own: no strip there; entering or leaving full screen
   keeps the Desktop's stages (a Space change during macOS's full-screen animation waits for
   it to settle). Stage numbers (hotkeys, `ctl switch N`) count the current Space's stages.
@@ -565,15 +567,25 @@ leaves them unmanaged and `float` pins them.
 ## Persistence
 
 `state.json` next to the config is written about 500 ms after every change, per Space (each
-with a synthetic id; macOS has no public one): stages in order, their windows (bundle ID,
-title, frame, front-to-back position, key window, pinned), the active stage and the strip
-slots. At launch, after the recovery scan, the Space shown is recognized by its windows
-(exact bundle ID + title; with no match, the Space shown when saved), its windows are matched
-to it (exact bundle ID + title first, then bundle ID alone), the stages are rebuilt, the
+with a synthetic id; macOS has no public one): stages in order, their windows (window id,
+bundle ID, title, frame, front-to-back position, key window, pinned), the active stage and
+the strip slots. Window ids outlive a restart of Stage Manager (the windows are other apps'),
+so a restart finds each window by its id whatever its title is now; a relaunched app's
+windows are matched by bundle ID + title. At launch, after the recovery scan, the Space
+shown is recognized by its windows (window id or exact bundle ID + title; with no match,
+the Space shown when saved), its windows are matched to it (window id, then exact bundle ID
++ title, then bundle ID alone), the stages are rebuilt, the
 saved active stage is shown and the others are parked. Windows that match nothing get stages
 the way a first start does. Every other saved Space is rebuilt the same way the first time
 you go there (macOS lists most apps' windows of a Space only while it shows), and is saved
 again untouched until then. Version 1 files (one Space) are read as one Space.
+
+While the screen is locked (or the login session is not on the console), Accessibility
+lists no window: a launch then waits to build its stages until it unlocks, a running app
+infers nothing from the window list and does not write `state.json` until then, and a
+Space change is recognized after the unlock. Accessibility listing none of the windows the
+window server shows on screen (three or more) holds a launch or an arrival the same way,
+for at most 10 s.
 
 ## Safety: no window stays parked
 
