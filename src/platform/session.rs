@@ -135,9 +135,10 @@ pub fn screen_locked() -> bool {
 }
 
 /// The window server session this process runs in, as a string kept in `state.json`
-/// ([`crate::engine::persist::StateFile::session`]): the boot time (`kern.boottime`) and the
-/// login session (`CGSessionCopyCurrentDictionary`'s `kCGSSessionIDKey` and
-/// `kCGSSessionAuditIDKey`). Window ids are only unique within one: after a reboot or a new
+/// ([`crate::engine::persist::StateFile::session`]): the boot (`kern.bootsessionuuid`, stable
+/// for the boot; `kern.boottime` in whole seconds when it cannot be read: macOS moves the
+/// boot time when the clock is set) and the login session (`CGSessionCopyCurrentDictionary`'s
+/// `kCGSSessionIDKey` and `kCGSSessionAuditIDKey`). Window ids are only unique within one: after a reboot or a new
 /// login they start over. Read once (it cannot change while the process lives); `None` when
 /// neither the boot time nor the session can be read.
 pub fn window_session() -> Option<&'static str> {
@@ -146,7 +147,7 @@ pub fn window_session() -> Option<&'static str> {
 }
 
 fn read_window_session() -> Option<String> {
-    let boot = boot_time();
+    let boot = boot_uuid().or_else(|| boot_time().map(|s| format!("t{s}")));
     let ids = CGSessionCopyCurrentDictionary().map(|dict| {
         // SAFETY: the session dictionary maps CFString keys to CF values (checked below).
         let dict: &CFDictionary<CFString, CFType> = unsafe { &*(&*dict as *const CFDictionary).cast() };
@@ -156,29 +157,48 @@ fn read_window_session() -> Option<String> {
         (number("kCGSSessionIDKey"), number("kCGSSessionAuditIDKey"))
     });
     let (id, audit) = ids.unwrap_or((None, None));
-    session_key(boot, id, audit)
+    let key = session_key(boot.as_deref(), id, audit);
+    match &key {
+        Some(k) if !k.contains('?') => tracing::debug!(session = %k, "window server session"),
+        _ => tracing::warn!(session = ?key, "window server session only partly readable: saved window ids may be dropped at the next launch"),
+    }
+    key
 }
 
 /// The session string from its parts; `None` when the boot time and the session id are
 /// both unknown (nothing to tell one session from another).
-pub fn session_key(boot: Option<(i64, i64)>, id: Option<i64>, audit: Option<i64>) -> Option<String> {
+pub fn session_key(boot: Option<&str>, id: Option<i64>, audit: Option<i64>) -> Option<String> {
     if boot.is_none() && id.is_none() {
         return None;
     }
     let part = |v: Option<i64>| v.map_or_else(|| "?".to_string(), |v| v.to_string());
-    let boot = boot.map_or_else(|| "?".to_string(), |(s, us)| format!("{s}.{us:06}"));
-    Some(format!("boot {boot} session {} audit {}", part(id), part(audit)))
+    Some(format!("boot {} session {} audit {}", boot.unwrap_or("?"), part(id), part(audit)))
 }
 
-/// `kern.boottime`: seconds and microseconds.
-fn boot_time() -> Option<(i64, i64)> {
+/// `kern.bootsessionuuid`: a UUID for this boot.
+fn boot_uuid() -> Option<String> {
+    let mut buf = [0u8; 64];
+    let mut size = buf.len();
+    // SAFETY: the sysctl writes a NUL-terminated string into our buffer of `size` bytes.
+    let rc = unsafe {
+        libc::sysctlbyname(c"kern.bootsessionuuid".as_ptr(), buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0)
+    };
+    if rc != 0 || size == 0 {
+        return None;
+    }
+    let s = std::str::from_utf8(&buf[..size]).ok()?.trim_end_matches('\0').trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// `kern.boottime` in whole seconds.
+fn boot_time() -> Option<i64> {
     let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
     let mut size = std::mem::size_of::<libc::timeval>();
     // SAFETY: `kern.boottime` is a `struct timeval`; the buffer and its size are ours.
     let rc = unsafe {
         libc::sysctlbyname(c"kern.boottime".as_ptr(), (&raw mut tv).cast(), &mut size, std::ptr::null_mut(), 0)
     };
-    (rc == 0 && size == std::mem::size_of::<libc::timeval>() && tv.tv_sec > 0).then(|| (tv.tv_sec, i64::from(tv.tv_usec)))
+    (rc == 0 && size == std::mem::size_of::<libc::timeval>() && tv.tv_sec > 0).then_some(tv.tv_sec)
 }
 
 #[cfg(test)]
@@ -286,11 +306,11 @@ mod tests {
 
     #[test]
     fn the_session_key_tells_boots_and_logins_apart() {
-        let a = session_key(Some((1_760_000_000, 5)), Some(257), Some(100_001));
-        assert_eq!(a.as_deref(), Some("boot 1760000000.000005 session 257 audit 100001"));
-        assert_ne!(a, session_key(Some((1_760_090_000, 5)), Some(257), Some(100_001)), "a reboot");
-        assert_ne!(a, session_key(Some((1_760_000_000, 5)), Some(257), Some(100_007)), "a new login");
+        let a = session_key(Some("2EA11F65-D66D-496B-94D1-84260EF970A2"), Some(257), Some(100_001));
+        assert_eq!(a.as_deref(), Some("boot 2EA11F65-D66D-496B-94D1-84260EF970A2 session 257 audit 100001"));
+        assert_ne!(a, session_key(Some("7C1B0A11-0000-4000-8000-000000000001"), Some(257), Some(100_001)), "a reboot");
+        assert_ne!(a, session_key(Some("2EA11F65-D66D-496B-94D1-84260EF970A2"), Some(257), Some(100_007)), "a new login");
         assert_eq!(session_key(None, None, Some(1)), None, "nothing to tell sessions apart");
-        assert!(session_key(Some((1, 0)), None, None).is_some());
+        assert!(session_key(Some("t1"), None, None).is_some());
     }
 }

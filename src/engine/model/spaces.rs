@@ -713,6 +713,12 @@ impl Model {
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
         }
         for stage in waiting {
+            // Just used, as far as the strip's eviction goes: a moved window's card is not
+            // the first to go (the review of 6Y2, 3).
+            let t = self.tick();
+            if let Some(s) = self.stage_mut(stage) {
+                s.last_active = t;
+            }
             self.strip_enter(target, stage);
         }
     }
