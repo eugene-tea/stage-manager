@@ -57,7 +57,7 @@ fn restoring(spaces: Vec<SavedSpace>) -> Model {
     file.start_new_session();
     let (file, _) = file.for_session(Some("B"));
     let mut m = model();
-    m.set_restore(Restore { session: "B".into(), restoring: true });
+    m.set_restore(Restore::after_restart("B"));
     m.restore_spaces(file.spaces);
     m
 }
@@ -138,7 +138,7 @@ fn windows_reopened_after_a_restart_go_back_to_their_stages_quietly() {
     assert!(!parks(&a, 23) && !switches(&a));
 
     // A new untitled editor window: the app alone (low), into the active stage it is shown
-    // in, at its own frame.
+    // in, at its own frame; Notes.txt is still awaited (a low match is no proof).
     let a = add(&mut m, win(24, 50, EDITOR, "Untitled", DEFAULT));
     assert_eq!(m.restored_grade(w(24)), Some(Grade::Low));
     assert_eq!(number_of(&m, 24), Some(1));
@@ -147,6 +147,10 @@ fn windows_reopened_after_a_restart_go_back_to_their_stages_quietly() {
     let active = m.main_active_stage().expect("active");
     assert_eq!(m.stage(active).map(|s| s.windows.clone()), Some(vec![w(23), w(24)]), "in saved order");
     assert_eq!(m.stage(active).and_then(|s| s.key), Some(w(23)), "the saved key window");
+    assert_eq!(m.pending_count(), 1);
+    // Notes.txt itself comes: medium by its frame, into the same stage.
+    add(&mut m, win(25, 50, EDITOR, "Notes.txt — Edited", DEFAULT));
+    assert_eq!(number_of(&m, 25), Some(1));
     assert_eq!(m.pending_count(), 0);
 
     let file = m.to_state();
@@ -244,7 +248,7 @@ fn late_windows_at_launch_join_their_saved_stages() {
     saved.stages[0].windows[0].window = Some(11);
     saved.stages[1].windows[0].window = Some(12);
     let mut m = model();
-    m.set_restore(Restore { session: "A".into(), restoring: false });
+    m.set_restore(Restore::same_session("A"));
     m.restore_spaces(vec![saved]);
     m.arrive(MAIN, &[win(11, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
     assert_eq!(m.current_space(MAIN).0, 5);
@@ -335,12 +339,21 @@ fn a_desktop_left_waiting_is_saved_and_adopted_again_on_return() {
     assert_ne!(m.current_space(MAIN).0, 5);
     assert_eq!(m.unvisited_saved_spaces(), 1, "back with the saved Desktops waiting");
     assert_eq!(m.pending_unvisited(), 3, "Plan.txt was closed; the three others wait");
-    // Back on Desktop 1, empty: provisional again; its first window adopts it again.
+    // Back on an empty Desktop: provisional again. Desktop 5 is no longer the one shown when
+    // saved, so one window of it is not enough (M2): the second adopts it, and the first
+    // goes back to its saved stage too.
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     assert!(m.provisional_spaces().contains(&m.current_space(MAIN)));
     add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_ne!(m.current_space(MAIN).0, 5, "one window of a Desktop not shown when saved");
+    assert_eq!(m.restored_grade(w(21)), None, "Apple's rule meanwhile");
+    add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
     assert_eq!(m.current_space(MAIN).0, 5);
-    assert_eq!(number_of(&m, 21), Some(2));
+    assert_eq!(number_of(&m, 22), Some(3));
+    assert_eq!(number_of(&m, 21), Some(2), "the first window back in its saved stage");
+    assert_eq!(m.restored_grade(w(21)), Some(Grade::Strong));
+    assert_eq!(m.stages_in(m.current_space(MAIN)).count(), 3, "no stage left over from Apple's rule");
+    assert!(m.window(w(21)).is_some_and(|x| x.parked) && m.window(w(22)).is_some_and(|x| x.parked), "both stages inactive");
 }
 
 #[test]
@@ -375,4 +388,264 @@ fn saved_recency_survives_a_restart() {
     assert!(recency[0] > recency[2], "the active one most recently");
     let saved: Vec<Option<u64>> = m.to_state().spaces[0].stages.iter().map(|s| s.last_active).collect();
     assert!(saved.iter().all(Option::is_some));
+}
+
+// ----- the 8E review (8E2): the restore window, the frame against names, adoption ----------
+
+fn focused(id: u32) -> Observation {
+    Observation { focused: Some(w(id)), ..Observation::default() }
+}
+
+fn add_focused(m: &mut Model, x: WindowMeta) -> Vec<Action> {
+    let id = x.id.0;
+    m.add_window(x, &Decision::default(), &focused(id))
+}
+
+/// Desktop 5 adopted by its editor window, the editor's stage active.
+fn adopted() -> Model {
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5);
+    m
+}
+
+#[test]
+fn after_the_restore_window_a_pending_match_brings_its_stage_forward() {
+    // H1: Chat opened hours later (the restore window long over): its window goes back to
+    // its saved stage and that stage comes forward, as Apple's rule does for an app whose
+    // windows are in another stage. Never parked out of the user's sight.
+    let mut m = adopted();
+    assert!(m.restoring());
+    assert!(m.end_restore(), "the first user action, or five minutes");
+    assert!(!m.restoring() && !m.end_restore());
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_eq!(number_of(&m, 21), Some(2), "its saved stage");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(21)), "switched to: {a:?}");
+    assert!(switches(&a) && !parks(&a, 21));
+    assert!(parks(&a, 23), "the stage left is parked");
+    assert!(m.window(w(21)).is_some_and(|x| !x.parked));
+    assert_eq!(m.restored_grade(w(21)), Some(Grade::Strong));
+    assert_eq!(m.last_pending().map(|n| (n.parked, n.switched)), Some((false, true)));
+    // A low match still never takes an inactive stage: Apple's rule, the entry kept.
+    let before = m.pending_count();
+    add(&mut m, win(31, 40, BROWSER, "Weather", DEFAULT));
+    assert_eq!(m.restored_grade(w(31)), None);
+    assert_eq!(m.pending_count(), before);
+}
+
+#[test]
+fn an_unminimized_pending_window_during_and_after_the_restore_window() {
+    // H1: a window the app reopened minimized shows when un-minimized. During the restore
+    // window it goes quietly to its inactive stage (parked, no switch); after it, its stage
+    // comes forward.
+    let mut m = adopted();
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert!(parks(&a, 21) && !switches(&a), "during: parked quietly: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(23)));
+    m.end_restore();
+    let a = add_focused(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    assert_eq!(number_of(&m, 22), Some(3));
+    assert!(switches(&a) && !parks(&a, 22), "after: switched to: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(22)));
+    assert_eq!(m.stage(m.stage_of(w(22)).expect("stage")).and_then(|s| s.key), Some(w(22)), "the key of its stage");
+}
+
+#[test]
+fn a_desktop_made_after_the_restore_window_never_adopts_a_saved_one() {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    d6.strip_slots = vec![1];
+    let mut m = restoring(vec![desktop_5(), d6]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5);
+    m.end_restore();
+    // The user makes a new Desktop and goes there: empty, but not provisional.
+    m.arrive(MAIN, &[], &[w(23)], &LaunchHints::default());
+    assert!(m.provisional_spaces().is_empty(), "no provisional Desktop after the restore window");
+    let here = m.current_space(MAIN);
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN), here, "not taken for Desktop 6");
+    assert_eq!(m.restored_grade(w(41)), None);
+    assert_eq!(m.restored_grade(w(42)), None);
+    assert_eq!(m.unvisited_saved_spaces(), 1, "Desktop 6 still waits");
+}
+
+#[test]
+fn a_provisional_desktop_from_the_restore_window_is_still_adopted_hours_later() {
+    // "Reopen windows" off: nothing comes back at login; the user opens Chat hours later and
+    // finds its stage, brought forward.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let space = m.current_space(MAIN);
+    m.end_restore();
+    assert_eq!(m.provisional_spaces(), [space], "made during the restore window: still provisional");
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_eq!(m.current_space(MAIN).0, 5, "adopted");
+    assert_eq!(number_of(&m, 21), Some(2));
+    assert_eq!(m.main_active_stage(), m.stage_of(w(21)), "brought forward: {a:?}");
+    assert!(!parks(&a, 21));
+}
+
+#[test]
+fn one_window_of_a_desktop_not_shown_when_saved_does_not_adopt_it() {
+    // M2, the reviewer's D1/D2 case: Desktop 5 was shown when saved, Desktop 6 was not. macOS
+    // reopens a Desktop 6 window on the empty Desktop 1 first: that alone is no proof.
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    let mut m = restoring(vec![desktop_5(), d6]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let a = add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    assert_ne!(m.current_space(MAIN).0, 6, "one window of Desktop 6");
+    assert_eq!(m.restored_grade(w(41)), None, "Apple's rule");
+    assert!(!parks(&a, 41));
+    // Desktop 5's window: the Desktop shown when saved takes one.
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5);
+    assert_eq!(m.unvisited_saved_spaces(), 1, "Desktop 6 still waits");
+    assert!(m.window(w(41)).is_some_and(|x| !x.parked), "Family stays where Apple's rule put it");
+    assert_eq!(m.restored_grade(w(41)), None);
+}
+
+#[test]
+fn two_windows_of_a_desktop_not_shown_when_saved_adopt_it() {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    d6.active_index = Some(0);
+    let mut m = restoring(vec![d6]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    assert_ne!(m.current_space(MAIN).0, 6);
+    let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN).0, 6, "the second window adopts it");
+    assert_eq!(number_of(&m, 42), Some(1), "the saved active stage");
+    assert_eq!(number_of(&m, 41), Some(2), "the first window back in its saved stage");
+    assert!(parks(&a, 41) && !parks(&a, 42), "{a:?}");
+    assert_eq!(m.stages_in(m.current_space(MAIN)).count(), 2);
+    assert_eq!(m.pending_count(), 0);
+}
+
+#[test]
+fn a_new_window_at_the_saved_frame_with_another_name_is_not_that_window() {
+    // H2: the browser opens "Start Page" where the saved page's window was. The frame alone
+    // against two different names is the size only: low, Apple's rule, the saved page
+    // still awaited; nothing parked.
+    let mut m = adopted();
+    let a = add(&mut m, win(31, 40, BROWSER, "Start Page", F_RECIPES));
+    assert_eq!(m.restored_grade(w(31)), None);
+    assert!(!parks(&a, 31) && m.window(w(31)).is_some_and(|x| !x.parked));
+    assert_eq!(m.pending_of(m.stages_in(m.current_space(MAIN)).nth(2).expect("browser stage").id).len(), 1, "Recipes still awaited");
+    // A file manager's new window where the pending "Downloads" was.
+    let finder = "com.example.files";
+    let mut space = desktop_5();
+    space.stages.push(stage(None, vec![sw(finder, "Downloads", F_NOTES, 0)]));
+    let mut m = restoring(vec![space]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    let a = add(&mut m, win(32, 80, finder, "Recents", F_NOTES));
+    assert_eq!(m.restored_grade(w(32)), None);
+    assert!(!parks(&a, 32));
+    assert_eq!(m.pending_bundles().iter().filter(|b| *b == finder).count(), 1, "Downloads still awaited");
+}
+
+#[test]
+fn a_window_a_rule_places_is_no_longer_awaited() {
+    // A rule (here: float) places the window: its confident saved entry is dropped, so it
+    // neither waits forever nor catches another window.
+    let mut m = adopted();
+    let float = Decision { action: crate::engine::rules::RuleAction::Float, ..Decision::default() };
+    m.add_window(win(21, 30, CHAT, "Team", F_TEAM), &float, &Observation::default());
+    assert_eq!(m.window(w(21)).map(|x| x.home), Some(Home::Pinned));
+    assert!(!m.pending_bundles().contains(&CHAT.to_string()));
+    assert_eq!(names(&m), [None, None], "the Chat stage, waiting for nothing now, is gone");
+    // A doubtful one (low) leaves the entry alone.
+    let current = Decision { action: crate::engine::rules::RuleAction::Current, ..Decision::default() };
+    m.add_window(win(31, 40, BROWSER, "Weather", DEFAULT), &current, &Observation::default());
+    assert!(m.pending_bundles().contains(&BROWSER.to_string()));
+}
+
+#[test]
+fn a_restored_window_does_not_take_the_key_from_the_window_the_user_focused() {
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
+    let active = m.main_active_stage().expect("active");
+    assert_eq!(m.stage(active).and_then(|s| s.key), Some(w(24)));
+    // The user works in Notes.txt; Plan.txt (the saved key window) comes back.
+    m.add_window(win(23, 50, EDITOR, "Plan.txt", F_PLAN), &Decision::default(), &focused(24));
+    assert_eq!(number_of(&m, 23), Some(1));
+    assert_eq!(m.stage(active).and_then(|s| s.key), Some(w(24)), "the user's focus keeps the key");
+    // Without a focus of the user's there, the saved key window takes it.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    let active = m.main_active_stage().expect("active");
+    assert_eq!(m.stage(active).and_then(|s| s.key), Some(w(23)));
+}
+
+#[test]
+fn an_adoption_keeps_the_strip_shown() {
+    // Two apps opened before the Desktop is adopted: their cards stay.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(51, 60, "com.example.music", "Player", DEFAULT));
+    add(&mut m, win(52, 61, "com.example.memo", "Memo", F_NOTES));
+    add(&mut m, win(53, 62, "com.example.paint", "Canvas", F_TEAM));
+    let cards = |m: &Model| m.strip().iter().map(|c| c.windows.iter().map(|x| x.0).collect::<Vec<_>>()).collect::<Vec<_>>();
+    // Not the recency order (Memo was used after Player).
+    assert_eq!(cards(&m), [vec![51], vec![52]]);
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5);
+    // The live cards as they were (not rebuilt from the pending stages' slots, then refilled
+    // by recency); the editor's stage, inactive, enters below.
+    assert_eq!(cards(&m), [vec![51], vec![52], vec![23]]);
+}
+
+#[test]
+fn a_window_pending_since_an_unknown_session_is_given_up_at_the_next_known_one() {
+    // A session that could not be read stamps `since: ""`; the next readable new session
+    // gives such windows up instead of keeping them forever.
+    let mut space = desktop_5();
+    space.stages[0].windows[0].pending = Some(Pending { since: String::new() });
+    let mut file = StateFile { session: None, ..StateFile::single(space) };
+    assert_eq!(file.start_new_session(), 1);
+    assert_eq!(file.pending_windows(), 3, "the others pending since the file's (unknown) session");
+    let mut space = desktop_5();
+    space.stages[0].windows[0].pending = Some(Pending { since: String::new() });
+    let mut file = StateFile { session: Some("B".into()), ..StateFile::single(space) };
+    assert_eq!(file.start_new_session(), 1);
+}
+
+#[test]
+fn a_parked_voter_goes_back_to_its_saved_stage_at_its_frame() {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    d6.active_index = Some(0);
+    let mut m = restoring(vec![d6]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
+    // Another app by Apple's rule: its stage comes forward, Family's is parked.
+    add(&mut m, win(51, 60, "com.example.music", "Player", DEFAULT));
+    assert!(m.window(w(41)).is_some_and(|x| x.parked));
+    let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert_eq!(m.current_space(MAIN).0, 6);
+    // Player's stage (1), then the saved ones in saved order: Holidays (2), Family (3); the
+    // stage Apple's rule made for Family is gone.
+    assert_eq!((number_of(&m, 51), number_of(&m, 42), number_of(&m, 41)), (Some(1), Some(2), Some(3)));
+    assert_eq!(m.stages_in(m.current_space(MAIN)).count(), 3);
+    assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((true, F_TEAM)), "parked in its saved stage, its frame kept: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(51)), "the stage shown stays in front");
+    assert!(m.window(w(51)).is_some_and(|x| !x.parked));
+    assert_eq!(m.restored_grade(w(41)), Some(Grade::Strong));
 }

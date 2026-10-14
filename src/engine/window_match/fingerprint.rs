@@ -10,6 +10,11 @@
 //! one trailing copy or counter dropped ([`TitleRule::Counter`]). A rule never empties a
 //! title: a step that would leave nothing is skipped. An empty title has an empty
 //! fingerprint, which never matches anything.
+//!
+//! A bare trailing number (" 2", " (2)") stays in the fingerprint: it may be the window's
+//! name ("Invoice 101" is not "Invoice 102"). Two fingerprints match ([`same_fingerprint`])
+//! when equal, or when one is the other plus a bare number and the other has none: an app's
+//! counter for a second window of the same name ("Untitled" and "Untitled 2").
 
 /// What a [`TITLE_RULES`] entry does with its pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,8 +26,8 @@ pub enum TitleRule {
     /// A separator: only the text before the first one is kept (Terminal's "name — zsh —
     /// 80×24", a browser's "Page — Browser").
     Split,
-    /// A trailing copy or counter: the pattern, optionally followed by a number; the empty
-    /// pattern stands for a bare number (" 2", " (2)").
+    /// A trailing copy or counter: the pattern, optionally followed by a number (a bare
+    /// number is never dropped here: [`same_fingerprint`] weighs it).
     Counter,
 }
 
@@ -42,7 +47,6 @@ pub const TITLE_RULES: &[(TitleRule, &str)] = &[
     (TitleRule::Split, " | "),
     (TitleRule::Split, " - "),
     (TitleRule::Counter, " copy"),
-    (TitleRule::Counter, ""),
 ];
 
 /// The fingerprint of `title` (see the module docs).
@@ -78,15 +82,36 @@ pub fn fingerprint(title: &str) -> String {
     t.trim().to_string()
 }
 
-/// `t` without a trailing `pattern` and number (" copy", " copy 3"; for the empty pattern
-/// " 2" or " (2)"), when that leaves something.
+/// True when fingerprints `a` and `b` name the same window: both non-empty and equal, or one
+/// is the other plus a bare trailing number while the other has none ("untitled" and
+/// "untitled 2"; never "invoice 101" and "invoice 102").
+pub fn same_fingerprint(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let counted = |x: &str, y: &str| strip_number(x).is_some_and(|head| head == y) && strip_number(y).is_none();
+    counted(a, b) || counted(b, a)
+}
+
+fn digits(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// `t` without a bare trailing number (" 2", " (2)"), when that leaves something.
+fn strip_number(t: &str) -> Option<&str> {
+    let (head, tail) = t.rsplit_once(' ')?;
+    let n = tail.strip_prefix('(').and_then(|x| x.strip_suffix(')')).unwrap_or(tail);
+    let head = head.trim_end();
+    (digits(n) && !head.is_empty()).then_some(head)
+}
+
+/// `t` without a trailing `pattern` and number (" copy", " copy 3"), when that leaves
+/// something.
 fn strip_counter(t: &str, pattern: &str) -> Option<String> {
-    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    let rest = if pattern.is_empty() {
-        let (head, tail) = t.rsplit_once(' ')?;
-        let n = tail.strip_prefix('(').and_then(|x| x.strip_suffix(')')).unwrap_or(tail);
-        digits(n).then_some(head)?
-    } else if let Some(head) = t.strip_suffix(pattern) {
+    let rest = if let Some(head) = t.strip_suffix(pattern) {
         head
     } else {
         let (head, tail) = t.rsplit_once(' ')?;
@@ -117,12 +142,13 @@ mod tests {
             ("Letter (Edited)", "letter"),
             ("Contract — Locked", "contract"),
             ("• Letter — Edited", "letter"),
-            // Copies and counters.
-            ("Untitled 2", "untitled"),
-            ("Untitled (3)", "untitled"),
+            // Copies; a bare number stays (see `same_fingerprint`).
+            ("Untitled 2", "untitled 2"),
+            ("Untitled (3)", "untitled (3)"),
             ("Sketch copy", "sketch"),
             ("Sketch copy 4", "sketch"),
-            ("Draft 2 — Edited", "draft"),
+            ("Draft 2 — Edited", "draft 2"),
+            ("Invoice 101", "invoice 101"),
             // Separators: the first segment only.
             ("project — zsh — 80×24", "project"),
             ("Weather Today — Example Browser", "weather today"),
@@ -154,5 +180,20 @@ mod tests {
         assert_eq!(fingerprint("Budget.numbers"), fingerprint("Budget.numbers — Edited"));
         assert_eq!(fingerprint("Inbox — 3 unread"), fingerprint("Inbox — 12 unread"));
         assert_ne!(fingerprint("Budget"), fingerprint("Forecast"));
+    }
+
+    #[test]
+    fn a_bare_number_counts_only_against_a_title_without_one() {
+        let same = |a: &str, b: &str| same_fingerprint(&fingerprint(a), &fingerprint(b));
+        // An app's counter for a second window of the same name.
+        assert!(same("Untitled", "Untitled 2"));
+        assert!(same("Untitled 2", "Untitled"));
+        assert!(same("Untitled (3)", "Untitled — Edited"));
+        assert!(same("Untitled 2", "Untitled 2 — Edited"));
+        // A number that names the window.
+        assert!(!same("Invoice 101", "Invoice 102"));
+        assert!(!same("Untitled 2", "Untitled 3"));
+        assert!(!same("", ""), "empty never matches");
+        assert!(!same("2", ""));
     }
 }

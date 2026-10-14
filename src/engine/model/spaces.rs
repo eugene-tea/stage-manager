@@ -45,11 +45,11 @@
 //! fresh one. A Space holding only pending stages (saved windows still to come) goes back to
 //! the saved Spaces waiting for a visit instead.
 //!
-//! **Restore mode** (`state.json` from another window server session): a Space made from an
-//! empty screen is provisional until its first window that matches a saved Desktop's with
-//! confidence makes it that Desktop (adoption, `pending.rs`); saved Spaces are recognized
-//! at an arrival by confident matches (exact title, frame, fingerprint) rather than exact
-//! titles alone.
+//! **After a restart** (`state.json` from another window server session): while the restore
+//! window is open ([`crate::engine::restore`]) a Space made from an empty screen is
+//! provisional until windows that match a saved Desktop's with confidence make it that
+//! Desktop (adoption, `pending.rs`); all session, saved Spaces are recognized at an arrival
+//! by confident matches (exact title, frame, fingerprint) rather than exact titles alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -258,6 +258,9 @@ impl Model {
         if self.provisional.remove(&old) {
             self.provisional.insert(new);
         }
+        if let Some(v) = self.adopt_votes.remove(&old) {
+            self.adopt_votes.insert(new, v);
+        }
         if let Some(v) = self.beside.remove(&old) {
             self.beside.insert(new, v);
         }
@@ -324,7 +327,7 @@ impl Model {
         scores.retain(|_, (n, _, _)| *n > 0);
         let parks = |m: &WindowMeta| self.display(m.display).parks(m.frame);
         for saved in &self.leftovers {
-            let n = if self.restore.restoring { confident_matches(saved, &arrivals, parks) } else { exact_matches(saved, &arrivals) } as i64;
+            let n = if self.restore.new_session { confident_matches(saved, &arrivals, parks) } else { exact_matches(saved, &arrivals) } as i64;
             if n > 0 {
                 scores.entry(SpaceId(saved.id)).or_insert((0, false, 0)).0 += n;
             }
@@ -370,7 +373,7 @@ impl Model {
             // A Space with stages still waiting: its new windows go to them first.
             let standard: Vec<WindowMeta> = arrivals.iter().filter(|m| m.role == WindowRole::Standard).cloned().collect();
             let shown = self.active_stage_in(target).map(|s| s.0);
-            let placed = self.match_pending(target, &standard, LowRule { shown, only_candidate: true }, &mut actions);
+            let placed = self.match_pending(target, &standard, LowRule { shown }, None, &mut actions);
             arrivals.retain(|m| !placed.contains(&m.id));
         }
         if !arrivals.is_empty() || saved.is_some() {
@@ -386,9 +389,10 @@ impl Model {
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
         self.hops.retain(|id, _| known.contains(id));
-        if self.restore.restoring && bare && carried == 0 && !self.leftovers.is_empty() && !self.space_has_pending(target) {
-            // Made from a screen no saved Desktop matched: its first confident window says
-            // which saved Desktop it is.
+        if self.restore.after_restart_window() && bare && carried == 0 && !self.leftovers.is_empty() && !self.space_has_pending(target) {
+            // Made from a screen no saved Desktop matched while the restore window is open:
+            // its confident windows say which saved Desktop it is. A Desktop made after the
+            // window never takes a saved one.
             self.provisional.insert(target);
         }
         self.normalize_slots();

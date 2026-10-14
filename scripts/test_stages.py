@@ -41,11 +41,14 @@ is Transient, the window server no longer lists the strip on screen while they s
 Desktop, drawn as before, and a card click switches), restore (a restart simulated with
 STAGE_MANAGER_SESSION: a layout of three fixture apps saved in session A; in session B the app
 starts on an empty screen, keeps every saved stage pending with no card, then the apps reopen
-their windows late, one by one, one app in reverse order and retitled: every window goes back
-to its saved stage and frame, parked only on a strong or medium match, the Desktop takes the
-saved id, the active stage is never switched away, the strip comes back in its saved order;
-the app that never reopens keeps its stage through a relaunch in the same session and loses
-it in the next session).
+their windows late, one by one, one app in reverse order and retitled, two windows minimized:
+every window goes back to its saved stage and frame, parked only on a strong or medium match,
+the Desktop takes the saved id, the active stage is never switched away, the strip comes back
+in its saved order; a minimized window un-minimized during the restore window goes quietly to
+its inactive stage, one un-minimized after it (a ctl command ends it) brings its stage
+forward; an app with no saved window goes by Apple's rule; the app that never reopens keeps
+its stage through a relaunch in the same session and loses it in the next session. Hands off
+the Mac during this phase: a click or key press ends the restore window early).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -2507,11 +2510,20 @@ def number_of(s, title):
     return None
 
 
+def stage_sets_restore(s, n):
+    """The base titles of stage `n`'s windows."""
+    return {base_title(x) for x in stage_titles(s).get(n, [])}
+
+
 def phase_restore():
     say("\n== restore after a restart (simulated: STAGE_MANAGER_SESSION) ==")
     stop_app()
     stop_all_fixtures()
     write_config('[stages]\nnames = ["Mail"]\n')
+    try:
+        os.remove(os.path.join(HOME, "state.json"))  # the test home's: no other phase's layout
+    except FileNotFoundError:
+        pass
     run_id = f"{os.getpid()}-{int(time.time())}"
     session = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"restore {k} {run_id}"} for k in "ABC"}
 
@@ -2533,6 +2545,8 @@ def phase_restore():
     want_active = set(stage_titles(s)[s["active"]])
     want_restore = {w["title"]: w["restore"] for w in s["windows"] if w["role"] == "standard"}
     want_strip = [set(stage_titles(s)[n]) for n in s["strip"]]
+    want_strip_n = list(s["strip"])
+    state_a = s
     say(f"  stages: {want}, active {sorted(want_active)}, strip {want_strip}")
     check(by_title(s)["Bravo 2"]["home"] == "pinned" and want.get(1) == {"Alpha 1", "Alpha 2"},
           "layout: Mail holds Alpha 1 and 2, Bravo 2 is pinned")
@@ -2551,7 +2565,7 @@ def phase_restore():
     if not check(s is not None, "app up in session B"):
         return
     r = s.get("restore") or {}
-    check(r.get("restoring") is True, "restore mode (state.json from another session)")
+    check(r.get("restoring") is True and r.get("after_restart") is True, "restore after a restart (state.json from another session)")
     check(s["space"] in r.get("provisional", []), "the empty Desktop is provisional")
     check(s["strip"] == [] and not s["windows"], "no card, no window")
     check(r.get("pending_unvisited") == 6, f"every saved window waits ({r})")
@@ -2561,27 +2575,31 @@ def phase_restore():
     check(len(pend) == 6 and all(p == session["A"]["STAGE_MANAGER_SESSION"] for _, p in pend),
           f"state.json keeps every saved window, pending since session A ({pend})")
 
-    say("-- the apps reopen their windows late: Alpha one by one, Bravo later, reversed and retitled")
-    start_extra_args("a", 3, "--delay-ms", "4000", "--stagger-ms", "1500", wait=False)
+    say("-- the apps reopen their windows late: Alpha one by one (two minimized), Bravo later, reversed and retitled")
+    say("   (hands off the Mac: a click or key press would end the restore window early)")
+    mail = number_of(state_a, "Alpha 1")
+    charlie_n = number_of(state_a, "Charlie 1")
+    start_extra_args("a", 3, "--delay-ms", "4000", "--stagger-ms", "1500", "--minimized", "Alpha 1;Alpha 2", wait=False)
     start_extra_args("b", 2, "--delay-ms", "12000", "--reverse", "--retitle-after-ms", "500",
                      "--retitle", "Bravo 1=Bravo 1 — Edited", wait=False)
-    shown_seen, polls = [], 0
+    shown_seen = []
     end = time.time() + 40
     s = None
     while time.time() < end:
         s = state()
-        polls += 1
         shown_seen.append({base_title(x) for x in active_titles(s)})
-        if len([w for w in s["windows"] if w["role"] == "standard"]) >= 5 and not s["unplaced"]:
-            time.sleep(1.5)  # the retitle and the last moves
+        # Alpha 3, Bravo 1 and 2 managed; the two minimized Alpha windows wait off screen.
+        if len([w for w in s["windows"] if w["role"] == "standard"]) >= 3 and len(s["unplaced"]) <= 2 \
+                and any(w["title"] == "Bravo 1 — Edited" for w in s["windows"]):
+            time.sleep(1.5)  # the last moves
             s = state()
             break
         time.sleep(0.3)
-    if not check(s is not None and len(s["windows"]) >= 5, "the five reopened windows are managed"):
+    if not check(s is not None and len(s["windows"]) >= 3, "the three reopened windows shown are managed"):
         return
     got = {n: {base_title(x) for x in v} for n, v in stage_titles(s).items() if v}
-    back = {n: v for n, v in want.items() if v != {"Charlie 1"}}
-    check(got == back, f"every window is back in its saved stage, under its saved number ({got}, saved {want})")
+    back = {n: v for n, v in want.items() if n not in (mail, charlie_n)}
+    check(got == back, f"every shown window is back in its saved stage, under its saved number ({got}, saved {want})")
     check(s["space"] == saved_space, f"the Desktop took the saved Desktop's id ({s['space']}, saved {saved_space})")
     check(not (s.get("restore") or {}).get("provisional"), "no Desktop is provisional any more")
     bad_shown = [x for x in shown_seen if x and not x <= want_active]
@@ -2589,19 +2607,71 @@ def phase_restore():
     check({base_title(x) for x in active_titles(s)} == want_active, "the saved active stage is active")
     pinned = by_title(s).get("Bravo 2") or {}
     check(pinned.get("home") == "pinned", "Bravo 2 is pinned again")
-    wrong = [w["title"] for w in s["windows"] if w["parked"] and w.get("restored") not in ("strong", "medium")]
-    check(not wrong, f"parked => matched strong or medium ({wrong})")
-    inactive = [w["title"] for w in s["windows"] if w["role"] == "standard" and w["home"] not in ("pinned", s["active"])]
-    check(all(by_title(s)[x]["parked"] for x in inactive), f"the inactive stages' windows are parked ({inactive})")
     off = [w["title"] for w in s["windows"] if w["role"] == "standard"
            and not close(w["restore"], want_restore.get(base_title(w["title"]), w["restore"]), 2.0)]
     check(not off, f"every window has its saved frame ({off})")
     consistent("restored")
-    strip = [{base_title(x) for x in stage_titles(s)[n]} for n in s["strip"]]
-    check(strip == [c for c in want_strip if c != {"Charlie 1"}], f"the strip in its saved order ({strip}, saved {want_strip})")
     check(any(w["title"] == "Bravo 1 — Edited" for w in s["windows"]), "Bravo 1 was retitled after it was matched")
-    charlie = [st for st in s["stages"] if st["pending"] and not st["windows"]]
-    check(len(charlie) == 1 and charlie[0]["number"] not in s["strip"], "Charlie's stage waits, pending, with no card")
+    waiting = {st["number"]: st for st in s["stages"] if st["pending"] and not st["windows"]}
+    check(set(waiting) == {mail, charlie_n} and not set(waiting) & set(s["strip"]),
+          f"Mail (minimized windows) and Charlie's stage wait, pending, with no card ({sorted(waiting)})")
+    check((s.get("restore") or {}).get("restoring") is True, "the restore window is still open")
+
+    say("-- un-minimized during the restore window: back to its inactive stage, quietly")
+    active_before = s["active"]
+    os.kill(extra_pid("a"), signal.SIGHUP)
+    s = wait_state(lambda x: "Alpha 1" in by_title(x), "Alpha 1 un-minimized and managed", timeout=8)
+    if check(s is not None, "Alpha 1 is managed once un-minimized"):
+        time.sleep(1.0)
+        s = state()
+        a1 = by_title(s)["Alpha 1"]
+        check(a1["home"] == mail and a1["parked"], f"in its saved stage (Mail), parked ({a1['home']}, parked {a1['parked']})")
+        check(a1.get("restored") in ("strong", "medium"), f"matched with confidence ({a1.get('restored')})")
+        check(re.search(rf"restore: back in its saved stage id={a1['id']} .*parked=true switched=false", log_text()) is not None,
+              "placed quietly: parked, no switch (the log)")
+        check(s["active"] == active_before and {base_title(x) for x in active_titles(s)} == want_active,
+              "no switch during the restore window (a focus macOS gives the un-minimized window would switch: 8F's settling)")
+        strip_n = [n for n in want_strip_n if n != charlie_n]
+        check(s["strip"] == strip_n, f"the strip in its saved order ({s['strip']}, saved {want_strip_n})")
+        consistent("un-minimized during")
+    wrong = [w["title"] for w in s["windows"] if w["parked"] and w.get("restored") not in ("strong", "medium")]
+    check(not wrong, f"parked => matched strong or medium ({wrong})")
+    inactive = [w["title"] for w in s["windows"] if w["role"] == "standard" and w["home"] not in ("pinned", s["active"])]
+    check(all(by_title(s)[x]["parked"] for x in inactive), f"the inactive stages' windows are parked ({inactive})")
+
+    say("-- after the restore window (a ctl command ends it): an un-minimized window brings its stage forward")
+    do("switch", s["active"])
+    s = state()
+    check((s.get("restore") or {}).get("restoring") is False, "a ctl command that acts ends the restore window")
+    os.kill(extra_pid("a"), signal.SIGHUP)
+    s = wait_state(lambda x: "Alpha 2" in by_title(x), "Alpha 2 un-minimized and managed", timeout=8)
+    if check(s is not None, "Alpha 2 is managed once un-minimized"):
+        time.sleep(1.0)
+        s = state()
+        t = by_title(s)
+        check(t["Alpha 2"]["home"] == mail and s["active"] == mail, f"its stage (Mail) came forward (active {s['active']})")
+        check(not t["Alpha 2"]["parked"] and not t["Alpha 1"]["parked"], "Mail's windows are shown")
+        check(t["Alpha 3"]["parked"] and t["Bravo 1 — Edited"]["parked"], "the stage left is parked")
+        check(t["Alpha 2"].get("restored") in ("strong", "medium"), f"matched with confidence ({t['Alpha 2'].get('restored')})")
+        check(re.search(rf"restore: back in its saved stage id={t['Alpha 2']['id']} .*switched=true", log_text()) is not None,
+              "its stage came forward with it (the log)")
+        consistent("un-minimized after")
+
+    say("-- an app with no saved window: Apple's rule")
+    start_fixture(1)
+    s = wait_state(lambda x: "Fixture 1" in by_title(x), "Fixture 1 managed", timeout=8)
+    if check(s is not None, "the unmatched app's window is managed"):
+        time.sleep(1.0)
+        s = state()
+        f1 = by_title(s)["Fixture 1"]
+        check(f1.get("restored") is None, "matched to no saved window")
+        check(stage_titles(s).get(f1["home"]) == ["Fixture 1"] and f1["home"] not in want, "a stage of its own")
+        check(s["active"] == f1["home"] and not f1["parked"], "shown, its stage in front, as Apple's does")
+        check(stage_sets_restore(s, mail) == {"Alpha 1", "Alpha 2"}, "the restored stages untouched")
+        consistent("unmatched app")
+    do("switch", mail)
+    stop_fixture()
+    wait_state(lambda x: "Fixture 1" not in by_title(x), "Fixture 1 gone")
 
     say("-- give up: Charlie never reopens")
     stop_app()
@@ -2609,7 +2679,7 @@ def phase_restore():
     s = start_app(5, extra_env=session["B"])
     if not check(s is not None, "relaunch in session B"):
         return
-    check(not (s.get("restore") or {}).get("restoring"), "the same session: no restore mode")
+    check((s.get("restore") or {}).get("after_restart") is False, "the same session: no restore after a restart")
     def stage_sets_now(x):
         return sorted(sorted(base_title(t) for t in v) for v in stage_titles(x).values() if v)
 

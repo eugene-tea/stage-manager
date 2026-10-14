@@ -101,7 +101,7 @@ use crate::engine::model::{
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
-use crate::engine::restore::{AppQuiet, Restore};
+use crate::engine::restore::{self, AppQuiet, Restore};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
@@ -705,6 +705,9 @@ pub struct Controller {
     /// Each saved Space's last time shown (Unix seconds), from the loaded file and the saves
     /// since ([`StateFile::stamp`]).
     seen_times: HashMap<u64, u64>,
+    /// When the restore window closes at the latest ([`restore::WINDOW`] after the stages
+    /// were built from `state.json`); `None` once closed or when there is none.
+    restore_until: Option<Instant>,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -823,6 +826,7 @@ impl Controller {
             quiet: AppQuiet::default(),
             quiet_checked: Instant::now(),
             seen_times: HashMap::new(),
+            restore_until: None,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -1902,14 +1906,16 @@ impl Controller {
     /// Reads `state.json`. Written in another window server session (a reboot or a new login
     /// since: the ids name other windows now), its window ids are dropped, every saved window
     /// is pending until it shows, and the ones pending through a whole session already are
-    /// given up ([`StateFile::start_new_session`]); the restore says which (restore mode).
+    /// given up ([`StateFile::start_new_session`]); the restore says which (the restore
+    /// window opens). A session that cannot be read now counts as the file's own for the
+    /// restore (no restore window at every relaunch), while its window ids are still dropped.
     fn load_state() -> Option<(StateFile, Restore)> {
         let path = paths::state_file();
         let text = std::fs::read_to_string(&path).ok()?;
         let current = session::window_session();
         match StateFile::from_json(&text) {
             Ok(mut s) => {
-                let restoring = !s.same_session(current);
+                let restoring = current.is_some() && !s.same_session(current);
                 if restoring {
                     let expired = s.start_new_session();
                     tracing::info!(
@@ -1922,7 +1928,8 @@ impl Controller {
                 if dropped > 0 {
                     tracing::info!(dropped, "state.json was written in another window server session (a reboot or a login since): its windows are matched by app, title and frame");
                 }
-                let restore = Restore { session: current.unwrap_or_default().to_string(), restoring };
+                let now = current.unwrap_or_default();
+                let restore = if restoring { Restore::after_restart(now) } else { Restore::same_session(now) };
                 Some((s, restore))
             }
             Err(e) => {
@@ -2273,6 +2280,7 @@ impl Controller {
         match event.kind {
             InputKind::MouseDown => {
                 tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
+                self.end_restore("a click (or a Dock click)");
                 // One window list for the press: the Dock's bar and the wallpaper are looked
                 // up in it. A press on a Dock item: its click may take the user to another
                 // Desktop.
@@ -2322,6 +2330,7 @@ impl Controller {
                 self.present();
             }
             InputKind::KeyDown => {
+                self.end_restore("a key press");
                 // Typing never cuts a switch's animation short: the keyboard is already the
                 // new stage's (its focus ran before the windows arrived).
                 if event.cmd {
@@ -2431,6 +2440,7 @@ impl Controller {
         );
         if let Some((state, restore)) = state {
             self.seen_times = state.seen_times();
+            self.restore_until = restore.restoring.then(|| Instant::now() + restore::WINDOW);
             model.set_restore(restore);
             model.restore_spaces(state.spaces);
         }
@@ -3253,7 +3263,7 @@ impl Controller {
         if let Some(m) = self.model.as_mut() {
             let actions = m.add_window(meta, &decision, &obs);
             if let Some(note) = m.last_pending().filter(|n| n.window.0 == id) {
-                tracing::info!(id, grade = note.grade.name(), points = note.points, parked = note.parked, adopted = ?note.adopted, "restore: back in its saved stage");
+                tracing::info!(id, grade = note.grade.name(), points = note.points, parked = note.parked, switched = note.switched, adopted = ?note.adopted, "restore: back in its saved stage");
             }
             self.execute_animated(ob, actions);
         }
@@ -3374,6 +3384,7 @@ impl Controller {
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
+        self.end_restore("a hotkey");
         self.flush_pending(ob);
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
@@ -3404,6 +3415,9 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
+        if !matches!(event, StripEvent::Unveil { .. }) {
+            self.end_restore("a card click");
+        }
         if let StripEvent::CardPressed { stage } = event {
             // Read the windows now, while the button is down (~100 ms before the release),
             // so the click's motion starts without waiting on AX. Not while a transition's
@@ -3651,6 +3665,9 @@ impl Controller {
                 self.quiet_checked = now;
                 self.give_up_pending(ob, now);
             }
+            if self.restore_until.is_some_and(|t| now >= t) {
+                self.end_restore("its five minutes are up");
+            }
             if self.locked {
                 // Nothing is inferred from what a locked screen lists.
             } else if self.space_pending {
@@ -3670,11 +3687,27 @@ impl Controller {
         }
     }
 
+    /// Closes the restore window (the first user action, or its time is up; see
+    /// [`crate::engine::restore`]): from now on a window that goes back to an inactive stage
+    /// brings that stage forward, and no Desktop becomes provisional.
+    fn end_restore(&mut self, why: &str) {
+        if self.restore_until.take().is_none() {
+            return;
+        }
+        if let Some(m) = self.model.as_mut()
+            && m.end_restore()
+        {
+            tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
+        }
+    }
+
     /// Gives up the pending windows of apps running and quiet for
     /// [`crate::engine::restore::QUIET`] (no new window): the windows were closed inside the
     /// app's own session. An app that is not running keeps them (until a later session); one
     /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet.
     fn give_up_pending(&mut self, ob: &mut Observer, now: Instant) {
+        // Apps that quit have no clock (a later launch starts one again).
+        self.quiet.prune(|b| !ob.pids_with_bundle(b).is_empty());
         let Some(m) = self.model.as_ref() else { return };
         let bundles = m.pending_bundles();
         if bundles.is_empty() {
@@ -3689,7 +3722,10 @@ impl Controller {
             if ob.pids_with_bundle(b).is_empty() {
                 self.quiet.stopped(b);
             } else {
-                self.quiet.running(b, now);
+                // The clock starts at the app's first window: one with none yet (still
+                // launching, or windowless) is never quiet.
+                let has_window = waiting.contains(b) || m.windows().any(|w| w.meta.bundle_id == *b);
+                self.quiet.running(b, has_window, now);
             }
         }
         let settled: Vec<String> =
@@ -3718,6 +3754,9 @@ impl Controller {
             cmd,
             Command::Switch(_) | Command::Send(..) | Command::New(_) | Command::Pin(_) | Command::Merge(_) | Command::Reveal
         );
+        if acts || matches!(cmd, Command::DebugDockClick { .. }) {
+            self.end_restore("a ctl command");
+        }
         if acts && let Some(why) = self.frozen_reason() {
             return json!({ "ok": false, "error": why });
         }
@@ -3927,6 +3966,7 @@ impl Controller {
             "registry": safety::registry_len(),
             "restore": {
                 "restoring": m.restoring(),
+                "after_restart": m.after_restart(),
                 "provisional": m.provisional_spaces().iter().map(|s| s.0).collect::<Vec<_>>(),
                 "pending": m.pending_count(),
                 "pending_unvisited": m.pending_unvisited(),

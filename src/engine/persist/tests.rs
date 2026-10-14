@@ -144,10 +144,12 @@ fn exact_title_matches_win_over_bundle_only() {
 }
 
 /// The design 8D: a match by app alone (low) goes to its saved stage only when that is the
-/// active stage or the app's only candidate; else the window goes by Apple's rule and the
-/// saved window stays pending (formerly: bundle-only matches filled stages in saved order).
+/// active stage, and the saved window stays pending; else the window goes by Apple's rule
+/// (formerly: bundle-only matches filled stages in saved order). M3 of the 8E review: the
+/// app's only candidate in an inactive stage is no exception (it would be parked on the app
+/// alone).
 #[test]
-fn bundle_only_matches_take_the_active_stage_or_the_only_candidate() {
+fn bundle_only_matches_take_only_the_active_stage() {
     let s = state(
         vec![
             (None, vec![saved("com.example.web", "Old tab", 0)]),
@@ -169,10 +171,11 @@ fn bundle_only_matches_take_the_active_stage_or_the_only_candidate() {
     let a = rematch(&s, &on_screen);
     assert_eq!(ids(&a.stages[0]), [1], "low, into the saved active stage");
     assert_eq!(a.stages[0].windows[0].grade, Grade::Low);
+    assert_eq!(a.stages[0].pending.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["Old tab"], "low: still awaited");
     assert_eq!(ids(&a.stages[1]), [2], "strong by title");
-    assert_eq!(a.unmatched, [WindowId(3)], "two candidates left for one window: Apple's rule");
+    assert_eq!(a.unmatched, [WindowId(3)], "nothing left in the active stage: Apple's rule");
     assert_eq!(a.stages[1].pending.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["Other"]);
-    // One window and one saved window of the app left: the only candidate, even inactive.
+    // One window and one saved window of the app left, in an inactive stage: Apple's rule.
     let relive = [live(2, "com.example.web", "Recipes"), live(3, "com.example.web", "Weather")];
     let s1 = state(
         vec![
@@ -182,8 +185,9 @@ fn bundle_only_matches_take_the_active_stage_or_the_only_candidate() {
         Some(0),
     );
     let a = rematch(&s1, &relive);
-    assert_eq!(ids(&a.stages[1]), [2, 3]);
-    assert!(a.unmatched.is_empty());
+    assert_eq!(ids(&a.stages[1]), [2]);
+    assert_eq!(a.unmatched, [WindowId(3)]);
+    assert_eq!(a.stages[1].pending.len(), 1, "Other still waits");
     assert_eq!(a.stages[0].pending.len(), 1, "the editor's window is pending");
 }
 

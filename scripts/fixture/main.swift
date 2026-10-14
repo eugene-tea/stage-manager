@@ -25,9 +25,13 @@
 //   --retitle M  | FIXTURE_RETITLE=M   retitle windows once shown, "Old=New;Old2=New2" (whole
 //                                      titles, e.g. "Fixture 1=Fixture 1 — Edited")
 //   --retitle-after-ms N | FIXTURE_RETITLE_AFTER_MS=N  how long after a window shows (default 0)
+//   --minimized M | FIXTURE_MINIMIZED=M  open these windows minimized, never shown first,
+//                                      "T 1;T 2" (whole titles: an app reopening a window
+//                                      that was minimized when it quit)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
+// SIGHUP un-minimizes the first minimized standard window (by title), as a Dock click would.
 // SIGWINCH stands in for "its Desktop is not shown": every visible standard window parked
 // in the screen's bottom-right corner is ordered out (the window server still lists it, off
 // screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
@@ -46,6 +50,7 @@ struct Options {
     var reverse = false
     var retitle: [String: String] = [:]
     var retitleAfterMs = 0
+    var minimized: Set<String> = []
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -77,6 +82,7 @@ struct Options {
         if env["FIXTURE_REVERSE"] == "1" { o.reverse = true }
         if let r = env["FIXTURE_RETITLE"] { o.retitle = parseRetitle(r) }
         if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
+        if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -91,6 +97,7 @@ struct Options {
             case "--reverse": o.reverse = true
             case "--retitle": if let r = args.next() { o.retitle = parseRetitle(r) }
             case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
+            case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -180,10 +187,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var opened = 0
 
-    /// Window number i + 1, shown, then retitled when `--retitle` names its title.
+    /// Window number i + 1, shown (or straight to the Dock when `--minimized` names it), then
+    /// retitled when `--retitle` names its title.
     func open(_ i: Int, area: NSRect) {
         let window = makeWindow(i, area: area)
-        show(window)
+        if options.minimized.contains(window.title) {
+            // Never ordered in first: it goes to the Dock as a window reopened minimized does.
+            window.miniaturize(nil)
+        } else {
+            show(window)
+        }
         guard let title = options.retitle[window.title] else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.retitleAfterMs)) { window.title = title }
     }
@@ -259,6 +272,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wins.sorted { $0.title < $1.title }.first?.miniaturize(nil)
     }
 
+    /// SIGHUP: un-minimize the first minimized standard window.
+    func unminimizeOne() {
+        let wins = NSApp.windows.filter { $0.isMiniaturized && !($0 is NSPanel) }
+        wins.sorted { $0.title < $1.title }.first?.deminiaturize(nil)
+    }
+
     var away: [(NSWindow, NSRect)] = []
 
     /// SIGWINCH: windows parked in the bottom-right corner go "to another Desktop".
@@ -307,6 +326,10 @@ signal(SIGUSR2, SIG_IGN)
 let minimize = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
 minimize.setEventHandler { delegate.minimizeOne() }
 minimize.resume()
+signal(SIGHUP, SIG_IGN)
+let unminimize = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
+unminimize.setEventHandler { delegate.unminimizeOne() }
+unminimize.resume()
 signal(SIGWINCH, SIG_IGN)
 let sendAway = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
 sendAway.setEventHandler { delegate.sendParkedAway() }

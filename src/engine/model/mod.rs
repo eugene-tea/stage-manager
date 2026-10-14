@@ -302,9 +302,13 @@ pub struct Model {
     /// The saved strip order per Space, pending stages included, while any is pending: a
     /// stage that comes back takes its saved place.
     pub(crate) slot_order: HashMap<SpaceId, Vec<StageId>>,
-    /// Spaces made from an empty screen in restore mode and not adopted yet: the first window
-    /// matching a saved Desktop's with confidence makes the Space that Desktop.
+    /// Spaces made from an empty screen while the restore window was open, not adopted yet:
+    /// a window matching a saved Desktop's with confidence makes the Space that Desktop (one
+    /// for the Desktop shown when saved, two for another).
     pub(crate) provisional: BTreeSet<SpaceId>,
+    /// Per provisional Space, the windows that matched a saved Desktop not shown when saved
+    /// (its id, the window): a second one adopts it.
+    pub(crate) adopt_votes: HashMap<SpaceId, Vec<(u64, WindowId)>>,
     /// Windows placed from a saved entry: how sure the match was and their saved place.
     pub(crate) restored: HashMap<WindowId, Restored>,
     /// The restore's session and mode.
@@ -347,6 +351,7 @@ impl Model {
             pending: HashMap::new(),
             slot_order: HashMap::new(),
             provisional: BTreeSet::new(),
+            adopt_votes: HashMap::new(),
             restored: HashMap::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,

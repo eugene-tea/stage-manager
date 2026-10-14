@@ -4,20 +4,28 @@
 //! - A window appearing later is scored against the pending windows of its Space
 //!   ([`Model::place_from_pending`], called by [`Model::add_window`] for windows the rules
 //!   leave to Apple's default). A strong or medium match goes to its saved stage at its saved
-//!   frame, parked when the stage is inactive, its card in its saved strip place; a low one
-//!   only into the active stage, with its live frame. Anything else is Apple's rule.
-//! - An arrival on a Space with pending stages matches its new windows the same way first.
-//! - **Adoption**: on a provisional Space (made from an empty screen in restore mode), a
-//!   window matching a saved Desktop's window with confidence makes the Space that Desktop:
-//!   its saved id, its stages rebuilt pending with their names, recency and strip order, its
-//!   active stage (unless the Space's own active stage already shows windows).
+//!   frame; when that stage is inactive the window is parked there quietly while the restore
+//!   window is open, and after it the stage comes forward (the window shows because of the
+//!   user, as Apple's rule switches to an app's stage). A low one goes only into the active
+//!   stage, with its live frame, and leaves the saved window waiting. Anything else is
+//!   Apple's rule. A window a rule places takes its confident match out of the waiting ones.
+//! - An arrival on a Space with pending stages matches its new windows the same way first
+//!   (parked, never switched to).
+//! - **Adoption**: on a provisional Space (made from an empty screen while the restore window
+//!   was open), a window matching a saved Desktop's window with confidence makes the Space
+//!   that Desktop: its saved id, its stages rebuilt pending with their names, recency and
+//!   strip order, its active stage (unless the Space's own active stage already shows
+//!   windows). The saved Desktop shown when saved takes one such window; another takes two
+//!   (one window of a Desktop is weak evidence: macOS may reopen it anywhere), and the
+//!   windows that voted go back to their saved stages then.
 //! - A Space left with only pending stages goes back to the saved Desktops waiting for a
 //!   visit ([`Model::pending_to_leftover`]); nothing pending is lost.
 
 use std::collections::HashSet;
 
-use super::{Action, DisplayId, Home, Model, SpaceId, StageId, WindowId, WindowMeta, WindowState};
-use crate::engine::persist::{LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch};
+use super::{Action, DisplayId, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
+use crate::engine::park::clamp_to_visible;
+use crate::engine::persist::{LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
 use crate::engine::restore::{Restore, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
@@ -42,6 +50,8 @@ pub struct PendingNote {
     pub points: u32,
     /// It went into an inactive stage (parked).
     pub parked: bool,
+    /// Its inactive stage came forward (after the restore window).
+    pub switched: bool,
     /// The saved Desktop the window's Space became (adoption), if it did.
     pub adopted: Option<u64>,
 }
@@ -52,9 +62,23 @@ impl Model {
         self.restore = restore;
     }
 
-    /// True in restore mode (`state.json` came from another window server session).
+    /// True while the restore window is open ([`crate::engine::restore`]).
     pub fn restoring(&self) -> bool {
         self.restore.restoring
+    }
+
+    /// True when `state.json` came from another window server session (a restart or a new
+    /// login since).
+    pub fn after_restart(&self) -> bool {
+        self.restore.new_session
+    }
+
+    /// Closes the restore window for good (the first user action, or its time is up): no
+    /// Desktop becomes provisional any more, an empty saved active stage no longer holds its
+    /// place, and a window matched to an inactive stage brings it forward. Returns true when
+    /// it was open.
+    pub fn end_restore(&mut self) -> bool {
+        std::mem::replace(&mut self.restore.restoring, false)
     }
 
     /// True when stage `stage` holds pending windows.
@@ -153,9 +177,11 @@ impl Model {
 
     /// A standard window appeared on `space` (the rules leave it to Apple's default): placed
     /// from a pending entry when it matches one well enough (see the module docs), adopting a
-    /// saved Desktop first when `space` is provisional. Actions go to `actions` (adoption's
-    /// too, when the window itself then goes by Apple's rule). True when the window was placed.
-    pub(crate) fn place_from_pending(&mut self, meta: &WindowMeta, space: SpaceId, actions: &mut Vec<Action>) -> bool {
+    /// saved Desktop first when `space` is provisional. `obs`: the screen now (the window
+    /// focused there keeps the stage's key; after the restore window a match into an inactive
+    /// stage switches to it). Actions go to `actions` (adoption's too, when the window itself
+    /// then goes by Apple's rule). True when the window was placed.
+    pub(crate) fn place_from_pending(&mut self, meta: &WindowMeta, space: SpaceId, obs: &Observation, actions: &mut Vec<Action>) -> bool {
         let mut space = space;
         let mut adopted = None;
         if self.provisional.contains(&space)
@@ -164,19 +190,62 @@ impl Model {
             && let Some(i) = self.adoption_for(meta)
         {
             let id = self.leftovers[i].id;
-            actions.extend(self.adopt(space, i));
-            space = SpaceId(id);
-            adopted = Some(id);
+            let votes = self.adopt_votes.entry(space).or_default();
+            if !votes.contains(&(id, meta.id)) {
+                votes.push((id, meta.id));
+            }
+            let n = votes.iter().filter(|v| v.0 == id).count();
+            if self.leftovers[i].current || n >= 2 {
+                let voters: Vec<WindowId> = votes.iter().filter(|v| v.0 == id && v.1 != meta.id).map(|v| v.1).collect();
+                self.adopt_votes.remove(&space);
+                actions.extend(self.adopt(space, i, &voters));
+                space = SpaceId(id);
+                adopted = Some(id);
+            } else {
+                tracing::debug!(id = meta.id.0, desktop = id, "restore: a window of a saved Desktop not shown when saved; a second one is needed to take it");
+            }
         }
         if !self.space_has_pending(space) {
             return false;
         }
         let shown = self.active_stage_in(space).map(|s| s.0);
-        let placed = self.match_pending(space, std::slice::from_ref(meta), LowRule { shown, only_candidate: false }, actions);
+        let placed = self.match_pending(space, std::slice::from_ref(meta), LowRule { shown }, Some(obs), actions);
         if let Some(note) = self.last_pending.as_mut().filter(|n| n.window == meta.id) {
             note.adopted = adopted;
         }
         !placed.is_empty()
+    }
+
+    /// A standard window a rule placed (not Apple's default) on `space`: the saved window it
+    /// matches with confidence is no longer awaited (the rule decided where it goes; the entry
+    /// would otherwise wait for, and maybe catch, another window).
+    pub(crate) fn forget_pending_match(&mut self, meta: &WindowMeta, space: SpaceId) {
+        if meta.role != WindowRole::Standard || !self.space_has_pending(space) {
+            return;
+        }
+        let mut entries: Vec<(StageId, usize)> = Vec::new();
+        let mut keys: Vec<Saved> = Vec::new();
+        for s in self.stages.iter().filter(|s| s.space == space) {
+            for (k, w) in self.pending_of(s.id).iter().enumerate() {
+                keys.push(w.scorer_key(s.id.0));
+                entries.push((s.id, k));
+            }
+        }
+        let parked = self.display(meta.display).parks(meta.frame);
+        let pick = assign(&keys, &[live_key(meta, parked)], LowRule::default()).into_iter().next().flatten();
+        let Some((stage, k)) = pick.filter(|p| p.grade.confident()).map(|p| entries[p.saved]) else {
+            return;
+        };
+        if let Some(list) = self.pending.get_mut(&stage)
+            && k < list.len()
+        {
+            list.remove(k);
+            tracing::debug!(id = meta.id.0, "restore: a rule placed a window that was awaited; its saved entry is dropped");
+        }
+        self.pending.retain(|_, l| !l.is_empty());
+        let mut ignored = Vec::new();
+        self.drop_if_dead(stage, &mut ignored);
+        self.tidy_slot_order();
     }
 
     /// The saved Desktop (index into the waiting ones) whose window `meta` matches with
@@ -197,31 +266,63 @@ impl Model {
 
     /// Makes provisional Space `space` the saved Desktop `self.leftovers[index]`: its id, its
     /// stages rebuilt pending (names, recency, strip order) and its active stage unless the
-    /// Space's own active stage shows windows already.
-    fn adopt(&mut self, space: SpaceId, index: usize) -> Vec<Action> {
+    /// Space's own active stage shows windows already. `voters`: windows that matched it
+    /// earlier and went by Apple's rule; they go back to their saved stages now (a window
+    /// with children of its own stays where it is).
+    fn adopt(&mut self, space: SpaceId, index: usize, voters: &[WindowId]) -> Vec<Action> {
         let saved = self.leftovers.remove(index);
         let target = SpaceId(saved.id);
         self.provisional.remove(&space);
         self.relabel_space(space, target);
-        let mut assignment = rematch(&saved, &[]);
+        let mut actions = Vec::new();
+        let mut moved: Vec<WindowMeta> = Vec::new();
+        for &v in voters {
+            let Some(w) = self.windows.get(&v) else { continue };
+            let Home::Stage(from) = w.home else { continue };
+            if w.space != target || w.meta.role != WindowRole::Standard || self.restored.contains_key(&v) || !self.children_of(v).is_empty() {
+                continue;
+            }
+            if w.parked {
+                // Shown again first, so its frame is a real one wherever it goes now (parked
+                // again below when its saved stage is inactive).
+                self.restore_window(v, &mut actions);
+                let shown = self.windows.get(&v).map(|w| clamp_to_visible(w.restore, self.display(w.meta.display).visible));
+                if let (Some(frame), Some(w)) = (shown, self.windows.get_mut(&v)) {
+                    w.meta.frame = frame;
+                }
+            }
+            let Some(w) = self.windows.remove(&v) else { continue };
+            moved.push(w.meta);
+            if let Some(st) = self.stage_mut(from) {
+                st.windows.retain(|&x| x != v);
+                if st.key == Some(v) {
+                    st.key = st.windows.first().copied();
+                }
+            }
+            self.drop_if_dead(from, &mut actions);
+        }
+        let mut assignment = rematch_on(&saved, &moved, |m| self.display(m.display).parks(m.frame));
         let showing = self.active_stage_in(target).is_some_and(|a| self.stage(a).is_some_and(|s| !s.windows.is_empty()));
         if showing {
             assignment.active_index = None;
         }
-        let mut actions = self.apply_launch(&[], &assignment, false, &LaunchHints::default());
+        actions.extend(self.apply_launch(&moved, &assignment, false, &LaunchHints::default()));
         actions.retain(|a| *a != Action::StateChanged);
-        tracing::info!(desktop = saved.id, stages = saved.stages.len(), "restore: a Desktop made from an empty screen is the saved Desktop its first window belongs to");
+        tracing::info!(desktop = saved.id, stages = saved.stages.len(), voters = moved.len(), "restore: a Desktop made from an empty screen is the saved Desktop its windows belong to");
         actions
     }
 
     /// Matches `metas` (standard windows new on `space`) against the pending windows of
-    /// `space`'s stages and places the matched ones ([`Model::insert_from_pending`]).
-    /// Returns the windows placed.
+    /// `space`'s stages and places the matched ones ([`Model::insert_from_pending`]): a
+    /// confident match takes its saved entry, a low one (into the stage shown only) leaves it
+    /// waiting for the window itself. `obs`: one window appearing ([`Model::add_window`]),
+    /// none at an arrival. Returns the windows placed.
     pub(crate) fn match_pending(
         &mut self,
         space: SpaceId,
         metas: &[WindowMeta],
         low: LowRule,
+        obs: Option<&Observation>,
         actions: &mut Vec<Action>,
     ) -> HashSet<WindowId> {
         let mut entries: Vec<(StageId, usize)> = Vec::new();
@@ -241,14 +342,16 @@ impl Model {
             .zip(&picks)
             .filter_map(|((i, _), p)| p.map(|p| (i, entries[p.saved].0, entries[p.saved].1, p.grade, p.points)))
             .collect();
-        // Take the entries out (highest index first per stage, so the others stay valid).
+        // Take the confident entries out (highest index first per stage, so the others stay
+        // valid); a low match leaves its entry waiting.
         chosen.sort_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)));
         let mut taken: Vec<(usize, StageId, SavedWindow, Grade, u32)> = Vec::new();
         for (i, stage, k, grade, points) in chosen {
             if let Some(list) = self.pending.get_mut(&stage)
                 && k < list.len()
             {
-                taken.push((i, stage, list.remove(k), grade, points));
+                let entry = if grade.confident() { list.remove(k) } else { list[k].clone() };
+                taken.push((i, stage, entry, grade, points));
             }
         }
         self.pending.retain(|_, l| !l.is_empty());
@@ -256,16 +359,18 @@ impl Model {
         let mut placed = HashSet::new();
         for (i, stage, entry, grade, points) in taken {
             let meta = &metas[i];
-            let parked = self.insert_from_pending(meta, space, stage, &entry, grade, actions);
+            let went = self.insert_from_pending(meta, space, stage, &entry, grade, obs, actions);
+            let (parked, switched) = (went == Placed::Parked, went == Placed::Switched);
             tracing::debug!(
                 id = meta.id.0,
                 bundle = %meta.bundle_id,
                 grade = grade.name(),
                 points,
                 parked,
+                switched,
                 "restore: a window back in its saved stage"
             );
-            self.last_pending = Some(PendingNote { window: meta.id, grade, points, parked, adopted: None });
+            self.last_pending = Some(PendingNote { window: meta.id, grade, points, parked, switched, adopted: None });
             placed.insert(meta.id);
         }
         self.tidy_slot_order();
@@ -275,9 +380,12 @@ impl Model {
     /// Puts window `meta` into `stage` of `space` from its saved entry: a strong or medium
     /// match at its saved frame with its flags (pinned, pre-fit frame), a low one at its live
     /// frame (a live frame in a park zone always takes the saved one); in the saved place
-    /// among the stage's restored windows. A window of an inactive stage is parked and the
-    /// stage's card takes its saved strip place; one shown is moved only when its frame
-    /// differs. Returns true when it was parked.
+    /// among the stage's restored windows, the stage's key when it was saved as the key (not
+    /// over a window of the stage the user has focused, `obs`). A window of an inactive stage
+    /// is parked and the stage's card takes its saved strip place, or, for a window appearing
+    /// after the restore window (`obs` given), the stage comes forward with it as its key;
+    /// one shown is moved only when its frame differs.
+    #[allow(clippy::too_many_arguments)]
     fn insert_from_pending(
         &mut self,
         meta: &WindowMeta,
@@ -285,8 +393,9 @@ impl Model {
         stage: StageId,
         entry: &SavedWindow,
         grade: Grade,
+        obs: Option<&Observation>,
         actions: &mut Vec<Action>,
-    ) -> bool {
+    ) -> Placed {
         let display: DisplayId = self.known_display(meta.display);
         let live_parked = self.display(display).parks(meta.frame);
         let sure = grade.confident();
@@ -300,6 +409,11 @@ impl Model {
         let live = meta.frame;
         self.windows.insert(id, WindowState { meta, home, restore, parked: false, original, space, sticky: false });
         self.restored.insert(id, Restored { grade, z: entry.z });
+        let shown = match home {
+            Home::Pinned => true,
+            Home::Stage(s) => self.is_active(s),
+        };
+        let follow = obs.filter(|_| !shown && sure && !self.restore.restoring);
         if let Home::Stage(s) = home {
             let at = self.stage(s).map_or(0, |st| {
                 st.windows
@@ -307,28 +421,32 @@ impl Model {
                     .position(|w| self.restored.get(w).is_some_and(|r| r.z > entry.z))
                     .unwrap_or(st.windows.len())
             });
+            // The user's own focus on another window of the stage keeps the key there.
+            let focused_other = obs.and_then(|o| o.focused).is_some_and(|f| f != id && self.stage(s).is_some_and(|st| st.windows.contains(&f)));
             if let Some(st) = self.stage_mut(s) {
                 st.windows.insert(at, id);
-                if entry.key || st.key.is_none() {
+                if follow.is_some() || st.key.is_none() || (entry.key && !focused_other) {
                     st.key = Some(id);
                 }
             }
         }
         self.fit_window(id);
-        let shown = match home {
-            Home::Pinned => true,
-            Home::Stage(s) => self.is_active(s),
-        };
         if shown {
             let restore = self.windows[&id].restore;
             if !same_frame(restore, live) {
                 actions.push(Action::SetFrame { id, frame: restore });
             }
-            false
+            Placed::Shown
+        } else if let Some(obs) = follow {
+            // After the restore window the window shows because of the user (an activation,
+            // an un-minimize, a Dock click): its stage comes forward, as Apple's rule brings
+            // an app's stage forward (`NativeTarget::Join`).
+            actions.extend(self.switch_to(stage, obs));
+            Placed::Switched
         } else {
             self.park_window(id, actions);
             self.strip_enter_restored(space, stage);
-            true
+            Placed::Parked
         }
     }
 
@@ -376,7 +494,19 @@ impl Model {
         }
         self.slot_order.remove(&space);
         self.provisional.remove(&space);
+        self.adopt_votes.remove(&space);
     }
+}
+
+/// Where [`Model::insert_from_pending`] put a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    /// In a stage shown (or pinned).
+    Shown,
+    /// Parked in its inactive stage.
+    Parked,
+    /// Its inactive stage came forward with it.
+    Switched,
 }
 
 #[cfg(test)]

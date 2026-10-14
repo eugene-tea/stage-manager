@@ -6,7 +6,7 @@
 //! window's own app), its exact title, the frame its app reopened it at, its title's
 //! fingerprint, its app alone; each live window used at most once. Only a strong or medium
 //! match puts a window into an inactive (parked) stage; a low one joins its saved stage only
-//! when that is the active stage or it is the app's only candidate. Live windows that match
+//! when that is the active stage, and leaves the saved window pending. Live windows that match
 //! nothing are grouped the way Apple's Stage Manager does when it is turned on: one stage
 //! per app (see [`Model::apply_launch`]). Saved windows not on screen stay **pending** in
 //! their stage ([`crate::engine::restore`]). A Space is recognized by its windows: the
@@ -237,14 +237,15 @@ impl StateFile {
     /// A load in another window server session than the file's (a restart, a new login):
     /// every saved window becomes pending, since the file's session; one already pending
     /// since an earlier session than the file's was pending through that whole session (its
-    /// app never brought it back) and is given up; a saved Space left without a standard
-    /// window is dropped. Returns how many windows were given up.
+    /// app never brought it back) and is given up, as is one pending since a session that
+    /// could not be read (`""`: at least that whole session went by); a saved Space left
+    /// without a standard window is dropped. Returns how many windows were given up.
     pub fn start_new_session(&mut self) -> usize {
         let since = self.session.clone().unwrap_or_default();
         let mut expired = 0;
         for stage in self.spaces.iter_mut().flat_map(|s| s.stages.iter_mut()) {
             let before = stage.windows.len();
-            stage.windows.retain(|w| w.pending.as_ref().is_none_or(|p| p.since == since));
+            stage.windows.retain(|w| w.pending.as_ref().is_none_or(|p| !p.since.is_empty() && p.since == since));
             expired += before - stage.windows.len();
             for w in &mut stage.windows {
                 w.pending.get_or_insert_with(|| Pending { since: since.clone() });
@@ -472,10 +473,10 @@ pub fn rematch(state: &SavedSpace, live: &[WindowMeta]) -> Assignment {
 
 /// Places live standard windows into one saved Space's stages with the scored matcher
 /// ([`assign`]): strong and medium matches into their saved stages; a low one only into the
-/// saved active stage or as its app's only candidate (at an arrival, Apple's rule for the
-/// rest parks too); each live window used at most once. Saved standard windows left over
-/// are pending in their stages. Child windows on either side are left out; they follow their
-/// parents. `parked`: a live window's frame is in a park zone (its frame says nothing).
+/// saved active stage (never parked), its saved window still pending; each live window used
+/// at most once. Saved standard windows left over are pending in their stages. Child windows
+/// on either side are left out; they follow their parents. `parked`: a live window's frame
+/// is in a park zone (its frame says nothing).
 pub fn rematch_on(state: &SavedSpace, live: &[WindowMeta], parked: impl Fn(&WindowMeta) -> bool) -> Assignment {
     let standard: Vec<&WindowMeta> = live
         .iter()
@@ -493,10 +494,7 @@ pub fn rematch_on(state: &SavedSpace, live: &[WindowMeta], parked: impl Fn(&Wind
     }
     let keys: Vec<Saved> = saved.iter().map(|(i, w)| w.scorer_key(*i as u64)).collect();
     let lives: Vec<Live> = standard.iter().map(|m| live_key(m, parked(m))).collect();
-    let low = LowRule {
-        shown: state.active_index.filter(|&i| i < state.stages.len()).map(|i| i as u64),
-        only_candidate: true,
-    };
+    let low = LowRule { shown: state.active_index.filter(|&i| i < state.stages.len()).map(|i| i as u64) };
     let picks = assign(&keys, &lives, low);
     // Saved index -> (live window, grade).
     let mut matched: Vec<Option<(WindowId, Grade)>> = vec![None; saved.len()];
@@ -528,6 +526,10 @@ pub fn rematch_on(state: &SavedSpace, live: &[WindowMeta], parked: impl Fn(&Wind
                     grade: *grade,
                     z: sw.z,
                 });
+                if !sure {
+                    // Not sure it is that window: the saved one is still awaited.
+                    stages[*stage].pending.push((*sw).clone());
+                }
             }
             None => stages[*stage].pending.push((*sw).clone()),
         }
@@ -833,7 +835,10 @@ impl Model {
             // Stages still pending have no card yet; when one comes, it takes its saved place.
             self.slot_order.insert(space, slots.clone());
         }
-        if !slots.is_empty() || !self.slots.contains_key(&space) {
+        // Slots of pending stages only (an adoption) never replace the strip shown: no card
+        // of theirs exists yet, and the saved order above places them as they come.
+        let cards = slots.iter().any(|&s| self.stage(s).is_some_and(|st| !st.windows.is_empty()));
+        if (!slots.is_empty() && cards) || !self.slots.contains_key(&space) {
             self.slots.insert(space, slots);
         }
         self.normalize_slots();
@@ -919,7 +924,7 @@ impl Model {
         let active = self.ensure_active(space);
         // A saved active stage whose windows are still to come keeps its place in a restore
         // (it is the stage the user left in front); else an empty one gives way.
-        let waits = self.restore.restoring && self.has_pending(active);
+        let waits = self.restore.after_restart_window() && self.has_pending(active);
         if self.stage(active).is_some_and(|s| s.windows.is_empty())
             && !waits
             && let Some(&first) = fresh.first()

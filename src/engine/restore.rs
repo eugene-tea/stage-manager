@@ -6,24 +6,36 @@
 //! (`state.json` writes it with `pending: {since}`), and the stage stays alive with no card,
 //! so a window its app opens later goes back there ([`crate::engine::model::Model::add_window`]).
 //! A pending window is given up on when:
-//! - its app has been running and opened no window for [`QUIET`] (the window was closed inside
-//!   the app's own session, or was an unsaved document): the platform asks [`AppQuiet`];
+//! - its app has shown a window and then opened none for [`QUIET`] (the window was closed
+//!   inside the app's own session, or was an unsaved document): the platform asks
+//!   [`AppQuiet`]; an app with no window yet is never quiet;
 //! - it was pending through a whole window server session already (its app never brought it
 //!   back): [`crate::engine::persist::StateFile::start_new_session`] drops it at the next one.
 //!
-//! **Restore mode** is a launch in another window server session than the file's (a restart
-//! or a new login): a Desktop the model makes from an empty screen is then *provisional*, and
-//! the first window that matches a saved Desktop's window with confidence makes it that
-//! Desktop ([`crate::engine::model::Model::add_window`], adoption).
+//! **The restore window** ([`Restore::restoring`]) opens at a launch that finds saved stages
+//! and closes at the first user action (a click, a key press, a card click, a Dock click, a
+//! hotkey, a ctl command that acts) or [`WINDOW`] after the launch, whichever comes first
+//! ([`crate::engine::model::Model::end_restore`]). While it is open a window going back to an
+//! inactive stage is parked there quietly (its app is reopening it, or it is listed late),
+//! and after a restart ([`Restore::new_session`]) a Desktop the model makes from an empty
+//! screen is *provisional* (windows that match a saved Desktop's with confidence make it that
+//! Desktop, adoption) and the saved active stage keeps its place while its windows are still
+//! to come. After it, no Desktop becomes provisional, and a window matched to an inactive
+//! stage brings that stage forward, as Apple's rule does for an app whose windows are in
+//! another stage (the window shows because of the user: an activation, an un-minimize, a
+//! Dock click). Pending windows are matched all session either way.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::model::StageId;
 
-/// An app running this long without a new window has settled: its pending windows are
-/// given up on.
+/// An app this long without a new window (after its first) has settled: its pending
+/// windows are given up on.
 pub const QUIET: Duration = Duration::from_secs(60);
+
+/// The restore window's longest life after the launch (the design's cap).
+pub const WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// What the model knows of the restore.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,21 +43,48 @@ pub struct Restore {
     /// The window server session now, stamped on windows that become pending
     /// (`pending.since`); empty when unknown.
     pub session: String,
-    /// Restore mode: `state.json` came from another session.
+    /// The restore window is open (see the module docs): set at a launch that finds
+    /// `state.json`, cleared for good at its end.
     pub restoring: bool,
+    /// `state.json` came from another window server session (its window ids were dropped):
+    /// saved Desktops are recognized at an arrival by confident matches (title, frame,
+    /// fingerprint), all session.
+    pub new_session: bool,
 }
 
-/// When each app with pending windows was last busy: first seen running, or opened a
-/// window. Pure: the platform feeds it times.
+impl Restore {
+    /// A launch in another window server session than the file's, now `session`.
+    pub fn after_restart(session: &str) -> Self {
+        Self { session: session.to_string(), restoring: true, new_session: true }
+    }
+
+    /// A launch in the file's own session (or one that cannot be told apart), now `session`.
+    pub fn same_session(session: &str) -> Self {
+        Self { session: session.to_string(), restoring: true, new_session: false }
+    }
+
+    /// True while a Desktop made from an empty screen is provisional and an empty saved
+    /// active stage holds its place: the restore window after a restart.
+    pub fn after_restart_window(&self) -> bool {
+        self.restoring && self.new_session
+    }
+}
+
+/// When each app was last busy: its last new window, or when it was first seen running
+/// with a window. An app with no window yet has no clock (never settled). Pure: the
+/// platform feeds it times.
 #[derive(Debug, Clone, Default)]
 pub struct AppQuiet {
     last: HashMap<String, Instant>,
 }
 
 impl AppQuiet {
-    /// App `bundle` is running at `now` (its clock starts the first time).
-    pub fn running(&mut self, bundle: &str, now: Instant) {
-        self.last.entry(bundle.to_string()).or_insert(now);
+    /// App `bundle` is running at `now`; `has_window`: it has a window already (one we
+    /// manage or one waiting to show). Its clock starts the first time it has one.
+    pub fn running(&mut self, bundle: &str, has_window: bool, now: Instant) {
+        if has_window {
+            self.last.entry(bundle.to_string()).or_insert(now);
+        }
     }
 
     /// App `bundle` opened a window at `now`.
@@ -56,6 +95,22 @@ impl AppQuiet {
     /// App `bundle` is not running: a later launch starts its clock again.
     pub fn stopped(&mut self, bundle: &str) {
         self.last.remove(bundle);
+    }
+
+    /// Forgets the apps `running` says quit (a clock for every app ever seen would grow all
+    /// session).
+    pub fn prune(&mut self, running: impl Fn(&str) -> bool) {
+        self.last.retain(|b, _| running(b));
+    }
+
+    /// How many apps have a clock.
+    pub fn len(&self) -> usize {
+        self.last.len()
+    }
+
+    /// True when no app has a clock.
+    pub fn is_empty(&self) -> bool {
+        self.last.is_empty()
     }
 
     /// The apps quiet for [`QUIET`] at `now`.
@@ -103,8 +158,11 @@ mod tests {
     fn an_app_settles_after_a_quiet_minute() {
         let t0 = Instant::now();
         let mut q = AppQuiet::default();
-        q.running("com.example.a", t0);
-        q.running("com.example.a", t0 + Duration::from_secs(30));
+        // M4: running with no window yet is no clock at all.
+        q.running("com.example.a", false, t0);
+        assert!(q.settled(t0 + Duration::from_secs(600)).is_empty(), "an app with no window yet is never settled");
+        q.running("com.example.a", true, t0);
+        q.running("com.example.a", true, t0 + Duration::from_secs(30));
         assert!(q.settled(t0 + Duration::from_secs(59)).is_empty());
         assert_eq!(q.settled(t0 + QUIET), ["com.example.a"], "running does not restart the clock");
         q.window("com.example.a", t0 + Duration::from_secs(50));
@@ -112,6 +170,23 @@ mod tests {
         assert_eq!(q.settled(t0 + Duration::from_secs(110)), ["com.example.a"]);
         q.stopped("com.example.a");
         assert!(q.settled(t0 + Duration::from_secs(500)).is_empty(), "an app that quit is not settled");
+        // The first window starts the clock of an app seen running without one.
+        q.running("com.example.b", false, t0);
+        q.window("com.example.b", t0 + Duration::from_secs(200));
+        assert!(q.settled(t0 + Duration::from_secs(259)).is_empty());
+        assert_eq!(q.settled(t0 + Duration::from_secs(260)), ["com.example.b"]);
+    }
+
+    #[test]
+    fn apps_that_quit_are_forgotten() {
+        let t0 = Instant::now();
+        let mut q = AppQuiet::default();
+        for b in ["com.example.a", "com.example.b", "com.example.c"] {
+            q.window(b, t0);
+        }
+        q.prune(|b| b == "com.example.b");
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.settled(t0 + QUIET), ["com.example.b"]);
     }
 
     #[test]

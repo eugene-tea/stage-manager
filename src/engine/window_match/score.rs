@@ -5,16 +5,22 @@
 //!
 //! Signals, added up ([`points`]): the same app (required), the same window id (only ever
 //! given within one window server session), the exact title, the frame the app reopened the
-//! window at, the title's fingerprint ([`super::fingerprint`]), the size alone. Grades:
-//! [`Grade::Strong`] from [`STRONG`] points, [`Grade::Medium`] from [`MEDIUM`], else
-//! [`Grade::Low`] (the app alone, maybe its size).
+//! window at, the title's fingerprint ([`super::fingerprint`], [`super::same_fingerprint`]),
+//! the size alone. Grades: [`Grade::Strong`] from [`STRONG`] points, [`Grade::Medium`] from
+//! [`MEDIUM`], else [`Grade::Low`] (the app alone, maybe its size).
+//!
+//! **The frame never outweighs two different names.** When both titles have a fingerprint
+//! and they differ, the frame counts only as the size: an app opens a new window at its last
+//! window's frame (a browser's "Start Page" where the saved page was, Finder's ⌘N where
+//! "Downloads" was), and that window is not the saved one.
 //!
 //! **A window is parked into an inactive stage only on a strong or medium match** (the
-//! callers' rule); a low one goes to its saved stage only when that stage is shown, or, at an
-//! arrival, when it is the only candidate. A pick whose runner-up of another stage scores
-//! within [`AMBIGUOUS_WITHIN`] points is ambiguous and counts as low, unless both carry the
-//! frame signal and the pick's frame is the nearer one.
+//! callers' rule); a low one goes only to the stage shown ([`LowRule`]), never parked, and
+//! leaves the saved window waiting (the callers keep its entry). A pick whose runner-up of
+//! another stage scores within [`AMBIGUOUS_WITHIN`] points is ambiguous and counts as low,
+//! unless both carry the frame signal and the pick's frame is the nearer one.
 
+use super::fingerprint::same_fingerprint;
 use crate::engine::geometry::Rect;
 
 /// Points per signal.
@@ -27,9 +33,10 @@ pub mod points {
     pub const TITLE: u32 = 60;
     /// The live frame is the saved one (within [`super::FRAME_TOLERANCE`]).
     pub const FRAME: u32 = 50;
-    /// The same non-empty fingerprint (when the titles differ).
+    /// The same fingerprint (when the titles differ; [`super::same_fingerprint`]).
     pub const FINGERPRINT: u32 = 35;
-    /// The same size only (when the frames differ).
+    /// The same size only (when the frames differ, or the frame is the same but the names
+    /// are not).
     pub const SIZE: u32 = 15;
 }
 
@@ -136,14 +143,12 @@ pub struct Pick {
     pub points: u32,
 }
 
-/// Which low matches the caller takes (low never parks: see the module docs).
+/// Which low matches the caller takes: only into the group shown now (the active stage),
+/// so a low match never parks a window (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LowRule {
-    /// The group shown now: a low match into it is taken.
+    /// The group shown now: a low match into it is taken; `None` takes none.
     pub shown: Option<u64>,
-    /// A low match is also taken when its app has exactly one saved and one live window left
-    /// once the confident matches are made (an arrival: Apple's rule parks there too).
-    pub only_candidate: bool,
 }
 
 /// The score of `saved` for `live`; `None` for another app.
@@ -155,16 +160,21 @@ pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
     if saved.id == Some(live.id) {
         points += points::ID;
     }
-    if !saved.title.is_empty() && saved.title == live.title {
+    let same_title = !saved.title.is_empty() && saved.title == live.title;
+    let same_fp = !same_title && same_fingerprint(&saved.fp, &live.fp);
+    if same_title {
         points += points::TITLE;
-    } else if !saved.fp.is_empty() && saved.fp == live.fp {
+    } else if same_fp {
         points += points::FINGERPRINT;
     }
+    // Two different names: the frame says only that the app opened a window where the
+    // saved one was.
+    let named_apart = !same_title && !same_fp && !saved.fp.is_empty() && !live.fp.is_empty();
     let frames = || saved.frames.iter().flatten().filter(|f| !f.is_degenerate());
     let near = |a: f64, b: f64| (a - b).abs() <= FRAME_TOLERANCE;
     let usable = live.frame_usable && !live.frame.is_degenerate();
     let l = live.frame;
-    let frame = usable && frames().any(|f| near(f.x, l.x) && near(f.y, l.y) && near(f.w, l.w) && near(f.h, l.h));
+    let frame = usable && !named_apart && frames().any(|f| near(f.x, l.x) && near(f.y, l.y) && near(f.w, l.w) && near(f.h, l.h));
     if frame {
         points += points::FRAME;
     } else if usable && frames().any(|f| near(f.w, l.w) && near(f.h, l.h)) {
@@ -182,7 +192,8 @@ pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
 
 /// For each live window, its saved window, each used once: confident picks first, greedily
 /// by descending score (ties: the nearer frame, then saved order, then live order), each
-/// tested for ambiguity; then the low picks `low` allows. See the module docs.
+/// tested for ambiguity; then the low picks `low` allows (into the group shown). See the
+/// module docs.
 pub fn assign(saved: &[Saved], live: &[Live], low: LowRule) -> Vec<Option<Pick>> {
     let mut pairs: Vec<(usize, usize, Score)> = Vec::new();
     for (i, l) in live.iter().enumerate() {
@@ -220,24 +231,19 @@ pub fn assign(saved: &[Saved], live: &[Live], low: LowRule) -> Vec<Option<Pick>>
             out[i] = Some(Pick { saved: k, grade, points: sc.points });
         }
     }
-    // Low picks: into the group shown, or the only candidate left.
-    let left = |bundle: &str, used: &[bool], out: &[Option<Pick>]| {
-        let s = saved.iter().enumerate().filter(|(k, s)| !used[*k] && s.bundle == bundle).count();
-        let l = live.iter().enumerate().filter(|(i, l)| out[*i].is_none() && l.bundle == bundle).count();
-        (s, l)
-    };
-    let only: Vec<bool> = live.iter().map(|l| low.only_candidate && left(l.bundle, &used_saved, &out) == (1, 1)).collect();
-    for i in 0..live.len() {
-        if out[i].is_some() {
+    // Low picks: into the group shown only (never parked).
+    let Some(shown) = low.shown else { return out };
+    for (i, pick) in out.iter_mut().enumerate() {
+        if pick.is_some() {
             continue;
         }
         let best = pairs
             .iter()
-            .filter(|(i2, k, _)| *i2 == i && !used_saved[*k] && (only[i] || low.shown == Some(saved[*k].group)))
+            .filter(|(i2, k, _)| *i2 == i && !used_saved[*k] && saved[*k].group == shown)
             .min_by(|a, b| order(a, b));
         if let Some(&(_, k, sc)) = best {
             used_saved[k] = true;
-            out[i] = Some(Pick { saved: k, grade: Grade::Low, points: sc.points });
+            *pick = Some(Pick { saved: k, grade: Grade::Low, points: sc.points });
         }
     }
     out
@@ -270,7 +276,8 @@ mod tests {
         // The app alone, its size, its frame, the fingerprint, the title, the id.
         assert_eq!(pts(live(1, "com.example.a", "Other", OTHER)), Some(10));
         assert_eq!(pts(live(1, "com.example.a", "Other", Rect { x: 900.0, ..F1 })), Some(25));
-        assert_eq!(pts(live(1, "com.example.a", "Other", Rect { x: 101.5, ..F1 })), Some(60), "within 2 pt");
+        assert_eq!(pts(live(1, "com.example.a", "", Rect { x: 101.5, ..F1 })), Some(60), "within 2 pt, no title yet");
+        assert_eq!(pts(live(1, "com.example.a", "Other", F1)), Some(25), "another name at the frame: the size only");
         assert_eq!(pts(live(1, "com.example.a", "Plan — Edited", OTHER)), Some(45));
         assert_eq!(pts(live(1, "com.example.a", "Plan", OTHER)), Some(70));
         assert_eq!(pts(live(7, "com.example.a", "Other", OTHER)), Some(110));
@@ -312,7 +319,7 @@ mod tests {
         let l = [live(1, "com.example.a", "Untitled", F1)];
         assert_eq!(assign(&s, &l, LowRule::default()), vec![None], "ambiguous: Apple's rule");
         // Low into the stage shown is taken.
-        let shown = LowRule { shown: Some(2), only_candidate: false };
+        let shown = LowRule { shown: Some(2) };
         assert_eq!(assign(&s, &l, shown)[0].map(|p| (p.saved, p.grade)), Some((1, Grade::Low)));
         // In the same stage there is nothing to confuse.
         let same = [saved("com.example.a", "Untitled", OTHER, 1), saved("com.example.a", "Untitled", OTHER, 1)];
@@ -332,20 +339,43 @@ mod tests {
     }
 
     #[test]
-    fn low_matches_only_where_the_caller_allows() {
+    fn low_matches_only_into_the_stage_shown() {
         let s = [saved("com.example.a", "Old", OTHER, 1)];
         let l = [live(1, "com.example.a", "New", F1)];
         assert_eq!(assign(&s, &l, LowRule::default()), vec![None]);
-        let only = LowRule { shown: None, only_candidate: true };
-        assert_eq!(assign(&s, &l, only)[0].map(|p| p.grade), Some(Grade::Low), "the only candidate");
-        // Two saved windows of the app left: no longer the only candidate.
-        let s2 = [saved("com.example.a", "Old", OTHER, 1), saved("com.example.a", "Older", OTHER, 2)];
-        assert_eq!(assign(&s2, &l, only), vec![None]);
-        // The confident picks are made first, then the counts.
-        let s3 = [saved("com.example.a", "Kept", F2, 1), saved("com.example.a", "Old", OTHER, 2)];
+        // M3: the app's only saved window, in a stage not shown: never a low pick (it would
+        // be parked on the app alone).
+        assert_eq!(assign(&s, &l, LowRule { shown: Some(2) }), vec![None]);
+        assert_eq!(assign(&s, &l, LowRule { shown: Some(1) })[0].map(|p| p.grade), Some(Grade::Low), "the stage shown");
+        // The confident picks are made first, then the low ones.
+        let s3 = [saved("com.example.a", "Kept", F2, 2), saved("com.example.a", "Old", OTHER, 1)];
         let l3 = [live(1, "com.example.a", "New", F1), live(2, "com.example.a", "Kept", F2)];
-        let got = assign(&s3, &l3, only);
+        let got = assign(&s3, &l3, LowRule { shown: Some(1) });
         assert_eq!(got[1].map(|p| (p.saved, p.grade)), Some((0, Grade::Strong)));
         assert_eq!(got[0].map(|p| (p.saved, p.grade)), Some((1, Grade::Low)));
+    }
+
+    #[test]
+    fn the_frame_never_outweighs_two_different_names() {
+        // H2: a browser opens "Start Page" at the frame of the saved page's window.
+        let s = [saved("com.example.browser", "Example Domain — Example Browser", F1, 2)];
+        let start = live(1, "com.example.browser", "Start Page", F1);
+        let sc = score(&s[0], &start).expect("same app");
+        assert_eq!((sc.points, sc.frame), (25, false), "the frame counts as the size only");
+        assert_eq!(assign(&s, std::slice::from_ref(&start), LowRule { shown: Some(1) }), vec![None], "low: Apple's rule, the entry kept");
+        // Finder's ⌘N where the pending "Downloads" window was.
+        let s = [saved("com.example.finder", "Downloads", F2, 3)];
+        let recents = live(2, "com.example.finder", "Recents", F2);
+        assert_eq!(score(&s[0], &recents).map(|x| x.points), Some(25));
+        assert_eq!(assign(&s, &[recents], LowRule::default()), vec![None]);
+        // A title not known yet (empty) or the same name: the frame still counts in full.
+        assert_eq!(score(&s[0], &live(3, "com.example.finder", "", F2)).map(|x| x.points), Some(60));
+        assert_eq!(score(&s[0], &live(3, "com.example.finder", "Downloads — Edited", F2)).map(|x| x.points), Some(95));
+        // A counter of the same name ("Untitled" and "Untitled 2") is the same name.
+        let s = saved("com.example.editor", "Untitled", F1, 1);
+        assert_eq!(score(&s, &live(4, "com.example.editor", "Untitled 2", F1)).map(|x| x.points), Some(95));
+        // A number that names the window is another name.
+        let s = saved("com.example.books", "Invoice 101", F1, 1);
+        assert_eq!(score(&s, &live(5, "com.example.books", "Invoice 102", F1)).map(|x| x.points), Some(25));
     }
 }

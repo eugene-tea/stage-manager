@@ -32,8 +32,10 @@ impl Model {
     ///
     /// Before Apple's default (`native`), a saved window still pending on this Space is looked
     /// for ([`Model::place_from_pending`]): a confident match goes back to its saved stage and
-    /// frame, parked there when the stage is inactive, with no switch; a provisional Space
-    /// (restore mode) first becomes the saved Desktop the window belongs to.
+    /// frame; into an inactive stage it is parked there with no switch while the restore
+    /// window is open, and switched to after it, as `native` joins an app's stage; a
+    /// provisional Space first becomes the saved Desktop the window belongs to. A window
+    /// another rule places takes its confident match out of the pending ones.
     pub fn add_window(
         &mut self,
         meta: WindowMeta,
@@ -88,10 +90,14 @@ impl Model {
             return actions;
         }
 
-        if decision.action == RuleAction::Native && self.place_from_pending(&meta, space, &mut actions) {
-            self.normalize_slots();
-            actions.push(Action::StateChanged);
-            return actions;
+        if decision.action == RuleAction::Native {
+            if self.place_from_pending(&meta, space, obs, &mut actions) {
+                self.normalize_slots();
+                actions.push(Action::StateChanged);
+                return actions;
+            }
+        } else {
+            self.forget_pending_match(&meta, space);
         }
         // Adoption may have renamed the Space.
         let space = self.current_space(display);
