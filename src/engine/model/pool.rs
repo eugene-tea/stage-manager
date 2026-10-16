@@ -41,6 +41,7 @@ use std::collections::HashSet;
 
 use super::pending::Placed;
 use super::{Action, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
 
@@ -97,6 +98,18 @@ pub(crate) enum Scope {
     OwnAndPool,
     /// Every other Desktop's only (an arrival's windows its own saved stages did not take).
     Pool,
+}
+
+/// What a stage number meant before the restore window's end acted
+/// ([`Model::number_ref`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberRef {
+    /// This stage.
+    Stage(StageId),
+    /// The stage after the last (a send creates it).
+    Next,
+    /// Nothing.
+    Missing,
 }
 
 /// What a part stands for, taken with its first window.
@@ -444,6 +457,15 @@ impl Model {
     /// else it stays where Apple's rule put it and the entry it voted with (on saved Desktop
     /// `.0`) is forgotten. A window is never live and waiting at once (the review of 8I, M2).
     /// A voter with children of its own, or one placed since, stays where it is.
+    ///
+    /// The restore window ends at the user's first action (a card pressed, a number key), and
+    /// that action must still mean what the user saw (the review of 8I2): a voter alone in a
+    /// stage of its own (no name, no saved origin, nothing waiting) makes that very stage its
+    /// part, keeping its id, number and card; a voter whose stage still goes (it joins a part
+    /// or a stage that was waiting for it) leaves the stage's id to follow it
+    /// ([`Model::follow_stage`]). A voter waiting in its own Desktop's stage also leaves the
+    /// entry it voted with (no stale duplicate). A parked voter is placed from its real frame,
+    /// not the park corner.
     pub(crate) fn pool_voters(&mut self, votes: Vec<(u64, WindowId)>, actions: &mut Vec<Action>) {
         if !self.pooling() {
             return;
@@ -453,41 +475,149 @@ impl Model {
             if self.restored.contains_key(&v) {
                 continue;
             }
-            let (space, meta) = (w.space, w.meta.clone());
-            let movable = matches!(w.home, Home::Stage(_)) && meta.role == WindowRole::Standard && self.children_of(v).is_empty();
-            let claimed = movable
-                && self.picks(space, std::slice::from_ref(&meta), LowRule::default(), Scope::OwnAndPool).iter().any(|c| c.2.confident());
-            if claimed && let Some(meta) = self.take_out(v, actions) {
-                let placed = self.match_waiting(space, std::slice::from_ref(&meta), LowRule::default(), None, Scope::OwnAndPool, actions);
-                if placed.is_empty() {
-                    // Never left unmanaged: it comes back as any new window.
-                    tracing::warn!(id = v.0, "restore: a voter's saved stage could not take it after all; managed again as a new window");
-                    let more = self.add_window(meta, &crate::engine::rules::Decision::default(), &Observation::default());
-                    actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
-                } else {
-                    tracing::debug!(id = v.0, desktop, "restore: a voter that can adopt nothing goes back to its saved stage here");
+            let (space, meta, home) = (w.space, w.meta.clone(), w.home);
+            let movable = matches!(home, Home::Stage(_)) && meta.role == WindowRole::Standard && self.children_of(v).is_empty();
+            let pick = if movable {
+                self.picks(space, std::slice::from_ref(&meta), LowRule::default(), Scope::OwnAndPool).into_iter().find(|c| c.2.confident())
+            } else {
+                None
+            };
+            let (Some((_, spot, _, _)), Home::Stage(from)) = (pick, home) else {
+                if self.forget_voted(&meta, desktop) {
+                    tracing::debug!(id = v.0, desktop, "restore: a voter stays where Apple's rule put it; its saved entry is forgotten");
                 }
-            } else if self.forget_voted(&meta, desktop) {
-                tracing::debug!(id = v.0, desktop, "restore: a voter stays where Apple's rule put it; its saved entry is forgotten");
+                continue;
+            };
+            let own = matches!(spot, Spot::Stage(s, _) if self.stage(s).is_some_and(|st| st.space == space));
+            let in_place = !own && self.become_part(from, v, space, spot);
+            let mark = actions.len();
+            let was_parked = self.windows.get(&v).is_some_and(|w| w.parked);
+            let Some(meta) = self.lift(v) else { continue };
+            let placed = self.match_waiting(space, std::slice::from_ref(&meta), LowRule::default(), None, Scope::OwnAndPool, actions);
+            if placed.is_empty() {
+                // Never left unmanaged: it comes back as any new window.
+                tracing::warn!(id = v.0, "restore: a voter's saved stage could not take it after all; managed again as a new window");
+                let more = self.add_window(meta.clone(), &crate::engine::rules::Decision::default(), &Observation::default());
+                actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+            } else {
+                tracing::debug!(id = v.0, desktop, in_place, own, "restore: a voter that can adopt nothing goes back to its saved stage here");
+            }
+            if own && space.0 != desktop && self.forget_voted(&meta, desktop) {
+                tracing::debug!(id = v.0, desktop, "restore: a voter back in its own Desktop's stage; the entry it voted with is forgotten");
+            }
+            // Parked, it was taken out at its real frame: shown now, it is brought back.
+            let shown = self.windows.get(&v).is_some_and(|w| !w.parked);
+            let moved = actions[mark..].iter().any(|a| matches!(a, Action::SetFrame { id, .. } if *id == v));
+            if was_parked && shown && !moved {
+                self.restore_window(v, actions);
+            }
+            if self.stage(from).is_some_and(|s| s.windows.is_empty()) && in_place {
+                // Claimed as the part but the window went elsewhere after all: a plain stage
+                // again.
+                self.kin.remove(&from);
+                self.pool_rank.remove(&from);
+                if let Some(st) = self.stage_mut(from) {
+                    st.name = None;
+                }
+            }
+            self.drop_if_dead(from, actions);
+            if self.stage(from).is_none() {
+                self.followed.insert(from, v);
             }
         }
         self.drop_empty_leftovers();
     }
 
-    /// Takes managed window `id` out of its stage (to be placed again at once), keeping its
-    /// frame; its stage goes if left dead. Its meta, when it was managed.
-    fn take_out(&mut self, id: WindowId, actions: &mut Vec<Action>) -> Option<WindowMeta> {
-        let w = self.windows.remove(&id)?;
-        if let Home::Stage(from) = w.home {
-            if let Some(st) = self.stage_mut(from) {
-                st.windows.retain(|&x| x != id);
-                if st.key == Some(id) {
-                    st.key = st.windows.first().copied();
-                }
-            }
-            self.drop_if_dead(from, actions);
+    /// Makes `stage`, where voter `v` of `space` is alone (no name, no saved origin, nothing
+    /// waiting, no orphan), the part of the saved stage its waiting entry at `spot` (another
+    /// Desktop's) stands for, when no stage of `space` is that part already or bears its name:
+    /// the voter then goes back into the stage it is in. True when it did.
+    fn become_part(&mut self, stage: StageId, v: WindowId, space: SpaceId, spot: Spot) -> bool {
+        let alone = self.stage(stage).is_some_and(|s| s.windows == [v] && s.name.is_none())
+            && !self.has_pending(stage)
+            && !self.kin.contains_key(&stage)
+            && !self.pool_rank.contains_key(&stage)
+            && !self.restore.front_waits.contains(&stage)
+            && self.children_in(Home::Stage(stage)).is_empty();
+        if !alone {
+            return false;
         }
-        Some(w.meta)
+        let origin = match spot {
+            Spot::Stage(s, _) => self.origin_of_stage(s),
+            Spot::Saved(l, j, _) => {
+                let Some(saved) = self.leftovers.get(l).filter(|saved| j < saved.stages.len()) else { return false };
+                Origin { root: Kin::Saved(saved.id, j), rank: rank_of_saved(saved, j), name: saved.stages[j].name.clone() }
+            }
+        };
+        let elsewhere = self.stages.iter().any(|s| s.space == space && s.id != stage && self.kin.get(&s.id) == Some(&origin.root))
+            || origin.name.as_deref().and_then(|n| self.find_named(space, n)).is_some_and(|s| s != stage);
+        if elsewhere {
+            return false;
+        }
+        self.kin.insert(stage, origin.root);
+        self.pool_rank.insert(stage, origin.rank);
+        if let Some(st) = self.stage_mut(stage) {
+            st.name = origin.name;
+        }
+        tracing::debug!(id = v.0, stage = stage.0, "restore: a voter's own stage becomes its saved stage's part (its card and number stay)");
+        true
+    }
+
+    /// Takes managed window `id` out of its stage (to be placed again at once; the stage
+    /// stays, dropped by the caller if left dead). Its meta, when it was managed, at its real
+    /// frame when it was parked (where it goes back to; as [`Model::adopt`] does).
+    fn lift(&mut self, id: WindowId) -> Option<WindowMeta> {
+        let w = self.windows.remove(&id)?;
+        let mut meta = w.meta;
+        if w.parked {
+            meta.frame = clamp_to_visible(w.restore, self.display(meta.display).visible);
+        }
+        if let Home::Stage(from) = w.home
+            && let Some(st) = self.stage_mut(from)
+        {
+            st.windows.retain(|&x| x != id);
+            if st.key == Some(id) {
+                st.key = st.windows.first().copied();
+            }
+        }
+        Some(meta)
+    }
+
+    /// The stage `stage` stands for now: itself while it exists, else, when the restore
+    /// window's end moved its voter into its saved stage, the stage that window is in (a card
+    /// clicked or a number pressed for it as the window closed follows the window).
+    pub fn follow_stage(&self, stage: StageId) -> StageId {
+        if self.stage(stage).is_some() {
+            return stage;
+        }
+        let to = self.followed.get(&stage).and_then(|v| self.windows.get(v)).and_then(|w| match w.home {
+            Home::Stage(s) => Some(s),
+            Home::Pinned => None,
+        });
+        to.unwrap_or(stage)
+    }
+
+    /// What number `n` (a hotkey's) means on `space` now, to be read again after the
+    /// restore window's end ([`Model::number_now`]).
+    pub fn number_ref(&self, space: SpaceId, n: usize) -> NumberRef {
+        match self.stage_by_number(space, n) {
+            Some(s) => NumberRef::Stage(s),
+            None if n == self.stages_in(space).count() + 1 => NumberRef::Next,
+            None => NumberRef::Missing,
+        }
+    }
+
+    /// The number on `space` of what `r` meant ([`Model::number_ref`]): the same stage (or
+    /// the one its window followed), the next new stage, or 0 (none).
+    pub fn number_now(&self, space: SpaceId, r: NumberRef) -> usize {
+        match r {
+            NumberRef::Stage(s) => {
+                let s = self.follow_stage(s);
+                self.stage(s).filter(|st| st.space == space).and_then(|_| self.stage_number(s)).unwrap_or(0)
+            }
+            NumberRef::Next => self.stages_in(space).count() + 1,
+            NumberRef::Missing => 0,
+        }
     }
 
     /// Forgets the entry of saved Desktop `desktop` (waiting unvisited, or in the stages of

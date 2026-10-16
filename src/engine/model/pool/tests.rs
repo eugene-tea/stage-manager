@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Model, Observation, Pid, WindowRole};
+use crate::engine::model::{Model, ModelOptions, Observation, Pid, WindowRole};
 use crate::engine::persist::{LaunchHints, SavedStage, StateFile};
 use crate::engine::restore::Restore;
 use crate::engine::rules::Decision;
@@ -477,4 +477,120 @@ fn a_native_on_its_own_desktop_keeps_its_confidence_against_a_same_title_elsewhe
     // Two live windows titled "zsh", nothing waiting for either.
     assert!(titles(&m).iter().all(|(t, n)| *n == if t == "zsh" { 2 } else { 1 }), "{:?}", titles(&m));
     assert!(!m.to_state().spaces.iter().filter(|s| s.id == 4).flat_map(|s| &s.stages).flat_map(|s| &s.windows).any(|x| x.title == "zsh"));
+}
+
+
+/// The login on a Desktop that adopts nothing: a window of no saved Desktop first (in front),
+/// then the calendar of Desktop 2, a vote that never adopts, parked alone in a stage of its own
+/// by Apple's rule, then (`third`) another window of no saved Desktop in a stage after it.
+fn lone_voter_behind(m: &mut Model, third: bool) -> (SpaceId, StageId) {
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let here = m.current_space(MAIN);
+    add(m, win(99, 30, "com.example.notes", "Notes", r(13.0)));
+    add(m, win(81, 10, CAL, "Week", r(10.0)));
+    if third {
+        add(m, win(98, 31, "com.example.draw", "Sketch", r(16.0)));
+    }
+    let y = m.stage_of(w(81)).expect("managed");
+    assert!(!m.is_active(y) && m.window(w(81)).is_some_and(|x| x.parked), "a voter parked alone in an inactive stage");
+    assert_eq!(m.restored_grade(w(81)), None, "by Apple's rule meanwhile");
+    (here, y)
+}
+
+#[test]
+fn the_card_click_that_ends_the_restore_window_keeps_its_stage() {
+    // The review of 8I2 (Medium): the user presses the card of the voter's stage; the press
+    // ends the restore window. The stage becomes the voter's part in place: the click that
+    // follows finds it, and the window shows with it.
+    let mut m = launched(vec![desktop_1(), desktop_2()], Restore::after_restart("B"));
+    let (here, y) = lone_voter_behind(&mut m, true);
+    let number = m.stage_number(y);
+    let a = m.end_restore().expect("it was open (the card's press)");
+    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if id.0 == 81)), "never shown on the way: {a:?}");
+    assert!(m.stage(y).is_some() && m.stage_of(w(81)) == Some(y), "the same stage");
+    assert_eq!(m.stage_number(y), number, "the same number");
+    assert_eq!(m.root_of(y), Kin::Saved(8, 2), "now the part of its saved stage");
+    assert!(m.is_pooled(w(81)) && m.restored_grade(w(81)).is_some_and(Grade::confident));
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
+    // The click (mouse-up).
+    assert_eq!(m.follow_stage(y), y);
+    let a = m.switch_to(m.follow_stage(y), &Observation::default());
+    assert!(m.is_active(y) && m.window(w(81)).is_some_and(|x| !x.parked && x.space == here));
+    let back = a.iter().find_map(|x| match x {
+        Action::SetFrame { id, frame } if id.0 == 81 => Some(*frame),
+        _ => None,
+    });
+    assert!(back.is_some_and(|f| !m.display(MAIN).parks(f)), "shown at a real frame: {a:?}");
+}
+
+#[test]
+fn the_number_key_that_ends_the_restore_window_keeps_its_stage() {
+    // The same with a number key: the stage after the voter's keeps its number, the voter's
+    // stage its own.
+    let mut m = launched(vec![desktop_1(), desktop_2()], Restore::after_restart("B"));
+    let (here, y) = lone_voter_behind(&mut m, true);
+    let n = m.stage_number(y).expect("numbered");
+    let after = m.stage_by_number(here, n + 1).expect("a stage after it");
+    let r = m.number_ref(here, n);
+    m.end_restore().expect("it was open (the key)");
+    assert_eq!(m.number_now(here, r), n);
+    assert_eq!(m.stage_number(after), Some(n + 1));
+    m.switch_to_number(m.number_now(here, r), &Observation::default());
+    assert!(m.is_active(y) && m.window(w(81)).is_some_and(|x| !x.parked));
+    // The next number still makes a stage.
+    let next = m.number_ref(here, m.stages_in(here).count() + 1);
+    assert_eq!(next, NumberRef::Next);
+    assert_eq!(m.number_now(here, next), m.stages_in(here).count() + 1);
+    assert_eq!(m.number_now(here, NumberRef::Missing), 0);
+}
+
+#[test]
+fn a_card_or_number_of_a_voters_stage_that_goes_follows_its_window() {
+    // The voter's saved stage is named, and a declared stage of that name is on the Desktop:
+    // the voter goes there and its own stage goes. The card clicked and the number pressed
+    // for that stage follow the window; the number of the stage after it too.
+    let mut d2 = desktop_2();
+    d2.stages[2].name = Some("Plan".into());
+    let options = ModelOptions { named_stages: vec!["Plan".into()], ..Default::default() };
+    let mut file = StateFile { session: Some("A".into()), ..StateFile::single(SavedSpace::default()) };
+    file.spaces = vec![desktop_1(), d2];
+    file.start_new_session();
+    let (file, _) = file.for_session(Some("B"));
+    let mut m = crate::engine::testkit::model_with(options);
+    m.set_restore(Restore::after_restart("B"));
+    m.restore_spaces(file.spaces);
+    let (here, y) = lone_voter_behind(&mut m, true);
+    let plan = m.find_named(here, "Plan").expect("declared here");
+    assert_ne!(plan, y);
+    let n = m.stage_number(y).expect("numbered");
+    let r = m.number_ref(here, n);
+    let r_after = m.number_ref(here, n + 1);
+    let sketch = m.stage_of(w(98)).expect("managed");
+    m.end_restore().expect("it was open");
+    assert!(m.stage(y).is_none(), "its stage went");
+    assert_eq!(m.stage_of(w(81)), Some(plan));
+    assert_eq!(m.follow_stage(y), plan, "the card follows the window");
+    assert_eq!(m.number_now(here, r), m.stage_number(plan).expect("numbered"), "the number too");
+    assert_eq!(m.number_now(here, r_after), m.stage_number(sketch).expect("numbered"), "the next stage keeps meaning itself");
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
+}
+
+#[test]
+fn a_voter_back_in_its_own_desktops_stage_leaves_the_entry_it_voted_with() {
+    // Low 3: "zsh" on both Desktops; the one that shows first is nearest Desktop 1's and votes
+    // for it; Desktop 2 then takes the Desktop, and the voter's own Desktop's entry takes it.
+    // Desktop 1's entry it voted with goes too (no stale duplicate).
+    let mut d1 = desktop_1();
+    d1.stages[4].windows.push(sw(TERM, "zsh", r(14.0), 1));
+    let mut d2 = desktop_2();
+    d2.stages[1].windows.push(sw(TERM, "zsh", r(15.0), 1));
+    let mut m = launched(vec![d1, d2], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(86, 11, TERM, "zsh", r(14.0)));
+    assert_eq!(m.restored_grade(w(86)), None, "a vote");
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    assert_eq!(m.current_space(MAIN).0, 8);
+    assert_eq!(kin(&m, 86), Some(Kin::Saved(8, 1)), "its own Desktop's");
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
 }

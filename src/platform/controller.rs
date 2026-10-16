@@ -3512,7 +3512,7 @@ impl Controller {
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
-        self.end_restore(ob, "a hotkey", End::User);
+        let command = self.end_restore_for_hotkey(ob, command);
         self.flush_pending(ob);
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
@@ -3530,6 +3530,65 @@ impl Controller {
                 Ok(0)
             }
         };
+    }
+
+    /// Ends the restore window for a hotkey; a stage number keeps meaning the stage the user
+    /// saw under it when the window's end moves a voter (its stage may go: the number then
+    /// names the stage its window went to; the review of 8I2).
+    fn end_restore_for_hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) -> HotkeyCommand {
+        let n = match command {
+            HotkeyCommand::SwitchTo(n) | HotkeyCommand::SendTo(n) => n,
+            _ => {
+                self.end_restore(ob, "a hotkey", End::User);
+                return command;
+            }
+        };
+        let held = if self.settling.is_some() && self.model.is_some() {
+            let obs = self.observe(ob);
+            self.model.as_ref().map(|m| {
+                // The Space each command acts on: the current one, or the focused window's.
+                let space = match command {
+                    HotkeyCommand::SendTo(_) => obs.focused.and_then(|f| m.space_of(f)),
+                    _ => None,
+                }
+                .unwrap_or_else(|| m.current_space_for(&obs));
+                (space, m.number_ref(space, n))
+            })
+        } else {
+            None
+        };
+        self.end_restore(ob, "a hotkey", End::User);
+        let Some((space, r)) = held else { return command };
+        let Some(now) = self.model.as_ref().map(|m| m.number_now(space, r)) else { return command };
+        if now != n {
+            tracing::debug!(was = n, now, "restore: the stage under the number moved as the restore window ended; the number follows it");
+        }
+        match command {
+            HotkeyCommand::SwitchTo(_) => HotkeyCommand::SwitchTo(now),
+            HotkeyCommand::SendTo(_) => HotkeyCommand::SendTo(now),
+            other => other,
+        }
+    }
+
+    /// `event` with each stage it names as it stands now ([`Model::follow_stage`]).
+    fn follow_event(&self, event: StripEvent) -> StripEvent {
+        let Some(m) = self.model.as_ref() else { return event };
+        let f = |stage: u64| {
+            let to = m.follow_stage(StageId(stage)).0;
+            if to != stage {
+                tracing::debug!(stage, to, "restore: the card's stage went as the restore window ended; its window's stage instead");
+            }
+            to
+        };
+        match event {
+            StripEvent::CardClicked { stage, shift } => StripEvent::CardClicked { stage: f(stage), shift },
+            StripEvent::CardPressed { stage } => StripEvent::CardPressed { stage: f(stage) },
+            StripEvent::CardDropped { stage, x, y } => StripEvent::CardDropped { stage: f(stage), x, y },
+            StripEvent::IconClicked { stage, pid } => StripEvent::IconClicked { stage: f(stage), pid },
+            StripEvent::CardMoved { stage, before } => StripEvent::CardMoved { stage: f(stage), before: before.map(f) },
+            StripEvent::CardMerged { stage, into } => StripEvent::CardMerged { stage: f(stage), into: f(into) },
+            StripEvent::Unveil { id } => StripEvent::Unveil { id },
+        }
     }
 
     /// Shows or hides the strip (menu and hotkey).
@@ -3560,6 +3619,9 @@ impl Controller {
             }
             return;
         }
+        // The restore window's end (at this event or at the card's press) may have moved a
+        // voter out of the stage the card showed: the card follows its window.
+        let event = self.follow_event(event);
         self.flush_pending(ob);
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).

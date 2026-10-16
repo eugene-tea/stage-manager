@@ -204,6 +204,12 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   their entries are forgotten; a saved Desktop's stages the pool emptied are never built at
   its visit (its most recent stage left takes the front); own-Desktop entries are scored
   first, other Desktops' only for a window nothing there takes with confidence.
+  8I3 (the review): the card pressed or the number key that ends the restore window keeps
+  its target: a voter alone in a stage of its own makes that stage its part (same id, number
+  and card); a voter whose stage still goes leaves the stage's id and number to follow its
+  window. Known, left: a part finds an existing stage by its saved stage's name
+  (`find_named`); two Desktops saved with stages of the same name both feed the one stage of
+  that name on the Desktop shown (the strays of two same-named stages share a part there).
 
 ## 8G: the real-restart check
 

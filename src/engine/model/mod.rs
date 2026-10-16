@@ -42,6 +42,7 @@ use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area
 
 pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use pending::{PendingNote, Restored};
+pub use pool::NumberRef;
 pub(crate) use pool::Kin;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
@@ -328,6 +329,10 @@ pub struct Model {
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
     pub(crate) pooled_out: HashSet<(u64, usize)>,
+    /// Stages that went when the restore window's end moved their voter into its saved stage
+    /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
+    /// ([`Model::follow_stage`]).
+    pub(crate) followed: HashMap<StageId, WindowId>,
     /// Saved entries of windows whose app quit, kept for `state.json` a while (round 8H,
     /// [`quit`]).
     pub(crate) quit: Vec<QuitWindow>,
@@ -377,6 +382,7 @@ impl Model {
             pool_rank: HashMap::new(),
             pooled: HashMap::new(),
             pooled_out: HashSet::new(),
+            followed: HashMap::new(),
             quit: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
