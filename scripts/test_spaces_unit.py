@@ -2,7 +2,8 @@
 """Offline unit tests for the hands-free Spaces check's parsing and state
 (scripts/test_spaces.py): the screen-lock flag, the Desktop watcher's verdicts and the Space
 change rule, the guardian drill's verdict, the Mission Control check's pixels and pane
-behavior, the activation check's stage lookup. Nothing is launched or switched.
+behavior, the activation check's stage lookup and its cover pixels (8L4). Nothing is
+launched or switched.
 Run: python3 scripts/test_spaces_unit.py
 """
 
@@ -173,6 +174,119 @@ class StageHolding(unittest.TestCase):
         self.assertEqual(t.stage_holding(s, "Alpha 1"), 2)
         self.assertEqual(t.stage_holding(s, "Fixture 1"), 1)
         self.assertIsNone(t.stage_holding(s, "Bravo 1"))
+
+
+class OwnersWindows(unittest.TestCase):
+    """8L3: a synthetic click or drag the app refused over another process's window (the
+    owner's own, on screen while his Stage Manager is quit for a run) is a skip, not a failure."""
+
+    def test_a_refusal_over_another_window_is_noted(self):
+        reply = {"ok": False, "error": "the topmost window at 70,735 is not ours or a fixture's (pid 999999999)"}
+        note = t.ts.other_window_note(reply)
+        self.assertTrue(note.startswith("the topmost window at 70,735 is not ours or a fixture's (pid 999999999)"), note)
+        # Also from a drag's output text.
+        self.assertIsNotNone(t.ts.other_window_note('{"ok":false,"error":"the topmost window at 580,90 is not ours or a fixture\'s (pid 1)"}'))
+
+    def test_any_other_reply_is_not(self):
+        for reply in ({"ok": True}, {"ok": False, "error": "no window at 70,735 (our windows: )"}, "", None):
+            self.assertIsNone(t.ts.other_window_note(reply), reply)
+
+    def test_blocked_counts_a_skip(self):
+        before = len(t.ts.skipped)
+        self.assertTrue(t.ts.blocked({"error": "the topmost window at 1,2 is not ours or a fixture's (pid 999999999)"}, "a drill"))
+        self.assertFalse(t.ts.blocked({"ok": True}, "a drill"))
+        self.assertEqual(len(t.ts.skipped), before + 1)
+
+
+class CoverPixels(unittest.TestCase):
+    """8L4: the activation check's boxes in the switch's cover and its verdict on a read."""
+
+    corner = {"x": 2440.0, "y": 1300.0, "w": 120.0, "h": 140.0}
+    parked = {"x": 2500.0, "y": 1350.0, "w": 900.0, "h": 700.0}
+
+    def test_boxes_lie_on_the_arriving_sliver_inside_the_cover(self):
+        boxes = t.ts.cover_boxes(self.corner, [self.parked], [])
+        self.assertTrue(boxes)
+        self.assertLessEqual(len(boxes), 3)
+        for b in boxes:
+            self.assertTrue(t.ts.contains(self.corner, b, 0.0), b)
+            self.assertTrue(t.ts.contains(self.parked, b, 0.0), b)
+
+    def test_boxes_keep_off_the_icons(self):
+        icon = {"x": 2490.0, "y": 1340.0, "w": 80.0, "h": 110.0}
+        boxes = t.ts.cover_boxes(self.corner, [self.parked], [icon])
+        self.assertEqual(boxes, [], "the icon fills the sliver's part of the cover")
+        small = {"x": 2540.0, "y": 1420.0, "w": 20.0, "h": 20.0}
+        for b in t.ts.cover_boxes(self.corner, [self.parked], [small]):
+            self.assertIsNone(t.ts.intersect(b, {"x": 2534.0, "y": 1414.0, "w": 32.0, "h": 32.0}), b)
+
+    def test_no_box_without_a_corner_or_a_sliver(self):
+        self.assertEqual(t.ts.cover_boxes(None, [self.parked], []), [])
+        self.assertEqual(t.ts.cover_boxes(self.corner, [], []), [])
+
+    def test_a_read_matches_the_wallpaper_or_not(self):
+        read = {"ok": True, "bounds": {"x": 0, "y": 0, "w": 8, "h": 8}, "mean": [40, 80, 120, 255], "wallpaper": [44, 78, 125, 255]}
+        self.assertTrue(t.ts.cover_matches(read)[0])
+        window = dict(read, mean=[236, 236, 236, 255], still=[236, 236, 236, 255])
+        ok, note = t.ts.cover_matches(window)
+        self.assertFalse(ok)
+        self.assertIn("still", note)
+
+    def test_a_read_that_cannot_be_judged(self):
+        base = {"ok": True, "bounds": {"x": 0, "y": 0, "w": 8, "h": 8}, "mean": [40, 80, 120, 255]}
+        self.assertIsNone(t.ts.cover_matches(base)[0], "no wallpaper picture")
+        self.assertIsNone(t.ts.cover_matches(dict(base, bounds=None, wallpaper=[1, 2, 3, 255]))[0], "the overlay gone")
+        self.assertIsNone(t.ts.cover_matches(dict(base, mean=[40, 80, 120, 90], wallpaper=[1, 2, 3, 255]))[0], "not covered")
+        self.assertIsNone(t.ts.cover_matches({"ok": False, "error": "x"})[0])
+
+    def test_only_the_expected_reasons_skip_the_grow(self):
+        self.assertEqual(t.ts.AT_ONCE_CAPTURES_OFF, ("window captures are off",))
+
+
+class StayingWindow(unittest.TestCase):
+    """8L5: an activation that arrived at once only because the owner's own window stays shown
+    into the park corner (no snapshot of it) skips the grow's checks; a fixture's never."""
+
+    line = ('DEBUG platform::controller: transition covered id=7 cover=Cover { outgoing: true, incoming: true } '
+            'waited_ms=8 unveil_ms=403 at_once="a window that stays shown reaches the corner" '
+            'at_once_windows=[4711, 4712] "transition covered"')
+
+    def test_the_reason_and_its_windows_are_read_from_the_switch_line(self):
+        self.assertEqual(t.ts.at_once_of(self.line), (t.ts.STAYING_UNPICTURED, [4711, 4712]))
+        grew = 'transition covered id=8 cover=Cover { outgoing: true, incoming: true } at_once_windows=[]'
+        self.assertEqual(t.ts.at_once_of(grew), (None, []))
+        self.assertEqual(t.ts.at_once_of('at_once="window captures are off" at_once_windows=[]'), ("window captures are off", []))
+
+    def test_only_the_owners_windows_skip(self):
+        why, ids = t.ts.at_once_of(self.line)
+        self.assertTrue(t.ts.owners_window_only(why, ids, {1, 2, 3}))
+        self.assertFalse(t.ts.owners_window_only(why, ids, {4712}), "a fixture's window among them")
+        self.assertFalse(t.ts.owners_window_only(why, [], {1}), "no window named")
+        self.assertFalse(t.ts.owners_window_only("a window that stays shown", ids, {1}), "the exact reason only")
+        self.assertFalse(t.ts.owners_window_only("off", ids, {1}))
+
+
+class SlideCarriesTheCorner(unittest.TestCase):
+    """8L5: a parked window of a Desktop sliding in from the left is listed mid-screen, moved
+    sideways only, while the slide runs (live 10-16 14:26); it is not shown."""
+
+    display = {"x": 0.0, "y": 0.0, "w": 2560.0, "h": 1440.0}
+    rest = {"x": 2520.0, "y": 1400.0, "w": 520.0, "h": 392.0}
+
+    def test_a_parked_window_carried_by_the_slide(self):
+        for x in (1203.0, 300.0, -40.0, 2440.0):
+            self.assertTrue(t.slid_in_zone(dict(self.rest, x=x), self.rest, self.display), x)
+
+    def test_a_window_shown_at_its_frame_is_not(self):
+        frame = {"x": 80.0, "y": 78.0, "w": 520.0, "h": 392.0}
+        self.assertFalse(t.slid_in_zone(frame, self.rest, self.display), "at its frame, not the park zone's row")
+        self.assertFalse(t.slid_in_zone(dict(frame, x=-1000.0), self.rest, self.display))
+        # Resting out of the zone at the last look: never excused.
+        self.assertFalse(t.slid_in_zone(dict(frame, x=1200.0), frame, self.display))
+        self.assertFalse(t.slid_in_zone(self.rest, None, self.display))
+        # Not moved at all, or farther than a slide.
+        self.assertFalse(t.slid_in_zone(self.rest, self.rest, self.display))
+        self.assertFalse(t.slid_in_zone(dict(self.rest, x=2520.0 - 2800.0), self.rest, self.display))
 
 
 if __name__ == "__main__":

@@ -218,8 +218,9 @@ pub struct AnimationStyle {
     pub snapshot_interval_ms: u64,
     pub snapshot_cache_mb: u64,
     /// An activation of an app in another stage (Cmd-Tab, Dock, a click on its sliver) grows
-    /// its windows from their card like a card click; off (the default), they come to their
-    /// frames at once, since macOS has already raised them in the park corner.
+    /// its windows from their card like a card click, as Apple's does (the default; the park
+    /// corner, where macOS has raised them, is covered meanwhile); off, they come to their
+    /// frames at once.
     pub activation_grows: bool,
 }
 
@@ -1300,12 +1301,15 @@ shift_brings_here = false
 [animation]
 enabled = false
 unpark_at = 0.9
+activation_grows = false
 "##,
         );
         let c = p.config;
         assert_eq!(c.style.level, StripLevel::AboveWindows);
         assert!(!c.style.reorder && !c.style.merge_on_drop);
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
+        assert!(!c.style.animation.activation_grows, "kept: false brings an activation's windows at once");
+        assert!(Config::default().style.animation.activation_grows, "an activation grows from its card by default, as Apple's (8L)");
         assert_eq!(c.strip.order, StripOrder::Fixed);
         assert!(c.strip.show_active && c.style.show_numbers && c.strip.hide_while_desktop_shown);
         assert_eq!(c.strip.thumbnail_interval_ms, 2000);

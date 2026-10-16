@@ -25,7 +25,7 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGColor;
+use objc2_core_graphics::{CGColor, CGImage};
 use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue};
 use objc2_quartz_core::{
     CALayer, CAMediaTiming, CASpringAnimation, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
@@ -445,6 +445,48 @@ impl Overlay {
         CATransaction::commit();
         let extent = picture.map_or(Extent::NONE, |p| p.extent);
         let mut g = Ghost { window, plane, image: img, extent, pending: None, target: at };
+        g.set(at);
+        g
+    }
+
+    /// The park corner's cover for a switch (round 8L): `image` (the corner patch's picture,
+    /// `scale` pixels a point) flat at `at`, with no shadow, under every ghost, so the
+    /// incoming windows waiting in the corner (raised there by an activation) never show,
+    /// while every snapshot passes over it. `over`: snapshots of the windows that stay shown
+    /// into the corner, back to front, each window at its frame relative to the cover's
+    /// top-left (points) and its child windows' parts beside it by the picture's extent
+    /// (round 8K), drawn over the picture and clipped to the cover (round 8L5). Removed like a
+    /// ghost.
+    pub fn cover(&self, image: &CGImage, scale: f64, over: &[(Picture, Rect)], at: Plane) -> Ghost {
+        let plane = CALayer::new();
+        plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
+        let img = CALayer::new();
+        img.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        img.setMasksToBounds(true);
+        // SAFETY: framework constant.
+        img.setContentsGravity(unsafe { kCAGravityResize });
+        img.setContentsScale(scale);
+        // SAFETY: a CGImage is valid layer contents.
+        unsafe { img.setContents(Some(as_object(image))) };
+        for (snapshot, frame) in over {
+            // The window's part at its frame, the rest of the picture around it.
+            let whole = snapshot.extent.around(Rect::new(frame.x, frame.y, frame.w.max(1.0), frame.h.max(1.0)));
+            let window = CALayer::new();
+            window.setAnchorPoint(CGPoint::new(0.0, 0.0));
+            window.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(whole.w, whole.h)));
+            window.setPosition(CGPoint::new(whole.x, whole.y));
+            // SAFETY: framework constant.
+            window.setContentsGravity(unsafe { kCAGravityResize });
+            // SAFETY: a CGImage is valid layer contents.
+            unsafe { window.setContents(Some(as_object(&*snapshot.image))) };
+            img.addSublayer(&window);
+        }
+        plane.addSublayer(&img);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.space.insertSublayer_atIndex(&plane, 0);
+        CATransaction::commit();
+        let mut g = Ghost { window: 0, plane, image: img, extent: Extent::NONE, pending: None, target: at };
         g.set(at);
         g
     }

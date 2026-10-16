@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::StripStyle;
 
+use crate::engine::corner_patch::SwitchCover;
 use crate::engine::geometry::{Point, Rect};
 
 /// Everything the strip needs to draw one frame of state.
@@ -58,6 +59,10 @@ pub struct StripSnapshot {
     /// The active stage's standard windows, front to back, at their live frames: the strip
     /// keeps full-size snapshots of them ready for the next switch (`[animation]`).
     pub active_windows: Vec<CardWindow>,
+    /// The pinned windows shown on this Space, at their live frames: they stay shown through
+    /// a switch, and a snapshot of each kept ready lets the switch's cover of the park corner
+    /// draw one that reaches it (round 8L5).
+    pub pinned_windows: Vec<CardWindow>,
     /// Windows are about to leave or arrive: animate them (this snapshot is the strip after
     /// the change).
     pub transition: Option<Transition>,
@@ -94,6 +99,12 @@ pub struct Transition {
     /// The frontmost window of the arriving stage already in place (a window just opened,
     /// an activated app's): the snapshots pass under it, not over it.
     pub under: Option<u32>,
+    /// The park corner to cover while the incoming windows wait there behind their snapshots
+    /// (global, top-left; the controller's [`crate::engine::corner_patch::switch_cover`]),
+    /// with the corner patch's picture or a still of the desktop (round 8L3), whichever the
+    /// controller found ready: macOS raises an activated app's windows above the patch.
+    /// `None`: the corner is left as it is.
+    pub corner: Option<SwitchCover>,
 }
 
 /// One window of a [`Transition`].
@@ -269,6 +280,25 @@ pub fn published_cards() -> Vec<(u64, Rect)> {
     card_frames().lock().map(|f| f.clone()).unwrap_or_default()
 }
 
+fn snapshot_ids() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The strip publishes the windows it holds a full-size snapshot of (main thread, whenever
+/// its snapshot cache changes).
+pub fn publish_snapshots(ids: impl IntoIterator<Item = u32>) {
+    if let Ok(mut s) = snapshot_ids().lock() {
+        *s = ids.into_iter().collect();
+    }
+}
+
+/// Whether the strip holds a full-size snapshot of window `id` (any thread): a switch's cover
+/// can draw a window that stays shown into the park corner from it (round 8L5).
+pub fn has_snapshot(id: u32) -> bool {
+    snapshot_ids().lock().is_ok_and(|s| s.contains(&id))
+}
+
 /// The strip panel's state as the window server and AppKit see it, for `ctl state` and the
 /// guided Spaces check (a card click that found no window there).
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
@@ -377,6 +407,12 @@ pub struct TransitionReport {
     pub ghosts: Vec<GhostReport>,
     /// The strip's cards (stage ids, top to bottom) after it.
     pub order: Vec<u64>,
+    /// The park corner its overlay covered (the patch's picture or the desktop's) while the incoming
+    /// windows waited there (global, top-left), if it did.
+    pub corner: Option<Rect>,
+    /// What stood for the corner there: `"wallpaper"` (the patch's picture) or `"desktop"` (a
+    /// still of the desktop, icons and all; round 8L3).
+    pub corner_picture: Option<&'static str>,
 }
 
 fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {

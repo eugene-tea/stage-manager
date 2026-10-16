@@ -173,6 +173,7 @@ pub fn stand_down(why: &str) {
         snapshot.arrived = None;
         snapshot.window_drag = None;
         snapshot.active_windows = Default::default();
+        snapshot.pinned_windows = Default::default();
         s.present(snapshot);
         tracing::info!("strip: hidden on every Desktop ({why})");
     });

@@ -53,7 +53,8 @@ Shift-click a card to bring its windows into the current stage; Option-click doe
 Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
-stage.
+stage, animated as a card click: the stage you leave shrinks into the strip and the app's
+windows grow from their card. The keyboard goes to the app's window at once.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own.
@@ -108,8 +109,25 @@ launch from Applications, and Settings can turn that off.
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above everything, while
 the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
-nears a card, so content that changed meanwhile can jump when the motion ends. A click or
-key press during the motion brings the windows in at once.
+nears a card, so content that changed meanwhile can jump when the motion ends. A click
+during the motion brings the windows in at once; typing never cuts it short (the keyboard is
+already the new stage's). Arriving windows wait in the corner behind their pictures, and
+that corner is covered with the wallpaper patch's picture until they are in place (macOS
+raises an activated app's windows there), never over the menu bar or the Dock's bar. Where
+desktop icons lie in that corner, the patch's picture would hide them: a still of the
+desktop there (only the desktop's own layers: the picture and its icons, never a window,
+even one that appears as it is taken; laid over the patch's picture when macOS leaves the
+desktop picture out of it), kept fresh while card pictures are captured and the Mac is in
+use (none while the screen is locked or asleep, or after 2 minutes with no input and no
+switch; a fresh one at the first input), covers it instead; the parked windows' edges are
+under it too for the moment of the motion. A window that stays shown through the switch and
+reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
+the cover from its own picture, so it looks as it is (that corner of it holds still for the
+motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
+windows land); the outgoing stage's windows never count. Where it cannot be covered at all (the patch off, card captures off with icons there,
+no picture ready yet, a staying window with no picture of it, such as another app's the
+app does not manage), an activated app's windows come to their places at once instead of
+growing.
 
 **Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
 

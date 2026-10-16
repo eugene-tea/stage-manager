@@ -165,6 +165,13 @@ pub fn pointer() -> Option<Point> {
     pointer_now().map(|p| Point::new(p.x, p.y))
 }
 
+/// Since the last keyboard, mouse or trackpad event in this login session (any thread).
+pub fn since_last_input() -> Duration {
+    // kCGAnyInputEventType is all ones.
+    let secs = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType(u32::MAX));
+    Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO)
+}
+
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)

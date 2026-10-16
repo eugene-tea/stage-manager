@@ -778,9 +778,11 @@ def run():
         sampler = threading.Thread(target=sample_onscreen, args=(WATCH.ids["d1"], stop, hits), daemon=True)
         sampler.start()
     r = ctl("debug-click", x, y)
-    check(r.get("ok"), f"clicked the card ({r.get('error', 'ok')})")
-    s = ts.wait_state(lambda x: x["active"] != before, "the card click to switch", timeout=4)
-    check(s is not None, "the card click switched stages")
+    clicked = not ts.blocked(r, "the card click on Desktop 2 (the click, the switch)")
+    if clicked:
+        check(r.get("ok"), f"clicked the card ({r.get('error', 'ok')})")
+        s = ts.wait_state(lambda x: x["active"] != before, "the card click to switch", timeout=4)
+        check(s is not None, "the card click switched stages")
     time.sleep(1.5)
     check(current_space() == d2, "still on Desktop 2 (as the engine sees it)")
     if AUTO:
@@ -1160,6 +1162,21 @@ def first_after(events, text, since):
     return next((t for t, line in events if t >= since and text in line), None)
 
 
+def slid_in_zone(bounds, rest, display):
+    """True when a window listed at `bounds` while a Desktop slides is the same window at
+    `rest` (its bounds once the slide is over, in the park zone) moved sideways only, by more
+    than 2 pt and at most about the display's width: parked on the Desktop sliding in, its
+    corner carried across the screen with it (the app's `slid_from`, round 6T). A Desktop that
+    slides in from the left shows its bottom-right corner at the seam all through the slide,
+    so the window server lists a window parked there mid-screen (live 10-16 14:26, Desktop 1
+    left of Desktop 2: +90...+300 ms), where one coming from the right lists it past the
+    display's right edge, in the zone; neither is the window shown (round 8L5)."""
+    if not rest or not ts.is_parked(rest, display):
+        return False
+    dx = abs(bounds["x"] - rest["x"])
+    return abs(bounds["y"] - rest["y"]) <= 2.0 and abs(bounds["w"] - rest["w"]) <= 2.0 and 2.0 < dx <= display["w"] * 1.05
+
+
 def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how):
     """The arrival as the window server showed it, against the app's log (see
     `activation_to_desktop_1`); `how` "dock" is strict: arranged at the click, the stage left
@@ -1180,11 +1197,20 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
     def shown(w):
         return w["onscreen"] and not ts.is_parked(w["bounds"], display)
 
+    # Where each window rests at the last look (the slide over), to tell a parked window
+    # carried across the screen by the slide from one shown ([`slid_in_zone`], 8L5).
+    rest = {w["id"]: w["bounds"] for w in (samples[-1]["windows"] if samples else [])}
+
+    def shown_at(x, w):
+        sliding = any(v["onscreen"] and v["id"] in d2_ids for v in x["windows"])
+        return shown(w) and not (sliding and slid_in_zone(w["bounds"], rest.get(w["id"]), display))
+
     d1_on = [x["t"] for x in samples if any(w["onscreen"] and w["id"] in d1_ids for w in x["windows"])]
     d2_on = [x["t"] for x in samples if any(w["onscreen"] and w["id"] in d2_ids for w in x["windows"])]
     slide_from = d1_on[0] if d1_on else None
     slide_to = max((t for t in d2_on if slide_from and t >= slide_from), default=None)
-    stale = [x["t"] for x in samples if any(w["id"] in left and shown(w) for w in x["windows"])]
+    stale = [x["t"] for x in samples if any(w["id"] in left and shown_at(x, w) for w in x["windows"])]
+    carried = [x["t"] for x in samples if any(w["id"] in left and shown(w) and not shown_at(x, w) for w in x["windows"])]
     if ahead:
         path = f"6T: arranged ahead at the {trigger}"
     elif switched:
@@ -1195,7 +1221,17 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
         f"{rel(sent)}, recognized {rel(recognized)}; path: {path}")
     say(f"    window server ({len(samples)} looks, every ~30 ms): Desktop 1's windows on screen from {rel(slide_from)}, "
         f"Desktop 2's until {rel(slide_to)}; the stage left shown out of the park zone at "
-        f"{[rel(t) for t in stale if slide_from and t >= slide_from][:12]}")
+        f"{[rel(t) for t in stale if slide_from and t >= slide_from][:12]}"
+        + (f" (parked, carried across the screen by the slide at {len(carried)} looks)" if carried else ""))
+    if carried:
+        # The proof the allowance needs: each carried look's bounds against the parked frame
+        # they rest at (a pure sideways shift; 8L5 review).
+        for x in [x for x in samples if x["t"] in carried][:4]:
+            for w in x["windows"]:
+                if w["id"] in left and shown(w) and not shown_at(x, w):
+                    b, r = w["bounds"], rest.get(w["id"])
+                    say(f"      carried {rel(x['t'])}: window {w['id']} at {b['x']:.0f},{b['y']:.0f} {b['w']:.0f}x{b['h']:.0f}"
+                        + (f", parked at {r['x']:.0f},{r['y']:.0f} {r['w']:.0f}x{r['h']:.0f}" if r else ""))
     check(sent is not None, "the app's log says when the arrival's arrangement was sent")
     # Nothing below may pass for want of looking: the sampler saw the slide and the windows.
     check(slide_from is not None, "the window server was seen showing Desktop 1 during the 3 s sampled")
@@ -1410,7 +1446,7 @@ def main():
 def report():
     for line in PROBE:
         say(f"\n{line}")
-    say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed (every app run's log: {ts.HOME}/stage-manager.run-*.log and today's {ts.HOME}/YYYY-MM-DD.log)")
+    say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed, {len(ts.skipped)} skipped (every app run's log: {ts.HOME}/stage-manager.run-*.log and today's {ts.HOME}/YYYY-MM-DD.log)")
     for f in ts.failed:
         say(f"  FAIL {f}")
     return 1 if ts.failed else 0
