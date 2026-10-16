@@ -123,13 +123,18 @@ impl Model {
         actions
     }
 
+    /// True when the active stage of `space` is empty with saved windows still to come (the
+    /// saved active stage, waiting): a front with nothing shown.
+    pub(crate) fn front_waits_empty(&self, space: SpaceId) -> bool {
+        self.active_stage_in(space).is_some_and(|a| self.has_pending(a) && self.stage(a).is_some_and(|s| s.windows.is_empty()))
+    }
+
     /// Notes that the active stage of `space`, empty with its saved windows still to come,
     /// holds its place ([`Model::front_after_restore`] still lets it give way if they are
     /// given up instead).
     pub(crate) fn note_front_waits(&mut self, space: SpaceId) {
-        if let Some(a) = self.active_stage_in(space)
-            && self.has_pending(a)
-            && self.stage(a).is_some_and(|s| s.windows.is_empty())
+        if self.front_waits_empty(space)
+            && let Some(a) = self.active_stage_in(space)
             && !self.restore.front_waits.contains(&a)
         {
             self.restore.front_waits.push(a);
@@ -181,6 +186,13 @@ impl Model {
             pending: self.pending_count() + self.pending_unvisited(),
             by_apple: self.restore.by_apple,
         }
+    }
+
+    /// The restore's one line at the restore window's end ([`Model::restore_summary`]), only
+    /// after a restart: a relaunch in the same session restores nothing a user would call a
+    /// restore, and `log summary` repeats the line as "after a restart" (the review of 8F, L1).
+    pub fn restore_line(&self, seconds: u64) -> Option<Summary> {
+        self.after_restart().then(|| self.restore_summary(seconds))
     }
 
     /// True when saved frames apply on the main display now (its size is the saved one, or

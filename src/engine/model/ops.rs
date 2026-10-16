@@ -39,6 +39,10 @@ impl Model {
     ///
     /// While the login burst settles after a restart ([`Model::settling`]) no window switches
     /// stages: one whose stage would come forward is parked in it instead (its card shows).
+    /// But while the saved active stage is still empty, waiting for its windows, a window
+    /// opening a stage of its own takes the front ([`Model::front_waits_empty`]): nothing is
+    /// shown to animate away, and the screen is not left empty while a slow app opens; the
+    /// saved stage waits, inactive and with no card, for its windows.
     pub fn add_window(
         &mut self,
         meta: WindowMeta,
@@ -185,7 +189,9 @@ impl Model {
                 actions.push(Action::SetFrame { id, frame: restore });
             }
         } else if let Home::Stage(s) = home {
-            if follow && !self.settling() {
+            // While the login settles a new stage takes the front only from an empty saved
+            // active stage still waiting for its windows (the review of 8F, M4).
+            if follow && (!self.settling() || (created && self.front_waits_empty(space))) {
                 actions.extend(self.switch_to(s, obs));
                 return actions;
             }

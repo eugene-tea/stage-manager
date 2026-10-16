@@ -170,13 +170,33 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   once apps have been quiet 20 s and the login is a minute old.
 - 8F settling: after a restart, while the login settles, a window matching no saved one
   (or a doubtful match) goes by Apple's rule without the switch: into its app's stage, or a
-  stage of its own as a card, never brought forward; a launch-time activation or focus
-  switches nothing. Without the input monitor (no clicks or keys seen) settling ends only
+  stage of its own as a card, never brought forward, except that while the saved active
+  stage is still empty (its app slow to open) a new stage takes the front and the saved
+  stage waits inactive, its windows parked there with a card when they come (8F2, M4); a
+  launch-time activation or focus switches nothing. Without the input monitor (no clicks or keys seen) settling ends only
   when apps go quiet or after 5 minutes; the end's focus never takes the keyboard from a
   window shown in the front stage.
-- 8F logout head start: at `willPowerOffNotification` the app quits at once (every window
-  back, state saved). A logout another app then cancels leaves Stage Manager quit, every
-  window on screen; it is opened again by hand (or at the next login).
+- 8F logout head start (8F2, M3): at `willPowerOffNotification` every window comes back,
+  the leftovers check runs and the stages are saved, but the app keeps running (strip
+  hidden, input ignored) until macOS's own quit, which then only exits. A logout another
+  app cancels sends no quit: a minute later (`LOGOUT_WAIT`) the app starts afresh from the
+  saved stages, as at a launch; meanwhile every window shows, with no strip.
+
+## 8G: the real-restart check
+
+With the owner, from the day's log (titles never leave it), besides the design's list:
+
+- "Reopen windows when logging back in" on: Stage Manager itself comes back at the login.
+  8F quit it at `willPowerOffNotification`, before loginwindow asked, which may have kept
+  macOS from reopening it; 8F2 waits for macOS's quit. The log shows "logout, restart or
+  shutdown coming: every window back …", then "asked to quit by the system" and "quitting
+  after the logout's head start", with no "the quit could not run at once".
+- Each app's windows reopen at their real frames (none in the park zone: no `warn` of a
+  window brought back from it at the login).
+- A logout cancelled by an app with an unsaved document: a minute later the stages are back
+  ("no quit came after the logout's head start").
+- A slow app (Xcode, an Electron app) in the saved front stage: settling waits for its first
+  window (8F2, M2), or a new app's window takes the front meanwhile (M4).
 
 ## Out of scope (prototype)
 

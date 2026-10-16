@@ -4,10 +4,11 @@
 //!   `open`) reaches `applicationShouldHandleReopen:hasVisibleWindows:`: the app shows its
 //!   Settings window, the way back when the menu bar icon is hidden.
 //! - **Terminate:** a quit from elsewhere (logout, `osascript … quit`) goes through the app's
-//!   own Quit, which brings every parked window back first and exits. A logout is never
-//!   cancelled: when the Quit cannot run at once (the app's state is busy, or a quit is
-//!   already under way) the answer is "later", the Quit is tried again every 200 ms, and
-//!   after 5 s the registry unparks and macOS is told to go on.
+//!   own Quit, which brings every parked window back first and exits (after a logout's head
+//!   start, `willPowerOffNotification`, the windows are back already: it only exits). A
+//!   logout is never cancelled: when the Quit cannot run at once (the app's state is busy, or
+//!   a quit is already under way) the answer is "later", the Quit is tried again every
+//!   200 ms, and after 5 s the registry unparks and macOS is told to go on.
 //! - **Main menu:** an accessory app shows no menu bar, but its main menu's key equivalents
 //!   still work while one of its windows is key: ⌘, (Settings), ⌘Q (Quit, the safe one),
 //!   ⌘W and ⌘M, and the edit keys for text.

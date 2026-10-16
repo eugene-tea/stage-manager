@@ -1,8 +1,10 @@
-//! Global input: one `NSEvent` global monitor for left mouse down/up and key down in other
-//! apps, the live modifier and button state, and the Shift sugar's trigger record.
+//! Global input: one `NSEvent` global monitor for left mouse down/up, right and other mouse
+//! down and key down in other apps, the live modifier and button state, and the Shift sugar's
+//! trigger record.
 //!
 //! - The monitor (main thread) reports every left mouse-down (wallpaper clicks, the start of
-//!   a window drag), left mouse-up (the end of a window drag) and key-down, each with the
+//!   a window drag), left mouse-up (the end of a window drag), right or other button press
+//!   (a user action: it ends the login's settling, nothing more) and key-down, each with the
 //!   Shift and Command flags the user held. Global monitors never see our own windows'
 //!   events.
 //! - [`Triggers`] remembers the latest of those user actions, so a window or an activation
@@ -38,6 +40,9 @@ pub enum InputKind {
     MouseDown,
     /// Left mouse button released.
     MouseUp,
+    /// The right or another (middle, side) mouse button pressed: a user action, nothing
+    /// else (no drag, no wallpaper or Dock click).
+    OtherMouseDown,
     /// A key pressed.
     KeyDown,
 }
@@ -89,9 +94,9 @@ impl Drop for InputMonitor {
     }
 }
 
-/// Calls `sink` (main thread) for every left mouse down/up and key down in another app, and
-/// `moved` with the pointer (global, top-left) for every mouse move over another app's
-/// window or the desktop.
+/// Calls `sink` (main thread) for every left mouse down/up, right or other mouse down and key
+/// down in another app, and `moved` with the pointer (global, top-left) for every mouse move
+/// over another app's window or the desktop.
 pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
         // SAFETY: AppKit passes a live event for the duration of the block.
@@ -101,18 +106,13 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
             moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
             return;
         }
-        let kind = match event.r#type() {
-            NSEventType::LeftMouseDown => InputKind::MouseDown,
-            NSEventType::LeftMouseUp => InputKind::MouseUp,
-            NSEventType::KeyDown => InputKind::KeyDown,
-            _ => return,
-        };
+        let Some(kind) = kind_of(event.r#type()) else { return };
         let flags = event.modifierFlags();
         let at = NSEvent::mouseLocation();
         // clickCount and keyCode raise on the other kind of event: ask each only its own.
         let (clicks, key) = match kind {
             InputKind::KeyDown => (0, Some(event.keyCode())),
-            InputKind::MouseDown | InputKind::MouseUp => (event.clickCount() as i64, None),
+            InputKind::MouseDown | InputKind::MouseUp | InputKind::OtherMouseDown => (event.clickCount() as i64, None),
         };
         sink(InputEvent {
             kind,
@@ -124,9 +124,25 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
             key,
         });
     });
-    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::KeyDown | NSEventMask::MouseMoved;
+    let mask = NSEventMask::LeftMouseDown
+        | NSEventMask::LeftMouseUp
+        | NSEventMask::RightMouseDown
+        | NSEventMask::OtherMouseDown
+        | NSEventMask::KeyDown
+        | NSEventMask::MouseMoved;
     let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)?;
     Some(InputMonitor { token })
+}
+
+/// What an event the monitor sees is to us (`None`: not reported).
+fn kind_of(t: NSEventType) -> Option<InputKind> {
+    match t {
+        NSEventType::LeftMouseDown => Some(InputKind::MouseDown),
+        NSEventType::LeftMouseUp => Some(InputKind::MouseUp),
+        NSEventType::RightMouseDown | NSEventType::OtherMouseDown => Some(InputKind::OtherMouseDown),
+        NSEventType::KeyDown => Some(InputKind::KeyDown),
+        _ => None,
+    }
 }
 
 /// Modifier keys held right now.
@@ -486,6 +502,17 @@ mod tests {
         assert!(!event(InputKind::KeyDown, true, 0, Some(8)).is_switcher_key(), "⌘C");
         assert!(!event(InputKind::KeyDown, true, 0, Some(124)).is_switcher_key(), "⌘→");
         assert!(!event(InputKind::MouseDown, true, 1, None).is_switcher_key());
+    }
+
+    #[test]
+    fn a_right_or_middle_click_is_a_user_action() {
+        assert_eq!(kind_of(NSEventType::RightMouseDown), Some(InputKind::OtherMouseDown));
+        assert_eq!(kind_of(NSEventType::OtherMouseDown), Some(InputKind::OtherMouseDown));
+        assert_eq!(kind_of(NSEventType::LeftMouseDown), Some(InputKind::MouseDown));
+        assert_eq!(kind_of(NSEventType::LeftMouseUp), Some(InputKind::MouseUp));
+        assert_eq!(kind_of(NSEventType::KeyDown), Some(InputKind::KeyDown));
+        assert_eq!(kind_of(NSEventType::RightMouseUp), None, "a release is not reported");
+        assert_eq!(kind_of(NSEventType::MouseMoved), None, "moves go to the strip");
     }
 
     #[test]

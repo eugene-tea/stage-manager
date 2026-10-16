@@ -101,7 +101,7 @@ use crate::engine::model::{
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
-use crate::engine::restore::{AppQuiet, End, Restore, Settling};
+use crate::engine::restore::{self, AppQuiet, End, Restore, Settling};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
@@ -2371,6 +2371,12 @@ impl Controller {
                 }
                 self.present();
             }
+            InputKind::OtherMouseDown => {
+                // A right or middle click is the user's: it ends the login's settling (their
+                // focus and stage stand), and is no drag, Dock or wallpaper click.
+                tracing::debug!(x = event.at.x, y = event.at.y, "right or other mouse down in another app");
+                self.end_restore("a right or middle click", End::User);
+            }
             InputKind::KeyDown => {
                 // ⌘Tab's own app switch brings its stage; nothing else comes forward for it.
                 if event.is_switcher_key() {
@@ -3736,9 +3742,15 @@ impl Controller {
                 self.quiet_checked = now;
                 self.give_up_pending(ob, now);
             }
+            // An app with saved windows running with no window yet is still opening (Xcode, an
+            // Electron app: 30-90 s): the login is not quiet (the review of 8F, M2).
+            let opening = self.settling.is_some() && self.pending_apps_opening(ob);
             if let Some(clock) = self.settling.as_mut() {
                 if let Some(t) = ob.last_launch() {
                     clock.busy(t);
+                }
+                if opening {
+                    clock.busy(now);
                 }
                 // Not while the screen is locked (a login that locks at once): nothing is done
                 // for a screen nobody sees; the end comes after the unlock.
@@ -3786,16 +3798,17 @@ impl Controller {
     /// brings that stage forward, and no Desktop becomes provisional. At the next tick an
     /// empty saved active stage with cards beside it gives way (`front_after_restore`; not
     /// after an app switcher key, whose own switch wins), and when it ended by itself the
-    /// saved key window takes the keyboard (`focus_after_restore`). The restore's line is
-    /// logged (`log summary` repeats it).
+    /// saved key window takes the keyboard (`focus_after_restore`). After a restart the
+    /// restore's line is logged (`log summary` repeats it).
     fn end_restore(&mut self, why: &str, end: End) {
         let Some(clock) = self.settling.take() else { return };
         if let Some(m) = self.model.as_mut()
             && m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
-            let summary = m.restore_summary(clock.age(Instant::now()).as_secs());
-            tracing::info!("{summary}");
+            if let Some(line) = m.restore_line(clock.age(Instant::now()).as_secs()) {
+                tracing::info!("{line}");
+            }
             self.front_after_restore = end.brings_front();
             // Only after a restart: a relaunch in the same session changed no focus.
             self.focus_after_restore = end.by_itself() && m.after_restart();
@@ -3814,19 +3827,14 @@ impl Controller {
         if bundles.is_empty() {
             return;
         }
-        let waiting: HashSet<String> = self
-            .unplaced
-            .iter()
-            .filter_map(|id| ob.window(*id).and_then(|w| ob.bundle_id(w.pid)).map(str::to_string))
-            .collect();
+        let waiting = self.waiting_bundles(ob);
         for b in &bundles {
             if ob.pids_with_bundle(b).is_empty() {
                 self.quiet.stopped(b);
             } else {
                 // The clock starts at the app's first window: one with none yet (still
                 // launching, or windowless) is never quiet.
-                let has_window = waiting.contains(b) || m.windows().any(|w| w.meta.bundle_id == *b);
-                self.quiet.running(b, has_window, now);
+                self.quiet.running(b, app_has_window(m, &waiting, b), now);
             }
         }
         let settled: Vec<String> =
@@ -3844,6 +3852,25 @@ impl Controller {
                 self.front_after_restore = true;
             }
         }
+    }
+
+    /// The apps of windows waiting to show (another Desktop's, minimized, hidden: unplaced).
+    fn waiting_bundles(&self, ob: &Observer) -> HashSet<String> {
+        self.unplaced.iter().filter_map(|id| ob.window(*id).and_then(|w| ob.bundle_id(w.pid)).map(str::to_string)).collect()
+    }
+
+    /// True when an app with pending windows is running with no window yet (managed or
+    /// waiting to show): still opening ([`restore::still_opening`]).
+    fn pending_apps_opening(&self, ob: &Observer) -> bool {
+        let Some(m) = self.model.as_ref() else { return false };
+        let bundles = m.pending_bundles();
+        if bundles.is_empty() {
+            return false;
+        }
+        let waiting = self.waiting_bundles(ob);
+        restore::still_opening(bundles.iter().map(String::as_str), |b| !ob.pids_with_bundle(b).is_empty(), |b| {
+            app_has_window(m, &waiting, b)
+        })
     }
 
     // ----- ctl ---------------------------------------------------------------------------
@@ -4280,6 +4307,12 @@ fn frames_differ(cg: Rect, tracked: Rect) -> bool {
         || (cg.y - tracked.y).abs() > 1.0
         || (cg.w - tracked.w).abs() > 1.0
         || (cg.h - tracked.h).abs() > 1.0
+}
+
+/// True when app `bundle` has a window: one the model manages, or one waiting to show
+/// (`waiting`: the apps of unplaced windows).
+fn app_has_window(m: &Model, waiting: &HashSet<String>, bundle: &str) -> bool {
+    waiting.contains(bundle) || m.windows().any(|w| w.meta.bundle_id == bundle)
 }
 
 /// A shown window's frame for an activation's switch: the window server's bounds

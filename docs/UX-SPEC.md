@@ -150,13 +150,18 @@ cannot match. Saved windows not on screen at launch wait, with no card, in their
 apps reopen them each goes back to its stage, at its saved frame when the main display has
 the saved size, parked only on a confident match (a doubtful one goes by Apple's rule and
 stays in view or gets a card of its own). While the login settles (until apps have been
-quiet for 20 s and the login is a minute old, the first click or key press, or 5 minutes)
-launch-time activations and new windows switch nothing and animate nothing, and cards come
-in quietly in their saved order; then the stage left in front shows with its key window
-focused, unless a window shown there already has the keyboard. At a logout, restart or
-shutdown every window comes back before apps save theirs. No apps are relaunched (that is
-macOS's "Reopen windows when logging back in") and no window moves between Desktops. Off,
-a restart starts every app in a stage of its own, as Apple's does. One log line sums it up
+quiet for 20 s, none still opening its first window, and the login is a minute old; the
+first click or key press; or 5 minutes) launch-time activations and new windows switch
+nothing and animate nothing, and cards come in quietly in their saved order; then the stage
+left in front shows with its key window focused, unless a window shown there already has
+the keyboard. While that stage is still empty (its app slow to open), a window opening a
+stage of its own takes the front instead of a card beside an empty screen; the saved stage
+then waits, and its windows get a card when they come. At a logout, restart or shutdown
+every window comes back as soon as macOS announces it, so apps save their windows where
+they are as far as the timing allows (best effort: macOS asks apps to quit at the same
+time); the app itself quits when macOS asks it to. No apps are relaunched (that is macOS's
+"Reopen windows when logging back in") and no window moves between Desktops. Off, a restart
+starts every app in a stage of its own, as Apple's does. One log line sums it up
 (`stage-manager log summary` repeats it).
 
 ## Known gaps

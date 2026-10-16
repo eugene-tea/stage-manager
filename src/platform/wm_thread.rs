@@ -14,6 +14,12 @@
 //! ([`resume_plan`]), held windows are tried again and observation starts: the fresh
 //! controller builds stages from the windows on screen.
 //!
+//! At a logout, restart or shutdown the thread stands down the same way ahead of macOS's quit
+//! ([`Logout`], [`logout_plan`]): every window back, the stages saved (kept for the next
+//! login), observation stopped, input ignored; the quit that follows only exits. With no quit
+//! within [`crate::engine::stand_down::LOGOUT_WAIT`] (a cancelled logout) observation starts
+//! again: the fresh controller restores the saved stages, as at a launch.
+//!
 //! Every entry point (command drain, AX callback, timer) runs inside
 //! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
 //! of killing the thread that owns the windows.
@@ -42,7 +48,7 @@ use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
-use crate::engine::stand_down::{StandDown, Step, Task, Work, release_plan, resume_plan};
+use crate::engine::stand_down::{Logout, Quit, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
@@ -115,8 +121,12 @@ pub enum WmCommand {
     /// A ctl command for the engine; the reply is one JSON value.
     Ctl(Command, SyncSender<serde_json::Value>),
     /// Unpark every window, save state, drop every observer, stop the run loop, then reply
-    /// with whether every window came back.
+    /// with whether every window came back. After the logout's head start: only stop and
+    /// reply with what the head start found.
     Shutdown(SyncSender<bool>),
+    /// A logout, restart or shutdown is coming (`willPowerOffNotification`): the head start
+    /// ([`logout_plan`]), no quit.
+    LogoutComing,
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -210,6 +220,8 @@ struct WmState {
     stand_down_leftovers: Option<safety::Ours>,
     /// When the scan after a main display change is due.
     display_sweep: Option<Instant>,
+    /// The logout's head start, while it holds.
+    logout: Logout,
 }
 
 thread_local! {
@@ -303,6 +315,25 @@ impl WmState {
 
     fn handle(&mut self, cmd: WmCommand) {
         match cmd {
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip | WmCommand::SpaceChanged
+                if !self.logout.admits(Work::Input) =>
+            {
+                tracing::debug!("a logout is coming: input ignored");
+            }
+            WmCommand::LogoutComing => self.logout_head_start(),
+            WmCommand::Shutdown(reply) if matches!(self.logout.quit(), Quit::Done { .. }) => {
+                // The head start did the work: nothing is unparked, checked or saved again
+                // (the controller is a fresh one with no stages; saving it would write none).
+                let Quit::Done { all_back } = self.logout.quit() else { return };
+                tracing::info!(all_back, "quitting after the logout's head start: every window was brought back then");
+                self.observer.stop();
+                let _ = self.observer.take_events();
+                if let Some(rl) = CFRunLoop::current() {
+                    rl.stop();
+                }
+                let _ = reply.send(all_back && safety::registry_len() == 0);
+                return;
+            }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
             WmCommand::App(event) => self.observer.on_app_event(event, ax_callback),
             WmCommand::Accessibility(trusted) => {
@@ -318,7 +349,7 @@ impl WmState {
                     }
                 }
                 self.trusted = trusted;
-                if self.stand_down.admits(Work::Observe) || !trusted {
+                if (self.stand_down.admits(Work::Observe) && self.logout.admits(Work::Observe)) || !trusted {
                     self.observer.set_accessibility(trusted, ax_callback);
                 } else {
                     tracing::info!("Apple's Stage Manager is on: observation waits until it is off");
@@ -329,10 +360,15 @@ impl WmState {
                 self.settings = Some(settings.clone());
                 self.controller.set_settings(&settings);
                 self.observer.set_settings(settings);
-                match self.stand_down.apple(apple_on) {
-                    Step::Release => self.release(),
-                    Step::Resume => self.resume(),
-                    Step::Nothing => {}
+                if self.logout.holding() {
+                    // Read again when the hold ends (a cancelled logout).
+                    tracing::debug!(apple_on, "a logout is coming: Apple's Stage Manager is looked at again if it is cancelled");
+                } else {
+                    match self.stand_down.apple(apple_on) {
+                        Step::Release => self.release(),
+                        Step::Resume => self.resume(),
+                        Step::Nothing => {}
+                    }
                 }
             }
             WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
@@ -450,8 +486,82 @@ impl WmState {
                         self.controller.set_settings(raw);
                     }
                 }
-                Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(crate::ui::strip::stand_down),
-                Task::RetryHeld | Task::StartObserving => {}
+                Task::HideStrip => {
+                    dispatch2::DispatchQueue::main().exec_async(|| crate::ui::strip::stand_down("Apple's Stage Manager is on"));
+                }
+                Task::RetryHeld | Task::StartObserving | Task::SaveStages => {}
+            }
+        }
+    }
+
+    /// A logout, restart or shutdown is coming: carries out [`logout_plan`] once (the review
+    /// of 8F, M3), so windows are at their real frames as early as possible before apps save
+    /// theirs, and the app stays running for macOS's own quit. While standing down nothing is
+    /// parked: the quit does as before.
+    fn logout_head_start(&mut self) {
+        if self.stand_down.stood_down() {
+            tracing::info!("logout, restart or shutdown coming: standing down already, nothing parked");
+            return;
+        }
+        if !self.logout.coming(Instant::now()) {
+            return;
+        }
+        tracing::info!("logout, restart or shutdown coming: every window back and the stages saved now; the app quits when macOS asks");
+        let mut all_back = true;
+        for task in logout_plan(self.displays.is_some(), self.settings.is_some()) {
+            match task {
+                Task::UnparkAll => {
+                    // As at quit: the controller's unpark, then the window server's word on
+                    // every allowed app's window still in a park zone (6X).
+                    let failed = self.controller.unpark_all(&self.observer);
+                    let back = safety::leftovers_back_knowing("logout", safety::Ours::now(self.controller.model_window_ids())).is_none();
+                    let unrestored = self.controller.account_unrestored(&self.observer);
+                    all_back = back && unrestored == 0 && safety::registry_len() == 0;
+                    if !all_back {
+                        tracing::warn!(failed, unrestored, back, "not every window came back at the logout's head start; the quit tries the registry again");
+                    }
+                }
+                Task::SaveStages => self.controller.save_now(),
+                Task::StopObserving => {
+                    self.observer.stop();
+                    let _ = self.observer.take_events();
+                }
+                Task::NewController => self.controller = Controller::new(),
+                Task::ReplayDisplays => {
+                    if let Some(d) = self.displays.clone() {
+                        self.controller.set_displays(&mut self.observer, d);
+                    }
+                }
+                Task::ReplaySettings => {
+                    if let Some(raw) = &self.settings {
+                        self.controller.set_settings(raw);
+                    }
+                }
+                Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(|| {
+                    crate::ui::strip::stand_down("a logout, restart or shutdown is coming");
+                    if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+                        crate::ui::corner_patch::apply(mtm, crate::ui::corner_patch::PatchPlan::default());
+                    }
+                }),
+                Task::HoldStranded | Task::DropSavedStages | Task::RetryHeld | Task::StartObserving => {}
+            }
+        }
+        self.logout.released(all_back);
+    }
+
+    /// No quit came after the logout's head start (another app cancelled the logout): the app
+    /// starts afresh as at a launch (the fresh controller restores the saved stages), unless
+    /// Apple's Stage Manager came on meanwhile (then it stands down).
+    fn logout_cancelled(&mut self) {
+        tracing::info!("no quit came after the logout's head start (the logout was cancelled): starting afresh from the saved stages");
+        let apple_on = self.settings.as_ref().is_some_and(native_settings::apple_stage_manager_enabled);
+        match self.stand_down.apple(apple_on) {
+            Step::Release => self.release(),
+            Step::Resume => self.resume(),
+            Step::Nothing => {
+                if self.trusted {
+                    self.observer.set_accessibility(true, ax_callback);
+                }
             }
         }
     }
@@ -487,6 +597,9 @@ impl WmState {
     }
 
     fn tick(&mut self) {
+        if self.logout.cancelled(Instant::now()) {
+            self.logout_cancelled();
+        }
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks.is_multiple_of(RETRY_EVERY) {
             self.observer.retry_pending(ax_callback);
@@ -593,6 +706,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         rescan: Rescan::default(),
         stand_down_leftovers: None,
         display_sweep: None,
+        logout: Logout::default(),
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));

@@ -1090,3 +1090,71 @@ fn an_app_s_window_unminimized_after_the_restore_window_brings_its_saved_stage_f
     assert!(own != mail && m.main_active_stage() == Some(own));
     assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(21), w(22)]), "Mail untouched");
 }
+
+// ----- the review of 8F (8F2) ---------------------------------------------------------------
+
+#[test]
+fn a_new_stage_takes_the_front_from_an_empty_saved_active_stage_while_the_login_settles() {
+    // M4: the editor (the saved active stage) is slow to open; Chat came back into its
+    // inactive stage. An app with no saved window opens a window: rather than a card beside
+    // an empty screen for up to ~80 s, its stage of its own takes the front (nothing shown
+    // there to animate away). The editor's stage waits, inactive, with no card.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    let editor = m.main_active_stage().expect("the saved active stage");
+    assert!(m.settling() && m.has_pending(editor) && m.stage(editor).is_some_and(|s| s.windows.is_empty()));
+    let a = add_focused(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
+    let own = m.stage_of(w(31)).expect("managed");
+    assert!(own != editor && m.main_active_stage() == Some(own), "its own stage, in front: {a:?}");
+    assert!(!parks(&a, 31) && m.window(w(31)).is_some_and(|x| !x.parked), "shown, not parked");
+    assert!(m.has_pending(editor) && m.stage(editor).is_some(), "the editor's stage still waits");
+    assert!(m.strip().iter().all(|c| c.stage != editor && !c.windows.is_empty()), "with no card");
+    // Another app with no saved window now: the front shows a window, so a card as before.
+    let a = add_focused(&mut m, win(32, 61, "com.example.other", "Sketch", DEFAULT));
+    assert!(parks(&a, 32) && m.main_active_stage() == Some(own), "a card, no switch: {a:?}");
+    // The editor's window comes during the restore window: parked in its saved stage, which
+    // gets its card in its saved place; the front stays.
+    let a = add_focused(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.stage_of(w(23)), Some(editor));
+    assert!(parks(&a, 23) && !switches(&a) && m.main_active_stage() == Some(own), "{a:?}");
+    assert!(m.strip().iter().any(|c| c.stage == editor), "the editor's card shows");
+    // At the end: nothing to give way (the front shows a window); its key window is the one
+    // that takes the keyboard.
+    assert!(m.end_restore());
+    assert!(m.front_after_restore(&Observation::default()).is_empty());
+    assert_eq!(m.focus_after_restore(&Observation::default()), [Action::Focus { id: w(31) }]);
+    // After the window the editor's other window brings its stage forward, as usual.
+    let a = add_focused(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
+    assert_eq!(m.main_active_stage(), Some(editor), "{a:?}");
+}
+
+#[test]
+fn a_new_window_joins_no_saved_stage_and_a_front_with_windows_stays_while_settling() {
+    // M4's edge: the saved active stage shows a window already: a new stage is a card.
+    let mut m = adopted();
+    let editor = m.main_active_stage();
+    let a = add_focused(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
+    assert!(parks(&a, 31) && m.main_active_stage() == editor, "{a:?}");
+    // Before any saved Desktop is adopted the screen's own empty stage is simply used (no
+    // waiting stage in front then).
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let front = m.main_active_stage();
+    let a = add_focused(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
+    assert!(!parks(&a, 31) && m.stage_of(w(31)) == front, "{a:?}");
+}
+
+#[test]
+fn the_restore_line_is_logged_after_a_restart_only() {
+    // L1: `log summary` repeats it as "after a restart".
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_eq!(m.restore_line(12).map(|s| s.windows), Some(1));
+    let mut m = model();
+    m.set_restore(Restore::same_session("A"));
+    m.restore_spaces(vec![desktop_5()]);
+    m.arrive(MAIN, &[win(23, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
+    assert!(m.restoring() && m.restore_line(12).is_none(), "a relaunch in the same session");
+}

@@ -2666,15 +2666,22 @@ def phase_restore():
 
     say("-- settling ends by itself once apps are quiet for 20 s (8F): the saved key window has the keyboard")
     check((s.get("restore") or {}).get("settling") is True, "the login is settling (a restart)")
-    s = wait_state(lambda x: (x.get("restore") or {}).get("restoring") is False, "the restore window ends by itself", timeout=45)
+    # 75 s: quiet 20 s after the last window back (Bravo's stagger, Alpha 1) and a minute after
+    # the launch at least, with room for a slow machine.
+    s = wait_state(lambda x: (x.get("restore") or {}).get("restoring") is False, "the restore window ends by itself", timeout=75)
     if check(s is not None, "the restore window ended with no user action (apps quiet 20 s)"):
         time.sleep(1.5)  # the end's focus, at the next tick
         s = state()
         text = log_text()
         ends = re.search(r'restore: the restore window ends why="apps went quiet"', text)
         check(ends is not None, "it ended because apps went quiet (the log)")
-        switches_during = text[:ends.start()].count("stage switch") if ends else -1
-        check(switches_during == 0, f"no stage switch while the login settled ({switches_during} in the log)")
+        # Only session B's restore window counts: from its opening line to its end (the day's
+        # log also holds session A, whose `do("switch", …)` switched stages).
+        opens = [o for o in re.finditer(r"restore: the restore window opens after_restart=true", text)
+                 if ends is not None and o.start() < ends.start()]
+        check(bool(opens), "session B's restore window opened after a restart (the log)")
+        switches_during = text[opens[-1].end():ends.start()].count("stage switch") if ends and opens else -1
+        check(switches_during == 0, f"no stage switch while the login settled ({switches_during} in session B's restore window)")
         check(re.search(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule", text) is not None,
               "the restore's one line is logged, no titles")
         summary = run([BIN, "log", "summary"], timeout=15).stdout

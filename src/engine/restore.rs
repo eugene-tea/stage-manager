@@ -32,12 +32,21 @@
 //! **Settling** (round 8F): after a restart the restore window is also when the login burst
 //! settles. Launch-time activations, focus changes and new windows switch no stage and
 //! animate nothing ([`crate::engine::model::Model::settling`]); cards come in quietly. Besides
-//! a user action and [`WINDOW`], it ends once apps have been quiet for [`SETTLE_QUIET`] (no app
-//! launched, no window back from a saved entry) and at least [`SETTLE_AFTER_LOGIN`] after
-//! the login ([`Settling`]). A window matching no saved one (or a doubtful match) still
-//! goes by Apple's rule, only without the switch: into its app's stage, or a stage of its own
-//! with its card. Then the saved active stage shows and its key window takes the
-//! keyboard unless a window shown there has it already
+//! a user action (a click of any button, a key press) and [`WINDOW`], it ends once apps have
+//! been quiet for [`SETTLE_QUIET`] and at least [`SETTLE_AFTER_LOGIN`] after the login
+//! ([`Settling`]). Quiet: no app launched, no window back from a saved entry, and no app with
+//! saved windows still opening (running with no window yet: Xcode or an Electron app may take
+//! 30-90 s to show its first, [`still_opening`]). A screen lock during the burst (a login that
+//! locks at once) defers the end until the unlock: nothing is done for a screen nobody sees.
+//!
+//! A window matching no saved one (or a doubtful match) still goes by Apple's rule while the
+//! login settles, only without the switch: into its app's stage, or a stage of its own with
+//! its card. One exception: while the saved active stage is still empty, its windows still to
+//! come, a window that opens a stage of its own takes the front (nothing is shown there to
+//! animate away; the screen is not left empty while a slow app opens), and the saved stage
+//! waits, inactive and with no card; its windows, when they come, are parked there and its
+//! card shows. At the end the stage in front shows and its key window takes the keyboard
+//! unless a window shown there has it already
 //! ([`crate::engine::model::Model::focus_after_restore`]), and one line sums the restore up
 //! ([`Summary`]).
 //!
@@ -206,6 +215,19 @@ impl Settling {
     pub fn age(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.started)
     }
+}
+
+/// True when an app of `pending` (apps with saved windows still waiting) is running with no
+/// window yet (`running`, `has_window`: one managed or one waiting to show): it is still
+/// opening (Xcode or an Electron app may take 30-90 s to show its first window), so the
+/// login is not quiet: the platform keeps [`Settling`] busy while it is, [`WINDOW`] still
+/// bounding it. An app not running has nothing on its way.
+pub fn still_opening<'a>(
+    pending: impl IntoIterator<Item = &'a str>,
+    running: impl Fn(&str) -> bool,
+    has_window: impl Fn(&str) -> bool,
+) -> bool {
+    pending.into_iter().any(|b| running(b) && !has_window(b))
 }
 
 /// The restore summed up in one line, no titles (the log at its end, `log summary`):
@@ -396,6 +418,52 @@ mod tests {
         assert_eq!(c.due(s(4019)), None);
         assert_eq!(c.due(s(4020)), Some(End::Quiet));
         assert_eq!(c.age(s(4020)), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn an_app_still_opening_its_first_window_keeps_the_login_busy() {
+        // The review of 8F (M2): Xcode running 80 s with no window yet; settling would have
+        // ended at 60 s and its windows then switched stages after the end.
+        let pending = ["com.example.ide", "com.example.chat", "com.example.gone"];
+        let running = |b: &str| b != "com.example.gone";
+        let mut windows = vec!["com.example.chat"];
+        assert!(still_opening(pending, running, |b| windows.contains(&b)), "the IDE is running, no window yet");
+        windows.push("com.example.ide");
+        assert!(!still_opening(pending, running, |b| windows.contains(&b)), "every running app has a window; one not running counts for nothing");
+        assert!(!still_opening([], running, |_| false), "nothing pending");
+
+        // The platform's tick: busy while the IDE opens, then quiet 20 s after its window.
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut c = Settling::new(t0, Some(t0));
+        let mut ended = None;
+        for k in 0..=400 {
+            let now = s(k);
+            let ide_window = k >= 80;
+            if still_opening(["com.example.ide"], |_| true, |_| ide_window) {
+                c.busy(now);
+            }
+            if let Some(end) = c.due(now) {
+                ended = Some((k, end));
+                break;
+            }
+        }
+        assert_eq!(ended, Some((99, End::Quiet)), "busy until 79 s, quiet 20 s later");
+
+        // An app that never shows a window: the cap still ends it.
+        let mut c = Settling::new(t0, Some(t0));
+        let mut ended = None;
+        for k in 0..=400 {
+            let now = s(k);
+            if still_opening(["com.example.ide"], |_| true, |_| false) {
+                c.busy(now);
+            }
+            if let Some(end) = c.due(now) {
+                ended = Some((k, end));
+                break;
+            }
+        }
+        assert_eq!(ended, Some((300, End::TimeUp)), "five minutes at most");
     }
 
     #[test]

@@ -108,9 +108,11 @@ its own stage; the front one is shown and the rest wait in the strip.
 
 When you restart your Mac or log in again, your stages come back as your apps reopen their
 windows: each window goes back to its stage and its place, the strip keeps its order, and
-the stage you left in front is in front again, its window ready for typing. While apps are
-still opening, nothing jumps to the front; it settles by itself once they are done, or as
-soon as you click or type.
+the stage you left in front is in front again, its window ready for typing unless you
+clicked first. While apps are still opening, nothing jumps to the front; it settles by
+itself once they are done, or as soon as you click or type. If that stage's app is slow to
+open and another app opens a window first, that window shows rather than an empty screen,
+and your stage comes back as a card.
 
 What it cannot do:
 
