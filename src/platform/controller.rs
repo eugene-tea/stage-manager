@@ -420,10 +420,32 @@ fn resolve_cover(
 /// to 473,124 2087x1316 for minutes), and a window that stays shown through a switch.
 fn parked_in_zone(list: &[windows::CgWindow], parked: impl IntoIterator<Item = u32>, frame: Rect, visible: Rect, corner: Corner) -> HashSet<u32> {
     let parked: HashSet<u32> = parked.into_iter().collect();
-    list.iter()
-        .filter(|w| parked.contains(&w.id) && crate::engine::park::is_parked_in_at(w.bounds, frame, visible, corner))
-        .map(|w| w.id)
-        .collect()
+    let (inside, elsewhere): (Vec<_>, Vec<_>) = list
+        .iter()
+        .filter(|w| parked.contains(&w.id))
+        .partition(|w| crate::engine::park::is_parked_in_at(w.bounds, frame, visible, corner));
+    note_parked_elsewhere(&elsewhere);
+    inside.iter().map(|w| w.id).collect()
+}
+
+/// Logs once per window and listed frame a window the model has parked that the window server
+/// lists outside the park zone (8L6 review: the owner's 10-16 Fork window, listed at its frame
+/// for minutes while parked; the next log settles whether the park held).
+fn note_parked_elsewhere(elsewhere: &[&windows::CgWindow]) {
+    static SEEN: Mutex<Vec<(u32, i64, i64)>> = Mutex::new(Vec::new());
+    let Ok(mut seen) = SEEN.lock() else { return };
+    for w in elsewhere {
+        let key = (w.id, w.bounds.x.round() as i64, w.bounds.y.round() as i64);
+        if seen.contains(&key) {
+            continue;
+        }
+        if seen.len() >= 256 {
+            seen.clear();
+        }
+        seen.push(key);
+        tracing::debug!(id = w.id, pid = w.pid, bounds = %format!("{:.0},{:.0} {:.0}x{:.0}", w.bounds.x, w.bounds.y, w.bounds.w, w.bounds.h), onscreen = w.onscreen,
+            "a window the model has parked is listed outside the park zone");
+    }
 }
 
 /// The bounds, as listed in `list`, of a switch's `arriving` windows macOS has raised above the
