@@ -92,7 +92,7 @@ use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
-use crate::engine::park::{ParkRequest, choose_corner};
+use crate::engine::park::{Corner, ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
 use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
@@ -412,11 +412,61 @@ fn resolve_cover(
     Ok(SwitchCover { picture, ..c })
 }
 
+/// The windows of `parked` (the model's parked windows) that window server list `list` shows
+/// in the park zone of the display `frame` (visible frame `visible`, park `corner`): parked in
+/// fact. One the model has parked but the window server lists elsewhere (a park that did not
+/// hold, an app that put its window back) shows there: never a sliver of the corner patch nor
+/// of a switch's cover (round 8L6: on the owner's Mac one listed at 533,184 1741x1173 grew both
+/// to 473,124 2087x1316 for minutes), and a window that stays shown through a switch.
+fn parked_in_zone(list: &[windows::CgWindow], parked: impl IntoIterator<Item = u32>, frame: Rect, visible: Rect, corner: Corner) -> HashSet<u32> {
+    let parked: HashSet<u32> = parked.into_iter().collect();
+    let (inside, elsewhere): (Vec<_>, Vec<_>) = list
+        .iter()
+        .filter(|w| parked.contains(&w.id))
+        .partition(|w| crate::engine::park::is_parked_in_at(w.bounds, frame, visible, corner));
+    note_parked_elsewhere(&elsewhere);
+    inside.iter().map(|w| w.id).collect()
+}
+
+/// Logs once per window and listed frame a window the model has parked that the window server
+/// lists outside the park zone (8L6 review: the owner's 10-16 Fork window, listed at its frame
+/// for minutes while parked; the next log settles whether the park held).
+fn note_parked_elsewhere(elsewhere: &[&windows::CgWindow]) {
+    static SEEN: Mutex<Vec<(u32, i64, i64)>> = Mutex::new(Vec::new());
+    let Ok(mut seen) = SEEN.lock() else { return };
+    for w in elsewhere {
+        let key = (w.id, w.bounds.x.round() as i64, w.bounds.y.round() as i64);
+        if seen.contains(&key) {
+            continue;
+        }
+        if seen.len() >= 256 {
+            seen.clear();
+        }
+        seen.push(key);
+        tracing::debug!(id = w.id, pid = w.pid, bounds = %format!("{:.0},{:.0} {:.0}x{:.0}", w.bounds.x, w.bounds.y, w.bounds.w, w.bounds.h), onscreen = w.onscreen,
+            "a window the model has parked is listed outside the park zone");
+    }
+}
+
+/// The bounds, as listed in `list`, of a switch's `arriving` windows macOS has raised above the
+/// corner patch, which its cover must hide ([`crate::engine::corner_patch::CoverFacts::raised`]):
+/// those waiting in the park zone (`in_zone`), and the `activated` app's wherever macOS put
+/// them (one brought into view, outside the corner's square, means no cover: round 8L6).
+/// Normal, drawn, not ours (`own`).
+fn raised_windows(list: &[windows::CgWindow], own: i32, arriving: &HashSet<u32>, activated: &HashSet<u32>, in_zone: impl Fn(Rect) -> bool) -> Vec<Rect> {
+    list.iter()
+        .filter(|w| w.layer == 0 && w.alpha > 0.0 && w.pid != own && arriving.contains(&w.id))
+        .filter(|w| in_zone(w.bounds) || activated.contains(&w.id))
+        .map(|w| w.bounds)
+        .collect()
+}
+
 /// The windows of window server list `list` (front to back) that stay shown through a switch
 /// ([`Staying`]): normal, drawn, not ours (`own`), neither leaving (`outgoing`, the switch's
 /// parks: the outgoing stage's windows never count, however much of the screen they fill),
-/// nor arriving, nor parked in the model's eyes (`parked`): pinned windows, unmanaged ones
-/// (another app's, an ignored app's), a dialog of one. `snapshot`: whether the strip holds a
+/// nor arriving, nor parked in the park zone (`parked`, [`parked_in_zone`]): pinned windows,
+/// unmanaged ones (another app's, an ignored app's), a dialog of one, and one the model has
+/// parked that the window server lists elsewhere (8L6). `snapshot`: whether the strip holds a
 /// full-size snapshot of a window, for the cover to draw it (round 8L5).
 fn staying_windows(
     list: &[windows::CgWindow],
@@ -1412,8 +1462,12 @@ impl Controller {
             Some(m) if on => {
                 let list = windows::on_screen();
                 let own = std::process::id() as i32;
-                let parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
-                let display = m.main_display().frame;
+                let main = m.main_display();
+                let display = main.frame;
+                // Only those listed in the park zone (8L6): one the model has parked but the
+                // window server lists elsewhere shows there, and grew the patch's rectangle
+                // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
+                let parked = parked_in_zone(&list, m.windows().filter(|w| w.parked).map(|w| w.meta.id.0), main.frame, main.visible, main.corner);
                 let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
                 let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rect, r));
                 self.patch_rect = rect;
@@ -1920,7 +1974,10 @@ impl Controller {
                     _ => None,
                 })
                 .collect();
-            let found = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
+            // The activated app's windows are raised by macOS wherever it put them (8L6).
+            let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
+            let found =
+                self.switch_corner(&arriving, &outgoing, &activated, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
             match found {
                 Ok(c) => early_corner = Some((Some(c), list)),
                 Err(r) => {
@@ -2079,7 +2136,13 @@ impl Controller {
     /// `outgoing` the windows about to park. A window that stays shown into the corner is drawn
     /// on the cover from the strip's snapshot of it (8L5). The reason, and the windows it
     /// names, when the corner cannot be covered (it is left as it is).
-    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Result<SwitchCover, Refused> {
+    fn switch_corner(
+        &self,
+        arriving: &HashSet<u32>,
+        outgoing: &HashSet<u32>,
+        activated: &HashSet<u32>,
+        list: &[windows::CgWindow],
+    ) -> Result<SwitchCover, Refused> {
         use crate::engine::corner_patch::{CoverFacts, switch_cover};
         use crate::engine::park::is_parked_in_at;
         if arriving.is_empty() {
@@ -2089,7 +2152,9 @@ impl Controller {
         let config = self.store.config();
         let display = m.main_display();
         let own = std::process::id() as i32;
-        let parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
+        // Parked where the window server lists them in the park zone; one the model has parked
+        // listed elsewhere shows there and stays shown through the switch (8L6).
+        let parked = parked_in_zone(list, m.windows().filter(|w| w.parked).map(|w| w.meta.id.0), display.frame, display.visible, display.corner);
         let normal = |w: &&windows::CgWindow| w.layer == 0 && w.alpha > 0.0 && w.pid != own;
         let in_zone = |b: Rect| is_parked_in_at(b, display.frame, display.visible, display.corner);
         let zone: Vec<&windows::CgWindow> = list
@@ -2098,7 +2163,7 @@ impl Controller {
             .filter(|w| !outgoing.contains(&w.id) && (arriving.contains(&w.id) || parked.contains(&w.id)) && in_zone(w.bounds))
             .collect();
         let slivers = zone.iter().map(|w| w.bounds).collect();
-        let raised = zone.iter().filter(|w| arriving.contains(&w.id)).map(|w| w.bounds).collect();
+        let raised = raised_windows(list, own, arriving, activated, in_zone);
         let staying = staying_windows(list, own, outgoing, arriving, &parked, strip_model::has_snapshot);
         let now = Instant::now();
         let facts = CoverFacts {
@@ -2110,6 +2175,7 @@ impl Controller {
             slivers,
             raised,
             display: display.frame,
+            corner: display.corner,
             visible: display.visible,
             dock_bars: self.dock_bar.as_ref().map(|(_, b)| b.bars.clone()).filter(|b| !b.is_empty()),
             reach: config.windows.corner_patch_reach,
@@ -2148,7 +2214,9 @@ impl Controller {
             Some((corner, list)) => (corner, list),
             None => {
                 let list = windows::on_screen();
-                let corner = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
+                let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
+                let corner =
+                    self.switch_corner(&arriving, &outgoing, &activated, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
                 if let Err(r) = &corner
                     && !arriving.is_empty()
                 {
@@ -5282,7 +5350,8 @@ mod tests {
     fn a_corner_with_icons_is_covered_by_the_desktops_still_never_the_wallpaper() {
         // 8L3: the owner's corner has desktop icons; the patch's picture would hide them.
         let rect = Rect::new(2499.0, 1348.0, 61.0, 92.0);
-        let cover = |picture| SwitchCover { rect, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
+        let cap = Rect::new(2240.0, 1120.0, 320.0, 320.0);
+        let cover = |picture| SwitchCover { rect, cap, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
         let ok = |_: Rect| Ok(());
         let no = |_: Rect| Err("not ready");
         // Icons there: the still, or nothing (the activation then arrives at once).
@@ -5330,6 +5399,48 @@ mod tests {
         // The outgoing windows never count, even when the model has not marked them parked.
         let staying = staying_windows(&list[..2], own, &[1, 2].into(), &HashSet::new(), &HashSet::new(), |_| false);
         assert!(staying.is_empty());
+    }
+
+    /// A window of the owner's 2560x1440 Mac (10-16), as the window server lists it.
+    fn listed(id: u32, pid: i32, bounds: Rect) -> windows::CgWindow {
+        windows::CgWindow { id, pid, owner: String::new(), name: None, layer: 0, bounds, onscreen: true, alpha: 1.0 }
+    }
+
+    #[test]
+    fn a_window_the_model_has_parked_counts_as_parked_only_where_it_is_listed_in_the_zone() {
+        // 8L6, his log: window 101 (its stage parked) listed at its restore frame 533,184
+        // 1741x1173 grew the patch's rectangle and every switch's cover to 473,124 2087x1316.
+        let (display, visible) = (Rect::new(0.0, 0.0, 2560.0, 1440.0), Rect::new(0.0, 33.0, 2560.0, 1407.0));
+        let list = [
+            listed(96, 760, Rect::new(2559.0, 1408.0, 1794.0, 1251.0)), // parked, the corner
+            listed(115, 795, Rect::new(2559.0, 1399.0, 1894.0, 1336.0)), // parked, the corner
+            listed(101, 784, Rect::new(533.0, 184.0, 1741.0, 1173.0)),  // parked in the model's eyes
+            listed(109, 746, Rect::new(263.0, 43.0, 2208.0, 1271.0)),   // shown, not parked
+        ];
+        let parked = parked_in_zone(&list, [96, 115, 101], display, visible, Corner::BottomRight);
+        assert_eq!(parked, [96, 115].into());
+        // The patch's rectangle from those: the corner's, never the screen's.
+        let slivers: Vec<Rect> = list.iter().filter(|w| parked.contains(&w.id)).map(|w| w.bounds).collect();
+        let rect = crate::engine::corner_patch::patch_rect(&slivers, display, 60.0).expect("slivers");
+        assert!(crate::engine::corner_patch::cover_cap(display, Corner::BottomRight).contains_rect(&rect), "{rect:?}");
+        // And 101 stays shown through a switch: the cover draws it or is not drawn.
+        let staying = staying_windows(&list, 500, &[109].into(), &[96].into(), &parked, |_| false);
+        assert_eq!(staying.iter().map(|w| w.id).collect::<Vec<_>>(), [101]);
+    }
+
+    #[test]
+    fn an_activated_apps_window_counts_as_raised_wherever_macos_put_it() {
+        // 8L6: the cover must hide what macOS raised; an activated app's window brought into
+        // view counts (and then cannot be hidden in the corner); a card click's arriving
+        // window outside the zone is not raised by macOS.
+        let (display, visible) = (Rect::new(0.0, 0.0, 2560.0, 1440.0), Rect::new(0.0, 33.0, 2560.0, 1407.0));
+        let in_zone = |b: Rect| crate::engine::park::is_parked_in_at(b, display, visible, Corner::BottomRight);
+        let corner = Rect::new(2559.0, 1408.0, 1794.0, 1251.0);
+        let into_view = Rect::new(492.0, 71.0, 1794.0, 1251.0);
+        let list = [listed(96, 760, corner), listed(97, 760, into_view), listed(98, 761, into_view), listed(99, 761, corner)];
+        let arriving: HashSet<u32> = [96, 97, 98].into();
+        assert_eq!(raised_windows(&list, 500, &arriving, &[96, 97].into(), in_zone), [corner, into_view]);
+        assert_eq!(raised_windows(&list, 500, &arriving, &HashSet::new(), in_zone), [corner], "a card click");
     }
 
     #[test]

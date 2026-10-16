@@ -113,7 +113,9 @@ nears a card, so content that changed meanwhile can jump when the motion ends. A
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). Arriving windows wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
-raises an activated app's windows there), never over the menu bar or the Dock's bar. Where
+raises an activated app's windows there), never over the menu bar or the Dock's bar, and
+never more than the corner itself (a 320-point square; 10-16, covers of most of the screen
+painted the desktop over the owner's windows at every switch). Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
 desktop there (only the desktop's own layers: the picture and its icons, never a window,
 even one that appears as it is taken; laid over the patch's picture when macOS leaves the
@@ -126,8 +128,8 @@ the cover from its own picture, so it looks as it is (that corner of it holds st
 motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
 windows land); the outgoing stage's windows never count. Where it cannot be covered at all (the patch off, card captures off with icons there,
 no picture ready yet, a staying window with no picture of it, such as another app's the
-app does not manage), an activated app's windows come to their places at once instead of
-growing.
+app does not manage, an activated window macOS put outside that square), an activated app's
+windows come to their places at once instead of growing.
 
 **Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
 

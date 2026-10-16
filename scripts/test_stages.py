@@ -918,6 +918,41 @@ AT_ONCE_CAPTURES_OFF = ("window captures are off",)
 STAYING_UNPICTURED = "a window that stays shown reaches the corner"
 
 
+# The most a switch's cover paints at the park corner (engine::corner_patch::COVER_CAP, 8L6): a
+# square that side at a bottom corner (a column that wide down the side at a top one). 10-16 the
+# owner's covers were up to 2087x1316 pt: his desktop painted over his windows at every switch.
+COVER_CAP = 320.0
+
+_RECT = r"(-?\d+),(-?\d+) (\d+)x(\d+)"
+
+
+def covers_of(log):
+    """(rect, cap) of each switch cover the app drew in `log` (its `the park corner is covered`
+    lines, 8L6: `rect=` and `cap=`, cap None when the line has none)."""
+    out = []
+    for line in log.splitlines():
+        if "the park corner is covered" not in line:
+            continue
+        r = re.search(r"\brect=" + _RECT, line)
+        c = re.search(r"\bcap=" + _RECT, line)
+        if r:
+            box = lambda m: dict(zip(("x", "y", "w", "h"), map(float, m.groups())))  # noqa: E731
+            out.append((box(r), box(c) if c else None))
+    return out
+
+
+def cover_in_corner(rect, cap, display):
+    """(ok, note): switch cover `rect` lies inside its `cap`, which is the park corner's own
+    region: at most COVER_CAP wide, and at a bottom corner (reaching the display's bottom) at
+    most COVER_CAP tall; never more of the screen (8L6)."""
+    if cap is None:
+        return False, f"cover {fmt(rect)} with no cap logged"
+    bottom = abs(cap["y"] + cap["h"] - (display["y"] + display["h"])) <= 1.0 and cap["y"] > display["y"] + 1.0
+    small = cap["w"] <= COVER_CAP + 0.5 and (cap["h"] <= COVER_CAP + 0.5 or not bottom)
+    inside = contains(cap, rect, 0.5)
+    return small and inside, f"cover {fmt(rect)} in cap {fmt(cap)}: inside {inside}, the corner's size {small}"
+
+
 def at_once_of(line):
     """(reason, window ids) of a switch's `transition covered` log line: why its activation
     arrived at once (None when it grew) and the windows the reason names."""
@@ -1090,6 +1125,12 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
           f"{what}: every arriving window grows from a card-sized start ({len(grows)} incoming snapshots, {len(arrived)} windows)")
     check("the keyboard goes to the activated window now" in log or "the keyboard goes to the new stage now" in log,
           f"{what}: the switch's focus runs before the windows arrive")
+    # 8L6: the cover never paints more than the park corner (the owner's covered most of his screen).
+    patch = re.findall(r"corner patch: shown rect=" + _RECT, log_text()[:before_log])
+    for rect, cap in covers_of(log):
+        ok, note = cover_in_corner(rect, cap, probe_out["display"])
+        check(ok, f"{what}: the cover stays in the park corner, never larger ({note}; "
+                  f"the patch last shown at {','.join(patch[-1][:2]) + ' ' + 'x'.join(patch[-1][2:]) if patch else '-'})")
 
     display, samples, ours_pid = probe_out["display"], probe_out.get("samples", []), app_pid()
     corner = t.get("corner")
