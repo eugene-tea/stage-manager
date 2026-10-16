@@ -114,6 +114,8 @@ itself once they are done, or as soon as you click or type. If that stage's app 
 open and another app opens a window first, that window shows rather than an empty screen,
 and your stage comes back as a card. Stages whose apps quit as the Mac was restarting come
 back too: an app that quits keeps its windows' places in your saved stages for two minutes.
+Some apps (Electron ones, VS Code or Slack say) reopen their windows on whichever Desktop
+shows at login rather than their own; their stages are made again there.
 
 What it cannot do:
 

@@ -222,6 +222,7 @@ impl Model {
         }
         self.windows.remove(&id);
         self.restored.remove(&id);
+        self.pooled.remove(&id);
         // A window gone no longer vouches for a saved Desktop.
         for votes in self.adopt_votes.values_mut() {
             votes.retain(|v| v.1 != id);

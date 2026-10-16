@@ -189,6 +189,27 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   `state.json` (`quit_at`) for two minutes, so the stages survive a logout whose early signal
   never comes; a window reopened clamped against the park corner is matched by title and
   goes to its saved frame, an unmatched one is left and counted ("N at the corner").
+- 8I: one pool after a restart. Native apps reopen their windows on their own saved
+  Desktops, non-native ones (Electron) on the Desktop shown at login (10-16). Each Desktop
+  still becomes its saved Desktop by its own windows (adoption unchanged); a stray, a window
+  matching another saved Desktop's waiting entry with confidence, recreates its saved stage on
+  the Desktop where it showed (a part; a stage split across two Desktops has a part on each),
+  and the entry leaves the other Desktop. Strip: the adopted Desktop's saved slots, then the
+  parts in their saved order. At the restore window's end by itself, the Desktop shown when
+  saved (if shown) brings its saved active stage forward. The line: "K from other Desktops".
+  8I2 (the review): with another saved Desktop waiting, the Desktop shown when saved also
+  takes two windows while the restore window is open (one, as before, when it is the only
+  saved Desktop or after the window); voters that can adopt nothing any more (another
+  Desktop taken, or the window's end) join their saved stages where they are, else stay and
+  their entries are forgotten; a saved Desktop's stages the pool emptied are never built at
+  its visit (its most recent stage left takes the front); own-Desktop entries are scored
+  first, other Desktops' only for a window nothing there takes with confidence.
+  8I3 (the review): the card pressed or the number key that ends the restore window keeps
+  its target: a voter alone in a stage of its own makes that stage its part (same id, number
+  and card); a voter whose stage still goes leaves the stage's id and number to follow its
+  window. Known, left: a part finds an existing stage by its saved stage's name
+  (`find_named`); two Desktops saved with stages of the same name both feed the one stage of
+  that name on the Desktop shown (the strays of two same-named stages share a part there).
 
 ## 8G: the real-restart check
 
@@ -207,6 +228,8 @@ With the owner, from the day's log (titles never leave it), besides the design's
 - 8H: the order of the logout signals: every "logout signal" line (name, ms since the first,
   what it did). Which name comes first, and whether it comes before the first "app
   terminated"; then trim `SIGNALS` to what arrives. The restore line's "N at the corner".
+- 8I: which apps' windows came back on another Desktop than their saved one (the "back in
+  its saved stage" lines with `from_other=true`) and the line's "K from other Desktops".
 - A slow app (Xcode, an Electron app) in the saved front stage: settling waits for its first
   window (8F2, M2), or a new app's window takes the front meanwhile (M4).
 

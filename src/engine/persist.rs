@@ -647,6 +647,12 @@ impl Model {
             .collect();
         spaces.extend(self.leftovers.iter().cloned().map(|mut l| {
             l.current = false;
+            // Stages whose windows went to another Desktop (the pool after a restart): no
+            // stage with nothing in it is written.
+            let gone: Vec<usize> = (0..l.stages.len())
+                .filter(|&i| l.stages[i].windows.is_empty() && self.pooled_out.contains(&(l.id, i)))
+                .collect();
+            l.remove_stages(&gone);
             l
         }));
         let main = self.main_display().frame;
@@ -785,16 +791,19 @@ impl Model {
         hints: &LaunchHints,
     ) -> Vec<Action> {
         let frames = if restore_frames { LaunchFrames::Saved } else { LaunchFrames::Live };
-        self.launch_with(live, assignment, frames, hints)
+        self.launch_with(live, assignment, frames, hints, None)
     }
 
-    /// [`Model::apply_launch`] with the frames `frames` says.
+    /// [`Model::apply_launch`] with the frames `frames` says; `origin`: the saved Desktop the
+    /// assignment's stages come from, when one does (each stage built is noted as standing
+    /// for its saved stage, for the pool after a restart, `pool.rs`).
     pub(crate) fn launch_with(
         &mut self,
         live: &[WindowMeta],
         assignment: &Assignment,
         frames: LaunchFrames,
         hints: &LaunchHints,
+        origin: Option<u64>,
     ) -> Vec<Action> {
         let restore_frames = frames == LaunchFrames::Saved;
         // Saved frames only on a main display of the saved size (else the live ones).
@@ -835,6 +844,9 @@ impl Model {
                 _ => self.create_stage(space, st.name.clone()),
             };
             built[i] = Some(sid);
+            if let Some(id) = origin {
+                self.kin.insert(sid, super::model::Kin::Saved(id, i));
+            }
             for w in &members {
                 let home = if w.pinned {
                     Home::Pinned

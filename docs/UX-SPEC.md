@@ -165,7 +165,9 @@ to; a cancelled logout brings the stages back at once. An app that quits keeps i
 places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
 before macOS announced the logout still come back after the restart; a window reopened
 squeezed into the park corner goes to its saved frame when it is matched, and is left where
-it is (and counted) when it is not. No apps are relaunched (that is macOS's
+it is (and counted) when it is not. A window an app reopens on another Desktop than the one
+it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
+again on the Desktop where it shows. No apps are relaunched (that is macOS's
 "Reopen windows when logging back in") and no window moves between Desktops. Off, a restart
 starts every app in a stage of its own, as Apple's does. One log line sums it up
 (`stage-manager log summary` repeats it).

@@ -24,13 +24,14 @@ mod ahead;
 mod hide;
 mod ops;
 mod pending;
+mod pool;
 mod quit;
 mod spaces;
 mod strip;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,8 @@ use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area
 
 pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use pending::{PendingNote, Restored};
+pub use pool::NumberRef;
+pub(crate) use pool::Kin;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
@@ -314,6 +317,22 @@ pub struct Model {
     pub(crate) adopt_votes: HashMap<SpaceId, Vec<(u64, WindowId)>>,
     /// Windows placed from a saved entry: how sure the match was and their saved place.
     pub(crate) restored: HashMap<WindowId, Restored>,
+    /// The saved stage each stage stands for (built from it, or its part on another Desktop
+    /// after a restart; `pool.rs`).
+    pub(crate) kin: HashMap<StageId, pool::Kin>,
+    /// Parts of another Desktop's saved stage (`pool.rs`): their place among the parts in the
+    /// strip.
+    pub(crate) pool_rank: HashMap<StageId, pool::Rank>,
+    /// Windows placed from another Desktop's saved entry (`pool.rs`), with the saved stage
+    /// they stand for.
+    pub(crate) pooled: HashMap<WindowId, pool::Kin>,
+    /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
+    /// kept in place so stage indices hold, left out of `state.json`.
+    pub(crate) pooled_out: HashSet<(u64, usize)>,
+    /// Stages that went when the restore window's end moved their voter into its saved stage
+    /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
+    /// ([`Model::follow_stage`]).
+    pub(crate) followed: HashMap<StageId, WindowId>,
     /// Saved entries of windows whose app quit, kept for `state.json` a while (round 8H,
     /// [`quit`]).
     pub(crate) quit: Vec<QuitWindow>,
@@ -359,6 +378,11 @@ impl Model {
             provisional: BTreeSet::new(),
             adopt_votes: HashMap::new(),
             restored: HashMap::new(),
+            kin: HashMap::new(),
+            pool_rank: HashMap::new(),
+            pooled: HashMap::new(),
+            pooled_out: HashSet::new(),
+            followed: HashMap::new(),
             quit: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
@@ -894,6 +918,8 @@ impl Model {
         let leftovers = self.children_in(Home::Stage(stage));
         self.stages.retain(|s| s.id != stage);
         self.pending.remove(&stage);
+        self.kin.remove(&stage);
+        self.pool_rank.remove(&stage);
         self.revealed
             .retain(|_, r| r.from != stage && r.desktop != stage);
         if let Some(slots) = self.slots.get_mut(&space) {

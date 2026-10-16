@@ -55,8 +55,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Action, DisplayId, Home, Model, NativeTarget, Stage, StageId, WindowId, WindowMeta, WindowRole};
-use crate::engine::persist::{LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
+use super::pool::Scope;
+use super::{Action, DisplayId, Home, Model, NativeTarget, Observation, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::persist::{LaunchFrames, LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
+use crate::engine::rules::Decision;
 use crate::engine::window_match::LowRule;
 
 /// A window seen on screen on a Space other than its own at this many arrivals in a row,
@@ -213,6 +215,9 @@ impl Model {
             return;
         }
         self.pending_to_leftover(space);
+        let gone: Vec<StageId> = self.stages.iter().filter(|s| s.space == space).map(|s| s.id).collect();
+        self.kin.retain(|s, _| !gone.contains(s));
+        self.pool_rank.retain(|s, _| !gone.contains(s));
         self.stages.retain(|s| s.space != space);
         self.active.remove(&space);
         self.slots.remove(&space);
@@ -286,6 +291,7 @@ impl Model {
             }
         }
         self.leftovers = saved.into_iter().filter(|s| s.id != 0).collect();
+        self.restore.saved_front = self.leftovers.iter().find(|l| l.current).and_then(|l| l.active_index.map(|i| (l.id, i)));
     }
 
     // ----- arrival and learning ----------------------------------------------------------
@@ -378,15 +384,36 @@ impl Model {
         }
         if !arrivals.is_empty() || saved.is_some() {
             let empty = SavedSpace::default();
-            let assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.display(m.display).parks(m.frame));
+            let mut assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.display(m.display).parks(m.frame));
+            if let Some(s) = &saved {
+                // Its stages whose windows all came back on another Desktop are not built.
+                self.skip_pooled_out(s.id, &mut assignment);
+            }
+            // After a restart, windows this Desktop's saved stages do not take are looked for
+            // among every other Desktop's waiting windows (one pool, `pool.rs`).
+            let unmatched: Vec<WindowMeta> = arrivals.iter().filter(|m| assignment.unmatched.contains(&m.id)).cloned().collect();
+            let pooled = self.pool_claims(target, &unmatched);
+            assignment.unmatched.retain(|id| !pooled.contains(id));
             if self.restore.restoring {
                 // Windows no saved one claims go by Apple's rule (counted for the restore's line).
-                let unmatched: Vec<WindowMeta> =
-                    arrivals.iter().filter(|m| assignment.unmatched.contains(&m.id)).cloned().collect();
-                self.note_by_apple(&unmatched);
+                self.note_by_apple(unmatched.iter().filter(|m| !pooled.contains(&m.id)));
             }
-            let more = self.apply_launch(&arrivals, &assignment, false, hints);
+            let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = arrivals.iter().cloned().partition(|m| pooled.contains(&m.id));
+            let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id));
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+            if !claimed.is_empty() {
+                let placed = self.match_waiting(target, &claimed, LowRule::default(), None, Scope::Pool, &mut actions);
+                // Their children (the launch could not place them before their parents).
+                let children: Vec<WindowMeta> = rest
+                    .iter()
+                    .filter(|m| matches!(m.role, WindowRole::Child { parent: Some(p) } if placed.contains(&p)))
+                    .cloned()
+                    .collect();
+                for c in children {
+                    let more = self.add_window(c, &Decision::default(), &Observation::default());
+                    actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+                }
+            }
         }
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
