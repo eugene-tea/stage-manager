@@ -7,6 +7,7 @@
 pub mod apps;
 pub mod ax;
 pub mod capture;
+pub mod capture_frame;
 pub mod capture_gate;
 pub mod code_sign;
 pub mod controller;

@@ -25,7 +25,7 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGColor, CGImage};
+use objc2_core_graphics::CGColor;
 use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue};
 use objc2_quartz_core::{
     CALayer, CAMediaTiming, CASpringAnimation, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
@@ -33,7 +33,9 @@ use objc2_quartz_core::{
 };
 
 use crate::config::AnimationStyle;
-use crate::engine::geometry::Point;
+use crate::engine::geometry::{Point, Rect};
+use crate::platform::capture::Picture;
+use crate::platform::capture_frame::Extent;
 use crate::ui::motion_math::{Plane, Spring};
 use crate::ui::panels;
 
@@ -96,21 +98,43 @@ impl Look {
     }
 }
 
-/// One moving snapshot: a shadowed plane holding a masked image.
+/// One moving snapshot: a shadowed plane (the window's rectangle) holding a masked image
+/// (the window's picture, reaching past the plane where child windows stick out).
 pub struct Ghost {
     /// The window it shows.
     pub window: u32,
     plane: Retained<CALayer>,
     image: Retained<CALayer>,
+    /// Where the window is in the picture.
+    extent: Extent,
     /// Where it is headed (or sits).
     pub target: Plane,
 }
 
+/// The image layer's position and bounds (anchor at its top-left corner) on a plane of
+/// `bounds`: the window's part on the plane, the rest around it.
+fn image_frame(extent: &Extent, bounds: CGRect) -> (CGPoint, CGRect) {
+    let whole = extent.around(Rect::new(0.0, 0.0, bounds.size.width, bounds.size.height));
+    (CGPoint::new(whole.x, whole.y), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(whole.w, whole.h)))
+}
+
 impl Ghost {
-    /// Sets the image (a newer snapshot arrived).
-    pub fn set_image(&self, image: &CGImage) {
+    /// Sets the picture (a newer snapshot arrived); the window keeps its place on the plane.
+    pub fn set_image(&mut self, picture: &Picture) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
         // SAFETY: a CGImage is valid layer contents.
-        unsafe { self.image.setContents(Some(as_object(image))) };
+        unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
+        if picture.extent != self.extent {
+            self.extent = picture.extent;
+            for key in ["position", "bounds"] {
+                self.image.removeAnimationForKey(&NSString::from_str(key));
+            }
+            let (position, bounds) = image_frame(&self.extent, self.plane.bounds());
+            self.image.setPosition(position);
+            self.image.setBounds(bounds);
+        }
+        CATransaction::commit();
     }
 
     /// Puts the ghost at `p` at once.
@@ -126,8 +150,9 @@ impl Ghost {
         self.plane.setPosition(look.position);
         self.plane.setBounds(look.bounds);
         self.plane.setTransform(look.transform);
-        self.image.setBounds(look.bounds);
-        self.image.setPosition(CGPoint::new(0.0, 0.0));
+        let (position, bounds) = image_frame(&self.extent, look.bounds);
+        self.image.setBounds(bounds);
+        self.image.setPosition(position);
         self.image.setCornerRadius(look.corner);
         CATransaction::commit();
         self.target = p;
@@ -143,13 +168,16 @@ impl Ghost {
         let from_bounds = shown.as_ref().map_or(self.plane.bounds(), |l| l.bounds());
         let from_transform = shown.as_ref().map_or(self.plane.transform(), |l| l.transform());
         let from_corner = shown_image.as_ref().map_or(self.image.cornerRadius(), |l| l.cornerRadius());
+        let from_image = shown_image.as_ref().map_or((self.image.position(), self.image.bounds()), |l| (l.position(), l.bounds()));
         let to = Look::of(&p);
+        let to_image = image_frame(&self.extent, to.bounds);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.plane.setPosition(to.position);
         self.plane.setBounds(to.bounds);
         self.plane.setTransform(to.transform);
-        self.image.setBounds(to.bounds);
+        self.image.setPosition(to_image.0);
+        self.image.setBounds(to_image.1);
         self.image.setCornerRadius(to.corner);
         let add = |layer: &CALayer, key: &str, from: &AnyObject, to: &AnyObject| {
             let anim = spring_anim(spring, key, from, to);
@@ -158,7 +186,10 @@ impl Ghost {
         add(&self.plane, "position", &NSValue::new(from_position), &NSValue::new(to.position));
         add(&self.plane, "bounds", &NSValue::new(from_bounds), &NSValue::new(to.bounds));
         add(&self.plane, "transform", &transform_value(from_transform), &transform_value(to.transform));
-        add(&self.image, "bounds", &NSValue::new(from_bounds), &NSValue::new(to.bounds));
+        add(&self.image, "bounds", &NSValue::new(from_image.1), &NSValue::new(to_image.1));
+        if from_image.0 != to_image.0 {
+            add(&self.image, "position", &NSValue::new(from_image.0), &NSValue::new(to_image.0));
+        }
         add(&self.image, "cornerRadius", &NSNumber::new_f64(from_corner), &NSNumber::new_f64(to.corner));
         CATransaction::commit();
         self.target = p;
@@ -350,7 +381,7 @@ impl Overlay {
 
     /// A new ghost of window `window` showing `image` (or a plain card when there is none),
     /// placed at `at`, above the ghosts added before it.
-    pub fn ghost(&self, window: u32, image: Option<&CGImage>, at: Plane, style: &AnimationStyle, opacity: f32) -> Ghost {
+    pub fn ghost(&self, window: u32, picture: Option<&Picture>, at: Plane, style: &AnimationStyle, opacity: f32) -> Ghost {
         let plane = CALayer::new();
         plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
         plane.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
@@ -365,9 +396,9 @@ impl Overlay {
         img.setAllowsEdgeAntialiasing(true);
         // SAFETY: framework constant.
         img.setContentsGravity(unsafe { kCAGravityResize });
-        match image {
+        match picture {
             // SAFETY: a CGImage is valid layer contents.
-            Some(i) => unsafe { img.setContents(Some(as_object(i))) },
+            Some(p) => unsafe { img.setContents(Some(as_object(&*p.image))) },
             None => {
                 img.setBackgroundColor(Some(&color(1.0, 1.0, 1.0, 0.22)));
                 img.setBorderWidth(1.5);
@@ -379,7 +410,8 @@ impl Overlay {
         CATransaction::setDisableActions(true);
         self.space.addSublayer(&plane);
         CATransaction::commit();
-        let mut g = Ghost { window, plane, image: img, target: at };
+        let extent = picture.map_or(Extent::NONE, |p| p.extent);
+        let mut g = Ghost { window, plane, image: img, extent, target: at };
         g.set(at);
         g
     }

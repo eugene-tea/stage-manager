@@ -37,7 +37,9 @@ brings every window back at exactly its own frame, even where it overlaps the st
 away. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
-laptop, 6 on a 5K display.
+laptop, 6 on a 5K display. A popup open on a window (a popover, a child window sticking out
+of it) shows on its card beside the window, at its true size and place, as on Apple's; the
+window keeps its own size on the card, and nothing outside a window is drawn.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot

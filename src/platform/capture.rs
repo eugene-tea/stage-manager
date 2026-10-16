@@ -3,9 +3,12 @@
 //! A worker thread takes a still of every requested window each interval with
 //! `SCScreenshotManager` and an `SCContentFilter(desktopIndependentWindow:)`, sized as asked
 //! (the strip asks for 2× its thumbnail size) but always in the window's own proportions
-//! ([`fit_to_content`]): asked for another shape, ScreenCaptureKit pads the image and pins the
-//! window to its top-left corner (measured 10-12), so a snapshot stretched over the window's
-//! frame drew its content smaller and off to one side. Each image goes to the main thread through
+//! ([`capture_frame::fit_to_content`]): asked for another shape, ScreenCaptureKit pads the image
+//! and pins the window to its top-left corner (measured 10-12), so a snapshot stretched over the
+//! window's frame drew its content smaller and off to one side. The filter takes the window with
+//! its child windows, as Apple's thumbnails show them; each picture says where the window is in
+//! it ([`Picture::extent`], [`window_shot`]), so a popup sticking out is drawn beside the window,
+//! never squeezed into its frame (10-16). Each picture goes to the main thread through
 //! GCD, keyed by window id. Parked windows still render, so they capture too.
 //!
 //! Only the requested windows are captured; the caller replaces the request whenever the
@@ -40,16 +43,18 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::AllocAnyThread;
-use objc2::rc::autoreleasepool;
-use objc2_core_foundation::CFRetained;
-use objc2_core_graphics::{CGImage, CGPreflightScreenCaptureAccess};
-use objc2_foundation::{NSError, NSString};
+use objc2::rc::{Retained, autoreleasepool};
+use objc2_core_foundation::{CFRetained, CGRect};
+use objc2_core_graphics::{CGColor, CGImage, CGPreflightScreenCaptureAccess, kCGColorClear};
+use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCStreamErrorCode,
-    SCStreamErrorDomain,
+    SCStreamErrorDomain, SCWindow,
 };
 
+use super::capture_frame::{self, Extent};
 use super::capture_gate::{Change, Gate, Outcome, Permit};
+use crate::engine::geometry::Rect;
 use super::permissions;
 use crate::logbook::counters::{self, Count};
 
@@ -67,8 +72,17 @@ pub struct Target {
     pub height: u32,
 }
 
-/// Receives each captured image on the main thread.
-pub type Deliver = fn(u32, CFRetained<CGImage>);
+/// A window's picture: the image and where the window is in it.
+#[derive(Clone, Debug)]
+pub struct Picture {
+    /// The window with its child windows, on a clear background.
+    pub image: CFRetained<CGImage>,
+    /// How far the image reaches past the window (child windows sticking out); none for most.
+    pub extent: Extent,
+}
+
+/// Receives each picture on the main thread.
+pub type Deliver = fn(u32, Picture);
 
 /// How long one round may take before the worker moves on.
 const ROUND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -432,17 +446,70 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
     }
 }
 
-/// The image size for a capture asked at `asked` pixels of a window whose content is
-/// `content` pixels: the largest size of the content's proportions that fits in `asked`,
-/// never larger than the content itself (so the image is the window, edge to edge, with no
-/// padding). An unknown content size keeps what was asked.
-pub fn fit_to_content(asked: (u32, u32), content: (f64, f64)) -> (u32, u32) {
-    let (cw, ch) = content;
-    if !(cw >= 1.0 && ch >= 1.0) {
-        return (asked.0.max(1), asked.1.max(1));
+/// One window's capture, set up: the filter, the configuration, and what goes with them.
+pub(crate) struct WindowShot {
+    pub filter: Retained<SCContentFilter>,
+    pub config: Retained<SCStreamConfiguration>,
+    /// Pixels per point.
+    pub scale: f64,
+    /// Where the window is in the picture.
+    pub extent: Extent,
+    /// The configuration's background color: it does not retain it, so the caller keeps this
+    /// until the capture answered.
+    pub clear: Option<CFRetained<CGColor>>,
+}
+
+/// The capture of `window` (one of `windows`, the shareable content), the window's part at
+/// `asked` pixels: the window with its child windows as ScreenCaptureKit takes them, on a
+/// clear background with alpha (no area outside a window is ever opaque), and where the
+/// window is in the picture ([`capture_frame`]). When that is not known, the picture is
+/// taken as the window, as before. Every capture of a window uses it.
+pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, asked: (u32, u32)) -> WindowShot {
+    // SAFETY: plain getters on live SCK objects.
+    let (frame, pid) = unsafe { (window.frame(), window.owningApplication().map(|a| a.processID())) };
+    let id = unsafe { window.windowID() };
+    let frame = to_rect(frame);
+    let others: Vec<Rect> = match pid {
+        Some(pid) => windows
+            .iter()
+            // SAFETY: plain getters on live SCWindows.
+            .filter(|w| unsafe { w.windowID() != id && w.owningApplication().is_some_and(|a| a.processID() == pid) })
+            .map(|w| to_rect(unsafe { w.frame() }))
+            .collect(),
+        None => Vec::new(),
+    };
+    // SAFETY: designated initializer with a live SCWindow; plain getters.
+    let (filter, content, scale) = unsafe {
+        let filter = SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window);
+        let content = to_rect(filter.contentRect());
+        let scale = f64::from(filter.pointPixelScale());
+        (filter, content, scale)
+    };
+    let plan = capture_frame::plan(asked, content, scale, frame, &others);
+    if !plan.extent.is_none() {
+        tracing::trace!(window = id, ?content, ?frame, extent = ?plan.extent, "picture reaches past the window (child windows)");
     }
-    let k = (f64::from(asked.0.max(1)) / cw).min(f64::from(asked.1.max(1)) / ch).min(1.0);
-    ((cw * k).round().max(1.0) as u32, (ch * k).round().max(1.0) as u32)
+    // SAFETY: reading an immutable CoreGraphics constant.
+    let clear = CGColor::constant_color(Some(unsafe { kCGColorClear }));
+    // SAFETY: a plain initializer, then plain setters on the live configuration; the
+    // background color is kept alive by the caller (`clear`) until the capture answered.
+    let config = unsafe { SCStreamConfiguration::new() };
+    unsafe {
+        config.setWidth(plan.size.0 as usize);
+        config.setHeight(plan.size.1 as usize);
+        config.setPixelFormat(PIXEL_BGRA);
+        if let Some(clear) = clear.as_deref() {
+            config.setBackgroundColor(clear);
+        }
+    }
+    WindowShot { filter, config, scale: if scale.is_finite() { scale.max(1.0) } else { 1.0 }, extent: plan.extent, clear }
+}
+
+/// 32-bit BGRA with alpha ('BGRA'), ScreenCaptureKit's default, set so it stays so.
+const PIXEL_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+
+fn to_rect(r: CGRect) -> Rect {
+    Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
 }
 
 /// What one round did.
@@ -503,35 +570,28 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 let _ = content_tx.send(Msg::Missing { round, id: t.id });
                 continue;
             };
-            // SAFETY: designated initializer with a live SCWindow; plain setters and getters.
-            let (filter, config) = unsafe {
-                let filter = SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window);
-                let content = filter.contentRect();
-                let scale = f64::from(filter.pointPixelScale()).max(1.0);
-                let (width, height) = fit_to_content(
-                    (t.width, t.height),
-                    (content.size.width * scale, content.size.height * scale),
-                );
-                let config = SCStreamConfiguration::new();
-                config.setWidth(width as usize);
-                config.setHeight(height as usize);
-                config.setShowsCursor(false);
-                config.setIgnoreShadowsSingleWindow(true);
-                config.setScalesToFit(true);
-                (filter, config)
-            };
+            let shot = window_shot(&window, &windows, (t.width, t.height));
+            // SAFETY: plain setters on a live configuration.
+            unsafe {
+                shot.config.setShowsCursor(false);
+                shot.config.setIgnoreShadowsSingleWindow(true);
+                shot.config.setScalesToFit(true);
+            }
+            let WindowShot { filter, config, clear, extent, .. } = shot;
             let id = t.id;
             let done_tx = content_tx.clone();
             let flight = InFlight::issue();
             let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
                 let _answered = &flight;
+                // The configuration's background, alive until the capture answered.
+                let _background = &clear;
                 let (ok, why) = match NonNull::new(image) {
                     Some(ptr) => {
                         // SAFETY: SCK hands a valid CGImage for the duration of the block;
                         // retaining keeps it alive for the main thread.
                         let image = unsafe { CFRetained::retain(ptr) };
                         IMAGES.fetch_add(1, Ordering::Relaxed);
-                        DispatchQueue::main().exec_async(move || deliver(id, image));
+                        DispatchQueue::main().exec_async(move || deliver(id, Picture { image, extent }));
                         (true, None)
                     }
                     None => {
@@ -635,22 +695,5 @@ fn note_outcomes(batch: &[Target], handled: &[u32], failed: &HashMap<u32, String
             (Some(false), true) => tracing::debug!(window = t.id, "capture works again"),
             _ => {}
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fit_to_content;
-
-    #[test]
-    fn a_capture_keeps_the_windows_proportions_and_never_grows_past_it() {
-        // Asked at its own size: as asked.
-        assert_eq!(fit_to_content((4202, 2540), (4202.0, 2540.0)), (4202, 2540));
-        // Asked wider than the window (a stale frame): the window's shape, no padding.
-        assert_eq!(fit_to_content((5042, 2540), (4202.0, 2540.0)), (4202, 2540));
-        // Asked smaller and narrower: scaled down in the window's shape.
-        assert_eq!(fit_to_content((300, 300), (4202.0, 2540.0)), (300, 181));
-        // Unknown content: as asked.
-        assert_eq!(fit_to_content((10, 0), (0.0, 0.0)), (10, 1));
     }
 }

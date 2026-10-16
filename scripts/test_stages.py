@@ -36,7 +36,8 @@ in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays 
 above the others; with SM_PIXELS=1, a window dragged over the strip shows its card under the
 pointer at the top and bottom quarter and a slowed switch's snapshot lands on its window, read
 back from the overlay's pixels), capture (the one phase with window
-captures on: real thumbnails and snapshots, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
+captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
+its card as Apple's thumbnails show it, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
 is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
 Desktop, drawn as before, and a card click switches), restore (a restart simulated with
@@ -1837,18 +1838,74 @@ def phase_slots():
 # ----- capture: the one launch with window captures on -----------------------------------
 
 
+def popup_picture_check(s):
+    """Fixture 1's popup (the fixture's --child: a child window 150 pt past its right edge,
+    60 pt in from its top and bottom) is in its picture, as Apple's thumbnails show it: the
+    picture says where the window is in it (the extent matches the window server's frames),
+    has the union's proportions, its corners beside the popup (outside any window) are clear,
+    never opaque dark, and the card draws the window's part at the plane's size with the popup
+    beside it, not the whole picture squeezed into the plane (10-16)."""
+    t = by_title(s)
+    w1 = t["Fixture 1"]["id"]
+    wins, _ = fixture_windows([FIX_ID])
+    win = next((w["bounds"] for w in wins if w["id"] == w1), None)
+    if not check(win is not None, "Fixture 1 listed by the window server"):
+        return
+    def overlaps(b):
+        return b["x"] < win["x"] + win["w"] and win["x"] < b["x"] + b["w"] and b["y"] < win["y"] + win["h"] and win["y"] < b["y"] + b["h"]
+    popup = next((w["bounds"] for w in wins if w["id"] != w1 and abs(w["bounds"]["w"] - 250) <= 1 and overlaps(w["bounds"])), None)
+    if not check(popup is not None, "the fixture's popup is listed beside Fixture 1"):
+        return
+    want = {"left": max(0.0, win["x"] - popup["x"]) / win["w"], "top": max(0.0, win["y"] - popup["y"]) / win["h"],
+            "right": max(0.0, popup["x"] + popup["w"] - win["x"] - win["w"]) / win["w"],
+            "bottom": max(0.0, popup["y"] + popup["h"] - win["y"] - win["h"]) / win["h"]}
+
+    def held():
+        g = ctl("debug-strip")
+        strip = g.get("strip") or {}
+        pic = (strip.get("pictures") or {}).get(str(w1))
+        return (strip, pic) if pic and pic["extent"]["right"] > 0 else None
+    got = wait_until(held, 10, "Fixture 1's picture with its popup")
+    if not check(got is not None, f"Fixture 1's picture reaches past the window (want {want})"):
+        g = ctl("debug-strip")
+        say(f"  pictures: {((g.get('strip') or {}).get('pictures') or {}).get(str(w1))}")
+        return
+    strip, pic = got
+    e = pic["extent"]
+    check(all(abs(e[k] - want[k]) <= 0.02 for k in want),
+          f"the picture says where the window is: extent {e} vs the window server's {want}")
+    aspect = pic["w"] / pic["h"]
+    union = win["w"] * (1 + want["left"] + want["right"]) / (win["h"] * (1 + want["top"] + want["bottom"]))
+    check(abs(aspect - union) / union <= 0.03, f"the picture has the union's proportions ({pic['w']}x{pic['h']}, {aspect:.3f} vs {union:.3f})")
+    corners = pic.get("corners")
+    if check(corners is not None, "the picture's corner pixels read"):
+        # Top-right and bottom-right: beside the popup, outside any window.
+        check(all(corners[i][0] < 128 for i in (1, 3)), f"the corners outside any window are clear (alpha, mean: {corners})")
+        check(not any(a > 200 and m < 80 for a, m in corners), f"no corner is opaque dark ({corners})")
+    planes = [pl for c in strip.get("cards", []) for pl in c.get("planes", []) if pl["window"] == w1]
+    if check(planes, "Fixture 1 has a plane on a card"):
+        pl, im = planes[0]["plane"], planes[0]["image"]
+        grow = im["w"] / max(pl["w"], 1)
+        check(abs(im["x"] - pl["x"]) <= 3 and abs(im["y"] - pl["y"]) <= 3 and abs(im["h"] - pl["h"]) <= 3,
+              f"the window's part keeps the plane's place and height (plane {pl}, picture {im})")
+        check(abs(grow - (1 + want["right"])) <= 0.1 * (1 + want["right"]),
+              f"the popup's part is drawn beside the window, not squeezed in ({grow:.3f} vs {1 + want['right']:.3f})")
+
+
 def phase_capture():
     """The only app run with window captures on: thumbnails and switch snapshots are real
     pictures, and a quit with captures running waits for those in flight (an exit with one
     in flight makes macOS alert about screen access). The only phase that may raise that
-    alert: on the first run from a new app path, which macOS approves once."""
+    alert: on the first run from a new app path, which macOS approves once. Fixture 1 has a
+    popup sticking out of it (the fixture's --child): its card picture shows the popup beside
+    the window (popup_picture_check)."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
     p = os.path.join(HOME, "state.json")
     if os.path.exists(p):
         os.remove(p)
-    start_fixture(3)
+    start_fixture(3, "--child")
     s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
     if not check(s is not None, "app up with captures on"):
         return
@@ -1862,6 +1919,7 @@ def phase_capture():
     cap = state().get("capture", {})
     check(s is not None and cap.get("gate") == "open",
           f"window pictures arrive and captures stay open ({cap})")
+    popup_picture_check(state())
     for n in (2, 1):
         do("switch", n)
         time.sleep(1.2)

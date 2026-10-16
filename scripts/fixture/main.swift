@@ -40,6 +40,10 @@
 //                                      others are hidden tabs, listed off screen by the window
 //                                      server, never through Accessibility (not with
 //                                      --delay-ms, --stagger-ms or --minimized)
+//   --child      | FIXTURE_CHILD=1     window 1 gets a popover-like child window (a borderless
+//                                      panel, addChildWindow) sticking out 150 pt past its
+//                                      right edge, 60 pt in from its top and bottom: the
+//                                      capture phase's card shows it beside the window
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -66,6 +70,7 @@ struct Options {
     var retitleAfterMs = 0
     var minimized: Set<String> = []
     var tabbed = 0
+    var child = false
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -99,6 +104,7 @@ struct Options {
         if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
         if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
+        if env["FIXTURE_CHILD"] == "1" { o.child = true }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -115,6 +121,7 @@ struct Options {
             case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
             case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
+            case "--child": o.child = true
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -202,9 +209,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             show(panel)
             windows.append(panel)
         }
+        if options.child, let parent = windows.first(where: { $0.title == title(0) }) {
+            addPopup(to: parent)
+        }
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// `--child`: a popover-like child of `parent` sticking out past its right edge. A panel,
+    /// so the signals' standard-window filters leave it alone; it moves with its parent.
+    func addPopup(to parent: NSWindow) {
+        let f = parent.frame
+        let popup = NSPanel(
+            contentRect: NSRect(x: f.maxX - 100, y: f.minY + 60, width: 250, height: max(40, f.height - 120)),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        popup.isFloatingPanel = false
+        popup.hidesOnDeactivate = false
+        popup.isReleasedWhenClosed = false
+        popup.hasShadow = true
+        popup.contentView = LabelView(frame: .zero, color: .systemTeal, label: "Popup")
+        parent.addChildWindow(popup, ordered: .above)
     }
 
     var opened = 0

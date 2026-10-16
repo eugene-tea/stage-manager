@@ -33,13 +33,12 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask};
-use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTimer};
 
 use super::{Ghost as CardGhost, Strip, with_strip};
 use crate::engine::geometry::{Point, Rect, Size};
-use crate::platform::capture::{self, Capturer, Target};
+use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, time_to_progress};
 use crate::ui::overlay::{Ghost, Overlay};
 use crate::ui::strip_layout::CardLayout;
@@ -88,7 +87,7 @@ struct Landing {
 /// Motion state kept by the strip.
 pub(super) struct Motion {
     overlay: Overlay,
-    cache: SnapshotCache<CFRetained<CGImage>>,
+    cache: SnapshotCache<Picture>,
     capturer: Capturer,
     interval_ms: Option<u64>,
     running: Option<Running>,
@@ -132,9 +131,9 @@ impl Motion {
     }
 
     /// A thumbnail arrived: the dragged window's card uses it while it has no snapshot.
-    pub(super) fn thumbnail_arrived(&mut self, id: u32, image: &CGImage) {
+    pub(super) fn thumbnail_arrived(&mut self, id: u32, picture: &Picture) {
         if let Some(c) = self.window_card.as_mut().filter(|c| c.window == id && !c.has_image) {
-            c.ghost.set_image(image);
+            c.ghost.set_image(picture);
             c.has_image = true;
         }
     }
@@ -349,7 +348,7 @@ impl Strip {
                         continue;
                     }
                     let at = Plane::window(w.window.frame, o, style.corner_radius);
-                    self.motion.overlay.ghost(id, image.as_deref(), at, &style, 1.0)
+                    self.motion.overlay.ghost(id, image.as_ref(), at, &style, 1.0)
                 }
             };
             // It holds still over the window until the window has parked behind it.
@@ -378,7 +377,7 @@ impl Strip {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
-            let mut ghost = self.motion.overlay.ghost(id, image.as_deref(), start, &style, 1.0);
+            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &style, 1.0);
             let end = Plane::window(w.window.frame, o, style.corner_radius);
             ghost.spring_to(end, spring);
             report.push(GhostReport {
@@ -658,21 +657,21 @@ impl Strip {
     }
 
     /// A full-size snapshot arrived.
-    pub(super) fn set_snapshot(&mut self, id: u32, image: CFRetained<CGImage>) {
+    pub(super) fn set_snapshot(&mut self, id: u32, picture: Picture) {
         if !self.style.animation.animates() {
             return;
         }
-        let bytes = CGImage::width(Some(&image)) * CGImage::height(Some(&image)) * 4;
-        if let Some(r) = &self.motion.running {
-            for g in r.ghosts.iter().filter(|g| g.window == id) {
-                g.set_image(&image);
+        let bytes = CGImage::width(Some(&picture.image)) * CGImage::height(Some(&picture.image)) * 4;
+        if let Some(r) = self.motion.running.as_mut() {
+            for g in r.ghosts.iter_mut().filter(|g| g.window == id) {
+                g.set_image(&picture);
             }
         }
         if let Some(c) = self.motion.window_card.as_mut().filter(|c| c.window == id) {
-            c.ghost.set_image(&image);
+            c.ghost.set_image(&picture);
             c.has_image = true;
         }
-        self.motion.cache.insert(id, image, bytes);
+        self.motion.cache.insert(id, picture, bytes);
     }
 
     /// While a window is dragged with the pointer over the strip column (`over`, global), its
@@ -701,7 +700,7 @@ impl Strip {
             let o = self.motion.overlay.origin();
             let at = Plane::under_pointer(Point::new(p.x - o.x, p.y - o.y), m.thumb_size(&f), grab, m.tilt, corner);
             let style = self.style.animation.clone();
-            let ghost = self.motion.overlay.ghost(w.id, image.as_deref(), at, &style, self.style.drag.ghost_opacity as f32);
+            let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &style, self.style.drag.ghost_opacity as f32);
             self.motion.window_card = Some(WindowCard { window: w.id, ghost, has_image: image.is_some() });
             self.motion.overlay.show();
         }
