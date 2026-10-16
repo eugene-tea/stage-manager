@@ -41,7 +41,8 @@ is Transient, the window server no longer lists the strip on screen while they s
 Desktop, drawn as before, and a card click switches), restore (a restart simulated with
 STAGE_MANAGER_SESSION: a layout of three fixture apps saved in session A; in session B the app
 starts on an empty screen, keeps every saved stage pending with no card, then the apps reopen
-their windows late, one by one, one app in reverse order and retitled, two windows minimized:
+their windows late, one by one, one app in reverse order and retitled, two windows already
+minimized when the app starts (no card for a waiting stage unless declared in [stages] names):
 every window goes back to its saved stage and frame, parked only on a strong or medium match,
 the Desktop takes the saved id, the active stage is never switched away, the strip comes back
 in its saved order; a minimized window un-minimized during the restore window goes quietly to
@@ -2562,8 +2563,20 @@ def phase_restore():
           "state.json written in session A, with the Desktop shown")
     check(all(p is None for _, p in saved_windows(f)) and len(saved_windows(f)) == 6, "nothing pending in session A")
 
-    say("-- session B: the app starts on an empty screen")
+    say("-- session B: the app starts on an empty screen; Alpha already reopened two windows minimized")
     stop_all_fixtures()
+    # Minimized before the app starts: AppKit minimizes only a window that has been on screen,
+    # so the fixture shows each a moment first, and that moment must not be a new window to
+    # the app. Alpha's third window opens later (SIGUSR1: "Alpha 3", its session A frame).
+    start_extra_args("a", 2, "--minimized", "Alpha 1;Alpha 2", wait=False)
+    a_bundle = EXTRA["a"][0]
+    def minimized_both():
+        wins = fixture_windows([a_bundle])[0]
+        return len(wins) == 2 and not any(w.get("onscreen") for w in wins)
+    wait_until(minimized_both, 10, "Alpha 1 and 2 in the Dock")
+    time.sleep(1.5)  # past the moment on screen and the minimize animation
+    check(wait_until(minimized_both, 5, "Alpha 1 and 2 in the Dock, settled") is not None,
+          "Alpha 1 and 2 reopened minimized (the window server lists them off screen)")
     s = start_app(0, extra_env=session["B"])
     if not check(s is not None, "app up in session B"):
         return
@@ -2571,6 +2584,8 @@ def phase_restore():
     check(r.get("restoring") is True and r.get("after_restart") is True, "restore after a restart (state.json from another session)")
     check(s["space"] in r.get("provisional", []), "the empty Desktop is provisional")
     check(s["strip"] == [] and not s["windows"], "no card, no window")
+    s = wait_state(lambda x: len(x["unplaced"]) == 2, "the two minimized windows known, off screen", timeout=5)
+    check(s is not None, "the app knows Alpha 1 and 2 (Accessibility lists them) and leaves them in the Dock (unplaced, unmanaged)")
     check(r.get("pending_unvisited") == 6, f"every saved window waits ({r})")
     f = wait_until(lambda: (lambda x: x if x and x.get("session") == session["B"]["STAGE_MANAGER_SESSION"] else None)(read_state_file()),
                    10, "state.json saved in session B")
@@ -2578,12 +2593,12 @@ def phase_restore():
     check(len(pend) == 6 and all(p == session["A"]["STAGE_MANAGER_SESSION"] for _, p in pend),
           f"state.json keeps every saved window, pending since session A ({pend})")
 
-    say("-- the apps reopen their windows late: Alpha one by one (two minimized), Bravo later, reversed and retitled")
+    say("-- the apps reopen their windows late: Alpha 3, then Bravo one by one, reversed and retitled")
     say("   (hands off the Mac: a click or key press would end the restore window early)")
     mail = number_of(state_a, "Alpha 1")
     charlie_n = number_of(state_a, "Charlie 1")
-    start_extra_args("a", 3, "--delay-ms", "4000", "--stagger-ms", "1500", "--minimized", "Alpha 1;Alpha 2", wait=False)
-    start_extra_args("b", 2, "--delay-ms", "12000", "--reverse", "--retitle-after-ms", "500",
+    os.kill(extra_pid("a"), signal.SIGUSR1)
+    start_extra_args("b", 2, "--delay-ms", "8000", "--stagger-ms", "1500", "--reverse", "--retitle-after-ms", "500",
                      "--retitle", "Bravo 1=Bravo 1 — Edited", wait=False)
     shown_seen = []
     end = time.time() + 40
@@ -2616,8 +2631,12 @@ def phase_restore():
     consistent("restored")
     check(any(w["title"] == "Bravo 1 — Edited" for w in s["windows"]), "Bravo 1 was retitled after it was matched")
     waiting = {st["number"]: st for st in s["stages"] if st["pending"] and not st["windows"]}
-    check(set(waiting) == {mail, charlie_n} and not set(waiting) & set(s["strip"]),
-          f"Mail (minimized windows) and Charlie's stage wait, pending, with no card ({sorted(waiting)})")
+    check(set(waiting) == {mail, charlie_n}, f"Mail (minimized windows) and Charlie's stage wait, pending ({sorted(waiting)})")
+    # A waiting stage has no card (a card is a picture of windows; a minimized window is in the
+    # Dock, as at any launch), except a declared one: `[stages] names` cards show with no
+    # window, as in v1.2.0 (the 10-15 run's "failure": Mail is declared above).
+    check(charlie_n not in s["strip"] and mail in s["strip"],
+          f"Charlie's waiting stage has no card; Mail's, declared, has its card ({s['strip']})")
     check((s.get("restore") or {}).get("restoring") is True, "the restore window is still open")
 
     say("-- un-minimized during the restore window: back to its inactive stage, quietly")
@@ -2628,6 +2647,8 @@ def phase_restore():
         time.sleep(1.0)
         s = state()
         a1 = by_title(s)["Alpha 1"]
+        # Read off screen, a minimized window answers AXDialog: once shown it is read again.
+        check(a1["role"] == "standard", f"a standard window, not taken for a dialog ({a1['role']})")
         check(a1["home"] == mail and a1["parked"], f"in its saved stage (Mail), parked ({a1['home']}, parked {a1['parked']})")
         check(a1.get("restored") in ("strong", "medium"), f"matched with confidence ({a1.get('restored')})")
         check(re.search(rf"restore: back in its saved stage id={a1['id']} .*parked=true switched=false", log_text()) is not None,
@@ -2637,6 +2658,7 @@ def phase_restore():
         strip_n = [n for n in want_strip_n if n != charlie_n]
         check(s["strip"] == strip_n, f"the strip in its saved order ({s['strip']}, saved {want_strip_n})")
         consistent("un-minimized during")
+    s = state()  # also when Alpha 1 never came: the invariants below hold on any state
     wrong = [w["title"] for w in s["windows"] if w["parked"] and w.get("restored") not in ("strong", "medium")]
     check(not wrong, f"parked => matched strong or medium ({wrong})")
     inactive = [w["title"] for w in s["windows"] if w["role"] == "standard" and w["home"] not in ("pinned", s["active"])]
@@ -2674,6 +2696,7 @@ def phase_restore():
         time.sleep(1.0)
         s = state()
         t = by_title(s)
+        check(t["Alpha 2"]["role"] == "standard", f"a standard window, not taken for a dialog ({t['Alpha 2']['role']})")
         check(t["Alpha 2"]["home"] == mail and s["active"] == mail, f"its stage (Mail) came forward (active {s['active']})")
         check(not t["Alpha 2"]["parked"] and not t["Alpha 1"]["parked"], "Mail's windows are shown")
         check(t["Alpha 3"]["parked"] and t["Bravo 1 — Edited"]["parked"], "the stage left is parked")

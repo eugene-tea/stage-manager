@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::geometry::{Rect, Size};
-use crate::engine::model::{Model, Observation, Pid};
+use crate::engine::model::{Model, ModelOptions, Observation, Pid};
 use crate::engine::park::park_frame;
 use crate::engine::persist::{SavedSpace, SavedStage, StateFile};
 use crate::engine::restore::Restore;
@@ -52,11 +52,16 @@ fn desktop_5() -> SavedSpace {
 
 /// A launch in session "B" of a file written in session "A": restore mode.
 fn restoring(spaces: Vec<SavedSpace>) -> Model {
+    restoring_with(ModelOptions::default(), spaces)
+}
+
+/// [`restoring`] with model options (declared stages, say).
+fn restoring_with(options: ModelOptions, spaces: Vec<SavedSpace>) -> Model {
     let mut file = StateFile { session: Some("A".into()), ..StateFile::single(SavedSpace::default()) };
     file.spaces = spaces;
     file.start_new_session();
     let (file, _) = file.for_session(Some("B"));
-    let mut m = model();
+    let mut m = model_with(options);
     m.set_restore(Restore::after_restart("B"));
     m.restore_spaces(file.spaces);
     m
@@ -103,6 +108,47 @@ fn a_launch_on_an_empty_screen_keeps_every_saved_stage_waiting() {
     assert_eq!(saved.standard_windows(), 4);
     assert!(saved.stages.iter().flat_map(|s| &s.windows).all(|w| w.pending.as_ref().is_some_and(|p| p.since == "A")));
     assert_eq!(m.pending_unvisited(), 4);
+}
+
+#[test]
+fn a_declared_stage_keeps_its_card_while_its_windows_wait() {
+    // The 10-15 live run: `[stages] names = ["Mail"]` and Mail's windows reopened minimized
+    // (in the Dock, not on screen: no window yet). A declared stage shows its card with no
+    // window, as in v1.2.0; waiting for windows changes nothing about that. A stage that is
+    // not declared has no card while it waits (a card is a picture of real windows).
+    // Declared stages are made up front, so the saved layout has Chat first.
+    let saved = SavedSpace {
+        id: 5,
+        current: true,
+        stages: vec![
+            stage(Some("Chat"), vec![sw(CHAT, "Team", F_TEAM, 0)]),
+            stage(None, vec![sw(EDITOR, "Plan.txt", F_PLAN, 0), sw(EDITOR, "Notes.txt", F_NOTES, 1)]),
+            stage(None, vec![sw(BROWSER, "Recipes — Example Browser", F_RECIPES, 0)]),
+        ],
+        active_index: Some(1),
+        strip_slots: vec![2, 0],
+        last_seen: None,
+    };
+    let options = ModelOptions { named_stages: vec!["Chat".into()], ..Default::default() };
+    let mut m = restoring_with(options, vec![saved]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    assert!(m.strip().is_empty(), "the declared stage is the only one, and active: no card");
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5, "adopted");
+    assert_eq!(names(&m), [Some("Chat".into()), None, None], "the declared stage is the saved one, not a second Chat");
+    assert_eq!(number_of(&m, 23), Some(2), "the saved active stage");
+    let ids: Vec<StageId> = m.stages_in(m.current_space(MAIN)).map(|s| s.id).collect();
+    let (chat, browser) = (ids[0], ids[2]);
+    assert!(m.has_pending(chat) && m.has_pending(browser), "both wait");
+    assert!(m.stage(chat).is_some_and(|s| s.windows.is_empty()));
+    let strip: Vec<usize> = m.strip().iter().map(|c| c.number).collect();
+    assert_eq!(strip, [1], "Chat's card (declared, empty); none for the browser's waiting stage");
+    // Chat's window un-minimized: parked into its stage, its card now shows it.
+    let a = add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert!(parks(&a, 21) && !switches(&a), "{a:?}");
+    assert_eq!(m.strip().iter().map(|c| c.windows.clone()).collect::<Vec<_>>(), [vec![w(21)]]);
+    add(&mut m, win(22, 40, BROWSER, "Recipes", DEFAULT));
+    assert_eq!(m.strip().iter().map(|c| c.number).collect::<Vec<_>>(), [3, 1], "the saved strip order");
 }
 
 #[test]
@@ -814,7 +860,7 @@ fn voters_go_back_at_their_saved_frames() {
 
 // ----- 8F: settling, the end's focus, the restore's line, the frame gate, the setting -----
 
-fn restoring_with(spaces: Vec<SavedSpace>, restore: Restore) -> Model {
+fn restoring_after(spaces: Vec<SavedSpace>, restore: Restore) -> Model {
     let mut file = StateFile { session: Some("A".into()), ..StateFile::single(SavedSpace::default()) };
     file.spaces = spaces;
     file.start_new_session();
@@ -898,7 +944,7 @@ fn the_restore_line_counts_windows_stages_and_desktops() {
 #[test]
 fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
     // Saved on a 2560×1440 main display; the test display is 1440×900.
-    let mut m = restoring_with(vec![desktop_5()], Restore::after_restart("B").with_display(Some((2560.0, 1440.0))));
+    let mut m = restoring_after(vec![desktop_5()], Restore::after_restart("B").with_display(Some((2560.0, 1440.0))));
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     let a = add(&mut m, win(21, 30, CHAT, "Team", DEFAULT));
     assert!(parks(&a, 21), "still back in its stage");
@@ -911,7 +957,7 @@ fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
     add(&mut m, win(24, 50, EDITOR, "Notes.txt", corner));
     assert!(m.window(w(24)).is_some_and(|x| !parked_at(x.restore)));
     // The same display size: the saved frames.
-    let mut m = restoring_with(vec![desktop_5()], Restore::after_restart("B").with_display(Some((1440.0, 900.0))));
+    let mut m = restoring_after(vec![desktop_5()], Restore::after_restart("B").with_display(Some((1440.0, 900.0))));
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     add(&mut m, win(21, 30, CHAT, "Team", DEFAULT));
     assert_eq!(m.window(w(21)).map(|x| x.restore), Some(F_TEAM));
@@ -920,7 +966,7 @@ fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
 #[test]
 fn restore_after_restart_off_keeps_nothing_waiting_as_before() {
     // The setting off: a launch after a restart behaves as 1.2.0 did.
-    let mut m = restoring_with(vec![desktop_5()], Restore::off_after_restart("B"));
+    let mut m = restoring_after(vec![desktop_5()], Restore::off_after_restart("B"));
     m.arrive(MAIN, &[win(21, 30, CHAT, "Team", F_TEAM)], &[], &LaunchHints::default());
     assert!(!m.restoring() && !m.settling() && m.provisional_spaces().is_empty());
     assert_eq!(m.current_space(MAIN).0, 5, "the saved Desktop recognized by its window");
@@ -972,4 +1018,75 @@ fn an_empty_saved_active_stage_given_up_still_gives_way() {
     m.end_restore();
     assert!(m.front_after_restore(&Observation::default()).is_empty());
     assert_eq!(m.main_active_stage(), editor);
+}
+
+/// The restore phase's layout (made-up titles): Mail (declared) holds two editor windows, the
+/// active stage the editor's third window and Chat's, the browser a stage of its own.
+fn mail_desktop() -> (Model, StageId) {
+    let saved = SavedSpace {
+        id: 7,
+        current: true,
+        stages: vec![
+            stage(Some("Mail"), vec![sw(EDITOR, "Inbox", F_NOTES, 0), sw(EDITOR, "Drafts", F_TEAM, 1)]),
+            stage(None, vec![sw(EDITOR, "Plan.txt", F_PLAN, 0), sw(CHAT, "Team", F_RECIPES, 1)]),
+            stage(None, vec![sw(BROWSER, "Recipes — Example Browser", DEFAULT, 0)]),
+        ],
+        active_index: Some(1),
+        strip_slots: vec![2, 0],
+        last_seen: None,
+    };
+    let options = ModelOptions { named_stages: vec!["Mail".into()], ..Default::default() };
+    let mut m = restoring_with(options, vec![saved]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(24, 30, CHAT, "Team", F_RECIPES));
+    assert_eq!(m.current_space(MAIN).0, 7, "adopted");
+    let mail = m.stages_in(m.current_space(MAIN)).next().map(|s| s.id).expect("Mail");
+    assert_eq!(m.stage(mail).and_then(|s| s.name.clone()).as_deref(), Some("Mail"));
+    assert_eq!(number_of(&m, 23), Some(2), "the saved active stage");
+    (m, mail)
+}
+
+#[test]
+fn an_app_s_window_unminimized_during_the_restore_window_goes_to_its_saved_stage_not_its_app_s() {
+    // The 10-15 live run: the editor (Alpha) has a window shown in the active stage; its
+    // other two reopened minimized and wait for Mail. Un-minimized while the restore window
+    // is open, one goes quietly to Mail (parked, no switch), never to the active stage as
+    // Apple's rule for the app's window shown would put it.
+    let (mut m, mail) = mail_desktop();
+    let active = m.main_active_stage();
+    let a = add_focused(&mut m, win(21, 50, EDITOR, "Inbox", F_NOTES));
+    assert_eq!(m.stage_of(w(21)), Some(mail), "its saved stage");
+    assert!(parks(&a, 21) && !switches(&a), "parked quietly: {a:?}");
+    assert!(m.window(w(21)).is_some_and(|x| x.parked && x.restore == F_NOTES));
+    assert_eq!(m.restored_grade(w(21)), Some(Grade::Strong));
+    assert_eq!(m.last_pending().map(|n| (n.window, n.parked, n.switched)), Some((w(21), true, false)));
+    assert_eq!(m.main_active_stage(), active, "no switch");
+    assert!(m.has_pending(mail), "Drafts still waits");
+}
+
+#[test]
+fn an_app_s_window_unminimized_after_the_restore_window_brings_its_saved_stage_forward() {
+    // The same, after the restore window: Mail comes forward with it (the window shows
+    // because of the user), the stage left is parked, and an app with no saved window then
+    // goes by Apple's rule, leaving Mail's windows where they are.
+    let (mut m, mail) = mail_desktop();
+    add_focused(&mut m, win(21, 50, EDITOR, "Inbox", F_NOTES));
+    assert!(m.end_restore());
+    let a = add_focused(&mut m, win(22, 50, EDITOR, "Drafts", F_TEAM));
+    assert_eq!(m.stage_of(w(22)), Some(mail), "its saved stage");
+    assert_eq!(m.main_active_stage(), Some(mail), "came forward: {a:?}");
+    assert!(switches(&a) && !parks(&a, 22));
+    assert!(parks(&a, 23) && parks(&a, 24), "the stage left is parked");
+    assert!(m.window(w(21)).is_some_and(|x| !x.parked) && m.window(w(22)).is_some_and(|x| !x.parked));
+    assert_eq!(m.restored_grade(w(22)), Some(Grade::Strong));
+    assert_eq!(m.last_pending().map(|n| (n.window, n.parked, n.switched)), Some((w(22), false, true)));
+    assert!(!m.has_pending(mail));
+    // An app with no saved window: a stage of its own, in front.
+    const OTHER: &str = "com.example.other";
+    add_focused(&mut m, win(31, 60, OTHER, "Sketch", DEFAULT));
+    assert_eq!(m.restored_grade(w(31)), None);
+    let own = m.stage_of(w(31)).expect("managed");
+    assert!(own != mail && m.main_active_stage() == Some(own));
+    assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(21), w(22)]), "Mail untouched");
 }

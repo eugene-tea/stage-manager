@@ -25,9 +25,16 @@
 //   --retitle M  | FIXTURE_RETITLE=M   retitle windows once shown, "Old=New;Old2=New2" (whole
 //                                      titles, e.g. "Fixture 1=Fixture 1 — Edited")
 //   --retitle-after-ms N | FIXTURE_RETITLE_AFTER_MS=N  how long after a window shows (default 0)
-//   --minimized M | FIXTURE_MINIMIZED=M  open these windows minimized, never shown first,
-//                                      "T 1;T 2" (whole titles: an app reopening a window
-//                                      that was minimized when it quit)
+//   --minimized M | FIXTURE_MINIMIZED=M  open these windows minimized, "T 1;T 2" (whole
+//                                      titles: an app reopening a window that was minimized
+//                                      when it quit). They open at launch, before --delay-ms
+//                                      applies to the others: each is ordered in behind the
+//                                      other windows and minimized a moment later (AppKit
+//                                      minimizes a window that has been on screen; one never
+//                                      ordered in was never listed by Accessibility in the
+//                                      10-15 live run, and SIGHUP had nothing to un-minimize).
+//                                      A test starts this fixture before Stage Manager, so
+//                                      the moment on screen is not seen as a new window.
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -157,7 +164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let order = options.reverse ? Array((0..<options.windows).reversed()) : Array(0..<options.windows)
+        let all = options.reverse ? Array((0..<options.windows).reversed()) : Array(0..<options.windows)
+        // Windows reopened minimized go to the Dock at once; the others follow the delays.
+        for i in all where options.minimized.contains(title(i)) { open(i, area: area) }
+        let order = all.filter { !options.minimized.contains(title($0)) }
         if options.delayMs == 0 && options.staggerMs == 0 {
             for i in order { open(i, area: area) }
         } else {
@@ -187,13 +197,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var opened = 0
 
-    /// Window number i + 1, shown (or straight to the Dock when `--minimized` names it), then
-    /// retitled when `--retitle` names its title.
+    /// The title of window number i + 1.
+    func title(_ i: Int) -> String {
+        "\(options.title) \(i + 1)"
+    }
+
+    /// Window number i + 1, shown (or, when `--minimized` names it, ordered in behind the
+    /// others and minimized), then retitled when `--retitle` names its title.
     func open(_ i: Int, area: NSRect) {
         let window = makeWindow(i, area: area)
         if options.minimized.contains(window.title) {
-            // Never ordered in first: it goes to the Dock as a window reopened minimized does.
-            window.miniaturize(nil)
+            // Ordered in first: `miniaturize` on a window never on screen left it unknown to
+            // Accessibility and not minimized (the 10-15 live run). A moment later, so the
+            // window server has shown it, it goes to the Dock.
+            window.orderBack(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { window.miniaturize(nil) }
         } else {
             show(window)
         }
@@ -213,14 +231,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fw = f[2] <= 0 ? area.width + f[2] : f[2]
             rect = NSRect(x: area.minX + f[0], y: area.maxY - f[1] - f[3], width: fw, height: f[3])
         }
-        let title = "\(options.title) \(i + 1)"
+        let name = title(i)
         let window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = title
+        window.title = name
         window.isReleasedWhenClosed = false
-        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: title)
+        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: name)
         if !options.styles.isEmpty {
             applyStyle(options.styles[i % options.styles.count], to: window)
         }

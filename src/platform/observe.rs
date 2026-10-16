@@ -99,6 +99,19 @@ struct ObservedApp {
     observer: AxObserver,
 }
 
+/// What reading a window's subrole again makes of it ([`Observer::recheck_kind`]): only a
+/// window taken for a child is asked (a standard window read off screen was read right), and
+/// an answer replaces the old one; no answer keeps it. `Some((subrole, kind))` when asked and
+/// answered.
+pub fn reread_kind(kind: WindowKind, read: impl FnOnce() -> AxResult<String>) -> Option<(String, WindowKind)> {
+    if kind == WindowKind::Standard {
+        return None;
+    }
+    let subrole = read().ok()?;
+    let kind = WindowKind::from_subrole(&subrole);
+    Some((subrole, kind))
+}
+
 /// The `STAGE_MANAGER_ONLY` filter: a set of bundle ids, or `None` for every app.
 pub fn parse_only(value: Option<&str>) -> Option<HashSet<String>> {
     let set: HashSet<String> =
@@ -241,6 +254,23 @@ impl Observer {
             w.frame = f;
         }
         Some(w.frame)
+    }
+
+    /// Reads the subrole of a tracked window taken for a child again, keeping the answer: a
+    /// window first read off screen may have answered for its state then (measured 10-15, macOS
+    /// 27: a window reopened minimized reads `AXDialog`, `AXStandardWindow` once it shows), so
+    /// a window that waited off screen is read again when it is placed ([`reread_kind`]).
+    /// True when its kind changed.
+    pub fn recheck_kind(&mut self, id: u32) -> bool {
+        let Some(w) = self.windows.get_mut(&id) else { return false };
+        let Some((subrole, kind)) = reread_kind(w.kind, || w.element.subrole()) else { return false };
+        let changed = kind != w.kind;
+        if changed {
+            tracing::info!(id, pid = w.pid, from = %w.subrole, to = %subrole, "window subrole read again once on screen: it changed (first read off screen)");
+        }
+        w.subrole = subrole;
+        w.kind = kind;
+        changed
     }
 
     /// True when app `pid` is observed (allowed and answering, not ours).
@@ -824,6 +854,27 @@ mod tests {
         assert_eq!(WindowKind::from_subrole("AXStandardWindow"), WindowKind::Standard);
         assert_eq!(WindowKind::from_subrole("AXDialog"), WindowKind::Child);
         assert_eq!(WindowKind::from_subrole(""), WindowKind::Child);
+    }
+
+    #[test]
+    fn a_window_first_read_minimized_is_read_again_when_it_shows() {
+        // The 10-15 live run: Alpha 1 and 2, reopened minimized before the app started, read
+        // `AXDialog` then; taken for children, they joined the stage of Alpha's window shown
+        // when un-minimized instead of their saved stage. Read again, they are standard.
+        let shown = || Ok::<_, AxError>("AXStandardWindow".to_string());
+        assert_eq!(reread_kind(WindowKind::Child, shown), Some(("AXStandardWindow".into(), WindowKind::Standard)));
+        // A real dialog stays one.
+        assert_eq!(reread_kind(WindowKind::Child, || Ok("AXDialog".into())), Some(("AXDialog".into(), WindowKind::Child)));
+        // No answer (busy, gone): kept as it was.
+        assert_eq!(reread_kind(WindowKind::Child, || Err(AxError::CANNOT_COMPLETE)), None);
+        // A standard window is never asked again.
+        let asked = std::cell::Cell::new(false);
+        let read = || {
+            asked.set(true);
+            Ok("AXDialog".to_string())
+        };
+        assert_eq!(reread_kind(WindowKind::Standard, read), None);
+        assert!(!asked.get());
     }
 
     fn app(pid: i32, bundle: Option<&str>) -> AppInfo {

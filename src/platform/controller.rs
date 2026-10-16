@@ -2796,6 +2796,11 @@ impl Controller {
         for id in known {
             ob.refresh_frame(id);
         }
+        // Windows that waited off screen and show now are read again ([`Observer::recheck_kind`]);
+        // a view read before with a kind that changed is read again.
+        let waited: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown.contains(id)).collect();
+        let rekinded = waited.into_iter().fold(false, |any, id| ob.recheck_kind(id) | any);
+        let view = view.filter(|_| !rekinded);
         let Some(m) = self.model.as_ref() else { return };
         let (live, absent) = match view {
             Some((mut live, absent)) => {
@@ -3276,7 +3281,11 @@ impl Controller {
             }
             return;
         }
-        self.unplaced.remove(&id);
+        if self.unplaced.remove(&id) {
+            // It waited off screen: a window reopened minimized was taken for a dialog then
+            // (and would follow Apple's rule for a child, never its saved stage).
+            ob.recheck_kind(id);
+        }
         let z = windows::z_order(&list);
         let Some(mut meta) = self.meta(ob, id, &z) else { return };
         if let Some(title) = ob.window(id).and_then(|w| w.element.title().ok()) {
