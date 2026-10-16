@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::geometry::{Rect, Size};
-use crate::engine::model::{Model, Observation, Pid};
+use crate::engine::model::{Model, ModelOptions, Observation, Pid};
 use crate::engine::park::park_frame;
 use crate::engine::persist::{SavedSpace, SavedStage, StateFile};
 use crate::engine::restore::Restore;
@@ -52,11 +52,16 @@ fn desktop_5() -> SavedSpace {
 
 /// A launch in session "B" of a file written in session "A": restore mode.
 fn restoring(spaces: Vec<SavedSpace>) -> Model {
+    restoring_with(ModelOptions::default(), spaces)
+}
+
+/// [`restoring`] with model options (declared stages, say).
+fn restoring_with(options: ModelOptions, spaces: Vec<SavedSpace>) -> Model {
     let mut file = StateFile { session: Some("A".into()), ..StateFile::single(SavedSpace::default()) };
     file.spaces = spaces;
     file.start_new_session();
     let (file, _) = file.for_session(Some("B"));
-    let mut m = model();
+    let mut m = model_with(options);
     m.set_restore(Restore::after_restart("B"));
     m.restore_spaces(file.spaces);
     m
@@ -103,6 +108,47 @@ fn a_launch_on_an_empty_screen_keeps_every_saved_stage_waiting() {
     assert_eq!(saved.standard_windows(), 4);
     assert!(saved.stages.iter().flat_map(|s| &s.windows).all(|w| w.pending.as_ref().is_some_and(|p| p.since == "A")));
     assert_eq!(m.pending_unvisited(), 4);
+}
+
+#[test]
+fn a_declared_stage_keeps_its_card_while_its_windows_wait() {
+    // The 10-15 live run: `[stages] names = ["Mail"]` and Mail's windows reopened minimized
+    // (in the Dock, not on screen: no window yet). A declared stage shows its card with no
+    // window, as in v1.2.0; waiting for windows changes nothing about that. A stage that is
+    // not declared has no card while it waits (a card is a picture of real windows).
+    // Declared stages are made up front, so the saved layout has Chat first.
+    let saved = SavedSpace {
+        id: 5,
+        current: true,
+        stages: vec![
+            stage(Some("Chat"), vec![sw(CHAT, "Team", F_TEAM, 0)]),
+            stage(None, vec![sw(EDITOR, "Plan.txt", F_PLAN, 0), sw(EDITOR, "Notes.txt", F_NOTES, 1)]),
+            stage(None, vec![sw(BROWSER, "Recipes — Example Browser", F_RECIPES, 0)]),
+        ],
+        active_index: Some(1),
+        strip_slots: vec![2, 0],
+        last_seen: None,
+    };
+    let options = ModelOptions { named_stages: vec!["Chat".into()], ..Default::default() };
+    let mut m = restoring_with(options, vec![saved]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    assert!(m.strip().is_empty(), "the declared stage is the only one, and active: no card");
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5, "adopted");
+    assert_eq!(names(&m), [Some("Chat".into()), None, None], "the declared stage is the saved one, not a second Chat");
+    assert_eq!(number_of(&m, 23), Some(2), "the saved active stage");
+    let ids: Vec<StageId> = m.stages_in(m.current_space(MAIN)).map(|s| s.id).collect();
+    let (chat, browser) = (ids[0], ids[2]);
+    assert!(m.has_pending(chat) && m.has_pending(browser), "both wait");
+    assert!(m.stage(chat).is_some_and(|s| s.windows.is_empty()));
+    let strip: Vec<usize> = m.strip().iter().map(|c| c.number).collect();
+    assert_eq!(strip, [1], "Chat's card (declared, empty); none for the browser's waiting stage");
+    // Chat's window un-minimized: parked into its stage, its card now shows it.
+    let a = add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert!(parks(&a, 21) && !switches(&a), "{a:?}");
+    assert_eq!(m.strip().iter().map(|c| c.windows.clone()).collect::<Vec<_>>(), [vec![w(21)]]);
+    add(&mut m, win(22, 40, BROWSER, "Recipes", DEFAULT));
+    assert_eq!(m.strip().iter().map(|c| c.number).collect::<Vec<_>>(), [3, 1], "the saved strip order");
 }
 
 #[test]
