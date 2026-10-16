@@ -385,6 +385,10 @@ impl Model {
         if !arrivals.is_empty() || saved.is_some() {
             let empty = SavedSpace::default();
             let mut assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.display(m.display).parks(m.frame));
+            if let Some(s) = &saved {
+                // Its stages whose windows all came back on another Desktop are not built.
+                self.skip_pooled_out(s.id, &mut assignment);
+            }
             // After a restart, windows this Desktop's saved stages do not take are looked for
             // among every other Desktop's waiting windows (one pool, `pool.rs`).
             let unmatched: Vec<WindowMeta> = arrivals.iter().filter(|m| assignment.unmatched.contains(&m.id)).cloned().collect();

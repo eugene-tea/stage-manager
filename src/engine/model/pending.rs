@@ -18,8 +18,13 @@
 //!   windows). The saved Desktop shown when saved takes one such window; another takes two
 //!   while the restore window is open (one window of a Desktop is weak evidence: macOS may
 //!   reopen it anywhere), and the windows that voted go back to their saved stages (and
-//!   frames) then. After the restore window a Desktop not shown when saved is never adopted
-//!   (a vote would move a window the user sees into a stage not shown).
+//!   frames) then. After a restart with another saved Desktop waiting, the one shown when
+//!   saved takes two as well while the restore window is open (a non-native app reopens its
+//!   windows on the Desktop shown at login). Voters that can adopt nothing any more (another
+//!   Desktop was taken, or the restore window ended) join their saved stages where they are,
+//!   or stay and their entries are forgotten. After the restore window a Desktop not shown
+//!   when saved is never adopted (a vote would move a window the user sees into a stage not
+//!   shown).
 //! - A Space left with only pending stages goes back to the saved Desktops waiting for a
 //!   visit ([`Model::pending_to_leftover`]); nothing pending is lost.
 
@@ -87,15 +92,22 @@ impl Model {
 
     /// Closes the restore window for good (the first user action, or its time is up): no
     /// Desktop becomes provisional any more, an empty saved active stage no longer holds its
-    /// place, and a window matched to an inactive stage brings it forward. Returns true when
-    /// it was open.
-    pub fn end_restore(&mut self) -> bool {
-        // Votes for a Desktop not shown when saved count only while the window is open.
-        self.adopt_votes.clear();
+    /// place, and a window matched to an inactive stage brings it forward. The windows that
+    /// voted for a saved Desktop go back to their saved stages where they are, or stay and
+    /// their entries are forgotten ([`Model::pool_voters`]). The actions to run when it was
+    /// open, else `None`.
+    pub fn end_restore(&mut self) -> Option<Vec<Action>> {
+        let was = std::mem::replace(&mut self.restore.restoring, false);
+        // Votes count only while the window is open: the voters can adopt nothing now.
+        let mut votes: Vec<(u64, WindowId)> = std::mem::take(&mut self.adopt_votes).into_values().flatten().collect();
+        votes.sort_by_key(|v| (v.1, v.0));
+        votes.dedup_by_key(|v| v.1);
+        let mut actions = Vec::new();
+        self.pool_voters(votes, &mut actions);
         // A saved Desktop whose windows all strayed to other Desktops waits for nothing (one
         // with windows still waiting keeps them for its visit).
         self.drop_empty_leftovers();
-        std::mem::replace(&mut self.restore.restoring, false)
+        was.then_some(actions)
     }
 
     /// At the restore window's end (and after a give-up once it is over): a Space shown whose
@@ -337,7 +349,12 @@ impl Model {
             && let Some(i) = self.adoption_for(meta)
         {
             let id = self.leftovers[i].id;
-            let take = if self.leftovers[i].current {
+            // After a restart, with another saved Desktop waiting (the one the login may show),
+            // the Desktop shown when saved takes two windows too while the restore window is
+            // open: a non-native app reopens its windows on the Desktop shown at login,
+            // whichever that is, so one of them is no proof (the review of 8I, M3).
+            let doubt = self.pooling() && self.restore.restoring && self.leftovers.len() > 1;
+            let take = if self.leftovers[i].current && !doubt {
                 true
             } else if self.restore.restoring {
                 let votes = self.adopt_votes.entry(space).or_default();
@@ -357,11 +374,14 @@ impl Model {
                 false
             };
             if take {
-                let voters: Vec<WindowId> =
-                    self.adopt_votes.remove(&space).unwrap_or_default().into_iter().filter(|v| v.0 == id && v.1 != meta.id).map(|v| v.1).collect();
+                let (voters, others): (Vec<_>, Vec<_>) =
+                    self.adopt_votes.remove(&space).unwrap_or_default().into_iter().filter(|v| v.1 != meta.id).partition(|v| v.0 == id);
+                let voters: Vec<WindowId> = voters.into_iter().map(|v| v.1).collect();
                 actions.extend(self.adopt(space, i, &voters));
                 space = SpaceId(id);
                 adopted = Some(id);
+                // The windows that voted for another saved Desktop can adopt nothing now.
+                self.pool_voters(others, actions);
             }
         }
         let pool = self.pooling() && !voted;
@@ -445,6 +465,7 @@ impl Model {
             self.drop_if_dead(from, &mut actions);
         }
         let mut assignment = rematch_on(&saved, &moved, |m| self.display(m.display).parks(m.frame));
+        self.skip_pooled_out(saved.id, &mut assignment);
         let showing = self.active_stage_in(target).is_some_and(|a| self.stage(a).is_some_and(|s| !s.windows.is_empty()));
         if showing {
             assignment.active_index = None;

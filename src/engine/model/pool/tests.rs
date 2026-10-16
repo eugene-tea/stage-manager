@@ -94,6 +94,10 @@ fn add(m: &mut Model, x: WindowMeta) -> Vec<Action> {
     m.add_window(x, &Decision::default(), &Observation::default())
 }
 
+fn parks(actions: &[Action], id: u32) -> bool {
+    actions.iter().any(|a| matches!(a, Action::Park { id: x, .. } if x.0 == id))
+}
+
 fn kin(m: &Model, id: u32) -> Option<Kin> {
     m.stage_of(w(id)).map(|s| m.root_of(s))
 }
@@ -243,6 +247,8 @@ fn the_desktop_shown_when_saved_brings_its_saved_active_stage_forward_at_the_end
     add(&mut m, win(70, 40, "com.example.notes", "List", r(13.0)));
     let front = m.main_active_stage();
     add(&mut m, win(51, 30, TERM, "build", r(2.0)));
+    assert_ne!(m.current_space(MAIN).0, 4, "with Desktop 2 waiting too, one window is no proof (M3 of the review)");
+    add(&mut m, win(42, 20, IDE, "lib.rs — proj", r(1.0)));
     assert_eq!(m.current_space(MAIN).0, 4);
     assert_eq!(m.main_active_stage(), front, "a front that shows a window stays while settling");
     assert!(m.window(w(51)).is_some_and(|x| x.parked));
@@ -258,6 +264,7 @@ fn the_desktop_shown_when_saved_brings_its_saved_active_stage_forward_at_the_end
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     add(&mut m, win(70, 40, "com.example.notes", "List", r(13.0)));
     add(&mut m, win(52, 31, MUSIC, "Library", r(4.0)));
+    add(&mut m, win(53, 12, MAIL, "Inbox", r(7.0)));
     assert_eq!(m.current_space(MAIN).0, 4);
     m.end_restore();
     assert!(m.front_of_saved_current(&Observation::default()).is_empty());
@@ -295,4 +302,179 @@ fn strays_listed_at_an_arrival_go_to_their_saved_stages_with_their_children() {
     assert!(m.window(w(90)).is_some_and(|x| x.parked && x.home == m.window(w(43)).map(|p| p.home).unwrap_or(Home::Pinned)), "the sheet follows it");
     assert_eq!(m.restore_summary(0).by_apple, 0);
     assert!(titles(&m).iter().filter(|(t, _)| t == "General").all(|(_, n)| *n == 1));
+}
+
+// ----- the review of 8I (8I2) -----------------------------------------------------------
+
+/// Desktop 1 with its saved active stage all strays: the IDE's two windows only (the
+/// terminal's "build" in a stage of its own, used after the git stage).
+fn desktop_1_ide_front() -> SavedSpace {
+    let mut d1 = desktop_1();
+    d1.stages[0].windows.retain(|x| x.bundle_id == IDE);
+    d1.stages.push(stage(vec![sw(TERM, "build", r(2.0), 0)], 75));
+    d1.strip_slots.push(5);
+    d1
+}
+
+/// The login on Desktop 2 (adopted by two of its natives) with every stray of `d1` there.
+fn login_with(d1: SavedSpace) -> Model {
+    let mut m = launched(vec![d1, desktop_2()], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    assert_eq!(m.current_space(MAIN).0, 8);
+    for x in [
+        win(41, 20, IDE, "main.rs — proj", r(0.0)),
+        win(42, 20, IDE, "lib.rs — proj", r(1.0)),
+        win(43, 21, TEAMCHAT, "General", r(3.0)),
+        win(44, 22, GIT, "proj", r(5.0)),
+        win(45, 22, GIT, "site", r(6.0)),
+    ] {
+        add(&mut m, x);
+    }
+    m
+}
+
+#[test]
+fn a_visit_to_a_desktop_whose_active_stage_all_strayed_shows_its_most_recent_stage() {
+    // M1: Desktop 1's saved active stage (the IDE's) came back whole on Desktop 2. At Desktop
+    // 1's visit no empty stage is built for it, nor made active with the natives parked
+    // beside it: the most recently used stage with windows is in front.
+    let mut m = login_with(desktop_1_ide_front());
+    let d2 = m.current_space(MAIN);
+    let file = m.to_state();
+    let saved = file.spaces.iter().find(|s| s.id == 4).expect("Desktop 1 waits");
+    assert_eq!(saved.stages.len(), 3, "music, inbox, build: no stage with nothing in it is written");
+    m.end_restore();
+    let natives = [win(51, 30, TERM, "build", r(2.0)), win(52, 31, MUSIC, "Library", r(4.0)), win(53, 12, MAIL, "Inbox", r(7.0))];
+    let shown: Vec<WindowId> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.id).collect();
+    let a = m.arrive(MAIN, &natives, &shown, &LaunchHints::default());
+    let d1 = m.current_space(MAIN);
+    assert_eq!(d1.0, 4);
+    assert_eq!(m.stages_in(d1).count(), 3, "build, music, inbox; nothing for the strays' stages");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(51)), "build's stage, the most recent left: {a:?}");
+    assert!(m.window(w(51)).is_some_and(|x| !x.parked));
+    assert!(m.window(w(52)).is_some_and(|x| x.parked) && m.window(w(53)).is_some_and(|x| x.parked));
+    assert!(m.stages_in(d1).all(|s| !s.windows.is_empty()), "no empty stage on Desktop 1");
+    assert!(m.pooled_out.is_empty());
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
+    // Only the natives of an older stage back yet: that one is in front.
+    let mut m = login_with(desktop_1_ide_front());
+    m.end_restore();
+    let shown: Vec<WindowId> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &natives[2..], &shown, &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 4);
+    let front = m.main_active_stage().expect("a front");
+    assert_eq!(m.root_of(front), Kin::Saved(4, 5), "build's stage, the most recent with a window waiting");
+    assert!(m.has_pending(front) && m.window(w(53)).is_some_and(|x| x.parked));
+}
+
+#[test]
+fn a_lone_voter_joins_its_saved_stage_at_the_restore_windows_end() {
+    // M2: one window of Desktop 2 on the Desktop shown at login and nothing more: a vote that
+    // never adopts. At the restore window's end it can adopt nothing: it joins its saved
+    // stage where it is, its entry leaves Desktop 2.
+    let mut m = launched(vec![desktop_1(), desktop_2()], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let here = m.current_space(MAIN);
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    assert_eq!(m.restored_grade(w(81)), None, "a voter, by Apple's rule meanwhile");
+    assert_eq!(titles(&m).iter().find(|(t, _)| t == "Week").map(|x| x.1), Some(2), "live and waiting (the finding)");
+    let stage = m.stage_of(w(81));
+    let a = m.end_restore().expect("it was open");
+    assert!(!parks(&a, 81), "where it is: {a:?}");
+    assert_eq!(m.stage_of(w(81)), stage, "the stage Apple's rule made is its part now");
+    assert_eq!(kin(&m, 81), Some(Kin::Saved(8, 2)));
+    assert!(m.is_pooled(w(81)) && m.window(w(81)).is_some_and(|x| x.space == here && !x.parked));
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
+    // A voter with a sheet of its own stays where it is; its entry is forgotten.
+    let mut m = launched(vec![desktop_1(), desktop_2()], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    let sheet = WindowMeta { role: WindowRole::Child { parent: Some(w(81)) }, ..win(91, 10, CAL, "New Event", r(12.0)) };
+    add(&mut m, sheet);
+    let stage = m.stage_of(w(81));
+    let a = m.end_restore().expect("it was open");
+    assert!(a.is_empty(), "{a:?}");
+    assert_eq!(m.stage_of(w(81)), stage);
+    assert_eq!(m.restored_grade(w(81)), None, "by Apple's rule");
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
+}
+
+#[test]
+fn a_lone_stray_of_the_desktop_shown_when_saved_does_not_take_the_login_desktop() {
+    // M3, the 10-16 order: the team chat (Desktop 1's, the Desktop shown when saved) reopens
+    // first on the Desktop shown at login, Desktop 2. One window of Desktop 1 no longer makes
+    // it Desktop 1 while Desktop 2 waits too: Desktop 2's natives adopt it, and the chat, a
+    // vote that can adopt nothing now, joins its saved stage here.
+    let mut m = launched(vec![desktop_1(), desktop_2()], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(43, 21, TEAMCHAT, "General", r(3.0)));
+    assert_ne!(m.current_space(MAIN).0, 4, "one window is no proof");
+    assert_eq!(m.restored_grade(w(43)), None);
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    assert_eq!(m.current_space(MAIN).0, 8, "Desktop 2 by its own windows");
+    assert_eq!(kin(&m, 43), Some(Kin::Saved(4, 1)), "the chat in its saved stage, a part here");
+    assert!(m.is_pooled(w(43)) && m.window(w(43)).is_some_and(|x| !x.parked), "where it shows");
+    assert_eq!(kin(&m, 81), Some(Kin::Saved(8, 2)));
+    for x in [win(41, 20, IDE, "main.rs — proj", r(0.0)), win(42, 20, IDE, "lib.rs — proj", r(1.0)), win(83, 12, MAIL, "Archive", r(8.0))] {
+        add(&mut m, x);
+    }
+    assert_eq!(kin(&m, 41), Some(Kin::Saved(4, 0)));
+    assert_eq!(kin(&m, 83), Some(Kin::Saved(8, 0)));
+    assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
+    assert_eq!(m.unvisited_saved_spaces(), 1, "Desktop 1 waits for its natives");
+    // The same session is unchanged: there the Desktop shown when saved takes one window.
+    let mut d1 = desktop_1();
+    let mut d2 = desktop_2();
+    for (i, x) in d1.stages.iter_mut().chain(d2.stages.iter_mut()).flat_map(|s| s.windows.iter_mut()).enumerate() {
+        x.window = Some(100 + i as u32);
+    }
+    let m = launched(vec![d1, d2], Restore::same_session("A"));
+    assert!(!m.pooling());
+}
+
+#[test]
+fn a_rule_placed_stray_empties_its_saved_stage_like_any_other() {
+    // L2: a rule (float) places the team chat; its entry leaves Desktop 1 and the stage it
+    // emptied is neither written nor built at the visit.
+    let mut m = launched(vec![desktop_1(), desktop_2()], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    let float = Decision { action: crate::engine::rules::RuleAction::Float, ..Decision::default() };
+    m.add_window(win(43, 21, TEAMCHAT, "General", r(3.0)), &float, &Observation::default());
+    assert_eq!(m.window(w(43)).map(|x| x.home), Some(Home::Pinned));
+    assert!(m.pooled_out.contains(&(4, 1)));
+    let file = m.to_state();
+    let d1 = file.spaces.iter().find(|s| s.id == 4).expect("Desktop 1 waits");
+    assert_eq!(d1.stages.len(), 4, "no empty stage written for the chat's");
+    assert!(d1.stages.iter().all(|s| !s.windows.is_empty()));
+}
+
+#[test]
+fn a_native_on_its_own_desktop_keeps_its_confidence_against_a_same_title_elsewhere() {
+    // L3: both Desktops had a terminal titled "zsh". The one that shows on Desktop 2 is scored
+    // against Desktop 2's waiting windows first: confident there, it never looks elsewhere.
+    let mut d1 = desktop_1();
+    d1.stages[4].windows.push(sw(TERM, "zsh", r(14.0), 1));
+    let mut d2 = desktop_2();
+    d2.stages[1].windows.push(sw(TERM, "zsh", r(15.0), 1));
+    let mut m = launched(vec![d1, d2], Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 10, CAL, "Week", r(10.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    assert_eq!(m.current_space(MAIN).0, 8);
+    add(&mut m, win(85, 11, TERM, "zsh", r(20.0)));
+    assert_eq!(kin(&m, 85), Some(Kin::Saved(8, 1)), "its own Desktop's");
+    assert!(!m.is_pooled(w(85)) && m.restored_grade(w(85)).is_some_and(Grade::confident));
+    assert!(titles(&m).iter().any(|(t, n)| t == "zsh" && *n == 2), "Desktop 1's still waits for its visit");
+    // Nothing on its own Desktop: the other Desktop's then, with confidence.
+    add(&mut m, win(86, 11, TERM, "zsh", r(14.0)));
+    assert_eq!(kin(&m, 86), Some(Kin::Saved(4, 4)));
+    assert!(m.is_pooled(w(86)));
+    // Two live windows titled "zsh", nothing waiting for either.
+    assert!(titles(&m).iter().all(|(t, n)| *n == if t == "zsh" { 2 } else { 1 }), "{:?}", titles(&m));
+    assert!(!m.to_state().spaces.iter().filter(|s| s.id == 4).flat_map(|s| &s.stages).flat_map(|s| &s.windows).any(|x| x.title == "zsh"));
 }

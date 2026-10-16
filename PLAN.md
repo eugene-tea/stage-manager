@@ -197,8 +197,13 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   and the entry leaves the other Desktop. Strip: the adopted Desktop's saved slots, then the
   parts in their saved order. At the restore window's end by itself, the Desktop shown when
   saved (if shown) brings its saved active stage forward. The line: "K from other Desktops".
-  Known gap kept: on a Desktop made from an empty screen, the first confident window of the
-  Desktop shown when saved adopts it (8E2 M2), a stray of it included.
+  8I2 (the review): with another saved Desktop waiting, the Desktop shown when saved also
+  takes two windows while the restore window is open (one, as before, when it is the only
+  saved Desktop or after the window); voters that can adopt nothing any more (another
+  Desktop taken, or the window's end) join their saved stages where they are, else stay and
+  their entries are forgotten; a saved Desktop's stages the pool emptied are never built at
+  its visit (its most recent stage left takes the front); own-Desktop entries are scored
+  first, other Desktops' only for a window nothing there takes with confidence.
 
 ## 8G: the real-restart check
 

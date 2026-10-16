@@ -253,6 +253,8 @@ fn a_stray_of_another_saved_desktop_joins_its_saved_stage_here() {
     let mut m = restoring(vec![desktop_5(), d6]);
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_ne!(m.current_space(MAIN).0, 5, "with Desktop 6 waiting too, one window is no proof (8I, M3)");
+    add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
     assert_eq!(m.current_space(MAIN).0, 5);
     // Desktop 6's window shows here (a stray, round 8I): its saved stage is made here, its
     // entry leaves Desktop 6, which still waits for its visit with the rest.
@@ -475,8 +477,8 @@ fn after_the_restore_window_a_pending_match_brings_its_stage_forward() {
     // windows are in another stage. Never parked out of the user's sight.
     let mut m = adopted();
     assert!(m.restoring());
-    assert!(m.end_restore(), "the first user action, or five minutes");
-    assert!(!m.restoring() && !m.end_restore());
+    assert!(m.end_restore().is_some(), "the first user action, or five minutes");
+    assert!(!m.restoring() && m.end_restore().is_none());
     let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
     assert_eq!(number_of(&m, 21), Some(2), "its saved stage");
     assert_eq!(m.main_active_stage(), m.stage_of(w(21)), "switched to: {a:?}");
@@ -518,11 +520,13 @@ fn a_desktop_made_after_the_restore_window_never_adopts_a_saved_one() {
     d6.strip_slots = vec![1];
     let mut m = restoring(vec![desktop_5(), d6]);
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    // Two windows: with Desktop 6 waiting too, Desktop 5 takes two (the review of 8I, M3).
     add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
     assert_eq!(m.current_space(MAIN).0, 5);
     m.end_restore();
     // The user makes a new Desktop and goes there: empty, but not provisional.
-    m.arrive(MAIN, &[], &[w(23)], &LaunchHints::default());
+    m.arrive(MAIN, &[], &[w(23), w(24)], &LaunchHints::default());
     assert!(m.provisional_spaces().is_empty(), "no provisional Desktop after the restore window");
     let here = m.current_space(MAIN);
     add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
@@ -565,12 +569,20 @@ fn one_window_of_a_desktop_not_shown_when_saved_does_not_adopt_it() {
     assert_ne!(m.current_space(MAIN).0, 6, "one window of Desktop 6");
     assert_eq!(m.restored_grade(w(41)), None, "Apple's rule");
     assert!(!parks(&a, 41));
-    // Desktop 5's window: the Desktop shown when saved takes one.
+    // Desktop 5's windows: after a restart with Desktop 6 waiting too, the Desktop shown when
+    // saved takes two as well (the review of 8I, M3).
     add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_ne!(m.current_space(MAIN).0, 5, "one window of Desktop 5 is no proof either");
+    add(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
     assert_eq!(m.current_space(MAIN).0, 5);
     assert_eq!(m.unvisited_saved_spaces(), 1, "Desktop 6 still waits");
-    assert!(m.window(w(41)).is_some_and(|x| !x.parked), "Family stays where Apple's rule put it");
-    assert_eq!(m.restored_grade(w(41)), None);
+    assert!(m.window(w(41)).is_some_and(|x| !x.parked), "Family stays where it shows");
+    // Family's vote can adopt nothing now: it joins its saved stage where it is, its entry
+    // gone from Desktop 6 (8I, M2): never live and waiting at once.
+    assert!(m.is_pooled(w(41)) && m.restored_grade(w(41)).is_some_and(Grade::confident));
+    assert!(m.adopt_votes.is_empty());
+    let family = m.to_state().spaces.iter().flat_map(|s| &s.stages).flat_map(|s| &s.windows).filter(|w| w.title == "Family").count();
+    assert_eq!(family, 1);
 }
 
 #[test]
@@ -733,7 +745,7 @@ fn after_the_restore_window_a_desktop_not_shown_when_saved_moves_no_window() {
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     let here = m.current_space(MAIN);
     add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
-    assert!(m.end_restore());
+    assert!(m.end_restore().is_some());
     assert!(m.adopt_votes.is_empty(), "votes count only while the window is open");
     let stage_41 = m.stage_of(w(41));
     let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
@@ -744,10 +756,12 @@ fn after_the_restore_window_a_desktop_not_shown_when_saved_moves_no_window() {
     assert!(set_frame(&a, 41).is_none());
     assert_eq!(m.main_active_stage(), m.stage_of(w(42)));
     assert_eq!(m.stages_in(here).count(), 2, "no saved stage rebuilt");
-    // The voter stays by Apple's rule; the second window, a stray after the window, is in its
-    // saved stage (round 8I), its stage brought forward as Apple's rule would.
-    assert_eq!((m.restored_grade(w(41)), m.restored_grade(w(42))), (None, Some(Grade::Strong)));
-    assert_eq!(m.unvisited_saved_spaces(), 1, "Desktop 6 still waits for Family");
+    // The voter, at the window's end, joined its saved stage where it is (the review of 8I,
+    // M2: the stage Apple's rule made, nothing moved); the second window, a stray after the
+    // window, is in its saved stage (round 8I), its stage brought forward as Apple's rule
+    // would.
+    assert_eq!((m.restored_grade(w(41)), m.restored_grade(w(42))), (Some(Grade::Strong), Some(Grade::Strong)));
+    assert_eq!(m.unvisited_saved_spaces(), 0, "every window of Desktop 6 is here");
     // Both windows after the window: the same.
     let mut m = restoring(vec![d6()]);
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
@@ -810,7 +824,7 @@ fn an_empty_saved_active_stage_gives_way_at_the_restore_windows_end() {
     let empty = m.main_active_stage().expect("the saved active stage");
     assert_eq!(m.stage(empty).map(|s| s.windows.len()), Some(0));
     assert!(m.has_pending(empty));
-    assert!(m.end_restore());
+    assert!(m.end_restore().is_some());
     let a = m.front_after_restore(&Observation::default());
     assert_eq!(m.main_active_stage(), m.stage_of(w(21)), "the most recent stage with windows: {a:?}");
     assert!(switches(&a) && !parks(&a, 21));
@@ -904,7 +918,7 @@ fn while_the_login_settles_nothing_switches_stages() {
     assert!(m.window_focused(w(31), &focused(31)).is_empty());
     assert_eq!(m.main_active_stage(), editor, "the saved active stage stays in front");
     // After the window, the user's activation switches as Apple's does.
-    assert!(m.end_restore());
+    assert!(m.end_restore().is_some());
     assert!(!m.settling());
     let a = m.app_activated(60, &focused(31));
     assert!(switches(&a) && m.main_active_stage() == m.stage_of(w(31)), "{a:?}");
@@ -1083,7 +1097,7 @@ fn an_app_s_window_unminimized_after_the_restore_window_brings_its_saved_stage_f
     // goes by Apple's rule, leaving Mail's windows where they are.
     let (mut m, mail) = mail_desktop();
     add_focused(&mut m, win(21, 50, EDITOR, "Inbox", F_NOTES));
-    assert!(m.end_restore());
+    assert!(m.end_restore().is_some());
     let a = add_focused(&mut m, win(22, 50, EDITOR, "Drafts", F_TEAM));
     assert_eq!(m.stage_of(w(22)), Some(mail), "its saved stage");
     assert_eq!(m.main_active_stage(), Some(mail), "came forward: {a:?}");
@@ -1132,7 +1146,7 @@ fn a_new_stage_takes_the_front_from_an_empty_saved_active_stage_while_the_login_
     assert!(m.strip().iter().any(|c| c.stage == editor), "the editor's card shows");
     // At the end: nothing to give way (the front shows a window); its key window is the one
     // that takes the keyboard.
-    assert!(m.end_restore());
+    assert!(m.end_restore().is_some());
     assert!(m.front_after_restore(&Observation::default()).is_empty());
     assert_eq!(m.focus_after_restore(&Observation::default()), [Action::Focus { id: w(31) }]);
     // After the window the editor's other window brings its stage forward, as usual.

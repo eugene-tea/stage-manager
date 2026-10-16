@@ -7,10 +7,12 @@
 //! [`super::pending`], unchanged); the pool is for the strays. After a restart
 //! ([`Model::pooling`]) a window appearing anywhere is scored against the waiting windows of
 //! its own Desktop *and* of every other: the other Desktops' stages in the model and the
-//! saved Desktops not visited yet (one scorer call, so a title saved on two Desktops is as
-//! ambiguous as one saved in two stages). A confident match (strong or medium; a low one only
-//! ever goes to the stage shown, its own Desktop's) recreates the saved stage on the Desktop
-//! where the window showed, as a **part**:
+//! saved Desktops not visited yet. Its own Desktop's come first: only a window none of them
+//! takes with confidence is scored against the other Desktops' (one call for those, so a
+//! title saved on two other Desktops is as ambiguous as one saved in two stages; a native
+//! keeps its own Desktop's entry whatever waits elsewhere). A confident match (strong or
+//! medium; a low one only ever goes to the stage shown, its own Desktop's) recreates the
+//! saved stage on the Desktop where the window showed, as a **part**:
 //!
 //! - the part already made there for the same saved stage (its [`Kin`]), else the stage of
 //!   the saved stage's name there, else the Desktop's empty front stage (nothing shown there;
@@ -38,8 +40,8 @@ use std::cmp::Reverse;
 use std::collections::HashSet;
 
 use super::pending::Placed;
-use super::{Action, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta};
-use crate::engine::persist::{SavedRole, SavedSpace, SavedWindow, live_key};
+use super::{Action, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
 
 /// The saved stage a model stage stands for: built from it (an adoption, an arrival on a
@@ -142,34 +144,59 @@ impl Model {
 
     /// The waiting entries `scope` looks at from `space`, with where each one is.
     fn waiting(&self, space: SpaceId, scope: Scope) -> (Vec<Spot>, Vec<Saved<'_>>) {
+        let stage_ok = |s: &Stage| match scope {
+            Scope::Own => s.space == space,
+            Scope::OwnAndPool => true,
+            Scope::Pool => s.space != space,
+        };
+        self.waiting_where(stage_ok, |_| scope != Scope::Own)
+    }
+
+    /// The waiting entries of the model's stages `stage_ok` takes and of the saved Desktops
+    /// not visited `saved_ok` takes, with where each one is.
+    fn waiting_where(&self, stage_ok: impl Fn(&Stage) -> bool, saved_ok: impl Fn(&SavedSpace) -> bool) -> (Vec<Spot>, Vec<Saved<'_>>) {
         let mut spots = Vec::new();
         let mut keys = Vec::new();
-        for s in &self.stages {
-            let own = s.space == space;
-            let take = match scope {
-                Scope::Own => own,
-                Scope::OwnAndPool => true,
-                Scope::Pool => !own,
-            };
-            if !take {
-                continue;
-            }
+        for s in self.stages.iter().filter(|s| stage_ok(s)) {
             for (k, w) in self.pending_of(s.id).iter().enumerate() {
                 keys.push(w.scorer_key(s.id.0));
                 spots.push(Spot::Stage(s.id, k));
             }
         }
-        if scope != Scope::Own {
-            for (i, l) in self.leftovers.iter().enumerate() {
-                for (j, st) in l.stages.iter().enumerate() {
-                    for (k, w) in st.windows.iter().enumerate().filter(|(_, w)| w.role == SavedRole::Standard) {
-                        keys.push(w.scorer_key(saved_group(l.id, j)));
-                        spots.push(Spot::Saved(i, j, k));
-                    }
+        for (i, l) in self.leftovers.iter().enumerate().filter(|(_, l)| saved_ok(l)) {
+            for (j, st) in l.stages.iter().enumerate() {
+                for (k, w) in st.windows.iter().enumerate().filter(|(_, w)| w.role == SavedRole::Standard) {
+                    keys.push(w.scorer_key(saved_group(l.id, j)));
+                    spots.push(Spot::Saved(i, j, k));
                 }
             }
         }
         (spots, keys)
+    }
+
+    /// The matches of `metas` (windows on `space`) among the waiting entries `scope` looks at:
+    /// (index into `metas`, the entry, how sure, the points). With [`Scope::OwnAndPool`] the
+    /// window's own Desktop is scored first and the other Desktops only for a window nothing
+    /// there takes with confidence (a native on its own Desktop never loses its confidence to
+    /// a same-titled window waiting on another; the review of 8I, L3); a confident match
+    /// elsewhere beats a low one into the stage shown.
+    fn picks(&self, space: SpaceId, metas: &[WindowMeta], low: LowRule, scope: Scope) -> Vec<(usize, Spot, Grade, u32)> {
+        let lives: Vec<_> = metas.iter().map(|m| live_key(m, self.display(m.display).parks(m.frame))).collect();
+        let run = |scope: Scope, which: &[usize], low: LowRule| -> Vec<(usize, Spot, Grade, u32)> {
+            let (spots, keys) = self.waiting(space, scope);
+            let sub: Vec<_> = which.iter().map(|&i| lives[i].clone()).collect();
+            assign(&keys, &sub, low).into_iter().zip(which).filter_map(|(p, &i)| p.map(|p| (i, spots[p.saved], p.grade, p.points))).collect()
+        };
+        let all: Vec<usize> = (0..metas.len()).collect();
+        if scope != Scope::OwnAndPool {
+            return run(scope, &all, low);
+        }
+        let own = run(Scope::Own, &all, low);
+        let sure: HashSet<usize> = own.iter().filter(|c| c.2.confident()).map(|c| c.0).collect();
+        let rest: Vec<usize> = all.into_iter().filter(|i| !sure.contains(i)).collect();
+        let pool: Vec<_> = run(Scope::Pool, &rest, LowRule::default()).into_iter().filter(|c| c.2.confident()).collect();
+        let pooled: HashSet<usize> = pool.iter().map(|c| c.0).collect();
+        own.into_iter().filter(|c| !pooled.contains(&c.0)).chain(pool).collect()
     }
 
     /// Matches `metas` (standard windows new on `space`) against the waiting entries `scope`
@@ -186,12 +213,7 @@ impl Model {
         scope: Scope,
         actions: &mut Vec<Action>,
     ) -> HashSet<WindowId> {
-        let (spots, keys) = self.waiting(space, scope);
-        let parked: Vec<bool> = metas.iter().map(|m| self.display(m.display).parks(m.frame)).collect();
-        let lives: Vec<_> = metas.iter().zip(&parked).map(|(m, p)| live_key(m, *p)).collect();
-        let picks = assign(&keys, &lives, low);
-        let chosen: Vec<(usize, Spot, Grade, u32)> =
-            picks.iter().enumerate().filter_map(|(i, p)| p.map(|p| (i, spots[p.saved], p.grade, p.points))).collect();
+        let chosen = self.picks(space, metas, low, scope);
         let mut touched = Vec::new();
         let mut taken = self.take_waiting(space, chosen, &mut touched);
         self.pending.retain(|_, l| !l.is_empty());
@@ -233,10 +255,7 @@ impl Model {
         if !self.pooling() {
             return HashSet::new();
         }
-        let (_, keys) = self.waiting(space, Scope::Pool);
-        let lives: Vec<_> = metas.iter().map(|m| live_key(m, self.display(m.display).parks(m.frame))).collect();
-        let picks = assign(&keys, &lives, LowRule::default());
-        metas.iter().zip(&picks).filter(|(_, p)| p.is_some_and(|p| p.grade.confident())).map(|(m, _)| m.id).collect()
+        self.picks(space, metas, LowRule::default(), Scope::Pool).into_iter().filter(|c| c.2.confident()).map(|c| metas[c.0].id).collect()
     }
 
     /// Takes the chosen entries out of where they wait: a confident one leaves, a low one
@@ -286,20 +305,53 @@ impl Model {
         in_saved.sort_by(|a, b| (a.1, a.2).cmp(&(b.1, b.2)).then(b.3.cmp(&a.3)));
         for (i, l, j, k, grade, points) in in_saved {
             let Some(saved) = self.leftovers.get(l) else { continue };
-            if j >= saved.stages.len() || k >= saved.stages[j].windows.len() {
+            if j >= saved.stages.len() {
                 continue;
             }
-            let id = saved.id;
-            let origin = Origin { root: Kin::Saved(id, j), rank: rank_of_saved(saved, j), name: saved.stages[j].name.clone() };
-            let st = &mut self.leftovers[l].stages[j];
-            let entry = st.windows.remove(k);
-            if !st.windows.iter().any(|w| w.role == SavedRole::Standard) {
-                st.windows.clear();
-                self.pooled_out.insert((id, j));
+            let origin = Origin { root: Kin::Saved(saved.id, j), rank: rank_of_saved(saved, j), name: saved.stages[j].name.clone() };
+            if let Some(entry) = self.take_saved_entry(l, j, k) {
+                out.push((i, Dest::Part(origin), entry, grade, points));
             }
-            out.push((i, Dest::Part(origin), entry, grade, points));
         }
         out
+    }
+
+    /// Takes entry `k` of stage `j` of the saved Desktop not visited `l` out; a stage left
+    /// with no standard window is emptied and noted as gone to the pool (no stage with
+    /// nothing in it is written, none is built at the Desktop's visit).
+    fn take_saved_entry(&mut self, l: usize, j: usize, k: usize) -> Option<SavedWindow> {
+        let saved = self.leftovers.get_mut(l)?;
+        let id = saved.id;
+        let st = saved.stages.get_mut(j).filter(|st| k < st.windows.len())?;
+        let entry = st.windows.remove(k);
+        if !st.windows.iter().any(|w| w.role == SavedRole::Standard) {
+            st.windows.clear();
+            self.pooled_out.insert((id, j));
+        }
+        Some(entry)
+    }
+
+    /// Drops the waiting entry at `spot` (a rule placed its window, or the window stays where
+    /// Apple's rule put it): a stage of the model left with nothing goes, a saved Desktop
+    /// left with nothing too.
+    fn drop_spot(&mut self, spot: Spot) {
+        match spot {
+            Spot::Stage(stage, k) => {
+                if let Some(list) = self.pending.get_mut(&stage)
+                    && k < list.len()
+                {
+                    list.remove(k);
+                }
+                self.pending.retain(|_, l| !l.is_empty());
+                let mut ignored = Vec::new();
+                self.drop_if_dead(stage, &mut ignored);
+            }
+            Spot::Saved(l, j, k) => {
+                self.take_saved_entry(l, j, k);
+                self.drop_empty_leftovers();
+            }
+        }
+        self.tidy_slot_order();
     }
 
     /// What a part of model stage `stage` (on another Desktop) stands for.
@@ -380,34 +432,104 @@ impl Model {
     /// Takes window `meta`'s confident match out of the waiting entries `scope` looks at
     /// from `space` (a rule placed the window). True when one was taken.
     pub(crate) fn forget_waiting(&mut self, meta: &WindowMeta, space: SpaceId, scope: Scope) -> bool {
-        let (spots, keys) = self.waiting(space, scope);
-        let parked = self.display(meta.display).parks(meta.frame);
-        let pick = assign(&keys, &[live_key(meta, parked)], LowRule::default()).into_iter().next().flatten();
-        let Some(spot) = pick.filter(|p| p.grade.confident()).map(|p| spots[p.saved]) else {
-            return false;
-        };
-        match spot {
-            Spot::Stage(stage, k) => {
-                if let Some(list) = self.pending.get_mut(&stage)
-                    && k < list.len()
-                {
-                    list.remove(k);
-                }
-                self.pending.retain(|_, l| !l.is_empty());
-                let mut ignored = Vec::new();
-                self.drop_if_dead(stage, &mut ignored);
+        let pick = self.picks(space, std::slice::from_ref(meta), LowRule::default(), scope).into_iter().find(|c| c.2.confident());
+        let Some((_, spot, _, _)) = pick else { return false };
+        self.drop_spot(spot);
+        true
+    }
+
+    /// Voters that can no longer adopt anything (their Desktop was taken by another saved
+    /// one, or the restore window is over): each goes into its saved stage where it is, a part
+    /// on its Desktop (a confident match among every Desktop's waiting windows, as any stray),
+    /// else it stays where Apple's rule put it and the entry it voted with (on saved Desktop
+    /// `.0`) is forgotten. A window is never live and waiting at once (the review of 8I, M2).
+    /// A voter with children of its own, or one placed since, stays where it is.
+    pub(crate) fn pool_voters(&mut self, votes: Vec<(u64, WindowId)>, actions: &mut Vec<Action>) {
+        if !self.pooling() {
+            return;
+        }
+        for (desktop, v) in votes {
+            let Some(w) = self.windows.get(&v) else { continue };
+            if self.restored.contains_key(&v) {
+                continue;
             }
-            Spot::Saved(l, j, k) => {
-                if let Some(st) = self.leftovers.get_mut(l).and_then(|s| s.stages.get_mut(j))
-                    && k < st.windows.len()
-                {
-                    st.windows.remove(k);
+            let (space, meta) = (w.space, w.meta.clone());
+            let movable = matches!(w.home, Home::Stage(_)) && meta.role == WindowRole::Standard && self.children_of(v).is_empty();
+            let claimed = movable
+                && self.picks(space, std::slice::from_ref(&meta), LowRule::default(), Scope::OwnAndPool).iter().any(|c| c.2.confident());
+            if claimed && let Some(meta) = self.take_out(v, actions) {
+                let placed = self.match_waiting(space, std::slice::from_ref(&meta), LowRule::default(), None, Scope::OwnAndPool, actions);
+                if placed.is_empty() {
+                    // Never left unmanaged: it comes back as any new window.
+                    tracing::warn!(id = v.0, "restore: a voter's saved stage could not take it after all; managed again as a new window");
+                    let more = self.add_window(meta, &crate::engine::rules::Decision::default(), &Observation::default());
+                    actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+                } else {
+                    tracing::debug!(id = v.0, desktop, "restore: a voter that can adopt nothing goes back to its saved stage here");
                 }
-                self.drop_empty_leftovers();
+            } else if self.forget_voted(&meta, desktop) {
+                tracing::debug!(id = v.0, desktop, "restore: a voter stays where Apple's rule put it; its saved entry is forgotten");
             }
         }
-        self.tidy_slot_order();
+        self.drop_empty_leftovers();
+    }
+
+    /// Takes managed window `id` out of its stage (to be placed again at once), keeping its
+    /// frame; its stage goes if left dead. Its meta, when it was managed.
+    fn take_out(&mut self, id: WindowId, actions: &mut Vec<Action>) -> Option<WindowMeta> {
+        let w = self.windows.remove(&id)?;
+        if let Home::Stage(from) = w.home {
+            if let Some(st) = self.stage_mut(from) {
+                st.windows.retain(|&x| x != id);
+                if st.key == Some(id) {
+                    st.key = st.windows.first().copied();
+                }
+            }
+            self.drop_if_dead(from, actions);
+        }
+        Some(w.meta)
+    }
+
+    /// Forgets the entry of saved Desktop `desktop` (waiting unvisited, or in the stages of
+    /// the Desktop that took its id) that window `meta` matches with confidence. True when
+    /// one was.
+    fn forget_voted(&mut self, meta: &WindowMeta, desktop: u64) -> bool {
+        let (spots, keys) = self.waiting_where(|s| s.space.0 == desktop, |l| l.id == desktop);
+        let parked = self.display(meta.display).parks(meta.frame);
+        let pick = assign(&keys, &[live_key(meta, parked)], LowRule::default()).into_iter().next().flatten();
+        let Some(spot) = pick.filter(|p| p.grade.confident()).map(|p| spots[p.saved]) else { return false };
+        self.drop_spot(spot);
         true
+    }
+
+    /// Leaves the stages the pool emptied out of `assignment` (saved Desktop `id`'s, taken out
+    /// of the waiting ones at its visit or adoption): none is built, none takes a strip slot;
+    /// when the saved active stage is one, the most recently used stage with windows or
+    /// waiting entries is active instead (none: the usual fallback). Stage indices are kept
+    /// (each stage built stands for its saved stage, [`Kin::Saved`]). The review of 8I, M1.
+    pub(crate) fn skip_pooled_out(&mut self, id: u64, assignment: &mut Assignment) {
+        let gone: Vec<usize> = (0..assignment.stages.len())
+            .filter(|&i| {
+                let st = &assignment.stages[i];
+                self.pooled_out.contains(&(id, i)) && st.windows.is_empty() && st.pending.is_empty()
+            })
+            .collect();
+        self.pooled_out.retain(|(d, _)| *d != id);
+        if gone.is_empty() {
+            return;
+        }
+        assignment.strip_slots.retain(|i| !gone.contains(i));
+        if assignment.active_index.is_some_and(|a| gone.contains(&a)) {
+            let next = assignment
+                .stages
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| !gone.contains(i) && (!s.windows.is_empty() || !s.pending.is_empty()))
+                .max_by_key(|(i, s)| (s.last_active.unwrap_or(0), Reverse(*i)))
+                .map(|(i, _)| i);
+            tracing::info!(desktop = id, active = ?next, "restore: the saved active stage's windows all came back on another Desktop; the most recent stage left is active");
+            assignment.active_index = next;
+        }
     }
 
     /// Drops the saved Desktops not visited that have no standard window left (every entry

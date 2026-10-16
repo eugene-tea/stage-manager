@@ -2104,7 +2104,7 @@ impl Controller {
                 if self.model.as_ref().is_some_and(Model::settling) {
                     if input::left_button_down() {
                         // A click whose press the input monitor has not told us about yet.
-                        self.end_restore("a click", End::User);
+                        self.end_restore(ob, "a click", End::User);
                     } else {
                         // At login a focus is the app's (a click or key press would have
                         // ended the settling): no switch, nothing held for later.
@@ -2190,7 +2190,7 @@ impl Controller {
                 if self.model.as_ref().is_some_and(Model::settling) {
                     if input::left_button_down() {
                         // A Dock click whose press the input monitor has not told us about yet.
-                        self.end_restore("a click (or a Dock click)", End::User);
+                        self.end_restore(ob, "a click (or a Dock click)", End::User);
                     } else {
                         // A launch-time activation at login is the app's, not the user's: no
                         // switch, nothing held for later.
@@ -2372,7 +2372,7 @@ impl Controller {
         match event.kind {
             InputKind::MouseDown => {
                 tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
-                self.end_restore("a click (or a Dock click)", End::User);
+                self.end_restore(ob, "a click (or a Dock click)", End::User);
                 // One window list for the press: the Dock's bar and the wallpaper are looked
                 // up in it. A press on a Dock item: its click may take the user to another
                 // Desktop.
@@ -2425,14 +2425,14 @@ impl Controller {
                 // A right or middle click is the user's: it ends the login's settling (their
                 // focus and stage stand), and is no drag, Dock or wallpaper click.
                 tracing::debug!(x = event.at.x, y = event.at.y, "right or other mouse down in another app");
-                self.end_restore("a right or middle click", End::User);
+                self.end_restore(ob, "a right or middle click", End::User);
             }
             InputKind::KeyDown => {
                 // ⌘Tab's own app switch brings its stage; nothing else comes forward for it.
                 if event.is_switcher_key() {
-                    self.end_restore("an app switcher key", End::Switcher);
+                    self.end_restore(ob, "an app switcher key", End::Switcher);
                 } else {
-                    self.end_restore("a key press", End::User);
+                    self.end_restore(ob, "a key press", End::User);
                 }
                 // Typing never cuts a switch's animation short: the keyboard is already the
                 // new stage's (its focus ran before the windows arrived).
@@ -3512,7 +3512,7 @@ impl Controller {
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
-        self.end_restore("a hotkey", End::User);
+        self.end_restore(ob, "a hotkey", End::User);
         self.flush_pending(ob);
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
@@ -3544,7 +3544,7 @@ impl Controller {
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
         if !matches!(event, StripEvent::Unveil { .. }) {
-            self.end_restore("a card click", End::User);
+            self.end_restore(ob, "a card click", End::User);
         }
         if let StripEvent::CardPressed { stage } = event {
             // Read the windows now, while the button is down (~100 ms before the release),
@@ -3807,7 +3807,7 @@ impl Controller {
                 // for a screen nobody sees; the end comes after the unlock.
                 if let Some(end) = clock.due(now).filter(|_| !self.locked) {
                     let why = if end == End::TimeUp { "its five minutes are up" } else { "apps went quiet" };
-                    self.end_restore(why, end);
+                    self.end_restore(ob, why, end);
                 }
             } else if (self.front_after_restore || self.focus_after_restore)
                 && !self.frozen()
@@ -3856,10 +3856,11 @@ impl Controller {
     /// after an app switcher key, whose own switch wins), and when it ended by itself the
     /// saved key window takes the keyboard (`focus_after_restore`). After a restart the
     /// restore's line is logged (`log summary` repeats it).
-    fn end_restore(&mut self, why: &str, end: End) {
+    fn end_restore(&mut self, ob: &Observer, why: &str, end: End) {
         let Some(clock) = self.settling.take() else { return };
+        let mut voters = Vec::new();
         if let Some(m) = self.model.as_mut()
-            && m.end_restore()
+            && let Some(actions) = m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
             if let Some(line) = m.restore_line(clock.age(Instant::now()).as_secs()) {
@@ -3868,7 +3869,11 @@ impl Controller {
             self.front_after_restore = end.brings_front();
             // Only after a restart: a relaunch in the same session changed no focus.
             self.focus_after_restore = end.by_itself() && m.after_restart();
+            voters = actions;
         }
+        // The windows that voted for a saved Desktop, back in their saved stages (round 8I2):
+        // run now, before the action that ended the window acts on the model.
+        self.execute(ob, voters);
     }
 
     /// Gives up the pending windows of apps running and quiet for
@@ -3943,7 +3948,7 @@ impl Controller {
             Command::Switch(_) | Command::Send(..) | Command::New(_) | Command::Pin(_) | Command::Merge(_) | Command::Reveal
         );
         if acts || matches!(cmd, Command::DebugDockClick { .. }) {
-            self.end_restore("a ctl command", End::User);
+            self.end_restore(ob, "a ctl command", End::User);
         }
         if acts && let Some(why) = self.frozen_reason() {
             return json!({ "ok": false, "error": why });
