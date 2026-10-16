@@ -38,7 +38,19 @@ back from the overlay's pixels), capture (the one phase with window
 captures on: real thumbnails and snapshots, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
 is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
-Desktop, drawn as before, and a card click switches).
+Desktop, drawn as before, and a card click switches), restore (a restart simulated with
+STAGE_MANAGER_SESSION: a layout of three fixture apps saved in session A; in session B the app
+starts on an empty screen, keeps every saved stage pending with no card, then the apps reopen
+their windows late, one by one, one app in reverse order and retitled, two windows already
+minimized when the app starts (no card for a waiting stage unless declared in [stages] names):
+every window goes back to its saved stage and frame, parked only on a strong or medium match,
+the Desktop takes the saved id, the active stage is never switched away, the strip comes back
+in its saved order; a minimized window un-minimized during the restore window goes quietly to
+its inactive stage; the login settles with no stage switch and ends by itself once apps are
+quiet for 20 s, the saved key window then focused, the restore's line logged and repeated by
+`log summary`; one un-minimized after it brings its stage forward; an app with no saved window goes by Apple's rule; the app that never reopens keeps
+its stage through a relaunch in the same session and loses it in the next session. Hands off
+the Mac during this phase: a click or key press ends the restore window early).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -2460,8 +2472,299 @@ def replayd_alerts(since):
     return sum(1 for line in r.stdout.splitlines() if line.rstrip().endswith("]:140"))
 
 
+# ----- restore after a restart (design 8D, round 8E's phase) ------------------------------
+
+
+def start_extra_args(k, n, *args, wait=True):
+    """Starts fixture app `k` with `n` windows and extra fixture arguments (`--delay-ms`,
+    `--stagger-ms`, `--reverse`, `--retitle`...); waits for its windows unless `wait` is off."""
+    bundle, path, pattern, title = EXTRA[k]
+    stop_extra(k)
+    subprocess.run(["open", "-n", "-g", path, "--args", "--windows", str(n), "--title", title, "--background", *args], check=True)
+    if wait:
+        return wait_until(lambda: len(fixture_windows([bundle])[0]) >= n, 15, f"{n} {title} windows")
+    return True
+
+
+def read_state_file():
+    try:
+        with open(os.path.join(HOME, "state.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def saved_windows(f):
+    """(title, pending since or None) of every saved window in a state.json."""
+    return [(w["title"], (w.get("pending") or {}).get("since"))
+            for sp in (f or {}).get("spaces", []) for st in sp["stages"] for w in st["windows"]]
+
+
+def base_title(t):
+    """A title without the fixture's retitle suffix."""
+    return t.replace(" — Edited", "")
+
+
+def number_of(s, title):
+    for w in s["windows"]:
+        if base_title(w["title"]) == title:
+            return w["home"]
+    return None
+
+
+def stage_sets_restore(s, n):
+    """The base titles of stage `n`'s windows."""
+    return {base_title(x) for x in stage_titles(s).get(n, [])}
+
+
+def phase_restore():
+    say("\n== restore after a restart (simulated: STAGE_MANAGER_SESSION) ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config('[stages]\nnames = ["Mail"]\n')
+    try:
+        os.remove(os.path.join(HOME, "state.json"))  # the test home's: no other phase's layout
+    except FileNotFoundError:
+        pass
+    run_id = f"{os.getpid()}-{int(time.time())}"
+    session = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"restore {k} {run_id}"} for k in "ABC"}
+
+    say("-- session A: a layout of three apps")
+    start_extra("a", 3)
+    start_extra("b", 2)
+    start_extra("c", 1)
+    s = start_app(6, extra_env=session["A"])
+    if not check(s is not None, "app up with Alpha (3), Bravo (2) and Charlie (1)"):
+        return
+    t = by_title(s)
+    do("send", 1, t["Alpha 1"]["id"])
+    do("send", 1, t["Alpha 2"]["id"])
+    do("send", number_of(state(), "Alpha 3"), t["Bravo 1"]["id"])
+    do("pin", t["Bravo 2"]["id"])
+    do("switch", number_of(state(), "Alpha 3"))
+    s = state()
+    want = {n: set(v) for n, v in stage_titles(s).items() if v}
+    want_active = set(stage_titles(s)[s["active"]])
+    want_restore = {w["title"]: w["restore"] for w in s["windows"] if w["role"] == "standard"}
+    want_strip = [set(stage_titles(s)[n]) for n in s["strip"]]
+    want_strip_n = list(s["strip"])
+    active_a = next(st for st in s["stages"] if st["number"] == s["active"])
+    want_key = next((w["title"] for w in s["windows"] if w["id"] == active_a["key"]), None)
+    state_a = s
+    say(f"  stages: {want}, active {sorted(want_active)}, strip {want_strip}")
+    check(by_title(s)["Bravo 2"]["home"] == "pinned" and want.get(1) == {"Alpha 1", "Alpha 2"},
+          "layout: Mail holds Alpha 1 and 2, Bravo 2 is pinned")
+    time.sleep(1.0)
+    stop_app()
+    all_onscreen("session A quit")
+    f = read_state_file()
+    saved_space = next((sp["id"] for sp in (f or {}).get("spaces", []) if sp.get("current")), None)
+    check(f is not None and f.get("session") == session["A"]["STAGE_MANAGER_SESSION"] and saved_space is not None,
+          "state.json written in session A, with the Desktop shown")
+    check(all(p is None for _, p in saved_windows(f)) and len(saved_windows(f)) == 6, "nothing pending in session A")
+
+    say("-- session B: the app starts on an empty screen; Alpha already reopened two windows minimized")
+    stop_all_fixtures()
+    # Minimized before the app starts: AppKit minimizes only a window that has been on screen,
+    # so the fixture shows each a moment first, and that moment must not be a new window to
+    # the app. Alpha's third window opens later (SIGUSR1: "Alpha 3", its session A frame).
+    start_extra_args("a", 2, "--minimized", "Alpha 1;Alpha 2", wait=False)
+    a_bundle = EXTRA["a"][0]
+    def minimized_both():
+        wins = fixture_windows([a_bundle])[0]
+        return len(wins) == 2 and not any(w.get("onscreen") for w in wins)
+    wait_until(minimized_both, 10, "Alpha 1 and 2 in the Dock")
+    time.sleep(1.5)  # past the moment on screen and the minimize animation
+    check(wait_until(minimized_both, 5, "Alpha 1 and 2 in the Dock, settled") is not None,
+          "Alpha 1 and 2 reopened minimized (the window server lists them off screen)")
+    s = start_app(0, extra_env=session["B"])
+    if not check(s is not None, "app up in session B"):
+        return
+    r = s.get("restore") or {}
+    check(r.get("restoring") is True and r.get("after_restart") is True, "restore after a restart (state.json from another session)")
+    check(s["space"] in r.get("provisional", []), "the empty Desktop is provisional")
+    check(s["strip"] == [] and not s["windows"], "no card, no window")
+    s = wait_state(lambda x: len(x["unplaced"]) == 2, "the two minimized windows known, off screen", timeout=5)
+    check(s is not None, "the app knows Alpha 1 and 2 (Accessibility lists them) and leaves them in the Dock (unplaced, unmanaged)")
+    check(r.get("pending_unvisited") == 6, f"every saved window waits ({r})")
+    f = wait_until(lambda: (lambda x: x if x and x.get("session") == session["B"]["STAGE_MANAGER_SESSION"] else None)(read_state_file()),
+                   10, "state.json saved in session B")
+    pend = saved_windows(f)
+    check(len(pend) == 6 and all(p == session["A"]["STAGE_MANAGER_SESSION"] for _, p in pend),
+          f"state.json keeps every saved window, pending since session A ({pend})")
+
+    say("-- the apps reopen their windows late: Alpha 3, then Bravo one by one, reversed and retitled")
+    say("   (hands off the Mac: a click or key press would end the restore window early)")
+    mail = number_of(state_a, "Alpha 1")
+    charlie_n = number_of(state_a, "Charlie 1")
+    os.kill(extra_pid("a"), signal.SIGUSR1)
+    start_extra_args("b", 2, "--delay-ms", "8000", "--stagger-ms", "1500", "--reverse", "--retitle-after-ms", "500",
+                     "--retitle", "Bravo 1=Bravo 1 — Edited", wait=False)
+    shown_seen = []
+    end = time.time() + 40
+    s = None
+    while time.time() < end:
+        s = state()
+        shown_seen.append({base_title(x) for x in active_titles(s)})
+        # Alpha 3, Bravo 1 and 2 managed; the two minimized Alpha windows wait off screen.
+        if len([w for w in s["windows"] if w["role"] == "standard"]) >= 3 and len(s["unplaced"]) <= 2 \
+                and any(w["title"] == "Bravo 1 — Edited" for w in s["windows"]):
+            time.sleep(1.5)  # the last moves
+            s = state()
+            break
+        time.sleep(0.3)
+    if not check(s is not None and len(s["windows"]) >= 3, "the three reopened windows shown are managed"):
+        return
+    got = {n: {base_title(x) for x in v} for n, v in stage_titles(s).items() if v}
+    back = {n: v for n, v in want.items() if n not in (mail, charlie_n)}
+    check(got == back, f"every shown window is back in its saved stage, under its saved number ({got}, saved {want})")
+    check(s["space"] == saved_space, f"the Desktop took the saved Desktop's id ({s['space']}, saved {saved_space})")
+    check(not (s.get("restore") or {}).get("provisional"), "no Desktop is provisional any more")
+    bad_shown = [x for x in shown_seen if x and not x <= want_active]
+    check(not bad_shown, f"the active stage was never switched away while windows came back ({bad_shown[:3]})")
+    check({base_title(x) for x in active_titles(s)} == want_active, "the saved active stage is active")
+    pinned = by_title(s).get("Bravo 2") or {}
+    check(pinned.get("home") == "pinned", "Bravo 2 is pinned again")
+    off = [w["title"] for w in s["windows"] if w["role"] == "standard"
+           and not close(w["restore"], want_restore.get(base_title(w["title"]), w["restore"]), 2.0)]
+    check(not off, f"every window has its saved frame ({off})")
+    consistent("restored")
+    check(any(w["title"] == "Bravo 1 — Edited" for w in s["windows"]), "Bravo 1 was retitled after it was matched")
+    waiting = {st["number"]: st for st in s["stages"] if st["pending"] and not st["windows"]}
+    check(set(waiting) == {mail, charlie_n}, f"Mail (minimized windows) and Charlie's stage wait, pending ({sorted(waiting)})")
+    # A waiting stage has no card (a card is a picture of windows; a minimized window is in the
+    # Dock, as at any launch), except a declared one: `[stages] names` cards show with no
+    # window, as in v1.2.0 (the 10-15 run's "failure": Mail is declared above).
+    check(charlie_n not in s["strip"] and mail in s["strip"],
+          f"Charlie's waiting stage has no card; Mail's, declared, has its card ({s['strip']})")
+    check((s.get("restore") or {}).get("restoring") is True, "the restore window is still open")
+
+    say("-- un-minimized during the restore window: back to its inactive stage, quietly")
+    active_before = s["active"]
+    os.kill(extra_pid("a"), signal.SIGHUP)
+    s = wait_state(lambda x: "Alpha 1" in by_title(x), "Alpha 1 un-minimized and managed", timeout=8)
+    if check(s is not None, "Alpha 1 is managed once un-minimized"):
+        time.sleep(1.0)
+        s = state()
+        a1 = by_title(s)["Alpha 1"]
+        # Read off screen, a minimized window answers AXDialog: once shown it is read again.
+        check(a1["role"] == "standard", f"a standard window, not taken for a dialog ({a1['role']})")
+        check(a1["home"] == mail and a1["parked"], f"in its saved stage (Mail), parked ({a1['home']}, parked {a1['parked']})")
+        check(a1.get("restored") in ("strong", "medium"), f"matched with confidence ({a1.get('restored')})")
+        check(re.search(rf"restore: back in its saved stage id={a1['id']} .*parked=true switched=false", log_text()) is not None,
+              "placed quietly: parked, no switch (the log)")
+        check(s["active"] == active_before and {base_title(x) for x in active_titles(s)} == want_active,
+              "no switch during the restore window (the login settles: a focus macOS gives the un-minimized window switches nothing)")
+        strip_n = [n for n in want_strip_n if n != charlie_n]
+        check(s["strip"] == strip_n, f"the strip in its saved order ({s['strip']}, saved {want_strip_n})")
+        consistent("un-minimized during")
+    s = state()  # also when Alpha 1 never came: the invariants below hold on any state
+    wrong = [w["title"] for w in s["windows"] if w["parked"] and w.get("restored") not in ("strong", "medium")]
+    check(not wrong, f"parked => matched strong or medium ({wrong})")
+    inactive = [w["title"] for w in s["windows"] if w["role"] == "standard" and w["home"] not in ("pinned", s["active"])]
+    check(all(by_title(s)[x]["parked"] for x in inactive), f"the inactive stages' windows are parked ({inactive})")
+
+    say("-- settling ends by itself once apps are quiet for 20 s (8F): the saved key window has the keyboard")
+    check((s.get("restore") or {}).get("settling") is True, "the login is settling (a restart)")
+    # 75 s: quiet 20 s after the last window back (Bravo's stagger, Alpha 1) and a minute after
+    # the launch at least, with room for a slow machine.
+    s = wait_state(lambda x: (x.get("restore") or {}).get("restoring") is False, "the restore window ends by itself", timeout=75)
+    if check(s is not None, "the restore window ended with no user action (apps quiet 20 s)"):
+        time.sleep(1.5)  # the end's focus, at the next tick
+        s = state()
+        text = log_text()
+        ends = re.search(r'restore: the restore window ends why="apps went quiet"', text)
+        check(ends is not None, "it ended because apps went quiet (the log)")
+        # Only session B's restore window counts: from its opening line to its end (the day's
+        # log also holds session A, whose `do("switch", …)` switched stages).
+        opens = [o for o in re.finditer(r"restore: the restore window opens after_restart=true", text)
+                 if ends is not None and o.start() < ends.start()]
+        check(bool(opens), "session B's restore window opened after a restart (the log)")
+        switches_during = text[opens[-1].end():ends.start()].count("stage switch") if ends and opens else -1
+        check(switches_during == 0, f"no stage switch while the login settled ({switches_during} in session B's restore window)")
+        check(re.search(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule", text) is not None,
+              "the restore's one line is logged, no titles")
+        summary = run([BIN, "log", "summary"], timeout=15).stdout
+        check("last restore after a restart:" in summary, "`log summary` repeats the restore's line")
+        check({base_title(x) for x in active_titles(s)} == want_active and s["active"] == active_before, "the saved active stage is in front at the end")
+        key_ids = [w["id"] for w in s["windows"] if base_title(w["title"]) == want_key]
+        front = next((st for st in s["stages"] if st["number"] == s["active"]), {})
+        check(front.get("key") in key_ids, f"its saved key window ({want_key}) is the stage's key")
+        check(s.get("focused") in key_ids, f"the saved key window has the keyboard (focused {s.get('focused')}, key {key_ids})")
+        consistent("settled")
+
+    say("-- after the restore window: an un-minimized window brings its stage forward")
+    do("switch", s["active"])
+    s = state()
+    check((s.get("restore") or {}).get("restoring") is False, "the restore window is over")
+    os.kill(extra_pid("a"), signal.SIGHUP)
+    s = wait_state(lambda x: "Alpha 2" in by_title(x), "Alpha 2 un-minimized and managed", timeout=8)
+    if check(s is not None, "Alpha 2 is managed once un-minimized"):
+        time.sleep(1.0)
+        s = state()
+        t = by_title(s)
+        check(t["Alpha 2"]["role"] == "standard", f"a standard window, not taken for a dialog ({t['Alpha 2']['role']})")
+        check(t["Alpha 2"]["home"] == mail and s["active"] == mail, f"its stage (Mail) came forward (active {s['active']})")
+        check(not t["Alpha 2"]["parked"] and not t["Alpha 1"]["parked"], "Mail's windows are shown")
+        check(t["Alpha 3"]["parked"] and t["Bravo 1 — Edited"]["parked"], "the stage left is parked")
+        check(t["Alpha 2"].get("restored") in ("strong", "medium"), f"matched with confidence ({t['Alpha 2'].get('restored')})")
+        check(re.search(rf"restore: back in its saved stage id={t['Alpha 2']['id']} .*switched=true", log_text()) is not None,
+              "its stage came forward with it (the log)")
+        consistent("un-minimized after")
+
+    say("-- an app with no saved window: Apple's rule")
+    start_fixture(1)
+    s = wait_state(lambda x: "Fixture 1" in by_title(x), "Fixture 1 managed", timeout=8)
+    if check(s is not None, "the unmatched app's window is managed"):
+        time.sleep(1.0)
+        s = state()
+        f1 = by_title(s)["Fixture 1"]
+        check(f1.get("restored") is None, "matched to no saved window")
+        check(stage_titles(s).get(f1["home"]) == ["Fixture 1"] and f1["home"] not in want, "a stage of its own")
+        check(s["active"] == f1["home"] and not f1["parked"], "shown, its stage in front, as Apple's does")
+        check(stage_sets_restore(s, mail) == {"Alpha 1", "Alpha 2"}, "the restored stages untouched")
+        consistent("unmatched app")
+    do("switch", mail)
+    stop_fixture()
+    wait_state(lambda x: "Fixture 1" not in by_title(x), "Fixture 1 gone")
+
+    say("-- give up: Charlie never reopens")
+    stop_app()
+    all_onscreen("session B quit")
+    s = start_app(5, extra_env=session["B"])
+    if not check(s is not None, "relaunch in session B"):
+        return
+    check((s.get("restore") or {}).get("after_restart") is False, "the same session: no restore after a restart")
+    def stage_sets_now(x):
+        return sorted(sorted(base_title(t) for t in v) for v in stage_titles(x).values() if v)
+
+    want_sets = sorted(sorted(v) for v in want.values() if v != {"Charlie 1"})
+    check(stage_sets_now(s) == want_sets, f"the same-session relaunch keeps the stages ({stage_sets_now(s)})")
+    check(any(st["pending"] and not st["windows"] for st in s["stages"]), "Charlie's stage still waits")
+    time.sleep(1.5)
+    stop_app()
+    f = read_state_file()
+    check(("Charlie 1", session["A"]["STAGE_MANAGER_SESSION"]) in saved_windows(f),
+          "Charlie's window is kept through the relaunch, pending since session A")
+    s = start_app(5, extra_env=session["C"])
+    if not check(s is not None, "launch in session C"):
+        return
+    f = wait_until(lambda: (lambda x: x if x and x.get("session") == session["C"]["STAGE_MANAGER_SESSION"] else None)(read_state_file()),
+                   10, "state.json saved in session C")
+    titles = [base_title(x) for x, _ in saved_windows(f)]
+    check("Charlie 1" not in titles, "after two sessions without Charlie its window is given up")
+    check(sorted(titles) == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"the others are kept ({titles})")
+    check(stage_sets_now(s) == want_sets, f"session C: the stages matched again ({stage_sets_now(s)})")
+    check(not any(st["pending"] for st in s["stages"]), "session C: nothing pending")
+    consistent("session C")
+    stop_app()
+    all_onscreen("restore phase quit")
+    stop_all_fixtures()
+    write_config(None)
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -2478,7 +2781,7 @@ def main():
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
-             "expose": phase_expose, "capture": phase_capture}[p]()
+             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

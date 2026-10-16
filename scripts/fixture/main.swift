@@ -17,9 +17,28 @@
 //                                      title bar, as Chrome and Telegram draw), titleless
 //                                      (toolbar, title hidden); scripts/probe_park.py measures
 //                                      what macOS keeps on screen of each when parked
+//   --delay-ms N | FIXTURE_DELAY_MS=N  open the windows N ms after launch (an app reopening
+//                                      its windows late after a login)
+//   --stagger-ms N | FIXTURE_STAGGER_MS=N  one window every N ms instead of all at once
+//   --reverse    | FIXTURE_REVERSE=1   open the windows last first (their window ids then come
+//                                      in the other order; each keeps its own title and frame)
+//   --retitle M  | FIXTURE_RETITLE=M   retitle windows once shown, "Old=New;Old2=New2" (whole
+//                                      titles, e.g. "Fixture 1=Fixture 1 — Edited")
+//   --retitle-after-ms N | FIXTURE_RETITLE_AFTER_MS=N  how long after a window shows (default 0)
+//   --minimized M | FIXTURE_MINIMIZED=M  open these windows minimized, "T 1;T 2" (whole
+//                                      titles: an app reopening a window that was minimized
+//                                      when it quit). They open at launch, before --delay-ms
+//                                      applies to the others: each is ordered in behind the
+//                                      other windows and minimized a moment later (AppKit
+//                                      minimizes a window that has been on screen; one never
+//                                      ordered in was never listed by Accessibility in the
+//                                      10-15 live run, and SIGHUP had nothing to un-minimize).
+//                                      A test starts this fixture before Stage Manager, so
+//                                      the moment on screen is not seen as a new window.
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
+// SIGHUP un-minimizes the first minimized standard window (by title), as a Dock click would.
 // SIGWINCH stands in for "its Desktop is not shown": every visible standard window parked
 // in the screen's bottom-right corner is ordered out (the window server still lists it, off
 // screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
@@ -33,6 +52,21 @@ struct Options {
     var title = "Fixture"
     var frames: [[Double]] = []
     var styles: [String] = []
+    var delayMs = 0
+    var staggerMs = 0
+    var reverse = false
+    var retitle: [String: String] = [:]
+    var retitleAfterMs = 0
+    var minimized: Set<String> = []
+
+    static func parseRetitle(_ text: String) -> [String: String] {
+        var map: [String: String] = [:]
+        for part in text.split(separator: ";") {
+            let kv = part.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2, !kv[0].isEmpty { map[kv[0]] = kv[1] }
+        }
+        return map
+    }
 
     static func parseFrames(_ text: String) -> [[Double]] {
         text.split(separator: ";").compactMap { part in
@@ -50,6 +84,12 @@ struct Options {
         if let t = env["FIXTURE_TITLE"], !t.isEmpty { o.title = t }
         if let f = env["FIXTURE_FRAMES"] { o.frames = parseFrames(f) }
         if let s = env["FIXTURE_STYLES"] { o.styles = s.split(separator: ",").map(String.init) }
+        if let n = env["FIXTURE_DELAY_MS"].flatMap(Int.init) { o.delayMs = n }
+        if let n = env["FIXTURE_STAGGER_MS"].flatMap(Int.init) { o.staggerMs = n }
+        if env["FIXTURE_REVERSE"] == "1" { o.reverse = true }
+        if let r = env["FIXTURE_RETITLE"] { o.retitle = parseRetitle(r) }
+        if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
+        if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -59,10 +99,19 @@ struct Options {
             case "--title": if let t = args.next() { o.title = t }
             case "--frames": if let f = args.next() { o.frames = parseFrames(f) }
             case "--styles": if let s = args.next() { o.styles = s.split(separator: ",").map(String.init) }
+            case "--delay-ms": if let n = args.next().flatMap(Int.init) { o.delayMs = n }
+            case "--stagger-ms": if let n = args.next().flatMap(Int.init) { o.staggerMs = n }
+            case "--reverse": o.reverse = true
+            case "--retitle": if let r = args.next() { o.retitle = parseRetitle(r) }
+            case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
+            case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             default: if let n = Int(a) { o.windows = n }
             }
         }
         o.windows = max(0, min(o.windows, 12))
+        o.delayMs = max(0, o.delayMs)
+        o.staggerMs = max(0, o.staggerMs)
+        o.retitleAfterMs = max(0, o.retitleAfterMs)
         return o
     }
 }
@@ -115,8 +164,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        for i in 0..<options.windows {
-            show(makeWindow(i, area: area))
+        let all = options.reverse ? Array((0..<options.windows).reversed()) : Array(0..<options.windows)
+        // Windows reopened minimized go to the Dock at once; the others follow the delays.
+        for i in all where options.minimized.contains(title(i)) { open(i, area: area) }
+        let order = all.filter { !options.minimized.contains(title($0)) }
+        if options.delayMs == 0 && options.staggerMs == 0 {
+            for i in order { open(i, area: area) }
+        } else {
+            for (k, i) in order.enumerated() {
+                let ms = options.delayMs + k * options.staggerMs
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { self.open(i, area: area) }
+            }
         }
         if options.panel {
             let panel = NSPanel(
@@ -139,6 +197,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var opened = 0
 
+    /// The title of window number i + 1.
+    func title(_ i: Int) -> String {
+        "\(options.title) \(i + 1)"
+    }
+
+    /// Window number i + 1, shown (or, when `--minimized` names it, ordered in behind the
+    /// others and minimized), then retitled when `--retitle` names its title.
+    func open(_ i: Int, area: NSRect) {
+        let window = makeWindow(i, area: area)
+        if options.minimized.contains(window.title) {
+            // Ordered in first: `miniaturize` on a window never on screen left it unknown to
+            // Accessibility and not minimized (the 10-15 live run). A moment later, so the
+            // window server has shown it, it goes to the Dock.
+            window.orderBack(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { window.miniaturize(nil) }
+        } else {
+            show(window)
+        }
+        guard let title = options.retitle[window.title] else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.retitleAfterMs)) { window.title = title }
+    }
+
     /// Window number i + 1: distinct frames, a diagonal cascade with varied sizes.
     func makeWindow(_ i: Int, area: NSRect) -> NSWindow {
         let size = NSSize(width: 520, height: 360)
@@ -151,14 +231,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fw = f[2] <= 0 ? area.width + f[2] : f[2]
             rect = NSRect(x: area.minX + f[0], y: area.maxY - f[1] - f[3], width: fw, height: f[3])
         }
-        let title = "\(options.title) \(i + 1)"
+        let name = title(i)
         let window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = title
+        window.title = name
         window.isReleasedWhenClosed = false
-        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: title)
+        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: name)
         if !options.styles.isEmpty {
             applyStyle(options.styles[i % options.styles.count], to: window)
         }
@@ -210,6 +290,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wins.sorted { $0.title < $1.title }.first?.miniaturize(nil)
     }
 
+    /// SIGHUP: un-minimize the first minimized standard window.
+    func unminimizeOne() {
+        let wins = NSApp.windows.filter { $0.isMiniaturized && !($0 is NSPanel) }
+        wins.sorted { $0.title < $1.title }.first?.deminiaturize(nil)
+    }
+
     var away: [(NSWindow, NSRect)] = []
 
     /// SIGWINCH: windows parked in the bottom-right corner go "to another Desktop".
@@ -258,6 +344,10 @@ signal(SIGUSR2, SIG_IGN)
 let minimize = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
 minimize.setEventHandler { delegate.minimizeOne() }
 minimize.resume()
+signal(SIGHUP, SIG_IGN)
+let unminimize = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
+unminimize.setEventHandler { delegate.unminimizeOne() }
+unminimize.resume()
 signal(SIGWINCH, SIG_IGN)
 let sendAway = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
 sendAway.setEventHandler { delegate.sendParkedAway() }

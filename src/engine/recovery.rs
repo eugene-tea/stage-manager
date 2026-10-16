@@ -320,6 +320,7 @@ mod tests {
             role: SavedRole::Standard,
             original: None,
             window: None,
+            ..Default::default()
         }
     }
 
@@ -330,9 +331,10 @@ mod tests {
             stages: vec![SavedStage {
                 name: None,
                 windows,
+                ..Default::default()
             }],
             active_index: Some(0),
-            strip_slots: vec![],
+            ..Default::default()
         })
     }
 

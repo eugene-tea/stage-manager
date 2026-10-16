@@ -2,8 +2,8 @@
 //!
 //! The summary is short enough to paste into a chat: the day's counts (the last `COUNT`
 //! line of every app run, added up), the runs and unclean exits, every problem mark with its
-//! line number, and every warning and error, deduplicated (numbers folded) with how often and
-//! when.
+//! line number, every warning and error, deduplicated (numbers folded) with how often and
+//! when, and the day's last restore after a restart (its one line, no titles).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -34,6 +34,15 @@ pub struct Line<'a> {
     pub level: &'a str,
     /// The rest: target and message, or a mark's or count's text.
     pub text: &'a str,
+}
+
+/// The restore's one line ([`crate::engine::restore::Summary`]) in a log line's text.
+fn restore_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule")
+            .unwrap_or_else(|e| panic!("bad restore pattern: {e}"))
+    })
 }
 
 fn line_regex() -> &'static Regex {
@@ -106,6 +115,8 @@ pub struct Summary {
     pub marks: Vec<MarkRef>,
     /// The day's file reached its cap.
     pub capped: bool,
+    /// The last restore line of the day (`HH:MM:SS`, the line from "restore: " on).
+    pub last_restore: Option<(String, String)>,
 }
 
 /// Folds numbers to `#` and lists of them to `[#…]`, so repeats of one problem with other
@@ -141,6 +152,11 @@ pub fn summarize(date: Option<Date>, text: &str) -> Summary {
                 match last_counts.iter_mut().find(|(pid, _)| *pid == line.pid) {
                     Some(slot) => slot.1 = counts,
                     None => last_counts.push((line.pid, counts)),
+                }
+            }
+            "INFO" => {
+                if let Some(m) = restore_regex().find(line.text) {
+                    s.last_restore = Some((line.time[..8].to_string(), m.as_str().to_string()));
                 }
             }
             "MARK" => {
@@ -227,6 +243,9 @@ impl fmt::Display for Summary {
             .map(|c| format!("{} {}", c.label(), self.counts.get(*c)))
             .collect();
         writeln!(f, "counts ({}): {}", plural(self.counted_runs, "run", "runs"), counts.join(", "))?;
+        if let Some((time, line)) = &self.last_restore {
+            writeln!(f, "last restore after a restart: {time} {line}")?;
+        }
         writeln!(f, "problem marks: {}", self.marks.len())?;
         for (i, m) in self.marks.iter().enumerate() {
             let note = if m.note.is_empty() { "(no note)".to_string() } else { format!("\"{}\"", m.note) };
@@ -324,6 +343,21 @@ mod tests {
         assert!(text.contains("3 warnings, 1 error (3 kinds)"));
         assert!(text.contains("WARN     2x 09:10-11:00 app      platform::wm_thread: windows still parked"));
         assert!(text.lines().count() <= 12, "{text}");
+    }
+
+    #[test]
+    fn the_last_restore_line_is_repeated() {
+        let line = crate::engine::restore::Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1 };
+        let one = crate::engine::restore::Summary { windows: 1, stages: 1, desktops: 1, ..Default::default() };
+        let text = format!(
+            "2026-10-12 08:01:00.000 +02:00 app[1] INFO  platform::controller: {one}\n\
+             2026-10-12 08:02:11.000 +02:00 app[1] INFO  platform::controller: restore: the restore window ends why=\"apps went quiet\"\n\
+             2026-10-12 08:02:11.001 +02:00 app[1] INFO  platform::controller: {line}\n"
+        );
+        let s = summarize(Date::new(2026, 10, 12), &text);
+        assert_eq!(s.last_restore, Some(("08:02:11".into(), line.to_string())));
+        assert!(s.to_string().contains("last restore after a restart: 08:02:11 restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule"));
+        assert!(!summarize(None, DAY).to_string().contains("last restore"), "a day without one says nothing");
     }
 
     #[test]

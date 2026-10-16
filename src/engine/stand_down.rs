@@ -20,6 +20,20 @@
 //!   apart from any controller's registry entries, so a resumed controller's first park does
 //!   not drop them, and retried at every Space change and at the resume until all are back,
 //!   whether the app is still standing down or managing again.
+//!
+//! **The logout's head start** ([`Logout`], [`logout_plan`]; the review of 8F, M3) stands down
+//! the same way for a logout, restart or shutdown (`willPowerOffNotification`), without
+//! quitting: every window back, the leftovers check and the stages saved (kept: the next
+//! login restores them), so windows are at their real frames as early as possible before apps
+//! save theirs. The app stays running so macOS's own quit (`applicationShouldTerminate:`, as
+//! in 1.2.0) ends it: an app that quits before macOS asks may not be reopened at the next
+//! login. That quit finds the work done and only exits ([`Quit::Done`]), but for windows the
+//! head start could not bring back (another Desktop's): held as at a stand-down
+//! ([`Task::HoldStranded`]), tried again at every Space change during the hold and once more
+//! at the quit. A logout another app cancels sends no quit: after [`LOGOUT_WAIT`] the app
+//! starts afresh, from the saved stages, as at a launch, the held windows still on record.
+
+use std::time::{Duration, Instant};
 
 /// What the WM thread must do after a reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +69,8 @@ pub enum Task {
     RetryHeld,
     /// Observation starts again (when Accessibility is granted): a fresh start.
     StartObserving,
+    /// `state.json` is written now (the logout's head start: the next login restores it).
+    SaveStages,
 }
 
 /// The release, in order. Displays and settings are replayed when the WM thread has them.
@@ -78,6 +94,91 @@ pub fn resume_plan(stranded: bool) -> Vec<Task> {
     }
     plan.push(Task::StartObserving);
     plan
+}
+
+/// The logout's head start, in order: windows back and the leftovers check, windows it could
+/// not bring back held (as at a stand-down: a cancelled logout's fresh controller keeps them
+/// on record, and every Space change tries them again), the stages saved (never dropped),
+/// then the controller set aside as at a stand-down.
+pub fn logout_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
+    let mut plan = vec![Task::UnparkAll, Task::HoldStranded, Task::SaveStages, Task::StopObserving, Task::NewController];
+    if have_displays {
+        plan.push(Task::ReplayDisplays);
+    }
+    if have_settings {
+        plan.push(Task::ReplaySettings);
+    }
+    plan.push(Task::HideStrip);
+    plan
+}
+
+/// How long the logout's head start waits for macOS's quit before it takes the logout for
+/// cancelled (an app refused to quit, or the user cancelled its dialog) and starts afresh.
+pub const LOGOUT_WAIT: Duration = Duration::from_secs(60);
+
+/// What the app's quit has left to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quit {
+    /// Everything: unpark, the leftovers check, save (no head start ran).
+    Unpark,
+    /// The head start did it: only exit (`all_back`: every window came back then).
+    Done {
+        /// Every window came back at the head start.
+        all_back: bool,
+    },
+}
+
+/// The logout's head start (see the module docs): held from `willPowerOffNotification` until
+/// macOS's quit, or [`LOGOUT_WAIT`] when no quit comes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Logout {
+    /// When the head start ran; `None` when none is held.
+    since: Option<Instant>,
+    /// Every window came back at the head start.
+    all_back: bool,
+}
+
+impl Logout {
+    /// A logout, restart or shutdown is coming at `now`: true when the head start runs now
+    /// (once: a repeated notice while held does nothing).
+    pub fn coming(&mut self, now: Instant) -> bool {
+        if self.since.is_some() {
+            return false;
+        }
+        self.since = Some(now);
+        self.all_back = false;
+        true
+    }
+
+    /// The head start's work is done; `all_back`: every window came back.
+    pub fn released(&mut self, all_back: bool) {
+        self.all_back = all_back;
+    }
+
+    /// True while the head start holds (nothing is arranged; input is ignored).
+    pub fn holding(&self) -> bool {
+        self.since.is_some()
+    }
+
+    /// What the app's quit has left to do now.
+    pub fn quit(&self) -> Quit {
+        if self.holding() { Quit::Done { all_back: self.all_back } } else { Quit::Unpark }
+    }
+
+    /// True (once) when no quit came within [`LOGOUT_WAIT`] of the head start at `now`: the
+    /// logout was cancelled, the hold ends and the app starts afresh.
+    pub fn cancelled(&mut self, now: Instant) -> bool {
+        if self.since.is_some_and(|t| now.saturating_duration_since(t) >= LOGOUT_WAIT) {
+            self.since = None;
+            return true;
+        }
+        false
+    }
+
+    /// Whether `work` may run now (only housekeeping while held).
+    pub fn admits(&self, work: Work) -> bool {
+        !self.holding() || work == Work::Housekeeping
+    }
 }
 
 /// Something the user or the system asks of the engine.
@@ -231,6 +332,75 @@ mod tests {
         for stranded in [false, true] {
             assert!(!resume_plan(stranded).contains(&Task::DropSavedStages));
         }
+    }
+
+    /// The review of 8F, M3: the head start brings every window back and saves without
+    /// quitting; macOS's quit then only exits.
+    #[test]
+    fn the_logout_head_start_saves_the_stages_and_leaves_the_quit_to_macos() {
+        let plan = logout_plan(true, true);
+        let at = |t: Task| plan.iter().position(|p| *p == t).unwrap_or_else(|| panic!("{t:?} planned"));
+        assert!(at(Task::UnparkAll) < at(Task::SaveStages), "saved after the windows are back, as at quit");
+        assert!(at(Task::UnparkAll) < at(Task::HoldStranded), "what the unpark and its check left is held");
+        assert!(at(Task::HoldStranded) < at(Task::NewController), "held before the controller that parked them goes");
+        assert!(at(Task::SaveStages) < at(Task::NewController), "saved by the controller that knows the stages");
+        assert!(at(Task::NewController) < at(Task::ReplayDisplays) && at(Task::NewController) < at(Task::ReplaySettings));
+        assert!(plan.contains(&Task::HideStrip) && plan.contains(&Task::StopObserving));
+        assert!(!plan.contains(&Task::DropSavedStages), "the next login restores them");
+        assert!(!logout_plan(false, false).contains(&Task::ReplayDisplays));
+
+        let t0 = Instant::now();
+        let mut l = Logout::default();
+        assert_eq!(l.quit(), Quit::Unpark, "no head start: the quit does it all");
+        assert!(l.admits(Work::Input) && l.admits(Work::Observe));
+        assert!(l.coming(t0));
+        assert!(!l.coming(t0 + Duration::from_secs(1)), "once");
+        assert!(l.holding() && !l.admits(Work::Input) && !l.admits(Work::SpaceChange) && !l.admits(Work::Observe));
+        assert!(l.admits(Work::Housekeeping), "settings, displays, ctl reads and the quit still work");
+        assert_eq!(l.quit(), Quit::Done { all_back: false }, "under way: nothing said back yet");
+        l.released(true);
+        assert_eq!(l.quit(), Quit::Done { all_back: true }, "the quit only exits");
+        l.released(false);
+        assert_eq!(l.quit(), Quit::Done { all_back: false }, "a window left: the quit's own fallback");
+    }
+
+    /// The review of 8F2, 1: a window the head start could not move (another Desktop's) stays
+    /// on record through a cancelled logout: held, so the fresh controller's first batch (a
+    /// registry replace with only its own windows) keeps it, and it is retried until back.
+    #[test]
+    fn a_window_the_logout_could_not_move_stays_held_through_a_cancel() {
+        let plan = logout_plan(false, false);
+        assert!(plan.contains(&Task::HoldStranded));
+        assert!(!plan.contains(&Task::DropSavedStages));
+
+        // The head start's HoldStranded: one window left on another Desktop.
+        let mut s = StandDown::default();
+        s.released(false);
+        assert!(s.stranded() && !s.stood_down(), "held, though nothing stands down");
+        assert!(s.admits(Work::SpaceChange), "a Space change during or after the hold retries it");
+
+        // The cancel's fresh controller parks its own windows: the held one is kept.
+        let held: BTreeMap<u32, &str> = [(31, "another Desktop's")].into();
+        assert_eq!(merge_held(BTreeMap::new(), &held), held, "the first batch replaces nothing it does not own");
+        assert_eq!(merge_held([(5, "own 5")].into(), &held), [(5, "own 5"), (31, "another Desktop's")].into());
+
+        // Its Desktop shows: back, nothing held.
+        s.released(true);
+        assert!(!s.stranded());
+    }
+
+    #[test]
+    fn a_cancelled_logout_starts_afresh_after_the_wait() {
+        let t0 = Instant::now();
+        let mut l = Logout::default();
+        assert!(!l.cancelled(t0 + LOGOUT_WAIT), "nothing held");
+        l.coming(t0);
+        l.released(true);
+        assert!(!l.cancelled(t0 + LOGOUT_WAIT - Duration::from_millis(1)));
+        assert!(l.cancelled(t0 + LOGOUT_WAIT));
+        assert!(!l.holding() && l.quit() == Quit::Unpark, "managing again: a later quit does everything");
+        assert!(!l.cancelled(t0 + LOGOUT_WAIT * 2), "once");
+        assert!(l.coming(t0 + LOGOUT_WAIT * 3), "a later logout gets its own head start");
     }
 
     #[test]

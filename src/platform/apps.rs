@@ -2,7 +2,8 @@
 //! terminate / activate / hide / unhide notifications, observed on the main thread and handed
 //! on as plain Rust values; the active Space changing (`activeSpaceDidChangeNotification`);
 //! and hiding or unhiding an app by its pid (`NSRunningApplication`, public API, any thread),
-//! for `[windows] hide_parked_apps`.
+//! for `[windows] hide_parked_apps`; a logout, restart or shutdown coming
+//! (`willPowerOffNotification`); when the login session began (`loginwindow`'s start).
 
 use std::ptr::NonNull;
 use std::time::Instant;
@@ -14,7 +15,7 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
     NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidHideApplicationNotification,
     NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
-    NSWorkspaceDidUnhideApplicationNotification,
+    NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
     NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue, NSString,
@@ -146,6 +147,21 @@ pub fn observe_space_changes(sink: impl Fn() + 'static) -> WorkspaceObservers {
     WorkspaceObservers { center, tokens: vec![token] }
 }
 
+/// Observes `NSWorkspaceWillPowerOffNotification` on the main queue: the user logs out,
+/// restarts or shuts down, before apps are asked to quit (they save their windows then).
+/// Calls `sink` each time.
+pub fn observe_power_off(sink: impl Fn() + 'static) -> WorkspaceObservers {
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let main_queue = NSOperationQueue::mainQueue();
+    let block = RcBlock::new(move |_note: NonNull<NSNotification>| sink());
+    // SAFETY: the notification name is a valid framework static; the block runs on the
+    // main queue only, where `sink` lives.
+    let token = unsafe {
+        center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceWillPowerOffNotification), None, Some(&main_queue), &block)
+    };
+    WorkspaceObservers { center, tokens: vec![token] }
+}
+
 /// Observes `AppleInterfaceThemeChangedNotification` (the distributed notification macOS
 /// posts when Light, Dark or Auto flips the appearance) on the main queue; calls `sink`
 /// each time. The app's effective appearance may still be the old one at the call.
@@ -198,4 +214,55 @@ pub fn is_active(pid: i32) -> Option<bool> {
 /// The bundle id of running app `pid`, if any.
 pub fn bundle_of(pid: i32) -> Option<String> {
     running(pid).and_then(|a| a.bundleIdentifier()).map(|s| s.to_string())
+}
+
+/// When this login session began: the start of this user's `loginwindow` (it is relaunched
+/// at each login), as an instant on our clock. `None` when it cannot be read. The restore's
+/// settling waits at least a minute after it ([`crate::engine::restore::SETTLE_AFTER_LOGIN`]).
+pub fn login_started() -> Option<Instant> {
+    let uid = my_uid();
+    let list = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str("com.apple.loginwindow"));
+    let start = list
+        .iter()
+        .filter_map(|a| process_info(a.processIdentifier()))
+        .filter(|i| i.pbi_uid == uid)
+        .map(|i| std::time::UNIX_EPOCH + std::time::Duration::new(i.pbi_start_tvsec, (i.pbi_start_tvusec.min(999_999) * 1000) as u32))
+        .max()?;
+    let ago = std::time::SystemTime::now().duration_since(start).ok()?;
+    Instant::now().checked_sub(ago)
+}
+
+/// This process's user id.
+fn my_uid() -> libc::uid_t {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` of process `pid` (its user, start time); `None` when it
+/// cannot be read (gone, or another user's).
+fn process_info(pid: i32) -> Option<libc::proc_bsdinfo> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: the buffer is a proc_bsdinfo of exactly `size` bytes, ours for the call.
+    let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
+    // SAFETY: the kernel filled the whole struct when it returned its size; it was zeroed
+    // before, and every field is plain data.
+    (n == size).then(|| unsafe { info.assume_init() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn our_own_start_time_reads_back_in_the_past() {
+        let me = process_info(std::process::id() as i32).expect("our own process");
+        assert_eq!(me.pbi_uid, my_uid());
+        let started = std::time::UNIX_EPOCH + std::time::Duration::from_secs(me.pbi_start_tvsec);
+        assert!(started <= std::time::SystemTime::now());
+        assert!(process_info(-1).is_none() && process_info(0).is_none());
+    }
 }

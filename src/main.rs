@@ -171,6 +171,7 @@ mod app {
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
         _appearance: WorkspaceObservers,
+        _power_off: WorkspaceObservers,
         _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
@@ -336,7 +337,7 @@ mod app {
         safety::request_quit();
         // No new window capture from here on; those in flight are waited for at exit.
         capture::begin_shutdown();
-        let timeout = shutdown_timeout(safety::registry_len());
+        let timeout = shutdown_timeout(safety::registry_len().max(wm_thread::logout_windows()));
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
         let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
             Some(Some(true)) => true,
@@ -689,6 +690,18 @@ mod app {
             }
         });
 
+        // The logout's head start (8F, the review's M3): at a logout, restart or shutdown the
+        // WM thread brings every window back, checks for leftovers and saves the stages at
+        // once, so windows are at their real frames as early as possible before apps save
+        // theirs for "Reopen windows when logging back in". The app does not quit then: an app
+        // that quits before macOS asks may not be reopened at the next login. macOS's quit
+        // (`applicationShouldTerminate:`, as in 1.2.0) finds the work done and only exits; a
+        // logout another app cancels ends the hold after a minute (a fresh start).
+        let wm_power = wm.clone();
+        let power_off = apps::observe_power_off(move || {
+            wm_power.logout_coming();
+        });
+
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.
         let permissions = PermissionState::current();
         tracing::info!(
@@ -742,6 +755,7 @@ mod app {
             _workspace: workspace,
             _spaces: spaces,
             _appearance: appearance,
+            _power_off: power_off,
             _input: input_monitor,
             _timer: timer,
         };

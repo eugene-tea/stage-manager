@@ -20,6 +20,7 @@ pub mod persist;
 pub mod placement;
 pub mod recovery;
 pub mod rescan;
+pub mod restore;
 pub mod rules;
 pub mod settings;
 pub mod sliver;

@@ -4,8 +4,10 @@
 # Stages A/B/C.app" with IDs <id>.a/.b/.c for the native phase; SM_FIXTURE_ID picks another
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
-#   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 strip native visible parity
-#                                          # motion expose capture
+#   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 restore strip native visible
+#                                          # parity motion slots expose capture
+#   scripts/test-stages.sh restore m6      # restore after a restart (simulated new sessions), and
+#                                          # the same-session relaunch
 #   scripts/test-stages.sh m3 safety       # some phases
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches

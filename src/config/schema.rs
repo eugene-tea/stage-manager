@@ -345,6 +345,8 @@ pub const KEYS: &[KeyDef] = &[
     // [stages]
     k("stages", "names", Kind::Names, "[]",
         "Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty."),
+    k("stages", "restore_after_restart", Kind::Bool, "true",
+        "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
     // [defaults]
     k("defaults", "action", Kind::Action, "\"native\"",
         "\"native\" is Apple's: a window joins its app's stage, a newly opened app gets its own."),
@@ -489,6 +491,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-9.toml"),
     include_str!("legacy/default-10.toml"),
     include_str!("legacy/default-11.toml"),
+    include_str!("legacy/default-12.toml"),
 ];
 
 #[cfg(test)]

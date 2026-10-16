@@ -14,6 +14,12 @@
 //! ([`resume_plan`]), held windows are tried again and observation starts: the fresh
 //! controller builds stages from the windows on screen.
 //!
+//! At a logout, restart or shutdown the thread stands down the same way ahead of macOS's quit
+//! ([`Logout`], [`logout_plan`]): every window back, the stages saved (kept for the next
+//! login), observation stopped, input ignored; the quit that follows only exits. With no quit
+//! within [`crate::engine::stand_down::LOGOUT_WAIT`] (a cancelled logout) observation starts
+//! again: the fresh controller restores the saved stages, as at a launch.
+//!
 //! Every entry point (command drain, AX callback, timer) runs inside
 //! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
 //! of killing the thread that owns the windows.
@@ -22,6 +28,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -42,7 +49,7 @@ use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
-use crate::engine::stand_down::{StandDown, Step, Task, Work, release_plan, resume_plan};
+use crate::engine::stand_down::{Logout, Quit, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
@@ -115,8 +122,12 @@ pub enum WmCommand {
     /// A ctl command for the engine; the reply is one JSON value.
     Ctl(Command, SyncSender<serde_json::Value>),
     /// Unpark every window, save state, drop every observer, stop the run loop, then reply
-    /// with whether every window came back.
+    /// with whether every window came back. After the logout's head start: only stop and
+    /// reply with what the head start found.
     Shutdown(SyncSender<bool>),
+    /// A logout, restart or shutdown is coming (`willPowerOffNotification`): the head start
+    /// ([`logout_plan`]), no quit.
+    LogoutComing,
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -135,7 +146,24 @@ pub struct WmHandle {
     run_loop: Arc<RemoteRunLoop>,
 }
 
+/// How many windows were parked when a logout was announced ([`WmHandle::logout_coming`]): a
+/// quit that comes while the head start still brings them back waits as long as their unpark
+/// may take. Back to 0 when the logout is cancelled.
+static LOGOUT_WINDOWS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many windows were parked when the logout now held was announced (0: none held).
+pub fn logout_windows() -> usize {
+    LOGOUT_WINDOWS.load(Ordering::SeqCst)
+}
+
 impl WmHandle {
+    /// A logout, restart or shutdown is coming: notes how many windows are parked now
+    /// ([`logout_windows`]) and starts the head start ([`WmCommand::LogoutComing`]).
+    pub fn logout_coming(&self) -> bool {
+        LOGOUT_WINDOWS.fetch_max(safety::registry_len(), Ordering::SeqCst);
+        self.send(WmCommand::LogoutComing)
+    }
+
     /// Starts the WM thread and waits until its run loop exists.
     pub fn spawn() -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel::<WmCommand>();
@@ -210,6 +238,8 @@ struct WmState {
     stand_down_leftovers: Option<safety::Ours>,
     /// When the scan after a main display change is due.
     display_sweep: Option<Instant>,
+    /// The logout's head start, while it holds.
+    logout: Logout,
 }
 
 thread_local! {
@@ -303,6 +333,39 @@ impl WmState {
 
     fn handle(&mut self, cmd: WmCommand) {
         match cmd {
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
+                if !self.logout.admits(Work::Input) =>
+            {
+                tracing::debug!("a logout is coming: input ignored");
+            }
+            // Nothing is arranged during the hold, but a window the head start could not reach
+            // may show on this Space now (as while standing down).
+            WmCommand::SpaceChanged if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
+            WmCommand::LogoutComing => self.logout_head_start(),
+            WmCommand::Shutdown(reply) if matches!(self.logout.quit(), Quit::Done { .. }) => {
+                // The head start did the work: nothing is unparked or saved again (the
+                // controller is a fresh one with no stages; saving it would write none).
+                let Quit::Done { all_back } = self.logout.quit() else { return };
+                // Windows it could not bring back (another Desktop's) are tried once more,
+                // knowing what its check knew, as the quit after a stand-down does.
+                let back = if self.stand_down.stranded() {
+                    let held_back = safety::retry_held();
+                    let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                    let left_back = safety::leftovers_back_knowing("quit", ours).is_none();
+                    tracing::info!(held_back, left_back, "quitting after the logout's head start: windows it left were tried again");
+                    held_back && left_back
+                } else {
+                    tracing::info!(all_back, "quitting after the logout's head start: every window was brought back then");
+                    all_back
+                };
+                self.observer.stop();
+                let _ = self.observer.take_events();
+                if let Some(rl) = CFRunLoop::current() {
+                    rl.stop();
+                }
+                let _ = reply.send(back && safety::registry_len() == 0);
+                return;
+            }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
             WmCommand::App(event) => self.observer.on_app_event(event, ax_callback),
             WmCommand::Accessibility(trusted) => {
@@ -318,8 +381,10 @@ impl WmState {
                     }
                 }
                 self.trusted = trusted;
-                if self.stand_down.admits(Work::Observe) || !trusted {
+                if (self.stand_down.admits(Work::Observe) && self.logout.admits(Work::Observe)) || !trusted {
                     self.observer.set_accessibility(trusted, ax_callback);
+                } else if self.logout.holding() {
+                    tracing::info!("a logout, restart or shutdown is coming: observation waits (it starts again if the logout is cancelled)");
                 } else {
                     tracing::info!("Apple's Stage Manager is on: observation waits until it is off");
                 }
@@ -329,10 +394,15 @@ impl WmState {
                 self.settings = Some(settings.clone());
                 self.controller.set_settings(&settings);
                 self.observer.set_settings(settings);
-                match self.stand_down.apple(apple_on) {
-                    Step::Release => self.release(),
-                    Step::Resume => self.resume(),
-                    Step::Nothing => {}
+                if self.logout.holding() {
+                    // Read again when the hold ends (a cancelled logout).
+                    tracing::debug!(apple_on, "a logout is coming: Apple's Stage Manager is looked at again if it is cancelled");
+                } else {
+                    match self.stand_down.apple(apple_on) {
+                        Step::Release => self.release(),
+                        Step::Resume => self.resume(),
+                        Step::Nothing => {}
+                    }
                 }
             }
             WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
@@ -379,11 +449,7 @@ impl WmState {
                 // it is back.
                 // A quit while stood down still knows whose windows the stand-down left
                 // (its model and state.json are gone by then; the review of 6X3, 2).
-                let now = safety::Ours::now(self.controller.model_window_ids());
-                let ours = match self.stand_down_leftovers.take() {
-                    Some(kept) => kept.merged(now),
-                    None => now,
-                };
+                let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
                 let back = safety::leftovers_back_knowing("quit", ours).is_none();
                 // A restore that failed but went through late is seen back now.
                 let unrestored = self.controller.account_unrestored(&self.observer);
@@ -418,7 +484,9 @@ impl WmState {
                     // The window server's word, as at quit (the review of 6X): every allowed
                     // app's window still in a park zone comes back now, known to this run or
                     // not; one that cannot is looked for again whenever a Desktop shows.
-                    let left = safety::leftovers_back_knowing("stand-down", safety::Ours::now(self.controller.model_window_ids()));
+                    // An earlier stand-down's or logout's leftovers not yet back stay known.
+                    let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                    let left = safety::leftovers_back_knowing("stand-down", ours);
                     let back = left.is_none();
                     let unrestored = self.controller.account_unrestored(&self.observer);
                     if failed > 0 || !back {
@@ -426,14 +494,7 @@ impl WmState {
                     }
                     self.stand_down_leftovers = left;
                 }
-                Task::HoldStranded => {
-                    let held = safety::hold_remaining();
-                    let leftovers = self.stand_down_leftovers.is_some();
-                    if held > 0 || leftovers {
-                        tracing::warn!(held, leftovers, "standing down: windows of another Space come back when their Space shows");
-                    }
-                    self.stand_down.released(held == 0 && !leftovers);
-                }
+                Task::HoldStranded => self.hold_stranded("standing down"),
                 Task::DropSavedStages => drop_saved_stages(),
                 Task::StopObserving => {
                     self.observer.stop();
@@ -450,10 +511,105 @@ impl WmState {
                         self.controller.set_settings(raw);
                     }
                 }
-                Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(crate::ui::strip::stand_down),
-                Task::RetryHeld | Task::StartObserving => {}
+                Task::HideStrip => {
+                    dispatch2::DispatchQueue::main().exec_async(|| crate::ui::strip::stand_down("Apple's Stage Manager is on"));
+                }
+                Task::RetryHeld | Task::StartObserving | Task::SaveStages => {}
             }
         }
+    }
+
+    /// A logout, restart or shutdown is coming: carries out [`logout_plan`] once (the review
+    /// of 8F, M3), so windows are at their real frames as early as possible before apps save
+    /// theirs, and the app stays running for macOS's own quit. While standing down nothing is
+    /// parked: the quit does as before.
+    fn logout_head_start(&mut self) {
+        if self.stand_down.stood_down() {
+            tracing::info!("logout, restart or shutdown coming: standing down already, nothing parked");
+            return;
+        }
+        if !self.logout.coming(Instant::now()) {
+            return;
+        }
+        tracing::info!("logout, restart or shutdown coming: every window back and the stages saved now; the app quits when macOS asks");
+        let mut all_back = true;
+        for task in logout_plan(self.displays.is_some(), self.settings.is_some()) {
+            match task {
+                Task::UnparkAll => {
+                    // As at quit: the controller's unpark, then the window server's word on
+                    // every allowed app's window still in a park zone (6X).
+                    let failed = self.controller.unpark_all(&self.observer);
+                    let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                    let left = safety::leftovers_back_knowing("logout", ours);
+                    let back = left.is_none();
+                    let unrestored = self.controller.account_unrestored(&self.observer);
+                    all_back = back && unrestored == 0 && safety::registry_len() == 0;
+                    if !all_back {
+                        tracing::warn!(failed, unrestored, back, "not every window came back at the logout's head start; held and tried again at each Space change and at the quit");
+                    }
+                    // Kept past the controller (as at a stand-down): what the check knew of them.
+                    self.stand_down_leftovers = left;
+                }
+                // The registry's windows still parked (failed restores among them) outlive
+                // the controller that parked them: a cancelled logout's fresh one keeps them.
+                Task::HoldStranded => self.hold_stranded("a logout is coming"),
+                Task::SaveStages => self.controller.save_now(),
+                Task::StopObserving => {
+                    self.observer.stop();
+                    let _ = self.observer.take_events();
+                }
+                Task::NewController => self.controller = Controller::new(),
+                Task::ReplayDisplays => {
+                    if let Some(d) = self.displays.clone() {
+                        self.controller.set_displays(&mut self.observer, d);
+                    }
+                }
+                Task::ReplaySettings => {
+                    if let Some(raw) = &self.settings {
+                        self.controller.set_settings(raw);
+                    }
+                }
+                Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(|| {
+                    crate::ui::strip::stand_down("a logout, restart or shutdown is coming");
+                    if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+                        crate::ui::corner_patch::apply(mtm, crate::ui::corner_patch::PatchPlan::default());
+                    }
+                }),
+                Task::DropSavedStages | Task::RetryHeld | Task::StartObserving => {}
+            }
+        }
+        self.logout.released(all_back);
+    }
+
+    /// No quit came after the logout's head start (another app cancelled the logout): the app
+    /// starts afresh as at a launch (the fresh controller restores the saved stages), unless
+    /// Apple's Stage Manager came on meanwhile (then it stands down).
+    fn logout_cancelled(&mut self) {
+        tracing::info!("no quit came after the logout's head start (the logout was cancelled): starting afresh from the saved stages");
+        // A later quit waits for the windows parked then, not for this logout's.
+        LOGOUT_WINDOWS.store(0, Ordering::SeqCst);
+        let apple_on = self.settings.as_ref().is_some_and(native_settings::apple_stage_manager_enabled);
+        match self.stand_down.apple(apple_on) {
+            Step::Release => self.release(),
+            Step::Resume => self.resume(),
+            Step::Nothing => {
+                if self.trusted {
+                    self.observer.set_accessibility(true, ax_callback);
+                }
+            }
+        }
+    }
+
+    /// [`Task::HoldStranded`] (a stand-down's or a logout's, `why`): every window still in the
+    /// registry is held apart from any controller's entries, and with the leftovers check's
+    /// windows retried at every Space change until all are back.
+    fn hold_stranded(&mut self, why: &str) {
+        let held = safety::hold_remaining();
+        let leftovers = self.stand_down_leftovers.is_some();
+        if held > 0 || leftovers {
+            tracing::warn!(held, leftovers, why, "windows of another Space come back when their Space shows");
+        }
+        self.stand_down.released(held == 0 && !leftovers);
     }
 
     /// Apple's Stage Manager went off: carries out [`resume_plan`] (a fresh start).
@@ -487,6 +643,9 @@ impl WmState {
     }
 
     fn tick(&mut self) {
+        if self.logout.cancelled(Instant::now()) {
+            self.logout_cancelled();
+        }
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks.is_multiple_of(RETRY_EVERY) {
             self.observer.retry_pending(ax_callback);
@@ -561,6 +720,15 @@ fn retry_leftovers(kept: safety::Ours, now: impl FnOnce() -> safety::Ours, check
     check(kept.merged(now()))
 }
 
+/// What a check knows: what an earlier check left on record (`kept`), else nothing more, with
+/// what is known `now` ([`safety::Ours::merged`]).
+fn with_kept(kept: Option<safety::Ours>, now: safety::Ours) -> safety::Ours {
+    match kept {
+        Some(kept) => kept.merged(now),
+        None => now,
+    }
+}
+
 fn drop_saved_stages() {
     let state = super::paths::state_file();
     match std::fs::remove_file(&state) {
@@ -593,6 +761,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         rescan: Rescan::default(),
         stand_down_leftovers: None,
         display_sweep: None,
+        logout: Logout::default(),
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));
@@ -640,6 +809,28 @@ mod tests {
         assert_eq!(Duration::from_secs_f32(AX_TIMEOUT_SECONDS), leftovers::AX_CALL_MAX);
     }
 
+    /// The review of 8F2, 1: the quit after the logout's head start checks with what the head
+    /// start's check knew (its leftovers, kept past the controller), merged with what is known
+    /// then, as the quit after a stand-down does; with nothing kept, only what is known then.
+    #[test]
+    fn the_quit_after_a_head_start_knows_its_leftovers() {
+        use crate::engine::recovery::Known;
+        use std::collections::BTreeSet;
+
+        let (left, managed_then, held) = (31, 5, 40);
+        let kept = safety::Ours::from_parts(BTreeSet::new(), [managed_then].into(), None).kept_for_retry(&[left]);
+        // At the quit the controller is a fresh one (no model); the registry holds the held one.
+        let now = safety::Ours::from_parts([held].into(), BTreeSet::new(), None);
+        let ours = with_kept(Some(kept), now.clone());
+        assert_eq!(ours.known(left, None), Known::Registered, "the window the head start could not move");
+        assert_eq!(ours.known(held, None), Known::Registered, "the registry's held window");
+        assert_eq!(ours.known(managed_then, None), Known::Managed, "the old controller's window");
+
+        let fresh = with_kept(None, now);
+        assert_eq!(fresh.known(left, None), Known::Unknown, "nothing kept: only what is known then");
+        assert_eq!(fresh.known(held, None), Known::Registered);
+    }
+
     /// The review of 6X2, 2: a managed window a busy app left as a sliver at the stand-down
     /// stays ours on every retry, though `state.json` and the model are gone by then, until
     /// a check finds it back.
@@ -664,8 +855,9 @@ mod tests {
             role: SavedRole::Standard,
             original: None,
             window: None,
+            ..Default::default()
         };
-        let state = StateFile::single(SavedSpace { id: 1, current: true, stages: vec![SavedStage { name: None, windows: vec![saved] }], active_index: Some(0), strip_slots: vec![] });
+        let state = StateFile::single(SavedSpace { id: 1, current: true, stages: vec![SavedStage { name: None, windows: vec![saved], ..Default::default() }], active_index: Some(0), ..Default::default() });
 
         // After the stand-down (state.json dropped, a fresh controller) nothing knows it: a
         // sliver of an unknown window is never brought back.

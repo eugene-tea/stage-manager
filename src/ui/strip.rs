@@ -155,10 +155,10 @@ pub fn space_changed() {
     with_strip(Strip::space_changed);
 }
 
-/// Apple's Stage Manager took over: every other Desktop's pane closes, and the pane shown
-/// hides with no cards (a drag in progress ends). The next snapshot after the stand-down
-/// brings the strip back. Main thread.
-pub fn stand_down() {
+/// Apple's Stage Manager took over, or a logout is coming (`why`, for the log): every other
+/// Desktop's pane closes, and the pane shown hides with no cards (a drag in progress ends).
+/// The next snapshot after the stand-down brings the strip back. Main thread.
+pub fn stand_down(why: &str) {
     with_strip(|s| {
         s.others.clear();
         s.card_drag = None;
@@ -173,7 +173,7 @@ pub fn stand_down() {
         snapshot.window_drag = None;
         snapshot.active_windows = Default::default();
         s.present(snapshot);
-        tracing::info!("strip: hidden on every Desktop (Apple's Stage Manager is on)");
+        tracing::info!("strip: hidden on every Desktop ({why})");
     });
 }
 
@@ -1153,8 +1153,9 @@ impl Strip {
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
         }
-        // A Desktop arriving: its strip is already arranged when it slides in.
-        self.instant = rehome;
+        // A Desktop arriving: its strip is already arranged when it slides in. While the
+        // login settles cards come in place, one by one, with no fade or glide.
+        self.instant = rehome || self.snapshot.quiet;
         self.layout_cards(force);
         self.instant = false;
         if let (Some(t), Some(starts)) = (transition, starts) {

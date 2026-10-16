@@ -29,6 +29,20 @@ impl Model {
     /// is focused in `obs`, else parks it there; `float` pins it; `ignore` leaves it
     /// unmanaged. Placement (`center`, `cascade` from the stage's front window) applies before
     /// any switch.
+    ///
+    /// Before Apple's default (`native`), a saved window still pending on this Space is looked
+    /// for ([`Model::place_from_pending`]): a confident match goes back to its saved stage and
+    /// frame; into an inactive stage it is parked there with no switch while the restore
+    /// window is open, and switched to after it, as `native` joins an app's stage; a
+    /// provisional Space first becomes the saved Desktop the window belongs to. A window
+    /// another rule places takes its confident match out of the pending ones.
+    ///
+    /// While the login burst settles after a restart ([`Model::settling`]) no window switches
+    /// stages: one whose stage would come forward is parked in it instead (its card shows).
+    /// But while the saved active stage is still empty, waiting for its windows, a window
+    /// opening a stage of its own takes the front ([`Model::front_waits_empty`]): nothing is
+    /// shown to animate away, and the screen is not left empty while a slow app opens; the
+    /// saved stage waits, inactive and with no card, for its windows.
     pub fn add_window(
         &mut self,
         meta: WindowMeta,
@@ -83,6 +97,21 @@ impl Model {
             return actions;
         }
 
+        if decision.action == RuleAction::Native {
+            if self.place_from_pending(&meta, space, obs, &mut actions) {
+                self.normalize_slots();
+                actions.push(Action::StateChanged);
+                return actions;
+            }
+        } else {
+            self.forget_pending_match(&meta, space);
+        }
+        if decision.action == RuleAction::Native && self.restore.restoring {
+            // Matched no saved window: Apple's rule (counted for the restore's line).
+            self.restore.by_apple += 1;
+        }
+        // Adoption may have renamed the Space.
+        let space = self.current_space(display);
         let active = self.ensure_active(space);
         // (home, a stage was created for it, switch to its stage when that is inactive)
         let (home, created, follow) = match &decision.action {
@@ -160,7 +189,9 @@ impl Model {
                 actions.push(Action::SetFrame { id, frame: restore });
             }
         } else if let Home::Stage(s) = home {
-            if follow {
+            // While the login settles a new stage takes the front only from an empty saved
+            // active stage still waiting for its windows (the review of 8F, M4).
+            if follow && (!self.settling() || (created && self.front_waits_empty(space))) {
                 actions.extend(self.switch_to(s, obs));
                 return actions;
             }
@@ -188,6 +219,12 @@ impl Model {
             self.windows.remove(&c);
         }
         self.windows.remove(&id);
+        self.restored.remove(&id);
+        // A window gone no longer vouches for a saved Desktop.
+        for votes in self.adopt_votes.values_mut() {
+            votes.retain(|v| v.1 != id);
+        }
+        self.adopt_votes.retain(|_, v| !v.is_empty());
         if let Home::Stage(s) = home {
             if let Some(stage) = self.stage_mut(s) {
                 stage.windows.retain(|&w| w != id);
@@ -543,8 +580,10 @@ impl Model {
             .map_or(NativeTarget::Fresh, |s| NativeTarget::Join(s.id))
     }
 
+    /// True when a stage has no window and none pending (a stage waiting for its windows is
+    /// not an empty stage to reuse).
     pub(crate) fn stage_is_empty(&self, stage: StageId) -> bool {
-        self.stage(stage).is_some_and(|s| s.windows.is_empty())
+        self.stage(stage).is_some_and(|s| s.windows.is_empty()) && !self.has_pending(stage)
     }
 
     /// Brings app `pid`'s windows from other stages into the active stage instead of
@@ -929,8 +968,14 @@ impl Model {
     /// else the most recently active stage holding a window of the app. With
     /// [`AppWindows::AllAtOnce`] nothing happens while the active stage holds a window of the
     /// app (or the app has a pinned window); with [`AppWindows::OneAtATime`] the focused
-    /// window's stage wins even then.
+    /// window's stage wins even then. Nothing while the login burst settles
+    /// ([`Model::settling`]).
     pub fn app_activated(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
+        if self.settling() {
+            // A launch-time activation at login is the app's, not the user's (a click or a
+            // key press would have ended the settling).
+            return Vec::new();
+        }
         let display = self.current_display(obs);
         let space = self.current_space(display);
         let active = self.ensure_active(space);
@@ -1011,7 +1056,12 @@ impl Model {
     /// A window got focus (for example through ⌘` or a click on a sliver). If it sits in an
     /// inactive stage of a Space shown now, switch to that stage so the focused window is
     /// never left parked. Focus on another Space's window is left to the Space change.
+    /// Nothing while the login burst settles ([`Model::settling`]).
     pub fn window_focused(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
+        if self.settling() {
+            // As for an activation: at login a focus is the app's, not the user's.
+            return Vec::new();
+        }
         match self.resolve_standard(id).and_then(|w| self.stage_of(w)) {
             Some(s) if !self.is_active(s) => self.switch_to(s, obs),
             _ => Vec::new(),

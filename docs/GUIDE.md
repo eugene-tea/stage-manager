@@ -104,6 +104,30 @@ its app would open there: with that app's windows if it has a stage on that Desk
 a stage of its own, shown in front. Move windows of several apps at once and each app gets
 its own stage; the front one is shown and the rest wait in the strip.
 
+### After a restart
+
+When you restart your Mac or log in again, your stages come back as your apps reopen their
+windows: each window goes back to its stage and its place, the strip keeps its order, and
+the stage you left in front is in front again, its window ready for typing unless you
+clicked first. While apps are still opening, nothing jumps to the front; it settles by
+itself once they are done, or as soon as you click or type. If that stage's app is slow to
+open and another app opens a window first, that window shows rather than an empty screen,
+and your stage comes back as a card.
+
+What it cannot do:
+
+- It does not open apps. macOS does that when "Reopen windows when logging back in" is on
+  in the Log Out or Restart dialog; an app you open later still finds its windows' stages.
+- It cannot move a window to another Desktop. A Desktop's stages come back as far as macOS
+  puts their windows there.
+- A window it is not sure about (two of one app with the same name, say) stays in view and
+  goes where a new window of its app would.
+- On a main display of another size, windows keep the places their apps give them.
+
+`[stages] restore_after_restart = false` (or **Bring stages back after a restart** in
+Settings → Extras) turns it off: after a restart every app starts in a stage of its own, as
+with Apple's.
+
 ### Drag and drop
 
 - **Drag a card into the middle** to bring its windows into the stage you are in.
@@ -140,8 +164,9 @@ Applications and Settings appears.
 - **Stage Manager:** the same options as Apple's Stage Manager — show recent apps, and show
   an app's windows all at once or one at a time. These are macOS's own settings, so they
   stay in step with System Settings.
-- **Extras:** merging stages by dropping cards, Shift to bring apps here, keeping windows
-  clear of the strip, keyboard shortcuts, and animation speed.
+- **Extras:** bringing stages back after a restart, merging stages by dropping cards, Shift
+  to bring apps here, keeping windows clear of the strip, keyboard shortcuts, and animation
+  speed.
 - **Advanced:** the config file, and help for asking an AI assistant to change it.
 
 Changes apply at once.
@@ -276,8 +301,8 @@ Some limits to know about:
 - An empty Desktop is forgotten when you leave it. A Desktop whose windows are all hidden or
   minimized looks new until one of them shows again.
 - After you restart your Mac or log in again, and when an app is relaunched, windows are
-  matched to their stages by title. Two windows of one app with the same title may swap
-  stages.
+  matched to their stages by title and place (see [After a restart](#after-a-restart)). Two
+  windows of one app with the same title stay in view rather than guess.
 - Keyboard shortcuts use US key positions.
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", a click on a desktop icon
   also counts as a wallpaper click.

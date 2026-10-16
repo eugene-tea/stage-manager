@@ -146,6 +146,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `hotkeys.toggle_pin` | `"ctrl+alt+p"` | hotkey such as "ctrl+alt+n", or "" for none | Pin or unpin the focused window (shown on every stage). |
 | `hotkeys.toggle_strip` | `"ctrl+alt+s"` | hotkey such as "ctrl+alt+n", or "" for none | Show or hide the strip. |
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
+| `stages.restore_after_restart` | `true` | true or false | After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's "Reopen windows when logging back in"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
 | `log.level` | `"info"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "info" the main events, "debug" every decision (and shows Mark a Problem in the menu). |
