@@ -579,13 +579,25 @@ def drill_hidden_tab():
           "hidden tab: nothing is left \"still parked\", and the guardian waits for nothing")
     check(not pids_of(f"stage-manager --guardian {pid}$"), "hidden tab: the guardian has ended")
     check("a hidden tab of " + FIX_ID + " left alone" in text, "hidden tab: the log says it was left alone")
+    # The window server's word after the quit, not only the log's: every fixture window but
+    # the hidden tab is on screen out of the zone; the hidden tab alone stays, off screen.
+    wins, d = fixture_windows([FIX_ID])
+    rest = [w for w in wins if w["id"] != first["id"]]
+    stuck = [w["id"] for w in rest if is_parked(w["bounds"], d) or not w["onscreen"]]
+    check(bool(rest) and not stuck, f"hidden tab: after the quit every other fixture window is on screen out of the zone (stuck: {stuck})")
+    check(hidden_in_zone() is not None, "hidden tab: after the quit only the hidden tab stays in the zone, off screen")
+
     # Selected again, the hidden tab takes its group's frame: every fixture window out of the zone.
     def none_in_zone():
         wins, d = fixture_windows([FIX_ID])
         return wins if wins and not any(is_parked(w["bounds"], d) for w in wins) else None
 
     os.kill(fixture[0], signal.SIGIO)
-    wait_until(none_in_zone, 5, "the tab selected again to leave the zone")
+    check(wait_until(none_in_zone, 5, "the tab selected again to leave the zone") is not None,
+          "hidden tab: selected again, it takes its group's frame: no fixture window in the zone")
+    selected = wait_until(lambda: (lambda ws: ws if ws and ws[0]["onscreen"] else None)(
+        [w for w in fixture_windows([FIX_ID])[0] if w["id"] == first["id"]]), 5, "the tab selected again to show")
+    check(selected is not None, "hidden tab: selected again, it is on screen")
     all_onscreen("hidden tab drill")
     stop_fixture()
 

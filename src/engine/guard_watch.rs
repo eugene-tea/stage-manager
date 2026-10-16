@@ -876,6 +876,44 @@ mod tests {
         assert!(w.is_empty(), "and never joins again while it is one");
     }
 
+    /// The review of 8J, Medium: two real windows of the same size parked on a Desktop not
+    /// shown, the parked file lost (the guardian knows neither), both saved in `state.json`.
+    /// Accessibility lists neither, and nothing else vouches: neither is judged a hidden
+    /// tab (the guardian's [`crate::engine::hidden_tab::Candidate::Unknown`]), so both wait.
+    #[test]
+    fn two_same_size_windows_on_another_desktop_both_wait() {
+        use crate::engine::hidden_tab::{Candidate, TabListed, is_hidden_tab};
+        let t0 = Instant::now();
+        let spot = Rect::new(2559.0, 1408.0, 800.0, 600.0);
+        let saved = |id| Listed { id, pid: 501, bounds: spot, onscreen: false, allowed: true };
+        // Window 9, another app's, shows on the Desktop shown.
+        let listing = [saved(21), saved(22), at(9, RESTORE, true)];
+        let tabs: Vec<TabListed> = listing.iter().map(|l| TabListed { id: l.id, pid: l.pid, layer: 0, onscreen: l.onscreen, bounds: l.bounds }).collect();
+        let judged: BTreeSet<u32> = tabs.iter().filter(|t| is_hidden_tab(t, &tabs, Candidate::Unknown, Some(&[]), |_| true)).map(|t| t.id).collect();
+        assert!(judged.is_empty(), "{judged:?}");
+        let mut w = Watch::new(&[]);
+        assert!(w.hidden_tabs(&judged).is_empty());
+        w.observe(t0, &listing, &displays());
+        assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![21, 22], "both wait");
+    }
+
+    /// The review of 8J, High, in the guardian: window 1, parked, left its Space (dragged to
+    /// Desktop 2 in Mission Control) beside window 9 of the same size, shown. It stays
+    /// registered (its parked file): never let go as a hidden tab, pass after pass, whatever
+    /// the platform judged.
+    #[test]
+    fn a_registered_window_that_left_its_space_still_waits() {
+        let t0 = Instant::now();
+        let listing = on_desktop_1();
+        assert!(crate::engine::hidden_tab::same_size(listing[0].bounds, listing[2].bounds), "9 is 1's same-size sibling");
+        let mut w = Watch::new(&reg());
+        for ms in [0, 500, 1000, 5000] {
+            assert!(w.hidden_tabs(&[1].into()).is_empty());
+            w.observe(t0 + Duration::from_millis(ms), &listing, &displays());
+            assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1], "still waits");
+        }
+    }
+
     /// 8J: a window the app registered is never let go as a hidden tab (it waits as before).
     #[test]
     fn a_registered_window_is_never_let_go_as_a_hidden_tab() {

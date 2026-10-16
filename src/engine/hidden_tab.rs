@@ -12,10 +12,25 @@
 //!
 //! A window is a **hidden tab** ([`is_hidden_tab`]) when it is on layer 0, not on screen,
 //! not listed through Accessibility by its app (an app that does not answer never has one:
-//! today's caution stays), not a window we know as real ([`Candidate::known_real`]: one the
-//! model manages, one we parked and still track), and its app has another window of the
-//! same size ([`SAME_SIZE_SLACK`]) that Accessibility lists or that we know (the group's
-//! selected tab, shown or managed).
+//! today's caution stays), and its app has another window of the same size
+//! ([`SAME_SIZE_SLACK`]) that vouches for it: the group's selected tab.
+//!
+//! **Only by its own signature** (the review of 8J): a real window judged a tab would stay
+//! parked with every safety path blind to it, while a tab judged real only keeps a guardian
+//! waiting. So what may be judged at all is narrow ([`Candidate`]):
+//! - a window we know as real ([`Candidate::Real`]: the model's, one we parked and track,
+//!   one the model let go because it left its Space, was hidden or minimized, or for any
+//!   reason but the tab's) never is;
+//! - a parked window the model let go because Accessibility reported it **destroyed while
+//!   its app still listed it in the window server** ([`Candidate::Destroyed`]: how macOS
+//!   reports a tab no longer selected) is, beside a same-size window Accessibility lists now
+//!   or that the model manages and has not parked;
+//! - a window found in the park zone that we never registered nor manage
+//!   ([`Candidate::Unknown`]: the owner's 10-16 case) is only beside a same-size window
+//!   Accessibility lists now. Saved ids (`state.json`) never vouch: two real windows of the
+//!   same size on a Desktop not shown would vouch for each other. When the group's selected
+//!   tab is on a Desktop not shown, its hidden tabs wait until that Desktop shows: the safe
+//!   failure.
 
 use super::geometry::Rect;
 
@@ -37,12 +52,19 @@ pub struct TabListed {
     pub bounds: Rect,
 }
 
-/// What is known of the window looked at, beyond the window server's list.
+/// What may be judged of the window looked at (module docs), beyond the window server's list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Candidate {
-    /// A window we know as a real one: the model manages it, or we parked it and track it
-    /// still (a registered window the model has not let go). Never a hidden tab.
-    pub known_real: bool,
+pub enum Candidate {
+    /// A window we know as real: the model manages it, we parked it and track it still, or
+    /// the model let it go for any reason but the tab's signature. Never a hidden tab.
+    Real,
+    /// A parked window the model let go because Accessibility reported it destroyed while
+    /// its app still listed it in the window server (a tab no longer selected): a same-size
+    /// window Accessibility lists, or one the model manages and has not parked, vouches.
+    Destroyed,
+    /// A window found in the park zone that we never registered nor manage: only a same-size
+    /// window Accessibility lists now vouches.
+    Unknown,
 }
 
 /// True when `a` and `b` differ in size by at most [`SAME_SIZE_SLACK`] on each side.
@@ -53,16 +75,17 @@ pub fn same_size(a: Rect, b: Rect) -> bool {
 /// The cheap part of [`is_hidden_tab`], before any Accessibility call: layer 0, off screen,
 /// not known as real, and its app has another layer-0 window of the same size in `listed`.
 pub fn may_be_hidden_tab(w: &TabListed, listed: &[TabListed], candidate: Candidate) -> bool {
-    w.layer == 0 && !w.onscreen && !candidate.known_real && siblings(w, listed).next().is_some()
+    w.layer == 0 && !w.onscreen && candidate != Candidate::Real && siblings(w, listed).next().is_some()
 }
 
 /// True when `w` is a hidden tab (module docs): `ax` is its app's window ids as
-/// Accessibility lists them (`None`: the app did not answer); `known(id)` says whether we
-/// know window `id` as a real window (managed, registered, saved in `state.json` this
-/// session), which makes a sibling the group's selected tab even off the Desktop shown.
-pub fn is_hidden_tab(w: &TabListed, listed: &[TabListed], candidate: Candidate, ax: Option<&[u32]>, known: impl Fn(u32) -> bool) -> bool {
+/// Accessibility lists them now (`None`: the app did not answer); `shown_managed(id)` says
+/// whether the model manages window `id` and has not parked it, which vouches only for a
+/// [`Candidate::Destroyed`] window (its group's selected tab may be on a Desktop not shown).
+pub fn is_hidden_tab(w: &TabListed, listed: &[TabListed], candidate: Candidate, ax: Option<&[u32]>, shown_managed: impl Fn(u32) -> bool) -> bool {
     let Some(ax) = ax else { return false };
-    may_be_hidden_tab(w, listed, candidate) && !ax.contains(&w.id) && siblings(w, listed).any(|s| ax.contains(&s.id) || known(s.id))
+    let vouches = |id: u32| ax.contains(&id) || (candidate == Candidate::Destroyed && shown_managed(id));
+    may_be_hidden_tab(w, listed, candidate) && !ax.contains(&w.id) && siblings(w, listed).any(|s| vouches(s.id))
 }
 
 /// The app's other layer-0 windows of the same size.
@@ -106,107 +129,133 @@ mod tests {
     /// Accessibility lists the Desktop shown only: 85.
     const AX: [u32; 1] = [85];
 
-    /// The model manages 85 and 86 (86 on the Desktop not shown).
-    fn managed(id: u32) -> bool {
-        [85, 86].contains(&id)
+    /// The model manages 85 and 86 (86 on the Desktop not shown) and has parked neither in
+    /// its own eyes but 85 (parked in an inactive stage).
+    fn shown_managed(id: u32) -> bool {
+        id == 86
     }
 
-    const UNKNOWN: Candidate = Candidate { known_real: false };
-
-    fn tab(id: u32, ax: Option<&[u32]>, known: impl Fn(u32) -> bool) -> bool {
+    fn judged(id: u32, candidate: Candidate, ax: Option<&[u32]>, shown: impl Fn(u32) -> bool) -> bool {
         let l = listing();
         let w = l.iter().find(|w| w.id == id).copied().expect("listed");
-        is_hidden_tab(&w, &l, UNKNOWN, ax, known)
+        is_hidden_tab(&w, &l, candidate, ax, shown)
     }
 
+    fn tab(id: u32, ax: Option<&[u32]>, shown: impl Fn(u32) -> bool) -> bool {
+        judged(id, Candidate::Unknown, ax, shown)
+    }
+
+    /// The 10-16 case: 83 and 84 were never registered. Only a same-size window
+    /// Accessibility lists now vouches: 86, once its Desktop shows. While it does not, they
+    /// wait (the safe failure); the model managing 86 does not vouch for an unknown window.
     #[test]
-    fn the_10_16_terminal_tabs_are_hidden_tabs() {
-        assert!(tab(83, Some(&AX), managed), "its selected tab 86 is managed");
-        assert!(tab(84, Some(&AX), managed));
-        // 80–82 too (out of the park zone: no safety path asks).
-        assert!(tab(80, Some(&AX), managed), "85, its selected tab, is listed through Accessibility");
+    fn the_10_16_terminal_tabs_are_hidden_tabs_once_their_selected_tab_is_listed() {
+        assert!(!tab(83, Some(&AX), shown_managed), "86 not listed through Accessibility: 83 waits");
+        assert!(!tab(84, Some(&AX), |_| true));
+        assert!(tab(83, Some(&[86]), |_| false), "86's Desktop shows: Accessibility lists it");
+        assert!(tab(84, Some(&[86]), |_| false));
+        // 80–82 beside 85, listed through Accessibility (out of the park zone: no safety path asks).
+        assert!(tab(80, Some(&AX), |_| false));
+    }
+
+    /// A parked tab the model let go because Accessibility reported it destroyed while the
+    /// window server still listed it: its group's selected tab vouches when Accessibility
+    /// lists it or the model manages it unparked (on a Desktop not shown, say), never when the
+    /// model has it parked.
+    #[test]
+    fn a_tab_reported_destroyed_is_vouched_for_by_its_shown_selected_tab() {
+        assert!(judged(83, Candidate::Destroyed, Some(&AX), shown_managed), "86 managed, not parked");
+        assert!(judged(83, Candidate::Destroyed, Some(&[86]), |_| false));
+        assert!(!judged(83, Candidate::Destroyed, Some(&AX), |_| false), "nothing vouches");
+        assert!(!judged(83, Candidate::Destroyed, Some(&[83, 86]), shown_managed), "listed itself: no tab");
     }
 
     #[test]
     fn a_real_parked_window_is_never_a_hidden_tab() {
         // 85: on screen (its Desktop shows), listed through Accessibility.
-        assert!(!tab(85, Some(&AX), managed));
+        assert!(!tab(85, Some(&AX), shown_managed));
         assert!(!tab(85, Some(&[]), |_| false), "on screen: never");
     }
 
     #[test]
     fn a_lone_window_on_another_desktop_is_not_a_tab() {
-        assert!(!tab(90, Some(&AX), managed), "no window of its size");
-        assert!(!tab(90, Some(&AX), |_| true));
+        assert!(!tab(90, Some(&AX), shown_managed), "no window of its size");
+        assert!(!judged(90, Candidate::Destroyed, Some(&AX), |_| true));
     }
 
     #[test]
     fn an_app_that_does_not_answer_has_no_hidden_tab() {
-        assert!(!tab(83, None, managed));
-        assert!(!tab(83, None, |_| true));
+        assert!(!tab(83, None, shown_managed));
+        assert!(!judged(83, Candidate::Destroyed, None, |_| true));
     }
 
+    /// The review of 8J, High: two default-size windows, one parked, which the user drags to
+    /// another Desktop in Mission Control. The model lets it go (it left the Space): it stays
+    /// real, whatever its same-size sibling, shown and listed through Accessibility, says.
     #[test]
-    fn a_sibling_must_be_listed_through_accessibility_or_known() {
-        // 86 neither shown nor known: 83 and 84 only have each other, ordered out alike.
-        assert!(!tab(83, Some(&AX), |_| false));
-        // Once 86's Desktop shows, Accessibility lists it.
-        assert!(tab(83, Some(&[86]), |_| false));
-        // A window Accessibility lists is never one.
-        assert!(!tab(83, Some(&[83, 86]), managed));
+    fn a_parked_window_that_left_its_space_beside_a_same_size_sibling_is_real() {
+        let l = vec![win(1, 2559.0, 1408.0, 800.0, 600.0, false), win(2, 300.0, 200.0, 800.0, 600.0, true)];
+        assert!(!is_hidden_tab(&l[0], &l, Candidate::Real, Some(&[2]), |_| true));
+        assert!(!may_be_hidden_tab(&l[0], &l, Candidate::Real));
     }
 
+    /// The review of 8J, Medium: saved ids never vouch. Two real windows of the same size
+    /// parked on a Desktop not shown, the parked file lost (unknown to the guardian), both
+    /// saved in `state.json`: Accessibility lists neither, so neither is a tab; both wait.
     #[test]
-    fn a_window_known_as_real_is_never_a_hidden_tab() {
-        // Two real windows of the same size parked on another Desktop, both managed: each
-        // is the other's same-size sibling, and neither is a tab.
+    fn two_same_size_windows_on_another_desktop_never_vouch_for_each_other() {
         let l = vec![win(1, 2559.0, 1408.0, 800.0, 600.0, false), win(2, 2559.0, 1408.0, 800.0, 600.0, false)];
-        let real = Candidate { known_real: true };
-        assert!(!is_hidden_tab(&l[0], &l, real, Some(&[]), |_| true));
-        assert!(!may_be_hidden_tab(&l[1], &l, real));
+        for w in &l {
+            assert!(!is_hidden_tab(w, &l, Candidate::Unknown, Some(&[]), |_| true), "only Accessibility vouches for an unknown window");
+            assert!(!is_hidden_tab(w, &l, Candidate::Destroyed, Some(&[]), |_| false));
+            assert!(!is_hidden_tab(w, &l, Candidate::Real, Some(&[]), |_| true));
+        }
     }
 
     #[test]
     fn sizes_match_within_two_points_and_only_in_the_same_app() {
+        let u = Candidate::Unknown;
         let l = vec![win(1, 2559.0, 1408.0, 800.0, 600.0, false), win(2, 10.0, 10.0, 802.0, 598.0, true)];
-        assert!(is_hidden_tab(&l[0], &l, UNKNOWN, Some(&[2]), |_| false));
+        assert!(is_hidden_tab(&l[0], &l, u, Some(&[2]), |_| false));
         let l = vec![win(1, 2559.0, 1408.0, 800.0, 600.0, false), win(2, 10.0, 10.0, 803.0, 600.0, true)];
-        assert!(!is_hidden_tab(&l[0], &l, UNKNOWN, Some(&[2]), |_| false), "3 pt wider");
+        assert!(!is_hidden_tab(&l[0], &l, u, Some(&[2]), |_| false), "3 pt wider");
         let mut other = win(2, 10.0, 10.0, 800.0, 600.0, true);
         other.pid = 7;
         let l = vec![win(1, 2559.0, 1408.0, 800.0, 600.0, false), other];
-        assert!(!is_hidden_tab(&l[0], &l, UNKNOWN, Some(&[2]), |_| true), "another app's window");
+        assert!(!is_hidden_tab(&l[0], &l, u, Some(&[2]), |_| true), "another app's window");
         let mut panel = win(2, 10.0, 10.0, 800.0, 600.0, true);
         panel.layer = 3;
         let l = vec![win(1, 2559.0, 1408.0, 800.0, 600.0, false), panel];
-        assert!(!is_hidden_tab(&l[0], &l, UNKNOWN, Some(&[2]), |_| true), "not a layer-0 window");
+        assert!(!is_hidden_tab(&l[0], &l, u, Some(&[2]), |_| true), "not a layer-0 window");
+    }
+
+    /// The windows the quit's still-parked check leaves on the 10-16 listing (85, shown and
+    /// parked in an inactive stage, is brought back by the unpark): `candidate` for 83/84,
+    /// Accessibility listing `ax`.
+    fn left_at_quit(l: &[TabListed], candidate: Candidate, ax: &[u32]) -> Vec<u32> {
+        let d = displays();
+        l.iter()
+            .filter(|w| w.layer == 0 && w.id != 85 && is_stranded(w.bounds, &d, Known::Managed))
+            .filter(|w| {
+                let c = if [83, 84].contains(&w.id) { candidate } else { Candidate::Real };
+                !is_hidden_tab(w, l, c, Some(ax), shown_managed)
+            })
+            .map(|w| w.id)
+            .collect()
     }
 
     /// The quit's still-parked check on the 10-16 listing: 83 and 84 are in the park zone (a
-    /// sliver of an app we manage counts), and they are hidden tabs, so nothing is left: the
-    /// quit reports every window back. The lone window 90 still counts.
+    /// sliver of an app we manage counts). Never registered, they are let go once 86's
+    /// Desktop shows (Accessibility lists it), and wait before; reported destroyed by a run
+    /// that parked them, 86 managed and not parked vouches. The lone window 90 still counts.
     #[test]
-    fn the_quit_reports_all_back_on_the_10_16_listing() {
-        let d = displays();
+    fn the_quit_on_the_10_16_listing() {
         let l = listing();
-        let stranded: Vec<u32> = l.iter().filter(|w| w.layer == 0 && is_stranded(w.bounds, &d, Known::Managed)).map(|w| w.id).collect();
-        assert!(stranded.contains(&83) && stranded.contains(&84), "{stranded:?}");
-        let left: Vec<u32> = stranded
-            .into_iter()
-            .filter(|id| *id != 85) // shown and parked in an inactive stage: the unpark brings it back
-            .filter(|id| {
-                let w = l.iter().find(|w| w.id == *id).copied().expect("listed");
-                !is_hidden_tab(&w, &l, UNKNOWN, Some(&AX), managed)
-            })
-            .collect();
-        assert_eq!(left, vec![90], "only the lone window still parked on another Desktop is left");
+        assert_eq!(left_at_quit(&l, Candidate::Unknown, &AX), vec![83, 84, 90], "86's Desktop not shown: the tabs wait");
+        assert_eq!(left_at_quit(&l, Candidate::Unknown, &[86]), vec![90], "86's Desktop shows");
+        assert_eq!(left_at_quit(&l, Candidate::Destroyed, &AX), vec![90]);
         let without_90: Vec<TabListed> = l.into_iter().filter(|w| w.id != 90).collect();
-        let left: Vec<u32> = without_90
-            .iter()
-            .filter(|w| w.id != 85 && is_stranded(w.bounds, &d, Known::Managed))
-            .filter(|w| !is_hidden_tab(w, &without_90, UNKNOWN, Some(&AX), managed))
-            .map(|w| w.id)
-            .collect();
-        assert!(left.is_empty(), "the 10-16 quit: every window back ({left:?})");
+        assert!(left_at_quit(&without_90, Candidate::Unknown, &[86]).is_empty(), "every window back");
+        assert!(left_at_quit(&without_90, Candidate::Destroyed, &AX).is_empty(), "every window back");
     }
 }

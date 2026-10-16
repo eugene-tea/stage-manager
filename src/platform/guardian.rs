@@ -26,7 +26,9 @@
 //! 4. A hidden tab (8J, [`hidden_tabs`]) found in the park zone never joins the watch, and
 //!    one waiting is let go: nothing can move it, and it takes its group's frame once
 //!    selected. The guardian waits only for windows it can bring back. A window the app
-//!    registered is never judged one.
+//!    registered is never judged one, and only a same-size window its app lists through
+//!    Accessibility now vouches for one (the review of 8J: saved ids never do; a group
+//!    whose selected tab is on a Desktop not shown waits until that Desktop shows).
 
 use std::collections::{BTreeSet, HashMap};
 use std::os::unix::process::CommandExt;
@@ -38,6 +40,7 @@ use super::ax::AxElement;
 use super::safety::{self, guarded};
 use super::{ctl, hidden_tabs, observe, paths, windows};
 use crate::engine::guard_watch::{Event, Look, Watch, Waiting};
+use crate::engine::hidden_tab::Candidate;
 use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use crate::logbook::UNCLEAN_EXIT;
 use crate::logbook::counters::{self, Count};
@@ -498,9 +501,10 @@ fn describe(w: &Waiting) -> String {
 
 /// The windows found in the park zone this pass (layer 0, off screen, of an allowed app,
 /// never registered: those that would join, or wait, on suspicion alone) that are hidden tabs
-/// (8J, [`hidden_tabs`]): their group's selected tab is listed through Accessibility (its
-/// Desktop shows), registered, or saved in `state.json` this session (the crashed app
-/// managed it). A registered window is never judged one.
+/// (8J, [`hidden_tabs`]): their group's selected tab is listed through Accessibility now (its
+/// Desktop shows). Nothing else vouches ([`Candidate::Unknown`], the review of 8J): not a
+/// registered window, not one saved in `state.json` (two real windows of the same size on
+/// a Desktop not shown would vouch for each other). A registered window is never judged one.
 fn hidden_tabs_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], displays: &ScanDisplays) -> BTreeSet<u32> {
     let found: Vec<&windows::CgWindow> = list
         .iter()
@@ -515,10 +519,8 @@ fn hidden_tabs_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], d
     if found.is_empty() {
         return BTreeSet::new();
     }
-    let registered: BTreeSet<u32> = list.iter().map(|c| c.id).filter(|id| w.is_registered(*id)).collect();
-    let ours = safety::Ours::from_parts(registered, BTreeSet::new(), safety::read_state("guardian"));
     let mut tabs = hidden_tabs::Tabs::new(list);
-    found.into_iter().filter(|c| tabs.is_hidden_tab(c, ours.candidate(c.id), |id| ours.knows(id))).map(|c| c.id).collect()
+    found.into_iter().filter(|c| tabs.is_hidden_tab(c, Candidate::Unknown, |_| false)).map(|c| c.id).collect()
 }
 
 /// The window server's layer-0 windows on every Space (of `list`), with whether their app

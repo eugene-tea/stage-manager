@@ -27,15 +27,16 @@ impl Tabs {
     }
 
     /// True when `w` (one of the list's) is a hidden tab
-    /// ([`hidden_tab::is_hidden_tab`]); `known(id)`: window `id` is one we know as real
-    /// (managed, registered, saved). Logged once per window, at debug.
-    pub fn is_hidden_tab(&mut self, w: &CgWindow, candidate: Candidate, known: impl Fn(u32) -> bool) -> bool {
+    /// ([`hidden_tab::is_hidden_tab`]); `shown_managed(id)`: the model manages window `id`
+    /// and has not parked it (vouches for a [`Candidate::Destroyed`] window only). Logged
+    /// once per window, at debug.
+    pub fn is_hidden_tab(&mut self, w: &CgWindow, candidate: Candidate, shown_managed: impl Fn(u32) -> bool) -> bool {
         let t = tab_listed(w);
         if !hidden_tab::may_be_hidden_tab(&t, &self.listed, candidate) {
             return false;
         }
         let ax = self.ax.entry(w.pid).or_insert_with(|| ax_window_ids(w.pid));
-        let tab = hidden_tab::is_hidden_tab(&t, &self.listed, candidate, ax.as_deref(), known);
+        let tab = hidden_tab::is_hidden_tab(&t, &self.listed, candidate, ax.as_deref(), shown_managed);
         if tab {
             log_once(w);
         }

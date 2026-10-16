@@ -103,12 +103,18 @@ Hidden tabs (8J, `engine::hidden_tab`): macOS window tabs are separate window-se
 a tab not selected is off screen, not listed through Accessibility, and keeps its last frame
 (a park spot, say) until selected, when it takes its group's frame. Nothing can move one, nor
 needs to. A window is one when it is layer 0, off screen, not listed by its app (which must
-answer), not a window we know as real (the model's, or one we registered and still track), and
-its app has another window of the same size (±2 pt) that Accessibility lists or that we know
-(managed, registered, saved in `state.json`). The quit's leftovers check, the controller's retry
-of a parked window the model let go, and the guardian's watch skip it (logged once at debug).
-A registered window the model still tracks, and every window the guardian's parked file names,
-are never judged one: two same-size windows parked on another Desktop stay waited for.
+answer), and its app has another window of the same size (±2 pt) that vouches for it. Only by
+the tab's own signature (8J2): a real window judged a tab would stay parked with every safety
+path blind, a tab judged real only keeps a guardian waiting. So a window the model manages, one
+we registered and track, or one the model let go for any reason but one (it left its Space, was
+hidden, minimized) is real, never judged; a parked window the model let go because
+Accessibility reported it destroyed while the window server still listed it may be one, beside
+a same-size window Accessibility lists now or the model manages unparked; a window found in the
+park zone that we never registered (the 10-16 case) only beside one Accessibility lists now.
+Saved ids never vouch. The quit's leftovers check, the controller's retry of a parked window
+the model let go, and the guardian's watch skip a hidden tab (logged once at debug); every
+window the guardian's parked file names is never judged one. A group whose selected tab is on a
+Desktop not shown keeps its unregistered hidden tabs waited for until that Desktop shows.
 
 ## Testing hooks
 
