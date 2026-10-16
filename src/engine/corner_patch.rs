@@ -397,17 +397,55 @@ pub struct CoverFacts {
     /// Finder's desktop icons as last read well ([`PatchFacts::items`]).
     pub items: Option<Vec<Rect>>,
     /// Normal windows, drawn, another app's, that stay where they are through the switch
-    /// (neither parked, nor leaving, nor arriving).
-    pub staying: Vec<Rect>,
+    /// (neither parked, nor leaving, nor arriving: pinned, unmanaged, a dialog of one),
+    /// front to back as listed.
+    pub staying: Vec<Staying>,
+}
+
+/// A window that stays shown through a switch ([`CoverFacts::staying`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Staying {
+    /// Its `CGWindowID`.
+    pub id: u32,
+    /// Its bounds as listed (global, top-left).
+    pub bounds: Rect,
+    /// The strip holds a full-size snapshot of it, which the cover can draw where it reaches
+    /// the corner (round 8L5).
+    pub snapshot: bool,
+}
+
+/// Why a switch's corner cannot be covered: one staying window there has no snapshot to
+/// draw on the cover (the overlay would paint over it). Matched exactly by the scripted
+/// checks.
+pub const STAYING_UNPICTURED: &str = "a window that stays shown reaches the corner";
+
+/// Why a switch's corner is not covered ([`switch_cover`]), and the windows to blame, if any
+/// ([`STAYING_UNPICTURED`]: the staying windows there with no snapshot).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refused {
+    /// The reason, logged and named on the switch's line (`at_once`).
+    pub why: &'static str,
+    /// The windows it names.
+    pub windows: Vec<u32>,
+}
+
+impl From<&'static str> for Refused {
+    fn from(why: &'static str) -> Self {
+        Self { why, windows: Vec::new() }
+    }
 }
 
 /// What a switch's motion overlay paints over the park corner ([`switch_cover`]).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwitchCover {
     /// Where (global, top-left).
     pub rect: Rect,
     /// The picture that stands for the corner there.
     pub picture: CoverPicture,
+    /// The windows that stay shown into the corner (their ids and bounds as listed, back to
+    /// front): each one's snapshot is drawn over the picture, clipped to the cover, so the
+    /// overlay shows them as they are while it hides what waits in the corner (round 8L5).
+    pub over: Vec<(u32, Rect)>,
 }
 
 /// The picture a switch's cover shows.
@@ -429,43 +467,49 @@ pub enum CoverPicture {
 /// patch (and the switch's focus raises the key window) while they still sit in the corner.
 /// With the patch's picture where nothing lies on the desktop; with a still of the desktop
 /// where a desktop icon lies or the icons are not known (8L3: the owner's corner has icons).
-/// Never where the patch is off, in an overview or on a full-screen Space; and never over a
-/// window that stays shown there (the overlay is above it, the patch was below).
+/// Never where the patch is off, in an overview or on a full-screen Space. A window that
+/// stays shown into the corner (pinned, unmanaged, a dialog of one; never one leaving or
+/// arriving) is drawn on the cover from its snapshot ([`SwitchCover::over`], round 8L5);
+/// one with no snapshot means the corner is not covered ([`STAYING_UNPICTURED`]): the overlay
+/// is above it and would paint over it.
 ///
 /// The overlay sits above the Dock and the menu bar (the patch sits below them), so the cover
 /// keeps off both ([`screen_part`], review 8L2): below the menu bar always, and off the
 /// Dock's bar when it is known (else inside the visible frame). An incoming window that would
 /// still show somewhere neither the cover, the menu bar nor the Dock hides (beside a Dock bar
 /// reaching the corner, say) means the corner cannot be covered: `Err` too.
-pub fn switch_cover(f: &CoverFacts) -> Result<SwitchCover, &'static str> {
+pub fn switch_cover(f: &CoverFacts) -> Result<SwitchCover, Refused> {
     if !f.on {
-        return Err("off");
+        return Err("off".into());
     }
     if f.overview {
-        return Err("an overview is up");
+        return Err("an overview is up".into());
     }
     if f.fullscreen {
-        return Err("a full-screen Space shows");
+        return Err("a full-screen Space shows".into());
     }
     let grown = patch_rect(&f.slivers, f.display, f.reach);
     let rect = match (grown, f.in_use.and_then(|r| r.intersect(&f.display))) {
         (Some(a), Some(b)) => union(a, b),
         (Some(r), None) | (None, Some(r)) => r,
-        (None, None) => return Err("no sliver shows"),
+        (None, None) => return Err("no sliver shows".into()),
     };
     let rect = screen_part(rect, f.display, f.visible, f.dock_bars.as_deref(), &f.raised).ok_or("the menu bar or the Dock fills the corner")?;
     let picture = match &f.items {
         Some(items) if !items.iter().any(|i| i.intersect(&rect).is_some()) => CoverPicture::Wallpaper,
         _ => CoverPicture::Desktop,
     };
-    if f.staying.iter().any(|w| w.intersect(&rect).is_some()) {
-        return Err("a window that stays shown reaches the corner");
+    let reaching: Vec<&Staying> = f.staying.iter().filter(|w| w.bounds.intersect(&rect).is_some()).collect();
+    let unpictured: Vec<u32> = reaching.iter().filter(|w| !w.snapshot).map(|w| w.id).collect();
+    if !unpictured.is_empty() {
+        return Err(Refused { why: STAYING_UNPICTURED, windows: unpictured });
     }
     let hidden = hidden_parts(rect, f.display, f.visible, f.dock_bars.as_deref());
     if f.raised.iter().filter_map(|w| w.intersect(&f.display)).any(|w| !covered_by(w, &hidden)) {
-        return Err("an incoming window would show beside the cover (by the Dock)");
+        return Err("an incoming window would show beside the cover (by the Dock)".into());
     }
-    Ok(SwitchCover { rect, picture })
+    let over = reaching.iter().rev().map(|w| (w.id, w.bounds)).collect();
+    Ok(SwitchCover { rect, picture, over })
 }
 
 /// The visible frame, or the display when it is degenerate.
@@ -559,7 +603,7 @@ mod tests {
 
     /// The rectangle a switch covers (its picture aside).
     fn cover(f: &CoverFacts) -> Result<Rect, &'static str> {
-        switch_cover(f).map(|c| c.rect)
+        switch_cover(f).map(|c| c.rect).map_err(|e| e.why)
     }
 
     fn cover_facts() -> CoverFacts {
@@ -601,20 +645,43 @@ mod tests {
         assert_eq!(cover(&CoverFacts { slivers: vec![], ..f.clone() }), Err("no sliver shows"));
         // The desktop's own picture where icons lie or are not known (8L3), the patch's
         // where nothing does.
-        let picture = |f: &CoverFacts| switch_cover(f).map(|c| c.picture);
+        let picture = |f: &CoverFacts| switch_cover(f).map(|c| c.picture).map_err(|e| e.why);
         assert_eq!(picture(&f), Ok(CoverPicture::Wallpaper));
         assert_eq!(picture(&CoverFacts { items: None, ..f.clone() }), Ok(CoverPicture::Desktop));
         let icon = Rect::new(2480.0, 1300.0, 64.0, 64.0);
         assert_eq!(picture(&CoverFacts { items: Some(vec![icon]), ..f.clone() }), Ok(CoverPicture::Desktop));
         assert_eq!(cover(&CoverFacts { items: Some(vec![icon]), ..f.clone() }), cover(&f), "the same corner either way");
-        // A window that stays shown into the corner (the overlay would paint over it).
-        let staying = Rect::new(1800.0, 900.0, 740.0, 520.0);
+        // A window that stays shown into the corner with no snapshot of it (the overlay
+        // would paint over it): named.
+        let staying = Staying { id: 9, bounds: Rect::new(1800.0, 900.0, 740.0, 520.0), snapshot: false };
         assert_eq!(
-            cover(&CoverFacts { staying: vec![staying], ..f.clone() }),
-            Err("a window that stays shown reaches the corner")
+            switch_cover(&CoverFacts { staying: vec![staying], ..f.clone() }),
+            Err(Refused { why: STAYING_UNPICTURED, windows: vec![9] })
         );
         // One elsewhere changes nothing.
-        assert!(cover(&CoverFacts { staying: vec![Rect::new(100.0, 100.0, 600.0, 400.0)], ..f }).is_ok());
+        let away = Staying { id: 8, bounds: Rect::new(100.0, 100.0, 600.0, 400.0), snapshot: false };
+        let c = switch_cover(&CoverFacts { staying: vec![away], ..f }).expect("covered");
+        assert!(c.over.is_empty());
+    }
+
+    #[test]
+    fn a_window_that_stays_shown_into_the_corner_is_drawn_on_the_cover_from_its_snapshot() {
+        // 8L5: his windows nearly fill the screen; one that stays (pinned, unmanaged) reaches
+        // the corner. With its snapshot the cover draws it, so the grow still runs.
+        let f = cover_facts();
+        let alone = switch_cover(&f).expect("covered");
+        let front = Staying { id: 7, bounds: Rect::new(1800.0, 900.0, 740.0, 520.0), snapshot: true };
+        let back = Staying { id: 6, bounds: Rect::new(1200.0, 700.0, 1340.0, 720.0), snapshot: true };
+        let away = Staying { id: 5, bounds: Rect::new(100.0, 100.0, 600.0, 400.0), snapshot: false };
+        let c = switch_cover(&CoverFacts { staying: vec![front, away, back], ..f.clone() }).expect("covered");
+        assert_eq!((c.rect, c.picture), (alone.rect, alone.picture), "the same corner, the same picture");
+        assert_eq!(c.over, vec![(6, back.bounds), (7, front.bounds)], "those reaching it, back to front");
+        // One of two without a snapshot: not covered, that one named.
+        let bare = Staying { snapshot: false, ..back };
+        assert_eq!(
+            switch_cover(&CoverFacts { staying: vec![front, bare], ..f }),
+            Err(Refused { why: STAYING_UNPICTURED, windows: vec![6] })
+        );
     }
 
     /// The facts of a switch whose incoming window `raised` waits in the corner, on a display

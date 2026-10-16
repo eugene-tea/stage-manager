@@ -33,7 +33,7 @@ use objc2_quartz_core::{
 };
 
 use crate::config::AnimationStyle;
-use crate::engine::geometry::Point;
+use crate::engine::geometry::{Point, Rect};
 use crate::ui::motion_math::{Plane, Spring};
 use crate::ui::panels;
 
@@ -387,8 +387,11 @@ impl Overlay {
     /// The park corner's cover for a switch (round 8L): `image` (the corner patch's picture,
     /// `scale` pixels a point) flat at `at`, with no shadow, under every ghost, so the
     /// incoming windows waiting in the corner (raised there by an activation) never show,
-    /// while every snapshot passes over it. Removed like a ghost.
-    pub fn cover(&self, image: &CGImage, scale: f64, at: Plane) -> Ghost {
+    /// while every snapshot passes over it. `over`: snapshots of the windows that stay shown
+    /// into the corner, back to front, each at its frame relative to the cover's top-left
+    /// (points), drawn over the picture and clipped to the cover (round 8L5). Removed like a
+    /// ghost.
+    pub fn cover(&self, image: &CGImage, scale: f64, over: &[(CFRetained<CGImage>, Rect)], at: Plane) -> Ghost {
         let plane = CALayer::new();
         plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
         let img = CALayer::new();
@@ -399,6 +402,17 @@ impl Overlay {
         img.setContentsScale(scale);
         // SAFETY: a CGImage is valid layer contents.
         unsafe { img.setContents(Some(as_object(image))) };
+        for (snapshot, frame) in over {
+            let window = CALayer::new();
+            window.setAnchorPoint(CGPoint::new(0.0, 0.0));
+            window.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(frame.w.max(1.0), frame.h.max(1.0))));
+            window.setPosition(CGPoint::new(frame.x, frame.y));
+            // SAFETY: framework constant.
+            window.setContentsGravity(unsafe { kCAGravityResize });
+            // SAFETY: a CGImage is valid layer contents.
+            unsafe { window.setContents(Some(as_object(&**snapshot))) };
+            img.addSublayer(&window);
+        }
         plane.addSublayer(&img);
         CATransaction::begin();
         CATransaction::setDisableActions(true);

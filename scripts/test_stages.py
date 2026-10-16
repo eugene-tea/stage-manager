@@ -909,6 +909,28 @@ def intersect(a, b):
 # takes none. Any other `at_once` is a failure; with captures on, none is accepted.
 AT_ONCE_CAPTURES_OFF = ("window captures are off",)
 
+# The app's reason when a window that stays shown through the switch reaches the park corner
+# and no snapshot of it is at hand to draw on the cover (engine::corner_patch::STAYING_UNPICTURED,
+# 8L5). Skipped, never failed, only when every window it names (`at_once_windows`) is the
+# owner's own (not a fixture's, not ours): his Stage Manager quit for a run leaves his windows
+# on screen, unmanaged, and the app takes no snapshot of a window it does not manage.
+STAYING_UNPICTURED = "a window that stays shown reaches the corner"
+
+
+def at_once_of(line):
+    """(reason, window ids) of a switch's `transition covered` log line: why its activation
+    arrived at once (None when it grew) and the windows the reason names."""
+    why = m.group(1) if (m := re.search(r'at_once="([^"]*)"', line)) else None
+    ids = [int(i) for i in re.findall(r"\d+", m.group(1))] if (m := re.search(r"at_once_windows=\[([^\]]*)\]", line)) else []
+    return why, ids
+
+
+def owners_window_only(why, ids, fixture_ids):
+    """True when an activation arrived at once only because a window of the owner's own (one
+    of `ids`, none in `fixture_ids`: the fixtures' and ours as the sampler listed them) stays
+    shown into the park corner with no snapshot of it (8L5): the exact reason, and windows named."""
+    return why == STAYING_UNPICTURED and bool(ids) and not set(ids) & set(fixture_ids)
+
 # How far (0-255, any channel) the cover's mean colour in a box may be from the wallpaper's
 # there (colour management, the overlay's scaling).
 COVER_TOLERANCE = 16
@@ -971,7 +993,8 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     switch's key window within 100 ms of macOS activating the app. Returns whether it switched.
 
     `at_once_ok`: the switch's `at_once` reasons that skip the grow's checks (the corner could
-    not be covered by design); any other is a failure. `cover_still` (8L4, the capture phase:
+    not be covered by design); so does the owner's own window staying shown into the corner
+    with no snapshot of it ([`owners_window_only`], 8L5); any other is a failure. `cover_still` (8L4, the capture phase:
     captures on, the cover forced to the desktop's still): the cover is the still, and its
     pixels over the arriving window's sliver, away from any icon, read back from the overlay
     during the grow, are the wallpaper's (the still never holds a window)."""
@@ -1039,16 +1062,23 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     key = act.get("key")
     pid = next((w["pid"] for w in s1["windows"] if w["id"] in mine), None)
     covered = [line for line in log.splitlines() if "transition covered" in line]
-    at_once = next((m.group(1) for c in covered if (m := re.search(r'at_once="([^"]*)"', c))), None)
+    at_once, at_once_ids = next((at_once_of(c) for c in covered if at_once_of(c)[0] is not None), (None, []))
     if at_once is not None:
         # The park corner could not be covered for this switch, so the activated windows came
         # at once (8L2). Only the reasons expected by design skip the grow's checks (a run
-        # with captures off takes no still of the desktop, 8L3-8L4); any other is a failure.
+        # with captures off takes no still of the desktop, 8L3-8L4; the owner's own window
+        # staying shown into the corner, 8L5); any other is a failure.
+        listed = {w["id"] for x in probe_out.get("samples", []) for w in x["windows"]}
         if at_once in at_once_ok:
             skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
                  f"the activation arrived at once by design ({at_once})")
+        elif owners_window_only(at_once, at_once_ids, listed):
+            skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
+                 f"a window of the owner's (not a fixture's: {at_once_ids}) stays shown into the park corner with no "
+                 f"snapshot of it, so the activation arrived at once by design ({at_once}); it is left where it is")
         else:
-            check(False, f"{what}: the activation grows (it arrived at once: {at_once}; expected only {list(at_once_ok)})")
+            check(False, f"{what}: the activation grows (it arrived at once: {at_once}, windows {at_once_ids}; "
+                         f"expected only {list(at_once_ok)} or the owner's own window staying in the corner)")
         consistent(what)
         return True
     check(any("incoming: true" in line and "outgoing: true" in line for line in covered),

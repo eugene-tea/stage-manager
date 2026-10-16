@@ -86,7 +86,7 @@ use super::safety::{self, ParkedEntry};
 use super::{desktop, desktop_shot, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BusyApps, OffScreen};
-use crate::engine::corner_patch::{CoverPicture, SwitchCover};
+use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
@@ -401,14 +401,36 @@ fn resolve_cover(
     wallpaper: impl FnOnce(Rect) -> Result<(), &'static str>,
     desktop: impl FnOnce(Rect) -> Result<(), &'static str>,
 ) -> Result<SwitchCover, &'static str> {
-    let with = |picture| SwitchCover { picture, ..c };
-    match c.picture {
-        CoverPicture::Wallpaper => match wallpaper(c.rect) {
-            Ok(()) => Ok(with(CoverPicture::Wallpaper)),
-            Err(why) => desktop(c.rect).map(|()| with(CoverPicture::Desktop)).map_err(|_| why),
+    let rect = c.rect;
+    let picture = match c.picture {
+        CoverPicture::Wallpaper => match wallpaper(rect) {
+            Ok(()) => CoverPicture::Wallpaper,
+            Err(why) => desktop(rect).map(|()| CoverPicture::Desktop).map_err(|_| why)?,
         },
-        CoverPicture::Desktop => desktop(c.rect).map(|()| with(CoverPicture::Desktop)),
-    }
+        CoverPicture::Desktop => desktop(rect).map(|()| CoverPicture::Desktop)?,
+    };
+    Ok(SwitchCover { picture, ..c })
+}
+
+/// The windows of window server list `list` (front to back) that stay shown through a switch
+/// ([`Staying`]): normal, drawn, not ours (`own`), neither leaving (`outgoing`, the switch's
+/// parks: the outgoing stage's windows never count, however much of the screen they fill),
+/// nor arriving, nor parked in the model's eyes (`parked`): pinned windows, unmanaged ones
+/// (another app's, an ignored app's), a dialog of one. `snapshot`: whether the strip holds a
+/// full-size snapshot of a window, for the cover to draw it (round 8L5).
+fn staying_windows(
+    list: &[windows::CgWindow],
+    own: i32,
+    outgoing: &HashSet<u32>,
+    arriving: &HashSet<u32>,
+    parked: &HashSet<u32>,
+    snapshot: impl Fn(u32) -> bool,
+) -> Vec<Staying> {
+    list.iter()
+        .filter(|w| w.layer == 0 && w.alpha > 0.0 && w.pid != own)
+        .filter(|w| !outgoing.contains(&w.id) && !arriving.contains(&w.id) && !parked.contains(&w.id))
+        .map(|w| Staying { id: w.id, bounds: w.bounds, snapshot: snapshot(w.id) })
+        .collect()
 }
 
 /// Test only (`STAGE_MANAGER_COVER=desktop`, honoured with `STAGE_MANAGER_TEST` set): a
@@ -488,6 +510,10 @@ struct ActivationRun {
     /// switch's log line (`at_once`): the checks tell a corner that could not be covered
     /// (icons there with captures off, say) from a grow that went wrong (8L3).
     at_once: Option<&'static str>,
+    /// The windows [`Self::at_once`] names (a window that stays shown into the corner with
+    /// no snapshot of it, 8L5), logged on the switch's line: the checks tell the owner's own
+    /// window from a fixture's.
+    at_once_windows: Vec<u32>,
 }
 
 impl ActivationRun {
@@ -1894,12 +1920,13 @@ impl Controller {
                     _ => None,
                 })
                 .collect();
-            let found = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c));
+            let found = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
             match found {
                 Ok(c) => early_corner = Some((Some(c), list)),
-                Err(why) => {
-                    note_fallback(&mut self.fallback_said, why);
-                    run.arrive_now(why);
+                Err(r) => {
+                    note_fallback(&mut self.fallback_said, r.why);
+                    run.arrive_now(r.why);
+                    run.at_once_windows = r.windows;
                 }
             }
         }
@@ -2049,13 +2076,14 @@ impl Controller {
     /// there behind their snapshots ([`crate::engine::corner_patch::switch_cover`], round
     /// 8L): macOS has raised an activated app's windows above the corner patch, and the
     /// switch's focus raises its key window there too. `list` is the window server's list now;
-    /// `outgoing` the windows about to park. The reason when the corner cannot be covered (it
-    /// is left as it is).
-    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Result<SwitchCover, &'static str> {
+    /// `outgoing` the windows about to park. A window that stays shown into the corner is drawn
+    /// on the cover from the strip's snapshot of it (8L5). The reason, and the windows it
+    /// names, when the corner cannot be covered (it is left as it is).
+    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Result<SwitchCover, Refused> {
         use crate::engine::corner_patch::{CoverFacts, switch_cover};
         use crate::engine::park::is_parked_in_at;
         if arriving.is_empty() {
-            return Err("nothing arrives");
+            return Err("nothing arrives".into());
         }
         let m = self.model.as_ref().ok_or("no model")?;
         let config = self.store.config();
@@ -2071,12 +2099,7 @@ impl Controller {
             .collect();
         let slivers = zone.iter().map(|w| w.bounds).collect();
         let raised = zone.iter().filter(|w| arriving.contains(&w.id)).map(|w| w.bounds).collect();
-        let staying = list
-            .iter()
-            .filter(normal)
-            .filter(|w| !outgoing.contains(&w.id) && !arriving.contains(&w.id) && !parked.contains(&w.id))
-            .map(|w| w.bounds)
-            .collect();
+        let staying = staying_windows(list, own, outgoing, arriving, &parked, strip_model::has_snapshot);
         let now = Instant::now();
         let facts = CoverFacts {
             on: config.windows.corner_patch,
@@ -2125,11 +2148,11 @@ impl Controller {
             Some((corner, list)) => (corner, list),
             None => {
                 let list = windows::on_screen();
-                let corner = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c));
-                if let Err(why) = corner
+                let corner = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
+                if let Err(r) = &corner
                     && !arriving.is_empty()
                 {
-                    tracing::debug!(id, why, "transition: the park corner is not covered");
+                    tracing::debug!(id, why = r.why, windows = ?r.windows, "transition: the park corner is not covered");
                 }
                 (corner.ok(), list)
             }
@@ -2158,6 +2181,7 @@ impl Controller {
             focus_since_activation_ms,
             unveil_ms,
             at_once = run.at_once,
+            at_once_windows = ?run.at_once_windows,
             "transition covered"
         );
         if cover.outgoing || cover.incoming {
@@ -2316,6 +2340,13 @@ impl Controller {
                     .collect()
             })
             .unwrap_or_default();
+        // Pinned windows stay shown through a switch: snapshots of them kept ready let the
+        // switch's cover draw one reaching the park corner (8L5).
+        let pinned_windows = m
+            .windows()
+            .filter(|w| !w.parked && w.home == Home::Pinned && (w.space == space || w.sticky) && on.contains(&w.meta.id.0))
+            .map(|w| CardWindow { id: w.meta.id.0, pid: w.meta.pid, frame: w.meta.frame })
+            .collect();
         strip_model::present(StripSnapshot {
             cards,
             active_stage: active.map(|s| s.0),
@@ -2327,6 +2358,7 @@ impl Controller {
             window_drag_grab: dragged.map(|d| d.grab),
             announce: std::mem::take(&mut self.announce),
             active_windows,
+            pinned_windows,
             transition,
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
@@ -5250,7 +5282,7 @@ mod tests {
     fn a_corner_with_icons_is_covered_by_the_desktops_still_never_the_wallpaper() {
         // 8L3: the owner's corner has desktop icons; the patch's picture would hide them.
         let rect = Rect::new(2499.0, 1348.0, 61.0, 92.0);
-        let cover = |picture| SwitchCover { rect, picture };
+        let cover = |picture| SwitchCover { rect, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
         let ok = |_: Rect| Ok(());
         let no = |_: Rect| Err("not ready");
         // Icons there: the still, or nothing (the activation then arrives at once).
@@ -5260,6 +5292,44 @@ mod tests {
         assert_eq!(resolve_cover(cover(CoverPicture::Wallpaper), ok, ok), Ok(cover(CoverPicture::Wallpaper)));
         assert_eq!(resolve_cover(cover(CoverPicture::Wallpaper), |_| Err("an aerial"), ok), Ok(cover(CoverPicture::Desktop)));
         assert_eq!(resolve_cover(cover(CoverPicture::Wallpaper), |_| Err("an aerial"), no), Err("an aerial"));
+    }
+
+    #[test]
+    fn only_windows_that_really_stay_shown_can_keep_a_switchs_corner_uncovered() {
+        // 8L5: his windows nearly fill the screen. The outgoing stage's (parking), the
+        // arriving ones, the parked ones, ours, a hidden or non-normal one never count; a
+        // pinned or unmanaged window does, with whether a snapshot of it is at hand.
+        let own = 500;
+        let win = |id: u32, pid: i32, layer: i64, alpha: f64| windows::CgWindow {
+            id,
+            pid,
+            owner: String::new(),
+            name: None,
+            layer,
+            bounds: Rect::new(0.0, 0.0, 2560.0, 1410.0),
+            onscreen: true,
+            alpha,
+        };
+        let list = [
+            win(1, 10, 0, 1.0), // the outgoing stage's, filling the screen
+            win(2, 10, 0, 1.0), // its other window
+            win(3, 30, 0, 1.0), // arriving (raised in the corner by the activation)
+            win(4, 30, 0, 1.0), // parked in another stage
+            win(5, own, 0, 1.0), // the corner patch, the overlay
+            win(6, 40, 3, 1.0), // a floating panel, not a normal window
+            win(7, 41, 0, 0.0), // drawn transparent
+            win(8, 50, 0, 1.0), // pinned, snapshot kept
+            win(9, 60, 0, 1.0), // unmanaged (the owner's), no snapshot
+        ];
+        let staying = staying_windows(&list, own, &[1, 2].into(), &[3].into(), &[1, 2, 4].into(), |id| id == 8);
+        assert_eq!(
+            staying.iter().map(|w| (w.id, w.snapshot)).collect::<Vec<_>>(),
+            [(8, true), (9, false)],
+            "front to back, as listed"
+        );
+        // The outgoing windows never count, even when the model has not marked them parked.
+        let staying = staying_windows(&list[..2], own, &[1, 2].into(), &HashSet::new(), &HashSet::new(), |_| false);
+        assert!(staying.is_empty());
     }
 
     #[test]

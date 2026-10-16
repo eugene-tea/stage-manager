@@ -268,6 +268,11 @@ impl<T> SnapshotCache<T> {
         self.kept.is_empty()
     }
 
+    /// The windows a snapshot is held of.
+    pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.kept.keys().copied()
+    }
+
     fn trim(&mut self) {
         while self.bytes() > self.budget {
             let Some(oldest) = self.kept.iter().min_by_key(|(_, k)| k.taken).map(|(id, _)| *id) else { break };
@@ -407,6 +412,7 @@ mod tests {
         assert!(c.get(1).is_some() && c.get(3).is_some());
         c.retain(|id| id != 3);
         assert_eq!(c.len(), 1);
+        assert_eq!(c.ids().collect::<Vec<_>>(), [1]);
         c.set_budget(10);
         assert!(c.is_empty());
     }

@@ -59,6 +59,10 @@ pub struct StripSnapshot {
     /// The active stage's standard windows, front to back, at their live frames: the strip
     /// keeps full-size snapshots of them ready for the next switch (`[animation]`).
     pub active_windows: Vec<CardWindow>,
+    /// The pinned windows shown on this Space, at their live frames: they stay shown through
+    /// a switch, and a snapshot of each kept ready lets the switch's cover of the park corner
+    /// draw one that reaches it (round 8L5).
+    pub pinned_windows: Vec<CardWindow>,
     /// Windows are about to leave or arrive: animate them (this snapshot is the strip after
     /// the change).
     pub transition: Option<Transition>,
@@ -274,6 +278,25 @@ pub fn publish_cards(frames: Vec<(u64, Rect)>) {
 /// The cards' frames last published (any thread).
 pub fn published_cards() -> Vec<(u64, Rect)> {
     card_frames().lock().map(|f| f.clone()).unwrap_or_default()
+}
+
+fn snapshot_ids() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The strip publishes the windows it holds a full-size snapshot of (main thread, whenever
+/// its snapshot cache changes).
+pub fn publish_snapshots(ids: impl IntoIterator<Item = u32>) {
+    if let Ok(mut s) = snapshot_ids().lock() {
+        *s = ids.into_iter().collect();
+    }
+}
+
+/// Whether the strip holds a full-size snapshot of window `id` (any thread): a switch's cover
+/// can draw a window that stays shown into the park corner from it (round 8L5).
+pub fn has_snapshot(id: u32) -> bool {
+    snapshot_ids().lock().is_ok_and(|s| s.contains(&id))
 }
 
 /// The strip panel's state as the window server and AppKit see it, for `ctl state` and the

@@ -405,7 +405,7 @@ impl Strip {
             return;
         }
         // The park corner, under every snapshot, while the incoming windows wait there (8L).
-        let corner = if cover.incoming { t.corner.and_then(|c| self.corner_cover(t.id, c)) } else { None };
+        let corner = if cover.incoming { t.corner.clone().and_then(|c| self.corner_cover(t.id, c)) } else { None };
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
@@ -451,7 +451,7 @@ impl Strip {
             );
         }
         let order: Vec<u64> = self.snapshot.cards.iter().map(|c| c.stage).collect();
-        let covered = corner.as_ref().and(t.corner);
+        let covered = corner.as_ref().and(t.corner.as_ref());
         let corner_picture = covered.map(|c| match c.picture {
             CoverPicture::Wallpaper => "wallpaper",
             CoverPicture::Desktop => "desktop",
@@ -462,8 +462,9 @@ impl Strip {
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
     /// or the still of the desktop where icons lie (round 8L3), flat on the overlay under every
-    /// snapshot (round 8L). `None` (logged) when that picture does not hold it now: the corner
-    /// is left as it is.
+    /// snapshot (round 8L), with the snapshots of the windows that stay shown into it drawn
+    /// over the picture where they are (8L5). `None` (logged) when that picture, or one of
+    /// those snapshots, is not at hand now: the corner is left as it is.
     fn corner_cover(&self, id: u64, cover: SwitchCover) -> Option<Ghost> {
         let rect = cover.rect;
         let image = match cover.picture {
@@ -474,9 +475,18 @@ impl Strip {
             tracing::debug!(id, %rect, picture = ?cover.picture, "transition: no picture of the corner now; it is not covered");
             return None;
         };
+        let mut over = Vec::with_capacity(cover.over.len());
+        for (window, bounds) in &cover.over {
+            let Some(snapshot) = self.motion.cache.get(*window) else {
+                tracing::debug!(id, window, "transition: no snapshot of a window that stays shown into the corner now; it is not covered");
+                return None;
+            };
+            over.push((snapshot.clone(), Rect::new(bounds.x - rect.x, bounds.y - rect.y, bounds.w, bounds.h)));
+        }
         let o = self.motion.overlay.origin();
-        tracing::debug!(id, %rect, picture = ?cover.picture, "transition: the park corner is covered while the incoming windows wait there");
-        Some(self.motion.overlay.cover(&image, scale, Plane::window(rect, o, 0.0)))
+        let staying: Vec<u32> = cover.over.iter().map(|(w, _)| *w).collect();
+        tracing::debug!(id, %rect, picture = ?cover.picture, ?staying, "transition: the park corner is covered while the incoming windows wait there");
+        Some(self.motion.overlay.cover(&image, scale, &over, Plane::window(rect, o, 0.0)))
     }
 
     /// The incoming windows of transition `id` are in place at `frames` (read back from the
@@ -623,11 +633,13 @@ impl Strip {
             .snapshot
             .active_windows
             .iter()
+            .chain(&self.snapshot.pinned_windows)
             .chain(self.snapshot.cards.iter().flat_map(|c| c.windows.iter()))
             .map(|w| w.id)
             .collect();
         let running: Vec<u32> = self.motion.running.as_ref().map(|r| r.ghosts.iter().map(|g| g.window).collect()).unwrap_or_default();
         self.motion.cache.retain(|id| known.contains(&id) || running.contains(&id));
+        strip_model::publish_snapshots(self.motion.cache.ids());
         self.update_snapshot_targets(None, false);
         if let Some(l) = &self.motion.landing
             && !self.snapshot.cards.iter().any(|c| c.windows.iter().any(|w| w.id == l.window))
@@ -663,8 +675,9 @@ impl Strip {
         self.update_snapshot_targets(card, true);
     }
 
-    /// Tells the snapshot capturer what to keep: the active stage's windows and those of
-    /// `card` (or the hovered card), at full size. `now` captures them at once.
+    /// Tells the snapshot capturer what to keep: the active stage's windows, the pinned ones
+    /// shown (for a switch's cover of the park corner, 8L5) and those of `card` (or the
+    /// hovered card), at full size. `now` captures them at once.
     fn update_snapshot_targets(&mut self, card: Option<u64>, now: bool) {
         if !self.style.animation.animates() {
             self.motion.capturer.set_targets(Vec::new());
@@ -676,6 +689,7 @@ impl Strip {
             .snapshot
             .active_windows
             .iter()
+            .chain(&self.snapshot.pinned_windows)
             .chain(next.into_iter().flat_map(|c| c.windows.iter().take(self.m().max_windows)))
             .map(|w| Target {
                 id: w.id,
@@ -705,6 +719,7 @@ impl Strip {
             c.has_image = true;
         }
         self.motion.cache.insert(id, image, bytes);
+        strip_model::publish_snapshots(self.motion.cache.ids());
     }
 
     /// While a window is dragged with the pointer over the strip column (`over`, global), its

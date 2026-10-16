@@ -243,6 +243,52 @@ class CoverPixels(unittest.TestCase):
         self.assertEqual(t.ts.AT_ONCE_CAPTURES_OFF, ("window captures are off",))
 
 
+class StayingWindow(unittest.TestCase):
+    """8L5: an activation that arrived at once only because the owner's own window stays shown
+    into the park corner (no snapshot of it) skips the grow's checks; a fixture's never."""
+
+    line = ('DEBUG platform::controller: transition covered id=7 cover=Cover { outgoing: true, incoming: true } '
+            'waited_ms=8 unveil_ms=403 at_once="a window that stays shown reaches the corner" '
+            'at_once_windows=[4711, 4712] "transition covered"')
+
+    def test_the_reason_and_its_windows_are_read_from_the_switch_line(self):
+        self.assertEqual(t.ts.at_once_of(self.line), (t.ts.STAYING_UNPICTURED, [4711, 4712]))
+        grew = 'transition covered id=8 cover=Cover { outgoing: true, incoming: true } at_once_windows=[]'
+        self.assertEqual(t.ts.at_once_of(grew), (None, []))
+        self.assertEqual(t.ts.at_once_of('at_once="window captures are off" at_once_windows=[]'), ("window captures are off", []))
+
+    def test_only_the_owners_windows_skip(self):
+        why, ids = t.ts.at_once_of(self.line)
+        self.assertTrue(t.ts.owners_window_only(why, ids, {1, 2, 3}))
+        self.assertFalse(t.ts.owners_window_only(why, ids, {4712}), "a fixture's window among them")
+        self.assertFalse(t.ts.owners_window_only(why, [], {1}), "no window named")
+        self.assertFalse(t.ts.owners_window_only("a window that stays shown", ids, {1}), "the exact reason only")
+        self.assertFalse(t.ts.owners_window_only("off", ids, {1}))
+
+
+class SlideCarriesTheCorner(unittest.TestCase):
+    """8L5: a parked window of a Desktop sliding in from the left is listed mid-screen, moved
+    sideways only, while the slide runs (live 10-16 14:26); it is not shown."""
+
+    display = {"x": 0.0, "y": 0.0, "w": 2560.0, "h": 1440.0}
+    rest = {"x": 2520.0, "y": 1400.0, "w": 520.0, "h": 392.0}
+
+    def test_a_parked_window_carried_by_the_slide(self):
+        for x in (1203.0, 300.0, -40.0, 2440.0):
+            self.assertTrue(t.slid_in_zone(dict(self.rest, x=x), self.rest, self.display), x)
+
+    def test_a_window_shown_at_its_frame_is_not(self):
+        frame = {"x": 80.0, "y": 78.0, "w": 520.0, "h": 392.0}
+        self.assertFalse(t.slid_in_zone(frame, self.rest, self.display), "at its frame, not the park zone's row")
+        self.assertFalse(t.slid_in_zone(dict(frame, x=-1000.0), self.rest, self.display))
+        # Resting out of the zone at the last look: never excused.
+        self.assertFalse(t.slid_in_zone(dict(frame, x=1200.0), frame, self.display))
+        self.assertFalse(t.slid_in_zone(self.rest, None, self.display))
+        # Not moved at all, or farther than a slide.
+        self.assertFalse(t.slid_in_zone(self.rest, self.rest, self.display))
+        self.assertFalse(t.slid_in_zone(dict(self.rest, x=2520.0 - 2800.0), self.rest, self.display))
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=1)
