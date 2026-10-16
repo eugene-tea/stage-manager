@@ -29,9 +29,11 @@ use super::{pixels, wallpaper};
 use crate::engine::geometry::Rect;
 use crate::engine::wallpaper as wp;
 
-/// The side (points) of the square at the display's bottom-right corner always captured; the
-/// still grows to hold the patch's rectangle when that is bigger ([`block`]).
-pub const BLOCK: f64 = 320.0;
+/// The side (points) of the square at the display's bottom-right corner always captured: the
+/// most a switch's cover paints there ([`crate::engine::corner_patch::COVER_CAP`], round 8L6),
+/// so a still holds any cover; it grows to hold the patch's rectangle when that is bigger
+/// ([`block`]).
+pub const BLOCK: f64 = crate::engine::corner_patch::COVER_CAP;
 
 /// The side (points) of the square at the corner whose icons a still is keyed by ([`zone`]):
 /// any cover lies inside it with room to spare.

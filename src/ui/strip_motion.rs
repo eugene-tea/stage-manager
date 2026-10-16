@@ -484,7 +484,7 @@ impl Strip {
         }
         let o = self.motion.overlay.origin();
         let staying: Vec<u32> = cover.over.iter().map(|(w, _)| *w).collect();
-        tracing::debug!(id, %rect, picture = ?cover.picture, ?staying, "transition: the park corner is covered while the incoming windows wait there");
+        tracing::debug!(id, %rect, cap = %cover.cap, picture = ?cover.picture, ?staying, "transition: the park corner is covered while the incoming windows wait there");
         Some(self.motion.overlay.cover(&image, scale, &over, Plane::window(rect, o, 0.0)))
     }
 
