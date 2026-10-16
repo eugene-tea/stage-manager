@@ -379,6 +379,10 @@ impl Model {
         if !arrivals.is_empty() || saved.is_some() {
             let empty = SavedSpace::default();
             let assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.display(m.display).parks(m.frame));
+            if self.restore.restoring {
+                // Windows no saved one claims go by Apple's rule (counted for the restore's line).
+                self.restore.by_apple += assignment.unmatched.len();
+            }
             let more = self.apply_launch(&arrivals, &assignment, false, hints);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
         }

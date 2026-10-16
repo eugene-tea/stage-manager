@@ -1153,8 +1153,9 @@ impl Strip {
         if self.snapshot.window_drag.is_none() {
             self.drop_over = false;
         }
-        // A Desktop arriving: its strip is already arranged when it slides in.
-        self.instant = rehome;
+        // A Desktop arriving: its strip is already arranged when it slides in. While the
+        // login settles cards come in place, one by one, with no fade or glide.
+        self.instant = rehome || self.snapshot.quiet;
         self.layout_cards(force);
         self.instant = false;
         if let (Some(t), Some(starts)) = (transition, starts) {

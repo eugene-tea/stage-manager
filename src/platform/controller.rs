@@ -101,7 +101,7 @@ use crate::engine::model::{
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
-use crate::engine::restore::{self, AppQuiet, Restore};
+use crate::engine::restore::{AppQuiet, End, Restore, Settling};
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
@@ -705,13 +705,17 @@ pub struct Controller {
     /// Each saved Space's last time shown (Unix seconds), from the loaded file and the saves
     /// since ([`StateFile::stamp`]).
     seen_times: HashMap<u64, u64>,
-    /// When the restore window closes at the latest ([`restore::WINDOW`] after the stages
-    /// were built from `state.json`); `None` once closed or when there is none.
-    restore_until: Option<Instant>,
-    /// The restore window ended: at the next tick a still-empty saved active stage gives way
-    /// to a stage with windows ([`Model::front_after_restore`]), after the user's action that
-    /// ended it had its say.
+    /// The restore window's clock while it is open (its ends by itself: apps quiet, or
+    /// [`crate::engine::restore::WINDOW`] after the stages were built from `state.json`); `None` once closed
+    /// or when there is none.
+    settling: Option<Settling>,
+    /// The restore window ended (or a give-up after it emptied the front stage): at the next
+    /// tick a still-empty saved active stage gives way to a stage with windows
+    /// ([`Model::front_after_restore`]), after the user's action that ended it had its say.
     front_after_restore: bool,
+    /// The restore window ended by itself: at the next tick the saved key window takes the
+    /// keyboard ([`Model::focus_after_restore`]).
+    focus_after_restore: bool,
 }
 
 /// How placed windows are kept clear of the strip on a display with `visible` frame: never
@@ -830,8 +834,9 @@ impl Controller {
             quiet: AppQuiet::default(),
             quiet_checked: Instant::now(),
             seen_times: HashMap::new(),
-            restore_until: None,
+            settling: None,
             front_after_restore: false,
+            focus_after_restore: false,
         };
         logging::apply_config(&this.store.config().log);
         this.notify_config();
@@ -1876,6 +1881,7 @@ impl Controller {
             space: space.0,
             fullscreen: current && self.fullscreen,
             away: false,
+            quiet: m.settling(),
         });
     }
 
@@ -1914,14 +1920,18 @@ impl Controller {
     /// given up ([`StateFile::start_new_session`]); the restore says which (the restore
     /// window opens). A session that cannot be read now counts as the file's own for the
     /// restore (no restore window at every relaunch), while its window ids are still dropped.
-    fn load_state() -> Option<(StateFile, Restore)> {
+    /// `restore_after_restart` off (`[stages]`): after a restart nothing waits (1.2.0). The
+    /// restore knows the main display's size when saved (saved frames only on that size).
+    fn load_state(restore_after_restart: bool) -> Option<(StateFile, Restore)> {
         let path = paths::state_file();
         let text = std::fs::read_to_string(&path).ok()?;
         let current = session::window_session();
         match StateFile::from_json(&text) {
             Ok(mut s) => {
                 let restoring = current.is_some() && !s.same_session(current);
-                if restoring {
+                if restoring && !restore_after_restart {
+                    tracing::info!("restore: state.json is from another window server session; [stages] restore_after_restart is off, so saved windows not on screen are forgotten");
+                } else if restoring {
                     let expired = s.start_new_session();
                     tracing::info!(
                         pending = s.pending_windows(),
@@ -1934,7 +1944,12 @@ impl Controller {
                     tracing::info!(dropped, "state.json was written in another window server session (a reboot or a login since): its windows are matched by app, title and frame");
                 }
                 let now = current.unwrap_or_default();
-                let restore = if restoring { Restore::after_restart(now) } else { Restore::same_session(now) };
+                let restore = match (restoring, restore_after_restart) {
+                    (true, true) => Restore::after_restart(now),
+                    (true, false) => Restore::off_after_restart(now),
+                    (false, _) => Restore::same_session(now),
+                };
+                let restore = restore.with_display(s.display.as_ref().map(|d| (d.w, d.h)));
                 Some((s, restore))
             }
             Err(e) => {
@@ -2039,6 +2054,17 @@ impl Controller {
                     tracing::debug!(id, "Finder window focus after a wallpaper click: ignored (the desktop is Finder's)");
                     return;
                 }
+                if self.model.as_ref().is_some_and(Model::settling) {
+                    if input::left_button_down() {
+                        // A click whose press the input monitor has not told us about yet.
+                        self.end_restore("a click", End::User);
+                    } else {
+                        // At login a focus is the app's (a click or key press would have
+                        // ended the settling): no switch, nothing held for later.
+                        tracing::debug!(id, "a focus while the login settles: no switch");
+                        return;
+                    }
+                }
                 self.flush_pending(ob);
                 self.show_strip_after_desktop("a window was focused");
                 let pid = ob.window(id).map(|w| w.pid);
@@ -2110,6 +2136,17 @@ impl Controller {
                 if self.desktop_echo.classify(ob.bundle_id(pid), now) == Cause::WallpaperEcho {
                     tracing::debug!(pid, "Finder activation after a wallpaper click: ignored (the desktop is Finder's)");
                     return;
+                }
+                if self.model.as_ref().is_some_and(Model::settling) {
+                    if input::left_button_down() {
+                        // A Dock click whose press the input monitor has not told us about yet.
+                        self.end_restore("a click (or a Dock click)", End::User);
+                    } else {
+                        // A launch-time activation at login is the app's, not the user's: no
+                        // switch, nothing held for later.
+                        tracing::debug!(pid, "an activation while the login settles: no switch");
+                        return;
+                    }
                 }
                 // The user switched apps: a late echo of an earlier focus of ours is no
                 // longer one.
@@ -2285,7 +2322,7 @@ impl Controller {
         match event.kind {
             InputKind::MouseDown => {
                 tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
-                self.end_restore("a click (or a Dock click)");
+                self.end_restore("a click (or a Dock click)", End::User);
                 // One window list for the press: the Dock's bar and the wallpaper are looked
                 // up in it. A press on a Dock item: its click may take the user to another
                 // Desktop.
@@ -2335,7 +2372,12 @@ impl Controller {
                 self.present();
             }
             InputKind::KeyDown => {
-                self.end_restore("a key press");
+                // ⌘Tab's own app switch brings its stage; nothing else comes forward for it.
+                if event.is_switcher_key() {
+                    self.end_restore("an app switcher key", End::Switcher);
+                } else {
+                    self.end_restore("a key press", End::User);
+                }
                 // Typing never cuts a switch's animation short: the keyboard is already the
                 // new stage's (its focus ran before the windows arrived).
                 if event.cmd {
@@ -2435,7 +2477,7 @@ impl Controller {
         let (live, waiting): (Vec<WindowMeta>, Vec<WindowMeta>) =
             candidates.into_iter().partition(|m| shown.contains(&m.id.0));
         self.unplaced = waiting.iter().map(|m| m.id.0).collect();
-        let state = Self::load_state();
+        let state = Self::load_state(config.stages.restore_after_restart);
         let first_start = state.is_none();
         tracing::info!(
             live = live.len(),
@@ -2445,7 +2487,11 @@ impl Controller {
         );
         if let Some((state, restore)) = state {
             self.seen_times = state.seen_times();
-            self.restore_until = restore.restoring.then(|| Instant::now() + restore::WINDOW);
+            self.settling = restore.restoring.then(|| {
+                let login = if restore.new_session { super::apps::login_started() } else { None };
+                tracing::info!(after_restart = restore.new_session, login_ago_s = login.map(|l| l.elapsed().as_secs()), "restore: the restore window opens");
+                Settling::new(Instant::now(), login)
+            });
             model.set_restore(restore);
             model.restore_spaces(state.spaces);
         }
@@ -3267,10 +3313,21 @@ impl Controller {
         let obs = self.observe(ob);
         if let Some(m) = self.model.as_mut() {
             let actions = m.add_window(meta, &decision, &obs);
-            if let Some(note) = m.last_pending().filter(|n| n.window.0 == id) {
+            let back = m.last_pending().filter(|n| n.window.0 == id);
+            if let Some(note) = back {
                 tracing::info!(id, grade = note.grade.name(), points = note.points, parked = note.parked, switched = note.switched, adopted = ?note.adopted, "restore: back in its saved stage");
             }
-            self.execute_animated(ob, actions);
+            let settling = m.settling();
+            if let (Some(clock), true) = (self.settling.as_mut(), back.is_some()) {
+                // The restore is still under way.
+                clock.busy(Instant::now());
+            }
+            if settling {
+                // While the login settles nothing animates: windows go to their stages quietly.
+                self.execute(ob, actions);
+            } else {
+                self.execute_animated(ob, actions);
+            }
         }
     }
 
@@ -3389,7 +3446,7 @@ impl Controller {
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
-        self.end_restore("a hotkey");
+        self.end_restore("a hotkey", End::User);
         self.flush_pending(ob);
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
@@ -3421,7 +3478,7 @@ impl Controller {
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
         if !matches!(event, StripEvent::Unveil { .. }) {
-            self.end_restore("a card click");
+            self.end_restore("a card click", End::User);
         }
         if let StripEvent::CardPressed { stage } = event {
             // Read the windows now, while the button is down (~100 ms before the release),
@@ -3670,13 +3727,29 @@ impl Controller {
                 self.quiet_checked = now;
                 self.give_up_pending(ob, now);
             }
-            if self.restore_until.is_some_and(|t| now >= t) {
-                self.end_restore("its five minutes are up");
-            } else if self.front_after_restore && !self.frozen() && self.pending.is_none() && self.drag.is_none() && !input::left_button_down() {
-                self.front_after_restore = false;
+            if let Some(clock) = self.settling.as_mut() {
+                if let Some(t) = ob.last_launch() {
+                    clock.busy(t);
+                }
+                // Not while the screen is locked (a login that locks at once): nothing is done
+                // for a screen nobody sees; the end comes after the unlock.
+                if let Some(end) = clock.due(now).filter(|_| !self.locked) {
+                    let why = if end == End::TimeUp { "its five minutes are up" } else { "apps went quiet" };
+                    self.end_restore(why, end);
+                }
+            } else if (self.front_after_restore || self.focus_after_restore)
+                && !self.frozen()
+                && self.pending.is_none()
+                && self.drag.is_none()
+                && !input::left_button_down()
+            {
+                let (front, focus) = (std::mem::take(&mut self.front_after_restore), std::mem::take(&mut self.focus_after_restore));
                 let obs = self.observe(ob);
                 if let Some(m) = self.model.as_mut() {
-                    let actions = m.front_after_restore(&obs);
+                    let mut actions = if front { m.front_after_restore(&obs) } else { Vec::new() };
+                    if actions.is_empty() && focus {
+                        actions = m.focus_after_restore(&obs);
+                    }
                     self.execute_animated(ob, actions);
                 }
             }
@@ -3699,19 +3772,24 @@ impl Controller {
         }
     }
 
-    /// Closes the restore window (the first user action, or its time is up; see
+    /// Closes the restore window (the first user action, apps quiet, or its time up; see
     /// [`crate::engine::restore`]): from now on a window that goes back to an inactive stage
     /// brings that stage forward, and no Desktop becomes provisional. At the next tick an
-    /// empty saved active stage with cards beside it gives way (`front_after_restore`).
-    fn end_restore(&mut self, why: &str) {
-        if self.restore_until.take().is_none() {
-            return;
-        }
+    /// empty saved active stage with cards beside it gives way (`front_after_restore`; not
+    /// after an app switcher key, whose own switch wins), and when it ended by itself the
+    /// saved key window takes the keyboard (`focus_after_restore`). The restore's line is
+    /// logged (`log summary` repeats it).
+    fn end_restore(&mut self, why: &str, end: End) {
+        let Some(clock) = self.settling.take() else { return };
         if let Some(m) = self.model.as_mut()
             && m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
-            self.front_after_restore = true;
+            let summary = m.restore_summary(clock.age(Instant::now()).as_secs());
+            tracing::info!("{summary}");
+            self.front_after_restore = end.brings_front();
+            // Only after a restart: a relaunch in the same session changed no focus.
+            self.focus_after_restore = end.by_itself() && m.after_restart();
         }
     }
 
@@ -3752,6 +3830,10 @@ impl Controller {
         if dropped > 0 {
             tracing::info!(dropped, apps = ?settled, "restore: pending windows given up (their apps opened no window for a minute)");
             self.execute(ob, actions);
+            if self.settling.is_none() {
+                // A saved active stage emptied for good after the window: it gives way too.
+                self.front_after_restore = true;
+            }
         }
     }
 
@@ -3769,7 +3851,7 @@ impl Controller {
             Command::Switch(_) | Command::Send(..) | Command::New(_) | Command::Pin(_) | Command::Merge(_) | Command::Reveal
         );
         if acts || matches!(cmd, Command::DebugDockClick { .. }) {
-            self.end_restore("a ctl command");
+            self.end_restore("a ctl command", End::User);
         }
         if acts && let Some(why) = self.frozen_reason() {
             return json!({ "ok": false, "error": why });
@@ -3978,9 +4060,11 @@ impl Controller {
             "config_path": self.store.path(),
             "config_error": self.config_error,
             "registry": safety::registry_len(),
+            "focused": focused_window(),
             "restore": {
                 "restoring": m.restoring(),
                 "after_restart": m.after_restart(),
+                "settling": m.settling(),
                 "provisional": m.provisional_spaces().iter().map(|s| s.0).collect::<Vec<_>>(),
                 "pending": m.pending_count(),
                 "pending_unvisited": m.pending_unvisited(),

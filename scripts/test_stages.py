@@ -45,8 +45,9 @@ their windows late, one by one, one app in reverse order and retitled, two windo
 every window goes back to its saved stage and frame, parked only on a strong or medium match,
 the Desktop takes the saved id, the active stage is never switched away, the strip comes back
 in its saved order; a minimized window un-minimized during the restore window goes quietly to
-its inactive stage, one un-minimized after it (a ctl command ends it) brings its stage
-forward; an app with no saved window goes by Apple's rule; the app that never reopens keeps
+its inactive stage; the login settles with no stage switch and ends by itself once apps are
+quiet for 20 s, the saved key window then focused, the restore's line logged and repeated by
+`log summary`; one un-minimized after it brings its stage forward; an app with no saved window goes by Apple's rule; the app that never reopens keeps
 its stage through a relaunch in the same session and loses it in the next session. Hands off
 the Mac during this phase: a click or key press ends the restore window early).
 
@@ -2546,6 +2547,8 @@ def phase_restore():
     want_restore = {w["title"]: w["restore"] for w in s["windows"] if w["role"] == "standard"}
     want_strip = [set(stage_titles(s)[n]) for n in s["strip"]]
     want_strip_n = list(s["strip"])
+    active_a = next(st for st in s["stages"] if st["number"] == s["active"])
+    want_key = next((w["title"] for w in s["windows"] if w["id"] == active_a["key"]), None)
     state_a = s
     say(f"  stages: {want}, active {sorted(want_active)}, strip {want_strip}")
     check(by_title(s)["Bravo 2"]["home"] == "pinned" and want.get(1) == {"Alpha 1", "Alpha 2"},
@@ -2630,7 +2633,7 @@ def phase_restore():
         check(re.search(rf"restore: back in its saved stage id={a1['id']} .*parked=true switched=false", log_text()) is not None,
               "placed quietly: parked, no switch (the log)")
         check(s["active"] == active_before and {base_title(x) for x in active_titles(s)} == want_active,
-              "no switch during the restore window (a focus macOS gives the un-minimized window would switch: 8F's settling)")
+              "no switch during the restore window (the login settles: a focus macOS gives the un-minimized window switches nothing)")
         strip_n = [n for n in want_strip_n if n != charlie_n]
         check(s["strip"] == strip_n, f"the strip in its saved order ({s['strip']}, saved {want_strip_n})")
         consistent("un-minimized during")
@@ -2639,10 +2642,32 @@ def phase_restore():
     inactive = [w["title"] for w in s["windows"] if w["role"] == "standard" and w["home"] not in ("pinned", s["active"])]
     check(all(by_title(s)[x]["parked"] for x in inactive), f"the inactive stages' windows are parked ({inactive})")
 
-    say("-- after the restore window (a ctl command ends it): an un-minimized window brings its stage forward")
+    say("-- settling ends by itself once apps are quiet for 20 s (8F): the saved key window has the keyboard")
+    check((s.get("restore") or {}).get("settling") is True, "the login is settling (a restart)")
+    s = wait_state(lambda x: (x.get("restore") or {}).get("restoring") is False, "the restore window ends by itself", timeout=45)
+    if check(s is not None, "the restore window ended with no user action (apps quiet 20 s)"):
+        time.sleep(1.5)  # the end's focus, at the next tick
+        s = state()
+        text = log_text()
+        ends = re.search(r'restore: the restore window ends why="apps went quiet"', text)
+        check(ends is not None, "it ended because apps went quiet (the log)")
+        switches_during = text[:ends.start()].count("stage switch") if ends else -1
+        check(switches_during == 0, f"no stage switch while the login settled ({switches_during} in the log)")
+        check(re.search(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule", text) is not None,
+              "the restore's one line is logged, no titles")
+        summary = run([BIN, "log", "summary"], timeout=15).stdout
+        check("last restore after a restart:" in summary, "`log summary` repeats the restore's line")
+        check({base_title(x) for x in active_titles(s)} == want_active and s["active"] == active_before, "the saved active stage is in front at the end")
+        key_ids = [w["id"] for w in s["windows"] if base_title(w["title"]) == want_key]
+        front = next((st for st in s["stages"] if st["number"] == s["active"]), {})
+        check(front.get("key") in key_ids, f"its saved key window ({want_key}) is the stage's key")
+        check(s.get("focused") in key_ids, f"the saved key window has the keyboard (focused {s.get('focused')}, key {key_ids})")
+        consistent("settled")
+
+    say("-- after the restore window: an un-minimized window brings its stage forward")
     do("switch", s["active"])
     s = state()
-    check((s.get("restore") or {}).get("restoring") is False, "a ctl command that acts ends the restore window")
+    check((s.get("restore") or {}).get("restoring") is False, "the restore window is over")
     os.kill(extra_pid("a"), signal.SIGHUP)
     s = wait_state(lambda x: "Alpha 2" in by_title(x), "Alpha 2 un-minimized and managed", timeout=8)
     if check(s is not None, "Alpha 2 is managed once un-minimized"):

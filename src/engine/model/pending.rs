@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use super::{Action, DisplayId, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
-use crate::engine::restore::{Restore, slot_for};
+use crate::engine::restore::{Restore, Summary, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
 
@@ -75,6 +75,13 @@ impl Model {
         self.restore.new_session
     }
 
+    /// True while the login burst settles (the restore window after a restart,
+    /// [`crate::engine::restore`]): launch-time activations, focus changes and new windows
+    /// switch no stage.
+    pub fn settling(&self) -> bool {
+        self.restore.after_restart_window()
+    }
+
     /// Closes the restore window for good (the first user action, or its time is up): no
     /// Desktop becomes provisional any more, an empty saved active stage no longer holds its
     /// place, and a window matched to an inactive stage brings it forward. Returns true when
@@ -85,17 +92,23 @@ impl Model {
         std::mem::replace(&mut self.restore.restoring, false)
     }
 
-    /// At the restore window's end: a Space shown whose active stage is still empty, its
-    /// saved windows still to come, while other stages there have windows, brings one of
-    /// those forward (never an empty front stage with cards beside it): the stage of the
-    /// window focused (`obs`), else the most recently active one, as Apple's Stage Manager
-    /// shows the app in front. The empty stage keeps waiting for its windows, with no card.
+    /// At the restore window's end (and after a give-up once it is over): a Space shown whose
+    /// active stage is still empty, its saved windows still to come or given up, while other
+    /// stages there have windows, brings one of those forward (never an empty front stage
+    /// with cards beside it): the stage of the window focused (`obs`), else the most recently
+    /// active one, as Apple's Stage Manager shows the app in front. A stage still waiting
+    /// keeps waiting for its windows, with no card.
     pub fn front_after_restore(&mut self, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
+        // A saved active stage waits only while it is active and empty.
+        let waits: Vec<StageId> = std::mem::take(&mut self.restore.front_waits);
+        self.restore.front_waits =
+            waits.into_iter().filter(|&s| self.is_active(s) && self.stage(s).is_some_and(|st| st.windows.is_empty())).collect();
         let shown: Vec<SpaceId> = self.current.values().copied().collect();
         for space in shown {
             let Some(active) = self.active_stage_in(space) else { continue };
-            if !self.stage(active).is_some_and(|s| s.windows.is_empty()) || !self.has_pending(active) {
+            let waiting = self.has_pending(active) || self.restore.front_waits.contains(&active);
+            if !self.stage(active).is_some_and(|s| s.windows.is_empty()) || !waiting {
                 continue;
             }
             let with_windows = |s: &&super::Stage| s.space == space && s.id != active && !s.windows.is_empty();
@@ -104,9 +117,88 @@ impl Model {
                 continue;
             };
             tracing::info!(stage = target.0, "restore: the saved active stage is still empty at the window's end; the most recent stage with windows comes forward");
+            self.restore.front_waits.retain(|&s| s != active);
             actions.extend(self.switch_to(target, obs));
         }
         actions
+    }
+
+    /// Notes that the active stage of `space`, empty with its saved windows still to come,
+    /// holds its place ([`Model::front_after_restore`] still lets it give way if they are
+    /// given up instead).
+    pub(crate) fn note_front_waits(&mut self, space: SpaceId) {
+        if let Some(a) = self.active_stage_in(space)
+            && self.has_pending(a)
+            && self.stage(a).is_some_and(|s| s.windows.is_empty())
+            && !self.restore.front_waits.contains(&a)
+        {
+            self.restore.front_waits.push(a);
+        }
+    }
+
+    /// When the restore window ended by itself (apps quiet, or its time up; never after a user
+    /// action): the main display's active stage's key window takes the keyboard, as it had it
+    /// when saved, unless a window shown in that stage (or pinned) has it already (it is in
+    /// front; it may be the user's). One `Focus`, nothing moves.
+    pub fn focus_after_restore(&self, obs: &Observation) -> Vec<Action> {
+        let space = self.current_space(self.main_display().id);
+        let Some(active) = self.active_stage_in(space) else { return Vec::new() };
+        let Some(key) = self.stage(active).and_then(|s| s.key.filter(|k| s.windows.contains(k))) else { return Vec::new() };
+        if self.windows.get(&key).is_none_or(|w| w.parked) {
+            return Vec::new();
+        }
+        let shown_here = |id: WindowId| {
+            self.resolve_standard(id).and_then(|w| self.windows.get(&w)).is_some_and(|w| {
+                !w.parked && (w.home == Home::Stage(active) || (w.home == Home::Pinned && (w.space == space || w.sticky)))
+            })
+        };
+        if obs.focused.is_some_and(shown_here) {
+            return Vec::new();
+        }
+        tracing::info!(id = key.0, "restore: the saved active stage's key window takes the keyboard");
+        vec![Action::Focus { id: key }]
+    }
+
+    /// The restore summed up (`seconds` since the launch): the windows back from saved
+    /// entries, their stages and Desktops, what still waits, and what went by Apple's rule.
+    pub fn restore_summary(&self, seconds: u64) -> Summary {
+        let mut stages = HashSet::new();
+        let mut spaces = HashSet::new();
+        let mut windows = 0;
+        for id in self.restored.keys() {
+            let Some(w) = self.windows.get(id) else { continue };
+            windows += 1;
+            spaces.insert(w.space);
+            if let Home::Stage(s) = w.home {
+                stages.insert(s);
+            }
+        }
+        Summary {
+            windows,
+            stages: stages.len(),
+            desktops: spaces.len(),
+            seconds,
+            pending: self.pending_count() + self.pending_unvisited(),
+            by_apple: self.restore.by_apple,
+        }
+    }
+
+    /// True when saved frames apply on the main display now (its size is the saved one, or
+    /// the file did not say); logs once why not.
+    pub(crate) fn saved_frames_fit(&mut self) -> bool {
+        let main = self.main_display().frame;
+        let fits = self.restore.frames_fit(main.w, main.h);
+        if !fits && !std::mem::replace(&mut self.restore.frames_noted, true) {
+            let (w, h) = self.restore.saved_display.unwrap_or_default();
+            tracing::info!(
+                saved_w = w,
+                saved_h = h,
+                now_w = main.w,
+                now_h = main.h,
+                "restore: the main display is not the size it had when saved; windows keep the frames their apps give them"
+            );
+        }
+        fits
     }
 
     /// True when stage `stage` holds pending windows.
@@ -159,7 +251,11 @@ impl Model {
 
     /// Saved windows about to be pending: standard ones, stamped with this session unless
     /// already pending since an earlier one.
+    /// None with `[stages] restore_after_restart` off after a restart (1.2.0: nothing waits).
     pub(crate) fn mark_pending(&self, list: &[SavedWindow]) -> Vec<SavedWindow> {
+        if self.restore.drop_missing {
+            return Vec::new();
+        }
         list.iter()
             .filter(|w| w.role == SavedRole::Standard)
             .cloned()
@@ -440,9 +536,12 @@ impl Model {
         let display: DisplayId = self.known_display(meta.display);
         let live_parked = self.display(display).parks(meta.frame);
         let sure = grade.confident();
-        let base = if sure || live_parked || meta.frame.is_degenerate() { entry.frame } else { meta.frame };
+        // Saved frames only on a main display of the saved size; a live frame in a park zone
+        // takes the saved one anyway (made safe for this display).
+        let frames = sure && self.saved_frames_fit();
+        let base = if frames || live_parked || meta.frame.is_degenerate() { entry.frame } else { meta.frame };
         let restore = self.safe_restore(base, display);
-        let original = entry.original.filter(|_| sure && same_frame(base, entry.frame));
+        let original = entry.original.filter(|_| frames && same_frame(base, entry.frame));
         let home = if sure && entry.pinned { Home::Pinned } else { Home::Stage(stage) };
         let id = meta.id;
         let mut meta = meta.clone();

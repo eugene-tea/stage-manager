@@ -71,6 +71,9 @@ pub struct StripSnapshot {
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.
     pub away: bool,
+    /// The login is settling after a restart (the restore window): cards come and go in
+    /// place, with no fade or glide, as windows go back to their stages one by one.
+    pub quiet: bool,
 }
 
 /// A switch (or reveal, merge, drop, Cmd-M) about to happen, announced before any window

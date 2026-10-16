@@ -151,6 +151,9 @@ pub struct Observer {
     events: Vec<WinEvent>,
     /// When the main thread got each app's last activation notice.
     activated_at: HashMap<i32, Instant>,
+    /// When the last regular app launched (any app, managed or not): the restore window's
+    /// settling waits for launches to stop.
+    last_launch: Option<Instant>,
 }
 
 /// The AX callback type, installed by the WM thread.
@@ -182,6 +185,7 @@ impl Observer {
             recheck: HashMap::new(),
             events: Vec::new(),
             activated_at: HashMap::new(),
+            last_launch: None,
         }
     }
 
@@ -213,6 +217,11 @@ impl Observer {
     /// When the main thread got app `pid`'s last activation notice (NSWorkspace).
     pub fn activated_at(&self, pid: i32) -> Option<Instant> {
         self.activated_at.get(&pid).copied()
+    }
+
+    /// When the last regular app launched, if one did since this observer started.
+    pub fn last_launch(&self) -> Option<Instant> {
+        self.last_launch
     }
 
     /// The bundle id of a running app, if known.
@@ -627,6 +636,7 @@ impl Observer {
         match event {
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
+                self.last_launch = Some(Instant::now());
                 let pid = app.pid;
                 let allowed = self.allowed(&app);
                 self.apps.insert(pid, app);

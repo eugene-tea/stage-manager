@@ -141,9 +141,23 @@ until used; the rest are off.
 | Keyboard shortcuts to switch, send, pin and show the strip | off |
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
-| Saved stages across restarts | always |
+| Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
+
+**After a restart.** The restore is invisible when it works and Apple's behaviour when it
+cannot match. Saved windows not on screen at launch wait, with no card, in their stages; as
+apps reopen them each goes back to its stage, at its saved frame when the main display has
+the saved size, parked only on a confident match (a doubtful one goes by Apple's rule and
+stays in view or gets a card of its own). While the login settles (until apps have been
+quiet for 20 s and the login is a minute old, the first click or key press, or 5 minutes)
+launch-time activations and new windows switch nothing and animate nothing, and cards come
+in quietly in their saved order; then the stage left in front shows with its key window
+focused, unless a window shown there already has the keyboard. At a logout, restart or
+shutdown every window comes back before apps save theirs. No apps are relaunched (that is
+macOS's "Reopen windows when logging back in") and no window moves between Desktops. Off,
+a restart starts every app in a stage of its own, as Apple's does. One log line sums it up
+(`stage-manager log summary` repeats it).
 
 ## Known gaps
 

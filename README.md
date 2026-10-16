@@ -20,7 +20,7 @@ or <code>brew install eugene-tea/tap/stage-manager</code></p>
 - Sends new windows where you want them with rules: a named stage, a new stage, or pinned to
   every stage.
 - Offers keyboard shortcuts if you want them; nothing needs one.
-- Keeps your stages across restarts, and never leaves a window hidden, even after a crash.
+- Your stages come back after a restart. No window is ever left hidden, even after a crash.
 - Keeps every option in one config file, easiest changed by asking an AI assistant.
 
 ## First launch

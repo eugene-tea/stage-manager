@@ -728,7 +728,8 @@ impl Model {
         hints: &LaunchHints,
     ) -> Vec<Action> {
         let restore_frames = frames == LaunchFrames::Saved;
-        let matched_frames = frames != LaunchFrames::Live;
+        // Saved frames only on a main display of the saved size (else the live ones).
+        let matched_frames = frames != LaunchFrames::Live && self.saved_frames_fit();
         let mut actions = Vec::new();
         let metas: HashMap<WindowId, &WindowMeta> = live.iter().map(|m| (m.id, m)).collect();
         let space = self.current_space(self.main_display().id);
@@ -872,6 +873,7 @@ impl Model {
         if (!slots.is_empty() && cards) || !self.slots.contains_key(&space) {
             self.slots.insert(space, slots);
         }
+        self.note_front_waits(space);
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions

@@ -171,6 +171,7 @@ mod app {
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
         _appearance: WorkspaceObservers,
+        _power_off: WorkspaceObservers,
         _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
@@ -689,6 +690,16 @@ mod app {
             }
         });
 
+        // The logout's head start (8F): at a logout, restart or shutdown the quit starts at
+        // once (every window back, the leftovers check, state saved), so windows are at their
+        // real frames before apps save their windows for "Reopen windows when logging back
+        // in". The system's later quit request finds it under way (one quit only, `QUITTING`);
+        // it runs after the notice returns, never inside it.
+        let power_off = apps::observe_power_off(|| {
+            tracing::info!("logout, restart or shutdown coming: quitting now, so every window is back before apps save theirs");
+            DispatchQueue::main().exec_async(quit);
+        });
+
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.
         let permissions = PermissionState::current();
         tracing::info!(
@@ -742,6 +753,7 @@ mod app {
             _workspace: workspace,
             _spaces: spaces,
             _appearance: appearance,
+            _power_off: power_off,
             _input: input_monitor,
             _timer: timer,
         };

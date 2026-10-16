@@ -36,6 +36,9 @@ impl Model {
     /// window is open, and switched to after it, as `native` joins an app's stage; a
     /// provisional Space first becomes the saved Desktop the window belongs to. A window
     /// another rule places takes its confident match out of the pending ones.
+    ///
+    /// While the login burst settles after a restart ([`Model::settling`]) no window switches
+    /// stages: one whose stage would come forward is parked in it instead (its card shows).
     pub fn add_window(
         &mut self,
         meta: WindowMeta,
@@ -98,6 +101,10 @@ impl Model {
             }
         } else {
             self.forget_pending_match(&meta, space);
+        }
+        if decision.action == RuleAction::Native && self.restore.restoring {
+            // Matched no saved window: Apple's rule (counted for the restore's line).
+            self.restore.by_apple += 1;
         }
         // Adoption may have renamed the Space.
         let space = self.current_space(display);
@@ -178,7 +185,7 @@ impl Model {
                 actions.push(Action::SetFrame { id, frame: restore });
             }
         } else if let Home::Stage(s) = home {
-            if follow {
+            if follow && !self.settling() {
                 actions.extend(self.switch_to(s, obs));
                 return actions;
             }
@@ -955,8 +962,14 @@ impl Model {
     /// else the most recently active stage holding a window of the app. With
     /// [`AppWindows::AllAtOnce`] nothing happens while the active stage holds a window of the
     /// app (or the app has a pinned window); with [`AppWindows::OneAtATime`] the focused
-    /// window's stage wins even then.
+    /// window's stage wins even then. Nothing while the login burst settles
+    /// ([`Model::settling`]).
     pub fn app_activated(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
+        if self.settling() {
+            // A launch-time activation at login is the app's, not the user's (a click or a
+            // key press would have ended the settling).
+            return Vec::new();
+        }
         let display = self.current_display(obs);
         let space = self.current_space(display);
         let active = self.ensure_active(space);
@@ -1037,7 +1050,12 @@ impl Model {
     /// A window got focus (for example through ⌘` or a click on a sliver). If it sits in an
     /// inactive stage of a Space shown now, switch to that stage so the focused window is
     /// never left parked. Focus on another Space's window is left to the Space change.
+    /// Nothing while the login burst settles ([`Model::settling`]).
     pub fn window_focused(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
+        if self.settling() {
+            // As for an activation: at login a focus is the app's, not the user's.
+            return Vec::new();
+        }
         match self.resolve_standard(id).and_then(|w| self.stage_of(w)) {
             Some(s) if !self.is_active(s) => self.switch_to(s, obs),
             _ => Vec::new(),

@@ -166,7 +166,17 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   5 minutes after a launch (the restore window, `src/engine/restore.rs`; it ends sooner at
   the first click, key press, card or Dock click) has a window matching a saved window of an
   inactive stage placed into that stage (a card, parked) rather than switched to: the
-  restore cannot tell it from the app reopening its saved windows.
+  restore cannot tell it from the app reopening its saved windows. 8F: it ends sooner too,
+  once apps have been quiet 20 s and the login is a minute old.
+- 8F settling: after a restart, while the login settles, a window matching no saved one
+  (or a doubtful match) goes by Apple's rule without the switch: into its app's stage, or a
+  stage of its own as a card, never brought forward; a launch-time activation or focus
+  switches nothing. Without the input monitor (no clicks or keys seen) settling ends only
+  when apps go quiet or after 5 minutes; the end's focus never takes the keyboard from a
+  window shown in the front stage.
+- 8F logout head start: at `willPowerOffNotification` the app quits at once (every window
+  back, state saved). A logout another app then cancels leaves Stage Manager quit, every
+  window on screen; it is opened again by hand (or at the next login).
 
 ## Out of scope (prototype)
 

@@ -29,12 +29,31 @@
 //! ([`crate::engine::model::Model::front_after_restore`]): never an empty front stage with
 //! cards beside it.
 //!
+//! **Settling** (round 8F): after a restart the restore window is also when the login burst
+//! settles. Launch-time activations, focus changes and new windows switch no stage and
+//! animate nothing ([`crate::engine::model::Model::settling`]); cards come in quietly. Besides
+//! a user action and [`WINDOW`], it ends once apps have been quiet for [`SETTLE_QUIET`] (no app
+//! launched, no window back from a saved entry) and at least [`SETTLE_AFTER_LOGIN`] after
+//! the login ([`Settling`]). A window matching no saved one (or a doubtful match) still
+//! goes by Apple's rule, only without the switch: into its app's stage, or a stage of its own
+//! with its card. Then the saved active stage shows and its key window takes the
+//! keyboard unless a window shown there has it already
+//! ([`crate::engine::model::Model::focus_after_restore`]), and one line sums the restore up
+//! ([`Summary`]).
+//!
+//! **Frames** come back from `state.json` only on a main display of the saved size
+//! ([`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//!
+//! **Off** (`[stages] restore_after_restart = false`): after a restart nothing waits
+//! ([`Restore::off_after_restart`]): saved windows not on screen are dropped as 1.2.0 did.
+//!
 //! **Accepted:** an app that opens a window by itself, with no user action, during the
 //! restore window (the first five minutes after a launch, until the first click or key
 //! press) has a window matching a saved one in an inactive stage parked there (a card),
 //! not switched to; the restore cannot tell it from the app reopening its saved windows.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::model::StageId;
@@ -45,6 +64,13 @@ pub const QUIET: Duration = Duration::from_secs(60);
 
 /// The restore window's longest life after the launch (the design's cap).
 pub const WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Settling ends once apps have been this quiet (no launch, no window back from a saved
+/// entry)...
+pub const SETTLE_QUIET: Duration = Duration::from_secs(20);
+
+/// ...and no sooner than this after the login (apps are slow to reopen windows at login).
+pub const SETTLE_AFTER_LOGIN: Duration = Duration::from_secs(60);
 
 /// What the model knows of the restore.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,23 +85,163 @@ pub struct Restore {
     /// saved Desktops are recognized at an arrival by confident matches (title, frame,
     /// fingerprint), all session.
     pub new_session: bool,
+    /// `[stages] restore_after_restart = false` after a restart: saved windows not on screen
+    /// are not kept pending; their stages go as in 1.2.0.
+    pub drop_missing: bool,
+    /// The main display's size (points, rounded) when `state.json` was saved, if it says:
+    /// saved frames are used only on a main display of this size.
+    pub saved_display: Option<(i64, i64)>,
+    /// Why saved frames are not used was logged already (once a run).
+    pub frames_noted: bool,
+    /// Windows placed by Apple's rule while the restore window was open (they matched no
+    /// saved window), for the restore's line.
+    pub by_apple: usize,
+    /// Saved active stages that kept their place while empty, their windows still to come:
+    /// emptied for good (given up), they still give way to a stage with windows
+    /// ([`crate::engine::model::Model::front_after_restore`]).
+    pub front_waits: Vec<StageId>,
 }
 
 impl Restore {
     /// A launch in another window server session than the file's, now `session`.
     pub fn after_restart(session: &str) -> Self {
-        Self { session: session.to_string(), restoring: true, new_session: true }
+        Self { session: session.to_string(), restoring: true, new_session: true, ..Self::default() }
     }
 
     /// A launch in the file's own session (or one that cannot be told apart), now `session`.
     pub fn same_session(session: &str) -> Self {
-        Self { session: session.to_string(), restoring: true, new_session: false }
+        Self { session: session.to_string(), restoring: true, new_session: false, ..Self::default() }
+    }
+
+    /// A launch after a restart with `[stages] restore_after_restart = false`: no restore
+    /// window, nothing kept pending (1.2.0's behaviour), now `session`.
+    pub fn off_after_restart(session: &str) -> Self {
+        Self { session: session.to_string(), drop_missing: true, ..Self::default() }
+    }
+
+    /// The same, with the main display's size when saved (`w`×`h` points).
+    pub fn with_display(mut self, saved: Option<(f64, f64)>) -> Self {
+        self.saved_display = saved.filter(|(w, h)| w.is_finite() && h.is_finite()).map(|(w, h)| (w.round() as i64, h.round() as i64));
+        self
     }
 
     /// True while a Desktop made from an empty screen is provisional and an empty saved
     /// active stage holds its place: the restore window after a restart.
     pub fn after_restart_window(&self) -> bool {
         self.restoring && self.new_session
+    }
+
+    /// True when saved frames apply on a main display `w`×`h` points: the file's display had
+    /// that size, or the file does not say.
+    pub fn frames_fit(&self, w: f64, h: f64) -> bool {
+        self.saved_display.is_none_or(|d| d == (w.round() as i64, h.round() as i64))
+    }
+}
+
+/// Why the restore window ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// A click, a key press, a card click, a hotkey, a ctl command that acts: the user's
+    /// focus and stage stand.
+    User,
+    /// ⌘Tab or ⌘`: the app switch it starts brings its own stage (nothing comes forward on
+    /// our own).
+    Switcher,
+    /// Apps went quiet ([`SETTLE_QUIET`]).
+    Quiet,
+    /// [`WINDOW`] after the launch.
+    TimeUp,
+}
+
+impl End {
+    /// True when the end is no user's doing: the saved key window takes the keyboard.
+    pub fn by_itself(self) -> bool {
+        matches!(self, End::Quiet | End::TimeUp)
+    }
+
+    /// True when a stage with windows may come forward for an empty saved active stage
+    /// (not when an app switch is on its way: its own switch wins).
+    pub fn brings_front(self) -> bool {
+        self != End::Switcher
+    }
+}
+
+/// The clock of the restore window's ends by itself (pure: the platform feeds it times).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settling {
+    /// The launch.
+    started: Instant,
+    /// The login (the launch when unknown, or a login said to be later than the launch).
+    login: Instant,
+    /// The last app launch or window back from a saved entry (the launch at first).
+    busy: Instant,
+}
+
+impl Settling {
+    /// Opens at `launch`; `login`: when the login session began, if known.
+    pub fn new(launch: Instant, login: Option<Instant>) -> Self {
+        let login = login.filter(|l| *l <= launch).unwrap_or(launch);
+        Self { started: launch, login, busy: launch }
+    }
+
+    /// An app launched, or a window went back to its saved stage, at `at`.
+    pub fn busy(&mut self, at: Instant) {
+        self.busy = self.busy.max(at);
+    }
+
+    /// Whether the window ends by itself at `now`, and why.
+    pub fn due(&self, now: Instant) -> Option<End> {
+        if now.saturating_duration_since(self.started) >= WINDOW {
+            Some(End::TimeUp)
+        } else if now.saturating_duration_since(self.busy) >= SETTLE_QUIET
+            && now.saturating_duration_since(self.login) >= SETTLE_AFTER_LOGIN
+        {
+            Some(End::Quiet)
+        } else {
+            None
+        }
+    }
+
+    /// How long since the launch, at `now`.
+    pub fn age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.started)
+    }
+}
+
+/// The restore summed up in one line, no titles (the log at its end, `log summary`):
+/// "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Windows back from a saved entry.
+    pub windows: usize,
+    /// The stages they went into.
+    pub stages: usize,
+    /// The Desktops of those.
+    pub desktops: usize,
+    /// Seconds from the launch to the restore window's end.
+    pub seconds: u64,
+    /// Saved windows still waiting (all Desktops).
+    pub pending: usize,
+    /// Windows that matched no saved one, placed by Apple's rule meanwhile.
+    pub by_apple: usize,
+}
+
+/// What [`Summary`]'s line starts with.
+pub const SUMMARY_PREFIX: &str = "restore: ";
+
+impl fmt::Display for Summary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+        write!(
+            f,
+            "{SUMMARY_PREFIX}{} into {} on {} in {} s; {} pending; {} by Apple's rule",
+            n(self.windows, "window"),
+            n(self.stages, "stage"),
+            n(self.desktops, "Desktop"),
+            self.seconds,
+            self.pending,
+            self.by_apple
+        )
     }
 }
 
@@ -196,6 +362,73 @@ mod tests {
         q.prune(|b| b == "com.example.b");
         assert_eq!(q.len(), 1);
         assert_eq!(q.settled(t0 + QUIET), ["com.example.b"]);
+    }
+
+    #[test]
+    fn settling_ends_after_a_quiet_spell_past_the_login_minute() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        // Launched 5 s after the login: quiet from the start, but not before a minute after it.
+        let c = Settling::new(s(5), Some(t0));
+        assert_eq!(c.due(s(30)), None, "quiet 25 s, but only 30 s after the login");
+        assert_eq!(c.due(s(60)), Some(End::Quiet));
+        // Apps launching (or windows coming back) push the quiet end on.
+        let mut c = Settling::new(s(5), Some(t0));
+        c.busy(s(50));
+        assert_eq!(c.due(s(69)), None);
+        assert_eq!(c.due(s(70)), Some(End::Quiet));
+        c.busy(s(40));
+        assert_eq!(c.due(s(70)), Some(End::Quiet), "an earlier event never moves the clock back");
+        // Busy all along: the cap.
+        let mut c = Settling::new(s(5), Some(t0));
+        for k in (10..400).step_by(10) {
+            c.busy(s(k));
+        }
+        assert_eq!(c.due(s(5) + WINDOW - Duration::from_secs(1)), None);
+        assert_eq!(c.due(s(5) + WINDOW), Some(End::TimeUp));
+        // Login unknown (or said to be after the launch): the launch stands for it.
+        let c = Settling::new(s(100), None);
+        assert_eq!(c.due(s(120)), None, "20 s quiet, but a minute after the launch is needed");
+        assert_eq!(c.due(s(160)), Some(End::Quiet));
+        assert_eq!(Settling::new(s(100), Some(s(500))).due(s(160)), Some(End::Quiet));
+        // A relaunch long after the login: quiet 20 s is enough.
+        let c = Settling::new(s(4000), Some(t0));
+        assert_eq!(c.due(s(4019)), None);
+        assert_eq!(c.due(s(4020)), Some(End::Quiet));
+        assert_eq!(c.age(s(4020)), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn how_the_window_ended_decides_the_focus_and_the_front() {
+        assert!(End::Quiet.by_itself() && End::TimeUp.by_itself());
+        assert!(!End::User.by_itself() && !End::Switcher.by_itself(), "the user's focus is never taken");
+        assert!(End::User.brings_front() && End::Quiet.brings_front() && End::TimeUp.brings_front());
+        assert!(!End::Switcher.brings_front(), "an app switch brings its own stage");
+    }
+
+    #[test]
+    fn saved_frames_only_on_a_display_of_the_saved_size() {
+        let r = Restore::after_restart("s").with_display(Some((2560.0, 1440.0)));
+        assert!(r.frames_fit(2560.0, 1440.0));
+        assert!(r.frames_fit(2560.2, 1439.8), "rounded points");
+        assert!(!r.frames_fit(1512.0, 982.0));
+        assert!(Restore::after_restart("s").frames_fit(1512.0, 982.0), "a file that does not say: as before");
+        assert!(Restore::after_restart("s").with_display(Some((f64::NAN, 1.0))).frames_fit(1.0, 1.0));
+    }
+
+    #[test]
+    fn the_summary_line_has_counts_and_no_titles() {
+        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1 };
+        assert_eq!(s.to_string(), "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule");
+        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0 };
+        assert_eq!(one.to_string(), "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule");
+    }
+
+    #[test]
+    fn off_after_a_restart_keeps_nothing_waiting() {
+        let r = Restore::off_after_restart("s");
+        assert!(!r.restoring && !r.new_session && r.drop_missing && !r.after_restart_window());
+        assert!(!Restore::after_restart("s").drop_missing && !Restore::same_session("s").drop_missing);
     }
 
     #[test]

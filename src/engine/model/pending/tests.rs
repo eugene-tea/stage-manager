@@ -180,11 +180,17 @@ fn a_doubtful_window_is_never_parked() {
     add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
     assert_eq!(m.current_space(MAIN).0, 5);
     let a = add(&mut m, win(31, 30, CHAT, "Untitled", DEFAULT));
-    assert!(!parks(&a, 31), "{a:?}");
-    assert_eq!(m.restored_grade(w(31)), None);
-    assert_eq!(number_of(&m, 31), Some(4), "a stage of its own, by Apple's rule");
-    assert!(m.window(w(31)).is_some_and(|x| !x.parked));
+    assert_eq!(m.restored_grade(w(31)), None, "{a:?}");
+    assert_eq!(number_of(&m, 31), Some(4), "a stage of its own, by Apple's rule (a card while the login settles)");
+    assert!(m.strip().iter().any(|c| c.windows == [w(31)]), "never hidden in either saved stage");
     assert_eq!(m.pending_count(), 2, "both saved windows still wait");
+    // After the restore window Apple's rule brings it forward, shown.
+    let mut after = m.clone();
+    after.end_restore();
+    after.remove_window(w(31));
+    let a = add(&mut after, win(33, 30, CHAT, "Untitled", DEFAULT));
+    assert!(!parks(&a, 33) && after.window(w(33)).is_some_and(|x| !x.parked), "{a:?}");
+    assert_eq!(after.restored_grade(w(33)), None);
     // At one of the saved frames the frame tells them apart: strong, back in its stage.
     let a = add(&mut m, win(32, 30, CHAT, "Untitled", F_RECIPES));
     assert_eq!(number_of(&m, 32), Some(3));
@@ -540,8 +546,8 @@ fn a_new_window_at_the_saved_frame_with_another_name_is_not_that_window() {
     // still awaited; nothing parked.
     let mut m = adopted();
     let a = add(&mut m, win(31, 40, BROWSER, "Start Page", F_RECIPES));
-    assert_eq!(m.restored_grade(w(31)), None);
-    assert!(!parks(&a, 31) && m.window(w(31)).is_some_and(|x| !x.parked));
+    assert_eq!(m.restored_grade(w(31)), None, "{a:?}");
+    assert!(m.strip().iter().any(|c| c.windows == [w(31)]), "a stage of its own (a card while the login settles), not the saved page's");
     assert_eq!(m.pending_of(m.stages_in(m.current_space(MAIN)).nth(2).expect("browser stage").id).len(), 1, "Recipes still awaited");
     // A file manager's new window where the pending "Downloads" was.
     let finder = "com.example.files";
@@ -551,8 +557,8 @@ fn a_new_window_at_the_saved_frame_with_another_name_is_not_that_window() {
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
     let a = add(&mut m, win(32, 80, finder, "Recents", F_NOTES));
-    assert_eq!(m.restored_grade(w(32)), None);
-    assert!(!parks(&a, 32));
+    assert_eq!(m.restored_grade(w(32)), None, "{a:?}");
+    assert!(m.strip().iter().any(|c| c.windows == [w(32)]));
     assert_eq!(m.pending_bundles().iter().filter(|b| *b == finder).count(), 1, "Downloads still awaited");
 }
 
@@ -602,12 +608,16 @@ fn an_adoption_keeps_the_strip_shown() {
     add(&mut m, win(53, 62, "com.example.paint", "Canvas", F_TEAM));
     let cards = |m: &Model| m.strip().iter().map(|c| c.windows.iter().map(|x| x.0).collect::<Vec<_>>()).collect::<Vec<_>>();
     // Not the recency order (Memo was used after Player).
-    assert_eq!(cards(&m), [vec![51], vec![52]]);
+    // Player took the empty front stage; Memo and Canvas, opened while the login settles,
+    // came in as cards (not brought forward).
+    assert_eq!(cards(&m), [vec![52], vec![53]]);
+    let front = m.main_active_stage();
     add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
     assert_eq!(m.current_space(MAIN).0, 5);
     // The live cards as they were (not rebuilt from the pending stages' slots, then refilled
-    // by recency); the editor's stage, inactive, enters below.
-    assert_eq!(cards(&m), [vec![51], vec![52], vec![23]]);
+    // by recency); the editor's stage, inactive (Player's shows), enters below.
+    assert_eq!(cards(&m), [vec![52], vec![53], vec![23]]);
+    assert_eq!(m.main_active_stage(), front);
 }
 
 #[test]
@@ -635,9 +645,10 @@ fn a_parked_voter_goes_back_to_its_saved_stage_at_its_frame() {
     let mut m = restoring(vec![d6]);
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
     add(&mut m, win(41, 30, CHAT, "Family", F_TEAM));
-    // Another app by Apple's rule: its stage comes forward, Family's is parked.
+    // Another app by Apple's rule while the login settles: a card of its own, not brought
+    // forward; Family stays in front.
     add(&mut m, win(51, 60, "com.example.music", "Player", DEFAULT));
-    assert!(m.window(w(41)).is_some_and(|x| x.parked));
+    assert!(m.window(w(41)).is_some_and(|x| !x.parked) && m.window(w(51)).is_some_and(|x| x.parked));
     let a = add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
     assert_eq!(m.current_space(MAIN).0, 6);
     // Player's stage (1), then the saved ones in saved order: Holidays (2), Family (3); the
@@ -645,8 +656,8 @@ fn a_parked_voter_goes_back_to_its_saved_stage_at_its_frame() {
     assert_eq!((number_of(&m, 51), number_of(&m, 42), number_of(&m, 41)), (Some(1), Some(2), Some(3)));
     assert_eq!(m.stages_in(m.current_space(MAIN)).count(), 3);
     assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((true, F_TEAM)), "parked in its saved stage, its frame kept: {a:?}");
-    assert_eq!(m.main_active_stage(), m.stage_of(w(51)), "the stage shown stays in front");
-    assert!(m.window(w(51)).is_some_and(|x| !x.parked));
+    assert_eq!(m.main_active_stage(), m.stage_of(w(42)), "the saved active stage in front");
+    assert!(m.window(w(42)).is_some_and(|x| !x.parked) && m.window(w(51)).is_some_and(|x| x.parked));
     assert_eq!(m.restored_grade(w(41)), Some(Grade::Strong));
 }
 
@@ -799,4 +810,166 @@ fn voters_go_back_at_their_saved_frames() {
     assert_eq!(m.current_space(MAIN).0, 6);
     assert!(parks(&a, 41), "{a:?}");
     assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((true, F_TEAM)));
+}
+
+// ----- 8F: settling, the end's focus, the restore's line, the frame gate, the setting -----
+
+fn restoring_with(spaces: Vec<SavedSpace>, restore: Restore) -> Model {
+    let mut file = StateFile { session: Some("A".into()), ..StateFile::single(SavedSpace::default()) };
+    file.spaces = spaces;
+    file.start_new_session();
+    let (file, _) = file.for_session(Some("B"));
+    let mut m = model();
+    m.set_restore(restore);
+    m.restore_spaces(file.spaces);
+    m
+}
+
+const MAIL: &str = "com.example.mail";
+
+#[test]
+fn while_the_login_settles_nothing_switches_stages() {
+    let mut m = adopted();
+    assert!(m.settling());
+    let editor = m.main_active_stage();
+    // Chat reopens into its inactive stage: parked, no switch.
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert!(parks(&a, 21) && !switches(&a), "{a:?}");
+    // An app with no saved window: Apple's rule puts it in a stage of its own, parked there
+    // with its card, not switched to.
+    let a = add_focused(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
+    assert!(parks(&a, 31) && !switches(&a), "a new stage, not brought forward: {a:?}");
+    assert_ne!(m.stage_of(w(31)), editor);
+    assert!(m.strip().iter().any(|c| c.windows.contains(&w(31))), "its card shows");
+    // Launch-time activations and focus changes switch nothing.
+    assert!(m.app_activated(30, &focused(21)).is_empty());
+    assert!(m.app_activated(60, &focused(31)).is_empty());
+    assert!(m.window_focused(w(31), &focused(31)).is_empty());
+    assert_eq!(m.main_active_stage(), editor, "the saved active stage stays in front");
+    // After the window, the user's activation switches as Apple's does.
+    assert!(m.end_restore());
+    assert!(!m.settling());
+    let a = m.app_activated(60, &focused(31));
+    assert!(switches(&a) && m.main_active_stage() == m.stage_of(w(31)), "{a:?}");
+}
+
+#[test]
+fn a_same_session_launch_does_not_hold_switches() {
+    let mut m = model();
+    m.set_restore(Restore::same_session("A"));
+    m.restore_spaces(vec![desktop_5()]);
+    m.arrive(MAIN, &[win(23, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
+    assert!(m.restoring() && !m.settling(), "settling is the login's, after a restart");
+    let a = add_focused(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
+    assert!(switches(&a), "Apple's rule as in 1.2.0: {a:?}");
+}
+
+#[test]
+fn the_saved_key_window_takes_the_keyboard_at_the_end() {
+    let mut m = adopted();
+    add(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    let key = m.main_active_stage().and_then(|s| m.stage(s)).and_then(|s| s.key);
+    assert_eq!(key, Some(w(23)), "Plan.txt was the saved key");
+    m.end_restore();
+    let focus = |id: Option<u32>| m.focus_after_restore(&Observation { focused: id.map(w), ..Observation::default() });
+    assert_eq!(focus(None), [Action::Focus { id: w(23) }], "nothing focused: the saved key window");
+    assert_eq!(focus(Some(21)), [Action::Focus { id: w(23) }], "a parked window focused at launch: the key window");
+    assert!(focus(Some(23)).is_empty(), "already there");
+    assert!(focus(Some(24)).is_empty(), "a window shown in front has the keyboard: never taken from it");
+}
+
+#[test]
+fn the_restore_line_counts_windows_stages_and_desktops() {
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    add(&mut m, win(22, 40, BROWSER, "Recipes", DEFAULT));
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
+    let s = m.restore_summary(41);
+    assert_eq!(s.to_string(), "restore: 3 windows into 3 stages on 1 Desktop in 41 s; 1 pending; 1 by Apple's rule");
+    // After the window nothing more counts as the restore's.
+    m.end_restore();
+    add(&mut m, win(32, 61, "com.example.other", "Other", DEFAULT));
+    assert_eq!(m.restore_summary(41).by_apple, 1);
+}
+
+#[test]
+fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
+    // Saved on a 2560×1440 main display; the test display is 1440×900.
+    let mut m = restoring_with(vec![desktop_5()], Restore::after_restart("B").with_display(Some((2560.0, 1440.0))));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let a = add(&mut m, win(21, 30, CHAT, "Team", DEFAULT));
+    assert!(parks(&a, 21), "still back in its stage");
+    assert_eq!(m.window(w(21)).map(|x| x.restore), Some(DEFAULT), "the frame its app gave it");
+    let a = add(&mut m, win(23, 50, EDITOR, "Plan.txt", DEFAULT));
+    assert_eq!(set_frame(&a, 23), None, "a shown window is not moved: {a:?}");
+    assert_eq!(m.window(w(23)).map(|x| x.restore), Some(DEFAULT));
+    // A window reopened in the park zone still comes out of it.
+    let corner = park_frame(Size::new(640.0, 420.0), FRAME);
+    add(&mut m, win(24, 50, EDITOR, "Notes.txt", corner));
+    assert!(m.window(w(24)).is_some_and(|x| !parked_at(x.restore)));
+    // The same display size: the saved frames.
+    let mut m = restoring_with(vec![desktop_5()], Restore::after_restart("B").with_display(Some((1440.0, 900.0))));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", DEFAULT));
+    assert_eq!(m.window(w(21)).map(|x| x.restore), Some(F_TEAM));
+}
+
+#[test]
+fn restore_after_restart_off_keeps_nothing_waiting_as_before() {
+    // The setting off: a launch after a restart behaves as 1.2.0 did.
+    let mut m = restoring_with(vec![desktop_5()], Restore::off_after_restart("B"));
+    m.arrive(MAIN, &[win(21, 30, CHAT, "Team", F_TEAM)], &[], &LaunchHints::default());
+    assert!(!m.restoring() && !m.settling() && m.provisional_spaces().is_empty());
+    assert_eq!(m.current_space(MAIN).0, 5, "the saved Desktop recognized by its window");
+    assert_eq!(m.pending_count(), 0, "nothing waits");
+    assert_eq!(names(&m), [None, Some("Chat".into())], "the browser's stage, with no window on screen, is gone");
+    let file = m.to_state();
+    assert!(file.spaces.iter().flat_map(|s| &s.stages).flat_map(|s| &s.windows).all(|w| w.pending.is_none()));
+    assert_eq!(file.spaces[0].standard_windows(), 1);
+    // A window opened later goes by Apple's rule, switched to.
+    let a = add_focused(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    assert!(m.restored_grade(w(22)).is_none() && m.window(w(22)).is_some_and(|x| !x.parked), "Apple's rule, shown: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(22)));
+}
+
+#[test]
+fn an_empty_saved_active_stage_given_up_still_gives_way() {
+    // The review of 1e15dcf: the editor's windows given up (its app settled) before the
+    // window's end left an empty front stage with cards beside it.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    let editor = m.main_active_stage().expect("the saved active stage");
+    m.expire_pending(&[EDITOR.to_string()]);
+    assert!(!m.has_pending(editor) && m.main_active_stage() == Some(editor), "empty, still in front");
+    m.end_restore();
+    let a = m.front_after_restore(&Observation::default());
+    assert!(switches(&a) && m.main_active_stage() != Some(editor), "a stage with windows comes forward: {a:?}");
+    assert!(m.strip().iter().all(|c| !c.windows.is_empty()), "no empty card");
+
+    // Given up after the window's end (the front not brought forward then): the next pass does.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    let editor = m.main_active_stage().expect("the saved active stage");
+    m.end_restore();
+    m.expire_pending(&[EDITOR.to_string()]);
+    let a = m.front_after_restore(&Observation::default());
+    assert!(switches(&a) && m.main_active_stage() == m.stage_of(w(21)), "{a:?}");
+    assert_ne!(m.main_active_stage(), Some(editor));
+
+    // One that got a window waits no more: it stays in front.
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    let editor = m.main_active_stage();
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    m.expire_pending(&[EDITOR.to_string()]);
+    m.end_restore();
+    assert!(m.front_after_restore(&Observation::default()).is_empty());
+    assert_eq!(m.main_active_stage(), editor);
 }
