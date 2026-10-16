@@ -2,15 +2,20 @@
 //! terminate / activate / hide / unhide notifications, observed on the main thread and handed
 //! on as plain Rust values; the active Space changing (`activeSpaceDidChangeNotification`);
 //! and hiding or unhiding an app by its pid (`NSRunningApplication`, public API, any thread),
-//! for `[windows] hide_parked_apps`; a logout, restart or shutdown coming
-//! (`willPowerOffNotification`); when the login session began (`loginwindow`'s start).
+//! for `[windows] hide_parked_apps`; a logout, restart or shutdown coming or cancelled
+//! ([`observe_logout`]: `loginwindow`'s distributed notifications and notify(3) names, and
+//! `willPowerOffNotification`); when the login session began (`loginwindow`'s start).
 
+use std::cell::RefCell;
+use std::ffi::{CString, c_char, c_int};
 use std::ptr::NonNull;
 use std::time::Instant;
 
-use block2::RcBlock;
+use block2::{Block, RcBlock};
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
     NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidHideApplicationNotification,
@@ -18,9 +23,12 @@ use objc2_app_kit::{
     NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
-    NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue, NSString,
+    MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName,
+    NSNotificationSuspensionBehavior, NSObject, NSOperationQueue, NSString,
 };
 use serde::Serialize;
+
+use crate::engine::stand_down::{Channel, Signal, signals_to_observe};
 
 /// A running application.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -147,19 +155,159 @@ pub fn observe_space_changes(sink: impl Fn() + 'static) -> WorkspaceObservers {
     WorkspaceObservers { center, tokens: vec![token] }
 }
 
-/// Observes `NSWorkspaceWillPowerOffNotification` on the main queue: the user logs out,
-/// restarts or shuts down, before apps are asked to quit (they save their windows then).
-/// Calls `sink` each time.
-pub fn observe_power_off(sink: impl Fn() + 'static) -> WorkspaceObservers {
-    let center = NSWorkspace::sharedWorkspace().notificationCenter();
-    let main_queue = NSOperationQueue::mainQueue();
-    let block = RcBlock::new(move |_note: NonNull<NSNotification>| sink());
-    // SAFETY: the notification name is a valid framework static; the block runs on the
-    // main queue only, where `sink` lives.
-    let token = unsafe {
-        center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceWillPowerOffNotification), None, Some(&main_queue), &block)
-    };
-    WorkspaceObservers { center, tokens: vec![token] }
+/// A logout signal's handler: its name and meaning, on the main thread.
+type LogoutSink = std::rc::Rc<dyn Fn(&str, Signal)>;
+
+/// The distributed logout names listened for (with what each says) and their handler.
+type LogoutNames = (Vec<(String, Signal)>, LogoutSink);
+
+thread_local! {
+    /// What [`LogoutListener`] hands its notifications to.
+    static LOGOUT_SINK: RefCell<Option<LogoutNames>> = const { RefCell::new(None) };
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; LogoutListener does not implement Drop.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SMLogoutListener"]
+    struct LogoutListener;
+
+    // SAFETY: NSObjectProtocol has no safety requirements.
+    unsafe impl NSObjectProtocol for LogoutListener {}
+
+    impl LogoutListener {
+        // SAFETY: a notification observer's signature, `- (void)name:(NSNotification *)note`.
+        #[unsafe(method(logoutSignal:))]
+        fn logout_signal(&self, note: &NSNotification) {
+            let name = note.name().to_string();
+            let sink = LOGOUT_SINK.with(|s| {
+                s.borrow().as_ref().and_then(|(names, sink)| names.iter().find(|(n, _)| *n == name).map(|(_, sig)| (*sig, sink.clone())))
+            });
+            if let Some((signal, sink)) = sink {
+                sink(&name, signal);
+            }
+        }
+    }
+);
+
+impl LogoutListener {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: NSObject's init on a freshly allocated instance.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+unsafe extern "C" {
+    /// notify(3): calls `handler` on `queue` each time `name` is posted.
+    fn notify_register_dispatch(name: *const c_char, out_token: *mut c_int, queue: &DispatchQueue, handler: &Block<dyn Fn(c_int)>) -> u32;
+    /// notify(3): stops a registration.
+    fn notify_cancel(token: c_int) -> u32;
+}
+
+/// Keeps the logout observers alive; dropping it unregisters them.
+pub struct LogoutObservers {
+    distributed: Option<(Retained<NSDistributedNotificationCenter>, Retained<LogoutListener>)>,
+    workspace: Option<WorkspaceObservers>,
+    notify: Vec<c_int>,
+}
+
+impl Drop for LogoutObservers {
+    fn drop(&mut self) {
+        if let Some((center, listener)) = &self.distributed {
+            // SAFETY: the listener was added to this center; it is removed from every name.
+            unsafe { center.removeObserver_name_object(listener, None, None) };
+        }
+        for token in &self.notify {
+            // SAFETY: each token came from notify_register_dispatch and is cancelled once.
+            unsafe { notify_cancel(*token) };
+        }
+        LOGOUT_SINK.with(|s| s.borrow_mut().take());
+    }
+}
+
+/// The test's own logout note: `STAGE_MANAGER_LOGOUT_NOTE`, honoured only with
+/// `STAGE_MANAGER_TEST` set (a logout simulated without touching other apps).
+fn logout_note(test: Option<std::ffi::OsString>, note: Option<String>) -> Option<String> {
+    test?;
+    note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
+}
+
+/// Observes every logout signal on the main thread ([`signals_to_observe`]: `loginwindow`'s
+/// distributed notifications, delivered at once even while the app is not active; its notify(3)
+/// names; `NSWorkspaceWillPowerOffNotification`), or only the test's own note
+/// (`STAGE_MANAGER_LOGOUT_NOTE` with `STAGE_MANAGER_TEST`). Calls `sink` with the signal's
+/// name and meaning each time one arrives. A name that cannot be registered is logged and
+/// skipped.
+pub fn observe_logout(mtm: MainThreadMarker, sink: impl Fn(&str, Signal) + 'static) -> LogoutObservers {
+    let note = logout_note(std::env::var_os("STAGE_MANAGER_TEST"), std::env::var("STAGE_MANAGER_LOGOUT_NOTE").ok());
+    if let Some(note) = &note {
+        tracing::info!(note = %note, "logout signals: the test's own note only (STAGE_MANAGER_LOGOUT_NOTE)");
+    }
+    let sink: LogoutSink = std::rc::Rc::new(sink);
+    let signals = signals_to_observe(note.as_deref());
+    let mut out = LogoutObservers { distributed: None, workspace: None, notify: Vec::new() };
+
+    let distributed: Vec<(String, Signal)> =
+        signals.iter().filter(|(c, _, _)| *c == Channel::Distributed).map(|(_, n, s)| (n.clone(), *s)).collect();
+    if !distributed.is_empty() {
+        let center = NSDistributedNotificationCenter::defaultCenter();
+        let listener = LogoutListener::new(mtm);
+        for (name, _) in &distributed {
+            // SAFETY: the listener answers `logoutSignal:` with a notification observer's
+            // signature; it is kept alive (and removed) by the returned value.
+            unsafe {
+                center.addObserver_selector_name_object_suspensionBehavior(
+                    &listener,
+                    sel!(logoutSignal:),
+                    Some(&NSString::from_str(name)),
+                    None,
+                    NSNotificationSuspensionBehavior::DeliverImmediately,
+                );
+            }
+        }
+        LOGOUT_SINK.with(|s| *s.borrow_mut() = Some((distributed, sink.clone())));
+        out.distributed = Some((center, listener));
+    }
+
+    for (channel, name, signal) in &signals {
+        match channel {
+            Channel::Distributed => {}
+            Channel::Notify => match register_notify(name, *signal, sink.clone()) {
+                Some(token) => out.notify.push(token),
+                None => tracing::warn!(name = %name, "cannot listen for this logout signal (notify)"),
+            },
+            Channel::Workspace => {
+                let center = NSWorkspace::sharedWorkspace().notificationCenter();
+                let main_queue = NSOperationQueue::mainQueue();
+                let (sink, name, signal) = (sink.clone(), name.clone(), *signal);
+                let block = RcBlock::new(move |_note: NonNull<NSNotification>| sink(&name, signal));
+                // SAFETY: the notification name is a valid framework static; the block runs on
+                // the main queue only, where `sink` lives.
+                let token = unsafe {
+                    center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceWillPowerOffNotification), None, Some(&main_queue), &block)
+                };
+                out.workspace = Some(WorkspaceObservers { center, tokens: vec![token] });
+            }
+        }
+    }
+    out
+}
+
+/// Registers notify(3) name `name` on the main queue; the handler calls `sink`. The token, or
+/// `None` when notify refused it.
+fn register_notify(name: &str, signal: Signal, sink: LogoutSink) -> Option<c_int> {
+    let c_name = CString::new(name).ok()?;
+    let owned = name.to_string();
+    // The block runs on the main queue only (the main thread), where `sink` lives; notify
+    // copies it, so the Rc inside is only ever touched there.
+    let block = RcBlock::new(move |_token: c_int| sink(&owned, signal));
+    let mut token: c_int = 0;
+    // SAFETY: a valid C string, an out pointer to a live int, the main queue (a static) and a
+    // block notify copies for the registration's life.
+    let status = unsafe { notify_register_dispatch(c_name.as_ptr(), &mut token, DispatchQueue::main(), &block) };
+    (status == 0).then_some(token)
 }
 
 /// Observes `AppleInterfaceThemeChangedNotification` (the distributed notification macOS
@@ -256,6 +404,14 @@ fn process_info(pid: i32) -> Option<libc::proc_bsdinfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tests_logout_note_needs_test_mode() {
+        let test = Some(std::ffi::OsString::from("1"));
+        assert_eq!(logout_note(test.clone(), Some(" dev.example.logout ".into())), Some("dev.example.logout".into()));
+        assert_eq!(logout_note(None, Some("dev.example.logout".into())), None, "never outside a test");
+        assert_eq!(logout_note(test, Some("  ".into())), None);
+    }
 
     #[test]
     fn our_own_start_time_reads_back_in_the_past() {

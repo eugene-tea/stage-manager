@@ -65,11 +65,18 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use super::geometry::Rect;
 use super::model::StageId;
+use super::park::Corner;
 
 /// An app this long without a new window (after its first) has settled: its pending
 /// windows are given up on.
 pub const QUIET: Duration = Duration::from_secs(60);
+
+/// How long before the last save an app's quit may come for its windows to wait in their
+/// stages at the next session (round 8H): a logout's apps quit within seconds of the last
+/// save; an app the user quit earlier is not reopened by a login.
+pub const QUIT_KEEP: Duration = Duration::from_secs(120);
 
 /// The restore window's longest life after the launch (the design's cap).
 pub const WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -105,6 +112,9 @@ pub struct Restore {
     /// Windows placed by Apple's rule while the restore window was open (they matched no
     /// saved window), for the restore's line.
     pub by_apple: usize,
+    /// Of those, the ones macOS reopened clamped against the park corner (an app that saved
+    /// its frame while parked; round 8H): left where they are, counted for the line.
+    pub corner: usize,
     /// Saved active stages that kept their place while empty, their windows still to come:
     /// emptied for good (given up), they still give way to a stage with windows
     /// ([`crate::engine::model::Model::front_after_restore`]).
@@ -246,7 +256,27 @@ pub struct Summary {
     pub pending: usize,
     /// Windows that matched no saved one, placed by Apple's rule meanwhile.
     pub by_apple: usize,
+    /// Of those, the ones clamped against the park corner ([`clamped_at_corner`]).
+    pub corner: usize,
 }
+
+/// True when `frame` is clamped against the park corner `corner` of the visible frame
+/// `visible`: both of the corner's edges touch it within [`CORNER_TOUCH`] points (macOS
+/// reopened a window whose app saved a parked frame, squeezed onto the screen; the 10-16
+/// restart). Not a parked frame: the caller tells those apart first.
+pub fn clamped_at_corner(frame: Rect, visible: Rect, corner: Corner) -> bool {
+    if frame.is_degenerate() || visible.is_degenerate() {
+        return false;
+    }
+    let near = |a: f64, b: f64| (a - b).abs() <= CORNER_TOUCH;
+    let side = if corner.right() { near(frame.max_x(), visible.max_x()) } else { near(frame.x, visible.x) };
+    let end = if corner.bottom() { near(frame.max_y(), visible.max_y()) } else { near(frame.y, visible.y) };
+    side && end
+}
+
+/// How close (points) a window's edges must be to the visible frame's to count as clamped
+/// against the corner.
+pub const CORNER_TOUCH: f64 = 2.0;
 
 /// What [`Summary`]'s line starts with.
 pub const SUMMARY_PREFIX: &str = "restore: ";
@@ -256,13 +286,14 @@ impl fmt::Display for Summary {
         let n = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
         write!(
             f,
-            "{SUMMARY_PREFIX}{} into {} on {} in {} s; {} pending; {} by Apple's rule",
+            "{SUMMARY_PREFIX}{} into {} on {} in {} s; {} pending; {} by Apple's rule; {} at the corner",
             n(self.windows, "window"),
             n(self.stages, "stage"),
             n(self.desktops, "Desktop"),
             self.seconds,
             self.pending,
-            self.by_apple
+            self.by_apple,
+            self.corner
         )
     }
 }
@@ -486,10 +517,10 @@ mod tests {
 
     #[test]
     fn the_summary_line_has_counts_and_no_titles() {
-        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1 };
-        assert_eq!(s.to_string(), "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule");
-        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0 };
-        assert_eq!(one.to_string(), "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule");
+        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1 };
+        assert_eq!(s.to_string(), "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 1 at the corner");
+        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0 };
+        assert_eq!(one.to_string(), "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule; 0 at the corner");
     }
 
     #[test]

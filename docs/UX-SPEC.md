@@ -157,9 +157,15 @@ left in front shows with its key window focused, unless a window shown there alr
 the keyboard. While that stage is still empty (its app slow to open), a window opening a
 stage of its own takes the front instead of a card beside an empty screen; the saved stage
 then waits, and its windows get a card when they come. At a logout, restart or shutdown
-every window comes back as soon as macOS announces it, so apps save their windows where
-they are as far as the timing allows (best effort: macOS asks apps to quit at the same
-time); the app itself quits when macOS asks it to. No apps are relaunched (that is macOS's
+every window comes back at the first sign of it macOS gives (any of `loginwindow`'s logout
+notices, `willPowerOff` the last), so apps save their windows where they are as far as the
+timing allows (best effort: macOS may ask apps to quit first); from then on nothing is
+arranged (no switch, no card added or removed) and the app itself quits when macOS asks it
+to; a cancelled logout brings the stages back at once. An app that quits keeps its windows'
+places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
+before macOS announced the logout still come back after the restart; a window reopened
+squeezed into the park corner goes to its saved frame when it is matched, and is left where
+it is (and counted) when it is not. No apps are relaunched (that is macOS's
 "Reopen windows when logging back in") and no window moves between Desktops. Off, a restart
 starts every app in a stage of its own, as Apple's does. One log line sums it up
 (`stage-manager log summary` repeats it).

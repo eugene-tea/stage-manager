@@ -49,8 +49,13 @@ in its saved order; a minimized window un-minimized during the restore window go
 its inactive stage; the login settles with no stage switch and ends by itself once apps are
 quiet for 20 s, the saved key window then focused, the restore's line logged and repeated by
 `log summary`; one un-minimized after it brings its stage forward; an app with no saved window goes by Apple's rule; the app that never reopens keeps
-its stage through a relaunch in the same session and loses it in the next session. Hands off
-the Mac during this phase: a click or key press ends the restore window early).
+its stage through a relaunch in the same session and loses it in the next session; then a
+logout simulated with the test's own note (STAGE_MANAGER_LOGOUT_NOTE, never Apple's): the head
+start at its first signal, repeats ignored, a cancel resuming at once, the apps quitting while
+it holds with the file kept, and the next session bringing each window back into its stage at
+its saved frame (one reopened clamped against the park corner, one at the park spot); and the
+same with no early signal, from the entries kept with `quit_at`. Hands off the Mac during this
+phase: a click or key press ends the restore window early).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -2761,6 +2766,211 @@ def phase_restore():
     all_onscreen("restore phase quit")
     stop_all_fixtures()
     write_config(None)
+    restore_after_logout(run_id)
+
+
+# ----- a logout, simulated (round 8H) -----------------------------------------------------
+
+
+def post_note(name):
+    """Posts the distributed notification `name`: the test's own logout note
+    (STAGE_MANAGER_LOGOUT_NOTE), never one of Apple's."""
+    if name.startswith("com.apple."):
+        raise ValueError(f"not posting Apple's notification {name}")
+    js = ('ObjC.import("Foundation"); $.NSDistributedNotificationCenter.defaultCenter'
+          f'.postNotificationNameObjectUserInfoDeliverImmediately({json.dumps(name)}, null, null, true);')
+    r = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def signal_line(note, then, first=None):
+    """The log line of logout signal `note` that led to `then` ("head start", "repeat",
+    "resume"); `first`: True for 0 ms since the logout's first signal, False for later."""
+    since = r"0" if first else (r"[1-9]\d*" if first is False else r"\d+")
+    return re.search(rf'logout signal signal="{re.escape(note)}" cancel=(true|false) since_first_ms={since} .*then="{then}"',
+                     log_text())
+
+
+def quit_entries(f):
+    """(title, quit_at) of every saved window in a state.json."""
+    return [(w["title"], w.get("quit_at"))
+            for sp in (f or {}).get("spaces", []) for st in sp["stages"] for w in st["windows"]]
+
+
+def layout_of(s):
+    """Stage sets (base titles), the active stage's set, and every standard window's frame."""
+    sets = sorted(sorted(base_title(t) for t in v) for v in stage_titles(s).values() if v)
+    active = sorted(base_title(t) for t in active_titles(s))
+    frames = {base_title(w["title"]): w["restore"] for w in s["windows"] if w["role"] == "standard"}
+    return sets, active, frames
+
+
+def same_frames(s, want, tol=2.0):
+    """Titles whose frame differs from the one in `want`."""
+    return [t for t, f in layout_of(s)[2].items() if t in want and not close(f, want[t], tol)]
+
+
+def restore_after_logout(run_id):
+    """Round 8H: a logout simulated with the test's own note (STAGE_MANAGER_LOGOUT_NOTE): the
+    head start at its first signal (every window back, the stages saved), repeats ignored, a
+    cancel resuming at once; the apps quit while the logout holds and the file keeps the stages;
+    the next session brings each window back into its stage at its saved frame, one reopened
+    clamped against the park corner and one at the park spot included. Then the fallback with
+    no early signal: the apps quit first, their windows' entries stay in state.json with
+    `quit_at`, and the next session restores their stages; in the same session they are gone."""
+    say("\n-- a logout, simulated (STAGE_MANAGER_LOGOUT_NOTE): the head start at its first signal")
+    note = f"dev.eugene.stagemanager.test.logout.{run_id}"
+    env = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"logout {k} {run_id}", "STAGE_MANAGER_LOGOUT_NOTE": note}
+           for k in "DEFG"}
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    try:
+        os.remove(os.path.join(HOME, "state.json"))
+    except FileNotFoundError:
+        pass
+
+    # Session D: Alpha (2), Bravo and Charlie, each app in a stage of its own; Alpha's in front.
+    start_extra("a", 2)
+    start_extra("b", 1)
+    start_extra("c", 1)
+    s = start_app(4, extra_env=env["D"])
+    if not check(s is not None, "session D: app up with Alpha (2), Bravo and Charlie"):
+        return
+    do("switch", number_of(s, "Alpha 1"))
+    s = state()
+    want_sets, want_active, want_frames = layout_of(s)
+    saved_space = s["space"]
+    say(f"  stages {want_sets}, active {want_active}")
+    check("logout signals: the test's own note only" in log_text(), "the app listens for the test's note instead of Apple's signals")
+
+    check(post_note(note), "the logout note is posted")
+    check(wait_until(lambda: signal_line(note, "head start", first=True), 5, "the head start") is not None,
+          "its first signal starts the head start (the log: its name, 0 ms since the first)")
+    time.sleep(1.5)
+    all_onscreen("the logout's head start")
+    held = read_state_file()
+    check(held is not None and held.get("session") == env["D"]["STAGE_MANAGER_SESSION"] and len(quit_entries(held)) == 4
+          and all(q is None for _, q in quit_entries(held)), "the stages are saved at the head start, every window in them")
+    check(post_note(note), "the note again")
+    check(wait_until(lambda: signal_line(note, "repeat", first=False), 5, "the repeat") is not None,
+          "a repeat is ignored, logged with the ms since the first")
+
+    say("-- a cancel resumes at once: the windows go back to their stages (parked again)")
+    check(post_note(note + ".cancelled"), "the cancel note is posted")
+    check(wait_until(lambda: signal_line(note + ".cancelled", "resume"), 5, "the resume") is not None, "the cancel resumes at once")
+    s = wait_state(lambda x: len(x.get("windows", [])) >= 4 and layout_of(x)[0] == want_sets, "the stages back after the cancel", timeout=10)
+    if check(s is not None, "after the cancel the stages are managed again, as saved"):
+        time.sleep(1.0)
+        check(layout_of(state())[1] == want_active, "the same stage in front")
+        consistent("after the cancel")
+
+    say("-- the logout again; the apps quit while it holds")
+    check(post_note(note), "the logout note is posted again")
+    check(wait_until(lambda: len(re.findall(rf'signal="{re.escape(note)}" cancel=false since_first_ms=0 .*then="head start"', log_text())) >= 2,
+                     5, "a second head start") is not None, "a logout after a cancel is a new one: its own head start")
+    time.sleep(1.5)
+    all_onscreen("the second head start")
+    held = read_state_file()
+    stop_extra("b")
+    stop_extra("c")
+    stop_extra("a")
+    time.sleep(1.5)
+    check(read_state_file() == held, "the apps quit while the logout holds: the file keeps the stages (no save, no stage dropped)")
+    stop_app()
+    check("quitting after the logout's head start" in log_text(), "macOS's quit (here ctl quit) only exits after the head start")
+    check(read_state_file() == held, "the quit writes nothing over it")
+
+    say("-- session E (a restart): the apps reopen, Bravo clamped against the park corner, Charlie at the park spot")
+    s = start_app(0, extra_env=env["E"])
+    if not check(s is not None, "session E: app up on an empty screen"):
+        return
+    vis = s["display"]["visible"]
+    disp = s["display"]["frame"] if "frame" in s["display"] else vis
+    fb, fc = want_frames["Bravo 1"], want_frames["Charlie 1"]
+    corner = f"{vis['x'] + vis['w'] - fb['w']:.0f},{vis['y'] + vis['h'] - fb['h']:.0f},{fb['w']:.0f},{fb['h']:.0f}"
+    park = f"{disp['x'] + disp['w'] - 1:.0f},{disp['y'] + disp['h'] - 52:.0f},{fc['w']:.0f},{fc['h']:.0f}"
+    start_extra_args("a", 2, "--delay-ms", "2000", wait=False)
+    start_extra_args("b", 1, "--delay-ms", "3000", "--frames", corner, wait=False)
+    start_extra_args("c", 1, "--delay-ms", "4000", "--frames", park, wait=False)
+    s = wait_state(lambda x: len([w for w in x["windows"] if w["role"] == "standard"]) >= 4, "the four windows back", timeout=25)
+    if check(s is not None, "every reopened window is managed"):
+        time.sleep(1.5)
+        s = state()
+        sets, active, _ = layout_of(s)
+        check(sets == want_sets, f"every window back in its stage ({sets}, saved {want_sets})")
+        check(active == want_active, f"the saved front stage in front ({active})")
+        check(s["space"] == saved_space, "the Desktop took the saved id")
+        off = same_frames(s, want_frames)
+        check(not off, f"every window at its saved frame, the clamped and the parked one included ({off})")
+        wrong = [w["title"] for w in s["windows"] if w["role"] == "standard" and w.get("restored") not in ("strong", "medium")]
+        check(not wrong, f"each matched by title and app, whatever its frame ({wrong})")
+        consistent("session E")
+    stop_app()
+    all_onscreen("session E quit")
+
+    say("-- no early signal (the 10-16 restart): the apps quit first, then the app")
+    stop_all_fixtures()
+    try:
+        os.remove(os.path.join(HOME, "state.json"))
+    except FileNotFoundError:
+        pass
+    start_extra("a", 2)
+    start_extra("b", 1)
+    start_extra("c", 1)
+    s = start_app(4, extra_env=env["F"])
+    if not check(s is not None, "session F: app up"):
+        return
+    do("switch", number_of(s, "Alpha 1"))
+    s = state()
+    want_sets, want_active, want_frames = layout_of(s)
+    stop_extra("b")
+    stop_extra("c")
+    stop_extra("a")
+    time.sleep(2.0)  # the debounced save
+    f = read_state_file()
+    kept = quit_entries(f)
+    check(len(kept) == 4 and all(q is not None for _, q in kept), f"each quit app's windows stay in state.json with quit_at ({kept})")
+    check(sum(1 for sp in f["spaces"] for st in sp["stages"] if st["windows"]) == 3, "and their three stages")
+    check("an app quit: its windows' saved entries stay in state.json" in log_text(), "the log says so")
+    stop_app()
+
+    say("-- session G (a restart): the stages come back from the quit entries")
+    s = start_app(0, extra_env=env["G"])
+    if not check(s is not None, "session G: app up"):
+        return
+    check(re.search(r"restore: saved windows of apps that quit before the save.* kept=4 dropped=0|kept=4 dropped=0.*restore: saved windows of apps that quit",
+                    log_text()) is not None, "the four that quit just before the save wait")
+    start_extra_args("a", 2, "--delay-ms", "1500", wait=False)
+    start_extra_args("b", 1, "--delay-ms", "2500", wait=False)
+    start_extra_args("c", 1, "--delay-ms", "3500", wait=False)
+    s = wait_state(lambda x: len([w for w in x["windows"] if w["role"] == "standard"]) >= 4, "the four windows back", timeout=25)
+    if check(s is not None, "every reopened window is managed"):
+        time.sleep(1.5)
+        s = state()
+        sets, active, _ = layout_of(s)
+        check(sets == want_sets, f"every window back in its stage ({sets}, saved {want_sets})")
+        check(active == want_active, f"the saved front stage in front ({active})")
+        off = same_frames(s, want_frames)
+        check(not off, f"every window at its saved frame ({off})")
+        consistent("session G")
+
+    say("-- the same session: an app the user quits and opens again goes by the usual rules")
+    stop_extra("b")
+    time.sleep(2.0)
+    check(("Bravo 1" in [t for t, q in quit_entries(read_state_file()) if q is not None]), "Bravo's entry kept with quit_at")
+    stop_app()
+    s = start_app(3, extra_env=env["G"])
+    if check(s is not None, "relaunch in session G"):
+        check(re.search(r"kept=0 dropped=1", log_text()) is not None, "the same session: the quit entry is dropped at the load")
+        check(not any(st["pending"] for st in s["stages"]), "nothing waits for Bravo")
+        start_extra("b", 1)
+        s = wait_state(lambda x: "Bravo 1" in by_title(x), "Bravo 1 managed", timeout=8)
+        if check(s is not None, "Bravo reopened"):
+            check(by_title(s)["Bravo 1"].get("restored") is None, "matched to no saved window: Apple's rule")
+    stop_app()
+    all_onscreen("logout sub-phase quit")
+    stop_all_fixtures()
 
 
 def main():

@@ -181,6 +181,14 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   hidden, input ignored) until macOS's own quit, which then only exits. A logout another
   app cancels sends no quit: a minute later (`LOGOUT_WAIT`) the app starts afresh from the
   saved stages, as at a launch; meanwhile every window shows, with no strip.
+- 8H: the head start runs at the first logout signal (`loginwindow`'s distributed
+  `com.apple.logoutInitiated` / `restartInitiated` / `shutdownInitiated` /
+  `logoutContinued`, its notify(3) names, `willPowerOff` last); `logoutCancelled` resumes at
+  once; the hold waits two minutes after the latest signal (an early signal may come with the
+  confirmation dialog's one-minute countdown). An app's quit keeps its windows' entries in
+  `state.json` (`quit_at`) for two minutes, so the stages survive a logout whose early signal
+  never comes; a window reopened clamped against the park corner is matched by title and
+  goes to its saved frame, an unmatched one is left and counted ("N at the corner").
 
 ## 8G: the real-restart check
 
@@ -193,8 +201,12 @@ With the owner, from the day's log (titles never leave it), besides the design's
   after the logout's head start", with no "the quit could not run at once".
 - Each app's windows reopen at their real frames (none in the park zone: no `warn` of a
   window brought back from it at the login).
-- A logout cancelled by an app with an unsaved document: a minute later the stages are back
-  ("no quit came after the logout's head start").
+- A logout cancelled by an app with an unsaved document: the stages are back at its cancel
+  signal, else two minutes after the latest one ("the logout was cancelled after its head
+  start").
+- 8H: the order of the logout signals: every "logout signal" line (name, ms since the first,
+  what it did). Which name comes first, and whether it comes before the first "app
+  terminated"; then trim `SIGNALS` to what arrives. The restore line's "N at the corner".
 - A slow app (Xcode, an Electron app) in the saved front stage: settling waits for its first
   window (8F2, M2), or a new app's window takes the front meanwhile (M4).
 

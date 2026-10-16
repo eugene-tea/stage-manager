@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use super::{Action, DisplayId, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
-use crate::engine::restore::{Restore, Summary, slot_for};
+use crate::engine::restore::{Restore, Summary, clamped_at_corner, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
 
@@ -185,6 +185,7 @@ impl Model {
             seconds,
             pending: self.pending_count() + self.pending_unvisited(),
             by_apple: self.restore.by_apple,
+            corner: self.restore.corner,
         }
     }
 
@@ -627,6 +628,21 @@ impl Model {
                 break;
             };
             slots.remove(i);
+        }
+    }
+
+    /// Windows `metas` matched no saved window while the restore window is open and go by
+    /// Apple's rule: counted for the restore's line, with those macOS reopened clamped against
+    /// the park corner (left where they are; one at the park spot itself is brought back by
+    /// the usual rules).
+    pub(crate) fn note_by_apple<'a>(&mut self, metas: impl IntoIterator<Item = &'a WindowMeta>) {
+        for m in metas {
+            self.restore.by_apple += 1;
+            let d = self.display(self.known_display(m.display));
+            if !d.parks(m.frame) && clamped_at_corner(m.frame, d.visible, d.corner) {
+                self.restore.corner += 1;
+                tracing::info!(id = m.id.0, bundle = %m.bundle_id, "restore: a window matching no saved one came back clamped against the park corner; left where it is");
+            }
         }
     }
 

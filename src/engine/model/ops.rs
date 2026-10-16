@@ -97,6 +97,8 @@ impl Model {
             return actions;
         }
 
+        // Its app is back in this session: the entries kept from its quit go (round 8H).
+        self.forget_quit_of(&meta.bundle_id);
         if decision.action == RuleAction::Native {
             if self.place_from_pending(&meta, space, obs, &mut actions) {
                 self.normalize_slots();
@@ -108,7 +110,7 @@ impl Model {
         }
         if decision.action == RuleAction::Native && self.restore.restoring {
             // Matched no saved window: Apple's rule (counted for the restore's line).
-            self.restore.by_apple += 1;
+            self.note_by_apple([&meta]);
         }
         // Adoption may have renamed the Space.
         let space = self.current_space(display);
