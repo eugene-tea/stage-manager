@@ -3288,8 +3288,9 @@ impl Controller {
             return;
         }
         if self.unplaced.remove(&id) {
-            // It waited off screen: a window reopened minimized was taken for a dialog then
-            // (and would follow Apple's rule for a child, never its saved stage).
+            // It waited off screen: one read then as a dialog is read again (a window minimized
+            // then or now is standard: taken for a child, it would follow Apple's rule for a
+            // child, never its saved stage).
             ob.recheck_kind(id);
         }
         let z = windows::z_order(&list);
