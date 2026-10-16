@@ -27,9 +27,11 @@
 //! login restores them), so windows are at their real frames as early as possible before apps
 //! save theirs. The app stays running so macOS's own quit (`applicationShouldTerminate:`, as
 //! in 1.2.0) ends it: an app that quits before macOS asks may not be reopened at the next
-//! login. That quit finds the work done and only exits ([`Quit::Done`]). A logout another app
-//! cancels sends no quit: after [`LOGOUT_WAIT`] the app starts afresh, from the saved stages,
-//! as at a launch.
+//! login. That quit finds the work done and only exits ([`Quit::Done`]), but for windows the
+//! head start could not bring back (another Desktop's): held as at a stand-down
+//! ([`Task::HoldStranded`]), tried again at every Space change during the hold and once more
+//! at the quit. A logout another app cancels sends no quit: after [`LOGOUT_WAIT`] the app
+//! starts afresh, from the saved stages, as at a launch, the held windows still on record.
 
 use std::time::{Duration, Instant};
 
@@ -94,10 +96,12 @@ pub fn resume_plan(stranded: bool) -> Vec<Task> {
     plan
 }
 
-/// The logout's head start, in order: windows back and the leftovers check, the stages saved
-/// (never dropped), then the controller set aside as at a stand-down.
+/// The logout's head start, in order: windows back and the leftovers check, windows it could
+/// not bring back held (as at a stand-down: a cancelled logout's fresh controller keeps them
+/// on record, and every Space change tries them again), the stages saved (never dropped),
+/// then the controller set aside as at a stand-down.
 pub fn logout_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
-    let mut plan = vec![Task::UnparkAll, Task::SaveStages, Task::StopObserving, Task::NewController];
+    let mut plan = vec![Task::UnparkAll, Task::HoldStranded, Task::SaveStages, Task::StopObserving, Task::NewController];
     if have_displays {
         plan.push(Task::ReplayDisplays);
     }
@@ -337,6 +341,8 @@ mod tests {
         let plan = logout_plan(true, true);
         let at = |t: Task| plan.iter().position(|p| *p == t).unwrap_or_else(|| panic!("{t:?} planned"));
         assert!(at(Task::UnparkAll) < at(Task::SaveStages), "saved after the windows are back, as at quit");
+        assert!(at(Task::UnparkAll) < at(Task::HoldStranded), "what the unpark and its check left is held");
+        assert!(at(Task::HoldStranded) < at(Task::NewController), "held before the controller that parked them goes");
         assert!(at(Task::SaveStages) < at(Task::NewController), "saved by the controller that knows the stages");
         assert!(at(Task::NewController) < at(Task::ReplayDisplays) && at(Task::NewController) < at(Task::ReplaySettings));
         assert!(plan.contains(&Task::HideStrip) && plan.contains(&Task::StopObserving));
@@ -356,6 +362,31 @@ mod tests {
         assert_eq!(l.quit(), Quit::Done { all_back: true }, "the quit only exits");
         l.released(false);
         assert_eq!(l.quit(), Quit::Done { all_back: false }, "a window left: the quit's own fallback");
+    }
+
+    /// The review of 8F2, 1: a window the head start could not move (another Desktop's) stays
+    /// on record through a cancelled logout: held, so the fresh controller's first batch (a
+    /// registry replace with only its own windows) keeps it, and it is retried until back.
+    #[test]
+    fn a_window_the_logout_could_not_move_stays_held_through_a_cancel() {
+        let plan = logout_plan(false, false);
+        assert!(plan.contains(&Task::HoldStranded));
+        assert!(!plan.contains(&Task::DropSavedStages));
+
+        // The head start's HoldStranded: one window left on another Desktop.
+        let mut s = StandDown::default();
+        s.released(false);
+        assert!(s.stranded() && !s.stood_down(), "held, though nothing stands down");
+        assert!(s.admits(Work::SpaceChange), "a Space change during or after the hold retries it");
+
+        // The cancel's fresh controller parks its own windows: the held one is kept.
+        let held: BTreeMap<u32, &str> = [(31, "another Desktop's")].into();
+        assert_eq!(merge_held(BTreeMap::new(), &held), held, "the first batch replaces nothing it does not own");
+        assert_eq!(merge_held([(5, "own 5")].into(), &held), [(5, "own 5"), (31, "another Desktop's")].into());
+
+        // Its Desktop shows: back, nothing held.
+        s.released(true);
+        assert!(!s.stranded());
     }
 
     #[test]

@@ -88,7 +88,7 @@ mod app {
     use std::cell::RefCell;
     use std::process::ExitCode;
     use std::ptr::NonNull;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -150,10 +150,6 @@ mod app {
     const TEST_ENV: &str = "STAGE_MANAGER_TEST";
 
     static QUITTING: AtomicBool = AtomicBool::new(false);
-
-    /// How many windows were parked when a logout was announced: a quit that comes while the
-    /// head start still brings them back waits as long as their unpark may take.
-    static LOGOUT_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 
     /// When this run started: `ping` says how long ago, so a launch handing off at login does
     /// not open the Settings ([`instance::shows_settings`]).
@@ -341,7 +337,7 @@ mod app {
         safety::request_quit();
         // No new window capture from here on; those in flight are waited for at exit.
         capture::begin_shutdown();
-        let timeout = shutdown_timeout(safety::registry_len().max(LOGOUT_WINDOWS.load(Ordering::SeqCst)));
+        let timeout = shutdown_timeout(safety::registry_len().max(wm_thread::logout_windows()));
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
         let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
             Some(Some(true)) => true,
@@ -703,8 +699,7 @@ mod app {
         // logout another app cancels ends the hold after a minute (a fresh start).
         let wm_power = wm.clone();
         let power_off = apps::observe_power_off(move || {
-            LOGOUT_WINDOWS.fetch_max(safety::registry_len(), Ordering::SeqCst);
-            wm_power.send(WmCommand::LogoutComing);
+            wm_power.logout_coming();
         });
 
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.
