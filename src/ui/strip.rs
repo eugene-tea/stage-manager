@@ -83,7 +83,8 @@ use objc2_quartz_core::{
 use crate::config::{Rgba, StripLevel, StripStyle};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
-use crate::platform::capture::{Capturer, Target};
+use crate::platform::capture::{Capturer, Picture, Target};
+use crate::platform::capture_frame::Extent;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
@@ -257,13 +258,22 @@ pub fn set_screen_override(frame: NSRect, visible: NSRect) {
 }
 
 /// Receives captured thumbnails on the main thread.
-fn thumbnail_arrived(id: u32, image: CFRetained<CGImage>) {
-    with_strip(|s| s.set_thumbnail(id, image));
+fn thumbnail_arrived(id: u32, picture: Picture) {
+    with_strip(|s| s.set_thumbnail(id, picture));
 }
 
 /// Receives full-size window snapshots (for transitions) on the main thread.
-fn snapshot_arrived(id: u32, image: CFRetained<CGImage>) {
-    with_strip(|s| s.set_snapshot(id, image));
+fn snapshot_arrived(id: u32, picture: Picture) {
+    with_strip(|s| s.set_snapshot(id, picture));
+}
+
+/// Shows `picture` in `layer`, which draws a window at `window` (its superlayer's
+/// coordinates): the window keeps that rectangle, child windows sticking out of it are drawn
+/// past it (as Apple's thumbnails show a popup), never squeezed into it.
+pub(super) fn show_picture(layer: &CALayer, picture: &Picture, window: Rect) {
+    layer.setFrame(cg_rect(&picture.extent.around(window)));
+    // SAFETY: a CGImage is valid layer contents.
+    unsafe { layer.setContents(Some(as_object(&*picture.image))) };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -724,14 +734,22 @@ fn app_icon(pid: i32, points: f64) -> Option<CFRetained<CGImage>> {
 // ---------------------------------------------------------------------------------------
 // Card drag
 
-/// The ghost of a dragged card: its front thumbnail in a click-through panel of its own.
+/// The ghost of a dragged card: its front thumbnail in a click-through panel of its own. The
+/// panel holds the whole picture (a popup sticking out of the window included); the card's
+/// plate is the window's part of it.
 struct Ghost {
     panel: Retained<NSPanel>,
+    /// The window's plate (background, border, rounded corners).
     layer: Retained<CALayer>,
+    /// The picture, over the plate and past it where child windows stick out.
+    image: Retained<CALayer>,
+    extent: Extent,
+    /// Where its window was last put (global, top-left) and the primary display's height.
+    placed: std::cell::Cell<Option<(Rect, f64)>>,
 }
 
 impl Ghost {
-    fn new(mtm: MainThreadMarker, image: Option<&CGImage>, opacity: f32) -> Self {
+    fn new(mtm: MainThreadMarker, picture: Option<&Picture>, opacity: f32) -> Self {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0));
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -749,39 +767,62 @@ impl Ghost {
         // SAFETY: the panel is owned by the ghost and closed by it.
         unsafe { panel.setReleasedWhenClosed(false) };
         let view = NSView::initWithFrame(NSView::alloc(mtm), rect);
-        let layer = CALayer::new();
-        view.setLayer(Some(&layer));
+        let root = CALayer::new();
+        view.setLayer(Some(&root));
         view.setWantsLayer(true);
+        root.setOpacity(opacity);
+        let layer = CALayer::new();
         layer.setCornerRadius(9.0);
         layer.setMasksToBounds(true);
         layer.setBorderWidth(0.5);
         layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.35)));
         layer.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 0.95)));
-        layer.setOpacity(opacity);
+        let image = CALayer::new();
+        image.setCornerRadius(9.0);
+        image.setMasksToBounds(true);
         // SAFETY: framework constant.
-        layer.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
-        if let Some(img) = image {
+        image.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
+        root.addSublayer(&layer);
+        root.addSublayer(&image);
+        let mut extent = Extent::NONE;
+        if let Some(picture) = picture {
+            extent = picture.extent;
             // SAFETY: a CGImage is valid layer contents.
-            unsafe { layer.setContents(Some(as_object(img))) };
+            unsafe { image.setContents(Some(as_object(&*picture.image))) };
         }
         panel.setContentView(Some(&view));
-        Self { panel, layer }
+        Self { panel, layer, image, extent, placed: std::cell::Cell::new(None) }
     }
 
-    /// Places the ghost at `r` (global, top-left origin).
+    /// Places the ghost's window at `r` (global, top-left origin); the panel holds the whole
+    /// picture around it.
     fn set_frame(&self, r: Rect, primary_height: f64) {
-        let cocoa = NSRect::new(NSPoint::new(r.x, primary_height - (r.y + r.h)), NSSize::new(r.w, r.h));
+        let whole = self.extent.around(r);
+        let cocoa = NSRect::new(NSPoint::new(whole.x, primary_height - (whole.y + whole.h)), NSSize::new(whole.w, whole.h));
         self.panel.setFrame_display(cocoa, true);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        self.layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(r.w, r.h)));
+        // The view is not flipped: layer frames go up from the panel's bottom edge.
+        self.layer.setFrame(cg_rect(&Rect::new(r.x - whole.x, whole.max_y() - r.max_y(), r.w, r.h)));
+        self.image.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(whole.w, whole.h)));
         CATransaction::commit();
+        self.placed.set(Some((r, primary_height)));
         self.panel.orderFrontRegardless();
     }
 
-    fn set_image(&self, image: &CGImage) {
+    /// A newer picture: the panel keeps the window where it is and grows or shrinks around it
+    /// when the window sits elsewhere in the picture (by half a point or more as drawn).
+    fn set_image(&mut self, picture: &Picture) {
         // SAFETY: a CGImage is valid layer contents.
-        unsafe { self.layer.setContents(Some(as_object(image))) };
+        unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
+        let placed = self.placed.get();
+        let (w, h) = placed.map_or((0.0, 0.0), |(r, _)| (r.w, r.h));
+        if placed.is_none() || !picture.extent.same_as(&self.extent, w, h) {
+            self.extent = picture.extent;
+            if let Some((window, primary_height)) = placed {
+                self.set_frame(window, primary_height);
+            }
+        }
     }
 }
 
@@ -984,7 +1025,7 @@ struct Strip {
     /// The card drawn pressed (`[cards] press_scale`): from the mouse-down until its
     /// transition takes it, the press turns into a drag, or nothing came of the click.
     squeezed: Option<u64>,
-    thumbs: HashMap<u32, CFRetained<CGImage>>,
+    thumbs: HashMap<u32, Picture>,
     icons: HashMap<i32, Option<CFRetained<CGImage>>>,
     visibility: Visibility,
     poll_timer: Option<Retained<NSTimer>>,
@@ -1535,6 +1576,14 @@ impl Strip {
                 let front = l.planes.last().map(|(_, p)| in_root(p));
                 let edge = l.planes.last().map(|(_, p)| left_edge(p));
                 let icons: Vec<Rect> = l.icons.iter().map(|x| in_root(x)).collect();
+                // Each window's plane and where its picture is drawn (past the plane where
+                // child windows stick out).
+                let planes: Vec<serde_json::Value> = l
+                    .planes
+                    .iter()
+                    .zip(&l.images)
+                    .map(|((id, plane), (_, image))| serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image) }))
+                    .collect();
                 Some(serde_json::json!({
                     "stage": c.stage,
                     "z": l.card.zPosition(),
@@ -1542,12 +1591,28 @@ impl Strip {
                     "thumb": front,
                     "thumb_left_edge": edge,
                     "icons": icons,
+                    "planes": planes,
+                }))
+            })
+            .collect();
+        // The pictures held: size, where the window is in each, and the corner pixels.
+        let pictures: serde_json::Map<String, serde_json::Value> = self
+            .thumbs
+            .iter()
+            .map(|(id, p)| {
+                let e = p.extent;
+                (id.to_string(), serde_json::json!({
+                    "w": CGImage::width(Some(&p.image)),
+                    "h": CGImage::height(Some(&p.image)),
+                    "extent": { "left": e.left, "top": e.top, "right": e.right, "bottom": e.bottom },
+                    "corners": crate::platform::self_capture::corners(&p.image),
                 }))
             })
             .collect();
         serde_json::json!({
             "order": self.snapshot.cards.iter().map(|c| c.stage).collect::<Vec<_>>(),
             "cards": cards,
+            "pictures": pictures,
             "lifted": self.lifted_card.as_ref().map(|l| l.0),
             "dragging": self.card_drag.as_ref().map(|d| format!("{:?}", d.mode)),
             "merge_onto": self.merge_onto(),
@@ -1706,15 +1771,15 @@ impl Strip {
             plane.setShadowOffset(CGSize::new(c.shadow_offset_x * k, c.shadow_offset_y * k));
             plane.setAllowsEdgeAntialiasing(true);
             let image = CALayer::new();
-            image.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(slot.rect.w, slot.rect.h)));
+            let window = Rect::new(0.0, 0.0, slot.rect.w, slot.rect.h);
+            image.setFrame(cg_rect(&window));
             image.setCornerRadius(c.corner_radius * k);
             image.setMasksToBounds(true);
             // SAFETY: framework constant.
             image.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
             image.setAllowsEdgeAntialiasing(true);
-            if let Some(img) = self.thumbs.get(&slot.id) {
-                // SAFETY: a CGImage is valid layer contents.
-                unsafe { image.setContents(Some(as_object(&**img))) };
+            if let Some(picture) = self.thumbs.get(&slot.id) {
+                show_picture(&image, picture, window);
             }
             plane.addSublayer(&image);
             unit.addSublayer(&plane);
@@ -1789,24 +1854,27 @@ impl Strip {
 
     // -- thumbnails -------------------------------------------------------------------------
 
-    fn set_thumbnail(&mut self, id: u32, image: CFRetained<CGImage>) {
+    fn set_thumbnail(&mut self, id: u32, picture: Picture) {
         let shown = self.layouts.iter().any(|l| l.thumbs.iter().any(|t| t.id == id));
         if !shown {
             return;
         }
-        self.motion.thumbnail_arrived(id, &image);
+        self.motion.thumbnail_arrived(id, &picture);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
-            for (wid, layer) in &layers.images {
+            for ((wid, layer), (_, plane)) in layers.images.iter().zip(&layers.planes) {
                 if *wid == id {
-                    // SAFETY: a CGImage is valid layer contents.
-                    unsafe { layer.setContents(Some(as_object(&*image))) };
+                    let b = plane.bounds();
+                    show_picture(layer, &picture, Rect::new(0.0, 0.0, b.size.width, b.size.height));
                 }
             }
         }
-        if let Some(ghost) = self.card_drag.as_ref().filter(|d| d.front == id).and_then(|d| d.ghost.as_ref()) {
-            ghost.set_image(&image);
+        CATransaction::commit();
+        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.front == id).and_then(|d| d.ghost.as_mut()) {
+            ghost.set_image(&picture);
         }
-        self.thumbs.insert(id, image);
+        self.thumbs.insert(id, picture);
     }
 
     /// Tells the capturer what to capture: every shown thumbnail while the strip shows.
@@ -2006,7 +2074,7 @@ impl Strip {
                 drag.ghost = None;
             } else {
                 let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, p);
-                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_deref(), style.ghost_opacity as f32));
+                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32));
                 ghost.set_frame(frame, primary_height);
             }
         }

@@ -40,6 +40,14 @@
 //                                      others are hidden tabs, listed off screen by the window
 //                                      server, never through Accessibility (not with
 //                                      --delay-ms, --stagger-ms or --minimized)
+//   --child      | FIXTURE_CHILD=1     window 1 gets a "Details" button 100 pt in from its
+//                                      right edge that opens an NSPopover (as Calendar's event
+//                                      details are), 250 pt wide, its arrow on the button, so
+//                                      it sticks out ~150 pt past the window's right edge; it
+//                                      stays open (application-defined) and the button toggles
+//                                      it. The capture phase's card shows it beside the window.
+//                                      (A borderless panel added with addChildWindow was left
+//                                      out of ScreenCaptureKit's window capture, live 10-16.)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -66,6 +74,7 @@ struct Options {
     var retitleAfterMs = 0
     var minimized: Set<String> = []
     var tabbed = 0
+    var child = false
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -99,6 +108,7 @@ struct Options {
         if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
         if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
+        if env["FIXTURE_CHILD"] == "1" { o.child = true }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -115,6 +125,7 @@ struct Options {
             case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
             case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
+            case "--child": o.child = true
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -169,6 +180,22 @@ final class LabelView: NSView {
     }
 }
 
+/// `--child`: the popover's content, a flat color labelled "Popup".
+final class PopupController: NSViewController {
+    let size: NSSize
+
+    init(size: NSSize) {
+        self.size = size
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func loadView() {
+        view = LabelView(frame: NSRect(origin: .zero, size: size), color: .systemTeal, label: "Popup")
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let options = Options.parse()
     var windows: [NSWindow] = []
@@ -202,9 +229,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             show(panel)
             windows.append(panel)
         }
+        if options.child, let parent = windows.first(where: { $0.title == title(0) }) {
+            addPopup(to: parent)
+        }
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// `--child`: the popover and the button that toggles it.
+    var popover: NSPopover?
+    var popoverButton: NSButton?
+
+    /// `--child`: a "Details" button in `parent`, its right edge 100 pt in from the window's,
+    /// and an NSPopover from it (Calendar's event details are one) sticking out past the
+    /// window's right edge, shown a moment after the window is on screen. Application-defined,
+    /// so it stays open when the app is in the background or the window moves; it moves with
+    /// its window.
+    func addPopup(to parent: NSWindow) {
+        guard let content = parent.contentView else { return }
+        let button = NSButton(title: "Details", target: self, action: #selector(togglePopup(_:)))
+        button.bezelStyle = .rounded
+        button.sizeToFit()
+        let b = content.bounds
+        button.setFrameOrigin(NSPoint(x: b.maxX - 100 - button.frame.width, y: b.midY - button.frame.height / 2))
+        content.addSubview(button)
+        let popover = NSPopover()
+        popover.behavior = .applicationDefined
+        popover.animates = false
+        let size = NSSize(width: 250, height: max(40, parent.frame.height - 120))
+        popover.contentSize = size
+        popover.contentViewController = PopupController(size: size)
+        self.popover = popover
+        popoverButton = button
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { self.showPopup() }
+    }
+
+    /// Shows the popover on its button (once its window is on screen).
+    func showPopup() {
+        guard let popover, let button = popoverButton, !popover.isShown else { return }
+        guard button.window?.isVisible == true else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) { self.showPopup() }
+            return
+        }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxX)
+    }
+
+    @objc func togglePopup(_ sender: NSButton) {
+        if popover?.isShown == true { popover?.performClose(sender) } else { showPopup() }
     }
 
     var opened = 0
