@@ -376,19 +376,16 @@ pub fn wallpaper_click(s: &NativeSettings, clicks: i64) -> WallpaperClick {
 /// run now: the keyboard goes to the new stage at once, as Apple's does (the app activates
 /// first; its window, still in the park zone behind its snapshot, arrives a moment later,
 /// as after a Dock click). The arriving frames, the raises and the focus again (after the
-/// raises, so the key window ends in front) wait. `focused`: the focus was asked already, as
-/// soon as the transition was sent (an activation's, [`ActivationRun::focus`]), so the parks
-/// run alone.
-fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>, focused: bool) -> (Vec<Action>, Vec<Action>) {
+/// raises, so the key window ends in front) wait. An activation's early focus
+/// ([`Controller::focus_now`]) comes before all this and changes none of it.
+fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>, Vec<Action>) {
     let focus: Vec<Action> = actions.iter().copied().filter(|a| matches!(a, Action::Focus { .. })).collect();
     let (later, mut now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
         Action::SetFrame { id, .. } => arriving.contains(&id.0),
         Action::Raise { .. } | Action::Focus { .. } => true,
         Action::Park { .. } | Action::StateChanged => false,
     });
-    if !focused {
-        now.extend(focus);
-    }
+    now.extend(focus);
     (now, later)
 }
 
@@ -402,38 +399,56 @@ fn ax_focus(element: &AxElement, pid: i32) -> Result<(), AxError> {
     main.and(front)
 }
 
-/// How long each call of an activation's early focus may wait for the app, busy activating
-/// ([`Controller::focus_now`]): the parks wait behind it, under snapshots that start to shrink
-/// 200 ms after they show (the strip motion's `PARK_WAIT_MAX`). A focus that runs out is
-/// asked again with the parks.
-const EARLY_FOCUS_AX_SECONDS: f32 = 0.05;
+/// The whole budget of an activation's early focus ([`Controller::focus_now`]): one step,
+/// the window made main and its app frontmost, while the parks wait behind it under
+/// snapshots that start to shrink 200 ms after they show (the strip motion's
+/// `PARK_WAIT_MAX`). The rest of the focus (the raise, and all of it again) runs with the
+/// parks, as for a card click.
+const EARLY_FOCUS_BUDGET: Duration = Duration::from_millis(50);
+
+/// Below this much of [`EARLY_FOCUS_BUDGET`] left, the early focus's second call is not made
+/// (the app is busy: it goes with the parks).
+const EARLY_FOCUS_MIN_CALL: Duration = Duration::from_millis(5);
+
+/// An activation notice older than this is not the one that caused a switch (the timing
+/// logged for the keyboard, [`ActivationRun::noticed`]).
+const ACTIVATION_NOTICE_FRESH: Duration = Duration::from_secs(2);
 
 /// How the animated batch an activation caused runs (⌘Tab, a Dock click, a focus such as a
 /// click on a parked sliver, to an app in another stage; `[animation] activation_grows`).
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ActivationRun {
-    /// Off (6V): the activated app's windows come to their frames first and at once,
-    /// outside the transition (macOS has raised them in the park corner already).
+    /// Off (6V), or on with a corner the overlay cannot cover ([`Self::fallback`]): the
+    /// activated app's windows come to their frames first and at once, outside the
+    /// transition (macOS has raised them in the park corner already).
     now: HashSet<u32>,
     /// On (the default, round 8L): the batch's focus when it is the activated app's window,
-    /// asked the moment the transition is sent, before the strip's answer and the parks: the
-    /// keyboard is never left waiting for the motion. The windows grow from their card as a
-    /// card click's do, waiting parked in the corner, which the overlay covers
-    /// ([`crate::engine::corner_patch::switch_cover`]).
+    /// made main and its app frontmost in one bounded step the moment the transition is sent,
+    /// before the strip's answer and the parks: the keyboard is never left waiting for the
+    /// motion. The windows grow from their card as a card click's do, waiting parked in the
+    /// corner, which the overlay covers ([`crate::engine::corner_patch::switch_cover`]).
     focus: Option<WindowId>,
+    /// On: the activated app's arriving windows, brought at once as with it off (6V) when the
+    /// corner cannot be covered for this switch (round 8L2: the patch off, an icon under the
+    /// corner, its picture not ready...), so macOS's raise never shows them there.
+    fallback: HashSet<u32>,
+    /// When macOS's activation notice came, for the log's keyboard timing.
+    noticed: Option<Instant>,
+}
+
+impl ActivationRun {
+    /// The corner cannot be covered: the activated app's windows arrive at once (6V), the
+    /// focus with the parks.
+    fn arrive_now(&mut self) {
+        self.now.extend(self.fallback.drain());
+        self.focus = None;
+    }
 }
 
 /// The [`ActivationRun`] of `actions`, the switch an activation of app `pid` caused, with
 /// `grows` (`[animation] activation_grows`); `pid_of` gives a window's app.
 fn activation_run(grows: bool, pid: i32, actions: &[Action], pid_of: impl Fn(u32) -> Option<i32>) -> ActivationRun {
-    if grows {
-        let focus = actions.iter().rev().find_map(|a| match a {
-            Action::Focus { id } => Some(*id),
-            _ => None,
-        });
-        return ActivationRun { now: HashSet::new(), focus: focus.filter(|id| pid_of(id.0) == Some(pid)) };
-    }
-    let now = actions
+    let mine: HashSet<u32> = actions
         .iter()
         .filter_map(|a| match a {
             Action::SetFrame { id, .. } => Some(id.0),
@@ -441,7 +456,22 @@ fn activation_run(grows: bool, pid: i32, actions: &[Action], pid_of: impl Fn(u32
         })
         .filter(|id| pid_of(*id) == Some(pid))
         .collect();
-    ActivationRun { now, focus: None }
+    if grows {
+        let focus = actions.iter().rev().find_map(|a| match a {
+            Action::Focus { id } => Some(*id),
+            _ => None,
+        });
+        let focus = focus.filter(|id| pid_of(id.0) == Some(pid));
+        return ActivationRun { now: HashSet::new(), focus, fallback: mine, noticed: None };
+    }
+    ActivationRun { now: mine, ..ActivationRun::default() }
+}
+
+/// Logs once per reason (at debug) why an activation arrived at once instead of growing.
+fn note_fallback(said: &mut HashSet<&'static str>, why: &'static str) {
+    if said.insert(why) {
+        tracing::debug!(why, "activation: the park corner cannot be covered; the activated windows arrive at once (noted once per reason)");
+    }
 }
 
 /// True when a move of a shown window while the left button is down is the user dragging
@@ -688,6 +718,8 @@ pub struct Controller {
     /// How the next animated batch runs when an activation caused it ([`ActivationRun`],
     /// `[animation] activation_grows`).
     activation: ActivationRun,
+    /// Why activations arrived at once instead of growing, each logged once ([`note_fallback`]).
+    fallback_said: HashSet<&'static str>,
     /// `[windows] hide_parked_apps`: the apps we hid ([`hide`]).
     hides: hide::Hides,
     /// The corner patch's last plan sent to the main thread.
@@ -894,6 +926,7 @@ impl Controller {
             parked_note: None,
             arrived_note: None,
             activation: ActivationRun::default(),
+            fallback_said: HashSet::new(),
             hides: hide::Hides::default(),
             patch_sent: None,
             patch_rect: None,
@@ -1086,7 +1119,8 @@ impl Controller {
     /// activation_grows`).
     fn activation_for(&self, pid: i32, actions: &[Action], ob: &Observer) -> ActivationRun {
         let grows = self.store.config().style.animation.activation_grows;
-        activation_run(grows, pid, actions, |id| ob.window(id).map(|w| w.pid))
+        let noticed = ob.activated_at(pid).filter(|t| t.elapsed() < ACTIVATION_NOTICE_FRESH);
+        ActivationRun { noticed, ..activation_run(grows, pid, actions, |id| ob.window(id).map(|w| w.pid)) }
     }
 
     // ----- executing actions -------------------------------------------------------------
@@ -1168,7 +1202,8 @@ impl Controller {
     /// auto-hide changing is caught while nothing else happens; the tap gets it when it
     /// changed. Not while an overview shows (the shield is off then).
     fn refresh_dock_bar(&mut self, now: Instant) {
-        if !self.store.config().windows.inert_slivers || self.overview.showing().is_some() {
+        let windows = &self.store.config().windows;
+        if !(windows.inert_slivers || windows.corner_patch) || self.overview.showing().is_some() {
             return;
         }
         if self.dock_bar.as_ref().is_some_and(|(at, _)| now.duration_since(*at) < DOCK_BAR_FRESH) {
@@ -1769,10 +1804,44 @@ impl Controller {
     /// them. Without the strip's cover the batch runs at once.
     fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
         self.flush_pending(ob);
-        // With `activation_grows` off, an activated app's windows first, before the strip is
-        // told and anything parks: macOS has raised them in the park corner already (6V).
-        let ActivationRun { now: mut first, focus } = std::mem::take(&mut self.activation);
-        first.extend(self.hidden_arrivals(ob, &actions));
+        let mut run = std::mem::take(&mut self.activation);
+        let hidden = self.hidden_arrivals(ob, &actions);
+        // An activation that grows: can the overlay cover the corner where macOS has raised
+        // the activated windows? Decided before the strip is told, from the batch (its
+        // arrivals and parks); when not, those windows arrive at once (6V), never shown in
+        // the corner for the grow (8L2).
+        let mut early_corner: Option<(Option<Rect>, Vec<windows::CgWindow>)> = None;
+        let anim = &self.store.config().style.animation;
+        if !run.fallback.is_empty() && anim.animates() && self.strip_visible {
+            let list = windows::on_screen();
+            let arriving: HashSet<u32> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::SetFrame { id, .. } if !hidden.contains(&id.0) => Some(id.0),
+                    _ => None,
+                })
+                .collect();
+            let outgoing: HashSet<u32> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Park { id, .. } => Some(id.0),
+                    _ => None,
+                })
+                .collect();
+            let found = self.switch_corner(&arriving, &outgoing, &list).and_then(|rect| crate::ui::corner_patch::cover_ready(rect).map(|()| rect));
+            match found {
+                Ok(rect) => early_corner = Some((Some(rect), list)),
+                Err(why) => {
+                    note_fallback(&mut self.fallback_said, why);
+                    run.arrive_now();
+                }
+            }
+        }
+        // With `activation_grows` off (or the corner not coverable), an activated app's
+        // windows first, before the strip is told and anything parks: macOS has raised them
+        // in the park corner already (6V).
+        let mut first = std::mem::take(&mut run.now);
+        first.extend(hidden);
         let (early, actions): (Vec<Action>, Vec<Action>) =
             actions.into_iter().partition(|a| matches!(a, Action::SetFrame { id, .. } if first.contains(&id.0)));
         let mut failed = 0;
@@ -1787,8 +1856,10 @@ impl Controller {
             failed += self.execute_batch(ob, early, Batch::User);
             self.before = before;
             tracing::debug!(windows = n, took_ms = started.elapsed().as_millis() as u64, "the activated app's windows came to their frames first");
+            // Windows moved: the list read before is stale.
+            early_corner = None;
         }
-        failed + self.execute_animated_rest(ob, actions, &first, focus)
+        failed + self.execute_animated_rest(ob, actions, &first, run, early_corner)
     }
 
     /// The frontmost window of the main display's active stage already in place (shown, and
@@ -1821,53 +1892,58 @@ impl Controller {
         shown.contains(&front.id).then_some(front.id)
     }
 
-    /// Gives the keyboard to window `key` now, as a batch's focus does, for transition `id`
-    /// sent at `sent`, outside any batch: the registry is left as it is (the windows of the
-    /// switch still wait parked, the outgoing ones not parked yet: a batch would note the
-    /// model's view of them before they moved). True when it took.
-    fn focus_now(&mut self, ob: &Observer, key: WindowId, id: u64, sent: Instant) -> bool {
-        let Some(w) = ob.window(key.0) else { return false };
-        let now = Instant::now();
-        self.echoes.touch_window(key.0, now);
-        self.echoes.touch_app(w.pid, now);
-        let result = w.element.bounded(EARLY_FOCUS_AX_SECONDS, |e| {
-            let _ = e.raise();
-            e.set_main(true)
+    /// Routes the keyboard to window `key` now, for transition `id`, outside any batch (the
+    /// registry is left as it is: the windows of the switch still wait parked, the outgoing
+    /// ones not parked yet; a batch would note the model's view of them before they moved):
+    /// one bounded step, the window made main and its app frontmost, [`EARLY_FOCUS_BUDGET`]
+    /// in all; the raise and the rest of the focus run with the parks. The step's time when
+    /// it took.
+    fn focus_now(&mut self, ob: &Observer, key: WindowId, id: u64) -> Option<u64> {
+        let w = ob.window(key.0)?;
+        let started = Instant::now();
+        self.echoes.touch_window(key.0, started);
+        self.echoes.touch_app(w.pid, started);
+        let result = w.element.bounded(EARLY_FOCUS_BUDGET.as_secs_f32(), |e| e.set_main(true)).and_then(|()| {
+            let left = EARLY_FOCUS_BUDGET.saturating_sub(started.elapsed());
+            if left < EARLY_FOCUS_MIN_CALL {
+                return Err(AxError::CANNOT_COMPLETE);
+            }
+            AxElement::application(w.pid).bounded(left.as_secs_f32(), |a| a.set_frontmost(true))
         });
-        let result = result.and_then(|()| AxElement::application(w.pid).bounded(EARLY_FOCUS_AX_SECONDS, |a| a.set_frontmost(true)));
-        let asked_ms = sent.elapsed().as_millis() as u64;
+        let early_focus_ms = started.elapsed().as_millis() as u64;
         match &result {
-            Ok(()) => tracing::debug!(id, key = key.0, asked_ms, "activation: the keyboard goes to the activated window now, before the motion"),
-            Err(e) => tracing::debug!(id, key = key.0, asked_ms, "activation: the early focus failed ({e}); asked again with the parks"),
+            Ok(()) => tracing::debug!(id, key = key.0, early_focus_ms, "activation: the keyboard goes to the activated window now, before the motion"),
+            Err(e) => tracing::debug!(id, key = key.0, early_focus_ms, "activation: the early focus failed ({e}); it goes with the parks"),
         }
-        result.is_ok()
+        result.ok().map(|()| early_focus_ms)
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
     /// there behind their snapshots ([`crate::engine::corner_patch::switch_cover`], round
     /// 8L): macOS has raised an activated app's windows above the corner patch, and the
     /// switch's focus raises its key window there too. `list` is the window server's list now;
-    /// `outgoing` the windows about to park. `None` (the reason logged at debug) leaves the
-    /// corner as it is.
-    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Option<Rect> {
+    /// `outgoing` the windows about to park. The reason when the corner cannot be covered (it
+    /// is left as it is).
+    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Result<Rect, &'static str> {
         use crate::engine::corner_patch::{CoverFacts, switch_cover};
         use crate::engine::park::is_parked_in_at;
         if arriving.is_empty() {
-            return None;
+            return Err("nothing arrives");
         }
-        let m = self.model.as_ref()?;
+        let m = self.model.as_ref().ok_or("no model")?;
         let config = self.store.config();
         let display = m.main_display();
         let own = std::process::id() as i32;
         let parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
         let normal = |w: &&windows::CgWindow| w.layer == 0 && w.alpha > 0.0 && w.pid != own;
         let in_zone = |b: Rect| is_parked_in_at(b, display.frame, display.visible, display.corner);
-        let slivers = list
+        let zone: Vec<&windows::CgWindow> = list
             .iter()
             .filter(normal)
             .filter(|w| !outgoing.contains(&w.id) && (arriving.contains(&w.id) || parked.contains(&w.id)) && in_zone(w.bounds))
-            .map(|w| w.bounds)
             .collect();
+        let slivers = zone.iter().map(|w| w.bounds).collect();
+        let raised = zone.iter().filter(|w| arriving.contains(&w.id)).map(|w| w.bounds).collect();
         let staying = list
             .iter()
             .filter(normal)
@@ -1882,25 +1958,31 @@ impl Controller {
                 || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
             fullscreen: self.fullscreen,
             slivers,
+            raised,
             display: display.frame,
+            visible: display.visible,
+            dock_bars: self.dock_bar.as_ref().map(|(_, b)| b.bars.clone()).filter(|b| !b.is_empty()),
             reach: config.windows.corner_patch_reach,
             in_use: self.patch_rect,
             items: self.patch_items.known.clone(),
             staying,
         };
-        match switch_cover(&facts) {
-            Ok(rect) => Some(rect),
-            Err(why) => {
-                tracing::debug!(why, "transition: the park corner is not covered");
-                None
-            }
-        }
+        switch_cover(&facts)
     }
 
     /// The animated batch after its early windows (`first`): planned as a transition, sent to
-    /// the strip, `focus` (an activation's, [`ActivationRun::focus`]) asked at once, then the
-    /// parks behind the strip's snapshots and the arrivals held until it unveils them.
-    fn execute_animated_rest(&mut self, ob: &Observer, actions: Vec<Action>, first: &HashSet<u32>, focus: Option<WindowId>) -> usize {
+    /// the strip, an activation's focus (`run`, [`ActivationRun::focus`]) routed at once, then
+    /// the parks behind the strip's snapshots and the arrivals held until it unveils them.
+    /// `early_corner`: the corner's cover as the activation found it, and the window list it
+    /// read (none read, or moved since: both read here).
+    fn execute_animated_rest(
+        &mut self,
+        ob: &Observer,
+        actions: Vec<Action>,
+        first: &HashSet<u32>,
+        run: ActivationRun,
+        early_corner: Option<(Option<Rect>, Vec<windows::CgWindow>)>,
+    ) -> usize {
         let anim = self.store.config().style.animation.clone();
         if !anim.animates() || !self.strip_visible {
             return self.execute(ob, actions);
@@ -1911,22 +1993,44 @@ impl Controller {
         let id = t.id;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let outgoing: HashSet<u32> = t.outgoing.iter().map(|w| w.window.id).collect();
-        let list = windows::on_screen();
+        let (corner, list) = match early_corner {
+            Some((corner, list)) => (corner, list),
+            None => {
+                let list = windows::on_screen();
+                let corner = self.switch_corner(&arriving, &outgoing, &list);
+                if let Err(why) = corner
+                    && !arriving.is_empty()
+                {
+                    tracing::debug!(id, why, "transition: the park corner is not covered");
+                }
+                (corner.ok(), list)
+            }
+        };
         t.under = self.window_in_place(&arriving, &outgoing, &actions, &list);
-        t.corner = self.switch_corner(&arriving, &outgoing, &list);
+        t.corner = corner;
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let started = Instant::now();
         self.present_with(Some(Transition { sent: Some(started), ..t }));
         // An activation's keyboard goes at once, while the strip draws: macOS has activated
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
-        // must reach the window the switch focuses (8L). A failed or untracked focus is
-        // asked again with the parks.
-        let focused = match focus.filter(|key| actions.contains(&Action::Focus { id: *key })) {
-            Some(key) => self.focus_now(ob, key, id, started),
-            None => false,
+        // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
+        // focus runs with the parks as for a card click.
+        let early_focus_ms = match run.focus.filter(|key| actions.contains(&Action::Focus { id: *key })) {
+            Some(key) => self.focus_now(ob, key, id),
+            None => None,
         };
+        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
-        tracing::debug!(id, ?cover, waited_ms = started.elapsed().as_millis() as u64, "transition covered");
+        let unveil_ms = (motion_math::unveil_time(&self.store.config().style) * 1000.0).round() as u64;
+        tracing::debug!(
+            id,
+            ?cover,
+            waited_ms = started.elapsed().as_millis() as u64,
+            early_focus_ms,
+            focus_since_activation_ms,
+            unveil_ms,
+            "transition covered"
+        );
         if cover.outgoing || cover.incoming {
             std::thread::sleep(Duration::from_millis(anim.cover_ms));
         }
@@ -1938,7 +2042,7 @@ impl Controller {
             self.note_parked();
             return failed;
         }
-        let (now, later) = split_covered(actions, &arriving, focused);
+        let (now, later) = split_covered(actions, &arriving);
         if let Some(Action::Focus { id: key }) = now.iter().rev().find(|a| matches!(a, Action::Focus { .. })) {
             tracing::debug!(id, key = key.0, "the keyboard goes to the new stage now; its windows arrive behind their snapshots");
         }
@@ -4925,7 +5029,7 @@ mod tests {
             Action::StateChanged,
         ];
         let arriving: HashSet<u32> = [3, 4].into();
-        let (now, later) = split_covered(batch.clone(), &arriving, false);
+        let (now, later) = split_covered(batch, &arriving);
         assert_eq!(ids(&now), ["park 1", "park 2", "state", "focus 3"], "the keyboard goes to the new stage with the parks");
         assert_eq!(
             ids(&later),
@@ -4933,14 +5037,9 @@ mod tests {
             "the windows arrive behind their snapshots, the key window in front last"
         );
         // A batch without a focus focuses nothing early.
-        let (now, later) = split_covered(vec![Action::SetFrame { id: WindowId(3), frame: r }], &arriving, false);
+        let (now, later) = split_covered(vec![Action::SetFrame { id: WindowId(3), frame: r }], &arriving);
         assert!(now.is_empty());
         assert_eq!(ids(&later), ["frame 3"]);
-        // An activation's focus asked already (as the transition was sent): the parks alone,
-        // the arrivals and the focus after the raises as before.
-        let (now, later) = split_covered(batch, &arriving, true);
-        assert_eq!(ids(&now), ["park 1", "park 2", "state"]);
-        assert_eq!(ids(&later), ["frame 4", "frame 3", "raise 4", "raise 3", "focus 3"]);
     }
 
     /// A switch to stage {3, 4} from {1, 2}, as `Model::switch_to` gives it.
@@ -4965,6 +5064,7 @@ mod tests {
         let run = activation_run(true, 30, &activation_batch(), pid_of);
         assert!(run.now.is_empty(), "no window taken out of the transition: every incoming one grows from its card");
         assert_eq!(run.focus, Some(WindowId(3)), "the keyboard goes to the activated window as the transition is sent");
+        assert_eq!(run.fallback, [3, 4].into(), "brought at once should the corner not be coverable");
         // The switch's focus on another app's window (a stage of two apps): not hurried, so
         // that app is not raised in the corner before the overlay covers it.
         let other = |id: u32| Some(if id == 3 { 10 } else { 30 });
@@ -4979,9 +5079,33 @@ mod tests {
         let run = activation_run(false, 30, &activation_batch(), pid_of);
         assert_eq!(run.now, [3, 4].into(), "the activated app's arrivals, outside the transition (6V)");
         assert_eq!(run.focus, None, "the focus runs with the parks, as before");
+        assert!(run.fallback.is_empty());
         // Another app's arrivals in the same stage stay in the transition.
         let mixed = |id: u32| Some(if id == 4 { 30 } else { 10 });
         assert_eq!(activation_run(false, 30, &activation_batch(), mixed).now, [4].into());
+    }
+
+    #[test]
+    fn an_activation_whose_corner_cannot_be_covered_arrives_at_once_as_with_it_off() {
+        // 8L2: the patch off, an icon under the corner, its picture not ready...: the grow
+        // would show the windows macOS raised in the corner, so they come at once (6V).
+        let pid_of = |id: u32| Some(if id >= 3 { 30 } else { 10 });
+        let mut run = activation_run(true, 30, &activation_batch(), pid_of);
+        run.arrive_now();
+        let off = activation_run(false, 30, &activation_batch(), pid_of);
+        assert_eq!((&run.now, run.focus), (&off.now, off.focus), "exactly the instant arrival: the focus with the parks");
+        assert!(run.fallback.is_empty());
+        // A mixed stage: only the activated app's windows (another app's are not raised).
+        let mixed = |id: u32| Some(if id == 4 { 30 } else { 10 });
+        let mut run = activation_run(true, 30, &activation_batch(), mixed);
+        run.arrive_now();
+        assert_eq!(run.now, [4].into());
+        // Each reason logged once.
+        let mut said = HashSet::new();
+        note_fallback(&mut said, "off");
+        note_fallback(&mut said, "off");
+        note_fallback(&mut said, "a desktop icon lies under the corner");
+        assert_eq!(said.len(), 2);
     }
 
     #[test]

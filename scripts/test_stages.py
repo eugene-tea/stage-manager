@@ -989,7 +989,8 @@ def activation_grows_check(how, app, what):
         f"{[rel(v) for v in seen][:10]} (from the overlay); first out of the zone {rel(out_t[0][0]) if out_t else '-'}")
     check(t_ov is not None, f"{what}: the motion's overlay was seen while it ran")
     why = [line.split("why=")[-1][:80] for line in log.splitlines()
-           if "the park corner is not covered" in line or "no picture of the corner" in line]
+           if "the park corner is not covered" in line or "the park corner cannot be covered" in line
+           or "no picture of the corner" in line]
     if not patch_before:
         # The corner showed its slivers before the activation (the patch off, or stepping
         # aside here): nothing to keep clean.
@@ -1002,10 +1003,17 @@ def activation_grows_check(how, app, what):
         check(not late, f"{what}: never seen in the park zone once the motion is up ({[rel(v) for v in late][:8]})")
         span = (max(early) - min(early) + 0.02) if early else 0.0
         check(span <= 0.15, f"{what}: raised in the corner by macOS before the motion for {span * 1000:.0f} ms at most (150)")
+    num = lambda name, line: int(m.group(1)) if (m := re.search(name + r"=(\d+)", line)) else None  # noqa: E731
+    line = next((c for c in covered if "incoming: true" in c), covered[0] if covered else "")
+    # The windows arrive at the unveil (`[animation] unpark_at` of the switch spring, at
+    # `[animation] speed`), as the app logs it; most of it counts, the sampler's 20 ms aside.
+    unveil = num("unveil_ms", line)
+    least = 0.6 * unveil / 1000 if unveil else 0.25
     if out_t and t_ov is not None:
         first_out, still_up = out_t[0]
-        check(first_out - t_ov >= 0.25 and still_up,
-              f"{what}: never at its frame before the grow is done ({rel(first_out)} after the overlay, under it: {still_up})")
+        check(first_out - t_ov >= least and still_up,
+              f"{what}: never at its frame before the grow is done ({rel(first_out)} after the overlay, "
+              f"{least * 1000:.0f} ms at least, under it: {still_up})")
     else:
         check(False, f"{what}: the arriving window was seen out of the park zone at all ({len(out_t)} looks)")
     app_ids = {w["id"] for w in s1["windows"] if w["pid"] == pid}
@@ -1018,17 +1026,18 @@ def activation_grows_check(how, app, what):
               f"({'-' if t_key is None or t_app is None else f'{(t_key - t_app) * 1000:.0f} ms'})")
     else:
         # The sampler reads the focus through Accessibility, which the shell running the tests
-        # may not have: the app's own timings instead (the notice to the switch, then the
-        # focus asked as the transition was sent).
-        num = lambda name, line: int(m.group(1)) if (m := re.search(name + r"=(\d+)", line)) else None  # noqa: E731
-        since = next((num("since_activation_ms", line) for line in log.splitlines() if "lives in another stage; switching" in line), None)
-        asked = next((num("asked_ms", line) for line in log.splitlines() if "the keyboard goes to the activated window now" in line), None)
-        say(f"    (no focus read by the sampler: the shell has no Accessibility; the app's log: "
-            f"switch {since} ms after the notice, focus asked {asked} ms after the transition was sent)")
-        if asked is not None:
-            check((since or 0) + asked <= 100, f"{what}: the keyboard is asked for within 100 ms of the activation (the app's log)")
+        # may not have: the app's own timing instead, from macOS's activation notice to the
+        # early focus done (the switch's line: `focus_since_activation_ms`), and the early
+        # step's own length (`early_focus_ms`, at most 50).
+        since = num("focus_since_activation_ms", line)
+        step = num("early_focus_ms", line)
+        say(f"    (no focus read by the sampler: the shell has no Accessibility; the app's log: the keyboard routed "
+            f"{since} ms after macOS's activation notice, the early step {step} ms)")
+        if since is not None:
+            check(since <= 100, f"{what}: the keyboard is routed within 100 ms of the activation (the app's log)")
+            check(step is not None and step <= 60, f"{what}: the early focus is one bounded step ({step} ms, 50 + slack)")
         else:
-            say("    (no early focus logged: macOS's own key window was the switch's, or the focus went with the parks)")
+            say("    (no early focus logged: it failed, went with the parks, or the notice was not seen)")
     consistent(what)
     return True
 

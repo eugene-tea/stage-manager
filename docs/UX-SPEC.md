@@ -109,7 +109,9 @@ nears a card, so content that changed meanwhile can jump when the motion ends. A
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). Arriving windows wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
-raises an activated app's windows there).
+raises an activated app's windows there), never over the menu bar or the Dock's bar. Where
+it cannot be covered (the patch off, a desktop icon there, its picture not ready yet), an
+activated app's windows come to their places at once instead of growing.
 
 **Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
 
