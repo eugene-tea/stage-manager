@@ -3381,7 +3381,7 @@ impl Controller {
             let actions = m.add_window(meta, &decision, &obs);
             let back = m.last_pending().filter(|n| n.window.0 == id);
             if let Some(note) = back {
-                tracing::info!(id, grade = note.grade.name(), points = note.points, parked = note.parked, switched = note.switched, adopted = ?note.adopted, "restore: back in its saved stage");
+                tracing::info!(id, grade = note.grade.name(), points = note.points, parked = note.parked, switched = note.switched, adopted = ?note.adopted, from_other = note.from_other, "restore: back in its saved stage");
             }
             let settling = m.settling();
             if let (Some(clock), true) = (self.settling.as_mut(), back.is_some()) {
@@ -3818,7 +3818,12 @@ impl Controller {
                 let (front, focus) = (std::mem::take(&mut self.front_after_restore), std::mem::take(&mut self.focus_after_restore));
                 let obs = self.observe(ob);
                 if let Some(m) = self.model.as_mut() {
-                    let mut actions = if front { m.front_after_restore(&obs) } else { Vec::new() };
+                    // Ended by itself after a restart: the saved active stage of the Desktop
+                    // shown when saved comes forward when its windows came back (round 8I).
+                    let mut actions = if focus { m.front_of_saved_current(&obs) } else { Vec::new() };
+                    if actions.is_empty() && front {
+                        actions = m.front_after_restore(&obs);
+                    }
                     if actions.is_empty() && focus {
                         actions = m.focus_after_restore(&obs);
                     }
@@ -4113,6 +4118,7 @@ impl Controller {
                     "space": w.space.0,
                     "sticky": w.sticky,
                     "restored": m.restored_grade(w.meta.id).map(|g| g.name()),
+                    "pooled": m.is_pooled(w.meta.id),
                 })
             })
             .collect();
@@ -4156,6 +4162,8 @@ impl Controller {
                 "pending": m.pending_count(),
                 "pending_unvisited": m.pending_unvisited(),
                 "saved_spaces_waiting": m.unvisited_saved_spaces(),
+                "pooling": m.pooling(),
+                "pooled": m.pooled_count(),
                 "slots": m.strip_slots(m.main_display().id).iter().filter_map(|s| m.stage_number(*s)).collect::<Vec<_>>(),
             },
             "stages": stages,

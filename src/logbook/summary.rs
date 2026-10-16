@@ -40,7 +40,7 @@ pub struct Line<'a> {
 fn restore_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule(; \d+ at the corner)?")
+        Regex::new(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule(; \d+ at the corner)?(; \d+ from other Desktops)?")
             .unwrap_or_else(|e| panic!("bad restore pattern: {e}"))
     })
 }
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn the_last_restore_line_is_repeated() {
-        let line = crate::engine::restore::Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 0 };
+        let line = crate::engine::restore::Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 0, pooled: 3 };
         let one = crate::engine::restore::Summary { windows: 1, stages: 1, desktops: 1, ..Default::default() };
         let text = format!(
             "2026-10-12 08:01:00.000 +02:00 app[1] INFO  platform::controller: {one}\n\

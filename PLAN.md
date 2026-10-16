@@ -189,6 +189,16 @@ Known gaps a review found and the owner accepted as rare, left as they are:
   `state.json` (`quit_at`) for two minutes, so the stages survive a logout whose early signal
   never comes; a window reopened clamped against the park corner is matched by title and
   goes to its saved frame, an unmatched one is left and counted ("N at the corner").
+- 8I: one pool after a restart. Native apps reopen their windows on their own saved
+  Desktops, non-native ones (Electron) on the Desktop shown at login (10-16). Each Desktop
+  still becomes its saved Desktop by its own windows (adoption unchanged); a stray, a window
+  matching another saved Desktop's waiting entry with confidence, recreates its saved stage on
+  the Desktop where it showed (a part; a stage split across two Desktops has a part on each),
+  and the entry leaves the other Desktop. Strip: the adopted Desktop's saved slots, then the
+  parts in their saved order. At the restore window's end by itself, the Desktop shown when
+  saved (if shown) brings its saved active stage forward. The line: "K from other Desktops".
+  Known gap kept: on a Desktop made from an empty screen, the first confident window of the
+  Desktop shown when saved adopts it (8E2 M2), a stray of it included.
 
 ## 8G: the real-restart check
 
@@ -207,6 +217,8 @@ With the owner, from the day's log (titles never leave it), besides the design's
 - 8H: the order of the logout signals: every "logout signal" line (name, ms since the first,
   what it did). Which name comes first, and whether it comes before the first "app
   terminated"; then trim `SIGNALS` to what arrives. The restore line's "N at the corner".
+- 8I: which apps' windows came back on another Desktop than their saved one (the "back in
+  its saved stage" lines with `from_other=true`) and the line's "K from other Desktops".
 - A slow app (Xcode, an Electron app) in the saved front stage: settling waits for its first
   window (8F2, M2), or a new app's window takes the front meanwhile (M4).
 

@@ -2771,6 +2771,123 @@ def phase_restore():
     stop_all_fixtures()
     write_config(None)
     restore_after_logout(run_id)
+    restore_pool(run_id)
+
+
+# ----- one pool after a restart (round 8I) ---------------------------------------------------
+
+
+def restore_pool(run_id):
+    """Round 8I: native apps reopen their windows on their own saved Desktops, non-native ones
+    (Electron) on the Desktop shown at login. A hand-written state.json (session P) saves two
+    Desktops: Desktop 1 (id 4, shown when saved) with Alpha 1 and 2 and Charlie 1 in its active
+    stage and Alpha 3 in another, and Desktop 2 (id 8) with Bravo 1 (active) and Bravo 2. In
+    session Q the login shows "Desktop 2": Bravo's windows (natives) adopt it, then Alpha's
+    (strays of Desktop 1) come to the same Desktop and go back into their saved stages there;
+    Charlie (a native of Desktop 1, never reopened here) keeps waiting for Desktop 1's visit.
+    The phase cannot switch Desktops, so every fixture window shows on the one shown."""
+    say("\n-- one pool after a restart (8I): strays of Desktop 1 on the Desktop shown go back to their saved stages")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    sess = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"pool {k} {run_id}"} for k in "PQ"}
+    a, b, c = (EXTRA[k][0] for k in "abc")
+
+    def sw(bundle, title, i, z):
+        return {"bundle_id": bundle, "title": title, "frame": {"x": 140.0 + 40 * i, "y": 120.0 + 30 * i, "w": 520.0, "h": 380.0},
+                "z": z, "key": z == 0, "pinned": False, "role": "standard"}
+
+    saved = {
+        "version": 2,
+        "session": sess["P"]["STAGE_MANAGER_SESSION"],
+        "saved_at": int(time.time()),
+        "spaces": [
+            {"id": 4, "current": True, "active_index": 0, "strip_slots": [1], "stages": [
+                {"name": None, "last_active": 90, "windows": [sw(a, "Alpha 1", 0, 0), sw(a, "Alpha 2", 1, 1), sw(c, "Charlie 1", 2, 2)]},
+                {"name": None, "last_active": 80, "windows": [sw(a, "Alpha 3", 3, 0)]},
+            ]},
+            {"id": 8, "current": False, "active_index": 0, "strip_slots": [1], "stages": [
+                {"name": None, "last_active": 40, "windows": [sw(b, "Bravo 1", 4, 0)]},
+                {"name": None, "last_active": 30, "windows": [sw(b, "Bravo 2", 5, 0)]},
+            ]},
+        ],
+    }
+    with open(os.path.join(HOME, "state.json"), "w", encoding="utf-8") as f:
+        json.dump(saved, f, indent=2)
+
+    s = start_app(0, extra_env=sess["Q"])
+    if not check(s is not None, "app up in session Q on an empty screen"):
+        return
+    r = s.get("restore") or {}
+    check(r.get("after_restart") is True and r.get("pooling") is True, f"a restart: one pool ({r})")
+    check(r.get("pending_unvisited") == 6, f"both saved Desktops wait ({r.get('pending_unvisited')})")
+
+    say("-- Desktop 2's natives (Bravo) reopen: two windows adopt it")
+    start_extra("b", 2)
+    s = wait_state(lambda x: x["space"] == 8 and len(x["windows"]) >= 2, "the Desktop shown taken for Desktop 2", timeout=10)
+    if not check(s is not None, "the Desktop shown is Desktop 2 (id 8), by its own windows"):
+        return
+    check({base_title(x) for x in active_titles(s)} == {"Bravo 1"}, "Desktop 2's saved active stage in front")
+
+    say("-- Desktop 1's strays (Alpha) reopen on the Desktop shown")
+    start_extra("a", 3)
+    s = wait_state(lambda x: all(t in by_title(x) for t in ("Alpha 1", "Alpha 2", "Alpha 3")), "Alpha's three windows managed", timeout=10)
+    if not check(s is not None, "Alpha's windows are managed"):
+        return
+    time.sleep(1.5)  # the last moves
+    s = state()
+    t = by_title(s)
+    check(s["space"] == 8, "still Desktop 2: strays never adopt")
+    check(t["Alpha 1"]["home"] == t["Alpha 2"]["home"] and t["Alpha 3"]["home"] != t["Alpha 1"]["home"],
+          f"Alpha 1 and 2 share their saved stage, Alpha 3 has its own ({stage_titles(s)})")
+    check(all(t[x].get("pooled") and t[x].get("restored") in ("strong", "medium") for x in ("Alpha 1", "Alpha 2", "Alpha 3")),
+          "each matched with confidence to Desktop 1's entry")
+    check(all(t[x]["parked"] for x in ("Alpha 1", "Alpha 2", "Alpha 3")) and not t["Bravo 1"]["parked"],
+          "parked in their stages, quietly; Bravo 1's stage stays in front")
+    check(not any(x.get("pooled") for x in (t["Bravo 1"], t["Bravo 2"])), "Bravo's windows are Desktop 2's own")
+    r = s.get("restore") or {}
+    check(r.get("pooled") == 3, f"three windows from another Desktop ({r.get('pooled')})")
+    check(r.get("pending_unvisited") == 1, f"Charlie 1 still waits for Desktop 1's visit ({r.get('pending_unvisited')})")
+    strip = [{base_title(x) for x in stage_titles(s).get(n, [])} for n in s["strip"]]
+    check(strip == [{"Bravo 2"}, {"Alpha 1", "Alpha 2"}, {"Alpha 3"}],
+          f"strip: Desktop 2's saved slots, then Desktop 1's stages in their saved order ({strip})")
+    wrong = [w["title"] for w in s["windows"] if w["parked"] and w.get("restored") not in ("strong", "medium")]
+    check(not wrong, f"parked => matched strong or medium ({wrong})")
+    consistent("pooled")
+    f = wait_until(lambda: (lambda x: x if x and x.get("session") == sess["Q"]["STAGE_MANAGER_SESSION"]
+                                       and sum(1 for _ in saved_windows(x)) == 6 else None)(read_state_file()), 10, "state.json saved in session Q")
+    titles = sorted(base_title(x) for x, _ in saved_windows(f))
+    check(titles == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2", "Charlie 1"],
+          f"state.json: every window once, live or waiting, never both ({titles})")
+    d1 = next((sp for sp in (f or {}).get("spaces", []) if sp["id"] == 4), None)
+    check(d1 is not None and [w["title"] for st in d1["stages"] for w in st["windows"]] == ["Charlie 1"],
+          "Desktop 1 keeps only Charlie 1, waiting")
+
+    say("-- the restore window ends by itself: the line counts them; Desktop 1 is not shown, its front stays put")
+    say("   (hands off the Mac: a click or key press would end the restore window early)")
+    s = wait_state(lambda x: (x.get("restore") or {}).get("restoring") is False, "the restore window ends by itself", timeout=90)
+    if check(s is not None, "the restore window ended with no user action"):
+        time.sleep(1.5)
+        s = state()
+        check(re.search(r"restore: \d+ windows? into .*; 3 from other Desktops", log_text()) is not None,
+              "the restore's line counts the three from another Desktop")
+        check({base_title(x) for x in active_titles(s)} == {"Bravo 1"}, "Desktop 2's front stays (Desktop 1 is not the one shown)")
+        check((s.get("restore") or {}).get("pending_unvisited") == 1, "Charlie 1 still waits: the window's end gives up nothing")
+        consistent("pool settled")
+
+    say("-- a relaunch in the same session keeps the stages, no pool")
+    stop_app()
+    all_onscreen("session Q quit")
+    s = start_app(5, extra_env=sess["Q"])
+    if check(s is not None, "relaunch in session Q"):
+        r = s.get("restore") or {}
+        check(r.get("after_restart") is False and r.get("pooling") is False, f"the same session: no pool ({r})")
+        sets = sorted(sorted(base_title(x) for x in v) for v in stage_titles(s).values() if v)
+        check(sets == [["Alpha 1", "Alpha 2"], ["Alpha 3"], ["Bravo 1"], ["Bravo 2"]], f"the stages as they were ({sets})")
+        consistent("same session")
+    stop_app()
+    all_onscreen("pool sub-phase quit")
+    stop_all_fixtures()
 
 
 # ----- a logout, simulated (round 8H) -----------------------------------------------------

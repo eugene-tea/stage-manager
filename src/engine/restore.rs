@@ -50,6 +50,10 @@
 //! ([`crate::engine::model::Model::focus_after_restore`]), and one line sums the restore up
 //! ([`Summary`]).
 //!
+//! **One pool** (round 8I): after a restart a window that shows on another Desktop than the one
+//! it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
+//! again where it shows (`model/pool.rs`); "K from other Desktops" in the line.
+//!
 //! **Frames** come back from `state.json` only on a main display of the saved size
 //! ([`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
 //!
@@ -119,6 +123,10 @@ pub struct Restore {
     /// emptied for good (given up), they still give way to a stage with windows
     /// ([`crate::engine::model::Model::front_after_restore`]).
     pub front_waits: Vec<StageId>,
+    /// The Desktop shown when saved (its id) and its active stage's index in the file: the
+    /// stage in front when the restore window ends by itself after a restart, if any of its
+    /// windows came back ([`crate::engine::model::Model::front_of_saved_current`]).
+    pub saved_front: Option<(u64, usize)>,
 }
 
 impl Restore {
@@ -241,7 +249,8 @@ pub fn still_opening<'a>(
 }
 
 /// The restore summed up in one line, no titles (the log at its end, `log summary`):
-/// "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule".
+/// "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 0 at
+/// the corner; 3 from other Desktops".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
     /// Windows back from a saved entry.
@@ -258,6 +267,9 @@ pub struct Summary {
     pub by_apple: usize,
     /// Of those, the ones clamped against the park corner ([`clamped_at_corner`]).
     pub corner: usize,
+    /// Windows back from a saved entry of another Desktop than the one they showed on (the
+    /// pool after a restart, round 8I).
+    pub pooled: usize,
 }
 
 /// True when `frame` is clamped against the park corner `corner` of the visible frame
@@ -286,14 +298,15 @@ impl fmt::Display for Summary {
         let n = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
         write!(
             f,
-            "{SUMMARY_PREFIX}{} into {} on {} in {} s; {} pending; {} by Apple's rule; {} at the corner",
+            "{SUMMARY_PREFIX}{} into {} on {} in {} s; {} pending; {} by Apple's rule; {} at the corner; {} from other Desktops",
             n(self.windows, "window"),
             n(self.stages, "stage"),
             n(self.desktops, "Desktop"),
             self.seconds,
             self.pending,
             self.by_apple,
-            self.corner
+            self.corner,
+            self.pooled
         )
     }
 }
@@ -517,10 +530,16 @@ mod tests {
 
     #[test]
     fn the_summary_line_has_counts_and_no_titles() {
-        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1 };
-        assert_eq!(s.to_string(), "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 1 at the corner");
-        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0 };
-        assert_eq!(one.to_string(), "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule; 0 at the corner");
+        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3 };
+        assert_eq!(
+            s.to_string(),
+            "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 1 at the corner; 3 from other Desktops"
+        );
+        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0 };
+        assert_eq!(
+            one.to_string(),
+            "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule; 0 at the corner; 0 from other Desktops"
+        );
     }
 
     #[test]
