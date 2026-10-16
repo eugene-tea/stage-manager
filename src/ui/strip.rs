@@ -810,13 +810,16 @@ impl Ghost {
         self.panel.orderFrontRegardless();
     }
 
-    /// A newer picture: the panel keeps the window where it is and grows or shrinks around it.
+    /// A newer picture: the panel keeps the window where it is and grows or shrinks around it
+    /// when the window sits elsewhere in the picture (by half a point or more as drawn).
     fn set_image(&mut self, picture: &Picture) {
         // SAFETY: a CGImage is valid layer contents.
         unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
-        if picture.extent != self.extent {
+        let placed = self.placed.get();
+        let (w, h) = placed.map_or((0.0, 0.0), |(r, _)| (r.w, r.h));
+        if placed.is_none() || !picture.extent.same_as(&self.extent, w, h) {
             self.extent = picture.extent;
-            if let Some((window, primary_height)) = self.placed.get() {
+            if let Some((window, primary_height)) = placed {
                 self.set_frame(window, primary_height);
             }
         }

@@ -107,6 +107,9 @@ pub struct Ghost {
     image: Retained<CALayer>,
     /// Where the window is in the picture.
     extent: Extent,
+    /// A picture whose window sits elsewhere in it, arrived mid-flight: shown at the next
+    /// placement, so the flying image keeps its animation.
+    pending: Option<Picture>,
     /// Where it is headed (or sits).
     pub target: Plane,
 }
@@ -120,21 +123,49 @@ fn image_frame(extent: &Extent, bounds: CGRect) -> (CGPoint, CGRect) {
 
 impl Ghost {
     /// Sets the picture (a newer snapshot arrived); the window keeps its place on the plane.
+    /// One whose window sits elsewhere in it (by
+    /// [`SAME_PT`](crate::platform::capture_frame::SAME_PT) or more as drawn) waits while the
+    /// ghost flies, and shows at its next placement ([`Ghost::set`], [`Ghost::spring_to`]), so
+    /// a flight is never cut short.
     pub fn set_image(&mut self, picture: &Picture) {
+        let b = self.plane.bounds();
+        let same = picture.extent.same_as(&self.extent, b.size.width, b.size.height);
+        if !same && self.flying() {
+            self.pending = Some(picture.clone());
+            return;
+        }
+        self.pending = None;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        self.show(picture, !same);
+        CATransaction::commit();
+    }
+
+    /// True while a spring moves the ghost's image.
+    fn flying(&self) -> bool {
+        self.image.animationKeys().is_some_and(|keys| keys.count() > 0)
+    }
+
+    /// Shows `picture`; `place`: at its own extent on the plane (in a transaction).
+    fn show(&mut self, picture: &Picture, place: bool) {
         // SAFETY: a CGImage is valid layer contents.
         unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
-        if picture.extent != self.extent {
+        if place {
             self.extent = picture.extent;
-            for key in ["position", "bounds"] {
-                self.image.removeAnimationForKey(&NSString::from_str(key));
-            }
             let (position, bounds) = image_frame(&self.extent, self.plane.bounds());
             self.image.setPosition(position);
             self.image.setBounds(bounds);
         }
-        CATransaction::commit();
+    }
+
+    /// A picture that waited for the flight to end takes its place (in a transaction; the
+    /// caller places the image after).
+    fn take_pending(&mut self) {
+        if let Some(picture) = self.pending.take() {
+            // SAFETY: a CGImage is valid layer contents.
+            unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
+            self.extent = picture.extent;
+        }
     }
 
     /// Puts the ghost at `p` at once.
@@ -146,6 +177,7 @@ impl Ghost {
                 layer.removeAnimationForKey(&NSString::from_str(key));
             }
         }
+        self.take_pending();
         let look = Look::of(&p);
         self.plane.setPosition(look.position);
         self.plane.setBounds(look.bounds);
@@ -170,9 +202,10 @@ impl Ghost {
         let from_corner = shown_image.as_ref().map_or(self.image.cornerRadius(), |l| l.cornerRadius());
         let from_image = shown_image.as_ref().map_or((self.image.position(), self.image.bounds()), |l| (l.position(), l.bounds()));
         let to = Look::of(&p);
-        let to_image = image_frame(&self.extent, to.bounds);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        self.take_pending();
+        let to_image = image_frame(&self.extent, to.bounds);
         self.plane.setPosition(to.position);
         self.plane.setBounds(to.bounds);
         self.plane.setTransform(to.transform);
@@ -411,7 +444,7 @@ impl Overlay {
         self.space.addSublayer(&plane);
         CATransaction::commit();
         let extent = picture.map_or(Extent::NONE, |p| p.extent);
-        let mut g = Ghost { window, plane, image: img, extent, target: at };
+        let mut g = Ghost { window, plane, image: img, extent, pending: None, target: at };
         g.set(at);
         g
     }

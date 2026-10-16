@@ -15,7 +15,7 @@ use objc2_core_graphics::{CGBitmapInfo, CGDataProvider, CGImage, CGImageAlphaInf
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{SCScreenshotManager, SCShareableContent};
 
-use super::capture::{WindowShot, window_shot};
+use super::capture::{WindowShot, display_frames, window_shot};
 use super::capture_frame::Extent;
 
 use crate::engine::geometry::{Point, Rect};
@@ -118,7 +118,7 @@ fn capture(window: u32, timeout: Duration) -> Result<(CFRetained<CGImage>, f64, 
             return;
         };
         // At its native size, set up as every window capture is (child windows included).
-        let WindowShot { filter, config, scale, extent, clear } = window_shot(&found, &windows, (u32::MAX, u32::MAX));
+        let WindowShot { filter, config, scale, extent, clear } = window_shot(&found, &windows, &display_frames(content), (u32::MAX, u32::MAX));
         // SAFETY: plain setters on a live configuration.
         unsafe {
             config.setShowsCursor(false);

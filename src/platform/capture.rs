@@ -37,14 +37,14 @@ use std::collections::{HashMap, HashSet};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Once, Weak};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::AllocAnyThread;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_core_foundation::{CFRetained, CGRect};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage, CGPreflightScreenCaptureAccess, kCGColorClear};
 use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_screen_capture_kit::{
@@ -459,12 +459,24 @@ pub(crate) struct WindowShot {
     pub clear: Option<CFRetained<CGColor>>,
 }
 
-/// The capture of `window` (one of `windows`, the shareable content), the window's part at
-/// `asked` pixels: the window with its child windows as ScreenCaptureKit takes them, on a
-/// clear background with alpha (no area outside a window is ever opaque), and where the
-/// window is in the picture ([`capture_frame`]). When that is not known, the picture is
-/// taken as the window, as before. Every capture of a window uses it.
-pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, asked: (u32, u32)) -> WindowShot {
+/// Logs, once per process, how the first capture with a child window found the window in
+/// the filter's content (global or local `contentRect`), for the owner's live run to settle.
+static FOUND_LOGGED: Once = Once::new();
+
+/// Every display's frame in the shareable content (global, top-left origin, points).
+pub(crate) fn display_frames(content: &SCShareableContent) -> Vec<Rect> {
+    // SAFETY: plain getters on a live SCShareableContent and its SCDisplays.
+    unsafe { content.displays() }.iter().map(|d| to_rect(unsafe { d.frame() })).collect()
+}
+
+/// The capture of `window` (one of `windows`, the shareable content, on `displays`), the
+/// window's part at `asked` pixels: the window with its child windows as ScreenCaptureKit
+/// takes them, on a clear background with alpha (no area outside a window is ever opaque),
+/// and where the window is in the picture ([`capture_frame`]). When that is not known, the
+/// picture is taken as the window, as before; when the children reach too far (a palette
+/// far off, or on another display), the window alone, cropped to its frame. Every capture of
+/// a window uses it.
+pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, displays: &[Rect], asked: (u32, u32)) -> WindowShot {
     // SAFETY: plain getters on live SCK objects.
     let (frame, pid) = unsafe { (window.frame(), window.owningApplication().map(|a| a.processID())) };
     let id = unsafe { window.windowID() };
@@ -474,6 +486,7 @@ pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, asked:
             .iter()
             // SAFETY: plain getters on live SCWindows.
             .filter(|w| unsafe { w.windowID() != id && w.owningApplication().is_some_and(|a| a.processID() == pid) })
+            // SAFETY: a plain getter on a live SCWindow.
             .map(|w| to_rect(unsafe { w.frame() }))
             .collect(),
         None => Vec::new(),
@@ -485,9 +498,14 @@ pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, asked:
         let scale = f64::from(filter.pointPixelScale());
         (filter, content, scale)
     };
-    let plan = capture_frame::plan(asked, content, scale, frame, &others);
+    let plan = capture_frame::plan(asked, content, scale, frame, &others, displays);
+    if let Some(found) = plan.found {
+        FOUND_LOGGED.call_once(|| tracing::info!("capture: contentRect is {}", found.as_str()));
+    }
     if !plan.extent.is_none() {
         tracing::trace!(window = id, ?content, ?frame, extent = ?plan.extent, "picture reaches past the window (child windows)");
+    } else if let Some(source) = plan.source {
+        tracing::trace!(window = id, ?content, ?frame, ?source, "child windows reach too far; the window alone");
     }
     // SAFETY: reading an immutable CoreGraphics constant.
     let clear = CGColor::constant_color(Some(unsafe { kCGColorClear }));
@@ -498,6 +516,9 @@ pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, asked:
         config.setWidth(plan.size.0 as usize);
         config.setHeight(plan.size.1 as usize);
         config.setPixelFormat(PIXEL_BGRA);
+        if let Some(r) = plan.source {
+            config.setSourceRect(CGRect::new(CGPoint::new(r.x, r.y), CGSize::new(r.w, r.h)));
+        }
         if let Some(clear) = clear.as_deref() {
             config.setBackgroundColor(clear);
         }
@@ -562,6 +583,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
         }
         // SAFETY: plain getters on a live SCShareableContent.
         let windows = unsafe { content.windows() };
+        let displays = display_frames(content);
         let mut issued = 0;
         for t in &targets {
             // SAFETY: plain getter on a live SCWindow.
@@ -570,7 +592,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 let _ = content_tx.send(Msg::Missing { round, id: t.id });
                 continue;
             };
-            let shot = window_shot(&window, &windows, (t.width, t.height));
+            let shot = window_shot(&window, &windows, &displays, (t.width, t.height));
             // SAFETY: plain setters on a live configuration.
             unsafe {
                 shot.config.setShowsCursor(false);
