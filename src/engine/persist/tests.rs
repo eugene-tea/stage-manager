@@ -963,3 +963,77 @@ fn a_same_session_load_marks_nothing_and_another_session_marks_everything_pendin
     assert_eq!(later.pending_windows(), 1);
     assert_eq!(later.spaces[0].stages[0].windows[0].pending, Some(Pending { since: "A".into() }));
 }
+
+// ----- windows of apps that quit (round 8H) ---------------------------------------------------
+
+/// A file saved at `saved_at` whose Chat window quit at `quit_at`, in a stage of its own (the
+/// strip's second card), beside the editor's active stage.
+fn with_a_quit_window(saved_at: Option<u64>, quit_at: u64) -> StateFile {
+    let chat = SavedWindow { quit_at: Some(quit_at), ..saved("com.example.chat", "Team", 0) };
+    let mut s = state(
+        vec![(None, vec![saved("com.example.ed", "Plan", 0)]), (None, vec![chat]), (None, vec![saved("com.example.web", "Recipes", 0)])],
+        Some(0),
+    );
+    s.strip_slots = vec![2, 1];
+    StateFile { session: Some("A".into()), saved_at, ..StateFile::single(s) }
+}
+
+fn titles(f: &StateFile) -> Vec<Vec<String>> {
+    f.spaces[0].stages.iter().map(|s| s.windows.iter().map(|w| w.title.clone()).collect()).collect()
+}
+
+#[test]
+fn a_window_that_quit_within_two_minutes_of_the_save_waits_after_a_restart() {
+    let t = 1_760_600_000;
+    for quit_at in [t - QUIT_KEEP.as_secs(), t - 3, t] {
+        let mut f = with_a_quit_window(Some(t), quit_at);
+        assert_eq!(f.settle_quit(true), (1, 0), "quit {}s before the save", t - quit_at);
+        assert_eq!(titles(&f), [vec!["Plan"], vec!["Team"], vec!["Recipes"]]);
+        assert!(f.all_stages().flat_map(|s| &s.windows).all(|w| w.quit_at.is_none()), "an ordinary saved window now");
+        f.start_new_session();
+        assert_eq!(f.pending_windows(), 3, "pending in its stage as any window not on screen");
+    }
+}
+
+#[test]
+fn an_older_quit_or_a_same_session_load_drops_it_and_its_stage() {
+    let t = 1_760_600_000;
+    let cases = [
+        (with_a_quit_window(Some(t), t - QUIT_KEEP.as_secs() - 1), true, "quit too long before the save"),
+        (with_a_quit_window(Some(t), t), false, "the same session: the user quit it"),
+        (with_a_quit_window(None, t), true, "a file that does not say when it was saved"),
+    ];
+    for (mut f, new_session, why) in cases {
+        assert_eq!(f.settle_quit(new_session), (0, 1), "{why}");
+        assert_eq!(titles(&f), [vec!["Plan"], vec!["Recipes"]], "{why}: its stage, left empty, goes");
+        assert_eq!((f.spaces[0].active_index, f.spaces[0].strip_slots.clone()), (Some(0), vec![1]), "{why}: indices follow");
+    }
+}
+
+#[test]
+fn removing_stages_keeps_the_active_index_and_slots_on_their_stages() {
+    let mut s = state(vec![(None, vec![]), (None, vec![]), (None, vec![]), (None, vec![])], Some(3));
+    s.strip_slots = vec![2, 0, 1];
+    s.remove_stages(&[0, 2]);
+    assert_eq!((s.stages.len(), s.active_index, s.strip_slots.clone()), (2, Some(1), vec![0]));
+    s.remove_stages(&[1]);
+    assert_eq!((s.active_index, s.strip_slots.clone()), (None, vec![0]), "the active one removed: none active");
+}
+
+#[test]
+fn quit_at_round_trips_and_1_2_0_reads_it_as_a_saved_window() {
+    let f = with_a_quit_window(Some(1_760_600_000), 1_760_599_990);
+    let json = f.to_json().expect("encodes");
+    assert!(json.contains("\"quit_at\": 1760599990"), "{json}");
+    assert_eq!(StateFile::from_json(&json).expect("parses"), f);
+    let plain = StateFile::single(state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0))).to_json().expect("encodes");
+    assert!(!plain.contains("quit_at"), "absent when not set");
+    // 1.1.0 and 1.2.0 (the same window fields): an ordinary saved window to them.
+    let read: v1_2_0::StateFile = serde_json::from_str(&json).expect("1.2.0 reads it");
+    assert_eq!(read.version, STATE_VERSION);
+    assert_eq!(read.spaces[0].stages[1].windows.len(), 1);
+    // A 1.2.0 file has none: nothing to settle.
+    let mut old = StateFile::from_json(FILE_1_2_0).expect("a 1.2.0 file loads");
+    assert_eq!(old.settle_quit(true), (0, 0));
+    assert_eq!(old.spaces[0].stages[0].windows.len(), 1);
+}

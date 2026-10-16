@@ -864,6 +864,25 @@ fn reply(answer: AxResult<bool>) -> Reply {
 mod tests {
     use super::*;
 
+    /// Round 8H, the freeze: once the logout's head start stops observation, an app's quit or
+    /// activation reaches no controller (no stage switched, no card removed, nothing saved),
+    /// while the running apps stay known for a cancelled logout's fresh start.
+    #[test]
+    fn a_stopped_observer_hands_on_no_app_event() {
+        unsafe extern "C-unwind" fn never(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
+        let mail = AppInfo { pid: 4242, bundle_id: Some("com.example.mail".into()), name: Some("Mail".into()) };
+        let terminal = AppInfo { pid: 4343, bundle_id: Some("com.example.terminal".into()), name: Some("Terminal".into()) };
+        let mut ob = Observer::new(1, None);
+        ob.set_apps(vec![mail.clone(), terminal.clone()], never);
+        ob.stop();
+        let _ = ob.take_events();
+        ob.on_app_event(AppEvent::Terminated(mail.clone()), never);
+        ob.on_app_event(AppEvent::Activated(terminal.clone(), Instant::now()), never);
+        ob.on_app_event(AppEvent::Hidden(terminal.clone()), never);
+        assert!(ob.take_events().is_empty(), "nothing for any controller");
+        assert!(!ob.observing());
+    }
+
     #[test]
     fn an_axwindows_error_is_retried_unless_there_is_no_value() {
         assert_eq!(windows_or_retry(Ok(vec![1, 2])), (vec![1, 2], false));

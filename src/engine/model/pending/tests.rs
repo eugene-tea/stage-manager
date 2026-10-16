@@ -934,7 +934,7 @@ fn the_restore_line_counts_windows_stages_and_desktops() {
     add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
     add(&mut m, win(31, 60, MAIL, "Inbox", DEFAULT));
     let s = m.restore_summary(41);
-    assert_eq!(s.to_string(), "restore: 3 windows into 3 stages on 1 Desktop in 41 s; 1 pending; 1 by Apple's rule");
+    assert_eq!(s.to_string(), "restore: 3 windows into 3 stages on 1 Desktop in 41 s; 1 pending; 1 by Apple's rule; 0 at the corner");
     // After the window nothing more counts as the restore's.
     m.end_restore();
     add(&mut m, win(32, 61, "com.example.other", "Other", DEFAULT));
@@ -1157,4 +1157,52 @@ fn the_restore_line_is_logged_after_a_restart_only() {
     m.restore_spaces(vec![desktop_5()]);
     m.arrive(MAIN, &[win(23, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
     assert!(m.restoring() && m.restore_line(12).is_none(), "a relaunch in the same session");
+}
+
+// ----- frames after a restart (round 8H) ------------------------------------------------------
+
+/// Where macOS puts a window of `size` whose app saved a parked frame: squeezed onto the screen
+/// against the park corner (the 10-16 restart: right and bottom edges on the visible frame's).
+fn clamped(size: Rect) -> Rect {
+    let v = VISIBLE;
+    Rect::new(v.max_x() - size.w, v.max_y() - size.h, size.w, size.h)
+}
+
+#[test]
+fn a_window_clamped_against_the_corner_is_matched_by_title_and_app_and_takes_its_saved_frame() {
+    let mut m = adopted();
+    // Chat's stage is inactive: parked there at its saved frame, whatever frame it came at.
+    let a = add(&mut m, win(21, 30, CHAT, "Team", clamped(F_TEAM)));
+    assert_eq!(m.restored_grade(w(21)), Some(Grade::Strong), "the title and the app agree");
+    assert!(parks(&a, 21), "{a:?}");
+    assert_eq!(m.window(w(21)).map(|s| s.restore), Some(F_TEAM), "its saved frame, not the corner");
+    // The editor's second window, in the stage shown: moved back to its saved frame.
+    let a = add(&mut m, win(24, 50, EDITOR, "Notes.txt", clamped(F_NOTES)));
+    assert_eq!(set_frame(&a, 24), Some(F_NOTES), "{a:?}");
+    // Even when its size changed too (macOS shrank it to fit).
+    let small = Rect::new(VISIBLE.max_x() - 300.0, VISIBLE.max_y() - 200.0, 300.0, 200.0);
+    let a = add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", small));
+    assert!(m.restored_grade(w(22)).is_some_and(Grade::confident), "matched with confidence");
+    assert!(parks(&a, 22));
+    assert_eq!(m.window(w(22)).map(|s| s.restore), Some(F_RECIPES));
+    assert_eq!(m.restore_summary(0).corner, 0, "matched: not counted at the corner");
+}
+
+#[test]
+fn an_unmatched_window_at_the_corner_is_left_alone_and_counted_one_at_the_park_spot_comes_back() {
+    let mut m = adopted();
+    let at_corner = clamped(Rect::new(0.0, 0.0, 500.0, 300.0));
+    let a = add(&mut m, win(31, 60, MAIL, "Inbox", at_corner));
+    assert_eq!(m.restored_grade(w(31)), None, "no saved window of Mail: Apple's rule");
+    assert_eq!(set_frame(&a, 31), None, "left where it is: {a:?}");
+    assert_eq!(m.window(w(31)).map(|s| s.restore), Some(at_corner));
+    let at_park = park_frame(Size { w: 500.0, h: 300.0 }, FRAME);
+    assert!(parked_at(at_park));
+    let a = add(&mut m, win(32, 61, "com.example.notes", "List", at_park));
+    let back = m.window(w(32)).map(|s| s.restore).expect("managed");
+    assert!(!parked_at(back), "brought back from the park spot ({back:?})");
+    assert!(set_frame(&a, 32).is_some_and(|f| !parked_at(f)) || parks(&a, 32), "moved out of the park spot or parked by its stage: {a:?}");
+    let s = m.restore_summary(41);
+    assert_eq!((s.by_apple, s.corner), (2, 1), "only the clamped one counts at the corner");
+    assert!(s.to_string().ends_with("2 by Apple's rule; 1 at the corner"), "{s}");
 }

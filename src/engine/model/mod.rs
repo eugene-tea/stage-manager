@@ -24,6 +24,7 @@ mod ahead;
 mod hide;
 mod ops;
 mod pending;
+mod quit;
 mod spaces;
 mod strip;
 #[cfg(test)]
@@ -40,6 +41,7 @@ use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area
 
 pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use pending::{PendingNote, Restored};
+pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
 pub use strip::{StripCard, StripOptions, StripOrder};
 
@@ -312,6 +314,9 @@ pub struct Model {
     pub(crate) adopt_votes: HashMap<SpaceId, Vec<(u64, WindowId)>>,
     /// Windows placed from a saved entry: how sure the match was and their saved place.
     pub(crate) restored: HashMap<WindowId, Restored>,
+    /// Saved entries of windows whose app quit, kept for `state.json` a while (round 8H,
+    /// [`quit`]).
+    pub(crate) quit: Vec<QuitWindow>,
     /// The restore's session and mode.
     pub(crate) restore: super::restore::Restore,
     /// What the last placement from a pending entry did, for the log.
@@ -354,6 +359,7 @@ impl Model {
             provisional: BTreeSet::new(),
             adopt_votes: HashMap::new(),
             restored: HashMap::new(),
+            quit: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
             clock: 0,

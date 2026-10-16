@@ -171,7 +171,7 @@ mod app {
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
         _appearance: WorkspaceObservers,
-        _power_off: WorkspaceObservers,
+        _power_off: apps::LogoutObservers,
         _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
@@ -690,16 +690,19 @@ mod app {
             }
         });
 
-        // The logout's head start (8F, the review's M3): at a logout, restart or shutdown the
-        // WM thread brings every window back, checks for leftovers and saves the stages at
-        // once, so windows are at their real frames as early as possible before apps save
-        // theirs for "Reopen windows when logging back in". The app does not quit then: an app
+        // The logout's head start (8F, the review's M3; 8H: at the first of its signals): at a
+        // logout, restart or shutdown the WM thread brings every window back, checks for
+        // leftovers and saves the stages at once, so windows are at their real frames as early
+        // as possible before apps save theirs for "Reopen windows when logging back in", and
+        // nothing is arranged until the quit (the freeze). The app does not quit then: an app
         // that quits before macOS asks may not be reopened at the next login. macOS's quit
         // (`applicationShouldTerminate:`, as in 1.2.0) finds the work done and only exits; a
-        // logout another app cancels ends the hold after a minute (a fresh start).
+        // cancel signal resumes at once, and a logout cancelled without one ends the hold two
+        // minutes after its latest signal (a fresh start). Each signal is timed here, as it
+        // arrives.
         let wm_power = wm.clone();
-        let power_off = apps::observe_power_off(move || {
-            wm_power.logout_coming();
+        let power_off = apps::observe_logout(mtm, move |name, signal| {
+            wm_power.logout_signal(name, signal, Instant::now());
         });
 
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.

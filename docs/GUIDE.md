@@ -112,7 +112,8 @@ the stage you left in front is in front again, its window ready for typing unles
 clicked first. While apps are still opening, nothing jumps to the front; it settles by
 itself once they are done, or as soon as you click or type. If that stage's app is slow to
 open and another app opens a window first, that window shows rather than an empty screen,
-and your stage comes back as a card.
+and your stage comes back as a card. Stages whose apps quit as the Mac was restarting come
+back too: an app that quits keeps its windows' places in your saved stages for two minutes.
 
 What it cannot do:
 

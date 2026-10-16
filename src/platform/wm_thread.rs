@@ -14,11 +14,13 @@
 //! ([`resume_plan`]), held windows are tried again and observation starts: the fresh
 //! controller builds stages from the windows on screen.
 //!
-//! At a logout, restart or shutdown the thread stands down the same way ahead of macOS's quit
-//! ([`Logout`], [`logout_plan`]): every window back, the stages saved (kept for the next
-//! login), observation stopped, input ignored; the quit that follows only exits. With no quit
-//! within [`crate::engine::stand_down::LOGOUT_WAIT`] (a cancelled logout) observation starts
-//! again: the fresh controller restores the saved stages, as at a launch.
+//! At a logout, restart or shutdown the thread stands down the same way ahead of macOS's quit,
+//! at the first of the logout's signals ([`Logout`], [`logout_plan`]; each signal logged with
+//! the ms since the first): every window back, the stages saved (kept for the next login),
+//! observation stopped, input ignored, so nothing is arranged while apps quit (the freeze); the
+//! quit that follows only exits. A cancel signal, or no quit within
+//! [`crate::engine::stand_down::LOGOUT_WAIT`] of the latest signal, starts observation again:
+//! the fresh controller restores the saved stages, as at a launch.
 //!
 //! Every entry point (command drain, AX callback, timer) runs inside
 //! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
@@ -49,7 +51,7 @@ use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
-use crate::engine::stand_down::{Logout, Quit, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
+use crate::engine::stand_down::{Heard, Logout, Quit, Signal, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
@@ -125,9 +127,9 @@ pub enum WmCommand {
     /// with whether every window came back. After the logout's head start: only stop and
     /// reply with what the head start found.
     Shutdown(SyncSender<bool>),
-    /// A logout, restart or shutdown is coming (`willPowerOffNotification`): the head start
-    /// ([`logout_plan`]), no quit.
-    LogoutComing,
+    /// A logout signal (its name, what it says, when the main thread got it): the first starts
+    /// the head start ([`logout_plan`], no quit), a cancel resumes ([`Logout::signal`]).
+    LogoutSignal(String, Signal, Instant),
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -146,7 +148,7 @@ pub struct WmHandle {
     run_loop: Arc<RemoteRunLoop>,
 }
 
-/// How many windows were parked when a logout was announced ([`WmHandle::logout_coming`]): a
+/// How many windows were parked when a logout was announced ([`WmHandle::logout_signal`]): a
 /// quit that comes while the head start still brings them back waits as long as their unpark
 /// may take. Back to 0 when the logout is cancelled.
 static LOGOUT_WINDOWS: AtomicUsize = AtomicUsize::new(0);
@@ -157,11 +159,14 @@ pub fn logout_windows() -> usize {
 }
 
 impl WmHandle {
-    /// A logout, restart or shutdown is coming: notes how many windows are parked now
-    /// ([`logout_windows`]) and starts the head start ([`WmCommand::LogoutComing`]).
-    pub fn logout_coming(&self) -> bool {
-        LOGOUT_WINDOWS.fetch_max(safety::registry_len(), Ordering::SeqCst);
-        self.send(WmCommand::LogoutComing)
+    /// A logout signal `name` saying `signal`, got at `at`: when a logout is coming, notes
+    /// how many windows are parked now ([`logout_windows`]); the WM thread decides the rest
+    /// ([`WmCommand::LogoutSignal`]).
+    pub fn logout_signal(&self, name: &str, signal: Signal, at: Instant) -> bool {
+        if signal == Signal::Coming {
+            LOGOUT_WINDOWS.fetch_max(safety::registry_len(), Ordering::SeqCst);
+        }
+        self.send(WmCommand::LogoutSignal(name.to_string(), signal, at))
     }
 
     /// Starts the WM thread and waits until its run loop exists.
@@ -341,7 +346,7 @@ impl WmState {
             // Nothing is arranged during the hold, but a window the head start could not reach
             // may show on this Space now (as while standing down).
             WmCommand::SpaceChanged if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
-            WmCommand::LogoutComing => self.logout_head_start(),
+            WmCommand::LogoutSignal(name, signal, at) => self.logout_signal(&name, signal, at),
             WmCommand::Shutdown(reply) if matches!(self.logout.quit(), Quit::Done { .. }) => {
                 // The head start did the work: nothing is unparked or saved again (the
                 // controller is a fresh one with no stages; saving it would write none).
@@ -519,18 +524,31 @@ impl WmState {
         }
     }
 
-    /// A logout, restart or shutdown is coming: carries out [`logout_plan`] once (the review
-    /// of 8F, M3), so windows are at their real frames as early as possible before apps save
-    /// theirs, and the app stays running for macOS's own quit. While standing down nothing is
-    /// parked: the quit does as before.
+    /// A logout signal (round 8H): logged every time with the ms since the logout's first, then
+    /// the first starts the head start, a cancel while held resumes at once, and repeats do
+    /// nothing more. While standing down nothing is parked: the quit does as before.
+    fn logout_signal(&mut self, name: &str, signal: Signal, at: Instant) {
+        let stood_down = self.stand_down.stood_down();
+        let (heard, since_first_ms) = self.logout.signal(signal, at, !stood_down);
+        let queued_ms = at.elapsed().as_millis() as u64;
+        tracing::info!(signal = name, cancel = signal == Signal::Cancelled, since_first_ms, queued_ms, then = heard.name(), "logout signal");
+        match heard {
+            Heard::HeadStart => self.logout_head_start(),
+            Heard::Resume => self.logout_cancelled("a cancel signal"),
+            Heard::Nothing if stood_down && signal == Signal::Coming => {
+                tracing::info!("logout, restart or shutdown coming: standing down already, nothing parked");
+            }
+            Heard::Repeat | Heard::Nothing => {}
+        }
+    }
+
+    /// The logout's head start: carries out [`logout_plan`] once (the review of 8F, M3), so
+    /// windows are at their real frames as early as possible before apps save theirs, and the
+    /// app stays running for macOS's own quit. From here until the quit or a resume nothing is
+    /// arranged (the freeze): the controller that saved the stages is set aside and
+    /// observation stops, so an activation, a focus change or an app's quit switches no stage,
+    /// moves no card and is saved by no one.
     fn logout_head_start(&mut self) {
-        if self.stand_down.stood_down() {
-            tracing::info!("logout, restart or shutdown coming: standing down already, nothing parked");
-            return;
-        }
-        if !self.logout.coming(Instant::now()) {
-            return;
-        }
         tracing::info!("logout, restart or shutdown coming: every window back and the stages saved now; the app quits when macOS asks");
         let mut all_back = true;
         for task in logout_plan(self.displays.is_some(), self.settings.is_some()) {
@@ -581,11 +599,12 @@ impl WmState {
         self.logout.released(all_back);
     }
 
-    /// No quit came after the logout's head start (another app cancelled the logout): the app
-    /// starts afresh as at a launch (the fresh controller restores the saved stages), unless
-    /// Apple's Stage Manager came on meanwhile (then it stands down).
-    fn logout_cancelled(&mut self) {
-        tracing::info!("no quit came after the logout's head start (the logout was cancelled): starting afresh from the saved stages");
+    /// The logout was cancelled after the head start (`why`: a cancel signal, or no quit came
+    /// in time): the app starts afresh as at a launch (the fresh controller restores the saved
+    /// stages and parks their windows again), unless Apple's Stage Manager came on meanwhile
+    /// (then it stands down).
+    fn logout_cancelled(&mut self, why: &str) {
+        tracing::info!(why, "the logout was cancelled after its head start: starting afresh from the saved stages");
         // A later quit waits for the windows parked then, not for this logout's.
         LOGOUT_WINDOWS.store(0, Ordering::SeqCst);
         let apple_on = self.settings.as_ref().is_some_and(native_settings::apple_stage_manager_enabled);
@@ -644,7 +663,7 @@ impl WmState {
 
     fn tick(&mut self) {
         if self.logout.cancelled(Instant::now()) {
-            self.logout_cancelled();
+            self.logout_cancelled("no quit came in time");
         }
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks.is_multiple_of(RETRY_EVERY) {

@@ -97,7 +97,7 @@ use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
-    Action, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
+    Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
@@ -121,6 +121,15 @@ pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
 
 /// Quiet time before `state.json` is written after a change.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// How long before its app's quit notice a destroyed window still counts as quit with it (an
+/// app closes its windows as it quits, a moment before macOS says it terminated; round 8H).
+const CLOSING_KEEP: Duration = Duration::from_secs(10);
+
+/// Now, in Unix seconds (0 when the clock is before 1970).
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
 
 /// A busy stream of changes is still saved at least this often.
 const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
@@ -559,6 +568,10 @@ pub struct Controller {
     echoes: Echoes,
     dirty: Option<(Instant, Instant)>,
     strip_dirty: bool,
+    /// Saved entries of windows just destroyed, read before the model forgot them: those of an
+    /// app that quits within [`CLOSING_KEEP`] are kept for `state.json` (round 8H,
+    /// [`Model::keep_quit`]).
+    closing: Vec<(Instant, Closing)>,
     triggers: Triggers,
     press: Option<Press>,
     drag: Option<WindowDrag>,
@@ -776,6 +789,7 @@ impl Controller {
             echoes,
             dirty: None,
             strip_dirty: false,
+            closing: Vec::new(),
             triggers: Triggers::default(),
             press: None,
             drag: None,
@@ -1885,6 +1899,26 @@ impl Controller {
         });
     }
 
+    /// App `pid` quit at `now`: the saved entries of its windows destroyed within
+    /// [`CLOSING_KEEP`] are kept for `state.json` (round 8H, [`Model::keep_quit`]), so a logout
+    /// whose early signal never came still leaves their stages for the next login.
+    fn keep_quit_windows(&mut self, pid: i32, now: Instant) {
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.closing)
+            .into_iter()
+            .filter(|(t, _)| now.duration_since(*t) <= CLOSING_KEEP)
+            .partition(|(_, c)| c.pid == pid);
+        self.closing = rest;
+        if mine.is_empty() {
+            return;
+        }
+        let Some(m) = self.model.as_mut() else { return };
+        let n = mine.len();
+        let stages: BTreeSet<StageId> = mine.iter().map(|(_, c)| c.stage).collect();
+        m.keep_quit(mine.into_iter().map(|(_, c)| c).collect(), unix_now());
+        tracing::info!(pid, windows = n, stages = stages.len(), "an app quit: its windows' saved entries stay in state.json for two minutes (a login after a restart puts them back)");
+        self.mark_dirty();
+    }
+
     // ----- persistence -------------------------------------------------------------------
 
     /// Writes `state.json` now (atomically and durably, [`super::durable`], readable by the user
@@ -1892,12 +1926,14 @@ impl Controller {
     /// frame that is not finite) is not written: the file on disk stays.
     pub fn save_now(&mut self) {
         self.dirty = None;
-        let Some(m) = &self.model else { return };
+        let Some(m) = self.model.as_mut() else { return };
         let path = paths::state_file();
+        let now = unix_now();
+        // Windows of apps that quit too long ago are not reopened by a login.
+        m.prune_quit(now);
         let mut file = m.to_state();
         // The window ids in it hold for this window server session only.
         file.session = session::window_session().map(str::to_string);
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         file.stamp(now, &mut self.seen_times);
         let text = match file.to_json() {
             Ok(text) => text,
@@ -1929,6 +1965,12 @@ impl Controller {
         match StateFile::from_json(&text) {
             Ok(mut s) => {
                 let restoring = current.is_some() && !s.same_session(current);
+                // Windows of apps that quit just before the save (a logout whose early signal
+                // never came) wait in their stages after a restart; otherwise they are gone.
+                let (kept, dropped) = s.settle_quit(restoring && restore_after_restart);
+                if kept + dropped > 0 {
+                    tracing::info!(kept, dropped, "restore: saved windows of apps that quit before the save: kept when they quit within two minutes of it, after a restart");
+                }
                 if restoring && !restore_after_restart {
                     tracing::info!("restore: state.json is from another window server session; [stages] restore_after_restart is off, so saved windows not on screen are forgotten");
                 } else if restoring {
@@ -2011,6 +2053,11 @@ impl Controller {
                 self.unplaced.remove(&id);
                 self.absent.remove(&id);
                 let kept = self.parked_entries_of(&[id]);
+                // Its saved entry as it is now, should its app be quitting (round 8H).
+                if let Some(c) = self.model.as_ref().and_then(|m| m.closing(WindowId(id))) {
+                    self.closing.retain(|(t, _)| now.duration_since(*t) <= CLOSING_KEEP);
+                    self.closing.push((now, c));
+                }
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.remove_window(WindowId(id));
                     self.execute(ob, actions);
@@ -2122,7 +2169,10 @@ impl Controller {
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid, true),
             WinEvent::AppUnhidden(pid) => self.on_app_hidden(ob, pid, false),
-            WinEvent::AppTerminated(pid) => self.app_terminated(pid),
+            WinEvent::AppTerminated(pid) => {
+                self.keep_quit_windows(pid, now);
+                self.app_terminated(pid);
+            }
             WinEvent::AppActivated(pid) => {
                 let waiting: Vec<u32> =
                     self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();

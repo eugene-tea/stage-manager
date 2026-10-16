@@ -22,16 +22,24 @@
 //!   whether the app is still standing down or managing again.
 //!
 //! **The logout's head start** ([`Logout`], [`logout_plan`]; the review of 8F, M3) stands down
-//! the same way for a logout, restart or shutdown (`willPowerOffNotification`), without
-//! quitting: every window back, the leftovers check and the stages saved (kept: the next
-//! login restores them), so windows are at their real frames as early as possible before apps
-//! save theirs. The app stays running so macOS's own quit (`applicationShouldTerminate:`, as
+//! the same way for a logout, restart or shutdown, without quitting, at the first of its
+//! signals ([`SIGNALS`]; round 8H): `loginwindow`'s distributed notifications and notify(3)
+//! names, with `willPowerOffNotification` the last fallback (the owner's restart of 10-16 had
+//! it last, 4 ms before macOS's quit, after every app had quit). Each signal is logged with its
+//! name and the time since the first, so a real restart shows their order. From the first
+//! signal nothing is arranged (the freeze: activations, focus changes and app terminations
+//! switch no stage, animate no strip, add or remove no card, and no save drops a stage): the
+//! controller that saved the stages is set aside and observation stops. The head start: every
+//! window back, the leftovers check and the stages saved (kept: the next login restores them),
+//! so windows are at their real frames as early as possible before apps save theirs. The app stays running so macOS's own quit (`applicationShouldTerminate:`, as
 //! in 1.2.0) ends it: an app that quits before macOS asks may not be reopened at the next
 //! login. That quit finds the work done and only exits ([`Quit::Done`]), but for windows the
 //! head start could not bring back (another Desktop's): held as at a stand-down
 //! ([`Task::HoldStranded`]), tried again at every Space change during the hold and once more
-//! at the quit. A logout another app cancels sends no quit: after [`LOGOUT_WAIT`] the app
-//! starts afresh, from the saved stages, as at a launch, the held windows still on record.
+//! at the quit. A cancel signal (`logoutCancelled`) ends the hold at once: the app starts
+//! afresh from the saved stages, as at a launch (windows parked again per the model), the held
+//! windows still on record. A logout cancelled with no such signal (an app refused to quit)
+//! sends no quit: [`LOGOUT_WAIT`] after the latest signal the app starts afresh the same way.
 
 use std::time::{Duration, Instant};
 
@@ -112,9 +120,90 @@ pub fn logout_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
     plan
 }
 
-/// How long the logout's head start waits for macOS's quit before it takes the logout for
-/// cancelled (an app refused to quit, or the user cancelled its dialog) and starts afresh.
-pub const LOGOUT_WAIT: Duration = Duration::from_secs(60);
+/// How long the logout's head start waits after the latest logout signal for macOS's quit
+/// before it takes the logout for cancelled with no cancel signal (an app refused to quit) and
+/// starts afresh. Two minutes, not one: an early signal may come when the confirmation
+/// dialog shows (a minute's countdown), and a hold that ended then would park the windows
+/// again just as the apps save their frames.
+pub const LOGOUT_WAIT: Duration = Duration::from_secs(120);
+
+/// What a logout signal says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// A logout, restart or shutdown is coming (or goes on).
+    Coming,
+    /// The logout was cancelled.
+    Cancelled,
+}
+
+/// Where a logout signal comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// `NSDistributedNotificationCenter` (`loginwindow`'s distributed notifications).
+    Distributed,
+    /// notify(3) (`notify_register_dispatch`).
+    Notify,
+    /// `NSWorkspace`'s `willPowerOffNotification` (the last fallback).
+    Workspace,
+}
+
+/// Every logout signal listened for, by channel, name and meaning: `loginwindow` carries these
+/// names (we do not know yet which, if any, comes before the apps quit: the log tells). The
+/// notify(3) names keep `loginwindow`'s own spelling.
+pub const SIGNALS: [(Channel, &str, Signal); 10] = [
+    (Channel::Distributed, "com.apple.logoutInitiated", Signal::Coming),
+    (Channel::Distributed, "com.apple.restartInitiated", Signal::Coming),
+    (Channel::Distributed, "com.apple.shutdownInitiated", Signal::Coming),
+    (Channel::Distributed, "com.apple.logoutContinued", Signal::Coming),
+    (Channel::Distributed, "com.apple.logoutCancelled", Signal::Cancelled),
+    (Channel::Notify, "com.apple.system.loginwindow.logoutInitiated", Signal::Coming),
+    (Channel::Notify, "com.apple.system.loginwindow.restartinitiated", Signal::Coming),
+    (Channel::Notify, "com.apple.system.loginwindow.shutdownInitiated", Signal::Coming),
+    (Channel::Notify, "com.apple.system.loginwindow.logoutcancelled", Signal::Cancelled),
+    (Channel::Workspace, "NSWorkspaceWillPowerOffNotification", Signal::Coming),
+];
+
+/// The suffix of the test's cancel note: with `STAGE_MANAGER_LOGOUT_NOTE=<name>` the app
+/// listens for the distributed notifications `<name>` (coming) and `<name>.cancelled`.
+pub const TEST_CANCEL_SUFFIX: &str = ".cancelled";
+
+/// The signals listened for: Apple's ([`SIGNALS`]), or with a test note (`note`: the test's
+/// `STAGE_MANAGER_LOGOUT_NOTE`, honoured only with `STAGE_MANAGER_TEST`) only the test's two
+/// distributed names, so a scripted test can post them without touching other apps.
+pub fn signals_to_observe(note: Option<&str>) -> Vec<(Channel, String, Signal)> {
+    match note.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(note) => vec![
+            (Channel::Distributed, note.to_string(), Signal::Coming),
+            (Channel::Distributed, format!("{note}{TEST_CANCEL_SUFFIX}"), Signal::Cancelled),
+        ],
+        None => SIGNALS.iter().map(|(c, n, s)| (*c, (*n).to_string(), *s)).collect(),
+    }
+}
+
+/// What the WM thread does with a logout signal ([`Logout::signal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heard {
+    /// The first signal of a logout: the head start runs now.
+    HeadStart,
+    /// The logout is held already: nothing more (the wait counts from this one).
+    Repeat,
+    /// The logout was cancelled while held: the app starts afresh now.
+    Resume,
+    /// Nothing to do (a cancel with nothing held, a signal while standing down).
+    Nothing,
+}
+
+impl Heard {
+    /// Lower-case name, for the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::HeadStart => "head start",
+            Self::Repeat => "repeat",
+            Self::Resume => "resume",
+            Self::Nothing => "nothing",
+        }
+    }
+}
 
 /// What the app's quit has left to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,26 +217,55 @@ pub enum Quit {
     },
 }
 
-/// The logout's head start (see the module docs): held from `willPowerOffNotification` until
-/// macOS's quit, or [`LOGOUT_WAIT`] when no quit comes.
+/// The logout's head start (see the module docs): held from the first logout signal until
+/// macOS's quit, a cancel signal, or [`LOGOUT_WAIT`] after the latest signal when neither
+/// comes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Logout {
     /// When the head start ran; `None` when none is held.
     since: Option<Instant>,
+    /// The latest signal of the logout held (the wait counts from it).
+    last: Option<Instant>,
+    /// The first signal of this logout, for the log (ms since it).
+    first: Option<Instant>,
     /// Every window came back at the head start.
     all_back: bool,
 }
 
 impl Logout {
-    /// A logout, restart or shutdown is coming at `now`: true when the head start runs now
-    /// (once: a repeated notice while held does nothing).
-    pub fn coming(&mut self, now: Instant) -> bool {
-        if self.since.is_some() {
-            return false;
-        }
-        self.since = Some(now);
-        self.all_back = false;
-        true
+    /// A logout signal `signal` at `at`; `may_hold`: the head start may run (not while standing
+    /// down: nothing is parked then, the quit does as before). Returns what to do and how many
+    /// ms after the first signal of this logout it came (0 for the first). Any first signal
+    /// starts the head start; later ones only push the wait back; a cancel while held resumes.
+    pub fn signal(&mut self, signal: Signal, at: Instant, may_hold: bool) -> (Heard, u64) {
+        // A first signal long gone (a logout cancelled while standing down) starts the count
+        // afresh.
+        let first = match self.first {
+            Some(f) if self.since.is_some() || at.saturating_duration_since(f) < LOGOUT_WAIT => f,
+            _ => at,
+        };
+        self.first = Some(first);
+        let ms = at.saturating_duration_since(first).as_millis() as u64;
+        let heard = match signal {
+            Signal::Coming if self.since.is_some() => {
+                self.last = Some(at);
+                Heard::Repeat
+            }
+            Signal::Coming if may_hold => {
+                self.since = Some(at);
+                self.last = Some(at);
+                self.all_back = false;
+                Heard::HeadStart
+            }
+            Signal::Coming => Heard::Nothing,
+            Signal::Cancelled => {
+                let held = self.since.take().is_some();
+                self.last = None;
+                self.first = None;
+                if held { Heard::Resume } else { Heard::Nothing }
+            }
+        };
+        (heard, ms)
     }
 
     /// The head start's work is done; `all_back`: every window came back.
@@ -165,11 +283,15 @@ impl Logout {
         if self.holding() { Quit::Done { all_back: self.all_back } } else { Quit::Unpark }
     }
 
-    /// True (once) when no quit came within [`LOGOUT_WAIT`] of the head start at `now`: the
-    /// logout was cancelled, the hold ends and the app starts afresh.
+    /// True (once) when no quit and no cancel signal came within [`LOGOUT_WAIT`] of the
+    /// latest signal at `now`: the logout was cancelled, the hold ends and the app starts
+    /// afresh.
     pub fn cancelled(&mut self, now: Instant) -> bool {
-        if self.since.is_some_and(|t| now.saturating_duration_since(t) >= LOGOUT_WAIT) {
+        let Some(since) = self.since else { return false };
+        if now.saturating_duration_since(self.last.unwrap_or(since)) >= LOGOUT_WAIT {
             self.since = None;
+            self.last = None;
+            self.first = None;
             return true;
         }
         false
@@ -353,8 +475,8 @@ mod tests {
         let mut l = Logout::default();
         assert_eq!(l.quit(), Quit::Unpark, "no head start: the quit does it all");
         assert!(l.admits(Work::Input) && l.admits(Work::Observe));
-        assert!(l.coming(t0));
-        assert!(!l.coming(t0 + Duration::from_secs(1)), "once");
+        assert_eq!(l.signal(Signal::Coming, t0, true), (Heard::HeadStart, 0));
+        assert_eq!(l.signal(Signal::Coming, t0 + Duration::from_secs(1), true), (Heard::Repeat, 1000), "once");
         assert!(l.holding() && !l.admits(Work::Input) && !l.admits(Work::SpaceChange) && !l.admits(Work::Observe));
         assert!(l.admits(Work::Housekeeping), "settings, displays, ctl reads and the quit still work");
         assert_eq!(l.quit(), Quit::Done { all_back: false }, "under way: nothing said back yet");
@@ -394,13 +516,72 @@ mod tests {
         let t0 = Instant::now();
         let mut l = Logout::default();
         assert!(!l.cancelled(t0 + LOGOUT_WAIT), "nothing held");
-        l.coming(t0);
+        l.signal(Signal::Coming, t0, true);
         l.released(true);
         assert!(!l.cancelled(t0 + LOGOUT_WAIT - Duration::from_millis(1)));
         assert!(l.cancelled(t0 + LOGOUT_WAIT));
         assert!(!l.holding() && l.quit() == Quit::Unpark, "managing again: a later quit does everything");
         assert!(!l.cancelled(t0 + LOGOUT_WAIT * 2), "once");
-        assert!(l.coming(t0 + LOGOUT_WAIT * 3), "a later logout gets its own head start");
+        assert_eq!(l.signal(Signal::Coming, t0 + LOGOUT_WAIT * 3, true), (Heard::HeadStart, 0), "a later logout gets its own head start");
+    }
+
+    /// Round 8H: any first signal starts the head start; repeats are ignored (each only pushes
+    /// the wait back) and timed from the first; a cancel resumes at once.
+    #[test]
+    fn the_first_signal_starts_it_repeats_are_ignored_and_a_cancel_resumes() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut l = Logout::default();
+        // The 10-16 order, early names first this time: whichever comes first starts it.
+        assert_eq!(l.signal(Signal::Coming, ms(0), true), (Heard::HeadStart, 0));
+        assert!(l.holding());
+        assert_eq!(l.signal(Signal::Coming, ms(30), true), (Heard::Repeat, 30), "another name for the same logout");
+        assert_eq!(l.signal(Signal::Coming, ms(7_250), true), (Heard::Repeat, 7_250), "willPowerOff last: ignored");
+        // The wait counts from the latest signal, not the first.
+        assert!(!l.cancelled(ms(7_250) + LOGOUT_WAIT - Duration::from_millis(1)));
+        assert_eq!(l.quit(), Quit::Done { all_back: false });
+        // Cancelled: resumed at once, long before the wait.
+        assert_eq!(l.signal(Signal::Cancelled, ms(9_000), true), (Heard::Resume, 9_000));
+        assert!(!l.holding() && l.quit() == Quit::Unpark, "managing again");
+        assert!(!l.cancelled(ms(9_000) + LOGOUT_WAIT), "nothing held: no second resume");
+        assert_eq!(l.signal(Signal::Cancelled, ms(9_100), true), (Heard::Nothing, 0), "a second cancel does nothing");
+        // A later logout is a new one, timed from its own first signal.
+        assert_eq!(l.signal(Signal::Coming, ms(20_000), true), (Heard::HeadStart, 0));
+        assert_eq!(l.signal(Signal::Coming, ms(20_004), true), (Heard::Repeat, 4));
+    }
+
+    #[test]
+    fn a_signal_while_standing_down_holds_nothing() {
+        let t0 = Instant::now();
+        let mut l = Logout::default();
+        assert_eq!(l.signal(Signal::Coming, t0, false), (Heard::Nothing, 0), "nothing parked: the quit does as before");
+        assert!(!l.holding() && l.quit() == Quit::Unpark);
+        assert_eq!(l.signal(Signal::Coming, t0 + Duration::from_millis(5), false), (Heard::Nothing, 5), "still timed for the log");
+        // Long after, a new logout's first signal counts from itself.
+        assert_eq!(l.signal(Signal::Coming, t0 + LOGOUT_WAIT * 2, true), (Heard::HeadStart, 0));
+    }
+
+    #[test]
+    fn every_signal_is_listened_for_or_only_the_tests_note() {
+        let all = signals_to_observe(None);
+        assert_eq!(all.len(), SIGNALS.len());
+        for name in ["com.apple.logoutInitiated", "com.apple.restartInitiated", "com.apple.shutdownInitiated", "com.apple.logoutContinued"] {
+            assert!(all.contains(&(Channel::Distributed, name.to_string(), Signal::Coming)), "{name}");
+        }
+        assert!(all.contains(&(Channel::Distributed, "com.apple.logoutCancelled".to_string(), Signal::Cancelled)));
+        assert!(all.contains(&(Channel::Notify, "com.apple.system.loginwindow.logoutcancelled".to_string(), Signal::Cancelled)));
+        assert_eq!(all.iter().filter(|s| s.0 == Channel::Notify).count(), 4);
+        assert_eq!(all.last(), Some(&(Channel::Workspace, "NSWorkspaceWillPowerOffNotification".to_string(), Signal::Coming)), "the last fallback");
+        let test = signals_to_observe(Some("dev.example.test.logout"));
+        assert_eq!(
+            test,
+            vec![
+                (Channel::Distributed, "dev.example.test.logout".to_string(), Signal::Coming),
+                (Channel::Distributed, "dev.example.test.logout.cancelled".to_string(), Signal::Cancelled),
+            ],
+            "the test's own names instead of Apple's"
+        );
+        assert_eq!(signals_to_observe(Some("  ")).len(), SIGNALS.len(), "an empty note is no note");
     }
 
     #[test]

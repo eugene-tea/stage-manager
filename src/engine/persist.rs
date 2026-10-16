@@ -15,8 +15,18 @@
 //! their first visit.
 //!
 //! Fields added after version 2 first shipped (`saved_at`, `display`, a Space's
-//! `last_seen`, a stage's `last_active`, a window's `fp` and `pending`) are optional both
-//! ways: older files load without them, and older builds read newer files, ignoring them.
+//! `last_seen`, a stage's `last_active`, a window's `fp`, `pending` and `quit_at`) are
+//! optional both ways: older files load without them, and older builds read newer files,
+//! ignoring them.
+//!
+//! **Windows of apps that quit** (round 8H) stay in the file a while: an app's quit takes its
+//! windows out of the model (Apple's behaviour, no card), but their saved entries are written
+//! with `quit_at` in their stages (a stage gone with them is written too), at their last real
+//! frame. At a load in a new session the ones that quit within [`QUIT_KEEP`] before the save
+//! wait in their stages as any saved window not on screen does; older ones, and every one at
+//! a load in the same session, are dropped ([`StateFile::settle_quit`]). A logout whose early
+//! signal never came (the apps quit first, the strip losing their stages one by one) still
+//! leaves the stages it had for the next login.
 //!
 //! Version 1 files (one Space) are read as a single Space.
 
@@ -29,7 +39,7 @@ use super::model::{
     Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowMeta, WindowRole,
     WindowState,
 };
-use super::restore::merge_order;
+use super::restore::{QUIT_KEEP, merge_order};
 use super::rules::Decision;
 use super::settings::AppWindows;
 use super::stage_area::same_frame;
@@ -93,6 +103,10 @@ pub struct SavedWindow {
     /// Set while the window has not been seen in this window server session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
+    /// When its app quit (Unix seconds): the window left the model then and its entry is kept
+    /// for the next session only ([`StateFile::settle_quit`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quit_at: Option<u64>,
 }
 
 impl SavedWindow {
@@ -167,6 +181,23 @@ pub struct SavedSpace {
 }
 
 impl SavedSpace {
+    /// Removes the stages at `indices` (ascending), keeping `active_index` and `strip_slots`
+    /// pointing at the same stages (an active one removed leaves none active).
+    pub fn remove_stages(&mut self, indices: &[usize]) {
+        if indices.is_empty() {
+            return;
+        }
+        let new_index = |i: usize| (!indices.contains(&i)).then(|| i - indices.iter().filter(|&&r| r < i).count());
+        self.active_index = self.active_index.and_then(new_index);
+        self.strip_slots = self.strip_slots.iter().filter_map(|&i| new_index(i)).collect();
+        let mut i = 0;
+        self.stages.retain(|_| {
+            let keep = !indices.contains(&i);
+            i += 1;
+            keep
+        });
+    }
+
     /// How many standard windows it saved (children follow their parents and are never
     /// matched).
     pub fn standard_windows(&self) -> usize {
@@ -253,6 +284,40 @@ impl StateFile {
         }
         self.spaces.retain(|s| s.standard_windows() > 0);
         expired
+    }
+
+    /// The entries of windows whose app quit (`quit_at`), as a load must take them before
+    /// anything else reads the file: at a load in a new session (`new_session`, the restore
+    /// on) those that quit within [`QUIT_KEEP`] before `saved_at` become ordinary saved windows
+    /// (pending in their stages from then on, as any saved window not on screen); older ones,
+    /// any when the file does not say when it was saved, and every one at a load in the same
+    /// session (the app was quit by the user: its next windows go by the usual rules) are
+    /// dropped, with the stages left with no window by that. Returns (kept, dropped).
+    pub fn settle_quit(&mut self, new_session: bool) -> (usize, usize) {
+        let cutoff = self.saved_at.map(|t| t.saturating_sub(QUIT_KEEP.as_secs()));
+        let (mut kept, mut dropped) = (0, 0);
+        for space in &mut self.spaces {
+            let mut emptied = Vec::new();
+            for (i, stage) in space.stages.iter_mut().enumerate() {
+                let before = stage.windows.len();
+                stage.windows.retain(|w| match (w.quit_at, cutoff) {
+                    (None, _) => true,
+                    (Some(q), Some(c)) => new_session && q >= c,
+                    (Some(_), None) => false,
+                });
+                dropped += before - stage.windows.len();
+                for w in &mut stage.windows {
+                    if w.quit_at.take().is_some() {
+                        kept += 1;
+                    }
+                }
+                if before > 0 && stage.windows.is_empty() {
+                    emptied.push(i);
+                }
+            }
+            space.remove_stages(&emptied);
+        }
+        (kept, dropped)
     }
 
     /// Stamps the save time `now` (Unix seconds) and each Space's `last_seen`: now for the
@@ -577,7 +642,7 @@ impl Model {
         let mut spaces: Vec<SavedSpace> = self
             .spaces
             .iter()
-            .filter(|space| !self.space_is_empty(space.id))
+            .filter(|space| !self.space_is_empty(space.id) || self.space_has_quit(space.id))
             .map(|space| self.save_space(space.id))
             .collect();
         spaces.extend(self.leftovers.iter().cloned().map(|mut l| {
@@ -614,6 +679,7 @@ impl Model {
                 window: Some(id.0),
                 fp: (!fp.is_empty()).then_some(fp),
                 pending: None,
+                quit_at: None,
             })
         };
         let here: Vec<&crate::engine::model::Stage> = self.stages_in(space).collect();
@@ -667,6 +733,9 @@ impl Model {
             merge_order(&slots, saved, |s| here.iter().any(|h| h.id == s) && Some(s) != active && self.has_pending(s))
         });
         let strip_slots = order.iter().filter_map(|id| here.iter().position(|s| s.id == *id)).collect();
+        // Windows whose app quit a moment ago, in their stages (round 8H).
+        let ids: Vec<StageId> = here.iter().map(|s| s.id).collect();
+        let (stages, active_index, strip_slots) = self.with_quit(space, &ids, stages, active_index, strip_slots);
         SavedSpace {
             id: space.0,
             current: self.current.values().any(|&c| c == space),
@@ -737,6 +806,10 @@ impl Model {
         let mut placed: HashSet<WindowId> = HashSet::new();
         let saved_clock = assignment.stages.iter().filter_map(|s| s.last_active).max().unwrap_or(0);
         self.clock = self.clock.max(saved_clock);
+        // Apps with windows here are running: the entries kept from their quit go (round 8H).
+        for m in live.iter().filter(|m| m.role == WindowRole::Standard) {
+            self.forget_quit_of(&m.bundle_id);
+        }
 
         for (i, st) in assignment.stages.iter().enumerate() {
             let members: Vec<&AssignedWindow> = st
