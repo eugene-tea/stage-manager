@@ -83,12 +83,13 @@ use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::{desktop, logging, paths, session, windows};
+use super::{desktop, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BusyApps, OffScreen};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
+use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::park::{ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
@@ -453,6 +454,32 @@ struct Unrestored {
     forgotten: Forgotten,
     /// The element was looked up afresh in its app's list once already (L5).
     refreshed: bool,
+    /// Why the model let it go (the review of 8J): only a window reported destroyed while
+    /// the window server still listed it may be judged a hidden tab.
+    why: LetGo,
+}
+
+/// Why the model let a parked window go ([`Unrestored::why`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LetGo {
+    /// Not let go: a failed restore (the model still has it).
+    Kept,
+    /// Accessibility reported it destroyed while the window server still listed it: how
+    /// macOS reports a tab no longer selected (or a window closing, listed for a moment).
+    Destroyed,
+    /// It left its Space or display, or anything else: a real window, never judged a tab.
+    Other,
+}
+
+impl LetGo {
+    /// What the hidden-tab test may judge of a window let go so (8J): only the tab's own
+    /// signature, a window reported destroyed, is ever a candidate.
+    fn candidate(self) -> Candidate {
+        match self {
+            Self::Destroyed => Candidate::Destroyed,
+            Self::Kept | Self::Other => Candidate::Real,
+        }
+    }
 }
 
 /// How often a forgotten parked window was seen in the park zone ([`Unrestored::forgotten`]).
@@ -468,7 +495,7 @@ enum Forgotten {
 
 impl Unrestored {
     fn failed(entry: ParkedEntry) -> Self {
-        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false }
+        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false, why: LetGo::Kept }
     }
 }
 
@@ -536,14 +563,27 @@ enum UnrestoredStep {
 /// A window the model forgot (it left its Space, its element was reported destroyed) while
 /// the window server still lists it in the park zone is not done: the model forgetting a
 /// window does not bring it back (6X: such windows sat parked with no run tracking them).
-fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>) -> UnrestoredStep {
+/// Unless it is a hidden tab (`hidden_tab`, 8J: [`crate::engine::hidden_tab`]): off screen,
+/// out of Accessibility's reach beside its group's selected tab, nothing can move it and it
+/// takes its group's frame once selected.
+fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>, hidden_tab: bool) -> UnrestoredStep {
     match (model_parked, listed) {
         (Some(true), _) | (_, None) => UnrestoredStep::Done,
+        (None, Some((false, true))) if hidden_tab => UnrestoredStep::Done,
         (_, Some((true, false))) => UnrestoredStep::Done,
         (_, Some((true, true))) => UnrestoredStep::Retry,
         (Some(false), Some((false, _))) | (None, Some((false, true))) => UnrestoredStep::Wait,
         (None, Some((false, false))) => UnrestoredStep::Done,
     }
+}
+
+/// Whether an [`Unrestored`] window is let go as a hidden tab (8J): only one the model no
+/// longer has (`model_parked` `None`), let go as reported destroyed (`why`: the tab's own
+/// signature; the review of 8J), listed off screen in the park zone (`listed`), and judged
+/// one by `judge` with its [`Candidate`] (asked only then: it reads Accessibility).
+fn let_go_as_tab(model_parked: Option<bool>, listed: Option<(bool, bool)>, why: LetGo, judge: impl FnOnce(Candidate) -> bool) -> bool {
+    let candidate = why.candidate();
+    model_parked.is_none() && candidate != Candidate::Real && listed == Some((false, true)) && judge(candidate)
 }
 
 /// After a wallpaper click left to macOS's reveal, how long a check finding every window on
@@ -1475,6 +1515,8 @@ impl Controller {
         self.unrestored_checked = now;
         let list = windows::list_windows();
         let mut scan: Option<recovery::ScanDisplays> = None;
+        let mut tabs: Option<hidden_tabs::Tabs> = None;
+        let mut shown: Option<BTreeSet<u32>> = None;
         let before = self.unrestored.len();
         let ids: Vec<u32> = self.unrestored.keys().copied().collect();
         for id in ids {
@@ -1489,10 +1531,18 @@ impl Controller {
                 (w.onscreen, zone)
             });
             let forgotten_parked = model_parked.is_none() && listed.is_some_and(|(_, zone)| zone);
-            let step = if force && (model_parked == Some(false) || forgotten_parked) && listed.is_some() {
+            // A hidden tab (8J)? Only by its own signature: one that left its Space stays real.
+            let why = self.unrestored.get(&id).map_or(LetGo::Kept, |u| u.why);
+            let hidden_tab = let_go_as_tab(model_parked, listed, why, |candidate| {
+                list.iter().find(|w| w.id == id).is_some_and(|w| {
+                    let shown = shown.get_or_insert_with(|| self.model_shown_ids());
+                    tabs.get_or_insert_with(|| hidden_tabs::Tabs::new(&list)).is_hidden_tab(w, candidate, |i| shown.contains(&i))
+                })
+            });
+            let step = if force && !hidden_tab && (model_parked == Some(false) || forgotten_parked) && listed.is_some() {
                 UnrestoredStep::Retry
             } else {
-                unrestored_step(model_parked, listed)
+                unrestored_step(model_parked, listed, hidden_tab)
             };
             let Some(u) = self.unrestored.get_mut(&id) else { continue };
             // A forgotten window is quiet until it is seen in the zone a second time (L6).
@@ -1503,6 +1553,10 @@ impl Controller {
                 tracing::warn!(id, ?listed, restore = %u.entry.restore, "a parked window the model let go is still in the park zone: it stays registered until it is back");
             }
             match step {
+                UnrestoredStep::Done if hidden_tab => {
+                    tracing::info!(id, ?listed, "a parked window the model let go is a hidden tab: nothing can move it, and it needs not be");
+                    self.unrestored.remove(&id);
+                }
                 UnrestoredStep::Done if quiet => {
                     tracing::debug!(id, ?listed, "a parked window the model let go is accounted for (closed, or back)");
                     self.unrestored.remove(&id);
@@ -1576,8 +1630,9 @@ impl Controller {
     /// Windows the model just forgot while they were parked (`kept`: their registry entries):
     /// each one the window server still lists in the park zone stays registered as an
     /// unrestored window ([`Unrestored`]) until it is seen back or gone, so no run loses
-    /// track of a window it parked (6X).
-    fn watch_forgotten(&mut self, ob: &Observer, kept: Vec<(u32, ParkedEntry)>) {
+    /// track of a window it parked (6X). `why`: why the model let them go (only
+    /// [`LetGo::Destroyed`] may later be judged a hidden tab).
+    fn watch_forgotten(&mut self, ob: &Observer, kept: Vec<(u32, ParkedEntry)>, why: LetGo) {
         if kept.is_empty() {
             return;
         }
@@ -1596,7 +1651,7 @@ impl Controller {
             }
             // A closed window is listed here for a moment: quiet until a second sighting (L6).
             tracing::debug!(id, at = %l.bounds, onscreen = l.onscreen, restore = %entry.restore, "a parked window the model let go is in the park zone: it stays registered until it is back or gone");
-            self.unrestored.insert(id, Unrestored { forgotten: Forgotten::Once, ..Unrestored::failed(entry) });
+            self.unrestored.insert(id, Unrestored { forgotten: Forgotten::Once, why, ..Unrestored::failed(entry) });
             added = true;
         }
         if added {
@@ -1607,6 +1662,28 @@ impl Controller {
     /// Every window the model manages (the safety paths count a sliver of theirs as parked).
     pub fn model_window_ids(&self) -> BTreeSet<u32> {
         self.model.as_ref().map(|m| m.windows().map(|w| w.meta.id.0).collect()).unwrap_or_default()
+    }
+
+    /// Every window the model manages and has not parked: vouches for a hidden tab reported
+    /// destroyed (8J, [`safety::Ours::shown_managed`]).
+    pub fn model_shown_ids(&self) -> BTreeSet<u32> {
+        self.model.as_ref().map(|m| m.windows().filter(|w| !w.parked).map(|w| w.meta.id.0).collect()).unwrap_or_default()
+    }
+
+    /// Windows whose registry entry is kept while the model has let them go as reported
+    /// destroyed (the tab's signature): the only registered windows the hidden-tab test may
+    /// judge (the review of 8J, [`safety::Ours::destroyed`]). One that left its Space, or was
+    /// let go for any other reason, is not among them. None without a model.
+    pub fn destroyed_ids(&self) -> BTreeSet<u32> {
+        let Some(m) = &self.model else { return BTreeSet::new() };
+        self.unrestored.iter().filter(|(id, u)| u.why == LetGo::Destroyed && m.window(WindowId(**id)).is_none()).map(|(id, _)| *id).collect()
+    }
+
+    /// What the safety paths know of whose windows are ours ([`safety::Ours`]): the
+    /// registry, the model's windows, `state.json`, the registered windows the model let go
+    /// as reported destroyed, and the model's windows not parked.
+    pub fn safety_ours(&self) -> safety::Ours {
+        safety::Ours::now(self.model_window_ids()).with_tab_signs(self.destroyed_ids(), self.model_shown_ids())
     }
 
     /// Quit, after its leftovers check: windows whose restore failed are checked against the
@@ -2062,7 +2139,9 @@ impl Controller {
                     let actions = m.remove_window(WindowId(id));
                     self.execute(ob, actions);
                 }
-                self.watch_forgotten(ob, kept);
+                // Destroyed while the window server still lists it (`watch_forgotten` keeps
+                // only those): the tab's signature, the one let-go a hidden tab may have.
+                self.watch_forgotten(ob, kept, LetGo::Destroyed);
             }
             WinEvent::Moved(id) => {
                 self.maybe_start_drag(ob, id, now);
@@ -3246,7 +3325,7 @@ impl Controller {
             let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
-            self.watch_forgotten(ob, kept);
+            self.watch_forgotten(ob, kept, LetGo::Other);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -3284,7 +3363,7 @@ impl Controller {
             let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
-            self.watch_forgotten(ob, kept);
+            self.watch_forgotten(ob, kept, LetGo::Other);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -4492,14 +4571,14 @@ mod tests {
     fn a_failed_restore_stays_registered_until_the_window_is_seen_back() {
         use UnrestoredStep::*;
         // Still in the park zone on screen: moved again, never dropped.
-        assert_eq!(unrestored_step(Some(false), Some((true, true))), Retry);
+        assert_eq!(unrestored_step(Some(false), Some((true, true)), false), Retry);
         // Off screen (another Space, app hidden): kept, waiting.
-        assert_eq!(unrestored_step(Some(false), Some((false, true))), Wait);
-        assert_eq!(unrestored_step(Some(false), Some((false, false))), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((false, true)), false), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((false, false)), false), Wait);
         // Seen back out of the zone, closed, or parked again by the model: done.
-        assert_eq!(unrestored_step(Some(false), Some((true, false))), Done);
-        assert_eq!(unrestored_step(Some(false), None), Done);
-        assert_eq!(unrestored_step(Some(true), Some((true, true))), Done);
+        assert_eq!(unrestored_step(Some(false), Some((true, false)), false), Done);
+        assert_eq!(unrestored_step(Some(false), None, false), Done);
+        assert_eq!(unrestored_step(Some(true), Some((true, true)), false), Done);
     }
 
     /// 6X: a parked window the model forgot (it left its Space, its element was reported
@@ -4507,11 +4586,45 @@ mod tests {
     #[test]
     fn a_parked_window_the_model_forgot_stays_registered_until_it_is_back() {
         use UnrestoredStep::*;
-        assert_eq!(unrestored_step(None, Some((true, true))), Retry, "on screen in the corner: moved back");
-        assert_eq!(unrestored_step(None, Some((false, true))), Wait, "another Space's corner: waits for it");
-        assert_eq!(unrestored_step(None, Some((true, false))), Done, "seen back");
-        assert_eq!(unrestored_step(None, Some((false, false))), Done, "out of the zone elsewhere");
-        assert_eq!(unrestored_step(None, None), Done, "closed");
+        assert_eq!(unrestored_step(None, Some((true, true)), false), Retry, "on screen in the corner: moved back");
+        assert_eq!(unrestored_step(None, Some((false, true)), false), Wait, "another Space's corner: waits for it");
+        assert_eq!(unrestored_step(None, Some((true, false)), false), Done, "seen back");
+        assert_eq!(unrestored_step(None, Some((false, false)), false), Done, "out of the zone elsewhere");
+        assert_eq!(unrestored_step(None, None, false), Done, "closed");
+    }
+
+    /// 8J: a parked window the model let go that is a hidden tab (off screen in the park
+    /// zone, its group's selected tab listed or managed) is let go: nothing can move it. A
+    /// window the model still has is never judged one, nor one on screen.
+    #[test]
+    fn a_forgotten_hidden_tab_is_let_go() {
+        use UnrestoredStep::*;
+        assert_eq!(unrestored_step(None, Some((false, true)), true), Done, "a hidden tab at the park spot");
+        assert_eq!(unrestored_step(None, Some((true, true)), true), Retry, "on screen: no hidden tab");
+        assert_eq!(unrestored_step(Some(false), Some((false, true)), true), Wait, "the model has it: a real window");
+    }
+
+    /// The review of 8J, High: only a window the model let go as reported destroyed is ever
+    /// judged; one that left its Space (dragged to another Desktop in Mission Control) beside
+    /// a same-size sibling that would vouch stays real: it waits (and a quit retries it).
+    #[test]
+    fn only_a_window_reported_destroyed_is_judged_a_hidden_tab() {
+        use UnrestoredStep::*;
+        let zone_off = Some((false, true));
+        let vouched = |c: Candidate| c == Candidate::Destroyed;
+        assert!(let_go_as_tab(None, zone_off, LetGo::Destroyed, vouched), "the tab's signature");
+        let mut asked = false;
+        assert!(!let_go_as_tab(None, zone_off, LetGo::Other, |_| { asked = true; true }), "left its Space: real");
+        assert!(!asked, "a real window is never even judged");
+        assert!(!let_go_as_tab(None, zone_off, LetGo::Kept, |_| true), "a failed restore: real");
+        assert!(!let_go_as_tab(Some(false), zone_off, LetGo::Destroyed, |_| true), "the model has it again");
+        assert!(!let_go_as_tab(None, Some((true, true)), LetGo::Destroyed, |_| true), "on screen");
+        assert!(!let_go_as_tab(None, Some((false, false)), LetGo::Destroyed, |_| true), "out of the zone");
+        // The left-Space window: no hidden tab, so it waits off screen, as before.
+        let tab = let_go_as_tab(None, zone_off, LetGo::Other, |_| true);
+        assert_eq!(unrestored_step(None, zone_off, tab), Wait);
+        assert_eq!(LetGo::Other.candidate(), Candidate::Real);
+        assert_eq!(LetGo::Destroyed.candidate(), Candidate::Destroyed);
     }
 
     /// The review of 6X, M2: only an unpark tries a busy app again; a switch's arrivals

@@ -29,7 +29,9 @@
 //! quickly ([`set_frame_retrying`]), always within a deadline: the leftovers check never
 //! takes more than [`leftovers::LEFTOVERS_MAX`], the registry's retries share
 //! [`leftovers::REGISTRY_RETRY_BUDGET`]. Only windows we know ([`Ours`]) count as parked
-//! when a thin sliver of them shows ([`Known`]).
+//! when a thin sliver of them shows ([`Known`]). A hidden tab (8J, [`hidden_tabs`]) is never
+//! waited for: macOS keeps it off screen at its last frame, out of Accessibility's reach,
+//! until its tab is selected, when it takes its group's frame.
 //!
 //! **Hidden apps** (`[windows] hide_parked_apps`): every app we hid is recorded beside the
 //! registry ([`set_hidden`]) and in the parked file, and every path that unparks unhides it
@@ -47,8 +49,9 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, AxError, AxResult, names};
-use super::{desktop, logging, observe, paths, windows};
+use super::{desktop, hidden_tabs, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
+use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, UNPARK_POLL, UNPARK_SETTLE};
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
@@ -482,6 +485,15 @@ pub struct Ours {
     pub bundles: BTreeSet<String>,
     /// `state.json` as it was read: the frames a leftover goes back to.
     pub state: Option<StateFile>,
+    /// Registered windows the model let go because Accessibility reported them destroyed
+    /// while their app still listed them in the window server (a tab no longer selected; the
+    /// review of 8J): the only registered windows the hidden-tab test may judge
+    /// ([`Self::candidate`]). A window let go for any other reason (it left its Space, its app
+    /// was hidden) stays real.
+    pub destroyed: BTreeSet<u32>,
+    /// Windows the model manages and has not parked: they vouch for a
+    /// [`Candidate::Destroyed`] window's same size, on any Desktop.
+    pub shown_managed: BTreeSet<u32>,
 }
 
 impl Ours {
@@ -497,7 +509,31 @@ impl Ours {
             .as_ref()
             .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).map(|w| w.bundle_id.clone()).collect())
             .unwrap_or_default();
-        Self { registered, managed, bundles, state }
+        Self { registered, managed, bundles, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new() }
+    }
+
+    /// `self`, with what the hidden-tab test needs from the model (8J): the registered
+    /// windows it let go as reported destroyed ([`Self::destroyed`]) and its windows not
+    /// parked ([`Self::shown_managed`]).
+    pub fn with_tab_signs(mut self, destroyed: BTreeSet<u32>, shown_managed: BTreeSet<u32>) -> Self {
+        self.destroyed = destroyed;
+        self.shown_managed = shown_managed;
+        self
+    }
+
+    /// What the hidden-tab test may judge of window `id` (8J; [`Candidate`]): one the model
+    /// manages, or one we registered (or an earlier check left) and the model did not let go
+    /// as reported destroyed, is real; a registered one reported destroyed may be a tab its
+    /// shown selected tab vouches for; one we never registered nor manage, only beside a
+    /// window Accessibility lists now.
+    pub fn candidate(&self, id: u32) -> Candidate {
+        if self.managed.contains(&id) {
+            Candidate::Real
+        } else if self.registered.contains(&id) {
+            if self.destroyed.contains(&id) { Candidate::Destroyed } else { Candidate::Real }
+        } else {
+            Candidate::Unknown
+        }
     }
 
     /// What a check that left `left` in the park zone hands its next try: everything it knew,
@@ -514,6 +550,10 @@ impl Ours {
         self.registered.extend(now.registered);
         self.managed.extend(now.managed);
         self.bundles.extend(now.bundles);
+        // Reported destroyed stays true; what the model shows is `now`'s alone (an earlier
+        // check's model may have parked those windows since, or be gone).
+        self.destroyed.extend(now.destroyed);
+        self.shown_managed = now.shown_managed;
         if self.state.is_none() {
             self.state = now.state;
         }
@@ -538,12 +578,19 @@ impl Ours {
 /// candidates count: layer 0, not transparent, the frame in a park zone as far as what is
 /// known of it allows ([`recovery::is_stranded`], [`Ours`]: a sliver only for ours, no
 /// helper's tiny window unless we registered it).
+///
+/// A hidden tab ([`hidden_tabs`], 8J) is never one: nothing can move it, and it takes its
+/// group's frame once selected. Only by its own signature ([`Ours::candidate`]): a registered
+/// one the model let go as reported destroyed leaves the registry.
 pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
     let displays = scan_displays();
     let mut bundles: std::collections::HashMap<i32, Option<String>> = std::collections::HashMap::new();
-    windows::list_windows()
+    let list = windows::list_windows();
+    let mut tabs = hidden_tabs::Tabs::new(&list);
+    let mut registered_tabs = Vec::new();
+    let left = list
         .into_iter()
         // A transparent window is no window we parked (helpers keep such windows anywhere).
         .filter(|w| w.layer == 0 && w.alpha > 0.0 && displays.parks(w.bounds))
@@ -552,7 +599,16 @@ pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
             observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
                 && recovery::is_stranded(w.bounds, &displays, ours.known(w.id, bundle.as_deref()))
         })
-        .collect()
+        .filter(|w| {
+            let tab = tabs.is_hidden_tab(w, ours.candidate(w.id), |id| ours.shown_managed.contains(&id));
+            if tab && ours.registered.contains(&w.id) {
+                registered_tabs.push(w.id);
+            }
+            !tab
+        })
+        .collect();
+    registry_forget(&registered_tabs);
+    left
 }
 
 /// The apps (process ids) of allowed apps with a window listed now, on any Space: those a
@@ -1068,6 +1124,35 @@ mod tests {
         assert!(abort_wait(done, ABORT_WAIT, ABORT_STEP, sleep));
         assert_eq!(slept.get(), ABORT_STEP * 3, "returns as soon as the unpark is done");
         nanosleep(Duration::from_millis(1));
+    }
+
+    /// 8J and its review: what the hidden-tab test may judge. A window the model manages,
+    /// or one we registered (or an earlier check left) is real, unless the model let it go
+    /// as reported destroyed; one found in the park zone is unknown. Only the model's windows
+    /// not parked vouch beyond Accessibility; saved ids never do.
+    #[test]
+    fn only_a_window_reported_destroyed_or_never_known_may_be_a_hidden_tab() {
+        let ours = Ours::from_parts([1, 2].into(), [3, 6].into(), None).with_tab_signs([2].into(), [6].into());
+        assert_eq!(ours.candidate(1), Candidate::Real, "registered and tracked (or let go as it left its Space)");
+        assert_eq!(ours.candidate(2), Candidate::Destroyed, "registered, let go as reported destroyed");
+        assert_eq!(ours.candidate(3), Candidate::Real, "managed");
+        assert_eq!(ours.candidate(4), Candidate::Unknown, "found in the park zone");
+        let kept = ours.clone().kept_for_retry(&[4]);
+        assert_eq!(kept.candidate(4), Candidate::Real, "an earlier check's leftover stays real");
+        let merged = ours.clone().merged(Ours::default());
+        assert_eq!(merged.candidate(2), Candidate::Destroyed, "a merge keeps what was reported destroyed");
+        assert!(merged.shown_managed.is_empty(), "what the model shows is now's alone");
+        let merged = Ours::default().merged(ours);
+        assert_eq!(merged.shown_managed, [6].into());
+    }
+
+    /// The review of 8J, High: a parked window the model let go because it left its Space
+    /// (dragged to another Desktop in Mission Control) stays registered and not reported
+    /// destroyed: real at the quit's check, whatever its same-size sibling says.
+    #[test]
+    fn a_parked_window_that_left_its_space_stays_real_at_the_quit() {
+        let ours = Ours::from_parts([1].into(), [2].into(), None).with_tab_signs(BTreeSet::new(), [2].into());
+        assert_eq!(ours.candidate(1), Candidate::Real);
     }
 
     #[test]

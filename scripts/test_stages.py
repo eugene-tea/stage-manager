@@ -7,7 +7,8 @@ bundle ID, which no other run uses), so no other window is ever touched. Each ph
 every fixture window onscreen; the app and the fixture are quit at the end, whatever happens.
 
 Phases: m3 (stages, switching, frames, z-order, merge, pin, reveal, children), safety (quit,
-SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it), m4 (rules, placement,
+SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it, a hidden tab left in
+the park zone: a clean quit, no guardian wait), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
 only when its own strip window is topmost at that point), native (Apple's defaults with three
@@ -528,6 +529,84 @@ def phase_safety():
     consistent("after the relaunch")
     stop_app()
     all_onscreen("quit after the relaunch")
+
+    drill_hidden_tab()
+
+
+def drill_hidden_tab():
+    """8J: a tab group (the fixture's NSWindow tabbing) parked, then its other tab selected
+    while parked (the fixture's SIGIO): the tab parked becomes a hidden tab at the park spot,
+    off screen and out of Accessibility's reach, beside the selected tab of the same size.
+    Nothing can move it, nor needs to: the quit reports every window back and the guardian
+    waits for nothing (10-16: Terminal's hidden tabs kept the owner's guardian waiting)."""
+    say("-- drill: a hidden tab left in the park zone: the quit is clean, the guardian waits for nothing")
+    stop_app()
+    start_fixture(3, "--tabbed", "1")
+    fixture = pids_of(FIX_EXE)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and bool(fixture), "drill setup: the app manages the selected tab and the lone window"):
+        stop_app()
+        stop_fixture()
+        return
+    t = by_title(s)
+    first = t.get("Fixture 1")
+    check("Fixture 3" not in t, "the hidden tab (Fixture 3) is not managed: Accessibility does not list it")
+    if not check(first is not None, "drill setup: Fixture 1 (the selected tab) is managed"):
+        stop_app()
+        stop_fixture()
+        return
+    do("new", first["id"])
+    check(bool(by_title(state()).get("Fixture 1", {}).get("parked")), "drill setup: the tab group's selected tab is parked")
+
+    def hidden_in_zone():
+        wins, d = fixture_windows([FIX_ID])
+        w = [w for w in wins if w["id"] == first["id"]]
+        return w if w and not w[0]["onscreen"] and is_parked(w[0]["bounds"], d) else None
+
+    os.kill(fixture[0], signal.SIGIO)
+    hidden = wait_until(hidden_in_zone, 5, "Fixture 1 to become a hidden tab in the park zone")
+    check(hidden is not None, "drill setup: Fixture 1, now a hidden tab, stays in the park zone off screen")
+    time.sleep(1.5)  # the app hears of the tab switch (the tab left is reported destroyed)
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    ctl("quit")
+    wait_gone(pid)
+    for g in guards:
+        wait_gone(g, 15)
+    text = log_text()
+    check("unparked every window" in text and "guardian: clean exit" in text, "hidden tab: the quit is clean")
+    check("a window still parked cannot be reached" not in text and "guardian: waiting for" not in text,
+          "hidden tab: nothing is left \"still parked\", and the guardian waits for nothing")
+    check(not pids_of(f"stage-manager --guardian {pid}$"), "hidden tab: the guardian has ended")
+    # macOS may move a hidden tab with its group when the selected tab is brought back (seen
+    # 10-16); then nothing is left to judge. Only a tab that stays in the zone must be left alone.
+    followed = hidden_in_zone() is None
+    if followed:
+        say("    the hidden tab followed its group out of the zone (macOS moved it): nothing to leave alone")
+    else:
+        check("a hidden tab of " + FIX_ID + " left alone" in text, "hidden tab: the log says it was left alone")
+    # The window server's word after the quit, not only the log's: every fixture window but
+    # the hidden tab is on screen out of the zone; the hidden tab alone stays, off screen.
+    wins, d = fixture_windows([FIX_ID])
+    rest = [w for w in wins if w["id"] != first["id"]]
+    stuck = [w["id"] for w in rest if is_parked(w["bounds"], d) or not w["onscreen"]]
+    check(bool(rest) and not stuck, f"hidden tab: after the quit every other fixture window is on screen out of the zone (stuck: {stuck})")
+    if not followed:
+        check(hidden_in_zone() is not None, "hidden tab: after the quit only the hidden tab stays in the zone, off screen")
+
+    # Selected again, the hidden tab takes its group's frame: every fixture window out of the zone.
+    def none_in_zone():
+        wins, d = fixture_windows([FIX_ID])
+        return wins if wins and not any(is_parked(w["bounds"], d) for w in wins) else None
+
+    os.kill(fixture[0], signal.SIGIO)
+    check(wait_until(none_in_zone, 5, "the tab selected again to leave the zone") is not None,
+          "hidden tab: selected again, it takes its group's frame: no fixture window in the zone")
+    selected = wait_until(lambda: (lambda ws: ws if ws and ws[0]["onscreen"] else None)(
+        [w for w in fixture_windows([FIX_ID])[0] if w["id"] == first["id"]]), 5, "the tab selected again to show")
+    check(selected is not None, "hidden tab: selected again, it is on screen")
+    all_onscreen("hidden tab drill")
+    stop_fixture()
 
 
 def drill_away():

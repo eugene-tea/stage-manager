@@ -99,6 +99,23 @@ guardian only ever moves a window out of the park zone, never into it, so the wo
 window shown that the new app meant to keep parked (until its next switch), never one left
 parked; and it lets go of each window at its next pass once the new app reports it adopted.
 
+Hidden tabs (8J, `engine::hidden_tab`): macOS window tabs are separate window-server windows;
+a tab not selected is off screen, not listed through Accessibility, and keeps its last frame
+(a park spot, say) until selected, when it takes its group's frame. Nothing can move one, nor
+needs to. A window is one when it is layer 0, off screen, not listed by its app (which must
+answer), and its app has another window of the same size (±2 pt) that vouches for it. Only by
+the tab's own signature (8J2): a real window judged a tab would stay parked with every safety
+path blind, a tab judged real only keeps a guardian waiting. So a window the model manages, one
+we registered and track, or one the model let go for any reason but one (it left its Space, was
+hidden, minimized) is real, never judged; a parked window the model let go because
+Accessibility reported it destroyed while the window server still listed it may be one, beside
+a same-size window Accessibility lists now or the model manages unparked; a window found in the
+park zone that we never registered (the 10-16 case) only beside one Accessibility lists now.
+Saved ids never vouch. The quit's leftovers check, the controller's retry of a parked window
+the model let go, and the guardian's watch skip a hidden tab (logged once at debug); every
+window the guardian's parked file names is never judged one. A group whose selected tab is on a
+Desktop not shown keeps its unregistered hidden tabs waited for until that Desktop shows.
+
 ## Testing hooks
 
 - `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).

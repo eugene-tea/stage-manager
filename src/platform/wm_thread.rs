@@ -355,7 +355,7 @@ impl WmState {
                 // knowing what its check knew, as the quit after a stand-down does.
                 let back = if self.stand_down.stranded() {
                     let held_back = safety::retry_held();
-                    let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                    let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                     let left_back = safety::leftovers_back_knowing("quit", ours).is_none();
                     tracing::info!(held_back, left_back, "quitting after the logout's head start: windows it left were tried again");
                     held_back && left_back
@@ -454,7 +454,7 @@ impl WmState {
                 // it is back.
                 // A quit while stood down still knows whose windows the stand-down left
                 // (its model and state.json are gone by then; the review of 6X3, 2).
-                let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                 let back = safety::leftovers_back_knowing("quit", ours).is_none();
                 // A restore that failed but went through late is seen back now.
                 let unrestored = self.controller.account_unrestored(&self.observer);
@@ -490,7 +490,7 @@ impl WmState {
                     // app's window still in a park zone comes back now, known to this run or
                     // not; one that cannot is looked for again whenever a Desktop shows.
                     // An earlier stand-down's or logout's leftovers not yet back stay known.
-                    let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                    let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                     let left = safety::leftovers_back_knowing("stand-down", ours);
                     let back = left.is_none();
                     let unrestored = self.controller.account_unrestored(&self.observer);
@@ -557,7 +557,7 @@ impl WmState {
                     // As at quit: the controller's unpark, then the window server's word on
                     // every allowed app's window still in a park zone (6X).
                     let failed = self.controller.unpark_all(&self.observer);
-                    let ours = with_kept(self.stand_down_leftovers.take(), safety::Ours::now(self.controller.model_window_ids()));
+                    let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                     let left = safety::leftovers_back_knowing("logout", ours);
                     let back = left.is_none();
                     let unrestored = self.controller.account_unrestored(&self.observer);
