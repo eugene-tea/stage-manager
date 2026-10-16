@@ -2774,11 +2774,12 @@ def phase_restore():
 
 def post_note(name):
     """Posts the distributed notification `name`: the test's own logout note
-    (STAGE_MANAGER_LOGOUT_NOTE), never one of Apple's."""
+    (STAGE_MANAGER_LOGOUT_NOTE), never one of Apple's. The object and userInfo are `$()`
+    (nil): JXA's `null` there makes the post silently go nowhere (seen 10-16)."""
     if name.startswith("com.apple."):
         raise ValueError(f"not posting Apple's notification {name}")
     js = ('ObjC.import("Foundation"); $.NSDistributedNotificationCenter.defaultCenter'
-          f'.postNotificationNameObjectUserInfoDeliverImmediately({json.dumps(name)}, null, null, true);')
+          f'.postNotificationNameObjectUserInfoDeliverImmediately({json.dumps(name)}, $(), $(), true);')
     r = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True)
     return r.returncode == 0
 
