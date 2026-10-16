@@ -118,8 +118,9 @@ use (none while the screen is locked or asleep, or after 2 minutes with no input
 switch; a fresh one at the first input), covers it instead; the parked windows' edges are
 under it too for the moment of the motion. A window that stays shown through the switch and
 reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
-the cover from its own picture, so it looks as it is; the outgoing stage's windows never
-count. Where it cannot be covered at all (the patch off, card captures off with icons there,
+the cover from its own picture, so it looks as it is (that corner of it holds still for the
+motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
+windows land); the outgoing stage's windows never count. Where it cannot be covered at all (the patch off, card captures off with icons there,
 no picture ready yet, a staying window with no picture of it, such as another app's the
 app does not manage), an activated app's windows come to their places at once instead of
 growing.

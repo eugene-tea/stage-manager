@@ -1223,6 +1223,15 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
         f"Desktop 2's until {rel(slide_to)}; the stage left shown out of the park zone at "
         f"{[rel(t) for t in stale if slide_from and t >= slide_from][:12]}"
         + (f" (parked, carried across the screen by the slide at {len(carried)} looks)" if carried else ""))
+    if carried:
+        # The proof the allowance needs: each carried look's bounds against the parked frame
+        # they rest at (a pure sideways shift; 8L5 review).
+        for x in [x for x in samples if x["t"] in carried][:4]:
+            for w in x["windows"]:
+                if w["id"] in left and shown(w) and not shown_at(x, w):
+                    b, r = w["bounds"], rest.get(w["id"])
+                    say(f"      carried {rel(x['t'])}: window {w['id']} at {b['x']:.0f},{b['y']:.0f} {b['w']:.0f}x{b['h']:.0f}"
+                        + (f", parked at {r['x']:.0f},{r['y']:.0f} {r['w']:.0f}x{r['h']:.0f}" if r else ""))
     check(sent is not None, "the app's log says when the arrival's arrangement was sent")
     # Nothing below may pass for want of looking: the sampler saw the slide and the windows.
     check(slide_from is not None, "the window server was seen showing Desktop 1 during the 3 s sampled")
