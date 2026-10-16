@@ -1,8 +1,9 @@
 //! Where the window is in its picture: a capture's size and the window's place within it.
 //!
-//! `SCContentFilter(desktopIndependentWindow:)` takes the window **with its child windows**
-//! (a popover, a sheet): when a child sticks out past the window, the picture is the union
-//! of the two. Apple's Stage Manager shows exactly that (the popup sticking out of the
+//! `SCContentFilter(desktopIndependentWindow:)` takes the window **with the child windows it
+//! includes** (Calendar's event popover, 10-16; a borderless panel attached with
+//! `addChildWindow` was left out in the 10-16 live run, its `contentRect` the window's own
+//! frame): when such a child sticks out past the window, the picture is the union of the two. Apple's Stage Manager shows exactly that (the popup sticking out of the
 //! thumbnail, the owner checked 10-16), so the union is kept; what changed is how it is
 //! drawn: the picture fitted into the window's own frame drew the window shrunk inside a
 //! dark box (Calendar with a popup open, 10-16). Now each picture says where the window is
@@ -274,6 +275,18 @@ mod tests {
         assert_eq!(fit_to_content((300, 300), (4202.0, 2540.0)), (300, 181));
         // Unknown content: as asked.
         assert_eq!(fit_to_content((10, 0), (0.0, 0.0)), (10, 1));
+    }
+
+    #[test]
+    fn a_child_left_out_of_the_content_is_not_drawn() {
+        // The 10-16 live run: the fixture's addChildWindow panel (500,138 250x272) over
+        // Fixture 1 (80,78 520x392), but contentRect the window's own frame: the picture is
+        // the window, at its own size, whatever the app's windows say.
+        let window = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let panel = Rect::new(500.0, 138.0, 250.0, 272.0);
+        let display = [Rect::new(0.0, 0.0, 2560.0, 1440.0)];
+        let p = plan((546, 412), window, 2.0, window, &[panel], &display);
+        assert_eq!(p, Plan { extent: Extent::NONE, size: (546, 412), source: None, found: None });
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! ([`capture_frame::fit_to_content`]): asked for another shape, ScreenCaptureKit pads the image
 //! and pins the window to its top-left corner (measured 10-12), so a snapshot stretched over the
 //! window's frame drew its content smaller and off to one side. The filter takes the window with
-//! its child windows, as Apple's thumbnails show them; each picture says where the window is in
+//! the child windows ScreenCaptureKit includes (a popover), as Apple's thumbnails show them; each picture says where the window is in
 //! it ([`Picture::extent`], [`window_shot`]), so a popup sticking out is drawn beside the window,
 //! never squeezed into its frame (10-16). Each picture goes to the main thread through
 //! GCD, keyed by window id. Parked windows still render, so they capture too.
@@ -459,9 +459,61 @@ pub(crate) struct WindowShot {
     pub clear: Option<CFRetained<CGColor>>,
 }
 
-/// Logs, once per process, how the first capture with a child window found the window in
-/// the filter's content (global or local `contentRect`), for the owner's live run to settle.
+/// Logs at info, once per process, how the first capture whose content is larger than its
+/// window (a child included) found the window in it (global or local `contentRect`), for the
+/// owner's live run to settle. A content of the window's own size never logs it (the 10-16
+/// run: the fixture's `addChildWindow` panel was not in the content); [`log_reading`] shows
+/// every reading at debug.
 static FOUND_LOGGED: Once = Once::new();
+
+/// What a window's last capture read (its frame, the filter's content, the plan), per window:
+/// logged at debug when it changes, so every reading shows once, not every round.
+static LAST_READ: LazyLock<Mutex<HashMap<u32, Reading>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Windows remembered in [`LAST_READ`] before it starts over.
+const LAST_READ_CAP: usize = 512;
+
+/// One capture's reading of where its window is.
+#[derive(Clone, Copy, PartialEq)]
+struct Reading {
+    frame: Rect,
+    content: Rect,
+    scale: f64,
+    plan: capture_frame::Plan,
+}
+
+/// Logs at debug the window's frame, the filter's `contentRect`, its scale and the picture's
+/// extent (ids and points only, never titles) when they differ from the window's last capture.
+/// `reaching`: the frames of the app's windows overlapping the window and reaching past it
+/// (its children among them).
+fn log_reading(id: u32, read: Reading, reaching: &[Rect]) {
+    let Ok(mut last) = LAST_READ.lock() else { return };
+    if last.get(&id) == Some(&read) {
+        return;
+    }
+    if last.len() >= LAST_READ_CAP {
+        last.clear();
+    }
+    last.insert(id, read);
+    let Reading { frame, content, scale, plan } = read;
+    tracing::debug!(
+        window = id,
+        frame = %fmt_rect(frame),
+        content = %fmt_rect(content),
+        scale,
+        extent = ?plan.extent,
+        source = ?plan.source.map(fmt_rect),
+        found = plan.found.map(|f| f.as_str()),
+        size = ?plan.size,
+        reaching = ?reaching.iter().map(|r| fmt_rect(*r)).collect::<Vec<_>>(),
+        "capture: window frame, contentRect and extent"
+    );
+}
+
+/// `x,y wxh` in points.
+fn fmt_rect(r: Rect) -> String {
+    format!("{},{} {}x{}", r.x, r.y, r.w, r.h)
+}
 
 /// Every display's frame in the shareable content (global, top-left origin, points).
 pub(crate) fn display_frames(content: &SCShareableContent) -> Vec<Rect> {
@@ -502,11 +554,9 @@ pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, displa
     if let Some(found) = plan.found {
         FOUND_LOGGED.call_once(|| tracing::info!("capture: contentRect is {}", found.as_str()));
     }
-    if !plan.extent.is_none() {
-        tracing::trace!(window = id, ?content, ?frame, extent = ?plan.extent, "picture reaches past the window (child windows)");
-    } else if let Some(source) = plan.source {
-        tracing::trace!(window = id, ?content, ?frame, ?source, "child windows reach too far; the window alone");
-    }
+    let reaching: Vec<Rect> =
+        others.iter().filter(|o| o.intersect(&frame).is_some() && o.union(&frame) != frame).copied().collect();
+    log_reading(id, Reading { frame, content, scale, plan }, &reaching);
     // SAFETY: reading an immutable CoreGraphics constant.
     let clear = CGColor::constant_color(Some(unsafe { kCGColorClear }));
     // SAFETY: a plain initializer, then plain setters on the live configuration; the

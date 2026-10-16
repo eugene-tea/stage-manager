@@ -1839,23 +1839,35 @@ def phase_slots():
 
 
 def popup_picture_check(s):
-    """Fixture 1's popup (the fixture's --child: a child window 150 pt past its right edge,
-    60 pt in from its top and bottom) is in its picture, as Apple's thumbnails show it: the
+    """Fixture 1's popup (the fixture's --child: an NSPopover from a button, as Calendar's
+    event details, sticking out ~150 pt past its right edge) is in its picture, as Apple's
+    thumbnails show it: the
     picture says where the window is in it (the extent matches the window server's frames),
     has the union's proportions, its corners beside the popup (outside any window) are clear,
     never opaque dark, and the card draws the window's part at the plane's size with the popup
     beside it, not the whole picture squeezed into the plane (10-16)."""
     t = by_title(s)
     w1 = t["Fixture 1"]["id"]
-    wins, _ = fixture_windows([FIX_ID])
-    win = next((w["bounds"] for w in wins if w["id"] == w1), None)
-    if not check(win is not None, "Fixture 1 listed by the window server"):
+    managed = {w["id"] for w in s["windows"]}
+
+    def find():
+        """Fixture 1's frame and its popover's: a window the model does not manage, on any
+        layer (a popover's window need not be on layer 0), over Fixture 1 and past its right
+        edge."""
+        wins = probe(FIX_ID)["windows"]
+        win = next((w["bounds"] for w in wins if w["id"] == w1), None)
+        if win is None:
+            return None
+        def past(b):
+            return (b["x"] < win["x"] + win["w"] and win["x"] < b["x"] + b["w"] and b["y"] < win["y"] + win["h"]
+                    and win["y"] < b["y"] + b["h"] and b["x"] + b["w"] > win["x"] + win["w"] + 20)
+        popup = next((w["bounds"] for w in wins if w["id"] not in managed and past(w["bounds"])), None)
+        return (win, popup, wins) if popup else None
+    found = wait_until(find, 5, "Fixture 1's popover")
+    if not check(found is not None, "Fixture 1 and its popup listed by the window server"):
+        say(f"  fixture windows (id, layer, bounds): {[(w['id'], w['layer'], w['bounds']) for w in probe(FIX_ID)['windows']]}")
         return
-    def overlaps(b):
-        return b["x"] < win["x"] + win["w"] and win["x"] < b["x"] + b["w"] and b["y"] < win["y"] + win["h"] and win["y"] < b["y"] + b["h"]
-    popup = next((w["bounds"] for w in wins if w["id"] != w1 and abs(w["bounds"]["w"] - 250) <= 1 and overlaps(w["bounds"])), None)
-    if not check(popup is not None, "the fixture's popup is listed beside Fixture 1"):
-        return
+    win, popup, _ = found
     want = {"left": max(0.0, win["x"] - popup["x"]) / win["w"], "top": max(0.0, win["y"] - popup["y"]) / win["h"],
             "right": max(0.0, popup["x"] + popup["w"] - win["x"] - win["w"]) / win["w"],
             "bottom": max(0.0, popup["y"] + popup["h"] - win["y"] - win["h"]) / win["h"]}
@@ -1869,6 +1881,12 @@ def popup_picture_check(s):
     if not check(got is not None, f"Fixture 1's picture reaches past the window (want {want})"):
         g = ctl("debug-strip")
         say(f"  pictures: {((g.get('strip') or {}).get('pictures') or {}).get(str(w1))}")
+        say(f"  window {win}, popup {popup}")
+        # What the captures read (capture.rs logs each window's frame, contentRect and
+        # extent at debug when they change; this run's level shows debug).
+        reads = [ln for ln in log_text().splitlines() if "capture: " in ln and (f"window={w1} " in ln or "contentRect is" in ln)]
+        for ln in reads[-4:] or ["(no capture reading logged)"]:
+            say(f"  log: {ln.split('platform::capture: ', 1)[-1]}")
         return
     strip, pic = got
     e = pic["extent"]
