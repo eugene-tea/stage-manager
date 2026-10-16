@@ -29,7 +29,9 @@
 //! quickly ([`set_frame_retrying`]), always within a deadline: the leftovers check never
 //! takes more than [`leftovers::LEFTOVERS_MAX`], the registry's retries share
 //! [`leftovers::REGISTRY_RETRY_BUDGET`]. Only windows we know ([`Ours`]) count as parked
-//! when a thin sliver of them shows ([`Known`]).
+//! when a thin sliver of them shows ([`Known`]). A hidden tab (8J, [`hidden_tabs`]) is never
+//! waited for: macOS keeps it off screen at its last frame, out of Accessibility's reach,
+//! until its tab is selected, when it takes its group's frame.
 //!
 //! **Hidden apps** (`[windows] hide_parked_apps`): every app we hid is recorded beside the
 //! registry ([`set_hidden`]) and in the parked file, and every path that unparks unhides it
@@ -47,8 +49,9 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, AxError, AxResult, names};
-use super::{desktop, logging, observe, paths, windows};
+use super::{desktop, hidden_tabs, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
+use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, UNPARK_POLL, UNPARK_SETTLE};
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
@@ -482,6 +485,12 @@ pub struct Ours {
     pub bundles: BTreeSet<String>,
     /// `state.json` as it was read: the frames a leftover goes back to.
     pub state: Option<StateFile>,
+    /// Window ids saved in `state.json` (this session's): windows we know as real.
+    pub saved: BTreeSet<u32>,
+    /// Registered windows the model has let go (Accessibility reported them destroyed while
+    /// the window server still lists them: a tab ordered out, say): the only registered
+    /// windows that may be hidden tabs ([`Self::candidate`]).
+    pub forgotten: BTreeSet<u32>,
 }
 
 impl Ours {
@@ -497,7 +506,30 @@ impl Ours {
             .as_ref()
             .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).map(|w| w.bundle_id.clone()).collect())
             .unwrap_or_default();
-        Self { registered, managed, bundles, state }
+        let saved = state
+            .as_ref()
+            .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).filter_map(|w| w.window).collect())
+            .unwrap_or_default();
+        Self { registered, managed, bundles, state, saved, forgotten: BTreeSet::new() }
+    }
+
+    /// `self`, with the registered windows the model has let go ([`Self::forgotten`]).
+    pub fn with_forgotten(mut self, forgotten: BTreeSet<u32>) -> Self {
+        self.forgotten = forgotten;
+        self
+    }
+
+    /// What the hidden-tab test knows of window `id` (8J): one the model manages, or one we
+    /// registered and still track (not let go by the model), is real, never a hidden tab.
+    pub fn candidate(&self, id: u32) -> Candidate {
+        let tracked = self.registered.contains(&id) && !self.forgotten.contains(&id);
+        Candidate { known_real: self.managed.contains(&id) || tracked }
+    }
+
+    /// True when window `id` is one we know as real (a hidden tab's selected tab may be any
+    /// of these, on any Desktop): managed, registered and tracked, or saved in `state.json`.
+    pub fn knows(&self, id: u32) -> bool {
+        self.candidate(id).known_real || self.saved.contains(&id)
     }
 
     /// What a check that left `left` in the park zone hands its next try: everything it knew,
@@ -514,6 +546,8 @@ impl Ours {
         self.registered.extend(now.registered);
         self.managed.extend(now.managed);
         self.bundles.extend(now.bundles);
+        self.saved.extend(now.saved);
+        self.forgotten.extend(now.forgotten);
         if self.state.is_none() {
             self.state = now.state;
         }
@@ -538,12 +572,18 @@ impl Ours {
 /// candidates count: layer 0, not transparent, the frame in a park zone as far as what is
 /// known of it allows ([`recovery::is_stranded`], [`Ours`]: a sliver only for ours, no
 /// helper's tiny window unless we registered it).
+///
+/// A hidden tab ([`hidden_tabs`], 8J) is never one: nothing can move it, and it takes its
+/// group's frame once selected. A registered one (the model let it go) leaves the registry.
 pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
     let displays = scan_displays();
     let mut bundles: std::collections::HashMap<i32, Option<String>> = std::collections::HashMap::new();
-    windows::list_windows()
+    let list = windows::list_windows();
+    let mut tabs = hidden_tabs::Tabs::new(&list);
+    let mut registered_tabs = Vec::new();
+    let left = list
         .into_iter()
         // A transparent window is no window we parked (helpers keep such windows anywhere).
         .filter(|w| w.layer == 0 && w.alpha > 0.0 && displays.parks(w.bounds))
@@ -552,7 +592,16 @@ pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
             observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
                 && recovery::is_stranded(w.bounds, &displays, ours.known(w.id, bundle.as_deref()))
         })
-        .collect()
+        .filter(|w| {
+            let tab = tabs.is_hidden_tab(w, ours.candidate(w.id), |id| ours.knows(id));
+            if tab && ours.registered.contains(&w.id) {
+                registered_tabs.push(w.id);
+            }
+            !tab
+        })
+        .collect();
+    registry_forget(&registered_tabs);
+    left
 }
 
 /// The apps (process ids) of allowed apps with a window listed now, on any Space: those a
@@ -853,7 +902,7 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
 /// window server session ([`StateFile::for_session`]: after a reboot or a new login an id
 /// names another window), so the scans match by id first only when the id still means
 /// the same window.
-fn read_state(what: &str) -> Option<StateFile> {
+pub(crate) fn read_state(what: &str) -> Option<StateFile> {
     let text = std::fs::read_to_string(paths::state_file()).ok()?;
     match StateFile::from_json(&text) {
         Ok(s) => Some(s.for_session(super::session::window_session()).0),
@@ -1068,6 +1117,27 @@ mod tests {
         assert!(abort_wait(done, ABORT_WAIT, ABORT_STEP, sleep));
         assert_eq!(slept.get(), ABORT_STEP * 3, "returns as soon as the unpark is done");
         nanosleep(Duration::from_millis(1));
+    }
+
+    /// 8J: what the hidden-tab test may judge. A window the model manages, or one we
+    /// registered and still track, is real; a registered window the model let go may be a
+    /// hidden tab; a window an earlier check left (another Desktop's) stays real, as before.
+    /// Siblings are windows we know: real ones and those saved in `state.json`.
+    #[test]
+    fn only_windows_we_do_not_track_may_be_hidden_tabs() {
+        let ours = Ours::from_parts([1, 2].into(), [3].into(), None).with_forgotten([2].into());
+        assert!(ours.candidate(1).known_real, "registered and tracked");
+        assert!(!ours.candidate(2).known_real, "registered, let go by the model");
+        assert!(ours.candidate(3).known_real, "managed");
+        assert!(!ours.candidate(4).known_real, "found in the park zone");
+        assert!(ours.knows(1) && ours.knows(3) && !ours.knows(2) && !ours.knows(4));
+        let kept = ours.clone().kept_for_retry(&[4]);
+        assert!(kept.candidate(4).known_real);
+        let merged = Ours::default().merged(ours);
+        assert!(!merged.candidate(2).known_real, "a merge keeps what the model let go");
+        let mut saved = Ours::default();
+        saved.saved.insert(5);
+        assert!(saved.knows(5) && !saved.candidate(5).known_real, "saved: a sibling, never itself judged real");
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod desktop_items;
 pub mod dock;
 pub mod durable;
 pub mod guardian;
+pub mod hidden_tabs;
 pub mod hotkeys;
 pub mod input;
 pub mod instance;

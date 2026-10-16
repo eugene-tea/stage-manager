@@ -35,6 +35,11 @@
 //                                      10-15 live run, and SIGHUP had nothing to un-minimize).
 //                                      A test starts this fixture before Stage Manager, so
 //                                      the moment on screen is not seen as a new window.
+//   --tabbed N   | FIXTURE_TABBED=N    the last N standard windows open as tabs of window 1
+//                                      (NSWindow tabbing), window 1 the selected tab: the
+//                                      others are hidden tabs, listed off screen by the window
+//                                      server, never through Accessibility (not with
+//                                      --delay-ms, --stagger-ms or --minimized)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -43,6 +48,8 @@
 // in the screen's bottom-right corner is ordered out (the window server still lists it, off
 // screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
 // behind the other windows at the same frames (their Desktop shows), without activating.
+// SIGIO selects the next tab of every tab group (as ⌘⇧] would), without activating: the tab
+// selected before becomes a hidden tab where it was.
 import AppKit
 
 struct Options {
@@ -58,6 +65,7 @@ struct Options {
     var retitle: [String: String] = [:]
     var retitleAfterMs = 0
     var minimized: Set<String> = []
+    var tabbed = 0
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -90,6 +98,7 @@ struct Options {
         if let r = env["FIXTURE_RETITLE"] { o.retitle = parseRetitle(r) }
         if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
         if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
+        if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -105,6 +114,7 @@ struct Options {
             case "--retitle": if let r = args.next() { o.retitle = parseRetitle(r) }
             case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
             case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
+            case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -112,6 +122,7 @@ struct Options {
         o.delayMs = max(0, o.delayMs)
         o.staggerMs = max(0, o.staggerMs)
         o.retitleAfterMs = max(0, o.retitleAfterMs)
+        o.tabbed = max(0, min(o.tabbed, o.windows - 1))
         return o
     }
 }
@@ -170,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let order = all.filter { !options.minimized.contains(title($0)) }
         if options.delayMs == 0 && options.staggerMs == 0 {
             for i in order { open(i, area: area) }
+            if options.tabbed > 0 && options.minimized.isEmpty { joinTabs() }
         } else {
             for (k, i) in order.enumerated() {
                 let ms = options.delayMs + k * options.staggerMs
@@ -278,6 +290,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "\(window.title) \(style)"
     }
 
+    /// `--tabbed N`: the last N standard windows join window 1's tab group; window 1 stays the
+    /// selected tab, so the others are hidden tabs.
+    func joinTabs() {
+        let standard = windows.filter { !($0 is NSPanel) }.sorted { $0.title < $1.title }
+        guard let first = standard.first(where: { $0.title == title(0) }) else { return }
+        first.tabbingMode = .preferred
+        for i in (options.windows - options.tabbed)..<options.windows {
+            guard let tab = standard.first(where: { $0.title == title(i) }), tab !== first else { continue }
+            tab.tabbingMode = .preferred
+            first.addTabbedWindow(tab, ordered: .above)
+        }
+        first.tabGroup?.selectedWindow = first
+    }
+
+    /// SIGIO: the next tab of every tab group is selected.
+    func selectNextTabs() {
+        var seen = Set<ObjectIdentifier>()
+        for w in windows {
+            guard let group = w.tabGroup, group.windows.count > 1, seen.insert(ObjectIdentifier(group)).inserted,
+                  let selected = group.selectedWindow, let k = group.windows.firstIndex(of: selected) else { continue }
+            group.selectedWindow = group.windows[(k + 1) % group.windows.count]
+        }
+    }
+
     /// SIGUSR1: one more window, ordered front without activating the app.
     func openAnother() {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -356,4 +392,8 @@ signal(SIGINFO, SIG_IGN)
 let comeBack = DispatchSource.makeSignalSource(signal: SIGINFO, queue: .main)
 comeBack.setEventHandler { delegate.bringAwayBack() }
 comeBack.resume()
+signal(SIGIO, SIG_IGN)
+let nextTab = DispatchSource.makeSignalSource(signal: SIGIO, queue: .main)
+nextTab.setEventHandler { delegate.selectNextTabs() }
+nextTab.resume()
 app.run()
