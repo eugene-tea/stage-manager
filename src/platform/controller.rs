@@ -83,9 +83,10 @@ use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::{desktop, hidden_tabs, logging, paths, session, windows};
+use super::{desktop, desktop_shot, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BusyApps, OffScreen};
+use crate::engine::corner_patch::{CoverPicture, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
@@ -389,6 +390,36 @@ fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>,
     (now, later)
 }
 
+/// Switch cover `c` as it can be drawn now (round 8L3), or why not: where nothing lies on the
+/// desktop, the corner patch's picture (`wallpaper`: ready for that rectangle) or, when that
+/// is not ready (an aerial, a picture still rendering), the desktop's still; where a desktop
+/// icon lies or the icons are not known, only the desktop's still (`desktop`: ready for that
+/// rectangle), since the patch's picture would hide the icon. The reason given is the
+/// picture's that was wanted first.
+fn resolve_cover(
+    c: SwitchCover,
+    wallpaper: impl FnOnce(Rect) -> Result<(), &'static str>,
+    desktop: impl FnOnce(Rect) -> Result<(), &'static str>,
+) -> Result<SwitchCover, &'static str> {
+    let with = |picture| SwitchCover { picture, ..c };
+    match c.picture {
+        CoverPicture::Wallpaper => match wallpaper(c.rect) {
+            Ok(()) => Ok(with(CoverPicture::Wallpaper)),
+            Err(why) => desktop(c.rect).map(|()| with(CoverPicture::Desktop)).map_err(|_| why),
+        },
+        CoverPicture::Desktop => desktop(c.rect).map(|()| with(CoverPicture::Desktop)),
+    }
+}
+
+/// Whether ctl command `cmd` brings a running switch's held incoming windows to their frames
+/// first. Only a command that changes something does; a question (`state`, `space`, `dump`,
+/// `adopted`) leaves the motion alone: the scripted checks poll `state` while a switch runs,
+/// and that poll brought the incoming windows to their frames 40-60 ms into the grow,
+/// visible under the overlay (live 10-16, round 8L3).
+fn ctl_lands_switch(cmd: &Command) -> bool {
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_))
+}
+
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
 /// app brought forward (never all its windows): with its main window on the shown Space, macOS
 /// has no reason to switch Spaces. The engine never focuses another Space's.
@@ -434,14 +465,19 @@ struct ActivationRun {
     fallback: HashSet<u32>,
     /// When macOS's activation notice came, for the log's keyboard timing.
     noticed: Option<Instant>,
+    /// Why the windows arrived at once instead of growing ([`Self::arrive_now`]), for the
+    /// switch's log line (`at_once`): the checks tell a corner that could not be covered
+    /// (icons there with captures off, say) from a grow that went wrong (8L3).
+    at_once: Option<&'static str>,
 }
 
 impl ActivationRun {
     /// The corner cannot be covered: the activated app's windows arrive at once (6V), the
     /// focus with the parks.
-    fn arrive_now(&mut self) {
+    fn arrive_now(&mut self, why: &'static str) {
         self.now.extend(self.fallback.drain());
         self.focus = None;
+        self.at_once = Some(why);
     }
 }
 
@@ -462,7 +498,7 @@ fn activation_run(grows: bool, pid: i32, actions: &[Action], pid_of: impl Fn(u32
             _ => None,
         });
         let focus = focus.filter(|id| pid_of(id.0) == Some(pid));
-        return ActivationRun { now: HashSet::new(), focus, fallback: mine, noticed: None };
+        return ActivationRun { now: HashSet::new(), focus, fallback: mine, ..ActivationRun::default() };
     }
     ActivationRun { now: mine, ..ActivationRun::default() }
 }
@@ -1391,6 +1427,8 @@ impl Controller {
                     items,
                 };
                 let visible = visibility(&facts);
+                // A switch's cover where a desktop icon lies: a still of the desktop (8L3).
+                self.keep_desktop_shot(rect, facts.items.as_deref(), now);
                 let why = visible.err();
                 if why != self.patch_why {
                     if let Some(why) = why {
@@ -1810,7 +1848,7 @@ impl Controller {
         // the activated windows? Decided before the strip is told, from the batch (its
         // arrivals and parks); when not, those windows arrive at once (6V), never shown in
         // the corner for the grow (8L2).
-        let mut early_corner: Option<(Option<Rect>, Vec<windows::CgWindow>)> = None;
+        let mut early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)> = None;
         let anim = &self.store.config().style.animation;
         if !run.fallback.is_empty() && anim.animates() && self.strip_visible {
             let list = windows::on_screen();
@@ -1828,12 +1866,12 @@ impl Controller {
                     _ => None,
                 })
                 .collect();
-            let found = self.switch_corner(&arriving, &outgoing, &list).and_then(|rect| crate::ui::corner_patch::cover_ready(rect).map(|()| rect));
+            let found = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c));
             match found {
-                Ok(rect) => early_corner = Some((Some(rect), list)),
+                Ok(c) => early_corner = Some((Some(c), list)),
                 Err(why) => {
                     note_fallback(&mut self.fallback_said, why);
-                    run.arrive_now();
+                    run.arrive_now(why);
                 }
             }
         }
@@ -1918,13 +1956,59 @@ impl Controller {
         result.ok().map(|()| early_focus_ms)
     }
 
+    /// Whether switch cover `c` can be drawn now ([`resolve_cover`]): the patch's picture or
+    /// the desktop's still (round 8L3), whichever is ready; the cover as it will be drawn, or
+    /// why not.
+    fn cover_ready(&self, c: SwitchCover) -> Result<SwitchCover, &'static str> {
+        let key = self.shot_key();
+        resolve_cover(c, crate::ui::corner_patch::cover_ready, |rect| match &key {
+            Some(key) => desktop_shot::ready(rect, key),
+            None => Err("no model"),
+        })
+    }
+
+    /// What a still of the desktop in the park corner is of now ([`desktop_shot::Key`]): the
+    /// Space count, the main display, Finder's icons as last read.
+    fn shot_key(&self) -> Option<desktop_shot::Key> {
+        let m = self.model.as_ref()?;
+        Some(desktop_shot::Key::new(self.space_changes, m.main_display().frame, self.patch_items.known.as_deref()))
+    }
+
+    /// Keeps the still of the desktop in the park corner fresh while a switch's cover would
+    /// need it (round 8L3): an activation may grow (`[animation] activation_grows`, motion on,
+    /// the strip shown, `[windows] corner_patch` on), something is parked there (`rect`, the
+    /// patch's rectangle), and the patch's picture may not stand for the corner a switch
+    /// covers: a desktop icon (`items`, Finder's as last read) in the still's block around the
+    /// corner, not just under the patch (a switch's corner is the patch's grown by the
+    /// incoming windows: 10-16, the patch clear and the switch's corner on an icon), the
+    /// icons not known, or no picture of it now. Never during an overview, a Space change,
+    /// on a full-screen Space or while a switch runs.
+    fn keep_desktop_shot(&self, rect: Option<Rect>, items: Option<&[Rect]>, now: Instant) {
+        let config = self.store.config();
+        let anim = &config.style.animation;
+        if !(anim.activation_grows && anim.animates() && self.strip_visible && config.windows.corner_patch) {
+            return;
+        }
+        let Some(rect) = rect else { return };
+        if self.overview.showing().is_some() || self.space_pending || self.fullscreen || self.pending.is_some() {
+            return;
+        }
+        let (Some(key), Some(m)) = (self.shot_key(), self.model.as_ref()) else { return };
+        let block = desktop_shot::block(m.main_display().frame, Some(rect));
+        let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
+        if !icons && crate::ui::corner_patch::cover_ready(rect).is_ok() {
+            return;
+        }
+        desktop_shot::keep_fresh(key, block, now);
+    }
+
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
     /// there behind their snapshots ([`crate::engine::corner_patch::switch_cover`], round
     /// 8L): macOS has raised an activated app's windows above the corner patch, and the
     /// switch's focus raises its key window there too. `list` is the window server's list now;
     /// `outgoing` the windows about to park. The reason when the corner cannot be covered (it
     /// is left as it is).
-    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Result<Rect, &'static str> {
+    fn switch_corner(&self, arriving: &HashSet<u32>, outgoing: &HashSet<u32>, list: &[windows::CgWindow]) -> Result<SwitchCover, &'static str> {
         use crate::engine::corner_patch::{CoverFacts, switch_cover};
         use crate::engine::park::is_parked_in_at;
         if arriving.is_empty() {
@@ -1981,7 +2065,7 @@ impl Controller {
         actions: Vec<Action>,
         first: &HashSet<u32>,
         run: ActivationRun,
-        early_corner: Option<(Option<Rect>, Vec<windows::CgWindow>)>,
+        early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)>,
     ) -> usize {
         let anim = self.store.config().style.animation.clone();
         if !anim.animates() || !self.strip_visible {
@@ -1997,7 +2081,7 @@ impl Controller {
             Some((corner, list)) => (corner, list),
             None => {
                 let list = windows::on_screen();
-                let corner = self.switch_corner(&arriving, &outgoing, &list);
+                let corner = self.switch_corner(&arriving, &outgoing, &list).and_then(|c| self.cover_ready(c));
                 if let Err(why) = corner
                     && !arriving.is_empty()
                 {
@@ -2029,6 +2113,7 @@ impl Controller {
             early_focus_ms,
             focus_since_activation_ms,
             unveil_ms,
+            at_once = run.at_once,
             "transition covered"
         );
         if cover.outgoing || cover.incoming {
@@ -4315,7 +4400,9 @@ impl Controller {
             Ok(actions) => json!({ "ok": true, "actions": actions }),
             Err(e) => json!({ "ok": false, "error": e }),
         };
-        self.flush_pending(ob);
+        if ctl_lands_switch(&cmd) {
+            self.flush_pending(ob);
+        }
         let acts = matches!(
             cmd,
             Command::Switch(_) | Command::Send(..) | Command::New(_) | Command::Pin(_) | Command::Merge(_) | Command::Reveal
@@ -4518,6 +4605,9 @@ impl Controller {
             "window_drag": self.drag.filter(|d| d.moving).map(|d| d.id),
             "animation": self.store.config().style.animation.animates(),
             "animation_speed": self.store.config().style.animation.speed(),
+            // A switch whose incoming windows still wait behind their snapshots (its id): a
+            // question asked now leaves them there (8L3), so the checks wait for it to land.
+            "switching": self.pending.as_ref().map(|p| p.id),
             "capture": super::capture::status(),
             "strip_cards": strip_model::published_cards()
                 .into_iter()
@@ -5091,14 +5181,14 @@ mod tests {
         // would show the windows macOS raised in the corner, so they come at once (6V).
         let pid_of = |id: u32| Some(if id >= 3 { 30 } else { 10 });
         let mut run = activation_run(true, 30, &activation_batch(), pid_of);
-        run.arrive_now();
+        run.arrive_now("off");
         let off = activation_run(false, 30, &activation_batch(), pid_of);
         assert_eq!((&run.now, run.focus), (&off.now, off.focus), "exactly the instant arrival: the focus with the parks");
         assert!(run.fallback.is_empty());
         // A mixed stage: only the activated app's windows (another app's are not raised).
         let mixed = |id: u32| Some(if id == 4 { 30 } else { 10 });
         let mut run = activation_run(true, 30, &activation_batch(), mixed);
-        run.arrive_now();
+        run.arrive_now("off");
         assert_eq!(run.now, [4].into());
         // Each reason logged once.
         let mut said = HashSet::new();
@@ -5106,6 +5196,34 @@ mod tests {
         note_fallback(&mut said, "off");
         note_fallback(&mut said, "a desktop icon lies under the corner");
         assert_eq!(said.len(), 2);
+    }
+
+    #[test]
+    fn a_corner_with_icons_is_covered_by_the_desktops_still_never_the_wallpaper() {
+        // 8L3: the owner's corner has desktop icons; the patch's picture would hide them.
+        let rect = Rect::new(2499.0, 1348.0, 61.0, 92.0);
+        let cover = |picture| SwitchCover { rect, picture };
+        let ok = |_: Rect| Ok(());
+        let no = |_: Rect| Err("not ready");
+        // Icons there: the still, or nothing (the activation then arrives at once).
+        assert_eq!(resolve_cover(cover(CoverPicture::Desktop), ok, ok), Ok(cover(CoverPicture::Desktop)));
+        assert_eq!(resolve_cover(cover(CoverPicture::Desktop), ok, no), Err("not ready"));
+        // Nothing there: the patch's picture first, the still when that is not ready.
+        assert_eq!(resolve_cover(cover(CoverPicture::Wallpaper), ok, ok), Ok(cover(CoverPicture::Wallpaper)));
+        assert_eq!(resolve_cover(cover(CoverPicture::Wallpaper), |_| Err("an aerial"), ok), Ok(cover(CoverPicture::Desktop)));
+        assert_eq!(resolve_cover(cover(CoverPicture::Wallpaper), |_| Err("an aerial"), no), Err("an aerial"));
+    }
+
+    #[test]
+    fn a_ctl_question_never_lands_a_running_switch() {
+        // 8L3: the checks poll `state` while the grow runs; that poll must not bring the
+        // incoming windows to their frames ahead of their snapshots.
+        for q in [Command::State, Command::Space, Command::Dump, Command::Adopted(vec![1])] {
+            assert!(!ctl_lands_switch(&q), "{q:?}");
+        }
+        for c in [Command::Switch(1), Command::Send(1, None), Command::New(None), Command::Reload, Command::UnparkAll] {
+            assert!(ctl_lands_switch(&c), "{c:?}");
+        }
     }
 
     #[test]

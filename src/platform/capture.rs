@@ -26,6 +26,9 @@
 //! - Every capturer of the process shares one [`Gate`]: the first capture goes alone, and a
 //!   capture refused as user-declined stops them all for a long backoff (logged once);
 //!   [`retry_now`] (the user asked for access) probes again at once.
+//! - The one still that is not of a window, the desktop in the park corner for a switch's
+//!   cover ([`capture_desktop`], round 8L3), follows the same rules and goes only once the
+//!   gate is open (window captures already worked): it never asks and is never the probe.
 //! - Quit waits for captures in flight ([`quiesce`]): replayd checks a capture's approval
 //!   after answering it, and for a process that has just exited it cannot resolve the app's
 //!   path, so it alerts as if the app were new (see the guide's Known limitations).
@@ -40,17 +43,18 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::AllocAnyThread;
-use objc2::rc::autoreleasepool;
-use objc2_core_foundation::CFRetained;
+use objc2::rc::{Retained, autoreleasepool};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGImage, CGPreflightScreenCaptureAccess};
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCStreamErrorCode,
-    SCStreamErrorDomain,
+    SCStreamErrorDomain, SCWindow,
 };
 
 use super::capture_gate::{Change, Gate, Outcome, Permit};
 use super::permissions;
+use crate::engine::geometry::Rect;
 use crate::logbook::counters::{self, Count};
 
 /// Windows whose last capture outcome is remembered; past this the memory starts over.
@@ -636,6 +640,139 @@ fn note_outcomes(batch: &[Target], handled: &[u32], failed: &HashMap<u32, String
             _ => {}
         }
     }
+}
+
+/// What [`capture_desktop`] hands back: the still and its pixels a point, or why there is none.
+pub type DesktopStill = Result<(CFRetained<CGImage>, f64), String>;
+
+/// What [`capture_desktop`] calls with the still, once.
+pub type DesktopDone = Box<dyn FnOnce(DesktopStill) + Send>;
+
+/// Whether a still of the desktop may be taken now ([`capture_desktop`]): captures on, not
+/// quitting, Screen Recording granted (never asked for here), and the gate open: window
+/// captures already work, so this one goes with them and is never the process's probe.
+pub fn desktop_may_capture() -> Result<(), &'static str> {
+    if MODE.load(Ordering::SeqCst) != ON {
+        return Err("window captures are off");
+    }
+    if CLOSING.load(Ordering::SeqCst) {
+        return Err("quitting");
+    }
+    if !CGPreflightScreenCaptureAccess() {
+        return Err("no Screen Recording access");
+    }
+    match gate().state() {
+        super::capture_gate::State::Open => Ok(()),
+        _ => Err("window captures have not worked yet in this run (or rest after a refusal)"),
+    }
+}
+
+/// A still of `region` (global, top-left points) of the main display showing the desktop
+/// only (round 8L3): the desktop picture and what lies on it (Finder's icons, widgets), every
+/// window at the normal level or above excluded (the parked windows' slivers, the windows an
+/// activation raised in the corner, the Dock, the menu bar) and every one of this app (the
+/// corner patch, the strip, the overlay). The switch's cover in the park corner when a
+/// desktop icon lies there ([`super::desktop_shot`]).
+///
+/// Quiet by design as the window captures are ([`desktop_may_capture`]: nothing is asked,
+/// nothing goes before the gate is open); a refusal closes the gate for every capturer. `done`
+/// runs once, on a ScreenCaptureKit queue. `Err` when it is not taken at all.
+pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static str> {
+    desktop_may_capture()?;
+    let done = Arc::new(Mutex::new(Some(done)));
+    let finish = move |slot: &Mutex<Option<DesktopDone>>, still: DesktopStill| {
+        if let Some(f) = slot.lock().ok().and_then(|mut d| d.take()) {
+            f(still);
+        }
+    };
+    let own = std::process::id() as i32;
+    let content_flight = InFlight::issue();
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        let _answered = &content_flight;
+        // SAFETY: SCK passes a valid object or null for each argument.
+        let (content, error) = unsafe { (content.as_ref(), error.as_ref()) };
+        let Some(content) = content else {
+            if error.is_some_and(declined) {
+                desktop_declined();
+            }
+            let why = error.map(|e| e.localizedDescription().to_string()).unwrap_or_default();
+            finish(&done, Err(format!("no shareable content: {why}")));
+            return;
+        };
+        if CLOSING.load(Ordering::SeqCst) {
+            finish(&done, Err("quitting".into()));
+            return;
+        }
+        let main = objc2_core_graphics::CGMainDisplayID();
+        // SAFETY: plain getters on a live SCShareableContent and its SCDisplays.
+        let display = unsafe { content.displays() }.iter().find(|d| unsafe { d.displayID() } == main);
+        let Some(display) = display else {
+            finish(&done, Err("the main display is not in the shareable content".into()));
+            return;
+        };
+        // SAFETY: plain getters on live SCWindows and their apps.
+        let excluded: Vec<Retained<SCWindow>> = unsafe { content.windows() }
+            .iter()
+            .filter(|w| unsafe { w.windowLayer() >= 0 || w.owningApplication().is_some_and(|a| a.processID() == own) })
+            .collect();
+        let excluded = NSArray::from_retained_slice(&excluded);
+        // SAFETY: designated initializer with a live SCDisplay and array; plain setters and getters.
+        let (filter, config, scale) = unsafe {
+            let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded);
+            let scale = f64::from(filter.pointPixelScale()).max(1.0);
+            let frame = display.frame();
+            let config = SCStreamConfiguration::new();
+            config.setSourceRect(CGRect::new(
+                CGPoint::new(region.x - frame.origin.x, region.y - frame.origin.y),
+                CGSize::new(region.w, region.h),
+            ));
+            config.setWidth((region.w * scale).round().max(1.0) as usize);
+            config.setHeight((region.h * scale).round().max(1.0) as usize);
+            config.setShowsCursor(false);
+            (filter, config, scale)
+        };
+        let flight = InFlight::issue();
+        let done = done.clone();
+        let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+            let _answered = &flight;
+            match NonNull::new(image) {
+                Some(ptr) => {
+                    // SAFETY: SCK hands a valid CGImage for the duration of the block;
+                    // retaining keeps it alive past it.
+                    let image = unsafe { CFRetained::retain(ptr) };
+                    counters::bump(Count::CaptureOk);
+                    finish(&done, Ok((image, scale)));
+                }
+                None => {
+                    // SAFETY: SCK passes a valid NSError or null.
+                    let error = unsafe { error.as_ref() };
+                    if error.is_some_and(declined) {
+                        desktop_declined();
+                    }
+                    counters::bump(Count::CaptureFailed);
+                    let why = error.map_or_else(|| "no image".to_string(), |e| e.localizedDescription().to_string());
+                    finish(&done, Err(why));
+                }
+            }
+        });
+        // SAFETY: filter, configuration and handler are valid; SCK copies the block.
+        unsafe { SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&on_image)) };
+    });
+    // SAFETY: the handler matches the documented signature; SCK copies the block. Desktop
+    // windows are listed (and kept: only windows at the normal level or above are excluded).
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, true, &handler);
+    }
+    Ok(())
+}
+
+/// macOS refused a desktop still as user-declined: every capturer rests ([`Gate`]).
+fn desktop_declined() {
+    let change = gate().finished(Outcome::Declined, Instant::now());
+    if let Change::Refused(rest) | Change::RefusedAgain(rest) = change {
+        tracing::warn!(retry_in_s = rest.as_secs(), "macOS refused a capture of the desktop (not permitted); window captures rest");
+    }
+    wake_all();
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub mod controller;
 pub mod ctl;
 pub mod desktop;
 pub mod desktop_items;
+pub mod desktop_shot;
 pub mod dock;
 pub mod durable;
 pub mod guardian;

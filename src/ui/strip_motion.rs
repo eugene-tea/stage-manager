@@ -20,9 +20,10 @@
 //!   windows behind their snapshots and holds the incoming ones until
 //!   [`StripEvent::Unveil`] (at `unpark_at` of the motion). Meanwhile the park corner, where
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
-//!   the overlay with the patch's picture, under every snapshot ([`Transition::corner`],
-//!   round 8L). The outgoing stage's card stays hidden until its snapshots land, then
-//!   everything goes in one frame. A new transition cuts a running one short.
+//!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
+//!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
+//!   stays hidden until its snapshots land, then everything goes in one frame. A new
+//!   transition cuts a running one short.
 //! - **A window dragged over the strip** is shown as a card-sized snapshot, turned like a
 //!   card, under the pointer (following every drag event through a global monitor); dropped
 //!   there, it shrinks into its new card's slot as the transition's outgoing snapshot.
@@ -40,6 +41,7 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTimer};
 
 use super::{Ghost as CardGhost, Strip, with_strip};
+use crate::engine::corner_patch::{CoverPicture, SwitchCover};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Target};
 use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, time_to_progress};
@@ -403,7 +405,7 @@ impl Strip {
             return;
         }
         // The park corner, under every snapshot, while the incoming windows wait there (8L).
-        let corner = if cover.incoming { t.corner.and_then(|rect| self.corner_cover(t.id, rect)) } else { None };
+        let corner = if cover.incoming { t.corner.and_then(|c| self.corner_cover(t.id, c)) } else { None };
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
@@ -449,21 +451,31 @@ impl Strip {
             );
         }
         let order: Vec<u64> = self.snapshot.cards.iter().map(|c| c.stage).collect();
-        let corner_rect = corner.as_ref().and(t.corner);
-        strip_model::publish_transition(TransitionReport { id, ghosts: report, order, corner: corner_rect });
+        let covered = corner.as_ref().and(t.corner);
+        let corner_picture = covered.map(|c| match c.picture {
+            CoverPicture::Wallpaper => "wallpaper",
+            CoverPicture::Desktop => "desktop",
+        });
+        strip_model::publish_transition(TransitionReport { id, ghosts: report, order, corner: covered.map(|c| c.rect), corner_picture });
         self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner });
     }
 
-    /// The park corner's cover for transition `id` at `rect` (global): the corner patch's
-    /// picture of it, flat on the overlay under every snapshot (round 8L). `None` (logged)
-    /// when the patch has no picture of it to show now: the corner is left as it is.
-    fn corner_cover(&self, id: u64, rect: Rect) -> Option<Ghost> {
-        let Some((image, scale)) = crate::ui::corner_patch::cover_image(rect) else {
-            tracing::debug!(id, %rect, "transition: the corner patch has no picture of the corner now; it is not covered");
+    /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
+    /// or the still of the desktop where icons lie (round 8L3), flat on the overlay under every
+    /// snapshot (round 8L). `None` (logged) when that picture does not hold it now: the corner
+    /// is left as it is.
+    fn corner_cover(&self, id: u64, cover: SwitchCover) -> Option<Ghost> {
+        let rect = cover.rect;
+        let image = match cover.picture {
+            CoverPicture::Wallpaper => crate::ui::corner_patch::cover_image(rect),
+            CoverPicture::Desktop => crate::platform::desktop_shot::image(rect),
+        };
+        let Some((image, scale)) = image else {
+            tracing::debug!(id, %rect, picture = ?cover.picture, "transition: no picture of the corner now; it is not covered");
             return None;
         };
         let o = self.motion.overlay.origin();
-        tracing::debug!(id, %rect, "transition: the park corner is covered while the incoming windows wait there");
+        tracing::debug!(id, %rect, picture = ?cover.picture, "transition: the park corner is covered while the incoming windows wait there");
         Some(self.motion.overlay.cover(&image, scale, Plane::window(rect, o, 0.0)))
     }
 

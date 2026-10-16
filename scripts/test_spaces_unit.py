@@ -175,6 +175,28 @@ class StageHolding(unittest.TestCase):
         self.assertIsNone(t.stage_holding(s, "Bravo 1"))
 
 
+class OwnersWindows(unittest.TestCase):
+    """8L3: a synthetic click or drag the app refused over another process's window (the
+    owner's own, on screen while his Stage Manager is quit for a run) is a skip, not a failure."""
+
+    def test_a_refusal_over_another_window_is_noted(self):
+        reply = {"ok": False, "error": "the topmost window at 70,735 is not ours or a fixture's (pid 999999999)"}
+        note = t.ts.other_window_note(reply)
+        self.assertTrue(note.startswith("the topmost window at 70,735 is not ours or a fixture's (pid 999999999)"), note)
+        # Also from a drag's output text.
+        self.assertIsNotNone(t.ts.other_window_note('{"ok":false,"error":"the topmost window at 580,90 is not ours or a fixture\'s (pid 1)"}'))
+
+    def test_any_other_reply_is_not(self):
+        for reply in ({"ok": True}, {"ok": False, "error": "no window at 70,735 (our windows: )"}, "", None):
+            self.assertIsNone(t.ts.other_window_note(reply), reply)
+
+    def test_blocked_counts_a_skip(self):
+        before = len(t.ts.skipped)
+        self.assertTrue(t.ts.blocked({"error": "the topmost window at 1,2 is not ours or a fixture's (pid 999999999)"}, "a drill"))
+        self.assertFalse(t.ts.blocked({"ok": True}, "a drill"))
+        self.assertEqual(len(t.ts.skipped), before + 1)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=1)

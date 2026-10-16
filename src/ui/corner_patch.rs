@@ -272,6 +272,8 @@ pub fn appearance_changed(mtm: MainThreadMarker) {
 }
 
 fn settle(mtm: MainThreadMarker, why: &'static str) {
+    // A switch's still of the desktop is of the old Desktop or appearance (8L3).
+    crate::platform::desktop_shot::forget();
     let until = Instant::now() + SETTLE;
     let busy = PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else { return true };
@@ -380,6 +382,7 @@ pub fn cover_image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
 /// The main display changed (size, scale, color space): read the wallpaper again (while the
 /// patch is busy, [`BUSY_RETRY`] later).
 pub fn display_changed(mtm: MainThreadMarker) {
+    crate::platform::desktop_shot::forget();
     PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
             if let Some(patch) = p.as_mut() {

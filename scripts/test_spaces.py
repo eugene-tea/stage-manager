@@ -778,9 +778,11 @@ def run():
         sampler = threading.Thread(target=sample_onscreen, args=(WATCH.ids["d1"], stop, hits), daemon=True)
         sampler.start()
     r = ctl("debug-click", x, y)
-    check(r.get("ok"), f"clicked the card ({r.get('error', 'ok')})")
-    s = ts.wait_state(lambda x: x["active"] != before, "the card click to switch", timeout=4)
-    check(s is not None, "the card click switched stages")
+    clicked = not ts.blocked(r, "the card click on Desktop 2 (the click, the switch)")
+    if clicked:
+        check(r.get("ok"), f"clicked the card ({r.get('error', 'ok')})")
+        s = ts.wait_state(lambda x: x["active"] != before, "the card click to switch", timeout=4)
+        check(s is not None, "the card click switched stages")
     time.sleep(1.5)
     check(current_space() == d2, "still on Desktop 2 (as the engine sees it)")
     if AUTO:
@@ -1410,7 +1412,7 @@ def main():
 def report():
     for line in PROBE:
         say(f"\n{line}")
-    say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed (every app run's log: {ts.HOME}/stage-manager.run-*.log and today's {ts.HOME}/YYYY-MM-DD.log)")
+    say(f"\n{len(ts.passed)} passed, {len(ts.failed)} failed, {len(ts.skipped)} skipped (every app run's log: {ts.HOME}/stage-manager.run-*.log and today's {ts.HOME}/YYYY-MM-DD.log)")
     for f in ts.failed:
         say(f"  FAIL {f}")
     return 1 if ts.failed else 0
