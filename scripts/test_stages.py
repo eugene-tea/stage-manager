@@ -2644,6 +2644,8 @@ def phase_restore():
         time.sleep(1.0)
         s = state()
         a1 = by_title(s)["Alpha 1"]
+        # Read off screen, a minimized window answers AXDialog: once shown it is read again.
+        check(a1["role"] == "standard", f"a standard window, not taken for a dialog ({a1['role']})")
         check(a1["home"] == mail and a1["parked"], f"in its saved stage (Mail), parked ({a1['home']}, parked {a1['parked']})")
         check(a1.get("restored") in ("strong", "medium"), f"matched with confidence ({a1.get('restored')})")
         check(re.search(rf"restore: back in its saved stage id={a1['id']} .*parked=true switched=false", log_text()) is not None,
@@ -2669,6 +2671,7 @@ def phase_restore():
         time.sleep(1.0)
         s = state()
         t = by_title(s)
+        check(t["Alpha 2"]["role"] == "standard", f"a standard window, not taken for a dialog ({t['Alpha 2']['role']})")
         check(t["Alpha 2"]["home"] == mail and s["active"] == mail, f"its stage (Mail) came forward (active {s['active']})")
         check(not t["Alpha 2"]["parked"] and not t["Alpha 1"]["parked"], "Mail's windows are shown")
         check(t["Alpha 3"]["parked"] and t["Bravo 1 — Edited"]["parked"], "the stage left is parked")

@@ -846,3 +846,74 @@ fn voters_go_back_at_their_saved_frames() {
     assert!(parks(&a, 41), "{a:?}");
     assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((true, F_TEAM)));
 }
+
+/// The restore phase's layout (made-up titles): Mail (declared) holds two editor windows, the
+/// active stage the editor's third window and Chat's, the browser a stage of its own.
+fn mail_desktop() -> (Model, StageId) {
+    let saved = SavedSpace {
+        id: 7,
+        current: true,
+        stages: vec![
+            stage(Some("Mail"), vec![sw(EDITOR, "Inbox", F_NOTES, 0), sw(EDITOR, "Drafts", F_TEAM, 1)]),
+            stage(None, vec![sw(EDITOR, "Plan.txt", F_PLAN, 0), sw(CHAT, "Team", F_RECIPES, 1)]),
+            stage(None, vec![sw(BROWSER, "Recipes — Example Browser", DEFAULT, 0)]),
+        ],
+        active_index: Some(1),
+        strip_slots: vec![2, 0],
+        last_seen: None,
+    };
+    let options = ModelOptions { named_stages: vec!["Mail".into()], ..Default::default() };
+    let mut m = restoring_with(options, vec![saved]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(24, 30, CHAT, "Team", F_RECIPES));
+    assert_eq!(m.current_space(MAIN).0, 7, "adopted");
+    let mail = m.stages_in(m.current_space(MAIN)).next().map(|s| s.id).expect("Mail");
+    assert_eq!(m.stage(mail).and_then(|s| s.name.clone()).as_deref(), Some("Mail"));
+    assert_eq!(number_of(&m, 23), Some(2), "the saved active stage");
+    (m, mail)
+}
+
+#[test]
+fn an_app_s_window_unminimized_during_the_restore_window_goes_to_its_saved_stage_not_its_app_s() {
+    // The 10-15 live run: the editor (Alpha) has a window shown in the active stage; its
+    // other two reopened minimized and wait for Mail. Un-minimized while the restore window
+    // is open, one goes quietly to Mail (parked, no switch), never to the active stage as
+    // Apple's rule for the app's window shown would put it.
+    let (mut m, mail) = mail_desktop();
+    let active = m.main_active_stage();
+    let a = add_focused(&mut m, win(21, 50, EDITOR, "Inbox", F_NOTES));
+    assert_eq!(m.stage_of(w(21)), Some(mail), "its saved stage");
+    assert!(parks(&a, 21) && !switches(&a), "parked quietly: {a:?}");
+    assert!(m.window(w(21)).is_some_and(|x| x.parked && x.restore == F_NOTES));
+    assert_eq!(m.restored_grade(w(21)), Some(Grade::Strong));
+    assert_eq!(m.last_pending().map(|n| (n.window, n.parked, n.switched)), Some((w(21), true, false)));
+    assert_eq!(m.main_active_stage(), active, "no switch");
+    assert!(m.has_pending(mail), "Drafts still waits");
+}
+
+#[test]
+fn an_app_s_window_unminimized_after_the_restore_window_brings_its_saved_stage_forward() {
+    // The same, after the restore window: Mail comes forward with it (the window shows
+    // because of the user), the stage left is parked, and an app with no saved window then
+    // goes by Apple's rule, leaving Mail's windows where they are.
+    let (mut m, mail) = mail_desktop();
+    add_focused(&mut m, win(21, 50, EDITOR, "Inbox", F_NOTES));
+    assert!(m.end_restore());
+    let a = add_focused(&mut m, win(22, 50, EDITOR, "Drafts", F_TEAM));
+    assert_eq!(m.stage_of(w(22)), Some(mail), "its saved stage");
+    assert_eq!(m.main_active_stage(), Some(mail), "came forward: {a:?}");
+    assert!(switches(&a) && !parks(&a, 22));
+    assert!(parks(&a, 23) && parks(&a, 24), "the stage left is parked");
+    assert!(m.window(w(21)).is_some_and(|x| !x.parked) && m.window(w(22)).is_some_and(|x| !x.parked));
+    assert_eq!(m.restored_grade(w(22)), Some(Grade::Strong));
+    assert_eq!(m.last_pending().map(|n| (n.window, n.parked, n.switched)), Some((w(22), false, true)));
+    assert!(!m.has_pending(mail));
+    // An app with no saved window: a stage of its own, in front.
+    const OTHER: &str = "com.example.other";
+    add_focused(&mut m, win(31, 60, OTHER, "Sketch", DEFAULT));
+    assert_eq!(m.restored_grade(w(31)), None);
+    let own = m.stage_of(w(31)).expect("managed");
+    assert!(own != mail && m.main_active_stage() == Some(own));
+    assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(21), w(22)]), "Mail untouched");
+}
