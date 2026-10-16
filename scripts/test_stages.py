@@ -1878,6 +1878,18 @@ def popup_picture_check(s):
         pic = (strip.get("pictures") or {}).get(str(w1))
         return (strip, pic) if pic and pic["extent"]["right"] > 0 else None
     got = wait_until(held, 10, "Fixture 1's picture with its popup")
+    if got is None:
+        # ScreenCaptureKit may leave the popup out of a window's picture altogether (seen live
+        # 10-16 for both an addChildWindow panel and an NSPopover: contentRect == the window's
+        # frame). Then there is nothing to place: the picture must be the window alone, as
+        # before 8K, and the check is a skip, not a failure.
+        g = ctl("debug-strip")
+        pic = ((g.get("strip") or {}).get("pictures") or {}).get(str(w1))
+        reads = [ln for ln in log_text().splitlines() if "capture: window frame" in ln and f"window={w1} " in ln]
+        left_out = bool(reads) and all(re.search(r"frame=(\S+ \S+) content=\1 ", ln) for ln in reads[-3:])
+        if left_out and pic and all(v == 0.0 for v in pic["extent"].values()):
+            say("  SKIP the popup picture: macOS left the popup out of the window's capture (contentRect is the window's frame); the picture is the window alone")
+            return
     if not check(got is not None, f"Fixture 1's picture reaches past the window (want {want})"):
         g = ctl("debug-strip")
         say(f"  pictures: {((g.get('strip') or {}).get('pictures') or {}).get(str(w1))}")
