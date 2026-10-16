@@ -18,9 +18,11 @@
 //!   for `ctl state` ([`strip_model::last_transition`]). The strip answers
 //!   with what it covered ([`strip_model::cover`]); the controller parks the outgoing
 //!   windows behind their snapshots and holds the incoming ones until
-//!   [`StripEvent::Unveil`] (at `unpark_at` of the motion). The outgoing stage's card stays
-//!   hidden until its snapshots land, then everything goes in one frame. A new transition
-//!   cuts a running one short.
+//!   [`StripEvent::Unveil`] (at `unpark_at` of the motion). Meanwhile the park corner, where
+//!   they wait (raised above the corner patch when an activation brought them), is covered on
+//!   the overlay with the patch's picture, under every snapshot ([`Transition::corner`],
+//!   round 8L). The outgoing stage's card stays hidden until its snapshots land, then
+//!   everything goes in one frame. A new transition cuts a running one short.
 //! - **A window dragged over the strip** is shown as a card-sized snapshot, turned like a
 //!   card, under the pointer (following every drag event through a global monitor); dropped
 //!   there, it shrinks into its new card's slot as the transition's outgoing snapshot.
@@ -66,6 +68,8 @@ struct Running {
     timers: Vec<Retained<NSTimer>>,
     /// The window in place the snapshots pass under ([`Transition::under`]).
     under: Option<u32>,
+    /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
+    corner: Option<Ghost>,
 }
 
 /// The card shown under the pointer while a window is dragged over the strip.
@@ -398,6 +402,8 @@ impl Strip {
             strip_model::cover(t.id, cover);
             return;
         }
+        // The park corner, under every snapshot, while the incoming windows wait there (8L).
+        let corner = if cover.incoming { t.corner.and_then(|rect| self.corner_cover(t.id, rect)) } else { None };
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
@@ -443,8 +449,22 @@ impl Strip {
             );
         }
         let order: Vec<u64> = self.snapshot.cards.iter().map(|c| c.stage).collect();
-        strip_model::publish_transition(TransitionReport { id, ghosts: report, order });
-        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under });
+        let corner_rect = corner.as_ref().and(t.corner);
+        strip_model::publish_transition(TransitionReport { id, ghosts: report, order, corner: corner_rect });
+        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner });
+    }
+
+    /// The park corner's cover for transition `id` at `rect` (global): the corner patch's
+    /// picture of it, flat on the overlay under every snapshot (round 8L). `None` (logged)
+    /// when the patch has no picture of it to show now: the corner is left as it is.
+    fn corner_cover(&self, id: u64, rect: Rect) -> Option<Ghost> {
+        let Some((image, scale)) = crate::ui::corner_patch::cover_image(rect) else {
+            tracing::debug!(id, %rect, "transition: the corner patch has no picture of the corner now; it is not covered");
+            return None;
+        };
+        let o = self.motion.overlay.origin();
+        tracing::debug!(id, %rect, "transition: the park corner is covered while the incoming windows wait there");
+        Some(self.motion.overlay.cover(&image, scale, Plane::window(rect, o, 0.0)))
     }
 
     /// The incoming windows of transition `id` are in place at `frames` (read back from the
@@ -548,7 +568,7 @@ impl Strip {
         }
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
-        for g in &r.ghosts {
+        for g in r.ghosts.iter().chain(&r.corner) {
             g.remove();
         }
         for stage in &r.held {

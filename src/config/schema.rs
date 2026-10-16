@@ -308,8 +308,8 @@ pub const KEYS: &[KeyDef] = &[
     k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
         "How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip."),
     k("animation", "snapshot_cache_mb", i(16, 8192), "512", "Most memory kept for full-size window snapshots; the oldest go first."),
-    k("animation", "activation_grows", Kind::Bool, "false",
-        "Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click; false brings them to their frames at once (macOS has already raised them in the park corner, so waiting shows them there)."),
+    k("animation", "activation_grows", Kind::Bool, "true",
+        "Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click, as Apple does (the corner where they wait is covered meanwhile); false brings them to their frames at once, with no motion."),
     // [windows]
     k("windows", "fit", Kind::Choice(&["off", "move", "narrow"]), "\"off\"",
         "Keep placed windows clear of the strip: \"move\" right just enough, \"narrow\" also too-wide ones. Apple: \"off\"."),
@@ -492,6 +492,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-10.toml"),
     include_str!("legacy/default-11.toml"),
     include_str!("legacy/default-12.toml"),
+    include_str!("legacy/default-13.toml"),
 ];
 
 #[cfg(test)]

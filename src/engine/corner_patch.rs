@@ -30,6 +30,10 @@
 //!   that is not the one expected. A read that fails keeps the last good one. Widgets'
 //!   places are not public; with widgets shown on the desktop the patch would cover one in
 //!   the corner (logged).
+//! - **During a switch** ([`switch_cover`], round 8L) the incoming windows wait in the corner
+//!   behind their growing snapshots, and macOS raises an activated app's windows there above
+//!   the patch: the motion overlay, above every window, shows the patch's picture over the
+//!   corner until the snapshots land, wherever the patch could show.
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
 //!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
 //!   down (nothing parked).
@@ -360,11 +364,122 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
     Ok(rect)
 }
 
+/// What the corner a switch covers depends on ([`switch_cover`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CoverFacts {
+    /// `[windows] corner_patch`.
+    pub on: bool,
+    /// Mission Control, App Exposé or Show Desktop is up (or settling), or a Space change
+    /// settles.
+    pub overview: bool,
+    /// A full-screen app's Space shows.
+    pub fullscreen: bool,
+    /// The bounds, as listed, of the windows sitting in the park zone through the switch's
+    /// start: the parked ones and the incoming ones (which wait there behind their growing
+    /// snapshots, raised by macOS when an activation brought them).
+    pub slivers: Vec<Rect>,
+    /// The display the corner belongs to (the main display).
+    pub display: Rect,
+    /// `[windows] corner_patch_reach`.
+    pub reach: f64,
+    /// The patch's rectangle in use, if any ([`steady_rect`]).
+    pub in_use: Option<Rect>,
+    /// Finder's desktop icons as last read well ([`PatchFacts::items`]).
+    pub items: Option<Vec<Rect>>,
+    /// Normal windows, drawn, another app's, that stay where they are through the switch
+    /// (neither parked, nor leaving, nor arriving).
+    pub staying: Vec<Rect>,
+}
+
+/// The corner a switch's motion overlay covers with the patch's picture while its incoming
+/// windows wait parked behind their growing snapshots (round 8L): what the patch would cover
+/// (every sliver in the zone, the incoming windows' included, grown by the shadow's reach,
+/// with the rectangle in use), on the overlay above every window, because macOS raises an
+/// activated app's windows above the patch (and the switch's focus raises the key window)
+/// while they still sit in the corner. Never where the patch could not show: off, an
+/// overview, a full-screen Space, a desktop icon under it or icons not known; and never over
+/// a window that stays shown there (the overlay is above it, the patch was below).
+pub fn switch_cover(f: &CoverFacts) -> Result<Rect, &'static str> {
+    if !f.on {
+        return Err("off");
+    }
+    if f.overview {
+        return Err("an overview is up");
+    }
+    if f.fullscreen {
+        return Err("a full-screen Space shows");
+    }
+    let grown = patch_rect(&f.slivers, f.display, f.reach);
+    let rect = match (grown, f.in_use.and_then(|r| r.intersect(&f.display))) {
+        (Some(a), Some(b)) => union(a, b),
+        (Some(r), None) | (None, Some(r)) => r,
+        (None, None) => return Err("no sliver shows"),
+    };
+    let Some(items) = &f.items else { return Err("Finder's desktop icons are not known") };
+    if items.iter().any(|i| i.intersect(&rect).is_some()) {
+        return Err("a desktop icon lies under the corner");
+    }
+    if f.staying.iter().any(|w| w.intersect(&rect).is_some()) {
+        return Err("a window that stays shown reaches the corner");
+    }
+    Ok(rect)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+
+    fn cover_facts() -> CoverFacts {
+        CoverFacts {
+            on: true,
+            slivers: vec![sliver(32.0)],
+            display: MAIN,
+            reach: 60.0,
+            items: Some(vec![Rect::new(2400.0, 40.0, 100.0, 100.0)]),
+            ..CoverFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_switch_covers_every_sliver_the_incoming_ones_included_with_the_patch_in_use() {
+        let f = cover_facts();
+        let alone = switch_cover(&f).expect("covered");
+        assert_eq!(Some(alone), patch_rect(&f.slivers, MAIN, 60.0), "what the patch would cover");
+        assert_eq!(alone.max_x(), MAIN.max_x());
+        // An incoming window raised in the corner, a taller sliver: covered with its shadow.
+        let raised = CoverFacts { slivers: vec![sliver(32.0), sliver(80.0)], ..f.clone() };
+        let r = switch_cover(&raised).expect("covered");
+        let seen = sliver(80.0).intersect(&MAIN).expect("on screen");
+        assert!(r.contains_rect(&Rect::new(seen.x - 60.0, seen.y - 60.0, seen.w + 60.0, seen.h + 60.0).intersect(&MAIN).expect("on")));
+        // The patch's rectangle in use (a little bigger, kept steady) is covered too.
+        let in_use = Rect::new(2380.0, 1200.0, 180.0, 240.0);
+        let r = switch_cover(&CoverFacts { in_use: Some(in_use), ..f.clone() }).expect("covered");
+        assert!(r.contains_rect(&in_use) && r.contains_rect(&alone), "{r:?}");
+        // Nothing parked yet but the patch in use: its rectangle.
+        assert_eq!(switch_cover(&CoverFacts { slivers: vec![], in_use: Some(in_use), ..f }), Ok(in_use));
+    }
+
+    #[test]
+    fn a_switch_never_covers_where_the_patch_could_not_show() {
+        let f = cover_facts();
+        assert_eq!(switch_cover(&CoverFacts { on: false, ..f.clone() }), Err("off"));
+        assert_eq!(switch_cover(&CoverFacts { overview: true, ..f.clone() }), Err("an overview is up"));
+        assert_eq!(switch_cover(&CoverFacts { fullscreen: true, ..f.clone() }), Err("a full-screen Space shows"));
+        assert_eq!(switch_cover(&CoverFacts { slivers: vec![], ..f.clone() }), Err("no sliver shows"));
+        assert_eq!(switch_cover(&CoverFacts { items: None, ..f.clone() }), Err("Finder's desktop icons are not known"));
+        let icon = Rect::new(2480.0, 1300.0, 64.0, 64.0);
+        assert_eq!(switch_cover(&CoverFacts { items: Some(vec![icon]), ..f.clone() }), Err("a desktop icon lies under the corner"));
+        // A window that stays shown into the corner (the overlay would paint over it).
+        let staying = Rect::new(1800.0, 900.0, 740.0, 520.0);
+        assert_eq!(
+            switch_cover(&CoverFacts { staying: vec![staying], ..f.clone() }),
+            Err("a window that stays shown reaches the corner")
+        );
+        // One elsewhere changes nothing.
+        assert!(switch_cover(&CoverFacts { staying: vec![Rect::new(100.0, 100.0, 600.0, 400.0)], ..f }).is_ok());
+    }
 
     fn sliver(kept: f64) -> Rect {
         Rect::new(2559.0, 1364.0 - kept, 1200.0, 900.0)

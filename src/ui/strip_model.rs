@@ -94,6 +94,11 @@ pub struct Transition {
     /// The frontmost window of the arriving stage already in place (a window just opened,
     /// an activated app's): the snapshots pass under it, not over it.
     pub under: Option<u32>,
+    /// The park corner to cover with the corner patch's picture while the incoming windows
+    /// wait there behind their snapshots (global, top-left; the controller's
+    /// [`crate::engine::corner_patch::switch_cover`]): macOS raises an activated app's
+    /// windows above the patch. `None`: the corner is left as it is.
+    pub corner: Option<Rect>,
 }
 
 /// One window of a [`Transition`].
@@ -377,6 +382,9 @@ pub struct TransitionReport {
     pub ghosts: Vec<GhostReport>,
     /// The strip's cards (stage ids, top to bottom) after it.
     pub order: Vec<u64>,
+    /// The park corner its overlay covered with the patch's picture while the incoming
+    /// windows waited there (global, top-left), if it did.
+    pub corner: Option<Rect>,
 }
 
 fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {

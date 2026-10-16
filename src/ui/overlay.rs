@@ -384,6 +384,31 @@ impl Overlay {
         g
     }
 
+    /// The park corner's cover for a switch (round 8L): `image` (the corner patch's picture,
+    /// `scale` pixels a point) flat at `at`, with no shadow, under every ghost, so the
+    /// incoming windows waiting in the corner (raised there by an activation) never show,
+    /// while every snapshot passes over it. Removed like a ghost.
+    pub fn cover(&self, image: &CGImage, scale: f64, at: Plane) -> Ghost {
+        let plane = CALayer::new();
+        plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
+        let img = CALayer::new();
+        img.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        img.setMasksToBounds(true);
+        // SAFETY: framework constant.
+        img.setContentsGravity(unsafe { kCAGravityResize });
+        img.setContentsScale(scale);
+        // SAFETY: a CGImage is valid layer contents.
+        unsafe { img.setContents(Some(as_object(image))) };
+        plane.addSublayer(&img);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.space.insertSublayer_atIndex(&plane, 0);
+        CATransaction::commit();
+        let mut g = Ghost { window: 0, plane, image: img, target: at };
+        g.set(at);
+        g
+    }
+
     /// True when the root layer is top-down (what every plane assumes); checked after
     /// ordering in, since AppKit sets it from the view.
     pub fn top_down(&self) -> bool {

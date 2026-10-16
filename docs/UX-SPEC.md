@@ -49,7 +49,8 @@ Shift-click a card to bring its windows into the current stage; Option-click doe
 Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
-stage.
+stage, animated as a card click: the stage you leave shrinks into the strip and the app's
+windows grow from their card. The keyboard goes to the app's window at once.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own.
@@ -104,8 +105,11 @@ launch from Applications, and Settings can turn that off.
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above everything, while
 the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
-nears a card, so content that changed meanwhile can jump when the motion ends. A click or
-key press during the motion brings the windows in at once.
+nears a card, so content that changed meanwhile can jump when the motion ends. A click
+during the motion brings the windows in at once; typing never cuts it short (the keyboard is
+already the new stage's). Arriving windows wait in the corner behind their pictures, and
+that corner is covered with the wallpaper patch's picture until they are in place (macOS
+raises an activated app's windows there).
 
 **Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
 

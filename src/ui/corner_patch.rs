@@ -320,6 +320,27 @@ fn settled() {
     });
 }
 
+/// The patch's picture of `rect` (global, top-left, whole points) and its scale, for a
+/// switch's motion overlay to cover the park corner while incoming windows wait there (round
+/// 8L, [`crate::engine::corner_patch::switch_cover`]); main thread. Only the picture the patch
+/// would show now: the wallpaper read, its picture rendered for that read, no Space or
+/// appearance change settling, and the rendered block holding `rect`. `None` otherwise (the
+/// patch busy, too): the corner is left as it is.
+pub fn cover_image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
+    PATCH.with(|p| {
+        let p = p.try_borrow().ok()?;
+        let patch = p.as_ref()?;
+        if patch.settle_until.is_some_and(|t| Instant::now() < t) {
+            return None;
+        }
+        let (_, wall) = patch.wall.as_ref()?;
+        let (_, job) = wall.outcome.as_ref().ok()?;
+        let picture = patch.picture.as_ref().filter(|pic| pic.key == job.key())?;
+        let image = crop_for(&picture.image, picture.region, picture.scale, wall.screen, rect)?;
+        Some((image, picture.scale))
+    })
+}
+
 /// The main display changed (size, scale, color space): read the wallpaper again (while the
 /// patch is busy, [`BUSY_RETRY`] later).
 pub fn display_changed(mtm: MainThreadMarker) {

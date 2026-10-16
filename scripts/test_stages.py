@@ -14,9 +14,11 @@ synthetic click and shift-click on a card of the real strip; the click is posted
 only when its own strip window is topmost at that point), native (Apple's defaults with three
 more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
-along the whole path, and the pointer is put back; then wallpaper clicks with a Finder
-window of the test's own scratch folder: Finder's echo never brings its window back, card
-clicks while the desktop shows, a deliberate Finder activation, `[strip]
+along the whole path, and the pointer is put back; an activation with no click and a Dock
+click to a parked app grow its stage from its card, the corner never showing it, the window
+never at its frame before the grow is done, the keyboard there within 100 ms (round 8L); then
+wallpaper clicks with a Finder window of the test's own scratch folder: Finder's echo never
+brings its window back, card clicks while the desktop shows, a deliberate Finder activation, `[strip]
 hide_while_desktop_shown`; skipped while the owner has Finder windows open or Apple's own
 wallpaper click would act), visible (by default, Apple's: no window
 is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of the strip on
@@ -28,7 +30,8 @@ card's app icon brings every window of that app), motion (the strip below window
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
 across a relaunch; a card dropped in a gap reorders and one dropped on another card's middle
-merges the two stages (`[strip] merge_on_drop`, on by default); a card click animates and every frame is exact afterwards;
+merges the two stages (`[strip] merge_on_drop`, on by default); a card click animates and every frame is exact afterwards; an activation of the fixture from
+another app's stage grows from its card (round 8L: see `activation_grows_check`);
 `level = "above_windows"` keeps the strip on top), slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
@@ -878,6 +881,158 @@ def topmost_point(prefix):
     return b["x"] + b["w"] / 2, b["y"] + b["h"] / 2
 
 
+OUR_ID = "dev.eugene.stagemanager"
+
+
+def contains(outer, inner, tol=1.0):
+    return (outer["x"] - tol <= inner["x"] and outer["y"] - tol <= inner["y"]
+            and inner["x"] + inner["w"] <= outer["x"] + outer["w"] + tol
+            and inner["y"] + inner["h"] <= outer["y"] + outer["h"] + tol)
+
+
+def intersect(a, b):
+    x, y = max(a["x"], b["x"]), max(a["y"], b["y"])
+    r, btm = min(a["x"] + a["w"], b["x"] + b["w"]), min(a["y"] + a["h"], b["y"] + b["h"])
+    return {"x": x, "y": y, "w": r - x, "h": btm - y} if r > x and btm > y else None
+
+
+def activation_grows_check(how, app, what):
+    """Round 8L: an activation of `app` (a key of EXTRA, or "fixture") whose windows wait in
+    another stage, by `how`: "open" (an activation with no click, as ⌘Tab's) or "dock" (its
+    Dock item, `ctl debug-dock-click`). The window server is sampled every 20 ms (with the
+    window the keyboard goes to) while it runs. It animates as a card click: the outgoing and
+    the incoming windows covered (the incoming ones grow from their card); an incoming window
+    is never seen in the park zone once the motion's overlay is up (covered by the patch's
+    picture there; macOS raises it above the patch before the app hears of the activation,
+    which may show it for a moment, at most 150 ms), never at its frame before the motion
+    ends (it arrives at 99 % of the grow, under its snapshot), and the keyboard reaches the
+    switch's key window within 100 ms of macOS activating the app. Returns whether it switched."""
+    bundle, path = (FIX_ID, FIX_APP) if app == "fixture" else (EXTRA[app][0], EXTRA[app][1])
+    s0 = state()
+    mine = {w["id"] for w in s0["windows"] if w["bundle_id"] == bundle}
+    waiting = {w["id"] for w in s0["windows"] if w["id"] in mine and w["parked"]}
+    if not check(bool(waiting), f"{what}: the app's windows wait in another stage"):
+        return False
+    before_log = len(log_text())
+    sampler = subprocess.Popen([BIN, "probe-windows", "--every", "20", "--for", "1800", "--focus", *ALL_IDS, OUR_ID],
+                               env=ENV, stdout=subprocess.PIPE, text=True)
+    time.sleep(0.15)  # the sampler's first looks are before the activation
+    t_sent = time.time()
+    if how == "dock":
+        r = ctl("debug-dock-click", bundle)
+        if not check(r.get("ok"), f"{what}: the Dock item was pressed ({r.get('error') or 'ok'})"):
+            sampler.kill()
+            return False
+    else:
+        subprocess.run(["open", path], capture_output=True)
+
+    def switched(x):
+        act = next((st for st in x["stages"] if st["number"] == x["active"]), None)
+        return act is not None and x["active"] != s0["active"] and bool(set(act["windows"]) & waiting)
+
+    s1 = wait_state(switched, f"{what}: the app's stage to come", timeout=5)
+    try:
+        out, _ = sampler.communicate(timeout=10)
+        probe_out = json.loads(out)
+    except Exception as e:  # noqa: BLE001 - a sampler that failed is reported, not fatal
+        sampler.kill()
+        check(False, f"{what}: the window server was sampled ({e})")
+        return s1 is not None
+    if not check(s1 is not None, f"{what}: switched to the app's stage"):
+        return False
+    time.sleep(0.6)  # the motion has landed
+    s1 = state()
+    log = log_text()[before_log:]
+    act = next(st for st in s1["stages"] if st["number"] == s1["active"])
+    arrived = [i for i in act["windows"] if i in waiting]
+    key = act.get("key")
+    pid = next((w["pid"] for w in s1["windows"] if w["id"] in mine), None)
+    covered = [line for line in log.splitlines() if "transition covered" in line]
+    check(any("incoming: true" in line and "outgoing: true" in line for line in covered),
+          f"{what}: animated both ways, as a card click ({[c.split('cover=')[-1][:60] for c in covered]})")
+    t = s1.get("last_transition") or {}
+    grows = {g["window"]: g for g in t.get("ghosts", []) if not g["outgoing"]}
+    check(all(i in grows for i in arrived) and all(grows[i]["start"]["w"] < grows[i]["end"]["w"] * 0.6 for i in arrived),
+          f"{what}: every arriving window grows from a card-sized start ({len(grows)} incoming snapshots, {len(arrived)} windows)")
+    check("the keyboard goes to the activated window now" in log or "the keyboard goes to the new stage now" in log,
+          f"{what}: the switch's focus runs before the windows arrive")
+
+    display, samples, ours_pid = probe_out["display"], probe_out.get("samples", []), app_pid()
+    corner = t.get("corner")
+
+    def overlay_up(x):
+        return any(w["pid"] == ours_pid and w["onscreen"] and close(w["bounds"], display, 2.0) for w in x["windows"])
+
+    def exposed(x, w):
+        """Window `w` (listed in sample `x`) seen in the park zone: on screen there and not
+        covered, neither by the overlay's corner nor by the patch in front of it."""
+        if not w["onscreen"] or not is_parked(w["bounds"], display):
+            return False
+        sliver = intersect(w["bounds"], display)
+        if sliver is None:
+            return False
+        if corner and overlay_up(x) and contains(corner, sliver):
+            return False
+        return not any(p["pid"] == ours_pid and p["onscreen"] and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
+                       and p["z"] is not None and w["z"] is not None and p["z"] < w["z"] and contains(p["bounds"], sliver)
+                       for p in x["windows"])
+
+    t_ov = next((x["t"] for x in samples if overlay_up(x)), None)
+    seen = [x["t"] for x in samples for w in x["windows"] if w["id"] in arrived and exposed(x, w)]
+    out_t = [(x["t"], overlay_up(x)) for x in samples for w in x["windows"]
+             if w["id"] in arrived and w["onscreen"] and not is_parked(w["bounds"], display)]
+    patch_before = any(p["pid"] == ours_pid and p["onscreen"] and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
+                       for x in samples[:5] for p in x["windows"])
+    rel = lambda v: "-" if v is None or t_ov is None else f"{(v - t_ov) * 1000:+.0f} ms"  # noqa: E731
+    say(f"    {len(samples)} looks: overlay up {'-' if t_ov is None else f'{(t_ov - t_sent) * 1000:.0f} ms'} after the "
+        f"activation was sent, corner {corner and fmt(corner)}, patch before: {patch_before}; seen in the corner at "
+        f"{[rel(v) for v in seen][:10]} (from the overlay); first out of the zone {rel(out_t[0][0]) if out_t else '-'}")
+    check(t_ov is not None, f"{what}: the motion's overlay was seen while it ran")
+    why = [line.split("why=")[-1][:80] for line in log.splitlines()
+           if "the park corner is not covered" in line or "no picture of the corner" in line]
+    if not patch_before:
+        # The corner showed its slivers before the activation (the patch off, or stepping
+        # aside here): nothing to keep clean.
+        say(f"    (the corner patch did not show before the activation: the corner checks are skipped; {why[:1]})")
+    elif corner is None:
+        check(False, f"{what}: the corner is covered for the motion where the patch showed ({why[:1]})")
+    elif t_ov is not None:
+        late = [v for v in seen if v >= t_ov]
+        early = [v for v in seen if v < t_ov]
+        check(not late, f"{what}: never seen in the park zone once the motion is up ({[rel(v) for v in late][:8]})")
+        span = (max(early) - min(early) + 0.02) if early else 0.0
+        check(span <= 0.15, f"{what}: raised in the corner by macOS before the motion for {span * 1000:.0f} ms at most (150)")
+    if out_t and t_ov is not None:
+        first_out, still_up = out_t[0]
+        check(first_out - t_ov >= 0.25 and still_up,
+              f"{what}: never at its frame before the grow is done ({rel(first_out)} after the overlay, under it: {still_up})")
+    else:
+        check(False, f"{what}: the arriving window was seen out of the park zone at all ({len(out_t)} looks)")
+    app_ids = {w["id"] for w in s1["windows"] if w["pid"] == pid}
+    focus = [(x.get("tf", x["t"]), x.get("focused")) for x in samples if x.get("focused") is not None]
+    if focus:
+        t_app = next((tf for tf, f in focus if f in app_ids), None)
+        t_key = next((tf for tf, f in focus if f == key), None)
+        check(t_app is not None and t_key is not None and t_key - t_app <= 0.1,
+              f"{what}: the keyboard reaches the key window within 100 ms of the activation "
+              f"({'-' if t_key is None or t_app is None else f'{(t_key - t_app) * 1000:.0f} ms'})")
+    else:
+        # The sampler reads the focus through Accessibility, which the shell running the tests
+        # may not have: the app's own timings instead (the notice to the switch, then the
+        # focus asked as the transition was sent).
+        num = lambda name, line: int(m.group(1)) if (m := re.search(name + r"=(\d+)", line)) else None  # noqa: E731
+        since = next((num("since_activation_ms", line) for line in log.splitlines() if "lives in another stage; switching" in line), None)
+        asked = next((num("asked_ms", line) for line in log.splitlines() if "the keyboard goes to the activated window now" in line), None)
+        say(f"    (no focus read by the sampler: the shell has no Accessibility; the app's log: "
+            f"switch {since} ms after the notice, focus asked {asked} ms after the transition was sent)")
+        if asked is not None:
+            check((since or 0) + asked <= 100, f"{what}: the keyboard is asked for within 100 ms of the activation (the app's log)")
+        else:
+            say("    (no early focus logged: macOS's own key window was the switch's, or the focus went with the parks)")
+    consistent(what)
+    return True
+
+
 def phase_native():
     say("\n== native: first start, new windows, Shift sugar, card drag, window drag ==")
     stop_app()
@@ -911,6 +1066,13 @@ def phase_native():
     strip = [sets[n] for n in s["strip"]]
     check(strip == expect_strip, f"first start: the strip in recency order by z ({strip}, expected {expect_strip})")
     consistent("first start")
+
+    say("-- an activation with no click (as ⌘Tab) and a Dock click grow their stage from its card (8L)")
+    activation_grows_check("open", "a", "an activation of Alpha (no click, as ⌘Tab)")
+    activation_grows_check("dock", "c", "a Dock click on Charlie")
+    activate("b")
+    wait_state(lambda x: active_titles(x) == {"Bravo 1"}, "Bravo's stage back")
+    time.sleep(0.8)  # past the activation echo window
 
     say("-- a newly opened app gets a new stage")
     stop_extra("c")
@@ -1515,6 +1677,15 @@ def phase_motion():
         time.sleep(1.0)
         check(not any(w["layer"] == OVERLAY_LAYER for w in our_windows()), "the overlay is gone once the motion ends")
         consistent("animated switch")
+
+    say("-- an activation of the fixture from another app's stage grows from its card (8L)")
+    time.sleep(1.0)
+    start_extra("a", 1)
+    s = wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's own stage, shown")
+    if check(s is not None, "Alpha 1 opened a stage of its own, shown"):
+        time.sleep(1.0)
+        activation_grows_check("open", "fixture", "an activation of the fixture (no click, as ⌘Tab)")
+    stop_extra("a")
 
     say("-- level = \"above_windows\" keeps the strip on top")
     stop_app()

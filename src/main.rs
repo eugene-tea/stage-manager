@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }
@@ -788,9 +788,11 @@ mod app {
     }
 
     /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows.
+    /// Sampling (`--every MS --for MS`), `--focus` adds to each sample the window the keyboard
+    /// goes to (the frontmost app's focused window, through Accessibility) and when it was read.
     pub fn probe_windows(args: &[String]) -> ExitCode {
         let usage = || {
-            eprintln!("usage: stage-manager probe-windows [--every MS --for MS] <bundle-id>...");
+            eprintln!("usage: stage-manager probe-windows [--every MS --for MS [--focus]] <bundle-id>...");
             ExitCode::from(2)
         };
         let (sampling, args) = match args {
@@ -801,6 +803,10 @@ mod app {
                 }
             }
             _ => (None, args),
+        };
+        let (focus, args) = match args {
+            [flag, rest @ ..] if flag == "--focus" && sampling.is_some() => (true, rest),
+            _ => (false, args),
         };
         if args.is_empty() {
             return usage();
@@ -833,8 +839,14 @@ mod app {
             let start = Instant::now();
             let mut due = start;
             while start.elapsed() <= span {
-                let t = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-                samples.push(json!({ "t": t, "windows": look() }));
+                let clock = || SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+                let t = clock();
+                let mut sample = json!({ "t": t, "windows": look() });
+                if focus && let Some(obj) = sample.as_object_mut() {
+                    obj.insert("focused".into(), json!(controller::focused_window()));
+                    obj.insert("tf".into(), json!(clock()));
+                }
+                samples.push(sample);
                 due += every;
                 std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }
