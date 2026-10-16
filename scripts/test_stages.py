@@ -231,9 +231,13 @@ def guardian_pids(app):
 
 def owner_app_running():
     """Any Stage Manager that is not this run's own app (the owner's, from ~/Applications,
-    a repo's target/ or anywhere else): no live phase runs while it is up."""
+    a repo's target/ or anywhere else), or another Stage Manager's guardian still waiting for a
+    window it left parked: no live phase runs while it is up. Such a guardian brings back any
+    window it finds in the park zone, the fixtures' too (10-16: every Dock arrival failed)."""
     ours = app_pid()
-    return any(p != ours for p in pids_of("Stage Manager.app/Contents/MacOS/stage-manager$"))
+    apps = pids_of("Stage Manager.app/Contents/MacOS/stage-manager$")
+    guardians = set(pids_of("Stage Manager.app/Contents/MacOS/stage-manager --guardian ")) - set(guardian_pids(ours))
+    return any(p != ours for p in apps) or bool(guardians)
 
 
 def archive_log():
