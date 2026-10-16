@@ -246,6 +246,13 @@ fn say(s: &mut State, why: &str) {
 /// [`rest`] (`moment`).
 pub fn keep_fresh(key: Key, region: Rect, moment: Moment, now: Instant) {
     let start = with_state(|s| {
+        // The capture gate first (pure and cheap): with captures off that is the reason the
+        // switch logs, whatever else holds (the scripts expect exactly it).
+        if let Err(why) = capture::desktop_may_capture() {
+            s.why_none = Some(why);
+            say(s, why);
+            return None;
+        }
         if let Some(why) = rest(moment) {
             s.why_none = Some(why);
             say(s, why);
@@ -261,11 +268,6 @@ pub fn keep_fresh(key: Key, region: Rect, moment: Moment, now: Instant) {
             return None;
         }
         s.tried = Some(now);
-        if let Err(why) = capture::desktop_may_capture() {
-            s.why_none = Some(why);
-            say(s, why);
-            return None;
-        }
         s.taking = Some(now);
         Some(s.generation)
     })
