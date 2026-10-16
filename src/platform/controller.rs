@@ -411,11 +411,30 @@ fn resolve_cover(
     }
 }
 
+/// Test only (`STAGE_MANAGER_COVER=desktop`, honoured with `STAGE_MANAGER_TEST` set): a
+/// switch's cover is the desktop's still even where no icon lies under the corner, and the
+/// still is kept fresh, so the capture phase sees the still-based cover on any desktop
+/// (round 8L4).
+fn cover_desktop_forced() -> bool {
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var_os("STAGE_MANAGER_TEST").is_some() && std::env::var("STAGE_MANAGER_COVER").is_ok_and(|v| v == "desktop")
+    })
+}
+
 /// Whether ctl command `cmd` brings a running switch's held incoming windows to their frames
 /// first. Only a command that changes something does; a question (`state`, `space`, `dump`,
 /// `adopted`) leaves the motion alone: the scripted checks poll `state` while a switch runs,
 /// and that poll brought the incoming windows to their frames 40-60 ms into the grow,
 /// visible under the overlay (live 10-16, round 8L3).
+///
+/// The commands that still land it first: those that act on the stages or windows
+/// (`switch`, `send`, `new`, `pin`, `merge`, `reveal`, `unpark-all`, `reload`) and the test
+/// commands the WM thread runs (`debug-frame`, `debug-fullscreen`, `debug-dock-click`,
+/// `debug-close`). `ping`, `mark`, `quit`, `settings` and the main thread's test commands
+/// (`debug-strip`, `debug-overlay`, `debug-click`, `debug-hover`, `debug-drag`,
+/// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
+/// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
     !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_))
 }
@@ -800,6 +819,9 @@ pub struct Controller {
     space_changed_at: Option<Instant>,
     /// Space changes handled since launch (`ctl space`: a test's switch shows as a step).
     space_changes: u64,
+    /// When the last animated switch was sent (the desktop's still rests after a while with
+    /// no input and no switch, [`desktop_shot::rest`]).
+    last_switch: Option<Instant>,
     /// When the window server's list was last checked for Space changes.
     space_checked: Instant,
     /// Managed windows of other Spaces on screen: counted once the same ones show at two
@@ -982,6 +1004,7 @@ impl Controller {
             settle: Settle::default(),
             space_changed_at: None,
             space_changes: 0,
+            last_switch: None,
             space_checked: Instant::now(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
@@ -1427,8 +1450,9 @@ impl Controller {
                     items,
                 };
                 let visible = visibility(&facts);
-                // A switch's cover where a desktop icon lies: a still of the desktop (8L3).
-                self.keep_desktop_shot(rect, facts.items.as_deref(), now);
+                // A switch's cover where a desktop icon lies: a still of the desktop (8L3), laid
+                // over the patch's picture when it holds the icons only (8L4).
+                let still = self.keep_desktop_shot(rect, facts.items.as_deref(), now);
                 let why = visible.err();
                 if why != self.patch_why {
                     if let Some(why) = why {
@@ -1438,7 +1462,10 @@ impl Controller {
                 }
                 let show = visible.ok();
                 read = Some(list);
-                PatchPlan { show, above: show.and(above), reorder, space }
+                // The test's forced still is compared with the patch's picture (`debug-overlay`).
+                let wanted = desktop_shot::needs_wallpaper() || cover_desktop_forced();
+                let picture = if show.is_none() && still && wanted { rect } else { None };
+                PatchPlan { show, above: show.and(above), reorder, space, picture }
             }
             _ => {
                 self.patch_rect = None;
@@ -1447,10 +1474,10 @@ impl Controller {
                 // The icons known stay (they do not depend on the patch); a read is due when
                 // the patch is wanted again.
                 self.patch_items.read_for = None;
-                PatchPlan { show: None, above: None, reorder, space }
+                PatchPlan { show: None, above: None, reorder, space, picture: None }
             }
         };
-        if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none()) {
+        if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {
             return read;
         }
         self.patch_sent = Some(plan.clone());
@@ -1842,6 +1869,7 @@ impl Controller {
     /// them. Without the strip's cover the batch runs at once.
     fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
         self.flush_pending(ob);
+        self.last_switch = Some(Instant::now());
         let mut run = std::mem::take(&mut self.activation);
         let hidden = self.hidden_arrivals(ob, &actions);
         // An activation that grows: can the overlay cover the corner where macOS has raised
@@ -1962,7 +1990,8 @@ impl Controller {
     fn cover_ready(&self, c: SwitchCover) -> Result<SwitchCover, &'static str> {
         let key = self.shot_key();
         resolve_cover(c, crate::ui::corner_patch::cover_ready, |rect| match &key {
-            Some(key) => desktop_shot::ready(rect, key),
+            // A still that holds the icons only is laid over the patch's picture (8L4).
+            Some(key) => desktop_shot::ready(rect, key, crate::ui::corner_patch::cover_ready),
             None => Err("no model"),
         })
     }
@@ -1982,24 +2011,38 @@ impl Controller {
     /// corner, not just under the patch (a switch's corner is the patch's grown by the
     /// incoming windows: 10-16, the patch clear and the switch's corner on an icon), the
     /// icons not known, or no picture of it now. Never during an overview, a Space change,
-    /// on a full-screen Space or while a switch runs.
-    fn keep_desktop_shot(&self, rect: Option<Rect>, items: Option<&[Rect]>, now: Instant) {
+    /// on a full-screen Space or while a switch runs, and none at rest ([`desktop_shot::rest`]:
+    /// the screen locked, the display asleep, no input and no switch for 2 min; the first
+    /// input after brings a fresh one, 8L4). Whether a still is wanted for the corner now
+    /// (the patch then keeps its picture rendered while hidden, for a still that holds the
+    /// icons only, 8L4).
+    fn keep_desktop_shot(&self, rect: Option<Rect>, items: Option<&[Rect]>, now: Instant) -> bool {
         let config = self.store.config();
         let anim = &config.style.animation;
         if !(anim.activation_grows && anim.animates() && self.strip_visible && config.windows.corner_patch) {
-            return;
+            return false;
         }
-        let Some(rect) = rect else { return };
+        let Some(rect) = rect else { return false };
         if self.overview.showing().is_some() || self.space_pending || self.fullscreen || self.pending.is_some() {
-            return;
+            return false;
         }
-        let (Some(key), Some(m)) = (self.shot_key(), self.model.as_ref()) else { return };
+        let (Some(key), Some(m)) = (self.shot_key(), self.model.as_ref()) else { return false };
         let block = desktop_shot::block(m.main_display().frame, Some(rect));
         let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
-        if !icons && crate::ui::corner_patch::cover_ready(rect).is_ok() {
-            return;
+        if !icons && !cover_desktop_forced() && crate::ui::corner_patch::cover_ready(rect).is_ok() {
+            return false;
         }
-        desktop_shot::keep_fresh(key, block, now);
+        // No still while the screen is locked, the display sleeps or nobody has touched the
+        // Mac or switched for a while (8L4): the cover is only needed at a switch.
+        let moment = desktop_shot::Moment {
+            locked: self.locked,
+            asleep: objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()),
+            since_input: input::since_last_input(),
+            since_switch: self.last_switch.map(|t| now.saturating_duration_since(t)),
+        };
+        desktop_shot::keep_fresh(key, block, moment, now);
+        // At rest the patch's picture is not kept rendered either.
+        desktop_shot::rest(moment).is_none()
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
@@ -2051,7 +2094,8 @@ impl Controller {
             items: self.patch_items.known.clone(),
             staying,
         };
-        switch_cover(&facts)
+        let forced = cover_desktop_forced();
+        switch_cover(&facts).map(|c| if forced { SwitchCover { picture: CoverPicture::Desktop, ..c } } else { c })
     }
 
     /// The animated batch after its early windows (`first`): planned as a transition, sent to
@@ -4587,6 +4631,9 @@ impl Controller {
                 })
             })
             .collect();
+        // The desktop's still for a switch's cover (8L3-8L4) and the icons it is keyed by.
+        let mut desktop_still = desktop_shot::status();
+        desktop_still["icons"] = json!(self.patch_items.known);
         json!({
             "ok": true,
             "space": m.current_space(m.main_display().id).0,
@@ -4609,6 +4656,7 @@ impl Controller {
             // question asked now leaves them there (8L3), so the checks wait for it to land.
             "switching": self.pending.as_ref().map(|p| p.id),
             "capture": super::capture::status(),
+            "desktop_still": desktop_still,
             "strip_cards": strip_model::published_cards()
                 .into_iter()
                 .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))

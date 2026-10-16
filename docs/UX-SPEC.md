@@ -111,11 +111,14 @@ already the new stage's). Arriving windows wait in the corner behind their pictu
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there), never over the menu bar or the Dock's bar. Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
-desktop there (the picture and its icons, no window), kept fresh while card pictures are
-captured, covers it instead; the parked windows' edges are under it too for the moment of
-the motion. Where it cannot be covered at all (the patch off, card captures off with icons
-there, no picture ready yet), an activated app's windows come to their places at once
-instead of growing.
+desktop there (only the desktop's own layers: the picture and its icons, never a window,
+even one that appears as it is taken; laid over the patch's picture when macOS leaves the
+desktop picture out of it), kept fresh while card pictures are captured and the Mac is in
+use (none while the screen is locked or asleep, or after 2 minutes with no input and no
+switch; a fresh one at the first input), covers it instead; the parked windows' edges are
+under it too for the moment of the motion. Where it cannot be covered at all (the patch off,
+card captures off with icons there, no picture ready yet), an activated app's windows come
+to their places at once instead of growing.
 
 **Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
 

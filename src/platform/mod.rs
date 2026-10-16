@@ -27,6 +27,7 @@ pub mod native_settings;
 pub mod observe;
 pub mod park_probe;
 pub mod paths;
+pub mod pixels;
 pub mod permissions;
 pub mod safety;
 pub mod self_capture;

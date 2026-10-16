@@ -25,7 +25,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 
 use super::capture::{self, DesktopStill};
-use super::wallpaper;
+use super::{pixels, wallpaper};
 use crate::engine::geometry::Rect;
 use crate::engine::wallpaper as wp;
 
@@ -80,9 +80,24 @@ pub struct Meta {
     pub region: Rect,
     /// Its pixels a point.
     pub scale: f64,
-    /// When it came.
+    /// When its capture started (what it shows is at least that old).
     pub taken: Instant,
+    /// No see-through part: the desktop picture's own window is in it. Otherwise it holds
+    /// the icons only and is laid over the patch's picture of the wallpaper ([`Layers`]).
+    pub opaque: bool,
 }
+
+/// How a still stands for the corner ([`usable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layers {
+    /// On its own.
+    Alone,
+    /// Laid over the corner patch's picture of the wallpaper (it holds the icons only).
+    OverWallpaper,
+}
+
+/// [`usable`]'s reason when there is no still at all.
+const NO_STILL: &str = "no still of the desktop yet";
 
 /// The square of side `side` at `display`'s bottom-right corner, on the display.
 fn corner_square(display: Rect, side: f64) -> Rect {
@@ -114,9 +129,9 @@ pub fn due(meta: Option<&Meta>, key: &Key, region: Rect, now: Instant) -> bool {
 }
 
 /// Whether the still `meta` stands for the desktop at `rect` (global, top-left) now, for `key`
-/// (what the WM thread knows now); why not.
-pub fn usable(meta: Option<&Meta>, rect: Rect, key: &Key, now: Instant) -> Result<(), &'static str> {
-    let m = meta.ok_or("no still of the desktop yet")?;
+/// (what the WM thread knows now), and how ([`Layers`]); why not.
+pub fn usable(meta: Option<&Meta>, rect: Rect, key: &Key, now: Instant) -> Result<Layers, &'static str> {
+    let m = meta.ok_or(NO_STILL)?;
     if m.key.space != key.space || m.key.display != key.display {
         return Err("the desktop's still is of another Desktop or display");
     }
@@ -127,7 +142,52 @@ pub fn usable(meta: Option<&Meta>, rect: Rect, key: &Key, now: Instant) -> Resul
         return Err("the desktop's still is too old");
     }
     wp::crop_px(m.region, rect, m.scale).ok_or("the desktop's still does not hold the corner")?;
-    Ok(())
+    Ok(if m.opaque { Layers::Alone } else { Layers::OverWallpaper })
+}
+
+/// No still is taken after this long with no input and no switch: the cover is only needed
+/// at a switch, and the first input after brings a fresh one (round 8L4).
+pub const IDLE: Duration = Duration::from_secs(120);
+
+/// A still's take is logged at most this often (its skips once per reason).
+const TAKE_LOG_EVERY: Duration = Duration::from_secs(60);
+
+/// A still whose least alpha is below this has see-through parts: the desktop picture's own
+/// window was not drawn in it, and it is laid over the patch's picture of the wallpaper.
+const OPAQUE_ALPHA: u8 = 250;
+
+/// What the Mac is doing, for [`rest`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Moment {
+    /// The screen is locked (or the session is not on the console).
+    pub locked: bool,
+    /// The main display sleeps.
+    pub asleep: bool,
+    /// Since the last keyboard, mouse or trackpad event.
+    pub since_input: Duration,
+    /// Since the last switch (`None`: none yet in this run).
+    pub since_switch: Option<Duration>,
+}
+
+/// Why no still is taken now (round 8L4): the screen locked, the display asleep, or no
+/// input and no switch for [`IDLE`]. `None`: one may be taken.
+pub fn rest(m: Moment) -> Option<&'static str> {
+    if m.locked {
+        return Some("the screen is locked");
+    }
+    if m.asleep {
+        return Some("the display sleeps");
+    }
+    if m.since_input >= IDLE && m.since_switch.is_none_or(|s| s >= IDLE) {
+        return Some("no input and no switch for 2 min");
+    }
+    None
+}
+
+/// Whether an answer to a capture started at `started` is kept over the still `kept`: only
+/// one started after it (a stalled capture answering late never replaces a newer still).
+pub fn newer(kept: Option<&Meta>, started: Instant) -> bool {
+    kept.is_none_or(|k| started > k.taken)
 }
 
 /// A still and its facts.
@@ -148,29 +208,49 @@ struct State {
     generation: u64,
     /// The last reason no still could be taken, logged once.
     said: Option<String>,
+    /// The last reason no still could be taken or is taken now, as a switch's `at_once`
+    /// gives it when there is no still at all ([`ready`]).
+    why_none: Option<&'static str>,
     /// A still was taken once (logged once).
     had: bool,
+    /// When a take was last logged ([`TAKE_LOG_EVERY`]).
+    take_logged: Option<Instant>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { shot: None, taking: None, tried: None, generation: 0, said: None, had: false });
+static STATE: Mutex<State> = Mutex::new(State {
+    shot: None,
+    taking: None,
+    tried: None,
+    generation: 0,
+    said: None,
+    why_none: None,
+    had: false,
+    take_logged: None,
+});
 
 fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> Option<T> {
     STATE.lock().ok().map(|mut s| f(&mut s))
 }
 
-/// Logs why no still could be taken, once per reason.
+/// Logs why no still could be taken, once per reason (until one is taken).
 fn say(s: &mut State, why: &str) {
     if s.said.as_deref() != Some(why) {
-        tracing::debug!(why, "the desktop's still for a switch's cover cannot be taken now");
+        tracing::debug!(why, "the desktop's still for a switch's cover is not taken now");
         s.said = Some(why.to_string());
     }
 }
 
 /// Keeps a still of `region` (global, top-left; [`block`]) fresh for `key` (WM thread, at every
 /// corner patch plan while a switch's cover would need it): starts a capture when one is
-/// [`due`], none is in flight, and the last try is [`RETRY`] old.
-pub fn keep_fresh(key: Key, region: Rect, now: Instant) {
+/// [`due`], none is in flight, the last try is [`RETRY`] old, and the Mac is not at
+/// [`rest`] (`moment`).
+pub fn keep_fresh(key: Key, region: Rect, moment: Moment, now: Instant) {
     let start = with_state(|s| {
+        if let Some(why) = rest(moment) {
+            s.why_none = Some(why);
+            say(s, why);
+            return None;
+        }
         if s.taking.is_some_and(|t| now.saturating_duration_since(t) < STALL) {
             return None;
         }
@@ -182,6 +262,7 @@ pub fn keep_fresh(key: Key, region: Rect, now: Instant) {
         }
         s.tried = Some(now);
         if let Err(why) = capture::desktop_may_capture() {
+            s.why_none = Some(why);
             say(s, why);
             return None;
         }
@@ -191,45 +272,106 @@ pub fn keep_fresh(key: Key, region: Rect, now: Instant) {
     .flatten();
     let Some(generation) = start else { return };
     let wanted = key.clone();
-    let done = Box::new(move |still: DesktopStill| arrived(still, wanted, region, generation));
+    let done = Box::new(move |still: DesktopStill| arrived(still, wanted, region, generation, now));
     if let Err(why) = capture::capture_desktop(region, done) {
         with_state(|s| {
             s.taking = None;
+            s.why_none = Some(why);
             say(s, why);
         });
     }
 }
 
-/// A capture answered (a ScreenCaptureKit queue): kept unless [`forget`] came since.
-fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64) {
+/// A capture started at `started` answered (a ScreenCaptureKit queue): kept unless [`forget`]
+/// came since or a newer still is kept ([`newer`]); stamped with its start (what it shows is
+/// at least that old).
+fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started: Instant) {
+    // Judged before the lock: a small draw.
+    let still = still.map(|(image, scale)| {
+        let opaque = pixels::min_alpha(&image).is_some_and(|a| a >= OPAQUE_ALPHA);
+        (image, scale, opaque)
+    });
     with_state(|s| {
-        s.taking = None;
+        if s.taking == Some(started) {
+            s.taking = None;
+        }
         match still {
-            Ok((image, scale)) if s.generation == generation => {
+            Ok(_) if s.generation != generation => tracing::trace!("a desktop still from before a change: dropped"),
+            Ok(_) if !newer(s.shot.as_ref().map(|x| &x.meta), started) => {
+                tracing::debug!("a desktop still older than the one kept: dropped");
+            }
+            Ok((image, scale, opaque)) => {
                 if !s.had {
                     s.had = true;
-                    tracing::info!(%region, "switch cover: a still of the desktop stands for the park corner (a desktop icon lies under it, or the patch's picture cannot)");
+                    tracing::info!(%region, opaque, "switch cover: a still of the desktop stands for the park corner (a desktop icon lies under it, or the patch's picture cannot)");
+                }
+                let now = Instant::now();
+                if s.take_logged.is_none_or(|t| now.saturating_duration_since(t) >= TAKE_LOG_EVERY) {
+                    s.take_logged = Some(now);
+                    tracing::debug!(%region, opaque, took_ms = now.saturating_duration_since(started).as_millis() as u64, "the desktop's still taken (logged at most once a minute)");
                 }
                 s.said = None;
-                s.shot = Some(Shot { meta: Meta { key, region, scale, taken: Instant::now() }, image });
+                s.why_none = None;
+                s.shot = Some(Shot { meta: Meta { key, region, scale, taken: started, opaque }, image });
             }
-            Ok(_) => tracing::trace!("a desktop still from before a change: dropped"),
             Err(why) => say(s, &why),
         }
     });
 }
 
-/// Whether the still kept stands for the desktop at `rect` now ([`usable`]; any thread).
-pub fn ready(rect: Rect, key: &Key) -> Result<(), &'static str> {
-    with_state(|s| usable(s.shot.as_ref().map(|x| &x.meta), rect, key, Instant::now())).unwrap_or(Err("the desktop's still is not readable"))
+/// Whether the still kept stands for the desktop at `rect` now ([`usable`]; any thread),
+/// with `wallpaper` (whether the patch's picture holds `rect`) for a still that holds the
+/// icons only. With no still at all, why none was taken ([`decide`]).
+pub fn ready(rect: Rect, key: &Key, wallpaper: impl FnOnce(Rect) -> Result<(), &'static str>) -> Result<(), &'static str> {
+    let (found, why_none) = with_state(|s| (usable(s.shot.as_ref().map(|x| &x.meta), rect, key, Instant::now()), s.why_none))
+        .ok_or("the desktop's still is not readable")?;
+    decide(found, why_none, || wallpaper(rect))
+}
+
+/// [`ready`]'s answer from [`usable`]'s (`found`), why no still was taken (`why_none`) and
+/// whether the patch's picture holds the corner (`wallpaper`, asked only for a still that
+/// holds the icons only).
+fn decide(
+    found: Result<Layers, &'static str>,
+    why_none: Option<&'static str>,
+    wallpaper: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    match found {
+        Ok(Layers::Alone) => Ok(()),
+        Ok(Layers::OverWallpaper) => {
+            wallpaper().map_err(|_| "the desktop's still holds the icons only and the patch has no picture of the wallpaper")
+        }
+        Err(NO_STILL) => Err(why_none.unwrap_or(NO_STILL)),
+        Err(why) => Err(why),
+    }
 }
 
 /// The still's pixels of `rect` (global, top-left, whole points) and its scale, when it holds
-/// them (the strip, drawing a switch's cover the WM thread found [`ready`]).
+/// them (the strip, main thread, drawing a switch's cover the WM thread found [`ready`]); one
+/// that holds the icons only is laid over the patch's picture of the wallpaper. Logs why
+/// not when it finds nothing.
 pub fn image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
-    let (image, region, scale) = with_state(|s| s.shot.as_ref().map(|x| (x.image.clone(), x.meta.region, x.meta.scale))).flatten()?;
-    let px = wp::crop_px(region, rect, scale)?;
-    wallpaper::crop(&image, px).map(|i| (i, scale))
+    let found = with_state(|s| s.shot.as_ref().map(|x| (x.image.clone(), x.meta.region, x.meta.scale, x.meta.opaque))).flatten();
+    let picture = (|| {
+        let (image, region, scale, opaque) = found.ok_or("no still of the desktop now (dropped since it was ready)")?;
+        let px = wp::crop_px(region, rect, scale).ok_or("the still does not hold the corner")?;
+        let top = wallpaper::crop(&image, px).ok_or("the still's crop failed")?;
+        if opaque {
+            return Ok((top, scale));
+        }
+        let (base, base_scale) = crate::ui::corner_patch::cover_image(rect).ok_or("no picture of the wallpaper to lay the icons on")?;
+        pixels::over(&base, &top).map(|i| (i, base_scale)).ok_or("the icons could not be laid on the wallpaper")
+    })();
+    picture
+        .inspect_err(|why| tracing::debug!(%rect, why, "the desktop's still was ready for the switch but gives no picture of the corner now"))
+        .ok()
+}
+
+/// Whether a switch's cover may need the corner patch's picture under the still: none taken
+/// yet (it may hold the icons only), or the one kept does (WM thread: the patch keeps its
+/// picture rendered while hidden then).
+pub fn needs_wallpaper() -> bool {
+    with_state(|s| s.shot.as_ref().is_none_or(|x| !x.meta.opaque)).unwrap_or(false)
 }
 
 /// Drops the still (an appearance or display change); a capture in flight is not kept.
@@ -241,6 +383,20 @@ pub fn forget() {
     });
 }
 
+/// The still for `ctl state` (tests): its block, age, whether it stands alone, why none.
+pub fn status() -> serde_json::Value {
+    with_state(|s| {
+        serde_json::json!({
+            "region": s.shot.as_ref().map(|x| x.meta.region),
+            "age_ms": s.shot.as_ref().map(|x| x.meta.taken.elapsed().as_millis() as u64),
+            "opaque": s.shot.as_ref().map(|x| x.meta.opaque),
+            "taking": s.taking.is_some(),
+            "why_none": s.why_none,
+        })
+    })
+    .unwrap_or(serde_json::Value::Null)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,7 +404,7 @@ mod tests {
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
 
     fn meta(key: Key, taken: Instant) -> Meta {
-        Meta { key, region: block(MAIN, None), scale: 2.0, taken }
+        Meta { key, region: block(MAIN, None), scale: 2.0, taken, opaque: true }
     }
 
     #[test]
@@ -294,7 +450,8 @@ mod tests {
         let key = Key::new(1, MAIN, Some(&[icon]));
         let m = meta(key.clone(), now);
         let corner = Rect::new(2499.0, 1348.0, 61.0, 92.0);
-        assert_eq!(usable(Some(&m), corner, &key, now), Ok(()));
+        assert_eq!(usable(Some(&m), corner, &key, now), Ok(Layers::Alone));
+        assert_eq!(usable(Some(&Meta { opaque: false, ..m.clone() }), corner, &key, now), Ok(Layers::OverWallpaper), "the icons only");
         assert_eq!(usable(None, corner, &key, now), Err("no still of the desktop yet"));
         assert_eq!(
             usable(Some(&m), corner, &Key { space: 2, ..key.clone() }, now),
@@ -302,9 +459,50 @@ mod tests {
         );
         assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, Some(&[])), now), Err("the desktop's icons changed since its still"));
         // Icons not known now: its age alone.
-        assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, None), now), Ok(()));
+        assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, None), now), Ok(Layers::Alone));
         assert_eq!(usable(Some(&m), corner, &key, now + MAX_AGE + Duration::from_secs(1)), Err("the desktop's still is too old"));
         let outside = Rect::new(1900.0, 1348.0, 660.0, 92.0);
         assert_eq!(usable(Some(&m), outside, &key, now), Err("the desktop's still does not hold the corner"));
+    }
+
+    #[test]
+    fn no_still_while_locked_asleep_or_idle_and_one_at_the_first_input_after() {
+        let busy = Moment { locked: false, asleep: false, since_input: Duration::from_secs(1), since_switch: None };
+        assert_eq!(rest(busy), None);
+        assert_eq!(rest(Moment { locked: true, ..busy }), Some("the screen is locked"));
+        assert_eq!(rest(Moment { asleep: true, ..busy }), Some("the display sleeps"));
+        let idle = Moment { since_input: IDLE, ..busy };
+        assert_eq!(rest(idle), Some("no input and no switch for 2 min"), "no switch yet in the run");
+        assert_eq!(rest(Moment { since_switch: Some(IDLE + Duration::from_secs(5)), ..idle }), Some("no input and no switch for 2 min"));
+        // A switch (a ctl switch, a test's) counts as being in use.
+        assert_eq!(rest(Moment { since_switch: Some(Duration::from_secs(30)), ..idle }), None);
+        // The first input after: a still again (the old one is past REFRESH_EVERY, so due).
+        assert_eq!(rest(Moment { since_input: Duration::from_millis(200), ..idle }), None);
+    }
+
+    #[test]
+    fn an_answer_older_than_the_still_kept_is_dropped() {
+        let t0 = Instant::now();
+        let kept = meta(Key::new(1, MAIN, Some(&[])), t0 + Duration::from_secs(6));
+        assert!(newer(None, t0));
+        assert!(!newer(Some(&kept), t0), "a stalled capture started before the kept still");
+        assert!(!newer(Some(&kept), kept.taken));
+        assert!(newer(Some(&kept), t0 + Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn with_no_still_the_reason_none_was_taken_is_given() {
+        let ok = || Ok(());
+        let no = || Err("an aerial");
+        // A scripted run with captures off: the switch's at_once names it.
+        assert_eq!(decide(Err(NO_STILL), Some("window captures are off"), ok), Err("window captures are off"));
+        assert_eq!(decide(Err(NO_STILL), None, ok), Err(NO_STILL));
+        assert_eq!(decide(Err("the desktop's still is too old"), Some("the screen is locked"), ok), Err("the desktop's still is too old"));
+        assert_eq!(decide(Ok(Layers::Alone), None, no), Ok(()), "a whole still needs no wallpaper");
+        assert_eq!(decide(Ok(Layers::OverWallpaper), None, ok), Ok(()));
+        assert_eq!(
+            decide(Ok(Layers::OverWallpaper), None, no),
+            Err("the desktop's still holds the icons only and the patch has no picture of the wallpaper")
+        );
     }
 }

@@ -62,6 +62,9 @@ pub struct PatchPlan {
     pub reorder: u32,
     /// The WM thread's count of Space changes: a new one reads the wallpaper again.
     pub space: u64,
+    /// While hidden, keep the picture rendered for this rectangle anyway (round 8L4): a
+    /// switch's cover lays the desktop's still, when it holds the icons only, over it.
+    pub picture: Option<Rect>,
 }
 
 /// How often the wallpaper is read again while the patch is wanted.
@@ -218,7 +221,8 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
         };
         WAITING.with(|w| w.take());
         let patch = p.get_or_insert_with(|| Patch::new(mtm));
-        let fresh = plan.show.is_some() && (patch.plan.show.is_none() || plan.space != patch.plan.space);
+        let wants = |p: &PatchPlan| p.show.or(p.picture).is_some();
+        let fresh = wants(&plan) && (!wants(&patch.plan) || plan.space != patch.plan.space);
         patch.plan = plan;
         if fresh {
             patch.wall = None;
@@ -242,7 +246,7 @@ pub fn poll(mtm: MainThreadMarker) {
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else { return };
         let Some(patch) = p.as_mut() else { return };
-        if patch.plan.show.is_none() {
+        if patch.plan.show.is_none() && patch.plan.picture.is_none() {
             return;
         }
         let now = Instant::now();
@@ -483,6 +487,7 @@ impl Patch {
     fn reconcile_panel(&mut self, mtm: MainThreadMarker) {
         let Some(rect) = self.plan.show else {
             self.hide();
+            self.prepare(mtm);
             return;
         };
         if self.wall.is_none() {
@@ -537,6 +542,30 @@ impl Patch {
         );
         self.show(mtm, rect, &image, job.scale);
         self.showing = Some((key, self.plan.clone()));
+    }
+
+    /// Hidden, keeps the picture rendered for the plan's `picture` rectangle (round 8L4: a
+    /// switch's cover lays the desktop's still of the icons over it); nothing is shown.
+    fn prepare(&mut self, mtm: MainThreadMarker) {
+        let Some(rect) = self.plan.picture else { return };
+        if self.wall.is_none() {
+            let wall = self.reader.read(mtm);
+            self.wall = Some((Instant::now(), wall));
+        }
+        let Some((_, wall)) = self.wall.clone() else { return };
+        let Ok((_, job)) = &wall.outcome else { return };
+        let key = job.key();
+        if self.picture.as_ref().is_some_and(|p| p.key != key) {
+            self.picture = None;
+        }
+        let local = wp::local(rect, wall.screen);
+        if self.picture.as_ref().is_some_and(|p| wp::crop_px(p.region, local, p.scale).is_some()) {
+            return;
+        }
+        let region = wp::region(Size::new(wall.screen.w, wall.screen.h), local);
+        if self.renders.want(&key, region) == Want::Start {
+            start_render(job.clone(), wall.screen, rect, region);
+        }
     }
 
     fn show(&mut self, mtm: MainThreadMarker, rect: Rect, image: &CGImage, scale: f64) {

@@ -2,7 +2,8 @@
 """Offline unit tests for the hands-free Spaces check's parsing and state
 (scripts/test_spaces.py): the screen-lock flag, the Desktop watcher's verdicts and the Space
 change rule, the guardian drill's verdict, the Mission Control check's pixels and pane
-behavior, the activation check's stage lookup. Nothing is launched or switched.
+behavior, the activation check's stage lookup and its cover pixels (8L4). Nothing is
+launched or switched.
 Run: python3 scripts/test_spaces_unit.py
 """
 
@@ -195,6 +196,51 @@ class OwnersWindows(unittest.TestCase):
         self.assertTrue(t.ts.blocked({"error": "the topmost window at 1,2 is not ours or a fixture's (pid 999999999)"}, "a drill"))
         self.assertFalse(t.ts.blocked({"ok": True}, "a drill"))
         self.assertEqual(len(t.ts.skipped), before + 1)
+
+
+class CoverPixels(unittest.TestCase):
+    """8L4: the activation check's boxes in the switch's cover and its verdict on a read."""
+
+    corner = {"x": 2440.0, "y": 1300.0, "w": 120.0, "h": 140.0}
+    parked = {"x": 2500.0, "y": 1350.0, "w": 900.0, "h": 700.0}
+
+    def test_boxes_lie_on_the_arriving_sliver_inside_the_cover(self):
+        boxes = t.ts.cover_boxes(self.corner, [self.parked], [])
+        self.assertTrue(boxes)
+        self.assertLessEqual(len(boxes), 3)
+        for b in boxes:
+            self.assertTrue(t.ts.contains(self.corner, b, 0.0), b)
+            self.assertTrue(t.ts.contains(self.parked, b, 0.0), b)
+
+    def test_boxes_keep_off_the_icons(self):
+        icon = {"x": 2490.0, "y": 1340.0, "w": 80.0, "h": 110.0}
+        boxes = t.ts.cover_boxes(self.corner, [self.parked], [icon])
+        self.assertEqual(boxes, [], "the icon fills the sliver's part of the cover")
+        small = {"x": 2540.0, "y": 1420.0, "w": 20.0, "h": 20.0}
+        for b in t.ts.cover_boxes(self.corner, [self.parked], [small]):
+            self.assertIsNone(t.ts.intersect(b, {"x": 2534.0, "y": 1414.0, "w": 32.0, "h": 32.0}), b)
+
+    def test_no_box_without_a_corner_or_a_sliver(self):
+        self.assertEqual(t.ts.cover_boxes(None, [self.parked], []), [])
+        self.assertEqual(t.ts.cover_boxes(self.corner, [], []), [])
+
+    def test_a_read_matches_the_wallpaper_or_not(self):
+        read = {"ok": True, "bounds": {"x": 0, "y": 0, "w": 8, "h": 8}, "mean": [40, 80, 120, 255], "wallpaper": [44, 78, 125, 255]}
+        self.assertTrue(t.ts.cover_matches(read)[0])
+        window = dict(read, mean=[236, 236, 236, 255], still=[236, 236, 236, 255])
+        ok, note = t.ts.cover_matches(window)
+        self.assertFalse(ok)
+        self.assertIn("still", note)
+
+    def test_a_read_that_cannot_be_judged(self):
+        base = {"ok": True, "bounds": {"x": 0, "y": 0, "w": 8, "h": 8}, "mean": [40, 80, 120, 255]}
+        self.assertIsNone(t.ts.cover_matches(base)[0], "no wallpaper picture")
+        self.assertIsNone(t.ts.cover_matches(dict(base, bounds=None, wallpaper=[1, 2, 3, 255]))[0], "the overlay gone")
+        self.assertIsNone(t.ts.cover_matches(dict(base, mean=[40, 80, 120, 90], wallpaper=[1, 2, 3, 255]))[0], "not covered")
+        self.assertIsNone(t.ts.cover_matches({"ok": False, "error": "x"})[0])
+
+    def test_only_the_expected_reasons_skip_the_grow(self):
+        self.assertEqual(t.ts.AT_ONCE_CAPTURES_OFF, ("window captures are off",))
 
 
 if __name__ == "__main__":

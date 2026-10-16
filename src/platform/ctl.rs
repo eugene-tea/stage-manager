@@ -19,8 +19,10 @@
 //! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
 //! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
-//! read back from a capture of our own overlay window. `space` (any time) is the Space shown
-//! as the engine sees it.
+//! read back from a capture of our own overlay window, with a region's mean colour there and
+//! in the corner patch's picture of the wallpaper and the desktop's still (`mean`,
+//! `wallpaper`, `still`: a switch's cover checked against the wallpaper). `space` (any
+//! time) is the Space shown as the engine sees it.
 //!
 //! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
 //! never wider even for an instant) in a folder only the user can enter. Each connection's

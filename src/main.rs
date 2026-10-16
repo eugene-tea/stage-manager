@@ -506,8 +506,27 @@ mod app {
                 let Some((number, origin)) = overlay else {
                     return json!({ "ok": true, "shown": false });
                 };
-                match stage_manager::platform::self_capture::opaque_bounds(number as u32, origin, region, Duration::from_secs(3)) {
-                    Ok(bounds) => json!({ "ok": true, "shown": true, "bounds": bounds }),
+                // The pictures a switch's cover in the park corner stands for, within the
+                // region (8L4): the patch's picture of the wallpaper and the desktop's still.
+                let mut pictures = (None, None);
+                if let Some(r) = region {
+                    let mean = |p: Option<(objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>, f64)>| p.and_then(|(i, _)| stage_manager::platform::pixels::mean_rgba(&i));
+                    DispatchQueue::main().exec_sync(|| {
+                        pictures = (
+                            mean(stage_manager::ui::corner_patch::cover_image(r)),
+                            mean(stage_manager::platform::desktop_shot::image(r)),
+                        );
+                    });
+                }
+                match stage_manager::platform::self_capture::read_back(number as u32, origin, region, Duration::from_secs(3)) {
+                    Ok(b) => json!({
+                        "ok": true,
+                        "shown": true,
+                        "bounds": b.bounds,
+                        "mean": b.mean,
+                        "wallpaper": pictures.0,
+                        "still": pictures.1,
+                    }),
                     Err(e) => ctl::error_reply(&e),
                 }
             }

@@ -667,16 +667,35 @@ pub fn desktop_may_capture() -> Result<(), &'static str> {
     }
 }
 
+/// Whether a window ScreenCaptureKit lists at `layer`, of process `pid`, is part of the
+/// desktop a still may show ([`capture_desktop`], round 8L4): below the normal level (the
+/// desktop picture, Finder's desktop icons, desktop widgets, the window server's backdrop)
+/// and never this app's. Everything else, every window at the normal level or above (an
+/// app's, a notification, the Dock, the menu bar) and any window that appears after the
+/// list was read, is left out by construction.
+pub fn desktop_level(layer: isize, pid: Option<i32>, own: i32) -> bool {
+    layer < 0 && pid != Some(own)
+}
+
+/// The desktop windows' layers were logged once (which ones a still holds: the desktop
+/// picture's own window among them or not, [`capture_desktop`]).
+static DESKTOP_LAYERS_SAID: AtomicBool = AtomicBool::new(false);
+
 /// A still of `region` (global, top-left points) of the main display showing the desktop
-/// only (round 8L3): the desktop picture and what lies on it (Finder's icons, widgets), every
-/// window at the normal level or above excluded (the parked windows' slivers, the windows an
-/// activation raised in the corner, the Dock, the menu bar) and every one of this app (the
-/// corner patch, the strip, the overlay). The switch's cover in the park corner when a
-/// desktop icon lies there ([`super::desktop_shot`]).
+/// only: only the desktop-level windows listed when it is taken ([`desktop_level`]: the
+/// desktop picture and what lies on it, Finder's icons, widgets) are included (round 8L4:
+/// the filter names the windows it shows, so a window macOS raises in the corner, or a
+/// notification, between the list and the picture is never in it), on a clear background.
+/// Apple's filter documentation says the desktop background is left out of such a filter:
+/// when the desktop picture's window is not drawn, the still holds the icons only and is see-
+/// through elsewhere; [`super::desktop_shot`] then lays it over the corner patch's own
+/// picture of the wallpaper. The switch's cover in the park corner when a desktop icon lies
+/// there.
 ///
 /// Quiet by design as the window captures are ([`desktop_may_capture`]: nothing is asked,
 /// nothing goes before the gate is open); a refusal closes the gate for every capturer. `done`
-/// runs once, on a ScreenCaptureKit queue. `Err` when it is not taken at all.
+/// runs once, on a ScreenCaptureKit queue (`Err` when no desktop-level window is listed).
+/// `Err` when it is not taken at all.
 pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static str> {
     desktop_may_capture()?;
     let done = Arc::new(Mutex::new(Some(done)));
@@ -711,14 +730,26 @@ pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static s
             return;
         };
         // SAFETY: plain getters on live SCWindows and their apps.
-        let excluded: Vec<Retained<SCWindow>> = unsafe { content.windows() }
+        let included: Vec<Retained<SCWindow>> = unsafe { content.windows() }
             .iter()
-            .filter(|w| unsafe { w.windowLayer() >= 0 || w.owningApplication().is_some_and(|a| a.processID() == own) })
+            .filter(|w| unsafe { desktop_level(w.windowLayer(), w.owningApplication().map(|a| a.processID()), own) })
             .collect();
-        let excluded = NSArray::from_retained_slice(&excluded);
+        if included.is_empty() {
+            finish(&done, Err("no desktop-level window in the shareable content".into()));
+            return;
+        }
+        if !DESKTOP_LAYERS_SAID.swap(true, Ordering::SeqCst) {
+            // SAFETY: a plain getter on live SCWindows.
+            let layers: Vec<isize> = included.iter().map(|w| unsafe { w.windowLayer() }).collect();
+            tracing::debug!(?layers, "the desktop's still shows only these desktop-level windows (logged once)");
+        }
+        let included = NSArray::from_retained_slice(&included);
+        // Kept alive until the picture is answered (the configuration does not retain it).
+        // SAFETY: a constant name CoreGraphics defines.
+        let clear = objc2_core_graphics::CGColor::constant_color(Some(unsafe { objc2_core_graphics::kCGColorClear }));
         // SAFETY: designated initializer with a live SCDisplay and array; plain setters and getters.
         let (filter, config, scale) = unsafe {
-            let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded);
+            let filter = SCContentFilter::initWithDisplay_includingWindows(SCContentFilter::alloc(), &display, &included);
             let scale = f64::from(filter.pointPixelScale()).max(1.0);
             let frame = display.frame();
             let config = SCStreamConfiguration::new();
@@ -729,12 +760,15 @@ pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static s
             config.setWidth((region.w * scale).round().max(1.0) as usize);
             config.setHeight((region.h * scale).round().max(1.0) as usize);
             config.setShowsCursor(false);
+            if let Some(clear) = clear.as_deref() {
+                config.setBackgroundColor(clear);
+            }
             (filter, config, scale)
         };
         let flight = InFlight::issue();
         let done = done.clone();
         let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
-            let _answered = &flight;
+            let _answered = (&flight, &clear);
             match NonNull::new(image) {
                 Some(ptr) => {
                     // SAFETY: SCK hands a valid CGImage for the duration of the block;
@@ -759,7 +793,7 @@ pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static s
         unsafe { SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&on_image)) };
     });
     // SAFETY: the handler matches the documented signature; SCK copies the block. Desktop
-    // windows are listed (and kept: only windows at the normal level or above are excluded).
+    // windows are listed (only they are included in the still).
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, true, &handler);
     }
@@ -777,7 +811,31 @@ fn desktop_declined() {
 
 #[cfg(test)]
 mod tests {
-    use super::fit_to_content;
+    use super::{desktop_level, fit_to_content};
+
+    #[test]
+    fn a_still_of_the_desktop_holds_only_desktop_level_windows_never_ours() {
+        // The window server's list on a plain desktop (10-16, as the overview tests record
+        // it): the desktop picture's, WindowManager's, the window server's backdrop and
+        // Finder's icons far below layer 0; the Dock, the menu bar, our overlay, a fixture.
+        let own = 900;
+        let listed: [(isize, Option<i32>, bool); 10] = [
+            (-2147483625, Some(101), true),  // Wallpaper
+            (-2147483624, Some(102), true),  // WindowManager
+            (-2147483626, None, true),       // Window Server's backdrop
+            (-2147483603, Some(103), true),  // Finder's desktop icons
+            (-2147483603, Some(own), false), // ours, even at a desktop level
+            (0, Some(104), false),           // an app's window (raised in the corner)
+            (20, Some(105), false),          // the Dock
+            (24, Some(106), false),          // the menu bar
+            (25, Some(own), false),          // our motion overlay
+            (101, Some(107), false),         // a notification
+        ];
+        for (layer, pid, want) in listed {
+            assert_eq!(desktop_level(layer, pid, own), want, "layer {layer}, pid {pid:?}");
+        }
+        assert!(!listed.iter().filter(|(l, p, _)| desktop_level(*l, *p, own)).any(|(l, _, _)| *l >= 0));
+    }
 
     #[test]
     fn a_capture_keeps_the_windows_proportions_and_never_grows_past_it() {

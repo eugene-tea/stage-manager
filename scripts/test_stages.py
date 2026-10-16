@@ -904,7 +904,61 @@ def intersect(a, b):
     return {"x": x, "y": y, "w": r - x, "h": btm - y} if r > x and btm > y else None
 
 
-def activation_grows_check(how, app, what):
+# The reasons an activation may arrive at once by design in a run with window captures off
+# (8L2-8L4): a desktop icon under the corner and no still of the desktop, because the run
+# takes none. Any other `at_once` is a failure; with captures on, none is accepted.
+AT_ONCE_CAPTURES_OFF = ("window captures are off",)
+
+# How far (0-255, any channel) the cover's mean colour in a box may be from the wallpaper's
+# there (colour management, the overlay's scaling).
+COVER_TOLERANCE = 16
+
+
+def cover_boxes(corner, arriving, icons, side=8):
+    """Boxes (x, y, w, h; whole points) inside the switch's cover `corner` where it hides an
+    arriving window's sliver (`arriving`: their frames as parked) and no desktop icon lies
+    (`icons`, grown 6 pt): the cover's pixels there must be the desktop's, never the window's.
+    Nearest the display's corner first, at most three."""
+    if not corner:
+        return []
+    out = []
+    step = max(side, 12)
+    y = corner["y"] + corner["h"] - side - 4
+    while y >= corner["y"] + 4 and len(out) < 3:
+        x = corner["x"] + corner["w"] - side - 4
+        while x >= corner["x"] + 4 and len(out) < 3:
+            box = {"x": float(int(x)), "y": float(int(y)), "w": float(side), "h": float(side)}
+            on_window = any(contains(a, box, 0.0) for a in arriving)
+            on_icon = any(intersect(box, {"x": i["x"] - 6, "y": i["y"] - 6, "w": i["w"] + 12, "h": i["h"] + 12}) for i in icons)
+            if on_window and not on_icon:
+                out.append(box)
+                y -= step  # one box a row: spread over the corner
+                break
+            x -= step
+        else:
+            y -= step
+    return out
+
+
+def cover_matches(read, tol=COVER_TOLERANCE):
+    """(verdict, note) for one `ctl debug-overlay` read of a box in the cover: drawn there
+    (opaque), and its mean colour the wallpaper's (the patch's picture), within `tol`. None
+    as the verdict when it cannot be judged (the overlay gone, or no picture of the wallpaper
+    to compare with: an aerial, a dynamic picture still rendering)."""
+    mean, wall = read.get("mean"), read.get("wallpaper")
+    if not read.get("ok"):
+        return None, f"no read ({read.get('error')})"
+    if not read.get("bounds") or not mean or mean[3] < 250:
+        return None, f"the overlay did not cover the box when read (mean {mean})"
+    if not wall:
+        return None, "no picture of the wallpaper to compare with"
+    off = max(abs(mean[i] - wall[i]) for i in range(3))
+    still = read.get("still")
+    return off <= tol, (f"cover {[round(v) for v in mean[:3]]}, wallpaper {[round(v) for v in wall[:3]]}"
+                        + (f", still {[round(v) for v in still[:3]]}" if still else "") + f", off {off:.0f}")
+
+
+def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cover_still=False):
     """Round 8L: an activation of `app` (a key of EXTRA, or "fixture") whose windows wait in
     another stage, by `how`: "open" (an activation with no click, as ⌘Tab's) or "dock" (its
     Dock item, `ctl debug-dock-click`). The window server is sampled every 20 ms (with the
@@ -914,7 +968,13 @@ def activation_grows_check(how, app, what):
     picture there; macOS raises it above the patch before the app hears of the activation,
     which may show it for a moment, at most 150 ms), never at its frame before the motion
     ends (it arrives at 99 % of the grow, under its snapshot), and the keyboard reaches the
-    switch's key window within 100 ms of macOS activating the app. Returns whether it switched."""
+    switch's key window within 100 ms of macOS activating the app. Returns whether it switched.
+
+    `at_once_ok`: the switch's `at_once` reasons that skip the grow's checks (the corner could
+    not be covered by design); any other is a failure. `cover_still` (8L4, the capture phase:
+    captures on, the cover forced to the desktop's still): the cover is the still, and its
+    pixels over the arriving window's sliver, away from any icon, read back from the overlay
+    during the grow, are the wallpaper's (the still never holds a window)."""
     bundle, path = (FIX_ID, FIX_APP) if app == "fixture" else (EXTRA[app][0], EXTRA[app][1])
     s0 = state()
     mine = {w["id"] for w in s0["windows"] if w["bundle_id"] == bundle}
@@ -933,6 +993,29 @@ def activation_grows_check(how, app, what):
             return False
     else:
         subprocess.run(["open", path], capture_output=True)
+    reads = []
+    if cover_still:
+        # During the grow: the transition's corner, then the overlay's pixels in it.
+        arriving_frames = [w["live"] for w in s0["windows"] if w["id"] in waiting and w.get("live")]
+        icons = (s0.get("desktop_still") or {}).get("icons") or []
+        end, boxes, tid0 = time.time() + 1.5, None, (s0.get("last_transition") or {}).get("id")
+        while time.time() < end and len(reads) < 2:
+            x = state(landed=False)
+            t = x.get("last_transition") or {}
+            if x.get("switching") is None and boxes is None:
+                time.sleep(0.01)
+                continue
+            if boxes is None:
+                if t.get("id") == tid0 or not t.get("corner"):
+                    time.sleep(0.01)
+                    continue
+                boxes = cover_boxes(t["corner"], arriving_frames, icons)
+                if not boxes:
+                    break
+            if x.get("switching") is None:
+                break
+            b = boxes[len(reads) % len(boxes)]
+            reads.append((b, ctl("debug-overlay", b["x"], b["y"], b["w"], b["h"])))
 
     def switched(x):
         act = next((st for st in x["stages"] if st["number"] == x["active"]), None)
@@ -959,11 +1042,13 @@ def activation_grows_check(how, app, what):
     at_once = next((m.group(1) for c in covered if (m := re.search(r'at_once="([^"]*)"', c))), None)
     if at_once is not None:
         # The park corner could not be covered for this switch, so the activated windows came
-        # at once by design (8L2): a desktop icon under it with no still of the desktop (the
-        # scripted runs keep captures off; 8L3), the patch off, an overview... The grow's
-        # checks are not made; the app's log says why.
-        skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
-             f"the activation arrived at once by design ({at_once})")
+        # at once (8L2). Only the reasons expected by design skip the grow's checks (a run
+        # with captures off takes no still of the desktop, 8L3-8L4); any other is a failure.
+        if at_once in at_once_ok:
+            skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
+                 f"the activation arrived at once by design ({at_once})")
+        else:
+            check(False, f"{what}: the activation grows (it arrived at once: {at_once}; expected only {list(at_once_ok)})")
         consistent(what)
         return True
     check(any("incoming: true" in line and "outgoing: true" in line for line in covered),
@@ -977,6 +1062,19 @@ def activation_grows_check(how, app, what):
 
     display, samples, ours_pid = probe_out["display"], probe_out.get("samples", []), app_pid()
     corner = t.get("corner")
+    if cover_still:
+        check(t.get("corner_picture") == "desktop",
+              f"{what}: the corner is covered with the desktop's still ({t.get('corner_picture')}, corner {corner and fmt(corner)})")
+        judged = [(b, cover_matches(r)) for b, r in reads]
+        for b, (ok, note) in judged:
+            say(f"    the cover at {fmt(b)}: {note}")
+        verdicts = [ok for _, (ok, _) in judged if ok is not None]
+        if verdicts:
+            check(all(verdicts), f"{what}: the cover's pixels over the arriving window are the wallpaper's, never the "
+                                 f"window's ({len(verdicts)} of {len(reads)} reads judged)")
+        else:
+            skip(f"{what}: the cover's pixels against the wallpaper",
+                 f"no read could be judged ({[n for _, (_, n) in judged][:2] or 'no box over the arriving window away from icons'})")
 
     def overlay_up(x):
         return any(w["pid"] == ours_pid and w["onscreen"] and close(w["bounds"], display, 2.0) for w in x["windows"])
@@ -2108,7 +2206,9 @@ def phase_capture():
     """The only app run with window captures on: thumbnails and switch snapshots are real
     pictures, and a quit with captures running waits for those in flight (an exit with one
     in flight makes macOS alert about screen access). The only phase that may raise that
-    alert: on the first run from a new app path, which macOS approves once."""
+    alert: on the first run from a new app path, which macOS approves once. Its activation
+    grows over the desktop's still (8L4: the switch's cover forced to the still,
+    STAGE_MANAGER_COVER=desktop, so it is seen on any desktop, icons in the corner or not)."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
@@ -2116,7 +2216,7 @@ def phase_capture():
     if os.path.exists(p):
         os.remove(p)
     start_fixture(3)
-    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_COVER": "desktop"}, capture=True)
     if not check(s is not None, "app up with captures on"):
         return
     check(s.get("capture", {}).get("mode") == "on", f"captures are on ({s.get('capture')})")
@@ -2136,6 +2236,20 @@ def phase_capture():
     cap = state().get("capture", {})
     check(cap.get("images", 0) > (s or {}).get("capture", {}).get("images", 0),
           f"pictures keep coming ({cap.get('images')} so far)")
+
+    say("-- an activation grows over a still of the desktop (8L4: only desktop-level windows in it)")
+    start_extra("a", 1)
+    shown = wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's own stage, shown")
+    if check(shown is not None, "Alpha 1 opened a stage of its own, shown"):
+        kept = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("age_ms") is not None else None)(state()),
+                          15, "a still of the desktop")
+        still = state().get("desktop_still") or {}
+        if check(kept is not None, f"a still of the desktop is kept for a switch's cover ({still})"):
+            say(f"    the still: {still.get('region')}, opaque (the desktop picture's window in it): {still.get('opaque')}")
+            time.sleep(0.5)
+            activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
+                                   at_once_ok=(), cover_still=True)
+    stop_extra("a")
     stop_app()
     text = log_text()
     check("bye" in text and "window captures on" in text, "a clean quit after captures ran")

@@ -3,34 +3,58 @@
 //! A scripted test asks where a ghost really is on screen (not where our code thinks it put
 //! it): the overlay window is captured through ScreenCaptureKit at its native size and the
 //! bounds of its opaque pixels (alpha above half, so the soft shadows are left out) come back
-//! in global top-left points. Only our own overlay window is ever captured, and no image is
-//! kept.
+//! in global top-left points, with the mean colour within the region asked (round 8L4: the
+//! park corner's cover against the wallpaper). Only our own overlay window is ever captured,
+//! and no image is kept.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use block2::RcBlock;
 use objc2::AllocAnyThread;
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapInfo, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration};
 
 use crate::engine::geometry::{Point, Rect};
 
-/// The bounds of what window `window` (our overlay, top-left corner at `origin`, global)
-/// draws, within `region` (global) when given; `None` when nothing opaque is there.
-pub fn opaque_bounds(window: u32, origin: Point, region: Option<Rect>, timeout: Duration) -> Result<Option<Rect>, String> {
+/// What [`read_back`] found.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadBack {
+    /// The bounds of the opaque pixels (global), `None` when nothing opaque is there.
+    pub bounds: Option<Rect>,
+    /// The mean red, green, blue and alpha (0-255) within the region asked (round 8L4: the
+    /// switch's cover in the park corner compared with the wallpaper); `None` without one.
+    pub mean: Option<[f64; 4]>,
+}
+
+/// What window `window` (our overlay, top-left corner at `origin`, global) draws within
+/// `region` (global) when given: where its opaque pixels are, and their mean colour there.
+pub fn read_back(window: u32, origin: Point, region: Option<Rect>, timeout: Duration) -> Result<ReadBack, String> {
     let (image, scale) = capture(window, timeout)?;
-    let w = CGImage::width(Some(&image));
-    let h = CGImage::height(Some(&image));
-    let bpp = CGImage::bits_per_pixel(Some(&image));
-    let row = CGImage::bytes_per_row(Some(&image));
+    let bounds = opaque_bounds(&image, scale, origin, region)?;
+    let mean = region.and_then(|r| {
+        let px = Rect::new(((r.x - origin.x) * scale).floor(), ((r.y - origin.y) * scale).floor(), (r.w * scale).ceil(), (r.h * scale).ceil());
+        let part = CGImage::with_image_in_rect(Some(&image), CGRect::new(CGPoint::new(px.x, px.y), CGSize::new(px.w, px.h)))?;
+        super::pixels::mean_rgba(&part)
+    });
+    Ok(ReadBack { bounds, mean })
+}
+
+/// The bounds of the opaque pixels of `image` (the overlay at `scale`, its top-left at
+/// `origin`), within `region` (global) when given.
+fn opaque_bounds(image: &CGImage, scale: f64, origin: Point, region: Option<Rect>) -> Result<Option<Rect>, String> {
+    let image = Some(image);
+    let w = CGImage::width(image);
+    let h = CGImage::height(image);
+    let bpp = CGImage::bits_per_pixel(image);
+    let row = CGImage::bytes_per_row(image);
     if bpp != 32 {
         return Err(format!("unexpected pixel format ({bpp} bits per pixel)"));
     }
-    let alpha = alpha_byte(CGImage::alpha_info(Some(&image)), CGImage::bitmap_info(Some(&image)));
-    let provider: Option<CFRetained<CGDataProvider>> = CGImage::data_provider(Some(&image));
+    let alpha = alpha_byte(CGImage::alpha_info(image), CGImage::bitmap_info(image));
+    let provider: Option<CFRetained<CGDataProvider>> = CGImage::data_provider(image);
     let data = CGDataProvider::data(provider.as_deref()).ok_or("no pixel data")?;
     let bytes = data.to_vec();
     // The region in image pixels.
