@@ -344,8 +344,11 @@ def stage_titles(s):
     return {st["number"]: [titles[i] for i in st["windows"]] for st in s["stages"]}
 
 
-def all_onscreen(what):
+def all_onscreen(what, never_ours=()):
+    """Every fixture window out of the park zone, but `never_ours`: windows we never parked
+    and must leave where they are (the stray of the 8M drills: never shown, off screen)."""
     wins, d = fixture_windows()
+    wins = [w for w in wins if w["id"] not in set(never_ours)]
     if not wins:
         # A fixture that crashed, or a probe that failed, must not pass as "nothing parked".
         return check(False, f"{what}: every fixture window onscreen (the window server lists no fixture window)")
@@ -604,7 +607,7 @@ def drill_not_ours():
     check(bool(guards) and not pids_of(f"stage-manager --guardian {pid}$"), "kill -9: the guardian ended (nothing left to wait for)")
     joined = [ln for ln in text.splitlines() if "joins the watch" in ln and f"id={found['id']} " in ln]
     check(not joined, f"kill -9: the stray never joined the guardian's watch ({joined[:1]})")
-    all_onscreen("kill -9 with the stray")
+    all_onscreen("kill -9 with the stray", never_ours=[found["id"]])
     stop_fixture()
 
 
@@ -1380,6 +1383,9 @@ def phase_native():
     consistent("first start")
 
     say("-- an activation with no click (as ⌘Tab) and a Dock click grow their stage from its card (8L)")
+    # The corner patch draws its first picture a moment after launch; an activation before it
+    # arrives at once by design ("the corner patch has no picture …", seen live 10-21).
+    wait_until(lambda: "corner patch: drawing" in log_text() or None, 5, "the corner patch's first picture")
     activation_grows_check("open", "a", "an activation of Alpha (no click, as ⌘Tab)")
     activation_grows_check("dock", "c", "a Dock click on Charlie")
     activate("b")
