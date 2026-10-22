@@ -83,7 +83,7 @@ use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::{desktop, desktop_shot, hidden_tabs, logging, paths, session, windows};
+use super::{capture_pace, desktop, desktop_shot, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BusyApps, OffScreen};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
@@ -4367,6 +4367,15 @@ impl Controller {
         if self.model.is_some() {
             self.poll_lock(now, false);
         }
+        // No capture round while nobody can see the screen (8M: rounds failing for minutes).
+        let away = if self.locked {
+            Some(capture_pace::Away::Locked)
+        } else if objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()) {
+            Some(capture_pace::Away::Asleep)
+        } else {
+            None
+        };
+        super::capture::set_away(away);
         if let Some((first, last)) = self.dirty
             && (now.duration_since(last) >= SAVE_DEBOUNCE || now.duration_since(first) >= SAVE_MAX_DELAY)
             && !self.locked

@@ -9,6 +9,7 @@ pub mod ax;
 pub mod capture;
 pub mod capture_frame;
 pub mod capture_gate;
+pub mod capture_pace;
 pub mod code_sign;
 pub mod controller;
 pub mod ctl;

@@ -15,6 +15,7 @@ pub mod hidden_tab;
 pub mod hide;
 pub mod leftovers;
 pub mod model;
+pub mod not_ours;
 pub mod overview;
 pub mod park;
 pub mod persist;

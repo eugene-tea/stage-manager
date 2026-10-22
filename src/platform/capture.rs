@@ -14,8 +14,15 @@
 //! Only the requested windows are captured; the caller replaces the request whenever the
 //! strip changes and an empty request stops captures (the strip is hidden).
 //!
-//! Each capture counts in the day's log (ok or failed); a window's captures starting to fail,
-//! and working again, are logged once each, not every round.
+//! Each capture counts in the day's log (ok or failed), and each round that brought nothing
+//! back once more (`capture_rounds_failed`, round 8M: the day line reads rounds, not windows
+//! times rounds); a window's captures starting to fail, and working again, are logged once
+//! each, not every round.
+//!
+//! **Paced** (round 8M, [`capture_pace`]): rounds that keep failing (ScreenCaptureKit
+//! answering "Failed to start stream…" or nothing at all, for minutes, 10-18) back off,
+//! doubling up to 30 s, until one works; no round goes while the screen is locked or the
+//! display sleeps ([`set_away`], told by the controller). The cards keep their last pictures.
 //!
 //! Access: Screen Recording. When it is missing and prompts are allowed, the first capturer
 //! asks through `SCShareableContent` once captures are switched on (on recent macOS this is
@@ -57,6 +64,7 @@ use objc2_screen_capture_kit::{
 
 use super::capture_frame::{self, Extent};
 use super::capture_gate::{Change, Gate, Outcome, Permit};
+use super::capture_pace::{self, Away, Pace};
 use super::permissions;
 use crate::engine::geometry::Rect;
 use crate::logbook::counters::{self, Count};
@@ -126,6 +134,44 @@ static WORKERS: Mutex<Vec<Weak<Worker>>> = Mutex::new(Vec::new());
 
 fn gate() -> MutexGuard<'static, Gate> {
     GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The one pace of the process ([`capture_pace`]): every capturer's rounds back off together
+/// and pause together.
+static PACE: LazyLock<Mutex<Pace>> = LazyLock::new(|| Mutex::new(Pace::default()));
+
+fn pace() -> MutexGuard<'static, Pace> {
+    PACE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether anybody can see the screen (the controller's word, every tick): while the screen
+/// is locked or the display sleeps (`Some`), no capture round goes; the first one after goes
+/// at once. Each change is logged once.
+pub fn set_away(away: Option<Away>) {
+    let change = pace().set_away(away, Instant::now());
+    log_pace(change);
+    if matches!(change, capture_pace::Change::Resumed { .. }) {
+        wake_all();
+    }
+}
+
+/// Logs a change of the pace, once.
+fn log_pace(change: capture_pace::Change) {
+    use capture_pace::Change as C;
+    match change {
+        C::None => {}
+        C::BackingOff { failed, wait } => tracing::info!(
+            failed,
+            wait_s = wait.as_secs(),
+            cap_s = capture_pace::BACKOFF_CAP.as_secs(),
+            "window captures keep failing: rounds back off (twice as long after each failure, up to the cap) until one works; cards keep their last pictures"
+        ),
+        C::BackoffOver { failed, lasted } => {
+            tracing::info!(failed, lasted_s = lasted.as_secs(), "window captures work again: the back-off is over")
+        }
+        C::Paused(away) => tracing::info!("window captures pause: {}", away.as_str()),
+        C::Resumed { lasted } => tracing::info!(paused_s = lasted.as_secs(), "window captures resume"),
+    }
 }
 
 /// True when `STAGE_MANAGER_NO_CAPTURE` is set.
@@ -205,6 +251,7 @@ pub fn status() -> serde_json::Value {
         "mode": mode,
         "env_off": env_disabled(),
         "gate": gate().describe(),
+        "pace": pace().describe(),
         "in_flight": IN_FLIGHT.load(Ordering::SeqCst),
         "images": IMAGES.load(Ordering::SeqCst),
     })
@@ -393,7 +440,12 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                 let ready = on && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
                 let due_in = last_full.map_or(Duration::ZERO, |t| s.interval.saturating_sub(t.elapsed()));
                 let mut wait = IDLE_CHECK;
-                if ready && rest_until.is_none_or(|t| Instant::now() >= t) {
+                // Paused (nobody sees the screen: woken when that ends) or backing off.
+                let paced = if ready { pace().wait(Instant::now()) } else { Some(Duration::ZERO) };
+                if let Some(left) = paced.filter(|d| !d.is_zero()) {
+                    wait = left.min(IDLE_CHECK);
+                }
+                if ready && paced.is_some_and(|d| d.is_zero()) && rest_until.is_none_or(|t| Instant::now() >= t) {
                     let full = due_in.is_zero() || s.force;
                     let want: Vec<Target> = if full {
                         s.targets.clone()
@@ -428,6 +480,20 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
         };
         round_no += 1;
         let result = autoreleasepool(|_| capture_round(round_no, &batch, deliver, &mut outcomes));
+        if result.timed_out {
+            // Loud for the first of a streak only: the pace logs the back-off once.
+            if pace().failed_in_a_row() == 0 {
+                tracing::warn!(round = round_no, "capture round timed out");
+            } else {
+                tracing::debug!(round = round_no, "capture round timed out (failing already)");
+            }
+        }
+        if let Some(ok) = result.paced {
+            if !ok {
+                counters::bump(Count::CaptureRoundFailed);
+            }
+            log_pace(pace().finished(ok, Instant::now()));
+        }
         let change = gate().finished(result.outcome, Instant::now());
         rest_until = (permit == Permit::Probe && result.outcome == Outcome::Inconclusive).then(|| Instant::now() + IDLE_CHECK);
         match change {
@@ -592,6 +658,12 @@ struct RoundResult {
     done: Vec<u32>,
     /// For the gate.
     outcome: Outcome,
+    /// No answer came in time.
+    timed_out: bool,
+    /// For the pace ([`capture_pace`]): `Some(true)` an image came back, `Some(false)` the
+    /// round failed (captures issued and none brought an image back, or no answer in time),
+    /// `None` it tells nothing (cut short by quit, refused, or only windows gone).
+    paced: Option<bool>,
 }
 
 /// Messages from ScreenCaptureKit's queues back to the worker.
@@ -707,6 +779,8 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
     let mut finished = 0usize;
     let mut handled: Vec<u32> = Vec::new();
     let mut refused = false;
+    let mut timed_out = false;
+    let mut errors = 0usize;
     let mut failed: HashMap<u32, String> = HashMap::new();
     while expected.is_none_or(|n| finished < n) {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -718,6 +792,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 if ok {
                     handled.push(id);
                 } else {
+                    errors += 1;
                     failed.insert(id, why.unwrap_or_else(|| "no image".into()));
                 }
             }
@@ -726,7 +801,8 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
             }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {
-                tracing::warn!(round, "capture round timed out");
+                // Logged by the worker (loud once a streak, [`capture_pace`]).
+                timed_out = true;
                 break;
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -750,7 +826,16 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
     } else {
         Outcome::Inconclusive
     };
-    RoundResult { done: all, outcome }
+    let paced = if CLOSING.load(Ordering::SeqCst) || outcome == Outcome::Declined {
+        None
+    } else if outcome == Outcome::Captured {
+        Some(true)
+    } else if timed_out || errors > 0 {
+        Some(false)
+    } else {
+        None
+    };
+    RoundResult { done: all, outcome, timed_out, paced }
 }
 
 /// Counts a round's outcomes and logs each window whose captures start failing or work

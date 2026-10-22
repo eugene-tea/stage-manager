@@ -560,6 +560,12 @@ impl Ours {
         self
     }
 
+    /// True when `state.json` (this window server session's: [`read_state`] keeps saved ids only
+    /// then) names window `id`: a window an earlier run parked may be one of them (round 8M).
+    pub fn saved(&self, id: u32) -> bool {
+        self.state.as_ref().is_some_and(|s| s.all_stages().flat_map(|st| st.windows.iter()).any(|w| w.window == Some(id)))
+    }
+
     /// What is known of window `id` of an app with `bundle`.
     pub fn known(&self, id: u32, bundle: Option<&str>) -> Known {
         if self.registered.contains(&id) {
@@ -582,6 +588,12 @@ impl Ours {
 /// A hidden tab ([`hidden_tabs`], 8J) is never one: nothing can move it, and it takes its
 /// group's frame once selected. Only by its own signature ([`Ours::candidate`]): a registered
 /// one the model let go as reported destroyed leaves the registry.
+///
+/// Nor is another app's off-screen window we never parked (round 8M,
+/// [`crate::engine::not_ours`]: never registered nor managed, not saved in this session's
+/// `state.json`, off screen, its app answering and not listing it through Accessibility):
+/// logged at debug, never "still parked", so a quit is not unclean for it and the guardian
+/// never waits on it. A registered window always counts.
 pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
@@ -604,7 +616,7 @@ pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
             if tab && ours.registered.contains(&w.id) {
                 registered_tabs.push(w.id);
             }
-            !tab
+            !tab && !tabs.is_not_ours(w, ours.candidate(w.id), ours.saved(w.id))
         })
         .collect();
     registry_forget(&registered_tabs);
@@ -903,6 +915,15 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
         tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, unanswered = ?unanswered, "recovery scan (some apps did not answer)");
     }
     (report, unanswered)
+}
+
+/// The window ids this window server session's `state.json` names (none when it cannot be
+/// read, or was written in another session): windows an earlier run may have parked (round 8M,
+/// [`crate::engine::not_ours`]).
+pub fn saved_window_ids() -> BTreeSet<u32> {
+    read_state("saved window ids")
+        .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).filter_map(|w| w.window).collect())
+        .unwrap_or_default()
 }
 
 /// `state.json`, when it can be read; its window ids only when it was written in this
