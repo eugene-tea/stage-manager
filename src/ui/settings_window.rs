@@ -198,14 +198,15 @@ impl SettingsValues {
     }
 
     /// What decides the panes' rows (a change rebuilds them; anything else updates in place).
-    fn shape(&self) -> (u8, bool, bool, bool) {
+    fn shape(&self) -> (u8, bool, bool, bool, bool) {
         let login = match self.login {
             LoginStatus::On => 0,
             LoginStatus::NeedsApproval => 1,
             LoginStatus::Off => 2,
             LoginStatus::Unavailable(_) => 3,
         };
-        (login, self.apple_on, self.config_error.is_some(), self.animations_on)
+        // The Shift row says what Shift does, which the new-apps switch flips.
+        (login, self.apple_on, self.config_error.is_some(), self.animations_on, self.new_apps_join_current)
     }
 }
 
@@ -609,9 +610,12 @@ fn stages(f: &mut Form, m: &Maker, v: &SettingsValues) -> [Retained<NSSwitch>; 4
         Row::new("Bring stages back after a restart", Some(view(&restore)))
             .detail("Windows go back to their stages as their apps reopen them. Off is Apple's: each app starts in a stage of its own. Applies at the next launch."),
         Row::new("Open new apps in the current stage", Some(view(&new_apps)))
-            .detail("Off is Apple's: a newly opened app gets a stage of its own. Hold Shift while opening one to do the other."),
-        Row::new("Hold Shift to bring apps to the current stage", Some(view(&shift)))
-            .detail("While opening an app, clicking it in the Dock, or clicking a card."),
+            .detail("Off is Apple's: a newly opened app gets a stage of its own."),
+        Row::new("Hold Shift to choose the stage", Some(view(&shift))).detail(if v.new_apps_join_current {
+            "Opening an app with Shift gives it a stage of its own. Shift-clicking an app in the Dock or a card brings it to the current stage."
+        } else {
+            "Opening an app with Shift, Shift-clicking it in the Dock or Shift-clicking a card brings it to the current stage."
+        }),
         Row::new("Merge stages by dropping a card on a card", Some(view(&merge))),
     ]);
     f.footnote(EXTRAS_NOTE);
@@ -930,7 +934,6 @@ mod tests {
         let toggled = SettingsValues {
             merge_on_drop: false,
             restore_after_restart: false,
-            new_apps_join_current: true,
             speed: 2.0,
             app,
             ..base.clone()
@@ -941,6 +944,7 @@ mod tests {
             SettingsValues { apple_on: true, ..base.clone() },
             SettingsValues { config_error: Some("bad".into()), ..base.clone() },
             SettingsValues { animations_on: false, ..base.clone() },
+            SettingsValues { new_apps_join_current: true, ..base.clone() },
         ] {
             assert_ne!(base.shape(), other.shape());
         }
