@@ -1231,3 +1231,55 @@ fn an_unmatched_window_at_the_corner_is_left_alone_and_counted_one_at_the_park_s
     assert_eq!((s.by_apple, s.corner), (2, 1), "only the clamped one counts at the corner");
     assert!(s.to_string().ends_with("2 by Apple's rule; 1 at the corner; 0 from other Desktops"), "{s}");
 }
+
+/// Apple's rule with `[stages] new_apps_join_current` on (`Decision::for_new_window`).
+fn joins() -> Decision {
+    Decision { new_app_joins_current: true, ..Decision::default() }
+}
+
+#[test]
+fn new_apps_join_current_never_takes_a_window_from_its_saved_stage() {
+    // The restore window over, the key on: Chat opened hours later still goes back to its
+    // saved stage (which comes forward), never into the editor's stage in front.
+    let mut m = adopted();
+    assert!(m.end_restore().is_some());
+    let editor = m.main_active_stage();
+    let a = m.add_window(win(21, 30, CHAT, "Team", F_TEAM), &joins(), &focused(21));
+    assert_eq!(number_of(&m, 21), Some(2), "its saved stage: {a:?}");
+    assert_ne!(m.stage_of(w(21)), editor);
+    assert_eq!(m.restored_grade(w(21)), Some(Grade::Strong));
+    // A new app matching nothing saved joins the stage in front (Chat's, now).
+    let front = m.main_active_stage();
+    let a = m.add_window(win(61, 70, "com.example.paint", "Canvas", DEFAULT), &joins(), &focused(61));
+    assert_eq!(m.stage_of(w(61)), front, "joins the current stage: {a:?}");
+    assert!(!switches(&a) && !parks(&a, 61));
+}
+
+#[test]
+fn new_apps_join_current_waits_for_the_restore_window_to_close() {
+    // While macOS reopens apps after a login (the restore window, settling), a newly opened
+    // app keeps Apple's rule: a stage of its own, here a card. Piling the login's apps into
+    // one stage would undo the restore.
+    let mut m = adopted();
+    assert!(m.settling());
+    let editor = m.main_active_stage();
+    let a = m.add_window(win(61, 70, "com.example.paint", "Canvas", DEFAULT), &joins(), &Observation::default());
+    assert_ne!(m.stage_of(w(61)), editor, "a stage of its own: {a:?}");
+    assert!(m.strip().iter().any(|c| c.windows == [w(61)]), "its card");
+    // The same in a same-session launch's restore window (no settling, still restoring).
+    let mut saved = desktop_5();
+    saved.stages[0].windows[0].window = Some(11);
+    let mut m = model();
+    m.set_restore(Restore::same_session("A"));
+    m.restore_spaces(vec![saved]);
+    m.arrive(MAIN, &[win(11, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
+    assert!(m.restoring() && !m.settling());
+    let editor = m.stage_of(w(11));
+    m.add_window(win(61, 70, "com.example.paint", "Canvas", DEFAULT), &joins(), &focused(61));
+    assert_ne!(m.stage_of(w(61)), editor, "Apple's rule while the restore window is open");
+    // Once it closes, the next new app joins the stage in front.
+    m.end_restore();
+    let front = m.main_active_stage();
+    m.add_window(win(62, 71, "com.example.memo", "Memo", DEFAULT), &joins(), &focused(62));
+    assert_eq!(m.stage_of(w(62)), front);
+}

@@ -57,7 +57,9 @@
 //! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
 //!   current stage, and an activation (Dock click) of an app in another stage brings its
-//!   windows here. The app switcher (Command held) never counts.
+//!   windows here. The app switcher (Command held) never counts. With
+//!   `[stages] new_apps_join_current` on, a newly opened app's first window joins the current
+//!   stage without Shift, and Shift gives it a stage of its own (`Decision::for_new_window`).
 //! - **Transitions** (`[animation]`): a batch that parks shown windows or brings parked ones
 //!   back is announced to the strip first ([`strip_model::Transition`]); once the strip has
 //!   drawn snapshots over them, outgoing windows park behind theirs, and incoming windows wait
@@ -104,7 +106,7 @@ use crate::engine::model::{
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::restore::{self, AppQuiet, End, Restore, Settling};
-use crate::engine::rules::{Decision, RuleAction};
+use crate::engine::rules::{Decision, RuleAction, ShiftEffect};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEvent, StripSnapshot, Transition};
@@ -3906,22 +3908,29 @@ impl Controller {
             WindowRole::Standard => self.store.config().rules.decide(&meta.bundle_id, &meta.title),
             WindowRole::Child { .. } => Decision::default(),
         };
-        if meta.role == WindowRole::Standard
-            && self.store.config().sugar.shift_brings_here
-            && matches!(decision.action, RuleAction::Native | RuleAction::New | RuleAction::Stage(_))
-        {
-            let new_app = self
-                .model
-                .as_ref()
-                .is_some_and(|m| !m.windows().any(|w| w.meta.pid == meta.pid && w.meta.role == WindowRole::Standard));
-            let sugar = &self.store.config().sugar;
-            let within = Duration::from_millis(if new_app { sugar.launch_window_ms } else { sugar.activation_window_ms });
-            if self.triggers.shift_here(Instant::now(), within, input::live_modifiers()) {
-                if new_app {
+        if meta.role == WindowRole::Standard {
+            // Shift and `[stages] new_apps_join_current` (`Decision::for_new_window`).
+            let new_app = self.model.as_ref().is_some_and(|m| m.app_is_new(meta.pid));
+            let config = self.store.config();
+            let join_current = config.stages.new_apps_join_current;
+            let sugar = &config.sugar;
+            let mut shift = false;
+            if sugar.shift_brings_here && decision.action.shift_counts() {
+                let within = Duration::from_millis(if new_app { sugar.launch_window_ms } else { sugar.activation_window_ms });
+                shift = self.triggers.shift_here(Instant::now(), within, input::live_modifiers());
+                if shift && new_app {
                     self.triggers.consume();
                 }
-                tracing::info!(id, "Shift held: the new window joins the current stage");
-                decision.action = RuleAction::Current;
+            }
+            let effect;
+            (decision, effect) = decision.for_new_window(new_app, join_current, shift);
+            match effect {
+                ShiftEffect::BringsHere => tracing::info!(id, "Shift held: the new window joins the current stage"),
+                ShiftEffect::OwnStage => tracing::info!(id, "Shift held: the newly opened app gets a stage of its own"),
+                ShiftEffect::None if decision.new_app_joins_current => {
+                    tracing::debug!(id, "a newly opened app: asked to join the current stage ([stages] new_apps_join_current)")
+                }
+                ShiftEffect::None => {}
             }
         }
         if decision.action == RuleAction::Ignore {
@@ -5254,7 +5263,7 @@ mod tests {
         let mut m = model_with(ModelOptions::default());
         let window = meta(1, 10, "com.example.a");
         let obs = Observation { frames: [(window.id, window.frame)].into(), z_order: vec![window.id], focused: Some(window.id) };
-        m.add_window(window.clone(), &Decision { action: RuleAction::New, placement: Placement::AsIs }, &obs);
+        m.add_window(window.clone(), &Decision { action: RuleAction::New, placement: Placement::AsIs, ..Decision::default() }, &obs);
         for clicks in [1, 2] {
             if wallpaper_click(&settings, clicks) == WallpaperClick::Toggle {
                 m.reveal_desktop(&obs);

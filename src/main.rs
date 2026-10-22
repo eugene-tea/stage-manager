@@ -13,7 +13,7 @@
 //!   --reference` validates a file (errors with line numbers), prints the commented default
 //!   config, explains a key, or prints the configuration table of `docs/CONFIG.md`.
 //! - `stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate [--dark|--light]
-//!   [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
+//!   [--pane PANE] [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
 //!   no Accessibility, no login item), or renders it to a PNG and exits.
 //! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts;
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }

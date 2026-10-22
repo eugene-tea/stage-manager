@@ -154,7 +154,7 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
 
 ## Other tools
 
-- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--png FILE]`
+- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--png FILE]`
   opens one of the app's windows alone, or draws it to a PNG, without managing anything.
 - `stage-manager strip-demo` runs the strip alone, fed from the live window list, and never
   moves a window. Its variables (`STAGE_MANAGER_DEMO_*`, and an offscreen render with

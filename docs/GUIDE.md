@@ -128,7 +128,7 @@ What it cannot do:
 - On a main display of another size, windows keep the places their apps give them.
 
 `[stages] restore_after_restart = false` (or **Bring stages back after a restart** in
-Settings → Extras) turns it off: after a restart every app starts in a stage of its own, as
+Settings → Stages) turns it off: after a restart every app starts in a stage of its own, as
 with Apple's.
 
 ### Drag and drop
@@ -141,6 +141,15 @@ with Apple's.
 
 Shift-click a card to bring its windows into the current stage without leaving it. Hold
 Shift while you open an app, or Shift-click it in the Dock, to bring it here too.
+
+### New apps in the current stage
+
+As with Apple's, a newly opened app gets a stage of its own. Turn on **Open new apps in the
+current stage** (Settings → Stages, or `[stages] new_apps_join_current = true`) and a new
+app's first windows join the stage you are in instead; hold Shift while you open it to give
+it a stage of its own after all. An app already in a stage still opens its new windows
+there, rules in the config file come first, and while your stages come back after a
+restart the apps macOS reopens go back to their own stages.
 
 ### ⌘M and the wallpaper
 
@@ -161,15 +170,15 @@ looks empty. If another display sits beyond that corner, a free corner is used i
 ## Settings
 
 Open Settings from the menu bar icon. If you hid the icon, open Stage Manager again from
-Applications and Settings appears.
+Applications and Settings appears. The buttons along its top switch between five panes:
 
 - **General:** start at login, show the menu bar icon, check for updates, install them automatically.
 - **Stage Manager:** the same options as Apple's Stage Manager — show recent apps, and show
   an app's windows all at once or one at a time. These are macOS's own settings, so they
   stay in step with System Settings.
-- **Extras:** bringing stages back after a restart, merging stages by dropping cards, Shift
-  to bring apps here, keeping windows clear of the strip, keyboard shortcuts, and animation
-  speed.
+- **Stages:** bringing stages back after a restart, opening new apps in the current stage,
+  Shift to bring apps here, and merging stages by dropping cards.
+- **Windows:** keeping windows clear of the strip, animation speed, and keyboard shortcuts.
 - **Advanced:** the config file, and help for asking an AI assistant to change it.
 
 Changes apply at once.

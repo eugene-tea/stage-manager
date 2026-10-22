@@ -348,11 +348,15 @@ pub struct StagesConfig {
     /// for their apps to reopen them (on by default); off is 1.2.0's behaviour. Read at
     /// launch.
     pub restore_after_restart: bool,
+    /// A newly opened app's first windows join the active stage instead of a stage of their
+    /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
+    /// Restored windows and the restore window keep Apple's rule.
+    pub new_apps_join_current: bool,
 }
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true }
+        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
     }
 }
 
@@ -715,6 +719,7 @@ impl Config {
         let defaults = Decision {
             action: RuleAction::parse(v.text("defaults.action")).map_err(err)?,
             placement: Placement::parse(v.text("defaults.placement")).map_err(err)?,
+            ..Decision::default()
         };
 
         let numbered = |p: &str| hotkey::parse_numbered(v.text(p)).map_err(err);
@@ -882,7 +887,11 @@ impl Config {
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
-            stages: StagesConfig { names, restore_after_restart: v.flag("stages.restore_after_restart") },
+            stages: StagesConfig {
+                names,
+                restore_after_restart: v.flag("stages.restore_after_restart"),
+                new_apps_join_current: v.flag("stages.new_apps_join_current"),
+            },
             sugar: SugarConfig {
                 shift_brings_here: v.flag("sugar.shift_brings_here"),
                 launch_window_ms: v.uint("sugar.launch_window_ms"),
@@ -1103,6 +1112,14 @@ mod tests {
     }
 
     #[test]
+    fn new_apps_join_current_is_off_by_default_and_can_be_turned_on() {
+        assert!(!Config::default().stages.new_apps_join_current, "Apple's: a newly opened app gets a stage of its own");
+        let p = parse("[stages]\nnew_apps_join_current = true\n");
+        assert!(p.config.stages.new_apps_join_current && p.warnings.is_empty(), "{:?}", p.warnings);
+        assert!(Config::parse("[stages]\nnew_apps_join_current = \"yes\"").is_err(), "a switch: true or false");
+    }
+
+    #[test]
     fn the_rule_examples_parse_when_uncommented() {
         let uncommented: String = default_file()
             .lines()
@@ -1319,7 +1336,7 @@ activation_grows = false
         assert!((c.style.cards.shadow_color.a - 128.0 / 255.0).abs() < 1e-9);
         assert_eq!(c.windows.fit, FitMode::Narrow);
         assert!(!c.windows.minimize_to_strip);
-        assert_eq!(c.rules.defaults, Decision { action: RuleAction::New, placement: Placement::Cascade });
+        assert_eq!(c.rules.defaults, Decision { action: RuleAction::New, placement: Placement::Cascade, ..Decision::default() });
         assert_eq!(c.rules.rules.len(), 2);
         assert_eq!(c.rules.rules[1].app, AppMatch::Any);
         assert_eq!(c.rules.decide("com.example.chat", "x").action, RuleAction::Stage("Chat".into()));

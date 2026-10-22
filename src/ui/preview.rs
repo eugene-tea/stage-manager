@@ -6,7 +6,8 @@
 //! Windows: `settings`, `settings-apple` (Apple's Stage Manager on, the login item awaiting
 //! approval, a config error), `welcome` (both approvals missing), `welcome-apple` (Apple's Stage
 //! Manager on too), `welcome-done` (all set), `about`, `update` (a newer release offered),
-//! `uptodate`.
+//! `uptodate`. `--pane general|stage-manager|stages|windows|advanced` opens Settings on that
+//! pane (General by default); the preview never remembers one.
 //!
 //! With `--png FILE` the window is drawn into FILE in-process (`cacheDisplayInRect`; never a
 //! screen capture) and the command exits without the window ever showing. Without it the
@@ -36,7 +37,7 @@ thread_local! {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: stage-manager preview <{WINDOWS}> [--dark|--light] [--png FILE]");
+    eprintln!("usage: stage-manager preview <{WINDOWS}> [--dark|--light] [--pane PANE] [--png FILE]");
     ExitCode::from(2)
 }
 
@@ -68,6 +69,7 @@ fn preview_change(change: settings_window::Change) {
             C::ShowRecentApps(on) => values.show_recent_apps = on,
             C::AllAtOnce(all) => values.all_at_once = all,
             C::RestoreAfterRestart(on) => values.restore_after_restart = on,
+            C::NewAppsJoinCurrent(on) => values.new_apps_join_current = on,
             C::MergeOnDrop(on) => values.merge_on_drop = on,
             C::ShiftBringsHere(on) => values.shift_brings_here = on,
             C::Fit(m) => values.fit = m,
@@ -85,7 +87,7 @@ fn preview_change(change: settings_window::Change) {
 }
 
 /// The window to show or draw.
-fn make(mtm: MainThreadMarker, which: &str, drawn: bool) -> Option<Retained<NSWindow>> {
+fn make(mtm: MainThreadMarker, which: &str, pane: settings_window::Pane, drawn: bool) -> Option<Retained<NSWindow>> {
     let missing = PermissionState { accessibility: false, screen_recording: false };
     let granted = PermissionState { accessibility: true, screen_recording: true };
     let log = |a: welcome::WelcomeAction| tracing::info!(?a, "preview: welcome click");
@@ -94,7 +96,7 @@ fn make(mtm: MainThreadMarker, which: &str, drawn: bool) -> Option<Retained<NSWi
         "settings" => {
             let values = settings_values();
             VALUES.with(|v| *v.borrow_mut() = Some(values.clone()));
-            settings_window::show_with_handler(mtm, values, preview_change)
+            settings_window::show_with_handler(mtm, values, pane, preview_change)
         }
         "settings-apple" => {
             let mut values = settings_values();
@@ -102,7 +104,7 @@ fn make(mtm: MainThreadMarker, which: &str, drawn: bool) -> Option<Retained<NSWi
             values.login = LoginStatus::NeedsApproval;
             values.config_error = Some("config.toml: line 12: [strip] width: expected number, 60 to 800".into());
             VALUES.with(|v| *v.borrow_mut() = Some(values.clone()));
-            settings_window::show_with_handler(mtm, values, preview_change)
+            settings_window::show_with_handler(mtm, values, pane, preview_change)
         }
         "welcome" => welcome::create(mtm, welcome::rows(&missing, true, false, false), log),
         "welcome-apple" => welcome::create(mtm, welcome::rows(&missing, true, true, true), log),
@@ -148,12 +150,17 @@ pub fn run(args: &[String]) -> ExitCode {
     let Some(which) = args.first().map(String::as_str) else { return usage() };
     let mut dark = None;
     let mut png: Option<PathBuf> = None;
+    let mut pane = settings_window::Pane::default();
     let mut rest = args[1..].iter();
     while let Some(a) = rest.next() {
         match a.as_str() {
             "--dark" => dark = Some(true),
             "--light" => dark = Some(false),
             "--png" => png = rest.next().map(PathBuf::from),
+            "--pane" => match rest.next().and_then(|p| settings_window::Pane::from_id(p)) {
+                Some(p) => pane = p,
+                None => return usage(),
+            },
             _ => return usage(),
         }
     }
@@ -161,7 +168,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(if png.is_some() { NSApplicationActivationPolicy::Prohibited } else { NSApplicationActivationPolicy::Regular });
     form::set_app_appearance(mtm, dark);
-    let Some(window) = make(mtm, which, png.is_some()) else { return usage() };
+    let Some(window) = make(mtm, which, pane, png.is_some()) else { return usage() };
     if let Some(path) = png {
         window.center();
         return match form::render_png(&window, &path) {

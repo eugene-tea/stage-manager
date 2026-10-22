@@ -1905,7 +1905,7 @@ mod tests {
         // R11 1: window 1 parked in its stage, window 2's stage active; going back to 1's.
         let mut m = model();
         let obs = Observation::default();
-        let new = Decision { action: RuleAction::New, placement: Placement::AsIs };
+        let new = Decision { action: RuleAction::New, placement: Placement::AsIs, ..Decision::default() };
         m.add_window(meta(1, 10, "com.example.a"), &new, &obs);
         m.add_window(meta(2, 11, "com.example.b"), &new, &obs);
         let d = display();
