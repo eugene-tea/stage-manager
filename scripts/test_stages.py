@@ -2560,6 +2560,53 @@ def drop_settle_checks():
         time.sleep(0.5)
 
 
+def merge_hold_check():
+    """A card held over another card's middle (`[strip] merge_on_drop`; owner 10-22, round 9C:
+    "both windows render with the same content until I release"): the target previews the
+    merge, its own windows in front and the dragged card's behind, and each of its planes
+    shows its own window's picture (`shows` in `ctl debug-strip`: none while captures are
+    off), never another's; the dragged card, lying right over the target, fades to
+    `[drag] lifted_opacity` so the target's front window shows. Released there, the stages
+    merge."""
+    say("-- a card held over another card: the preview shows the target's own front window")
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if not check(len(cards) >= 2, f"two cards to merge ({len(cards)})"):
+        return
+    ids = ids_by_number(s0)
+    dragged, target = ids.get(cards[0]["number"]), ids.get(cards[1]["number"])
+    a, b = cards[0]["frame"], cards[1]["frame"]
+    start, over = center(a), center(b)
+    words = [str(round(v, 1)) for p in (start, (start[0], start[1] + 12), over) for v in p] + ["hold=1200"]
+    proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+    held = [p for p in sample_strip_during(proc, after=0.0) if p.get("merge_onto") == target]
+    if not check(len(held) >= 3, f"the card was held over the other ({len(held)} samples while held)"):
+        return
+    last = held[-1]
+    # A window's home is its stage's number.
+    mine = {w["id"] for w in s0["windows"] if w["home"] == cards[1]["number"] and w["role"] == "standard"}
+    theirs = {w["id"] for w in s0["windows"] if w["home"] == cards[0]["number"] and w["role"] == "standard"}
+    t = next((c for c in last["cards"] if c["stage"] == target), None)
+    d = next((c for c in last["cards"] if c["stage"] == dragged), None)
+    if not check(t is not None and d is not None, "both cards are drawn while held"):
+        return
+    planes = t["planes"]
+    front = planes[-1]["window"] if planes else None
+    check(front in mine and any(p["window"] in theirs for p in planes),
+          f"the target previews the merge: its own window in front ({front}), the dragged card's behind "
+          f"({[p['window'] for p in planes]})")
+    wrong = [(p["window"], p["shows"]) for h in held for c in h["cards"] for p in c["planes"]
+             if p.get("shows") is not None and p["shows"] != p["window"]]
+    check(not wrong, f"every plane shows its own window's picture ({wrong[:4]})")
+    lifted = 0.3
+    check(d["opacity"] <= lifted + 0.01, f"the dragged card fades over its target (opacity {d['opacity']:.2f})")
+    time.sleep(1.0)
+    st = state()
+    home = {w["id"]: w["home"] for w in st["windows"]}
+    into = {home.get(w) for w in mine}
+    check(len(into) == 1 and all(home.get(w) in into for w in theirs), f"released over the target, the stages merged ({into})")
+
+
 def phase_slots():
     say("\n== slots: a switch's snapshots land where they aim; clicks are clicks; a card drags whole ==")
     stop_app()
@@ -2746,6 +2793,7 @@ def phase_slots():
                   f"its last frame is within 1 pt of the window's (end {g and fmt(g['end'])}, window {b and fmt(b)})")
     in_place_checks()
     drop_settle_checks()
+    merge_hold_check()
     stop_app()
     all_onscreen("slots quit")
     write_config(None)

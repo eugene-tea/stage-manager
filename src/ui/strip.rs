@@ -130,6 +130,8 @@ const ACTIVE_RIM: f64 = 2.0;
 /// Depth of a card lifted above the others while it is dragged and while it glides into its
 /// slot after the release (its whole unit: thumbnails, icons, badge).
 const LIFTED_Z: f64 = 100.0;
+/// The animation key of a dragged card's fade while it is held over a card to merge into.
+const HELD_FADE: &str = "held";
 
 // ---------------------------------------------------------------------------------------
 // Main-thread state
@@ -1596,9 +1598,16 @@ impl Strip {
                 Point::new(g.x + q.x, g.y + q.y)
             })
         };
-        let cards: Vec<serde_json::Value> = self
-            .snapshot
-            .cards
+        // Which window's picture an image layer holds (its contents are that picture's image).
+        let shows = |image: &CALayer| -> Option<u32> {
+            // SAFETY: reading a layer's contents, set only to CGImages here.
+            let contents = unsafe { image.contents() }?;
+            let at = Retained::as_ptr(&contents).cast::<std::ffi::c_void>();
+            self.thumbs.iter().find(|(_, p)| std::ptr::from_ref::<CGImage>(&p.image).cast::<std::ffi::c_void>() == at).map(|(id, _)| *id)
+        };
+        // The cards drawn: the snapshot's, or while a card is held over another, the preview.
+        let drawn_cards = self.shown_cards();
+        let cards: Vec<serde_json::Value> = drawn_cards
             .iter()
             .filter_map(|c| {
                 let l = self.pane.cards.get(&c.stage)?;
@@ -1611,7 +1620,9 @@ impl Strip {
                     .planes
                     .iter()
                     .zip(&l.images)
-                    .map(|((id, plane), (_, image))| serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image) }))
+                    .map(|((id, plane), (_, image))| {
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image), "shows": shows(image) })
+                    })
                     .collect();
                 Some(serde_json::json!({
                     "stage": c.stage,
@@ -2095,8 +2106,27 @@ impl Strip {
     /// Sets a dragged card's opacity in the strip (lifted out, or back).
     fn set_card_opacity(&self, stage: u64, opacity: f32) {
         if let Some(layers) = self.pane.cards.get(&stage) {
+            layers.card.removeAnimationForKey(&NSString::from_str(HELD_FADE));
             layers.card.setOpacity(opacity);
         }
+    }
+
+    /// Eases a dragged card's opacity to `opacity` over `seconds` (0: at once) from what is
+    /// drawn now; nothing when it is there already.
+    fn fade_card(&self, stage: u64, opacity: f32, seconds: f64) {
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
+        if layers.card.opacity() == opacity {
+            return;
+        }
+        if seconds <= 0.0 {
+            self.set_card_opacity(stage, opacity);
+            return;
+        }
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let from = unsafe { layers.card.presentationLayer() }.map_or_else(|| layers.card.opacity(), |p| p.opacity());
+        layers.card.setOpacity(opacity);
+        let anim = ease("opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(opacity), seconds);
+        layers.card.addAnimation_forKey(&anim, Some(&NSString::from_str(HELD_FADE)));
     }
 
     fn mouse_dragged(&mut self) {
@@ -2136,7 +2166,14 @@ impl Strip {
         }
         match mode {
             DragMode::Reorder => {
-                self.set_card_opacity(stage, 1.0);
+                // Held over a card it would merge into, the dragged card fades as when it is
+                // dragged out: it lies right over the target, whose preview shows its own
+                // front window with the dragged card's windows behind; at full opacity the
+                // dragged card hid that front window, so the target seemed to show the
+                // dragged card's picture twice (owner 10-22, round 9C).
+                let held = if onto.is_some() { style.lifted_opacity as f32 } else { 1.0 };
+                let seconds = if was == DragMode::Reorder { self.style.animation.seconds(self.style.cards.hover_ms) } else { 0.0 };
+                self.fade_card(stage, held, seconds);
                 if was != DragMode::Reorder {
                     self.lift_card(stage);
                     self.set_hover(Some(stage));
@@ -2173,7 +2210,6 @@ impl Strip {
             && drag.mode != DragMode::Pressed
         {
             self.pressed = None;
-            self.set_card_opacity(drag.stage, 1.0);
             let at = self.pointer();
             if drag.mode == DragMode::Reorder
                 && let Some(into) = drag.onto
@@ -2189,6 +2225,7 @@ impl Strip {
                 self.update_targets();
                 return Some(StripEvent::CardMerged { stage: drag.stage, into });
             }
+            self.set_card_opacity(drag.stage, 1.0);
             if drag.mode == DragMode::Reorder {
                 // Put the card in its new slot now; the controller's snapshot agrees. It stays
                 // above the others until it has glided in.
@@ -2326,12 +2363,16 @@ impl Strip {
             let d = self.drawn_offset(into);
             Point::new(c.x + d.x, c.y + d.y)
         });
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let shown = unsafe { layers.card.presentationLayer() }.map_or_else(|| layers.card.opacity(), |p| p.opacity());
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        layers.card.removeAnimationForKey(&NSString::from_str(HELD_FADE));
         layers.card.setOpacity(0.0);
         // At speed 0 no fade: a zero duration would mean Core Animation's default (R3 5).
+        // It fades from what is drawn: the card held over its target is faded already.
         if seconds > 0.0 {
-            let fade = ease("opacity", &NSNumber::new_f32(1.0), &NSNumber::new_f32(0.0), seconds);
+            let fade = ease("opacity", &NSNumber::new_f32(shown), &NSNumber::new_f32(0.0), seconds);
             layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
         }
         if let Some(c) = toward {
