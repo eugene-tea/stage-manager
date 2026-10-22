@@ -50,6 +50,13 @@ pub fn corner_patch() -> B {
     B::MoveToActiveSpace | B::Transient | B::IgnoresCycle
 }
 
+/// Our own windows (Settings, Welcome, alerts): shown on the Desktop the user is on. Without
+/// it, a window closed (only hidden, kept for the next opening) still belongs to the Desktop it
+/// was last on, and opening it again takes the user there (the owner's report of 10-22).
+pub fn app_window() -> B {
+    B::MoveToActiveSpace
+}
+
 /// The names of the flags set in `bits` (for `ctl state` and logs), in a fixed order.
 pub fn names(bits: usize) -> Vec<&'static str> {
     const ALL: [(B, &str); 9] = [
