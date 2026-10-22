@@ -29,7 +29,7 @@ use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, N
 
 use super::alert::{self, AlertSpec};
 use super::app_menu::{self, AppEvent};
-use super::settings_window::{self, Change, SettingsValues};
+use super::settings_window::{self, Change, Pane, SettingsValues};
 use super::status_menu::MenuAction;
 use super::welcome::{self, WelcomeAction};
 use super::about;
@@ -373,6 +373,7 @@ impl Shell {
             Change::AllAtOnce(all) => self.write_apple("AppWindowGroupingBehavior", i64::from(all)),
             Change::OpenDesktopAndDock => open_url(DESKTOP_DOCK_URL),
             Change::RestoreAfterRestart(on) => self.write_config("stages.restore_after_restart", if on { "true" } else { "false" }),
+            Change::NewAppsJoinCurrent(on) => self.write_config("stages.new_apps_join_current", if on { "true" } else { "false" }),
             Change::MergeOnDrop(on) => self.write_config("strip.merge_on_drop", if on { "true" } else { "false" }),
             Change::ShiftBringsHere(on) => self.write_config("sugar.shift_brings_here", if on { "true" } else { "false" }),
             Change::Fit(mode) => {
@@ -396,14 +397,26 @@ impl Shell {
                 tracing::info!("settings: agent instructions copied");
                 settings_window::confirm_copied();
             }
+            Change::Pane(pane) => {
+                // The app's own state, never config.toml: shown again at the next opening.
+                if self.state.settings_pane.as_deref() != Some(pane.id()) {
+                    self.state.settings_pane = Some(pane.id().to_string());
+                    self.save_state();
+                }
+            }
         }
     }
 }
 
 /// Shows the Settings window in front (menu, ⌘,, a second launch, the welcome).
 pub fn show_settings() {
-    let Some((mtm, values)) = with(|s| (s.mtm, s.settings_values())) else { return };
-    settings_window::show(mtm, values, |change| {
+    let Some((mtm, values, pane)) = with(|s| {
+        let pane = s.state.settings_pane.as_deref().and_then(Pane::from_id).unwrap_or_default();
+        (s.mtm, s.settings_values(), pane)
+    }) else {
+        return;
+    };
+    settings_window::show(mtm, values, pane, |change| {
         later(move || {
             with(|s| s.on_change(change));
         })

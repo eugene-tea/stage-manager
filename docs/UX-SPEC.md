@@ -60,7 +60,8 @@ stage, animated as a card click: the stage you leave shrinks into the strip and 
 windows grow from their card. The keyboard goes to the app's window at once.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
-a waiting stage brings that stage forward. A newly opened app gets a stage of its own.
+a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
+extra, off by default, puts it in the current stage instead: see Extras).
 Sheets and dialogs follow their window.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
@@ -170,6 +171,7 @@ until used; the rest are off.
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
+| A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
 

@@ -18,7 +18,8 @@ it back), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
 only when its own strip window is topmost at that point), native (Apple's defaults with three
-more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
+more fixture apps: first start, new windows, Shift sugar, `[stages] new_apps_join_current`
+with and without Shift, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
 along the whole path, and the pointer is put back; an activation with no click and a Dock
 click to a parked app grow its stage from its card, the corner never showing it, the window
@@ -1539,6 +1540,9 @@ def phase_native():
               f"a Shift launch joins the current stage ({stage_titles(s) if s else None})")
     consistent("Shift launch")
 
+    say("-- [stages] new_apps_join_current: a new app joins the current stage; Shift gives it its own")
+    apps_here_check()
+
     say("-- Shift held on an activation: the app's windows come here")
     time.sleep(0.8)
     pt = topmost_point("Alpha")
@@ -1611,6 +1615,61 @@ def phase_native():
     all_onscreen("native quit")
     stop_all_fixtures()
     native_wallpaper()
+
+
+def set_config_live(text):
+    """Writes config.toml in the test home while the app runs (state.json stays, unlike
+    `write_config`) and waits for the app to reload it."""
+    before = log_text().count("config reloaded")
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write(text)
+    return wait_until(lambda: log_text().count("config reloaded") > before or None, 5, "the config reload")
+
+
+def apps_here_check():
+    """`[stages] new_apps_join_current` (9A): with the key on, a newly opened app's first window
+    joins the active stage, no stage of its own; Shift held while opening it gives it a stage of
+    its own, in front (Apple's rule once). Starts and ends as the Shift launch left the stages:
+    Charlie beside Alpha in the active stage, Bravo in a stage of its own; the key off again."""
+    if not check(set_config_live("[stages]\nnew_apps_join_current = true\n"), "the key turned on"):
+        return
+    stop_extra("c")
+    wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie to go")
+    time.sleep(0.8)
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x), "Charlie 1 managed")
+    check(s is not None and {"Alpha 1", "Charlie 1"} <= active_titles(s) and len(s["stages"]) == 2,
+          f"key on: a newly opened app's first window joins the current stage ({stage_titles(s) if s else None})")
+    consistent("key on: new app")
+
+    stop_extra("c")
+    wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie to go")
+    time.sleep(0.8)
+    pt = topmost_point("Alpha")
+    r = ctl("debug-click", pt[0], pt[1], "shift") if pt else {"ok": False, "error": "no Alpha window"}
+    shifted = not blocked(r, "the Shift launch with the key on (its click, a stage of its own)")
+    if shifted:
+        check(r.get("ok"), f"shift-clicked an Alpha window ({r.get('error', 'ok')})")
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x) and (not shifted or active_titles(x) == {"Charlie 1"}),
+                   "Charlie 1 managed")
+    if shifted:
+        check(s is not None and active_titles(s) == {"Charlie 1"} and len(s["stages"]) == 3,
+              f"key on, Shift held: the new app gets a stage of its own, in front ({stage_titles(s) if s else None})")
+    consistent("key on: Shift launch")
+
+    # Back to what the next checks start from: Charlie beside Alpha (the key still on), then
+    # the key off.
+    stop_extra("c")
+    wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie to go")
+    activate("a")
+    wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage in front")
+    time.sleep(0.8)  # past the activation echo window
+    start_extra("c", 1)
+    s = wait_state(lambda x: {"Alpha 1", "Charlie 1"} <= active_titles(x), "Charlie beside Alpha again")
+    check(s is not None and len(s["stages"]) == 2, f"key on: Charlie joins Alpha's stage again ({stage_titles(s) if s else None})")
+    check(set_config_live(""), "the key turned off")
+    consistent("key off again")
 
 
 # ----- native: wallpaper clicks and Finder ----------------------------------------------

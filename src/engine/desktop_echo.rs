@@ -135,7 +135,7 @@ mod tests {
         fn add(&mut self, meta: crate::engine::model::WindowMeta, action: RuleAction) {
             self.d.open(&meta);
             let obs = self.d.obs();
-            let a = self.m.add_window(meta, &Decision { action, placement: Placement::AsIs }, &obs);
+            let a = self.m.add_window(meta, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &obs);
             self.d.apply(&a);
         }
 

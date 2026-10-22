@@ -144,7 +144,7 @@ mod tests {
             let mt = meta(id, pid, &format!("com.example.app{pid}"));
             self.d.open(&mt);
             let obs = self.d.obs();
-            let a = self.m.add_window(mt, &Decision { action, placement: Placement::AsIs }, &obs);
+            let a = self.m.add_window(mt, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &obs);
             self.apply(a)
         }
 

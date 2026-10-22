@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- New apps can open in the current stage: turn on **Open new apps in the current stage**
+  (Settings → Stages, or `[stages] new_apps_join_current`) and a newly opened app's windows
+  join the stage you are in. Hold Shift while opening an app to give it a stage of its own.
+  Off by default, as Apple's.
+- Settings has a toolbar of panes, as Mac apps' settings do: General, Stage Manager, Stages,
+  Windows and Advanced. It opens on the pane you used last.
+
 ## 1.3.0 — 2026-10-21
 
 - Your stages come back after a restart. When you log out, restart or shut down, Stage

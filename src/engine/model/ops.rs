@@ -30,6 +30,12 @@ impl Model {
     /// unmanaged. Placement (`center`, `cascade` from the stage's front window) applies before
     /// any switch.
     ///
+    /// `[stages] new_apps_join_current` ([`Decision::new_app_joins_current`]): a window of an
+    /// app with no managed standard window, which `native` gives a stage of its own, joins the
+    /// active stage instead, unless it goes back to a saved stage (below) or the restore window
+    /// is open (apps macOS reopens at a login, or that open by themselves after a launch, keep
+    /// Apple's rule: piling them into one stage would undo the restore).
+    ///
     /// Before Apple's default (`native`), a saved window still pending on this Space is looked
     /// for ([`Model::place_from_pending`]): a confident match goes back to its saved stage and
     /// frame; into an inactive stage it is parked there with no switch while the restore
@@ -134,6 +140,9 @@ impl Model {
             RuleAction::Native => match self.native_target(meta.pid, display) {
                 NativeTarget::Join(s) => (Home::Stage(s), false, true),
                 NativeTarget::Fresh if self.stage_is_empty(active) => {
+                    (Home::Stage(active), false, false)
+                }
+                NativeTarget::Fresh if self.new_app_joins(&meta, decision) => {
                     (Home::Stage(active), false, false)
                 }
                 NativeTarget::Fresh => (Home::Stage(self.create_stage(space, None)), true, true),
@@ -581,6 +590,19 @@ impl Model {
             .filter(|s| s.space == space)
             .max_by_key(|s| s.last_active)
             .map_or(NativeTarget::Fresh, |s| NativeTarget::Join(s.id))
+    }
+
+    /// True when app `pid` has no managed standard window (on any Desktop): a window of it
+    /// shows a newly opened app (or one whose windows were all closed).
+    pub fn app_is_new(&self, pid: Pid) -> bool {
+        !self.windows.values().any(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard)
+    }
+
+    /// Whether `meta`'s window, which Apple's rule gives a stage of its own, joins the active
+    /// stage instead ([`Decision::new_app_joins_current`]): its app is new and the restore
+    /// window is closed.
+    fn new_app_joins(&self, meta: &WindowMeta, decision: &Decision) -> bool {
+        decision.new_app_joins_current && !self.restore.restoring && self.app_is_new(meta.pid)
     }
 
     /// True when a stage has no window and none pending (a stage waiting for its windows is
