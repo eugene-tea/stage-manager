@@ -85,7 +85,7 @@ use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
 use super::{capture_pace, desktop, desktop_shot, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
-use crate::engine::busy_apps::{BusyApps, OffScreen};
+use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
@@ -3255,7 +3255,6 @@ impl Controller {
         let now = Instant::now();
         let mut busy = self.busy_apps.borrow_mut();
         busy.prune(now);
-        let was_busy = busy.pids(now);
         let mut check = OffScreen::new(&mut busy, now);
         let out: Vec<u32> = windows
             .iter()
@@ -3265,9 +3264,24 @@ impl Controller {
             })
             .map(|&(id, _)| id)
             .collect();
-        let now_busy = busy.pids(now);
-        if now_busy.iter().any(|p| !was_busy.contains(p)) {
-            tracing::info!(apps = ?now_busy, "an app did not answer whether its windows are hidden or minimized; left alone for a moment");
+        // Once per episode, not every retry (8M: two apps polled for a minute, a line each).
+        for e in busy.take_episodes() {
+            match e {
+                Episode::Started { pid } => tracing::info!(
+                    pid,
+                    bundle = ob.bundle_id(pid),
+                    retry_s = BUSY_BACKOFF.as_secs(),
+                    "an app did not answer whether its windows are hidden or minimized: asked again now and then, its windows left as they are (logged again when it answers)"
+                ),
+                Episode::Answered { pid, lasted } => {
+                    tracing::info!(pid, bundle = ob.bundle_id(pid), lasted_s = lasted.as_secs(), "an app that did not answer answers again")
+                }
+                Episode::NotAsked { pid, lasted } => tracing::info!(
+                    pid,
+                    lasted_s = lasted.as_secs(),
+                    "an app that did not answer is no longer asked (its windows went, or it quit)"
+                ),
+            }
         }
         out
     }

@@ -839,6 +839,10 @@ pub struct ScanScope {
     pub pids: Option<Vec<i32>>,
     /// Windows left alone: those we park on purpose (the registry's), while the app runs.
     pub skip: BTreeSet<u32>,
+    /// A rescan's pass, every few seconds while an app does not answer (8M): the summary line
+    /// at debug unless a window was brought back or could not be (the caller logs each app's
+    /// episode of not answering once).
+    pub quiet: bool,
 }
 
 /// The recovery scan: every window of every allowed app (`STAGE_MANAGER_ONLY` honored, our
@@ -909,7 +913,9 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
     if report.restored > 0 {
         counters::bump(Count::Recovery);
     }
-    if unanswered.is_empty() {
+    if scope.quiet && report.restored == 0 && report.failed == 0 {
+        tracing::debug!(reason, checked = report.checked, unanswered = ?unanswered, "recovery scan");
+    } else if unanswered.is_empty() {
         tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, "recovery scan");
     } else {
         tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, unanswered = ?unanswered, "recovery scan (some apps did not answer)");
