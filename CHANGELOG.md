@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.0 — 2026-10-21
+
+- Your stages come back after a restart. When you log out, restart or shut down, Stage
+  Manager brings every window back first, so macOS saves them where they really are; after
+  you log back in, the windows macOS reopens go back into their saved stages, on each Desktop.
+  Windows that some apps (VS Code, Slack and other Electron apps) reopen on the wrong Desktop
+  join their saved stage where they appear. Turn it off with `[stages] restore_after_restart`.
+- ⌘-Tab and Dock clicks grow the app's windows from their card, as Apple's do; the corner
+  stays clean while they do.
+- A card shows a window without a gray box around it when a popup is open.
+- Quitting is quieter and cleaner: hidden tabs and other apps' helper windows no longer count
+  as windows left in the corner, and a leftover safety helper hands its windows to the next
+  copy of Stage Manager instead of waiting for days.
+- A window closed while its app is not responding leaves its stage (no empty gray card).
+- Window pictures retry less often after failures and pause while the Mac is locked or
+  asleep, which saves battery.
+- The menu bar icon is the same height as Apple's own symbols.
+
 ## 1.2.0 — 2026-10-13
 
 - Automatic updates: Stage Manager downloads a new version from GitHub, checks that it is
