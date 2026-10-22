@@ -888,6 +888,9 @@ struct CardDrag {
     front: u32,
     /// The ghost, once the press moved past the threshold.
     ghost: Option<Ghost>,
+    /// The drag went somewhere: over another card, or half a card away from the press. Then a
+    /// release back in its own slot puts the card back and is no click (no switch).
+    strayed: bool,
 }
 
 /// Where a card or window released over the column goes.
@@ -2100,6 +2103,7 @@ impl Strip {
             full: front.frame.size(),
             front: front.id,
             ghost: None,
+            strayed: false,
         })
     }
 
@@ -2156,6 +2160,7 @@ impl Strip {
             drag.mode = mode;
             drag.before = before;
             drag.onto = onto;
+            drag.strayed |= onto.is_some() || (p.x - drag.press.x).hypot(p.y - drag.press.y) > drag.thumb.h / 2.0;
             if mode == DragMode::Reorder {
                 drag.ghost = None;
             } else {
@@ -2237,12 +2242,14 @@ impl Strip {
                     tracing::debug!(stage = drag.stage, before = ?drag.before, "card reordered");
                     return Some(StripEvent::CardMoved { stage: drag.stage, before: self.real_stage(drag.before) });
                 }
-                // Back in its own slot: nothing moved. Released over the card, it was a click
-                // with a wobble.
-                if self.layouts.iter().find(|l| l.stage == drag.stage).is_some_and(|l| l.bounds(self.m()).contains(p)) {
+                // Back in its own slot: nothing moved. Released over the card after a wobble
+                // that never went anywhere, it was a click; after a real drag (over another
+                // card, or half a card away), the card just goes back and nothing switches.
+                if !drag.strayed && self.layouts.iter().find(|l| l.stage == drag.stage).is_some_and(|l| l.bounds(self.m()).contains(p)) {
                     tracing::debug!(stage = drag.stage, "a drag that ended in its own slot over the card: a click");
                     return Some(self.click_event(drag.stage, p, shift));
                 }
+                tracing::debug!(stage = drag.stage, strayed = drag.strayed, "a drag that ended in its own slot: the card goes back, no click");
                 return None;
             }
             let out = !self.geometry.global.contains(at);
