@@ -1849,6 +1849,9 @@ impl Strip {
             image.setAllowsEdgeAntialiasing(true);
             if let Some(picture) = self.thumbs.get(&slot.id) {
                 show_picture(&image, picture, window);
+            } else {
+                // Drawn gray until its next capture (the owner saw short gray flashes, 10-22).
+                tracing::debug!(stage, window = slot.id, "card drawn with a thumbnail that has no picture yet");
             }
             plane.addSublayer(&image);
             unit.addSublayer(&plane);
@@ -1951,6 +1954,10 @@ impl Strip {
         // The active stage's empty slot shows no thumbnails.
         let drawn = || self.layouts.iter().filter(|l| l.stage != GAP_STAGE);
         let shown_ids: Vec<u32> = drawn().flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
+        let dropped: Vec<u32> = self.thumbs.keys().copied().filter(|id| !shown_ids.contains(id)).collect();
+        if !dropped.is_empty() {
+            tracing::debug!(?dropped, "strip: pictures of windows no card shows now are let go");
+        }
         self.thumbs.retain(|id, _| shown_ids.contains(id));
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
         let targets = if self.pane.shown {
