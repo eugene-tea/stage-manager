@@ -138,7 +138,8 @@ pub struct StripDrop {
     pub before: Option<u64>,
 }
 
-/// One card: a stage that is not active.
+/// One card: a stage that is not active (in place, also the active stage's place:
+/// [`CardSnapshot::active`], [`CardSnapshot::gap`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CardSnapshot {
     /// The engine's stage id (stable while the app runs).
@@ -151,6 +152,11 @@ pub struct CardSnapshot {
     pub windows: Vec<CardWindow>,
     /// App pids in icon order (first = front window's app), without duplicates.
     pub apps: Vec<i32>,
+    /// The active stage, drawn highlighted (`[strip] order = "in_place"`, `active = "card"`).
+    pub active: bool,
+    /// The active stage's empty slot (`[strip] active = "gap"`): laid out at its card's size so
+    /// no other card moves, never drawn, never hit.
+    pub gap: bool,
 }
 
 impl CardSnapshot {
@@ -492,8 +498,8 @@ mod tests {
     #[test]
     fn a_merged_card_keeps_its_windows_in_front_and_adds_the_dropped_ones_behind() {
         let win = |id: u32, pid: i32| CardWindow { id, pid, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
-        let target = CardSnapshot { stage: 2, number: 2, name: Some("Work".into()), windows: vec![win(5, 50), win(6, 60)], apps: vec![50, 60] };
-        let dropped = CardSnapshot { stage: 7, number: 3, name: None, windows: vec![win(9, 60), win(8, 80)], apps: vec![60, 80] };
+        let target = CardSnapshot { stage: 2, number: 2, name: Some("Work".into()), windows: vec![win(5, 50), win(6, 60)], apps: vec![50, 60], ..Default::default() };
+        let dropped = CardSnapshot { stage: 7, number: 3, name: None, windows: vec![win(9, 60), win(8, 80)], apps: vec![60, 80], ..Default::default() };
         let m = target.merged_with(&dropped);
         assert_eq!((m.stage, m.number, m.name.as_deref()), (2, 2, Some("Work")), "the target's identity");
         assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 6, 9, 8]);

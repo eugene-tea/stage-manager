@@ -48,7 +48,7 @@ window's shape on a fill): never a fill around a window on a card.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
-of the least recently used card.
+of the least recently used card. (Keep stages in place, an extra below, orders it otherwise.)
 
 **Switching.** The pressed card eases back on mouse-down. On release, the windows you leave
 shrink into their card's slot and the new stage grows from its card, on Apple's spring.
@@ -172,8 +172,26 @@ until used; the rest are off.
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
+| Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
+
+**Keep stages in place** (Settings → Stages; `[strip] order = "in_place"`, round 9B). Apple's
+swap leaves the stages in click order, so a stage's place cannot be predicted. In place,
+every stage has a place of its own in creation order per Desktop (hotkey numbers follow it;
+a new stage goes last, a closed one leaves no gap, a dragged card moves its stage in that
+order, a restart brings the order back). The stage you leave shrinks into its own place and
+the clicked card grows into its windows, on the same spring and snapshots as Apple's swap;
+⌘-Tab, the Dock, the hotkeys and a desktop reveal follow the same rules. `[strip] active`
+says how the active stage's own place shows: `"close"` (the default) gives it no card, as
+Apple's strip never shows the active stage, and the cards below close up (the cards between
+the two places glide on the strip's spring); `"gap"` leaves its slot empty at its card's
+size, so no other card ever moves; `"card"` draws it as a card with a light rim. With more
+places than the strip holds, the first `capacity − 1` stages keep theirs and the rest share
+the bottom place: the most recently used of them shows, so the stage you leave always has a
+card and the head never moves (with `"close"`, an active stage in the head frees its place,
+and two of the rest show). Cards keep Apple's one size. "One at a Time" shows an app once,
+in the place of its first stage, whichever of its windows is shown.
 
 **After a restart.** The restore is invisible when it works and Apple's behaviour when it
 cannot match. Saved windows not on screen at launch wait, with no card, in their stages; as

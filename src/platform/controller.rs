@@ -4772,7 +4772,8 @@ impl Controller {
             "fullscreen": self.fullscreen,
             "unplaced": self.unplaced.iter().collect::<Vec<_>>(),
             "active": active.and_then(number),
-            "strip": m.strip().iter().map(|c| c.number).collect::<Vec<_>>(),
+            // The cards drawn (the active stage's empty slot left out: `strip_gap` is its slot).
+            "strip": m.strip().iter().filter(|c| !c.gap).map(|c| c.number).collect::<Vec<_>>(),
             "strip_capacity": m.options().strip.capacity,
             "stage_inset": m.options().fit.inset,
             "strip_width": strip_width(m.main_display().visible.size(), &self.style),
@@ -4817,6 +4818,10 @@ impl Controller {
             "stages": stages,
             "windows": windows,
         });
+        // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
+        state["strip_gap"] = json!(m.strip().iter().position(|c| c.gap));
+        state["strip_order"] = json!(format!("{:?}", m.options().strip.order));
+        state["strip_active"] = json!(format!("{:?}", m.options().strip.active));
         // The registry's windows, and those taken from an old guardian (round 8N).
         state["registry_ids"] = json!(safety::registry_ids());
         state["taken"] = json!(safety::taken_ids());
@@ -4920,6 +4925,8 @@ fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
                 .map(|w| CardWindow { id: w.meta.id.0, pid: w.meta.pid, frame: w.restore })
                 .collect(),
             apps: c.apps,
+            active: c.active,
+            gap: c.gap,
         })
         .collect()
 }

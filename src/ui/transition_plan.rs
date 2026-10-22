@@ -7,7 +7,9 @@
 //! windows at their live frames, each with the slot its stage's card has **after** the change
 //! (Apple's swap: the slot the clicked card vacated), incoming windows at their arrival
 //! frames, each with the slot its card had **before** (where it is drawn when the motion
-//! starts).
+//! starts). In place (`[strip] order = "in_place"`) the stage left shrinks into its own
+//! place, and with `active = "close"` the cards between the two places glide on the strip's
+//! spring ([`glides`]). The slots count the active stage's empty slot (`active = "gap"`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -110,6 +112,19 @@ pub fn order(slots: &Slots) -> Vec<u64> {
     slots.iter().map(|s| s.0).collect()
 }
 
+/// The cards in both `before` and `after` whose slot changed: (stage, slot before, slot
+/// after). The strip glides them on its spring (`[motion] spring_*`).
+pub fn glides(before: &Slots, after: &Slots) -> Vec<(u64, usize, usize)> {
+    after
+        .iter()
+        .enumerate()
+        .filter_map(|(to, (stage, _))| {
+            let from = before.iter().position(|(s, _)| s == stage)?;
+            (from != to).then_some((*stage, from, to))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     //! One test per kind of switch: the outgoing windows' card slot in the transition is the
@@ -117,7 +132,7 @@ mod tests {
     //! other card keeps its slot).
 
     use super::*;
-    use crate::engine::model::{ModelOptions, Observation, StageId, WindowId};
+    use crate::engine::model::{ActiveCard, ModelOptions, Observation, StageId, StripOrder, WindowId};
     use crate::engine::rules::{Decision, Placement, RuleAction};
     use crate::engine::testkit::{Desk, meta, model_with, w};
 
@@ -138,6 +153,25 @@ mod tests {
                 e.add(i, 100 + i as i32, action);
             }
             e
+        }
+
+        /// [`Env::new`] with the strip in place (`[strip] order = "in_place"`, `active = mode`).
+        fn in_place(n: u32, capacity: usize, mode: ActiveCard) -> Self {
+            let mut options = ModelOptions::default();
+            options.strip.capacity = capacity;
+            options.strip.order = StripOrder::InPlace;
+            options.strip.active = mode;
+            let mut e = Self { m: model_with(options), d: Desk::default(), before: Before::default() };
+            for i in 1..=n {
+                let action = if i == 1 { RuleAction::Current } else { RuleAction::New };
+                e.add(i, 100 + i as i32, action);
+            }
+            e
+        }
+
+        /// The strip's slots as the model lays them out now (the gap included).
+        fn slots(&self) -> Slots {
+            slots_of(&self.m)
         }
 
         fn add(&mut self, id: u32, pid: i32, action: RuleAction) -> Option<Transition> {
@@ -312,5 +346,106 @@ mod tests {
         assert_swap(&before, &e.order(), slot, leaving, "out of view");
         assert_aims(&e, &t, &before, "out of view");
         assert!(t.incoming.iter().all(|g| g.slot.is_none()), "it had no card: it grows from off the strip");
+    }
+
+    /// In place: clicks on slots 1, 3 and 6 (and back) in each mode. The stage left shrinks
+    /// into its own place, the clicked card's windows grow from where it was drawn, and only
+    /// with `close` do cards glide: exactly those between the two places, one slot each.
+    #[test]
+    fn in_place_the_stage_left_shrinks_into_its_own_place_and_only_close_glides() {
+        for mode in [ActiveCard::Close, ActiveCard::Gap, ActiveCard::Card] {
+            let mut e = Env::in_place(7, 9, mode);
+            for slot in [0usize, 2, 5, 1, 4] {
+                let before = e.slots();
+                let leaving = e.active();
+                let (target, gap) = (before[slot].0, before.iter().position(|(s, _)| *s == leaving));
+                if target == leaving {
+                    continue; // the active card or gap itself
+                }
+                let t = e.click(target).expect("a transition");
+                let after = e.slots();
+                let what = format!("{mode:?}, slot {slot}");
+                let own = after.iter().position(|(s, _)| *s == leaving).expect("the stage left has a card");
+                assert!(t.outgoing.iter().all(|g| g.slot == Some(own) && g.stage == Some(leaving)), "{what}: outgoing into its own slot {own}");
+                assert!(t.incoming.iter().all(|g| g.slot == Some(slot) && g.stage == Some(target)), "{what}: incoming from slot {slot}");
+                assert_aims(&e, &t, &order(&before), &what);
+                let glided = glides(&before, &after);
+                match mode {
+                    ActiveCard::Close => {
+                        // The stage left comes in at its own place, the clicked one goes.
+                        let (lo, hi) = if own <= slot { (own, slot) } else { (slot + 1, own + 1) };
+                        let want: Vec<(u64, usize, usize)> = before
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, (s, _))| *i >= lo && *i < hi && *s != target)
+                            .map(|(i, (s, _))| (*s, i, if own <= slot { i + 1 } else { i - 1 }))
+                            .collect();
+                        assert_eq!(glided, want, "{what}: the cards between the two places glide one slot");
+                        assert_eq!(gap, None);
+                    }
+                    ActiveCard::Gap | ActiveCard::Card => {
+                        assert!(glided.is_empty(), "{what}: no card moves ({glided:?})");
+                        assert_eq!(Some(own), gap, "{what}: the stage left fills its gap or card's slot");
+                        assert_eq!(after[slot].0, target, "{what}: the clicked stage's slot is its gap or card now");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn in_place_past_the_capacity_the_stage_left_takes_the_bottom_slot() {
+        let mut e = Env::in_place(7, 4, ActiveCard::Close);
+        let before = e.slots();
+        let leaving = e.active();
+        let target = before[3].0;
+        let t = e.click(target).expect("a transition");
+        let after = e.slots();
+        assert_eq!(after[3].0, leaving, "the stage left rotates into the bottom slot");
+        assert!(t.outgoing.iter().all(|g| g.slot == Some(3)));
+        assert!(t.incoming.iter().all(|g| g.slot == Some(3)));
+        assert!(glides(&before, &after).is_empty(), "the head never moves");
+    }
+
+    /// A Dock click, a hotkey and a desktop reveal follow the same rules as a click.
+    #[test]
+    fn in_place_a_dock_click_a_hotkey_and_a_reveal_leave_the_stage_in_its_own_place() {
+        for mode in [ActiveCard::Close, ActiveCard::Gap, ActiveCard::Card] {
+            let mut e = Env::in_place(6, 9, mode);
+            let check = |e: &Env, t: &Transition, before: &Slots, leaving: u64, what: &str| {
+                let after = e.slots();
+                let own = after.iter().position(|(s, _)| *s == leaving);
+                assert!(own.is_some() && t.outgoing.iter().all(|g| g.slot == own), "{mode:?} {what}: into its own slot");
+                let stages: Vec<u64> = e.m.stages().iter().filter(|s| !s.windows.is_empty()).map(|s| s.id.0).collect();
+                let shown: Vec<u64> = order(&after);
+                assert!(shown.iter().all(|s| stages.contains(s)), "{mode:?} {what}");
+                let mut sorted = shown.clone();
+                sorted.sort_by_key(|s| stages.iter().position(|x| x == s));
+                assert_eq!(shown, sorted, "{mode:?} {what}: creation order");
+                if mode != ActiveCard::Close {
+                    assert!(glides(before, &after).is_empty(), "{mode:?} {what}: nothing glides");
+                }
+            };
+            // The Dock: app 102's stage.
+            let (before, leaving) = (e.slots(), e.active());
+            let obs = e.obs();
+            let a = e.m.app_activated(102, &obs);
+            let t = e.apply(a).expect("a transition");
+            assert_eq!(e.active(), e.stage_of(2));
+            check(&e, &t, &before, leaving, "dock");
+            // A hotkey: stage 5.
+            let (before, leaving) = (e.slots(), e.active());
+            let obs = e.obs();
+            let a = e.m.switch_to_number(5, &obs);
+            let t = e.apply(a).expect("a transition");
+            assert_eq!(e.active(), e.stage_of(5));
+            check(&e, &t, &before, leaving, "hotkey");
+            // A wallpaper click.
+            let (before, leaving) = (e.slots(), e.active());
+            let obs = e.obs();
+            let a = e.m.reveal_desktop(&obs);
+            let t = e.apply(a).expect("a transition");
+            check(&e, &t, &before, leaving, "reveal");
+        }
     }
 }

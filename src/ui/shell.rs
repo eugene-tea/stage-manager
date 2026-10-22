@@ -376,6 +376,7 @@ impl Shell {
             Change::NewAppsJoinCurrent(on) => self.write_config("stages.new_apps_join_current", if on { "true" } else { "false" }),
             Change::MergeOnDrop(on) => self.write_config("strip.merge_on_drop", if on { "true" } else { "false" }),
             Change::ShiftBringsHere(on) => self.write_config("sugar.shift_brings_here", if on { "true" } else { "false" }),
+            Change::KeepInPlace(on) => self.write_config("strip.order", if on { "\"in_place\"" } else { "\"native\"" }),
             Change::Fit(mode) => {
                 let v = match mode {
                     FitMode::Off => "\"off\"",

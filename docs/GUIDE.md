@@ -87,6 +87,22 @@ You can switch stages the same ways as with Apple's Stage Manager:
 
 The stage you leave takes the card's place in the strip.
 
+### Stages in place
+
+With Apple's strip, the stage you leave takes the place of the card you click, so after a
+few clicks the stages sit in the order you clicked them. Turn on **Keep stages in place**
+(Settings → Stages, or `[strip] order = "in_place"`) and every stage keeps a place of its own,
+in the order the stages were made (the same order the ⌃⌥1–9 shortcuts use). The stage you
+leave goes back to its own place. A new stage goes last; drag a card to move its stage.
+
+The active stage has no card, as in Apple's strip, and the cards below its place close up.
+In the config file, `[strip] active = "gap"` leaves an empty slot there instead, so no card
+ever moves, and `active = "card"` shows the active stage as a highlighted card.
+
+When there are more stages than the strip has room for, the first stages keep their places
+and the others share the last one: it shows whichever of them you used last, so the stage
+you just left is always there.
+
 ### New windows
 
 A new window joins its app's stage. If the app is not on screen yet, it gets a stage of its
@@ -177,7 +193,7 @@ Applications and Settings appears. The buttons along its top switch between five
   an app's windows all at once or one at a time. These are macOS's own settings, so they
   stay in step with System Settings.
 - **Stages:** bringing stages back after a restart, opening new apps in the current stage,
-  Shift to bring apps here, and merging stages by dropping cards.
+  Shift to bring apps here, merging stages by dropping cards, and keeping stages in place.
 - **Windows:** keeping windows clear of the strip, animation speed, and keyboard shortcuts.
 - **Advanced:** the config file, and help for asking an AI assistant to change it.
 

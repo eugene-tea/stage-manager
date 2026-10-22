@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::engine::model::{ModelOptions, StripOptions, StripOrder};
+use crate::engine::model::{ActiveCard, ModelOptions, StripOptions, StripOrder};
 use crate::engine::rules::{Decision, Placement, Rule, RuleAction, RuleSet};
 use crate::engine::settings::NativeSettings;
 
@@ -100,10 +100,11 @@ impl CapacityRule {
 /// The `[strip]` keys the engine uses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripConfig {
-    /// Card order.
+    /// Card order (`[strip] order`).
     pub order: StripOrder,
-    /// Show the active stage as a card (fixed order only).
-    pub show_active: bool,
+    /// How the active stage shows in place (`[strip] active`; the older `show_active = true`
+    /// reads as [`ActiveCard::Card`]).
+    pub active: ActiveCard,
     /// Hide the strip while a wallpaper click shows the desktop (an option; Apple keeps it
     /// shown, as the way back to a stage). It comes back on any window activation.
     pub hide_while_desktop_shown: bool,
@@ -669,6 +670,10 @@ impl Config {
         let mut warnings = Vec::new();
         let mut values = default_values();
         let mut raw_rules: Vec<toml::Table> = Vec::new();
+        // `[strip] show_active = true`, the older spelling of `active = "card"`: still read,
+        // without a warning, unless `active` itself is set.
+        let mut legacy_show_active = false;
+        let active_set = table.get("strip").and_then(toml::Value::as_table).is_some_and(|t| t.contains_key("active"));
         for (section, value) in &table {
             if section == "rule" {
                 let items = value.as_array().ok_or_else(|| err("[[rule]] must be an array of tables".into()))?;
@@ -689,6 +694,11 @@ impl Config {
             }
             let t = value.as_table().ok_or_else(|| err(format!("[{section}] must be a table")))?;
             for (key, v) in t {
+                if section == "strip" && key == "show_active" {
+                    let on = v.as_bool().ok_or_else(|| err(at_line(text, section, key, "[strip] show_active: expected true or false".into())))?;
+                    legacy_show_active = on;
+                    continue;
+                }
                 if let Some((_, _, why)) = RETIRED.iter().find(|(s, k, _)| s == section && k == key) {
                     warnings.push(format!("[{section}] {key}: {why}"));
                     continue;
@@ -761,8 +771,16 @@ impl Config {
                 install_updates: v.flag("app.install_updates"),
             },
             strip: StripConfig {
-                order: if v.text("strip.order") == "fixed" { StripOrder::Fixed } else { StripOrder::Native },
-                show_active: v.flag("strip.show_active"),
+                order: match v.text("strip.order") {
+                    "in_place" | "fixed" => StripOrder::InPlace,
+                    _ => StripOrder::Native,
+                },
+                active: match v.text("strip.active") {
+                    "gap" => ActiveCard::Gap,
+                    "card" => ActiveCard::Card,
+                    _ if legacy_show_active && !active_set => ActiveCard::Card,
+                    _ => ActiveCard::Close,
+                },
                 hide_while_desktop_shown: v.flag("strip.hide_while_desktop_shown"),
                 capacity: CapacityRule {
                     fixed: v.count("strip.capacity"),
@@ -904,7 +922,7 @@ impl Config {
 
     /// Strip options for the model; `capacity` is computed by the platform from the screen.
     pub fn strip_options(&self, capacity: usize) -> StripOptions {
-        StripOptions { order: self.strip.order, show_active: self.strip.show_active, capacity }
+        StripOptions { order: self.strip.order, active: self.strip.active, capacity }
     }
 
     /// Model options from this config plus Apple's settings and the strip capacity.
@@ -1327,8 +1345,10 @@ activation_grows = false
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert!(!c.style.animation.activation_grows, "kept: false brings an activation's windows at once");
         assert!(Config::default().style.animation.activation_grows, "an activation grows from its card by default, as Apple's (8L)");
-        assert_eq!(c.strip.order, StripOrder::Fixed);
-        assert!(c.strip.show_active && c.style.show_numbers && c.strip.hide_while_desktop_shown);
+        assert_eq!(c.strip.order, StripOrder::InPlace, "\"fixed\" is the older name of \"in_place\"");
+        assert_eq!(c.strip.active, ActiveCard::Card, "show_active = true is the older active = \"card\"");
+        assert!(!p.warnings.iter().any(|w| w.contains("show_active") || w.contains("order")), "the older spellings read without a warning: {:?}", p.warnings);
+        assert!(c.style.show_numbers && c.strip.hide_while_desktop_shown);
         assert_eq!(c.strip.thumbnail_interval_ms, 2000);
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 4);
         assert_eq!(c.style.cards.tilt, Auto::Value(30.0));
@@ -1430,8 +1450,28 @@ swipe = true
     fn model_options_carry_config_and_settings() {
         let p = parse("[strip]\norder = \"fixed\"\n[stages]\nnames = [\"Work\"]");
         let o = p.config.model_options(NativeSettings::default(), 5);
-        assert_eq!(o.strip, StripOptions { order: StripOrder::Fixed, show_active: false, capacity: 5 });
+        assert_eq!(o.strip, StripOptions { order: StripOrder::InPlace, active: ActiveCard::Close, capacity: 5 });
         assert_eq!(o.named_stages, ["Work"]);
+    }
+
+    #[test]
+    fn keep_stages_in_place_and_the_active_stage_modes() {
+        let c = Config::default().strip;
+        assert_eq!((c.order, c.active), (StripOrder::Native, ActiveCard::Close), "Apple's swap by default");
+        let read = |t: &str| parse(t).config.strip;
+        assert_eq!(read("[strip]\norder = \"in_place\"").order, StripOrder::InPlace);
+        assert_eq!(read("[strip]\norder = \"fixed\"").order, StripOrder::InPlace, "the older name");
+        for (text, want) in [("close", ActiveCard::Close), ("gap", ActiveCard::Gap), ("card", ActiveCard::Card)] {
+            assert_eq!(read(&format!("[strip]\nactive = \"{text}\"")).active, want);
+        }
+        let legacy = parse("[strip]\nshow_active = true");
+        assert_eq!(legacy.config.strip.active, ActiveCard::Card, "show_active = true reads as \"card\"");
+        assert!(legacy.warnings.is_empty(), "with no warning: {:?}", legacy.warnings);
+        assert_eq!(read("[strip]\nshow_active = false").active, ActiveCard::Close);
+        assert_eq!(read("[strip]\nshow_active = true\nactive = \"gap\"").active, ActiveCard::Gap, "active itself wins");
+        assert_eq!(read("[strip]\nactive = \"close\"\nshow_active = true").active, ActiveCard::Close);
+        assert!(Config::parse("[strip]\nshow_active = 1").is_err(), "still a switch");
+        assert!(Config::parse("[strip]\nactive = \"hidden\"").is_err());
     }
 
     #[test]
@@ -1467,11 +1507,11 @@ swipe = true
         std::fs::write(&path, "[strip]\norder = \"fixed\"").expect("write");
         let (mut store, first) = ConfigStore::open(path.clone());
         assert_eq!(first, Ok((vec![], FileAction::Read)));
-        assert_eq!(store.config().strip.order, StripOrder::Fixed);
+        assert_eq!(store.config().strip.order, StripOrder::InPlace);
         std::fs::write(&path, "[strip]\norder = \"sideways\"").expect("write");
         let e = store.reload().expect_err("bad file");
         assert!(e.to_string().contains("sideways"));
-        assert_eq!(store.config().strip.order, StripOrder::Fixed);
+        assert_eq!(store.config().strip.order, StripOrder::InPlace);
         std::fs::write(&path, "[strip]\norder = \"native\"\nbogus = 1").expect("write");
         assert_eq!(store.reload().expect("good").len(), 1);
         assert_eq!(store.config().strip.order, StripOrder::Native);

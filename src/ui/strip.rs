@@ -96,6 +96,15 @@ mod motion;
 
 /// The gap's stage id in the column while a window is dragged over it (never a real stage).
 const DROP_STAGE: u64 = u64::MAX;
+/// The id the active stage's empty slot takes in the column (`[strip] active = "gap"`): laid
+/// out like a card, never drawn or hit. A drop right above it goes right above the active
+/// stage ([`Strip::real_stage`]).
+const GAP_STAGE: u64 = u64::MAX - 1;
+
+/// A slot of the column that is no card: the drop gap or the active stage's empty slot.
+fn placeholder(stage: u64) -> bool {
+    stage == DROP_STAGE || stage == GAP_STAGE
+}
 /// The strip's window level below windows (Apple's): just under normal windows.
 const BELOW_WINDOWS: isize = NSNormalWindowLevel - 1;
 
@@ -116,6 +125,8 @@ const TAB_PILL_WIDTH: f64 = 5.0;
 /// says: a click with a hand's tremor of a few points stays a click (owner 10-12: two clicks
 /// with a 2–4 pt wobble started a reorder and were lost).
 const MIN_DRAG_THRESHOLD: f64 = 5.0;
+/// The rim of the active stage's card (`[strip] active = "card"`), points.
+const ACTIVE_RIM: f64 = 2.0;
 /// Depth of a card lifted above the others while it is dragged and while it glides into its
 /// slot after the release (its whole unit: thumbnails, icons, badge).
 const LIFTED_Z: f64 = 100.0;
@@ -188,7 +199,10 @@ pub fn set_thumbnail_interval(ms: u64) {
 /// the strip (the user hid the strip, or `p` is outside the strip column), else the slot under
 /// `p`, the same one the strip's gap shows. Main thread.
 pub fn drop_slot(p: Point) -> Option<StripDrop> {
-    with_strip(|s| (s.snapshot.user_visible && s.geometry.global.contains(p)).then(|| s.drop_slot_at(p))).flatten()
+    with_strip(|s| {
+        (s.snapshot.user_visible && s.geometry.global.contains(p)).then(|| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })
+    })
+    .flatten()
 }
 
 /// The pointer moved to `p` (global, top-left origin) over another app's window or the
@@ -1146,7 +1160,11 @@ impl Strip {
 
     // -- snapshots ------------------------------------------------------------------------
 
-    fn present(&mut self, snapshot: StripSnapshot) {
+    fn present(&mut self, mut snapshot: StripSnapshot) {
+        // The active stage's empty slot is laid out as a card of its own id, never the stage's.
+        for c in snapshot.cards.iter_mut().filter(|c| c.gap) {
+            c.stage = GAP_STAGE;
+        }
         if snapshot.away {
             self.present_away(snapshot);
             return;
@@ -1404,7 +1422,7 @@ impl Strip {
             cards.insert(to, card);
         }
         if let Some(w) = self.snapshot.window_drag.filter(|_| self.drop_over) {
-            let gap = CardSnapshot { stage: DROP_STAGE, number: 0, name: None, windows: vec![w], apps: Vec::new() };
+            let gap = CardSnapshot { stage: DROP_STAGE, windows: vec![w], ..Default::default() };
             let to = self.drop_before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
             cards.insert(to, gap);
         }
@@ -1422,6 +1440,8 @@ impl Strip {
     /// the middle `band` of its height.
     fn spot_at(&self, layouts: &[CardLayout], p: Point, skip: Option<u64>, band: f64) -> Spot {
         let m = self.m();
+        // The active stage's empty slot counts as a slot (a drop there goes above it), never
+        // as a card to merge into.
         let others: Vec<&CardLayout> = layouts.iter().filter(|l| Some(l.stage) != skip && l.stage != DROP_STAGE).collect();
         let bands: Vec<(f64, f64)> = others
             .iter()
@@ -1433,7 +1453,11 @@ impl Strip {
         let y = p.y - self.geometry.global.y;
         match motion_math::drop_spot(&bands, y, band) {
             DropSpot::Gap(i) => Spot::Before(others.get(i).map(|l| l.stage)),
-            DropSpot::OnCard(i) => others.get(i).map_or(Spot::Before(None), |l| Spot::Onto(l.stage)),
+            DropSpot::OnCard(i) => match others.get(i) {
+                Some(l) if l.stage == GAP_STAGE => Spot::Before(Some(GAP_STAGE)),
+                Some(l) => Spot::Onto(l.stage),
+                None => Spot::Before(None),
+            },
         }
     }
 
@@ -1515,8 +1539,8 @@ impl Strip {
             self.hovered = None;
         }
         for (i, card) in cards.iter().enumerate() {
-            if card.stage == DROP_STAGE {
-                continue; // the gap: the window's own card follows the pointer above
+            if placeholder(card.stage) {
+                continue; // a gap: the window's own card follows the pointer above, or the active stage's slot
             }
             match &following {
                 Some((stage, l)) if *stage == card.stage => {
@@ -1633,7 +1657,7 @@ impl Strip {
         let frames = if self.pane.shown {
             self.layouts
                 .iter()
-                .filter(|l| l.stage != DROP_STAGE)
+                .filter(|l| !placeholder(l.stage))
                 .map(|l| (l.stage, l.bounds(self.m()).translate(g.x, g.y)))
                 .collect()
         } else {
@@ -1769,8 +1793,14 @@ impl Strip {
             plane.setTransform(turn(&m));
             plane.setCornerRadius(c.corner_radius * k);
             plane.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 1.0)));
-            plane.setBorderWidth(c.border_width * k);
-            plane.setBorderColor(Some(&rgba(c.border_color)));
+            if card.active {
+                // The active stage's card (`[strip] active = "card"`): a light rim marks it.
+                plane.setBorderWidth(ACTIVE_RIM * k);
+                plane.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.9)));
+            } else {
+                plane.setBorderWidth(c.border_width * k);
+                plane.setBorderColor(Some(&rgba(c.border_color)));
+            }
             plane.setShadowColor(Some(&rgba(c.shadow_color)));
             plane.setShadowOpacity(c.shadow_opacity as f32);
             plane.setShadowRadius(c.shadow_radius * k);
@@ -1861,7 +1891,7 @@ impl Strip {
     // -- thumbnails -------------------------------------------------------------------------
 
     fn set_thumbnail(&mut self, id: u32, picture: Picture) {
-        let shown = self.layouts.iter().any(|l| l.thumbs.iter().any(|t| t.id == id));
+        let shown = self.layouts.iter().filter(|l| !placeholder(l.stage)).any(|l| l.thumbs.iter().any(|t| t.id == id));
         if !shown {
             return;
         }
@@ -1885,12 +1915,13 @@ impl Strip {
 
     /// Tells the capturer what to capture: every shown thumbnail while the strip shows.
     fn update_targets(&mut self) {
-        let shown_ids: Vec<u32> = self.layouts.iter().flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
+        // The active stage's empty slot shows no thumbnails.
+        let drawn = || self.layouts.iter().filter(|l| l.stage != GAP_STAGE);
+        let shown_ids: Vec<u32> = drawn().flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
         self.thumbs.retain(|id, _| shown_ids.contains(id));
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
         let targets = if self.pane.shown {
-            self.layouts
-                .iter()
+            drawn()
                 .flat_map(|l| l.thumbs.iter())
                 .map(|t| Target {
                     id: t.id,
@@ -1913,7 +1944,7 @@ impl Strip {
         let mut hits = self
             .layouts
             .iter()
-            .filter(|l| l.stage != DROP_STAGE)
+            .filter(|l| !placeholder(l.stage))
             .map(|l| (l.stage, self.drawn_bounds(l)))
             .filter(|(_, b)| b.contains(p))
             .map(|(s, _)| s);
@@ -2148,7 +2179,7 @@ impl Strip {
                 self.update_visibility();
                 if moved {
                     tracing::debug!(stage = drag.stage, before = ?drag.before, "card reordered");
-                    return Some(StripEvent::CardMoved { stage: drag.stage, before: drag.before });
+                    return Some(StripEvent::CardMoved { stage: drag.stage, before: self.real_stage(drag.before) });
                 }
                 // Back in its own slot: nothing moved. Released over the card, it was a click
                 // with a wobble.
@@ -2222,11 +2253,20 @@ impl Strip {
 
     /// A click on `stage`'s card at `p`: on an app icon (without shift) or the card.
     fn click_event(&self, stage: u64, p: Point, shift: bool) -> StripEvent {
-        let slot = self.layouts.iter().filter(|l| l.stage != DROP_STAGE).position(|l| l.stage == stage);
+        let slot = self.layouts.iter().filter(|l| !placeholder(l.stage)).position(|l| l.stage == stage);
         tracing::debug!(stage, ?slot, "card click in slot");
         match self.icon_at(stage, p) {
             Some(pid) if !shift => StripEvent::IconClicked { stage, pid },
             _ => StripEvent::CardClicked { stage, shift },
+        }
+    }
+
+    /// The stage a slot of the column stands for: the active stage's for its empty slot
+    /// ([`GAP_STAGE`]), else the slot's own.
+    fn real_stage(&self, stage: Option<u64>) -> Option<u64> {
+        match stage {
+            Some(GAP_STAGE) => self.snapshot.active_stage,
+            other => other,
         }
     }
 

@@ -6,6 +6,12 @@
   (Settings → Stages, or `[stages] new_apps_join_current`) and a newly opened app's windows
   join the stage you are in. Hold Shift while opening an app to give it a stage of its own.
   Off by default, as Apple's.
+- Stages can keep their places: turn on **Keep stages in place** (Settings → Stages, or
+  `[strip] order = "in_place"`) and each stage keeps its own place in the strip, in the order
+  the stages were made, whichever card you click; the stage you leave goes back to its own
+  place. `[strip] active` chooses how the active stage's place shows: no card (the default),
+  an empty slot (`"gap"`) or a highlighted card (`"card"`). With more stages than fit, the
+  last place shows the one you used most recently. Off by default: Apple's strip swaps.
 - Settings has a toolbar of panes, as Mac apps' settings do: General, Stage Manager, Stages,
   Windows and Advanced. It opens on the pane you used last.
 
