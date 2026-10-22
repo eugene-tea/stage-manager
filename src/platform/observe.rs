@@ -44,6 +44,16 @@ use crate::engine::vanished::Vanished;
 /// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
 const MAX_ATTEMPTS: u32 = 10;
 
+/// Test only (round 8M): with `STAGE_MANAGER_TEST` set too, any value ignores Accessibility's
+/// destroyed notifications, as an app that does not answer sends none (Home, 10-21), so a
+/// scripted check sees a closed window leave through [`Observer::sweep_closed`] alone.
+pub const DROP_DESTROYED_ENV: &str = "STAGE_MANAGER_DROP_AX_DESTROYED";
+
+fn drop_destroyed() -> bool {
+    static DROP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DROP.get_or_init(|| std::env::var_os("STAGE_MANAGER_TEST").is_some() && std::env::var_os(DROP_DESTROYED_ENV).is_some())
+}
+
 /// Standard window or child (sheet, dialog, panel, popover…).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -708,6 +718,10 @@ impl Observer {
                 self.rescan_app(pid);
             }
             n::ELEMENT_DESTROYED => {
+                if drop_destroyed() {
+                    tracing::debug!(pid, "test: a destroyed notification ignored ({DROP_DESTROYED_ENV})");
+                    return;
+                }
                 if let Some(id) = self.find_window(pid, &element) {
                     if let (Some(w), Some(app)) = (self.windows.remove(&id), self.observed.get(&pid)) {
                         for name in n::WINDOW_LEVEL {

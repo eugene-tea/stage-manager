@@ -116,6 +116,13 @@ the model let go, and the guardian's watch skip a hidden tab (logged once at deb
 window the guardian's parked file names is never judged one. A group whose selected tab is on a
 Desktop not shown keeps its unregistered hidden tabs waited for until that Desktop shows.
 
+Round 8M widens it for windows we never parked: a window found in the park zone that we never
+registered nor manage, that this session's `state.json` does not name, off screen, whose app
+answers and does not list it through Accessibility, is another app's (Chrome's helper windows
+past the corner, a hidden tab whose selected tab is on another Desktop): the quit's check logs
+it at debug, never as still parked, and the guardian never waits on it. A registered window
+always waits; a saved one too.
+
 ## Testing hooks
 
 - `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).
