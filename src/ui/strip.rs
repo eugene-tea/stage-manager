@@ -113,6 +113,10 @@ const REHOME_CHECKS: [f64; 2] = [0.4, 1.2];
 /// A window dragged over the strip goes between cards only (dropping it onto a card's
 /// stage is not built).
 const WINDOW_DROP_BAND: f64 = 0.0;
+
+/// The most window pictures the strip keeps; past it, the pictures of windows no card shows
+/// now go (each is a thumbnail at card resolution, a few hundred KB).
+const KEPT_PICTURES: usize = 64;
 /// A released card drawn pressed lets go after this if no transition took it (seconds).
 const SQUEEZE_MAX: f64 = 0.6;
 /// What a card dropped onto another shrinks to, about the target's middle.
@@ -1954,11 +1958,15 @@ impl Strip {
         // The active stage's empty slot shows no thumbnails.
         let drawn = || self.layouts.iter().filter(|l| l.stage != GAP_STAGE);
         let shown_ids: Vec<u32> = drawn().flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
-        let dropped: Vec<u32> = self.thumbs.keys().copied().filter(|id| !shown_ids.contains(id)).collect();
-        if !dropped.is_empty() {
+        // Pictures of windows out of view (another Desktop's cards, a card that rotated out)
+        // are kept, so a card coming back shows its last picture at once rather than gray
+        // until its next capture (the owner's gray flashes, 10-22); past KEPT_PICTURES the
+        // ones out of view go.
+        if self.thumbs.len() > KEPT_PICTURES {
+            let dropped: Vec<u32> = self.thumbs.keys().copied().filter(|id| !shown_ids.contains(id)).collect();
             tracing::debug!(?dropped, "strip: pictures of windows no card shows now are let go");
+            self.thumbs.retain(|id, _| shown_ids.contains(id));
         }
-        self.thumbs.retain(|id, _| shown_ids.contains(id));
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
         let targets = if self.pane.shown {
             drawn()
