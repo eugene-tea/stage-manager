@@ -979,6 +979,11 @@ impl Model {
                     .and_then(|b| self.stages.iter().position(|s| s.id == b))
                     .unwrap_or(self.stages.len());
                 self.stages.insert(at, moved);
+                // Put where the user can see it: past the capacity the bottom places go
+                // by recency, so a card dragged (or a window dropped) there keeps showing.
+                if !self.is_active(stage) {
+                    self.touch(stage);
+                }
                 at != from
             }
         }

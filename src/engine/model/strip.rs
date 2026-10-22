@@ -340,6 +340,12 @@ impl Model {
     /// A stage enters the strip: a free slot at the bottom, else the least recently used
     /// card's slot.
     pub(crate) fn strip_enter(&mut self, space: SpaceId, stage: StageId) {
+        // In place, the stages past the capacity show by recency: a stage never used yet (a
+        // window dropped on the strip, a new stage in the background) counts as used now, or
+        // it would enter the strip with no card.
+        if self.options.strip.order == StripOrder::InPlace && self.stage(stage).is_some_and(|s| s.last_active == 0) {
+            self.touch(stage);
+        }
         let capacity = self.options.strip.capacity;
         if capacity == 0 {
             return;
@@ -357,6 +363,14 @@ impl Model {
         let age = |id: StageId| recency.iter().find(|r| r.0 == id).map_or(0, |r| r.1);
         if let Some((i, _)) = slots.iter().enumerate().min_by_key(|(_, s)| age(**s)) {
             slots[i] = stage;
+        }
+    }
+
+    /// Marks `stage` as just used (its recency is the clock's next tick).
+    pub(crate) fn touch(&mut self, stage: StageId) {
+        let t = self.tick();
+        if let Some(s) = self.stage_mut(stage) {
+            s.last_active = t;
         }
     }
 

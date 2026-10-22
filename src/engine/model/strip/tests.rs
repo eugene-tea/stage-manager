@@ -352,3 +352,31 @@ fn a_restart_brings_the_same_places_back() {
         .collect();
     assert_eq!(places, saved_places, "the same places and the same active stage");
 }
+
+#[test]
+fn past_the_capacity_a_window_dropped_on_the_strip_and_a_card_dragged_down_keep_their_cards() {
+    // The owner's report (10-22): seven stages at capacity 6, a window dropped on the strip
+    // made a stage that was never used, so the bottom place's rotation left it no card.
+    for mode in MODES {
+        let mut e = Env::stages(mode, 4, 7);
+        e.add(8, 107, RuleAction::Current);
+        let obs = e.obs();
+        let frame = obs.frames[&w(8)];
+        let a = e.m.drop_window_on_strip(w(8), frame, None, &obs);
+        e.d.apply(&a);
+        let dropped = e.s(8);
+        assert!(e.m.strip().iter().any(|c| c.stage == dropped), "{mode:?}: the dropped window's stage shows: {:?}", e.m.strip());
+        // Dropped between two cards: it shows there too.
+        e.add(9, 107, RuleAction::Current);
+        let obs = e.obs();
+        let before = e.m.strip().last().expect("a card").stage;
+        let a = e.m.drop_window_on_strip(w(9), obs.frames[&w(9)], Some(before), &obs);
+        e.d.apply(&a);
+        let dropped = e.s(9);
+        assert!(e.m.strip().iter().any(|c| c.stage == dropped), "{mode:?}: dropped above a card, it shows: {:?}", e.m.strip());
+        // A head card dragged to the bottom keeps its card.
+        let first = e.m.strip()[0].stage;
+        e.m.move_card(first, None);
+        assert!(e.m.strip().iter().any(|c| c.stage == first), "{mode:?}: a card dragged down still shows: {:?}", e.m.strip());
+    }
+}
