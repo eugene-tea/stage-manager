@@ -107,6 +107,11 @@ pub(super) struct Motion {
 }
 
 impl Motion {
+    /// The snapshot last taken of window `id` for a ghost, if still kept.
+    pub(super) fn snapshot(&self, id: u32) -> Option<&Picture> {
+        self.cache.get(id)
+    }
+
     pub(super) fn new(mtm: MainThreadMarker) -> Self {
         Self {
             overlay: Overlay::new(mtm),

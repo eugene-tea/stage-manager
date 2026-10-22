@@ -1851,7 +1851,9 @@ impl Strip {
             // SAFETY: framework constant.
             image.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
             image.setAllowsEdgeAntialiasing(true);
-            if let Some(picture) = self.thumbs.get(&slot.id) {
+            // With no card picture yet (a window first seen since launch), the snapshot a
+            // switch just took of it for its ghost stands in until its capture arrives.
+            if let Some(picture) = self.thumbs.get(&slot.id).or_else(|| self.motion.snapshot(slot.id)) {
                 show_picture(&image, picture, window);
             } else {
                 // Drawn gray until its next capture (the owner saw short gray flashes, 10-22).
