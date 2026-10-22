@@ -46,7 +46,7 @@ pub use pool::NumberRef;
 pub(crate) use pool::Kin;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
-pub use strip::{ActiveCard, StripCard, StripOptions, StripOrder};
+pub use strip::{ActiveCard, DockApp, StripCard, StripOptions, StripOrder};
 
 /// A process ID.
 pub type Pid = i32;
@@ -340,6 +340,9 @@ pub struct Model {
     pub(crate) restore: super::restore::Restore,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
+    /// The Dock's application items in order, as the platform last read them ("Follow the
+    /// Dock", [`StripOrder::Dock`]).
+    pub(crate) dock: Vec<DockApp>,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -386,6 +389,7 @@ impl Model {
             quit: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
+            dock: Vec::new(),
             clock: 0,
             next_stage: 1,
             options,
@@ -428,14 +432,11 @@ impl Model {
         self.stages.iter().find(|s| s.id == id)
     }
 
-    /// The 1-based hotkey number of a stage: its place among its Space's stages.
+    /// The 1-based hotkey number of a stage: its place among its Space's stages
+    /// ([`Model::place_order`]).
     pub fn stage_number(&self, id: StageId) -> Option<usize> {
         let space = self.stage(id)?.space;
-        self.stages
-            .iter()
-            .filter(|s| s.space == space)
-            .position(|s| s.id == id)
-            .map(|i| i + 1)
+        self.place_order(space).iter().position(|s| s.id == id).map(|i| i + 1)
     }
 
     /// The active stage of a display (on the Space it shows now).

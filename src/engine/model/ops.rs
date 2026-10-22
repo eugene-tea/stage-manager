@@ -878,8 +878,9 @@ impl Model {
     /// its own (parked, its card in the strip), and its restore frame is `pre_drag`, the
     /// frame it had before the drag, not where it was dropped. Its children move back by the
     /// same offset. Its card takes the slot it was dropped into: right above `before`'s card,
-    /// or the bottom when `before` is `None` (see [`Model::move_card`]). Same as
-    /// [`Model::send_window`] with [`Target::New`] otherwise.
+    /// or the bottom when `before` is `None` (see [`Model::move_card`]); following the Dock
+    /// ([`StripOrder::Dock`]) its Dock place instead. Same as [`Model::send_window`] with
+    /// [`Target::New`] otherwise.
     pub fn drop_window_on_strip(
         &mut self,
         id: WindowId,
@@ -892,7 +893,7 @@ impl Model {
             && before != Some(stage)
         {
             // A new stage, not a card dragged among the cards shown: in place it moves in
-            // creation order.
+            // creation order; following the Dock it takes its Dock place.
             self.place_card(stage, before, false);
         }
         actions
@@ -931,8 +932,10 @@ impl Model {
     /// recently used card, never the moved one); in place the stage moves in creation
     /// order, so hotkey numbers follow what the strip shows: among the places of the cards
     /// shown when both cards are in the strip ([`Model::reorder_shown`]), so the strip shows
-    /// the same stages after the drop as it drew at the release. Returns
-    /// [`Action::StateChanged`] when anything moved (the order is saved with the state).
+    /// the same stages after the drop as it drew at the release. Following the Dock
+    /// ([`StripOrder::Dock`]) nothing moves: the Dock decides, and the card springs back.
+    /// Returns [`Action::StateChanged`] when anything moved (the order is saved with the
+    /// state).
     pub fn move_card(&mut self, stage: StageId, before: Option<StageId>) -> Vec<Action> {
         if before == Some(stage) || !self.place_card(stage, before, true) {
             return Vec::new();
@@ -997,6 +1000,14 @@ impl Model {
                     self.touch(stage);
                 }
                 at != from
+            }
+            StripOrder::Dock => {
+                // The Dock decides the place. A window dropped on the strip still counts as
+                // used, so past the capacity its new stage shows (see the arm above).
+                if !among_shown && !self.is_active(stage) {
+                    self.touch(stage);
+                }
+                false
             }
         }
     }

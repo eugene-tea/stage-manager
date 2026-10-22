@@ -173,10 +173,12 @@ until used; the rest are off.
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
+| Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
 
-**Keep stages in place** (Settings → Stages; `[strip] order = "in_place"`, round 9B). Apple's
+**Keep stages in place** (Settings → Stages → Strip order: Keep in Place; `[strip] order =
+"in_place"`, round 9B). Apple's
 swap leaves the stages in click order, so a stage's place cannot be predicted. In place,
 every stage has a place of its own in creation order per Desktop (hotkey numbers follow it;
 a new stage goes last, a closed one leaves no gap, a dragged card moves its stage in that
@@ -192,6 +194,24 @@ the bottom place: the most recently used of them shows, so the stage you leave a
 card and the head never moves (with `"close"`, an active stage in the head frees its place,
 and two of the rest show). Cards keep Apple's one size. "One at a Time" shows an app once,
 in the place of its first stage, whichever of its windows is shown.
+
+**Follow the Dock** (Settings → Stages → Strip order: Follow the Dock; `[strip] order =
+"dock"`, round 9D). The places of Keep stages in place, ordered by the Dock: the strip's
+top-to-bottom order is the Dock's left-to-right order (top to bottom for a Dock on the side).
+The Dock's application items are read through Accessibility (its lists' `AXDockItem`
+children and their `AXURL`), so running apps that are not kept in the Dock count where their
+icons show; its preferences are never read or written. A stage sits at the leftmost Dock
+position among its windows' apps (by bundle id, else by pid); stages at the same position
+keep creation order, and stages whose apps have no Dock icon come after all others, in
+creation order. Hotkey numbers follow the strip. The Dock is read at launch, half a second
+after an app launches or quits, and every two seconds while this order is on (no
+Accessibility notification is known for a rearranged Dock); a changed order re-sorts the
+strip at the first moment no switch, drag or Desktop change is under way, and the cards glide
+to their new places on the strip's spring. `[strip] active`, the overflow rule and the
+animations are Keep stages in place's. A card dragged within the strip springs back and
+switches nothing (`[strip] reorder` is off in this order); dropping it on a card merges, and
+dragging it out still works. A window dropped on the strip makes its stage, which takes its
+Dock place, not the drop position.
 
 **After a restart.** The restore is invisible when it works and Apple's behaviour when it
 cannot match. Saved windows not on screen at launch wait, with no card, in their stages; as

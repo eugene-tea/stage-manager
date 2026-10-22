@@ -48,7 +48,11 @@ pointer at the top and bottom quarter and a slowed switch's snapshot lands on it
 back from the overlay's pixels; then "Keep stages in place", `order = "fixed"` in the phase's own
 config, in each `active` mode: clicks on slots 1, 3 and 6 leave every stage in creation order,
 the stage left shrinks into its own place, with "gap" no other card moves, and in a slowed
-click no two cards share a slot mid-flight), capture (the one phase with window
+click no two cards share a slot mid-flight; then "Follow the Dock", `order = "dock"`, in each
+`active` mode: three more fixture apps' stages, made in another order than the Dock shows
+them, sit in the Dock's order as the app read it from the Dock (never pinned or moved), clicks
+keep it, a card dragged down springs back with no switch, and the strip still follows after
+an app quits), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
 its card as Apple's thumbnails show it, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
@@ -2487,6 +2491,139 @@ def in_place_checks():
         time.sleep(1.0)
 
 
+def config_dock(active):
+    """The slots config following the Dock (`[strip] order = "dock"`, round 9D)."""
+    return CONFIG_SLOTS.replace("[strip]", f'[strip]\norder = "dock"\nactive = "{active}"')
+
+
+def dock_strip(s):
+    """(the strip's stage ids as the engine lists them, the ids the Dock's order gives): every
+    stage of the shown Desktop holding windows at the leftmost Dock position among its
+    windows' apps (bundle id, else pid; `dock_order` as the app read it from the Dock),
+    creation order among ties and for apps with no Dock icon (last); the active stage left
+    out but with active = "card"."""
+    dock = s.get("dock_order") or []
+    by_bundle = {}
+    by_pid = {}
+    for i, d in enumerate(dock):
+        if d.get("bundle"):
+            by_bundle.setdefault(d["bundle"], i)
+        if d.get("pid") is not None:
+            by_pid.setdefault(d["pid"], i)
+    wins = {w["id"]: w for w in s["windows"]}
+
+    def place(st):
+        spots = []
+        for wid in st["windows"]:
+            w = wins.get(wid) or {}
+            spot = by_bundle.get(w.get("bundle_id")) if w.get("bundle_id") else None
+            if spot is None:
+                spot = by_pid.get(w.get("pid"))
+            if spot is not None:
+                spots.append(spot)
+        return min(spots) if spots else len(dock)
+
+    here = [st for st in s["stages"] if st["space"] == s["space"] and st["windows"]]
+    here.sort(key=place)  # stable: ties keep creation order (`stages` lists it)
+    ids = ids_by_number(s)
+    active = ids.get(s["active"])
+    show_active = s.get("strip_active") == "Card"
+    want = [st["id"] for st in here if show_active or st["id"] != active]
+    got = [ids.get(n) for n in s["strip"]]
+    return got, want
+
+
+def dock_order_checks():
+    """Follow the Dock (9D), in each `[strip] active` mode: the fixture apps' order is whatever
+    the Dock shows (read from the Dock by the app, `dock_order` in `ctl state`; never pinned,
+    unpinned or moved here). Three more fixture apps, launched C, A, B (their icons appear in
+    that order unless the Dock keeps them elsewhere), get stages made B, A, C: the strip lists
+    the stages in the Dock's order, not creation order, and hotkey numbers follow it; clicks
+    keep it; a card dragged one slot down springs back and switches nothing; an app that quits
+    takes its icon, and the strip still follows the Dock read after."""
+    say("-- follow the Dock")
+    for k in ("c", "a", "b"):
+        start_extra(k, 1)
+        time.sleep(0.5)
+    time.sleep(1.0)
+    s = state()
+    extra = {k: next((w for w in s["windows"] if w["bundle_id"] == EXTRA[k][0] and w["role"] == "standard"), None) for k in EXTRA}
+    if not check(all(extra.values()), f"the three fixture apps' windows are managed ({ {k: bool(v) for k, v in extra.items()} })"):
+        return
+    for k in ("b", "a", "c"):
+        do("new", extra[k]["id"])
+    time.sleep(1.0)
+    for mode in ("close", "gap", "card"):
+        what = f"dock, active = \"{mode}\""
+        with open(os.path.join(HOME, "config.toml"), "w") as fh:
+            fh.write(config_dock(mode))
+        ctl("reload")
+        s = wait_state(lambda x: x.get("strip_order") == "Dock" and x.get("dock_order"), f"{what}: the Dock's order to load")
+        if not check(s is not None, f"{what}: [strip] order = \"dock\" reads the Dock"):
+            return
+        bundles = [d.get("bundle") for d in s["dock_order"]]
+        check(all(EXTRA[k][0] in bundles for k in EXTRA) and FIX_ID in bundles,
+              f"{what}: the running fixture apps are in the Dock's order as read ({len(bundles)} items)")
+        time.sleep(1.0)
+        s = state()
+        fits = len(s["strip"]) < s["strip_capacity"]
+        got, want = dock_strip(s)
+        if fits:
+            check(got == want, f"{what}: the strip follows the Dock ({got}, want {want})")
+        check(s["strip"] == sorted(s["strip"]), f"{what}: hotkey numbers follow the strip ({s['strip']})")
+        made = [extra[k]["id"] for k in ("b", "a", "c")]
+        stage_of = {w: next((st["id"] for st in s["stages"] if w in st["windows"]), None) for w in made}
+        bundle_of = {wn["id"]: wn["bundle_id"] for wn in s["windows"]}
+        known = all(bundle_of.get(w) in bundles for w in made)
+        docked = sorted(made, key=lambda w: bundles.index(bundle_of[w])) if known else made
+        if docked != made:
+            order = [stage_of[w] for w in docked]
+            shown = [x for x in got if x in order]
+            check(shown == [x for x in order if x in shown], f"{what}: the extra apps' stages in Dock order, not creation order ({shown}, Dock {order})")
+        # Two clicks: every stage keeps its Dock place.
+        for slot in (0, -1):
+            cards = state().get("strip_cards", [])
+            pick = [c for c in cards if c["number"] != state()["active"]]
+            if not pick:
+                break
+            target = pick[slot]["number"]
+            ctl("debug-click", *center(pick[slot]["frame"]))
+            if not check(wait_state(lambda x: x["active"] == target, f"{what}: the switch") is not None, f"{what}: switched to {target}"):
+                continue
+            time.sleep(1.2)
+            s = state()
+            got, want = dock_strip(s)
+            if len(s["strip"]) < s["strip_capacity"]:
+                check(got == want, f"{what}, after a click: every stage in its Dock place ({got}, want {want})")
+
+    say("-- follow the Dock: a card dragged one slot down springs back, no switch")
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if check(len(cards) >= 3, f"cards to drag ({len(cards)})"):
+        order0, active0 = s0["strip"], s0["active"]
+        a, b = cards[0]["frame"], cards[1]["frame"]
+        start = center(a)
+        y = b["y"] + b["h"] * 0.9
+        words = [str(round(v, 1)) for p in (start, (start[0], start[1] + 12), (start[0], y)) for v in p] + ["hold=300"]
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        proc.communicate(timeout=20)
+        time.sleep(1.2)
+        s = state()
+        check(s["strip"] == order0 and s["active"] == active0,
+              f"the order and the active stage are unchanged ({order0} -> {s['strip']}, active {active0} -> {s['active']})")
+
+    say("-- follow the Dock: an app quits, its icon goes, the strip still follows")
+    stop_extra("a")
+    time.sleep(3.0)
+    s = state()
+    got, want = dock_strip(s)
+    if len(s["strip"]) < s["strip_capacity"]:
+        check(got == want, f"after a quit: the strip follows the Dock read after it ({got}, want {want})")
+    stop_extra("b")
+    stop_extra("c")
+    time.sleep(1.0)
+
+
 def drop_settle_checks():
     """Keep stages in place past the capacity (round 9C, the owner's 10-22 report: "a little
     slide" after a drop right into a slot): a card dragged one slot and released. Sampled
@@ -2792,6 +2929,7 @@ def phase_slots():
             check(g is not None and g.get("real") and b and off(g["end"], b) <= 1.0,
                   f"its last frame is within 1 pt of the window's (end {g and fmt(g['end'])}, window {b and fmt(b)})")
     in_place_checks()
+    dock_order_checks()
     drop_settle_checks()
     merge_hold_check()
     stop_app()

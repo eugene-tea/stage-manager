@@ -773,6 +773,7 @@ impl Config {
             strip: StripConfig {
                 order: match v.text("strip.order") {
                     "in_place" | "fixed" => StripOrder::InPlace,
+                    "dock" => StripOrder::Dock,
                     _ => StripOrder::Native,
                 },
                 active: match v.text("strip.active") {
@@ -923,6 +924,14 @@ impl Config {
     /// Strip options for the model; `capacity` is computed by the platform from the screen.
     pub fn strip_options(&self, capacity: usize) -> StripOptions {
         StripOptions { order: self.strip.order, active: self.strip.active, capacity }
+    }
+
+    /// How the strip draws and moves: [`Config::style`], with dragging a card to another slot
+    /// off while the strip follows the Dock (`order = "dock"`: the Dock decides the order; a
+    /// card dragged within the strip springs back, and dropping it on a card or out of the
+    /// strip still works).
+    pub fn strip_style(&self) -> StripStyle {
+        StripStyle { reorder: self.style.reorder && self.strip.order != StripOrder::Dock, ..self.style.clone() }
     }
 
     /// Model options from this config plus Apple's settings and the strip capacity.
@@ -1455,12 +1464,26 @@ swipe = true
     }
 
     #[test]
+    fn following_the_dock_a_card_never_drags_to_another_slot_but_still_merges() {
+        let style = |t: &str| parse(t).config.strip_style();
+        assert!(style("").reorder && style("[strip]\norder = \"in_place\"").reorder, "dragging reorders elsewhere");
+        let dock = style("[strip]\norder = \"dock\"");
+        assert!(!dock.reorder, "the Dock decides: a card dragged within the strip springs back");
+        assert!(dock.merge_on_drop, "dropping a card on a card still merges");
+        assert!(!style("[strip]\nreorder = false").reorder);
+    }
+
+    #[test]
     fn keep_stages_in_place_and_the_active_stage_modes() {
         let c = Config::default().strip;
         assert_eq!((c.order, c.active), (StripOrder::Native, ActiveCard::Close), "Apple's swap by default");
         let read = |t: &str| parse(t).config.strip;
         assert_eq!(read("[strip]\norder = \"in_place\"").order, StripOrder::InPlace);
         assert_eq!(read("[strip]\norder = \"fixed\"").order, StripOrder::InPlace, "the older name");
+        assert_eq!(read("[strip]\norder = \"dock\"").order, StripOrder::Dock);
+        for order in [StripOrder::Native, StripOrder::InPlace, StripOrder::Dock] {
+            assert_eq!(read(&format!("[strip]\norder = \"{}\"", order.name())).order, order, "its name reads back");
+        }
         for (text, want) in [("close", ActiveCard::Close), ("gap", ActiveCard::Gap), ("card", ActiveCard::Card)] {
             assert_eq!(read(&format!("[strip]\nactive = \"{text}\"")).active, want);
         }

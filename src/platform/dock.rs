@@ -12,14 +12,21 @@
 //! moving (a press held opens the item's menu; a drag moves or removes it) and without a
 //! modifier (⌘ reveals the app in Finder, ⌥ hides the others, ⌃ opens the menu, ⇧ is the
 //! Shift sugar's).
+//!
+//! "Follow the Dock" (`[strip] order = "dock"`) reads the order of the Dock's application
+//! items, pinned and running alike, as the Dock shows them ([`app_order`]); the engine sorts
+//! the strip by it.
 
 use std::time::{Duration, Instant};
 
-use objc2_app_kit::NSRunningApplication;
+use std::collections::HashMap;
+
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_foundation::{NSBundle, NSString};
 
-use super::ax::{AxElement, names};
+use super::ax::{AxElement, AxError, names};
 use super::windows::CgWindow;
+use crate::engine::DockApp;
 use crate::engine::geometry::{Point, Rect};
 
 /// The Dock's bundle id.
@@ -157,6 +164,52 @@ fn application_item(element: &AxElement) -> Option<DockItem> {
         return None;
     }
     Some(DockItem { path: element.url_path().ok()?, frame: element.frame().ok()? })
+}
+
+/// The Dock's application items in its order (`dock`: its pid), left to right (top to bottom
+/// on the side), each with its bundle id and, when it runs, its pid: the order "Follow the
+/// Dock" sorts the strip by. Read through Accessibility only (the Dock's lists, `AXChildren`,
+/// each item's subrole and `AXURL`), never its preferences, so running apps that are not
+/// pinned are in it too. Every call runs at the Dock's bounded timeout; `None` when the Dock
+/// does not answer (the last order read stays).
+pub fn app_order(dock: i32) -> Option<Vec<DockApp>> {
+    let t = DOCK_AX_TIMEOUT_SECONDS;
+    let lists = AxElement::application(dock).bounded(t, AxElement::children).ok()?;
+    let mut paths = Vec::new();
+    for list in &lists {
+        let items = match list.bounded(t, AxElement::children) {
+            Ok(items) => items,
+            Err(AxError::CANNOT_COMPLETE) => return None,
+            Err(_) => continue,
+        };
+        for item in items {
+            match item.bounded(t, |e| e.subrole().map(|s| (s == names::SUBROLE_APPLICATION_DOCK_ITEM).then(|| e.url_path()))) {
+                Ok(Some(Ok(path))) => paths.push(path),
+                // A Dock that stops answering: no half-read order.
+                Err(AxError::CANNOT_COMPLETE) | Ok(Some(Err(AxError::CANNOT_COMPLETE))) => return None,
+                _ => {}
+            }
+        }
+    }
+    let running = running_by_path();
+    Some(
+        paths
+            .into_iter()
+            .map(|path| DockApp { bundle: bundle_id_at(&path), pid: running.get(path.trim_end_matches('/')).copied() })
+            .collect(),
+    )
+}
+
+/// The running apps by their bundle's path (no trailing slash).
+fn running_by_path() -> HashMap<String, i32> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .iter()
+        .filter_map(|a| {
+            let path = a.bundleURL()?.path()?.to_string();
+            Some((path.trim_end_matches('/').to_string(), a.processIdentifier()))
+        })
+        .collect()
 }
 
 /// The bundle id of the app bundle at `path`.

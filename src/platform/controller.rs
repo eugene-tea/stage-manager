@@ -113,6 +113,7 @@ use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEve
 use crate::ui::{motion_math, transition_plan};
 
 mod arrival;
+mod dock_order;
 mod hide;
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
@@ -928,6 +929,9 @@ pub struct Controller {
     /// The Dock and its bar as the inert-slivers tap last got them, and when they were read
     /// ([`Self::publish_shield`]).
     dock_bar: Option<(Instant, sliver::DockBar)>,
+    /// "Follow the Dock": when the Dock's order is read next, and one waiting for the strip
+    /// to be still ([`dock_order`]).
+    dock_order: dock_order::DockOrderWatch,
     /// The moves of an arrangement made at a Dock click, until the window server shows them.
     verify: Option<arrival::Verify>,
     /// The latest Dock press's prediction, until a Space change shows where it went.
@@ -1035,7 +1039,7 @@ impl Controller {
                 Some(e.to_string())
             }
         };
-        let style = Arc::new(store.config().style.clone());
+        let style = Arc::new(store.config().strip_style());
         let mut echoes = Echoes::default();
         echoes.set_window(Duration::from_millis(store.config().windows.focus_echo_ms));
         let this = Self {
@@ -1093,6 +1097,7 @@ impl Controller {
             dock_press: None,
             dock_pid: None,
             dock_bar: None,
+            dock_order: dock_order::DockOrderWatch::default(),
             verify: None,
             dock_seen: None,
             defer_present: false,
@@ -2712,6 +2717,8 @@ impl Controller {
             WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid, true),
             WinEvent::AppUnhidden(pid) => self.on_app_hidden(ob, pid, false),
             WinEvent::AppTerminated(pid) => {
+                // Its icon leaves the Dock unless pinned: the strip may follow.
+                self.dock_order.soon(now);
                 self.keep_quit_windows(pid, now);
                 self.app_terminated(pid);
             }
@@ -3106,6 +3113,8 @@ impl Controller {
             self.unplaced.extend(live.iter().map(|m| m.id.0));
         }
         self.model = Some(model);
+        // Following the Dock, the first strip shows in the Dock's order already.
+        self.refresh_dock_order(Instant::now(), ob.last_launch());
         self.announce = config.style.reveal.launch_reveal;
         self.execute(ob, actions);
         if !self.fullscreen {
@@ -4341,8 +4350,9 @@ impl Controller {
                 self.pressed_obs = None;
                 let config = self.store.config().clone();
                 logging::apply_config(&config.log);
-                if *self.style != config.style {
-                    self.style = Arc::new(config.style.clone());
+                let style = config.strip_style();
+                if *self.style != style {
+                    self.style = Arc::new(style);
                 }
                 self.echoes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
                 self.sync_fit();
@@ -4416,6 +4426,7 @@ impl Controller {
         }
         if self.model.is_some() && !safety::quit_requested() {
             self.refresh_dock_bar(now);
+            self.refresh_dock_order(now, ob.last_launch());
             // A wallpaper click's hold over: the patch is planned again (it stays hidden while
             // Show Desktop is listed; back if macOS showed none).
             if self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) >= PATCH_REVEAL_HOLD) {
@@ -4822,6 +4833,8 @@ impl Controller {
         state["strip_gap"] = json!(m.strip().iter().position(|c| c.gap));
         state["strip_order"] = json!(format!("{:?}", m.options().strip.order));
         state["strip_active"] = json!(format!("{:?}", m.options().strip.active));
+        // Follow the Dock (9D): the Dock's application items as last read, in order.
+        state["dock_order"] = json!(m.dock_order().iter().map(|d| json!({ "bundle": d.bundle, "pid": d.pid })).collect::<Vec<_>>());
         // The registry's windows, and those taken from an old guardian (round 8N).
         state["registry_ids"] = json!(safety::registry_ids());
         state["taken"] = json!(safety::taken_ids());

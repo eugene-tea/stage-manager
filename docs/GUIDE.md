@@ -90,10 +90,19 @@ The stage you leave takes the card's place in the strip.
 ### Stages in place
 
 With Apple's strip, the stage you leave takes the place of the card you click, so after a
-few clicks the stages sit in the order you clicked them. Turn on **Keep stages in place**
-(Settings → Stages, or `[strip] order = "in_place"`) and every stage keeps a place of its own,
-in the order the stages were made (the same order the ⌃⌥1–9 shortcuts use). The stage you
-leave goes back to its own place. A new stage goes last; drag a card to move its stage.
+few clicks the stages sit in the order you clicked them. Set **Strip order** to **Keep in
+Place** (Settings → Stages, or `[strip] order = "in_place"`) and every stage keeps a place of
+its own, in the order the stages were made (the same order the ⌃⌥1–9 shortcuts use). The
+stage you leave goes back to its own place. A new stage goes last; drag a card to move its
+stage.
+
+**Follow the Dock** (`[strip] order = "dock"`) keeps those places in your Dock's order
+instead: the strip from top to bottom lists the stages as the Dock lists their apps from left
+to right, and the ⌃⌥1–9 shortcuts follow. A stage with windows of several apps sits at the
+one furthest left in the Dock; two stages of one app keep the order they were made in; apps
+with no Dock icon come last. Rearrange the Dock, or open or quit an app that is not kept in
+the Dock, and the cards glide to their new places. The Dock decides, so a card dragged within
+the strip springs back; dropping it on another card still merges the two stages.
 
 The active stage has no card, as in Apple's strip, and the cards below its place close up.
 In the config file, `[strip] active = "gap"` leaves an empty slot there instead, so no card
@@ -193,7 +202,8 @@ Applications and Settings appears. The buttons along its top switch between five
   an app's windows all at once or one at a time. These are macOS's own settings, so they
   stay in step with System Settings.
 - **Stages:** bringing stages back after a restart, opening new apps in the current stage,
-  Shift to bring apps here, merging stages by dropping cards, and keeping stages in place.
+  Shift to bring apps here, merging stages by dropping cards, and the strip order (Apple's, Keep
+  in Place or Follow the Dock).
 - **Windows:** keeping windows clear of the strip, animation speed, and keyboard shortcuts.
 - **Advanced:** the config file, and help for asking an AI assistant to change it.
 

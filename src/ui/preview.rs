@@ -72,7 +72,7 @@ fn preview_change(change: settings_window::Change) {
             C::NewAppsJoinCurrent(on) => values.new_apps_join_current = on,
             C::MergeOnDrop(on) => values.merge_on_drop = on,
             C::ShiftBringsHere(on) => values.shift_brings_here = on,
-            C::KeepInPlace(on) => values.keep_in_place = on,
+            C::StripOrder(o) => values.strip_order = o,
             C::Fit(m) => values.fit = m,
             C::Hotkeys(on) => values.hotkeys = on,
             C::Speed(s) => values.speed = s,

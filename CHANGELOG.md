@@ -6,12 +6,18 @@
   (Settings → Stages, or `[stages] new_apps_join_current`) and a newly opened app's windows
   join the stage you are in. Hold Shift while opening an app to give it a stage of its own.
   Off by default, as Apple's.
-- Stages can keep their places: turn on **Keep stages in place** (Settings → Stages, or
+- Stages can keep their places: set **Strip order** to **Keep in Place** (Settings → Stages, or
   `[strip] order = "in_place"`) and each stage keeps its own place in the strip, in the order
   the stages were made, whichever card you click; the stage you leave goes back to its own
   place. `[strip] active` chooses how the active stage's place shows: no card (the default),
   an empty slot (`"gap"`) or a highlighted card (`"card"`). With more stages than fit, the
   last place shows the one you used most recently. Off by default: Apple's strip swaps.
+- The strip can follow your Dock: set **Strip order** to **Follow the Dock** (Settings →
+  Stages, or `[strip] order = "dock"`) and the stages sit from top to bottom in the order
+  their apps sit in the Dock from left to right; a stage of several apps sits at the one
+  furthest left, and apps without a Dock icon come last. Rearrange the Dock and the cards
+  follow. A card can't be dragged to another place in this order; dropping it on a card still
+  merges. Off by default.
 - Settings has a toolbar of panes, as Mac apps' settings do: General, Stage Manager, Stages,
   Windows and Advanced. It opens on the pane you used last.
 

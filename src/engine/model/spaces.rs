@@ -120,14 +120,16 @@ impl Model {
             .unwrap_or(SpaceId(0))
     }
 
-    /// The stages of a Space, in creation order (stage N is the Nth).
+    /// The stages of a Space, in creation order (stage N is the Nth, except with "Follow the
+    /// Dock": [`Model::stage_by_number`]).
     pub fn stages_in(&self, space: SpaceId) -> impl Iterator<Item = &Stage> {
         self.stages.iter().filter(move |s| s.space == space)
     }
 
-    /// Stage `n` (1-based) of a Space.
+    /// Stage `n` (1-based) of a Space: the Nth in creation order, or with "Follow the Dock"
+    /// the Nth in Dock order ([`Model::place_order`]).
     pub fn stage_by_number(&self, space: SpaceId, n: usize) -> Option<StageId> {
-        self.stages_in(space).nth(n.checked_sub(1)?).map(|s| s.id)
+        self.place_order(space).get(n.checked_sub(1)?).map(|s| s.id)
     }
 
     /// The Space a managed window lives on.

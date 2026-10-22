@@ -15,7 +15,8 @@
 //! place of its own, in creation order per Space (hotkey numbers follow it), whatever was
 //! clicked: the stage you leave goes back to its own place. [`ActiveCard`] says how the active
 //! stage's place shows, and [`Model::strip_in`] how stages past the capacity share the last
-//! place.
+//! place. [`StripOrder::Dock`] ("Follow the Dock") is the same with the places ordered by the
+//! Dock's order of the stages' apps instead of creation order (`dock.rs`).
 //!
 //! Every Space has its own strip: slots, order and recency are kept per Space, and a
 //! display's strip shows the Space it shows now.
@@ -24,6 +25,10 @@ use std::collections::HashSet;
 
 use super::{DisplayId, Model, Pid, SpaceId, StageId, WindowId, WindowRole};
 use crate::engine::settings::AppWindows;
+
+mod dock;
+
+pub use dock::DockApp;
 
 /// How cards are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,9 +39,31 @@ pub enum StripOrder {
     /// Every stage in a place of its own, in creation order per Space, never moved by a click
     /// (`"in_place"`; `"fixed"` is its older name).
     InPlace,
+    /// Every stage in a place of its own as in [`StripOrder::InPlace`], the places in the
+    /// Dock's order of the stages' apps (`"dock"`, "Follow the Dock"). Cards cannot be
+    /// dragged to another place: the Dock decides.
+    Dock,
 }
 
-/// How the active stage's place shows in [`StripOrder::InPlace`] (`[strip] active`).
+impl StripOrder {
+    /// The value of `[strip] order` that names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            StripOrder::Native => "native",
+            StripOrder::InPlace => "in_place",
+            StripOrder::Dock => "dock",
+        }
+    }
+
+    /// True when every stage has a place of its own ([`StripOrder::InPlace`],
+    /// [`StripOrder::Dock`]).
+    pub fn in_place(self) -> bool {
+        self != StripOrder::Native
+    }
+}
+
+/// How the active stage's place shows in place ([`StripOrder::InPlace`], [`StripOrder::Dock`];
+/// `[strip] active`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActiveCard {
     /// No card, as Apple's: the cards below its place close up (`"close"`).
@@ -54,8 +81,8 @@ pub enum ActiveCard {
 pub struct StripOptions {
     /// Card order.
     pub order: StripOrder,
-    /// How the active stage shows. Applies to [`StripOrder::InPlace`] only; Apple's native
-    /// strip never shows the active stage.
+    /// How the active stage shows. Applies in place only ([`StripOrder::InPlace`],
+    /// [`StripOrder::Dock`]); Apple's native strip never shows the active stage.
     pub active: ActiveCard,
     /// The most cards shown (Apple: 6 at 1440 pt height); computed by the platform. In
     /// place, with [`ActiveCard::Gap`] or [`ActiveCard::Card`], the active stage's place
@@ -112,7 +139,8 @@ impl Model {
     /// The cards of one Space, top to bottom.
     ///
     /// In place ([`StripOrder::InPlace`]) every stage holding windows (or declared in config)
-    /// has a place in creation order; the active stage's place shows as [`ActiveCard`] says.
+    /// has a place in creation order ([`StripOrder::Dock`]: in Dock order,
+    /// [`Model::place_order`]); the active stage's place shows as [`ActiveCard`] says.
     /// With more places than `capacity`, the first `capacity - 1` stages of the Space (the
     /// active one included, whatever it shows) keep theirs, and the stages past them share
     /// the places left at the bottom: the most recently used of them show, in creation order.
@@ -135,17 +163,17 @@ impl Model {
         self.in_place_cards(space).into_iter().map(|(_, c)| c).collect()
     }
 
-    /// [`Model::strip_in`] in place ([`StripOrder::InPlace`]): each card with the stage whose
-    /// place it shows (the card's own stage, or with "One at a Time" the first stage of its
-    /// app's group).
+    /// [`Model::strip_in`] in place ([`StripOrder::InPlace`], [`StripOrder::Dock`]): each card
+    /// with the stage whose place it shows (the card's own stage, or with "One at a Time" the
+    /// first stage of its app's group).
     fn in_place_cards(&self, space: SpaceId) -> Vec<(StageId, StripCard)> {
         let opts = self.options.strip;
         let active = self.active_stage_in(space);
         let one_at_a_time = self.options.settings.app_windows == AppWindows::OneAtATime;
         // Every place, the active stage's too (while it shows windows).
         let places: Vec<StripCard> = self
-            .stages
-            .iter()
+            .place_order(space)
+            .into_iter()
             .filter(|s| {
                 s.space == space
                     && if Some(s.id) == active { !s.windows.is_empty() } else { self.strip_eligible(s.id) }
@@ -413,7 +441,7 @@ impl Model {
         // In place, the stages past the capacity show by recency: a stage never used yet (a
         // window dropped on the strip, a new stage in the background) counts as used now, or
         // it would enter the strip with no card.
-        if self.options.strip.order == StripOrder::InPlace && self.stage(stage).is_some_and(|s| s.last_active == 0) {
+        if self.options.strip.order.in_place() && self.stage(stage).is_some_and(|s| s.last_active == 0) {
             self.touch(stage);
         }
         let capacity = self.options.strip.capacity;
@@ -502,3 +530,5 @@ impl Model {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod dock_tests;
