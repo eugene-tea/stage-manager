@@ -190,15 +190,16 @@ pub const KEYS: &[KeyDef] = &[
     k("app", "install_updates", Kind::Bool, "false",
         "Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first."),
     // [strip]
-    k("strip", "order", Kind::Choice(&["native", "fixed"]), "\"native\"",
-        "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"fixed\" is creation order."),
+    k("strip", "order", Kind::Choice(&["native", "in_place", "fixed"]), "\"native\"",
+        "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (Settings: Keep stages in place; \"fixed\" is its older name)."),
+    k("strip", "active", Kind::Choice(&["close", "gap", "card"]), "\"close\"",
+        "With order = \"in_place\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
         "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
     k("strip", "reorder", Kind::Bool, "true",
         "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
     k("strip", "merge_on_drop", Kind::Bool, "true",
         "Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used)."),
-    k("strip", "show_active", Kind::Bool, "false", "Also show the active stage as a card (fixed order only; Apple never does)."),
     k("strip", "hide_while_desktop_shown", Kind::Bool, "false",
         "Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown."),
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
@@ -496,6 +497,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-12.toml"),
     include_str!("legacy/default-13.toml"),
     include_str!("legacy/default-14.toml"),
+    include_str!("legacy/default-15.toml"),
 ];
 
 #[cfg(test)]

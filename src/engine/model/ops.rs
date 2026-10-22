@@ -775,7 +775,7 @@ impl Model {
     /// two recencies; `stage`'s slot frees by the slot rule (the cards below close up, and a
     /// free slot takes the most recent stage out of view). The emptied stage goes away
     /// unless it is declared in config. Into the active stage (a card of it shows only in
-    /// fixed order with `show_active`) it is [`Model::merge_into_active`]. A no-op for one
+    /// place with `[strip] active = "card"`) it is [`Model::merge_into_active`]. A no-op for one
     /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
     /// Spaces, or a Space not shown now.
     ///
@@ -924,7 +924,7 @@ impl Model {
     /// A card dragged to another slot of the strip (`[strip] reorder`): it goes right above
     /// `before`'s card, or to the bottom when `before` is `None`. In Apple's order the slots
     /// change and the slot-stable rule carries on from them (a full strip drops its least
-    /// recently used card, never the moved one); in fixed order the stage moves in creation
+    /// recently used card, never the moved one); in place the stage moves in creation
     /// order, so hotkey numbers follow what the strip shows. Returns
     /// [`Action::StateChanged`] when anything moved (the order is saved with the state).
     pub fn move_card(&mut self, stage: StageId, before: Option<StageId>) -> Vec<Action> {
@@ -970,7 +970,7 @@ impl Model {
                 }
                 *slots != old
             }
-            StripOrder::Fixed => {
+            StripOrder::InPlace => {
                 let Some(from) = self.stages.iter().position(|s| s.id == stage) else {
                     return false;
                 };

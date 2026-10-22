@@ -238,6 +238,7 @@ impl Strip {
     /// showing the window, else its stage's card (a disagreement is logged: it means the
     /// strip draws another order than the engine decided). With the card's slot.
     fn card_for<'a>(&self, layouts: &'a [CardLayout], w: &MovingWindow) -> Option<(usize, &'a CardLayout)> {
+        // The engine's slots count the active stage's empty slot (`[strip] active = "gap"`).
         let cards: Vec<(usize, &CardLayout)> = layouts.iter().filter(|l| l.stage != super::DROP_STAGE).enumerate().collect();
         if let Some(&(i, l)) = w.slot.and_then(|s| cards.get(s)).filter(|(_, l)| Some(l.stage) == w.stage) {
             return Some((i, l));

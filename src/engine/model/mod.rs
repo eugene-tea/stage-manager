@@ -46,7 +46,7 @@ pub use pool::NumberRef;
 pub(crate) use pool::Kin;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
-pub use strip::{StripCard, StripOptions, StripOrder};
+pub use strip::{ActiveCard, StripCard, StripOptions, StripOrder};
 
 /// A process ID.
 pub type Pid = i32;

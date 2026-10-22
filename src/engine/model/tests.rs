@@ -1253,18 +1253,18 @@ fn capacity_shrinks_by_evicting_the_oldest_and_grows_back() {
 }
 
 #[test]
-fn fixed_order_lists_creation_order_and_can_show_the_active_stage() {
+fn in_place_lists_creation_order_and_can_show_the_active_stage() {
     let mut e = stages(4, 6);
     e.switch(2);
     e.m.set_strip_options(StripOptions {
-        order: StripOrder::Fixed,
-        show_active: false,
+        order: StripOrder::InPlace,
+        active: ActiveCard::Close,
         capacity: 6,
     });
     assert_eq!(e.slot_numbers(), [1, 3, 4]);
     e.m.set_strip_options(StripOptions {
-        order: StripOrder::Fixed,
-        show_active: true,
+        order: StripOrder::InPlace,
+        active: ActiveCard::Card,
         capacity: 6,
     });
     let cards = e.m.strip();
@@ -1272,14 +1272,21 @@ fn fixed_order_lists_creation_order_and_can_show_the_active_stage() {
         cards.iter().map(|c| c.number).collect::<Vec<_>>(),
         [1, 2, 3, 4]
     );
-    assert!(cards[1].active);
+    assert!(cards[1].active && !cards[1].gap);
+    e.m.set_strip_options(StripOptions {
+        order: StripOrder::InPlace,
+        active: ActiveCard::Gap,
+        capacity: 6,
+    });
+    let cards = e.m.strip();
+    assert_eq!(cards.iter().map(|c| (c.number, c.gap)).collect::<Vec<_>>(), [(1, false), (2, true), (3, false), (4, false)]);
     e.m.set_strip_options(StripOptions {
         order: StripOrder::Native,
-        show_active: true,
+        active: ActiveCard::Card,
         capacity: 6,
     });
     assert!(
-        e.m.strip().iter().all(|c| !c.active),
+        e.m.strip().iter().all(|c| !c.active && !c.gap),
         "native never shows the active stage"
     );
 }
@@ -1499,7 +1506,7 @@ fn merging_into_the_active_stage_restores_and_the_active_card_never_moves() {
     assert!(e.m.merge_stages(s1, s1, &obs).is_empty(), "onto itself");
     assert!(e.m.merge_stages(s1, StageId(99), &obs).is_empty(), "onto an unknown stage");
     assert!(e.m.merge_stages(StageId(99), s1, &obs).is_empty(), "an unknown stage");
-    // Onto the active stage's card (fixed order with show_active): a shift-click merge.
+    // Onto the active stage's card (in place with `active = "card"`): a shift-click merge.
     let a = e.m.merge_stages(s2, s3, &obs);
     e.run(a);
     assert!(e.m.stage(s2).is_none());
@@ -2309,9 +2316,9 @@ fn a_card_dragged_to_another_slot_stays_there_and_the_swap_rule_carries_on() {
 }
 
 #[test]
-fn in_fixed_order_a_dragged_card_moves_in_creation_order() {
+fn in_place_a_dragged_card_moves_in_creation_order() {
     let mut e = Env::with(ModelOptions {
-        strip: StripOptions { order: StripOrder::Fixed, show_active: false, capacity: 6 },
+        strip: StripOptions { order: StripOrder::InPlace, active: ActiveCard::Close, capacity: 6 },
         ..ModelOptions::default()
     });
     for (id, pid) in [(1, 10), (2, 11), (3, 12), (4, 13)] {

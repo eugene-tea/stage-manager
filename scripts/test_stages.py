@@ -45,7 +45,10 @@ landing on the card or window it aimed at; a click on the slot a transition is s
 in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
 above the others; with SM_PIXELS=1, a window dragged over the strip shows its card under the
 pointer at the top and bottom quarter and a slowed switch's snapshot lands on its window, read
-back from the overlay's pixels), capture (the one phase with window
+back from the overlay's pixels; then "Keep stages in place", `order = "fixed"` in the phase's own
+config, in each `active` mode: clicks on slots 1, 3 and 6 leave every stage in creation order,
+the stage left shrinks into its own place, with "gap" no other card moves, and in a slowed
+click no two cards share a slot mid-flight), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
 its card as Apple's thumbnails show it, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
@@ -2270,6 +2273,16 @@ level = "above_windows"
 # A slow spring (about ten times Apple's), so the overlay can be read back while it moves.
 CONFIG_SLOW = CONFIG_SLOTS.replace("[strip]", "[animation]\nspring_stiffness = 6.0\nspring_damping = 4.9\n\n[strip]")
 
+def config_in_place(active, slow=False):
+    """The slots config with "Keep stages in place" (its older name, `fixed`, read as an
+    alias) and `[strip] active`; `slow` slows the switch and the cards' glide about ten times."""
+    text = CONFIG_SLOTS.replace("[strip]", f'[strip]\norder = "fixed"\nactive = "{active}"')
+    if slow:
+        text = ("[animation]\nspring_stiffness = 6.0\nspring_damping = 4.9\n\n"
+                "[motion]\nspring_stiffness = 6.0\nspring_damping = 4.9\n") + text
+    return text
+
+
 CLICK_RE = re.compile(r"card click in slot stage=(\d+) slot=Some\((\d+)\)")
 
 
@@ -2372,6 +2385,105 @@ def sample_strip_during(proc, after=0.8):
         if p:
             seen.append(p)
     return seen
+
+
+def in_place_checks():
+    """Keep stages in place (9B), in each `[strip] active` mode: clicks on slots 1, 3 and 6
+    (and back to the first) keep creation order, the stage left shrinks into its own place, and
+    with "gap" every other card stays exactly where it was. Then one slowed click: no two
+    cards drawn in one slot while they move."""
+    def here(s):
+        return sorted(st["number"] for st in s["stages"] if st["space"] == s["space"] and st["windows"])
+
+    def frames(s):
+        return {c["number"]: c["frame"] for c in s.get("strip_cards", [])}
+
+    for mode in ("close", "gap", "card"):
+        say(f"-- keep stages in place, active = \"{mode}\"")
+        with open(os.path.join(HOME, "config.toml"), "w") as fh:
+            fh.write(config_in_place(mode))
+        ctl("reload")
+        s = wait_state(lambda x: x.get("strip_order") == "InPlace", f"{mode}: the in-place order to load")
+        if not check(s is not None, f"{mode}: [strip] order = \"fixed\" reads as in place"):
+            return
+        time.sleep(1.0)
+        for slot in (0, 2, 5, 0):
+            s0 = state()
+            cards, order0, active0 = s0.get("strip_cards", []), s0["strip"], s0["active"]
+            if mode == "card":
+                pick = [i for i, c in enumerate(cards) if c["number"] != active0]
+            else:
+                pick = list(range(len(cards)))
+            if not pick:
+                break
+            at = pick[min(slot, len(pick) - 1)]
+            target = cards[at]["number"]
+            what = f"{mode}, slot {slot + 1} (stage {target})"
+            f0 = frames(s0)
+            t0 = (s0.get("last_transition") or {}).get("id")
+            ctl("debug-click", *center(cards[at]["frame"]))
+            if not check(wait_state(lambda x: x["active"] == target, f"{what}: the switch") is not None, f"{what}: switched"):
+                continue
+            time.sleep(1.2)
+            s = state()
+            order, f1 = s["strip"], frames(s)
+            check(order == sorted(order), f"{what}: the cards in creation order ({order0} -> {order})")
+            check(active0 in order, f"{what}: the stage left ({active0}) has its card")
+            fits = len(here(s)) - (0 if mode == "card" else 1) <= s["strip_capacity"]
+            if fits:
+                want = [n for n in here(s) if mode == "card" or n != s["active"]]
+                check(order == want, f"{what}: every stage in its place ({order}, want {want})")
+            if mode == "gap" and s.get("strip_gap") is not None:
+                g = s["strip_gap"]
+                check(all(n < s["active"] for n in order[:g]) and all(n > s["active"] for n in order[g:]),
+                      f"{what}: the gap is the active stage's own slot ({order}, gap {g})")
+            if mode == "gap" and fits:
+                moved = [n for n in f1 if n in f0 and n not in (active0, target) and off(f0[n], f1[n]) > 1.0]
+                check(not moved, f"{what}: no other card moved ({moved})")
+            t = s.get("last_transition") or {}
+            if not check(t.get("id") and t.get("id") != t0, f"{what}: a transition was drawn"):
+                continue
+            num = numbers_by_id(s)
+            bad = []
+            for gh in t["ghosts"]:
+                if gh["aimed_slot"] != gh["slot"]:
+                    bad.append(f"{gh['window']} aimed at slot {gh['aimed_slot']}, the engine's is {gh['slot']}")
+                if gh["outgoing"]:
+                    if num.get(gh["stage"]) != active0:
+                        bad.append(f"outgoing {gh['window']} into stage {num.get(gh['stage'])}, not {active0}")
+                    if active0 in f1 and not inside(center(gh["end"]), f1[active0], 4):
+                        bad.append(f"outgoing {gh['window']} ends at {fmt(gh['end'])}, its own card is at {fmt(f1[active0])}")
+                elif num.get(gh["stage"]) != target:
+                    bad.append(f"incoming {gh['window']} from stage {num.get(gh['stage'])}, not {target}")
+            check(not bad, f"{what}: the stage left shrank into its own place, the clicked one grew from its card" + (f" ({'; '.join(bad)})" if bad else ""))
+
+    say("-- keep stages in place, slowed: never two cards in one slot mid-flight")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(config_in_place("close", slow=True))
+    ctl("reload")
+    time.sleep(1.0)
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if check(len(cards) >= 3, f"cards to click ({len(cards)})"):
+        target = cards[-1]["number"]
+        ctl("debug-click", *center(cards[-1]["frame"]))
+        seen, end = [], time.time() + 5
+        while time.time() < end:
+            p = strip_probe()
+            if p:
+                seen.append(p)
+        clash = []
+        for p in seen:
+            shown = [c for c in p.get("cards", []) if c.get("thumb") and c.get("opacity", 1) > 0.1]
+            for i, a in enumerate(shown):
+                for b in shown[i + 1:]:
+                    ta, tb = a["thumb"], b["thumb"]
+                    over = min(ta["y"] + ta["h"], tb["y"] + tb["h"]) - max(ta["y"], tb["y"])
+                    if over > 0.5 * min(ta["h"], tb["h"]):
+                        clash.append((a["stage"], b["stage"], round(over)))
+        check(len(seen) >= 5 and not clash, f"no two cards drawn in one slot while they glide ({len(seen)} samples; {clash[:3]})")
+        wait_state(lambda x: x["active"] == target, "the slowed switch", timeout=10)
+        time.sleep(1.0)
 
 
 def phase_slots():
@@ -2558,6 +2670,7 @@ def phase_slots():
             g = next((g for g in t.get("ghosts", []) if g["window"] == win["id"]), None)
             check(g is not None and g.get("real") and b and off(g["end"], b) <= 1.0,
                   f"its last frame is within 1 pt of the window's (end {g and fmt(g['end'])}, window {b and fmt(b)})")
+    in_place_checks()
     stop_app()
     all_onscreen("slots quit")
     write_config(None)
