@@ -23,6 +23,13 @@
 //!    window, as before. One that stays busy (no answer) for [`BUSY_CAP`] while a waiting
 //!    window shows is taken as having adopted nothing. A panic inside a pass is logged and
 //!    the watch goes on.
+//!
+//!    Round 8N: once the new app answers with a list (it manages windows), the guardian hands
+//!    it the rest of its watch ([`crate::engine::handoff`], `ctl take-watch`) and exits: the new
+//!    app's registry, quit and guardian own those windows from then on. A window the guardian
+//!    can never see again (a helper window off screen) no longer keeps it waiting for days.
+//!    An app that does not take them (an earlier version, a quit under way) leaves the watch
+//!    as it was, offered again a minute later.
 //! 4. A hidden tab (8J, [`hidden_tabs`]) found in the park zone never joins the watch, and
 //!    one waiting is let go: nothing can move it, and it takes its group's frame once
 //!    selected. The guardian waits only for windows it can bring back. A window the app
@@ -42,8 +49,9 @@ use std::time::{Duration, Instant};
 
 use super::ax::AxElement;
 use super::safety::{self, guarded};
-use super::{ctl, hidden_tabs, observe, paths, windows};
+use super::{ctl, handoff, hidden_tabs, observe, paths, windows};
 use crate::engine::guard_watch::{Event, Look, Release, Watch, Waiting};
+use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use crate::logbook::UNCLEAN_EXIT;
@@ -166,7 +174,7 @@ pub fn run(args: &[String]) -> ExitCode {
     install_stop_handlers();
     // The window server lists moved windows at their new frames a moment later.
     std::thread::sleep(SETTLE);
-    watch(&registered);
+    watch(parent as u32, &registered);
     let _ = std::fs::remove_file(&parked_file);
     ExitCode::SUCCESS
 }
@@ -181,7 +189,7 @@ enum Pass {
 
 /// Restore attempts at one window: how many, and when the last one was.
 #[derive(Default)]
-struct Attempts {
+pub(crate) struct Attempts {
     count: u32,
     last: Option<Instant>,
 }
@@ -192,13 +200,21 @@ impl Attempts {
     }
 }
 
+/// The handoff's side of the watch (round 8N): whose watch it is, and when it may be offered.
+struct Handoff {
+    /// The crashed app's process id.
+    parent: u32,
+    offering: Offering,
+}
+
 /// The watch after the scan: see the module docs.
-fn watch(registered: &[Registered]) {
+fn watch(parent: u32, registered: &[Registered]) {
     let mut w = Watch::new(registered);
     let mut reported: Option<Vec<(u32, bool)>> = None;
     let mut attempts: HashMap<u32, Attempts> = HashMap::new();
     let mut asked: Option<Instant> = None;
     let mut busy = BusyStreak::default();
+    let mut handoff = Handoff { parent, offering: Offering::default() };
     loop {
         let sig = STOP_SIGNAL.load(Ordering::SeqCst);
         if sig != 0 {
@@ -207,7 +223,9 @@ fn watch(registered: &[Registered]) {
             tracing::warn!(restored = r.restored, failed = r.failed, "guardian: stopped");
             return;
         }
-        let pass = guarded("the guardian's watch", || watch_pass(&mut w, &mut reported, &mut attempts, &mut asked, &mut busy));
+        let pass = guarded("the guardian's watch", || {
+            watch_pass(&mut w, &mut reported, &mut attempts, &mut asked, &mut busy, &mut handoff)
+        });
         if matches!(pass, Some(Pass::Done)) {
             return;
         }
@@ -224,6 +242,7 @@ fn watch_pass(
     attempts: &mut HashMap<u32, Attempts>,
     asked: &mut Option<Instant>,
     busy: &mut BusyStreak,
+    handoff: &mut Handoff,
 ) -> Pass {
     let displays = safety::scan_displays();
     let now = Instant::now();
@@ -268,15 +287,24 @@ fn watch_pass(
             }
             return if w.is_empty() { Pass::Done } else { Pass::Wait };
         }
-        Successor::Adopted(adopted) => {
+        Successor::Starting | Successor::Adopted(_) => {
             if !w.handed_over() {
                 tracing::info!("guardian: Stage Manager runs again; watching until it adopts each window");
             }
-            for e in w.hand_over(&adopted) {
+            let adopted = match &answer {
+                Successor::Adopted(list) => list.as_slice(),
+                _ => &[],
+            };
+            for e in w.hand_over(adopted) {
                 log_event(&e);
             }
             if w.is_empty() {
                 tracing::info!("guardian: Stage Manager runs again and has adopted every window; done");
+                return Pass::Done;
+            }
+            // It manages windows (a list, not a word that it is still starting): it takes the
+            // rest of the watch (round 8N).
+            if matches!(answer, Successor::Adopted(_)) && handoff.offering.due(now) && hand_off(w, handoff, now) {
                 return Pass::Done;
             }
         }
@@ -287,12 +315,50 @@ fn watch_pass(
         *reported = Some(now_state);
     }
     attempts.retain(|id, _| w.waiting().any(|x| x.id == *id));
-    reach_shown(w, &displays, attempts, now);
+    reach_shown(w, &displays, attempts, now, "guardian", &log_event);
     if w.is_empty() {
         tracing::info!("guardian: no window is left waiting; done");
         return Pass::Done;
     }
     Pass::Wait
+}
+
+/// Offers the running Stage Manager every registered window still waiting (round 8N): those
+/// it takes are let go. True when none is left (the guardian is done).
+fn hand_off(w: &mut Watch, handoff: &mut Handoff, now: Instant) -> bool {
+    let offered = w.registered_waiting();
+    if offered.is_empty() {
+        return false;
+    }
+    match handoff::offer(handoff.parent, offered.clone()) {
+        Answer::Taken { ids, pid } => {
+            let events = w.let_go(&ids, Release::HandedOff);
+            for e in &events {
+                tracing::debug!("guardian: {e:?}");
+            }
+            if w.is_empty() {
+                tracing::info!(
+                    app = ?pid,
+                    windows = ?ids,
+                    "guardian: handed its watch to the running Stage Manager, which waits for these windows now; done"
+                );
+                return true;
+            }
+            let left: Vec<u32> = w.waiting().map(|x| x.id).collect();
+            tracing::info!(app = ?pid, taken = ?ids, left = ?left, "guardian: the running Stage Manager took part of the watch; waiting for the rest");
+            false
+        }
+        Answer::Refused(why) => {
+            if handoff.offering.refused(now) {
+                tracing::info!(windows = offered.len(), "guardian: the running Stage Manager does not take the watch ({why}); watching on as before");
+            }
+            false
+        }
+        Answer::Unanswered => {
+            tracing::debug!("guardian: no answer to the handoff; asked again at the next look");
+            false
+        }
+    }
 }
 
 /// Whether Stage Manager runs again, and which of the waiting windows it has adopted.
@@ -302,6 +368,9 @@ enum Successor {
     None,
     /// It is there but did not answer in time (busy with its launch).
     Busy,
+    /// It runs and has adopted nothing: it says it manages no window yet (its WM thread busy,
+    /// Accessibility missing), or it stayed busy past [`BUSY_CAP`]. Never handed the watch.
+    Starting,
     /// An earlier version: it does not know `adopted`.
     Older,
     /// These of the ids asked about are in its model.
@@ -338,7 +407,7 @@ fn successor_from_reply(reply: &str) -> Successor {
     }
     match (ok, v.get("error").and_then(serde_json::Value::as_str)) {
         (Some(false), Some(e)) if e.starts_with("unknown command: adopted") => Successor::Older,
-        (Some(false), Some(e)) if NOTHING_ADOPTED.contains(&e) => Successor::Adopted(Vec::new()),
+        (Some(false), Some(e)) if NOTHING_ADOPTED.contains(&e) => Successor::Starting,
         _ => Successor::Busy,
     }
 }
@@ -354,7 +423,7 @@ struct BusyStreak {
 
 impl BusyStreak {
     /// The answer to act on. A Busy answer stays Busy until the streak has lasted
-    /// [`BUSY_CAP`] and a waiting window `shows`; then it is `Adopted([])` (nothing adopted:
+    /// [`BUSY_CAP`] and a waiting window `shows`; then it is `Starting` (nothing adopted:
     /// the guardian brings the registered windows back; windows found in the park zone were
     /// let go at the first hand-over). Any other answer ends the streak.
     fn note(&mut self, answer: Successor, shows: bool, now: Instant) -> Successor {
@@ -373,17 +442,39 @@ impl BusyStreak {
                 "guardian: Stage Manager runs again but has not answered for a long time; bringing the waiting windows back"
             );
         }
-        Successor::Adopted(Vec::new())
+        Successor::Starting
     }
 }
 
 /// Every waiting window listed on screen, through Accessibility: one already outside the
 /// park zone is let go; a registered one still parked goes back to its registered frame and
 /// is read back; any other is the recovery scan's (`state.json`, else centered), once per
-/// pass, then read back.
-fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u32, Attempts>, now: Instant) {
+/// pass, then read back. `who` names the watch in the log (the guardian, or the app's watch
+/// of the windows it took from one, round 8N); `log` gets every change.
+pub(crate) fn reach_shown(
+    w: &mut Watch,
+    displays: &ScanDisplays,
+    attempts: &mut HashMap<u32, Attempts>,
+    now: Instant,
+    who: &str,
+    log: &dyn Fn(&Event),
+) {
+    let shown = w.shown();
+    reach(w, shown, displays, attempts, now, who, log);
+}
+
+/// [`reach_shown`] over `windows` (the app's last look at quit tries every taken window).
+pub(crate) fn reach(
+    w: &mut Watch,
+    windows: Vec<Waiting>,
+    displays: &ScanDisplays,
+    attempts: &mut HashMap<u32, Attempts>,
+    now: Instant,
+    who: &str,
+    log: &dyn Fn(&Event),
+) {
     let mut scanned: Vec<Waiting> = Vec::new();
-    for x in w.shown() {
+    for x in windows {
         let a = attempts.entry(x.id).or_default();
         if !a.due(now) {
             continue;
@@ -393,21 +484,21 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
             Err(why) => {
                 a.count += 1;
                 a.last = Some(now);
-                log_attempt(&x, a.count, &why);
+                log_attempt(who, &x, a.count, &why);
                 continue;
             }
         };
         match element.frame() {
             Ok(f) if !is_stranded(f, displays, x.known()) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
-                    log_event(&e);
+                    log(&e);
                     continue;
                 }
                 // A fitted window still at its fitted frame: moved to its pre-fit frame below.
-                tracing::debug!(id = x.id, at = %f, "guardian: a fitted window; putting back its pre-fit frame");
+                tracing::debug!(id = x.id, at = %f, "{who}: a fitted window; putting back its pre-fit frame");
             }
             Ok(_) => {}
-            Err(e) => tracing::debug!(id = x.id, "guardian: cannot read its frame ({e})"),
+            Err(e) => tracing::debug!(id = x.id, "{who}: cannot read its frame ({e})"),
         }
         a.count += 1;
         a.last = Some(now);
@@ -415,15 +506,15 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
             Some(frame) => match element.set_frame(frame) {
                 Ok(()) => match element.frame() {
                     Ok(f) if !is_stranded(f, displays, x.known()) => {
-                        tracing::warn!(id = x.id, pid = x.pid, to = %f, "guardian: its Desktop shows; window brought back");
+                        tracing::warn!(id = x.id, pid = x.pid, to = %f, "{who}: its Desktop shows; window brought back");
                         if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
-                            log_event(&e);
+                            log(&e);
                         }
                     }
-                    Ok(f) => log_attempt(&x, a.count, &format!("it reads {f} after the move")),
-                    Err(e) => log_attempt(&x, a.count, &format!("its frame cannot be read after the move ({e})")),
+                    Ok(f) => log_attempt(who, &x, a.count, &format!("it reads {f} after the move")),
+                    Err(e) => log_attempt(who, &x, a.count, &format!("its frame cannot be read after the move ({e})")),
                 },
-                Err(e) => log_attempt(&x, a.count, &format!("it refused the move ({e})")),
+                Err(e) => log_attempt(who, &x, a.count, &format!("it refused the move ({e})")),
             },
             None => scanned.push(x),
         }
@@ -431,27 +522,27 @@ fn reach_shown(w: &mut Watch, displays: &ScanDisplays, attempts: &mut HashMap<u3
     if scanned.is_empty() {
         return;
     }
-    let r = safety::recovery_scan("guardian: a Desktop with parked windows shows");
-    tracing::info!(restored = r.restored, failed = r.failed, "guardian: scanned the shown Desktop");
+    let r = safety::recovery_scan(&format!("{who}: a Desktop with parked windows shows"));
+    tracing::info!(restored = r.restored, failed = r.failed, "{who}: scanned the shown Desktop");
     for x in scanned {
         match safety::ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
             Ok(f) if !is_stranded(f, displays, x.known()) => {
                 if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
-                    log_event(&e);
+                    log(&e);
                 }
             }
-            Ok(f) => log_attempt(&x, attempts.get(&x.id).map_or(1, |a| a.count), &format!("it reads {f} after the scan")),
-            Err(why) => log_attempt(&x, attempts.get(&x.id).map_or(1, |a| a.count), &why),
+            Ok(f) => log_attempt(who, &x, attempts.get(&x.id).map_or(1, |a| a.count), &format!("it reads {f} after the scan")),
+            Err(why) => log_attempt(who, &x, attempts.get(&x.id).map_or(1, |a| a.count), &why),
         }
     }
 }
 
 /// A failed attempt at a shown window: loud at the first, the last fast one and every 20th.
-fn log_attempt(x: &Waiting, attempt: u32, why: &str) {
+fn log_attempt(who: &str, x: &Waiting, attempt: u32, why: &str) {
     if attempt == 1 || attempt == FAST_ATTEMPTS || attempt.is_multiple_of(20) {
-        tracing::warn!(id = x.id, pid = x.pid, attempt, "guardian: its Desktop shows, but {why}; retrying");
+        tracing::warn!(id = x.id, pid = x.pid, attempt, "{who}: its Desktop shows, but {why}; retrying");
     } else {
-        tracing::debug!(id = x.id, attempt, "guardian: {why}; retrying");
+        tracing::debug!(id = x.id, attempt, "{who}: {why}; retrying");
     }
 }
 
@@ -547,7 +638,7 @@ fn left_alone_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], di
 
 /// The window server's layer-0 windows on every Space (of `list`), with whether their app
 /// may be managed.
-fn listed_windows(list: &[windows::CgWindow]) -> Vec<Listed> {
+pub(crate) fn listed_windows(list: &[windows::CgWindow]) -> Vec<Listed> {
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
     let mut allowed: HashMap<i32, bool> = HashMap::new();
@@ -647,8 +738,8 @@ mod tests {
         assert_eq!(successor_from_reply(r#"{"ok":false,"error":"unknown command: adopted 4"}"#), Successor::Older);
         assert_eq!(
             successor_from_reply(r#"{"ok":false,"error":"WM thread did not answer"}"#),
-            Successor::Adopted(vec![]),
-            "busy: nothing adopted yet"
+            Successor::Starting,
+            "busy: nothing adopted yet, and no handoff to an app not managing windows"
         );
         assert_eq!(successor_from_reply("garbage"), Successor::Busy);
     }
@@ -658,7 +749,7 @@ mod tests {
     fn only_known_errors_count_as_answers() {
         for e in NOTHING_ADOPTED {
             let reply = serde_json::json!({ "ok": false, "error": e }).to_string();
-            assert_eq!(successor_from_reply(&reply), Successor::Adopted(vec![]), "{e}");
+            assert_eq!(successor_from_reply(&reply), Successor::Starting, "{e}");
         }
         for reply in [
             r#"{"ok":false,"error":"not allowed"}"#,
@@ -681,9 +772,9 @@ mod tests {
         let mut b = BusyStreak::default();
         assert_eq!(b.note(Successor::Busy, true, s(0)), Successor::Busy);
         assert_eq!(b.note(Successor::Busy, true, s(29)), Successor::Busy);
-        assert_eq!(b.note(Successor::Busy, true, s(30)), Successor::Adopted(vec![]));
+        assert_eq!(b.note(Successor::Busy, true, s(30)), Successor::Starting);
         assert_eq!(b.note(Successor::Busy, false, s(31)), Successor::Busy, "nothing shows: nothing to move");
-        assert_eq!(b.note(Successor::Busy, true, s(32)), Successor::Adopted(vec![]), "still the same streak");
+        assert_eq!(b.note(Successor::Busy, true, s(32)), Successor::Starting, "still the same streak");
         assert_eq!(b.note(Successor::Adopted(vec![4]), true, s(33)), Successor::Adopted(vec![4]));
         assert_eq!(b.note(Successor::Busy, true, s(34)), Successor::Busy, "a new streak");
         assert_eq!(b.note(Successor::None, true, s(40)), Successor::None);
@@ -691,7 +782,7 @@ mod tests {
         // Busy while nothing showed counts: a window shown after the cap comes back at once.
         let mut b = BusyStreak::default();
         assert_eq!(b.note(Successor::Busy, false, s(0)), Successor::Busy);
-        assert_eq!(b.note(Successor::Busy, true, s(45)), Successor::Adopted(vec![]));
+        assert_eq!(b.note(Successor::Busy, true, s(45)), Successor::Starting);
     }
 
     #[test]

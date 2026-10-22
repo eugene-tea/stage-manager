@@ -33,6 +33,13 @@
 //! waited for: macOS keeps it off screen at its last frame, out of Accessibility's reach,
 //! until its tab is selected, when it takes its group's frame.
 //!
+//! **Taken windows** (round 8N, [`crate::engine::handoff`]): an old guardian still waiting when
+//! this app runs hands its watch over ([`take_watch`]). The windows it took join the parked
+//! file (so this app's guardian waits for them after a crash), count as ours at the quit's
+//! leftovers check (brought back to their taken frame), and are watched on the WM thread
+//! ([`super::handoff::TakenWatch`]) until each is back, gone, or in the model. A quit is clean
+//! only once none is left ([`taken_len`]).
+//!
 //! **Hidden apps** (`[windows] hide_parked_apps`): every app we hid is recorded beside the
 //! registry ([`set_hidden`]) and in the parked file, and every path that unparks unhides it
 //! too ([`unhide_ours`]): quit, the panic hook, the signals and, from the parked file, the
@@ -42,7 +49,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -92,6 +99,87 @@ pub fn quit_requested() -> bool {
 }
 
 static REGISTRY: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new());
+
+/// Windows taken from an old guardian (round 8N): no AX element yet (most sit on a Desktop
+/// not shown), only what the guardian knew. Locked after [`REGISTRY`] when both are.
+static TAKEN: Mutex<BTreeMap<u32, Registered>> = Mutex::new(BTreeMap::new());
+
+fn lock_taken() -> MutexGuard<'static, BTreeMap<u32, Registered>> {
+    TAKEN.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Takes an old guardian's watch ([`crate::engine::handoff::take`]): its windows join the
+/// taken ones and the parked file, its park corners this run's. Returns every offered id
+/// (all held now) and how many were new.
+pub fn take_watch(windows: &[Registered], corners: &[Corner]) -> (Vec<u32>, usize) {
+    let taken = crate::engine::handoff::take(&mut lock_taken(), windows);
+    if let Ok(mut c) = CORNERS.lock() {
+        c.extend(corners.iter().copied());
+    }
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
+    taken
+}
+
+/// The windows taken from an old guardian, still waited for.
+pub fn taken() -> Vec<Registered> {
+    lock_taken().values().copied().collect()
+}
+
+/// How many windows taken from an old guardian are still waited for.
+pub fn taken_len() -> usize {
+    lock_taken().len()
+}
+
+/// The ids of the windows taken from an old guardian.
+pub fn taken_ids() -> BTreeSet<u32> {
+    lock_taken().keys().copied().collect()
+}
+
+/// A taken window's entry.
+fn taken_entry(id: u32) -> Option<Registered> {
+    lock_taken().get(&id).copied()
+}
+
+/// Windows the latest leftovers check left in the park zone that were not handed over (taken
+/// from an old guardian): those keep a quit's error.
+static LEFT_NOT_TAKEN: AtomicUsize = AtomicUsize::new(0);
+
+/// How many windows the latest leftovers check left that were not handed over.
+pub fn left_not_taken() -> usize {
+    LEFT_NOT_TAKEN.load(Ordering::SeqCst)
+}
+
+/// Set by a quit whose only windows not back are handed-over ones still away: passed on to
+/// this app's guardian, a warning rather than an error.
+static PASSED_ON: AtomicBool = AtomicBool::new(false);
+
+/// Notes whether this quit passes handed-over windows on (and nothing else is left).
+pub fn set_passed_on(on: bool) {
+    PASSED_ON.store(on, Ordering::SeqCst);
+}
+
+/// True when this quit passes handed-over windows on and nothing else is left.
+pub fn passed_on() -> bool {
+    PASSED_ON.load(Ordering::SeqCst)
+}
+
+/// Lets go of taken windows (back, gone, or in the model now).
+pub fn taken_forget(ids: &[u32]) {
+    if ids.is_empty() {
+        return;
+    }
+    let changed = {
+        let mut taken = lock_taken();
+        let before = taken.len();
+        taken.retain(|id, _| !ids.contains(id));
+        taken.len() != before
+    };
+    if changed {
+        let listed = registered(&lock_registry());
+        write_parked_file(&listed);
+    }
+}
 
 /// Windows a stand-down could not bring back (another Space's): owned by no controller, kept
 /// in the registry through every [`registry_replace`] until they are back
@@ -158,7 +246,8 @@ static VISIBLE: Mutex<Option<Rect>> = Mutex::new(None);
 /// window parked at a corner the arrangement no longer picks still counts as parked.
 static CORNERS: Mutex<BTreeSet<Corner>> = Mutex::new(BTreeSet::new());
 
-fn corners_used() -> Vec<Corner> {
+/// Every park corner used this run (or named by the guardian's parked file).
+pub(crate) fn corners_used() -> Vec<Corner> {
     CORNERS.lock().map(|c| c.iter().copied().collect()).unwrap_or_default()
 }
 
@@ -239,9 +328,11 @@ pub fn retry_held() -> bool {
     lock_held().is_empty()
 }
 
-/// The registry as the guardian needs it: ids, pids and restore frames.
+/// The registry as the guardian needs it: ids, pids and restore frames; then the windows
+/// taken from an old guardian that the registry does not hold (round 8N).
 fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
-    map.iter()
+    let mut listed: Vec<Registered> = map
+        .iter()
         .map(|(&id, e)| Registered {
             id,
             pid: e.element.pid().unwrap_or(-1),
@@ -249,7 +340,9 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
             child: e.child,
             fitted: e.fitted,
         })
-        .collect()
+        .collect();
+    listed.extend(lock_taken().values().filter(|r| !map.contains_key(&r.id)).copied());
+    listed
 }
 
 /// What the parked file holds now (only rewritten when it changes).
@@ -315,12 +408,14 @@ pub fn registry_ids() -> BTreeSet<u32> {
     lock_registry().keys().copied().collect()
 }
 
-/// Drops the entries of windows seen back (quit's leftovers, [`leftovers_back`]).
+/// Drops the entries of windows seen back (quit's leftovers, [`leftovers_back`]), taken ones
+/// too.
 fn registry_forget(ids: &[u32]) {
     if ids.is_empty() {
         return;
     }
     lock_held().retain(|id, _| !ids.contains(id));
+    lock_taken().retain(|id, _| !ids.contains(id));
     let listed = {
         let mut guard = lock_registry();
         guard.retain(|id, _| !ids.contains(id));
@@ -497,10 +592,12 @@ pub struct Ours {
 }
 
 impl Ours {
-    /// The registry now, `managed` (the model's windows, when the caller has them) and
-    /// `state.json` (its bundles and frames).
+    /// The registry now (the windows taken from an old guardian too), `managed` (the model's
+    /// windows, when the caller has them) and `state.json` (its bundles and frames).
     pub fn now(managed: BTreeSet<u32>) -> Self {
-        Self::from_parts(registry_ids(), managed, read_state("safety"))
+        let mut registered = registry_ids();
+        registered.extend(taken_ids());
+        Self::from_parts(registered, managed, read_state("safety"))
     }
 
     /// What is known from the registry's ids, the model's windows and `state.json`.
@@ -1009,6 +1106,7 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
     };
     let left = read(UNPARK_SETTLE);
     if left.is_empty() {
+        LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
         return None;
     }
     let seen: Vec<(u32, bool)> = left.iter().map(|w| (w.id, w.onscreen)).collect();
@@ -1020,15 +1118,25 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
     let took_ms = start.elapsed().as_millis() as u64;
     if after.is_empty() {
         tracing::info!(reason, back = left.len(), took_ms, "every window still parked after unparking is back");
+        LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
         return None;
     }
     let ids: Vec<u32> = after.iter().map(|w| w.id).collect();
-    tracing::error!(reason, windows = ?ids, unreached = ?unreached, took_ms, "windows still parked: the guardian brings each back once its Desktop shows or its app answers");
+    let taken = taken_ids();
+    let mine: Vec<u32> = ids.iter().copied().filter(|id| !taken.contains(id)).collect();
+    LEFT_NOT_TAKEN.store(mine.len(), Ordering::SeqCst);
+    if mine.is_empty() {
+        // Only windows handed over by an old guardian (round 8N): passed on, never an error.
+        tracing::info!(reason, windows = ?ids, took_ms, "handed-over windows still parked: passed on to the guardian");
+    } else {
+        tracing::error!(reason, windows = ?ids, unreached = ?unreached, took_ms, "windows still parked: the guardian brings each back once its Desktop shows or its app answers");
+    }
     Some(ours.kept_for_retry(&ids))
 }
 
 /// Brings back every window in `left` (listed in the park zone after an unpark) before
-/// `deadline`: to its registry frame, else its `state.json` frame, else centered
+/// `deadline`: to its registry frame (or the frame it was taken with from an old guardian),
+/// else its `state.json` frame, else centered
 /// ([`leftovers::leftover_frame`]), through the registry's element or the app's own list.
 /// A window is tried only when its try fits in the time left ([`leftovers::leftover_fits`]),
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
@@ -1061,7 +1169,8 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         // The title only matters for a state.json match (no registry frame).
         let title = if entry.is_none() { element.title().unwrap_or_default() } else { String::new() };
         let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
-        let (frame, source) = leftovers::leftover_frame(entry.as_ref().map(|e| e.restore), &live, state, &displays);
+        let registered = entry.as_ref().map(|e| e.restore).or_else(|| taken_entry(w.id).map(|r| r.restore));
+        let (frame, source) = leftovers::leftover_frame(registered, &live, state, &displays);
         let known = ours.known(w.id, bundle.as_deref());
         let mut result = set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now()));
         // The registry's element went stale (the window was reported destroyed while ordered

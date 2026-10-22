@@ -99,6 +99,19 @@ guardian only ever moves a window out of the park zone, never into it, so the wo
 window shown that the new app meant to keep parked (until its next switch), never one left
 parked; and it lets go of each window at its next pass once the new app reports it adopted.
 
+Round 8N, the handoff (`engine::handoff`, `platform::handoff`): once the new app answers
+`adopted` with a list (it manages windows), the guardian hands it the rest of its watch
+(`ctl take-watch`: ids, pids, restore frames, park corners) and exits, logged once at info on
+both sides. The new app holds them as taken windows beside its registry: its parked file names
+them (its own guardian waits for them after a crash), its quit's leftovers check brings them
+back to their taken frames, and its WM thread watches them by the guardian's rules (seen back,
+gone, or in the model: let go; shown while parked: brought back). A quit with one still away is
+unclean, so its own guardian takes it over, and hands it on to the next copy. A copy that
+does not take the watch (an earlier version, one quitting) leaves the guardian watching as
+before, offered again a minute later; the offer is answered on the ctl thread, never the WM
+thread's. A window a guardian can never see again (10-21: a Chrome helper off screen) no longer
+keeps an old guardian waiting for days: it travels with the running copy instead, never dropped.
+
 Hidden tabs (8J, `engine::hidden_tab`): macOS window tabs are separate window-server windows;
 a tab not selected is off screen, not listed through Accessibility, and keeps its last frame
 (a park spot, say) until selected, when it takes its group's frame. Nothing can move one, nor

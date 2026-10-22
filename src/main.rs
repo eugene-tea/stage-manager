@@ -112,7 +112,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -365,12 +365,19 @@ mod app {
     fn registry_then_leftovers(reason: &str) -> bool {
         let registry = safety::emergency_unpark(reason);
         let leftovers = safety::leftovers_back(reason, Default::default());
-        registry && leftovers
+        // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits;
+        // when they are all that is left, passed on with a warning (no error).
+        let rest_back = registry && (leftovers || safety::left_not_taken() == 0) && safety::registry_len() == 0;
+        safety::set_passed_on(rest_back && safety::taken_len() > 0);
+        rest_back && safety::taken_len() == 0
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
         if ok {
             safety::mark_clean_exit();
+        } else if safety::passed_on() {
+            // Only handed-over windows still away (round 8N): this app's guardian takes them over.
+            tracing::info!("handed-over windows still away: this app's guardian takes them over");
         } else {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
@@ -416,6 +423,9 @@ mod app {
                 "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
                 "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
+            // On this thread, never the WM thread's: a busy WM thread never keeps an old
+            // guardian waiting (round 8N).
+            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst)),
             Command::Settings => {
                 DispatchQueue::main().exec_async(shell::show_settings);
                 json!({ "ok": true })
