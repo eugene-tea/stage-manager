@@ -416,7 +416,7 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        self.motion.overlay.show_below(below);
+        self.show_overlay(below);
         self.motion.overlay.flush();
         self.motion.landing = None;
         strip_model::cover(t.id, cover);
@@ -580,7 +580,18 @@ impl Strip {
     pub(super) fn reorder_overlay(&mut self) {
         let Some(under) = self.motion.running.as_ref().map(|r| r.under) else { return };
         let below = self.overlay_below(under);
-        self.motion.overlay.show_below(below);
+        self.show_overlay(below);
+    }
+
+    /// Shows the overlay where [`Self::overlay_below`] puts it: above every window while a
+    /// dragged window's card shows (it passes over the raised strip's cards), else under
+    /// `below`, or above every normal window and below floating ones.
+    fn show_overlay(&mut self, below: Option<(u32, isize)>) {
+        if self.motion.window_card.is_some() {
+            self.motion.overlay.show_on_top();
+        } else {
+            self.motion.overlay.show_below(below);
+        }
     }
 
     fn finish_transition(&mut self, landed: bool) {
@@ -750,7 +761,7 @@ impl Strip {
             let style = self.style.animation.clone();
             let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &style, self.style.drag.ghost_opacity as f32);
             self.motion.window_card = Some(WindowCard { window: w.id, ghost, has_image: image.is_some() });
-            self.motion.overlay.show();
+            self.motion.overlay.show_on_top();
         }
         let o = self.motion.overlay.origin();
         let at = Plane::under_pointer(Point::new(p.x - o.x, p.y - o.y), m.thumb_size(&f), grab, m.tilt, corner);
