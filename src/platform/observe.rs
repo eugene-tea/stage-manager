@@ -3,7 +3,8 @@
 //!
 //! A *manageable* window is an AX element with role `AXWindow`, a `CGWindowID`, not
 //! fullscreen, on layer 0. Subrole `AXStandardWindow` is [`WindowKind::Standard`]; any other
-//! subrole is [`WindowKind::Child`]. Windows are deduplicated by window id.
+//! subrole is [`WindowKind::Child`], except a window that is or was minimized, which is
+//! standard whatever its subrole says ([`kind_of`]). Windows are deduplicated by window id.
 //!
 //! The [`Observer`] only tracks; it reports what changed as [`WinEvent`]s, which the
 //! controller drains with [`Observer::take_events`] and turns into engine operations.
@@ -14,6 +15,12 @@
 //! goes there ([`Observer::rescan_all`] on a Space change), and a tracked window that goes
 //! to another Space stays tracked (no destroy notification comes). Whether a window is on
 //! the current Space is the window server's on-screen flag, read by the controller.
+//!
+//! **Closed while its app did not answer** (round 8M, [`crate::engine::vanished`]): an app that
+//! stops answering Accessibility sends no destroyed notification for a window the user closes
+//! (Home, 10-21). About once a second ([`Observer::sweep_closed`]) the tracked windows are
+//! looked up in the window server's complete list (every Desktop, minimized and hidden
+//! windows included); one missing from it on two looks apart is reported destroyed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -32,9 +39,20 @@ use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
 use crate::engine::busy_apps::Reply;
 use crate::engine::geometry::Rect;
+use crate::engine::vanished::Vanished;
 
 /// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
 const MAX_ATTEMPTS: u32 = 10;
+
+/// Test only (round 8M): with `STAGE_MANAGER_TEST` set too, any value ignores Accessibility's
+/// destroyed notifications, as an app that does not answer sends none (Home, 10-21), so a
+/// scripted check sees a closed window leave through [`Observer::sweep_closed`] alone.
+pub const DROP_DESTROYED_ENV: &str = "STAGE_MANAGER_DROP_AX_DESTROYED";
+
+fn drop_destroyed() -> bool {
+    static DROP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DROP.get_or_init(|| std::env::var_os("STAGE_MANAGER_TEST").is_some() && std::env::var_os(DROP_DESTROYED_ENV).is_some())
+}
 
 /// Standard window or child (sheet, dialog, panel, popover…).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -51,6 +69,15 @@ impl WindowKind {
     }
 }
 
+/// A window's kind from its subrole and whether it is (or was) minimized. Only a standard
+/// window can be minimized (a sheet, dialog or panel has no minimize button), so a minimized
+/// one is standard whatever its subrole says: measured 10-15 on macOS 27, a window reopened
+/// minimized reads `AXDialog` while in the Dock and may still read it during the un-minimize
+/// animation, when it is placed. A window never minimized is classified by its subrole.
+pub fn kind_of(subrole: &str, minimized: bool) -> WindowKind {
+    if minimized { WindowKind::Standard } else { WindowKind::from_subrole(subrole) }
+}
+
 /// A manageable window being observed.
 #[derive(Clone, Debug)]
 pub struct TrackedWindow {
@@ -61,6 +88,8 @@ pub struct TrackedWindow {
     pub kind: WindowKind,
     pub title: String,
     pub frame: Rect,
+    /// Minimized when first read, or since (`AXWindowMiniaturized`); never cleared: a window
+    /// once minimized is a standard window ([`kind_of`]).
     pub minimized: bool,
 }
 
@@ -97,6 +126,37 @@ pub enum WinEvent {
 struct ObservedApp {
     element: AxElement,
     observer: AxObserver,
+}
+
+/// What reading a window taken for a child again makes of it ([`Observer::recheck_kind`]).
+/// A standard window is never asked (one read off screen was read right). A window that was
+/// minimized (`was_minimized`: when first read, or since) or is minimized now
+/// (`minimized_now`) is standard whatever its subrole ([`kind_of`]); any other is classified
+/// by the subrole read now. `Some((subrole, kind))` with the subrole read now (`None` when it
+/// did not answer) and the kind; `None` when the kind stays (standard, or no answer).
+pub fn reread_kind(
+    kind: WindowKind,
+    was_minimized: bool,
+    minimized_now: impl FnOnce() -> AxResult<bool>,
+    read: impl FnOnce() -> AxResult<String>,
+) -> Option<(Option<String>, WindowKind)> {
+    if kind == WindowKind::Standard {
+        return None;
+    }
+    let subrole = read().ok();
+    if was_minimized {
+        return Some((subrole, WindowKind::Standard));
+    }
+    if subrole.as_deref() == Some(names::SUBROLE_STANDARD) {
+        return Some((subrole, WindowKind::Standard));
+    }
+    // Still a child's subrole, or no answer: a window minimized now is standard all the same.
+    if minimized_now().unwrap_or(false) {
+        return Some((subrole, WindowKind::Standard));
+    }
+    let subrole = subrole?;
+    let kind = kind_of(&subrole, false);
+    Some((Some(subrole), kind))
 }
 
 /// The `STAGE_MANAGER_ONLY` filter: a set of bundle ids, or `None` for every app.
@@ -151,6 +211,11 @@ pub struct Observer {
     events: Vec<WinEvent>,
     /// When the main thread got each app's last activation notice.
     activated_at: HashMap<i32, Instant>,
+    /// When the last regular app launched (any app, managed or not): the restore window's
+    /// settling waits for launches to stop.
+    last_launch: Option<Instant>,
+    /// Tracked windows the window server no longer lists ([`Self::sweep_closed`], 8M).
+    vanished: Vanished,
 }
 
 /// The AX callback type, installed by the WM thread.
@@ -182,6 +247,8 @@ impl Observer {
             recheck: HashMap::new(),
             events: Vec::new(),
             activated_at: HashMap::new(),
+            last_launch: None,
+            vanished: Vanished::default(),
         }
     }
 
@@ -215,6 +282,11 @@ impl Observer {
         self.activated_at.get(&pid).copied()
     }
 
+    /// When the last regular app launched, if one did since this observer started.
+    pub fn last_launch(&self) -> Option<Instant> {
+        self.last_launch
+    }
+
     /// The bundle id of a running app, if known.
     pub fn bundle_id(&self, pid: i32) -> Option<&str> {
         self.apps.get(&pid).and_then(|a| a.bundle_id.as_deref())
@@ -232,6 +304,29 @@ impl Observer {
             w.frame = f;
         }
         Some(w.frame)
+    }
+
+    /// Reads the kind of a tracked window taken for a child again, keeping the answer: a
+    /// window first read off screen may have answered for its state then (measured 10-15, macOS
+    /// 27: a window reopened minimized reads `AXDialog`, `AXStandardWindow` once it shows, and
+    /// may read `AXDialog` still during the un-minimize animation), so a window that waited off
+    /// screen is read again when it is placed; one minimized then or now is standard
+    /// ([`reread_kind`]). True when its kind changed.
+    pub fn recheck_kind(&mut self, id: u32) -> bool {
+        let Some(w) = self.windows.get_mut(&id) else { return false };
+        let element = &w.element;
+        let Some((subrole, kind)) = reread_kind(w.kind, w.minimized, || element.is_minimized(), || element.subrole())
+        else {
+            return false;
+        };
+        let changed = kind != w.kind;
+        let subrole = subrole.unwrap_or_else(|| w.subrole.clone());
+        if changed {
+            tracing::info!(id, pid = w.pid, from = %w.subrole, to = %subrole, minimized = w.minimized, "window read again once on screen: now a standard window (first read off screen)");
+        }
+        w.subrole = subrole;
+        w.kind = kind;
+        changed
     }
 
     /// True when app `pid` is observed (allowed and answering, not ours).
@@ -423,6 +518,45 @@ impl Observer {
         }
     }
 
+    /// Windows closed while their app did not answer (round 8M, [`crate::engine::vanished`]):
+    /// each tracked window of an app still observed and running that the window server's
+    /// complete list ([`windows::list_windows`]: `kCGWindowListOptionAll`, every Desktop,
+    /// minimized and hidden windows included) misses on two looks at least
+    /// [`crate::engine::vanished::LOOK_APART`] apart is dropped and reported destroyed, as a
+    /// destroyed notification would have (its stage drops it; an empty stage has no card).
+    /// Logged at info, once per window. Called about once a second.
+    pub fn sweep_closed(&mut self) {
+        if !self.observing || self.windows.is_empty() {
+            return;
+        }
+        let list = windows::list_windows();
+        // Nothing on screen at all: the window server answered nothing (or the session is not
+        // the console's): no observation.
+        let blind = !list.iter().any(|w| w.onscreen);
+        let listed: HashSet<u32> = list.iter().map(|w| w.id).collect();
+        let alive = |pid: i32| {
+            // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+            unsafe { libc::kill(pid, 0) == 0 }
+        };
+        let tracked: Vec<u32> =
+            self.windows.values().filter(|w| self.observed.contains_key(&w.pid) && alive(w.pid)).map(|w| w.id).collect();
+        for id in self.vanished.look(Instant::now(), tracked, &listed, blind) {
+            let Some(w) = self.windows.remove(&id) else { continue };
+            if let Some(app) = self.observed.get(&w.pid) {
+                for name in n::WINDOW_LEVEL {
+                    let _ = app.observer.remove(&w.element, name);
+                }
+            }
+            tracing::info!(
+                id,
+                pid = w.pid,
+                bundle = self.bundle_of(w.pid),
+                "window closed while its app did not answer: the window server no longer lists it on any Desktop and no destroyed notification came; dropped"
+            );
+            self.events.push(WinEvent::Destroyed(id));
+        }
+    }
+
     /// Tracks `element` if it is a manageable window not tracked yet; returns its id.
     fn track_window(&mut self, pid: i32, element: AxElement, cg: &HashMap<u32, CgWindow>) -> Option<u32> {
         let id = element.window_id().ok()?;
@@ -446,14 +580,19 @@ impl Observer {
             return None;
         }
         let subrole = element.subrole().unwrap_or_default();
+        let minimized = element.is_minimized().unwrap_or(false);
+        let kind = kind_of(&subrole, minimized);
+        if kind != WindowKind::from_subrole(&subrole) {
+            tracing::info!(id, pid, subrole = %subrole, "window first read minimized: a standard window whatever its subrole");
+        }
         let window = TrackedWindow {
             id,
             pid,
-            kind: WindowKind::from_subrole(&subrole),
+            kind,
             subrole,
             title: element.title().unwrap_or_default(),
             frame: element.frame().unwrap_or(cg_window.bounds),
-            minimized: element.is_minimized().unwrap_or(false),
+            minimized,
             element,
         };
         if let Some(app) = self.observed.get(&pid) {
@@ -579,6 +718,10 @@ impl Observer {
                 self.rescan_app(pid);
             }
             n::ELEMENT_DESTROYED => {
+                if drop_destroyed() {
+                    tracing::debug!(pid, "test: a destroyed notification ignored ({DROP_DESTROYED_ENV})");
+                    return;
+                }
                 if let Some(id) = self.find_window(pid, &element) {
                     if let (Some(w), Some(app)) = (self.windows.remove(&id), self.observed.get(&pid)) {
                         for name in n::WINDOW_LEVEL {
@@ -627,6 +770,7 @@ impl Observer {
         match event {
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
+                self.last_launch = Some(Instant::now());
                 let pid = app.pid;
                 let allowed = self.allowed(&app);
                 self.apps.insert(pid, app);
@@ -783,6 +927,25 @@ fn reply(answer: AxResult<bool>) -> Reply {
 mod tests {
     use super::*;
 
+    /// Round 8H, the freeze: once the logout's head start stops observation, an app's quit or
+    /// activation reaches no controller (no stage switched, no card removed, nothing saved),
+    /// while the running apps stay known for a cancelled logout's fresh start.
+    #[test]
+    fn a_stopped_observer_hands_on_no_app_event() {
+        unsafe extern "C-unwind" fn never(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
+        let mail = AppInfo { pid: 4242, bundle_id: Some("com.example.mail".into()), name: Some("Mail".into()) };
+        let terminal = AppInfo { pid: 4343, bundle_id: Some("com.example.terminal".into()), name: Some("Terminal".into()) };
+        let mut ob = Observer::new(1, None);
+        ob.set_apps(vec![mail.clone(), terminal.clone()], never);
+        ob.stop();
+        let _ = ob.take_events();
+        ob.on_app_event(AppEvent::Terminated(mail.clone()), never);
+        ob.on_app_event(AppEvent::Activated(terminal.clone(), Instant::now()), never);
+        ob.on_app_event(AppEvent::Hidden(terminal.clone()), never);
+        assert!(ob.take_events().is_empty(), "nothing for any controller");
+        assert!(!ob.observing());
+    }
+
     #[test]
     fn an_axwindows_error_is_retried_unless_there_is_no_value() {
         assert_eq!(windows_or_retry(Ok(vec![1, 2])), (vec![1, 2], false));
@@ -814,6 +977,76 @@ mod tests {
         assert_eq!(WindowKind::from_subrole("AXStandardWindow"), WindowKind::Standard);
         assert_eq!(WindowKind::from_subrole("AXDialog"), WindowKind::Child);
         assert_eq!(WindowKind::from_subrole(""), WindowKind::Child);
+    }
+
+    #[test]
+    fn a_minimized_window_is_standard_whatever_its_subrole() {
+        // The 10-15 live run: a window reopened minimized reads `AXDialog` in the Dock.
+        assert_eq!(kind_of("AXDialog", true), WindowKind::Standard);
+        assert_eq!(kind_of("", true), WindowKind::Standard);
+        assert_eq!(kind_of("AXStandardWindow", true), WindowKind::Standard);
+        // Never minimized: its subrole decides, so a real dialog stays a child.
+        assert_eq!(kind_of("AXDialog", false), WindowKind::Child);
+        assert_eq!(kind_of("AXFloatingWindow", false), WindowKind::Child);
+        assert_eq!(kind_of("AXStandardWindow", false), WindowKind::Standard);
+    }
+
+    #[test]
+    fn a_window_first_read_off_screen_is_read_again_when_it_shows() {
+        let not_minimized = || Ok::<_, AxError>(false);
+        // Alpha 2 (10-15): read `AXDialog` off screen, `AXStandardWindow` once shown.
+        let shown = || Ok::<_, AxError>("AXStandardWindow".to_string());
+        assert_eq!(
+            reread_kind(WindowKind::Child, false, not_minimized, shown),
+            Some((Some("AXStandardWindow".into()), WindowKind::Standard))
+        );
+        // A real dialog (never minimized) stays one.
+        assert_eq!(
+            reread_kind(WindowKind::Child, false, not_minimized, || Ok("AXDialog".into())),
+            Some((Some("AXDialog".into()), WindowKind::Child))
+        );
+        // No answer (busy, gone): kept as it was.
+        assert_eq!(reread_kind(WindowKind::Child, false, not_minimized, || Err(AxError::CANNOT_COMPLETE)), None);
+        assert_eq!(
+            reread_kind(WindowKind::Child, false, || Err(AxError::CANNOT_COMPLETE), || Ok("AXDialog".into())),
+            Some((Some("AXDialog".into()), WindowKind::Child))
+        );
+        // A standard window is never asked again.
+        let asked = std::cell::Cell::new(false);
+        let read = || {
+            asked.set(true);
+            Ok("AXDialog".to_string())
+        };
+        let minimized = || {
+            asked.set(true);
+            Ok(false)
+        };
+        assert_eq!(reread_kind(WindowKind::Standard, false, minimized, read), None);
+        assert!(!asked.get());
+    }
+
+    #[test]
+    fn a_window_minimized_then_or_now_is_standard_when_read_again() {
+        // Alpha 1 (10-15): un-minimized during the restore window, it still read `AXDialog`
+        // mid-animation when placed. Once minimized, it is standard whatever it reads now.
+        let dialog = || Ok::<_, AxError>("AXDialog".to_string());
+        assert_eq!(
+            reread_kind(WindowKind::Child, true, || Ok(false), dialog),
+            Some((Some("AXDialog".into()), WindowKind::Standard))
+        );
+        assert_eq!(
+            reread_kind(WindowKind::Child, true, || Ok(false), || Err(AxError::CANNOT_COMPLETE)),
+            Some((None, WindowKind::Standard))
+        );
+        // Minimized now (not seen before): standard as well, even with no subrole answer.
+        assert_eq!(
+            reread_kind(WindowKind::Child, false, || Ok(true), dialog),
+            Some((Some("AXDialog".into()), WindowKind::Standard))
+        );
+        assert_eq!(
+            reread_kind(WindowKind::Child, false, || Ok(true), || Err(AxError::CANNOT_COMPLETE)),
+            Some((None, WindowKind::Standard))
+        );
     }
 
     fn app(pid: i32, bundle: Option<&str>) -> AppInfo {

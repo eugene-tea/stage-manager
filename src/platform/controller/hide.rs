@@ -12,7 +12,7 @@
 //!   a batch that brings back a window of an app we hid first sends that app's other
 //!   in-place windows the stage leaves parked to the corner (still unseen), runs, then
 //!   unhides the app: its windows show at their frames. In an animated switch those windows
-//!   come first, outside the transition (`arrive_now`).
+//!   come first, outside the transition (`execute_animated`'s early batch).
 //! - **macOS's unhide** (⌘Tab, a Dock click, Show All; [`Controller::app_visibility`]): the
 //!   app is ours no more; the activation's switch follows as for any app (its windows already
 //!   in place count as arriving at once). An in-place window the switch did not bring (the

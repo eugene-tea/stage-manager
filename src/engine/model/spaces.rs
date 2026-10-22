@@ -42,14 +42,24 @@
 //!   comes back as a new arrival wherever it shows next.
 //!
 //! Empty Spaces are forgotten when left: they hold nothing, and the next visit makes a
-//! fresh one.
+//! fresh one. A Space holding only pending stages (saved windows still to come) goes back to
+//! the saved Spaces waiting for a visit instead.
+//!
+//! **After a restart** (`state.json` from another window server session): while the restore
+//! window is open ([`crate::engine::restore`]) a Space made from an empty screen is
+//! provisional until windows that match a saved Desktop's with confidence make it that
+//! Desktop (adoption, `pending.rs`); all session, saved Spaces are recognized at an arrival
+//! by confident matches (exact title, frame, fingerprint) rather than exact titles alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Action, DisplayId, Home, Model, NativeTarget, Stage, StageId, WindowId, WindowMeta, WindowRole};
-use crate::engine::persist::{LaunchHints, SavedSpace, bundle_matches, exact_matches, rematch};
+use super::pool::Scope;
+use super::{Action, DisplayId, Home, Model, NativeTarget, Observation, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::persist::{LaunchFrames, LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
+use crate::engine::rules::Decision;
+use crate::engine::window_match::LowRule;
 
 /// A window seen on screen on a Space other than its own at this many arrivals in a row,
 /// the last one back on the Space it came from, is on every Space (sticky). Two are not
@@ -193,17 +203,21 @@ impl Model {
         self.spaces.iter().any(|s| s.id == space)
     }
 
-    /// True when no managed window lives on `space`.
+    /// True when `space` holds nothing: no managed window lives there and none is pending.
     pub(crate) fn space_is_empty(&self, space: SpaceId) -> bool {
-        !self.windows.values().any(|w| w.space == space)
+        !self.windows.values().any(|w| w.space == space) && !self.space_has_pending(space)
     }
 
-    /// Forgets an empty Space that is not shown: its (empty) stages, active stage, strip and
-    /// reveal.
+    /// Forgets a Space that is not shown and has no window: its stages, active stage, strip
+    /// and reveal; pending stages go back to the saved Spaces waiting for a visit.
     fn prune_space(&mut self, space: SpaceId) {
-        if self.is_shown_space(space) || !self.space_is_empty(space) {
+        if self.is_shown_space(space) || self.windows.values().any(|w| w.space == space) {
             return;
         }
+        self.pending_to_leftover(space);
+        let gone: Vec<StageId> = self.stages.iter().filter(|s| s.space == space).map(|s| s.id).collect();
+        self.kin.retain(|s, _| !gone.contains(s));
+        self.pool_rank.retain(|s, _| !gone.contains(s));
         self.stages.retain(|s| s.space != space);
         self.active.remove(&space);
         self.slots.remove(&space);
@@ -213,7 +227,7 @@ impl Model {
     }
 
     /// Renames a Space everywhere it is referenced.
-    fn relabel_space(&mut self, old: SpaceId, new: SpaceId) {
+    pub(crate) fn relabel_space(&mut self, old: SpaceId, new: SpaceId) {
         for s in &mut self.spaces {
             if s.id == old {
                 s.id = new;
@@ -243,6 +257,23 @@ impl Model {
         if let Some(v) = self.revealed.remove(&old) {
             self.revealed.insert(new, v);
         }
+        if let Some(v) = self.slot_order.remove(&old) {
+            self.slot_order.insert(new, v);
+        }
+        if self.provisional.remove(&old) {
+            self.provisional.insert(new);
+        }
+        if let Some(v) = self.adopt_votes.remove(&old) {
+            self.adopt_votes.insert(new, v);
+        }
+        if let Some(v) = self.beside.remove(&old) {
+            self.beside.insert(new, v);
+        }
+        for from in self.moved_from.values_mut() {
+            if *from == old {
+                *from = new;
+            }
+        }
     }
 
     /// Takes the Spaces saved in `state.json`: each is rebuilt on its first visit
@@ -260,6 +291,7 @@ impl Model {
             }
         }
         self.leftovers = saved.into_iter().filter(|s| s.id != 0).collect();
+        self.restore.saved_front = self.leftovers.iter().find(|l| l.current).and_then(|l| l.active_index.map(|i| (l.id, i)));
     }
 
     // ----- arrival and learning ----------------------------------------------------------
@@ -299,8 +331,9 @@ impl Model {
         let all = self.scores(display, &known, absent);
         let mut scores = all.clone();
         scores.retain(|_, (n, _, _)| *n > 0);
+        let parks = |m: &WindowMeta| self.display(m.display).parks(m.frame);
         for saved in &self.leftovers {
-            let n = exact_matches(saved, &arrivals) as i64;
+            let n = if self.restore.new_session { confident_matches(saved, &arrivals, parks) } else { exact_matches(saved, &arrivals) } as i64;
             if n > 0 {
                 scores.entry(SpaceId(saved.id)).or_insert((0, false, 0)).0 += n;
             }
@@ -341,11 +374,46 @@ impl Model {
 
         let mut moving = self.collect_moves(target, &known, &beside, &mut actions);
         let carried = if bare { self.carry_stages(target, &mut moving, &mut actions) } else { 0 };
+        let mut arrivals = arrivals;
+        if saved.is_none() && self.space_has_pending(target) {
+            // A Space with stages still waiting: its new windows go to them first.
+            let standard: Vec<WindowMeta> = arrivals.iter().filter(|m| m.role == WindowRole::Standard).cloned().collect();
+            let shown = self.active_stage_in(target).map(|s| s.0);
+            let placed = self.match_pending(target, &standard, LowRule { shown }, None, &mut actions);
+            arrivals.retain(|m| !placed.contains(&m.id));
+        }
         if !arrivals.is_empty() || saved.is_some() {
             let empty = SavedSpace::default();
-            let assignment = rematch(saved.as_ref().unwrap_or(&empty), &arrivals);
-            let more = self.apply_launch(&arrivals, &assignment, false, hints);
+            let mut assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.display(m.display).parks(m.frame));
+            if let Some(s) = &saved {
+                // Its stages whose windows all came back on another Desktop are not built.
+                self.skip_pooled_out(s.id, &mut assignment);
+            }
+            // After a restart, windows this Desktop's saved stages do not take are looked for
+            // among every other Desktop's waiting windows (one pool, `pool.rs`).
+            let unmatched: Vec<WindowMeta> = arrivals.iter().filter(|m| assignment.unmatched.contains(&m.id)).cloned().collect();
+            let pooled = self.pool_claims(target, &unmatched);
+            assignment.unmatched.retain(|id| !pooled.contains(id));
+            if self.restore.restoring {
+                // Windows no saved one claims go by Apple's rule (counted for the restore's line).
+                self.note_by_apple(unmatched.iter().filter(|m| !pooled.contains(&m.id)));
+            }
+            let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = arrivals.iter().cloned().partition(|m| pooled.contains(&m.id));
+            let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id));
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+            if !claimed.is_empty() {
+                let placed = self.match_waiting(target, &claimed, LowRule::default(), None, Scope::Pool, &mut actions);
+                // Their children (the launch could not place them before their parents).
+                let children: Vec<WindowMeta> = rest
+                    .iter()
+                    .filter(|m| matches!(m.role, WindowRole::Child { parent: Some(p) } if placed.contains(&p)))
+                    .cloned()
+                    .collect();
+                for c in children {
+                    let more = self.add_window(c, &Decision::default(), &Observation::default());
+                    actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+                }
+            }
         }
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
@@ -354,6 +422,12 @@ impl Model {
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
         self.hops.retain(|id, _| known.contains(id));
+        if self.restore.after_restart_window() && bare && carried == 0 && !self.leftovers.is_empty() && !self.space_has_pending(target) {
+            // Made from a screen no saved Desktop matched while the restore window is open:
+            // its confident windows say which saved Desktop it is. A Desktop made after the
+            // window never takes a saved one.
+            self.provisional.insert(target);
+        }
         self.normalize_slots();
         self.last_arrival = ArrivalNote {
             rebuilt: saved.map(|s| s.id),
@@ -574,7 +648,7 @@ impl Model {
         let placeholders: Vec<StageId> = self
             .stages
             .iter()
-            .filter(|s| s.space == target && !carried.contains(&s.id) && s.windows.is_empty())
+            .filter(|s| s.space == target && !carried.contains(&s.id) && s.windows.is_empty() && !self.has_pending(s.id))
             .filter(|s| s.name.is_none() || names.contains(&s.name))
             .map(|s| s.id)
             .collect();

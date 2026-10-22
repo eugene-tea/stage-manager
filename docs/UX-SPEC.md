@@ -37,7 +37,14 @@ brings every window back at exactly its own frame, even where it overlaps the st
 away. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
-laptop, 6 on a 5K display.
+laptop, 6 on a 5K display. A popup open on a window (a popover, a child window sticking out
+of it) shows on its card beside the window, at its true size and place, as on Apple's; the
+window keeps its own size on the card, and nothing outside a window is drawn. A palette
+far from its window (more than the window's own width or height past it, or on another
+display) is left off: the card shows the window alone. So is a popup over a window that
+macOS's capture does not place (round 8M, Calendar's event popup reaching past the window's
+top: the capture's content said the window's frame, its image held both squeezed into the
+window's shape on a fill): never a fill around a window on a card.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
@@ -49,7 +56,8 @@ Shift-click a card to bring its windows into the current stage; Option-click doe
 Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
-stage.
+stage, animated as a card click: the stage you leave shrinks into the strip and the app's
+windows grow from their card. The keyboard goes to the app's window at once.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own.
@@ -96,7 +104,8 @@ in the slot under the pointer.
 
 **A menu bar icon.** Apple's Stage Manager has none; its toggle lives in Control Center. Ours
 gives a place for Settings, About, updates and Quit. It can be hidden, and opening the app
-again then shows Settings.
+again then shows Settings. Its glyph is original art, as tall as the SF Symbols beside it at
+the menu bar's default size (12 pt of ink, their median; round 8N).
 
 **Launch at login.** Apple's is part of macOS. Ours registers as a login item at its first
 launch from Applications, and Settings can turn that off.
@@ -104,8 +113,27 @@ launch from Applications, and Settings can turn that off.
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above everything, while
 the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
-nears a card, so content that changed meanwhile can jump when the motion ends. A click or
-key press during the motion brings the windows in at once.
+nears a card, so content that changed meanwhile can jump when the motion ends. A click
+during the motion brings the windows in at once; typing never cuts it short (the keyboard is
+already the new stage's). Arriving windows wait in the corner behind their pictures, and
+that corner is covered with the wallpaper patch's picture until they are in place (macOS
+raises an activated app's windows there), never over the menu bar or the Dock's bar, and
+never more than the corner itself (a 320-point square; 10-16, covers of most of the screen
+painted the desktop over the owner's windows at every switch). Where
+desktop icons lie in that corner, the patch's picture would hide them: a still of the
+desktop there (only the desktop's own layers: the picture and its icons, never a window,
+even one that appears as it is taken; laid over the patch's picture when macOS leaves the
+desktop picture out of it), kept fresh while card pictures are captured and the Mac is in
+use (none while the screen is locked or asleep, or after 2 minutes with no input and no
+switch; a fresh one at the first input), covers it instead; the parked windows' edges are
+under it too for the moment of the motion. A window that stays shown through the switch and
+reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
+the cover from its own picture, so it looks as it is (that corner of it holds still for the
+motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
+windows land); the outgoing stage's windows never count. Where it cannot be covered at all (the patch off, card captures off with icons there,
+no picture ready yet, a staying window with no picture of it, such as another app's the
+app does not manage, an activated window macOS put outside that square), an activated app's
+windows come to their places at once instead of growing.
 
 **Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
 
@@ -141,9 +169,36 @@ until used; the rest are off.
 | Keyboard shortcuts to switch, send, pin and show the strip | off |
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
-| Saved stages across restarts | always |
+| Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
+
+**After a restart.** The restore is invisible when it works and Apple's behaviour when it
+cannot match. Saved windows not on screen at launch wait, with no card, in their stages; as
+apps reopen them each goes back to its stage, at its saved frame when the main display has
+the saved size, parked only on a confident match (a doubtful one goes by Apple's rule and
+stays in view or gets a card of its own). While the login settles (until apps have been
+quiet for 20 s, none still opening its first window, and the login is a minute old; the
+first click or key press; or 5 minutes) launch-time activations and new windows switch
+nothing and animate nothing, and cards come in quietly in their saved order; then the stage
+left in front shows with its key window focused, unless a window shown there already has
+the keyboard. While that stage is still empty (its app slow to open), a window opening a
+stage of its own takes the front instead of a card beside an empty screen; the saved stage
+then waits, and its windows get a card when they come. At a logout, restart or shutdown
+every window comes back at the first sign of it macOS gives (any of `loginwindow`'s logout
+notices, `willPowerOff` the last), so apps save their windows where they are as far as the
+timing allows (best effort: macOS may ask apps to quit first); from then on nothing is
+arranged (no switch, no card added or removed) and the app itself quits when macOS asks it
+to; a cancelled logout brings the stages back at once. An app that quits keeps its windows'
+places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
+before macOS announced the logout still come back after the restart; a window reopened
+squeezed into the park corner goes to its saved frame when it is matched, and is left where
+it is (and counted) when it is not. A window an app reopens on another Desktop than the one
+it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
+again on the Desktop where it shows. No apps are relaunched (that is macOS's
+"Reopen windows when logging back in") and no window moves between Desktops. Off, a restart
+starts every app in a stage of its own, as Apple's does. One log line sums it up
+(`stage-manager log summary` repeats it).
 
 ## Known gaps
 

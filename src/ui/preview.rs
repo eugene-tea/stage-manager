@@ -67,6 +67,7 @@ fn preview_change(change: settings_window::Change) {
             C::InstallUpdates(on) => values.app.install_updates = on,
             C::ShowRecentApps(on) => values.show_recent_apps = on,
             C::AllAtOnce(all) => values.all_at_once = all,
+            C::RestoreAfterRestart(on) => values.restore_after_restart = on,
             C::MergeOnDrop(on) => values.merge_on_drop = on,
             C::ShiftBringsHere(on) => values.shift_brings_here = on,
             C::Fit(m) => values.fit = m,

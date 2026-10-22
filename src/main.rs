@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }
@@ -112,7 +112,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -171,6 +171,7 @@ mod app {
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
         _appearance: WorkspaceObservers,
+        _power_off: apps::LogoutObservers,
         _input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
@@ -336,7 +337,7 @@ mod app {
         safety::request_quit();
         // No new window capture from here on; those in flight are waited for at exit.
         capture::begin_shutdown();
-        let timeout = shutdown_timeout(safety::registry_len());
+        let timeout = shutdown_timeout(safety::registry_len().max(wm_thread::logout_windows()));
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
         let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
             Some(Some(true)) => true,
@@ -364,12 +365,19 @@ mod app {
     fn registry_then_leftovers(reason: &str) -> bool {
         let registry = safety::emergency_unpark(reason);
         let leftovers = safety::leftovers_back(reason, Default::default());
-        registry && leftovers
+        // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits;
+        // when they are all that is left, passed on with a warning (no error).
+        let rest_back = registry && (leftovers || safety::left_not_taken() == 0) && safety::registry_len() == 0;
+        safety::set_passed_on(rest_back && safety::taken_len() > 0);
+        rest_back && safety::taken_len() == 0
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
         if ok {
             safety::mark_clean_exit();
+        } else if safety::passed_on() {
+            // Only handed-over windows still away (round 8N): this app's guardian takes them over.
+            tracing::info!("handed-over windows still away: this app's guardian takes them over");
         } else {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
@@ -415,6 +423,9 @@ mod app {
                 "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
                 "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
+            // On this thread, never the WM thread's: a busy WM thread never keeps an old
+            // guardian waiting (round 8N).
+            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst)),
             Command::Settings => {
                 DispatchQueue::main().exec_async(shell::show_settings);
                 json!({ "ok": true })
@@ -505,8 +516,27 @@ mod app {
                 let Some((number, origin)) = overlay else {
                     return json!({ "ok": true, "shown": false });
                 };
-                match stage_manager::platform::self_capture::opaque_bounds(number as u32, origin, region, Duration::from_secs(3)) {
-                    Ok(bounds) => json!({ "ok": true, "shown": true, "bounds": bounds }),
+                // The pictures a switch's cover in the park corner stands for, within the
+                // region (8L4): the patch's picture of the wallpaper and the desktop's still.
+                let mut pictures = (None, None);
+                if let Some(r) = region {
+                    let mean = |p: Option<(objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>, f64)>| p.and_then(|(i, _)| stage_manager::platform::pixels::mean_rgba(&i));
+                    DispatchQueue::main().exec_sync(|| {
+                        pictures = (
+                            mean(stage_manager::ui::corner_patch::cover_image(r)),
+                            mean(stage_manager::platform::desktop_shot::image(r)),
+                        );
+                    });
+                }
+                match stage_manager::platform::self_capture::read_back(number as u32, origin, region, Duration::from_secs(3)) {
+                    Ok(b) => json!({
+                        "ok": true,
+                        "shown": true,
+                        "bounds": b.bounds,
+                        "mean": b.mean,
+                        "wallpaper": pictures.0,
+                        "still": pictures.1,
+                    }),
                     Err(e) => ctl::error_reply(&e),
                 }
             }
@@ -689,6 +719,21 @@ mod app {
             }
         });
 
+        // The logout's head start (8F, the review's M3; 8H: at the first of its signals): at a
+        // logout, restart or shutdown the WM thread brings every window back, checks for
+        // leftovers and saves the stages at once, so windows are at their real frames as early
+        // as possible before apps save theirs for "Reopen windows when logging back in", and
+        // nothing is arranged until the quit (the freeze). The app does not quit then: an app
+        // that quits before macOS asks may not be reopened at the next login. macOS's quit
+        // (`applicationShouldTerminate:`, as in 1.2.0) finds the work done and only exits; a
+        // cancel signal resumes at once, and a logout cancelled without one ends the hold two
+        // minutes after its latest signal (a fresh start). Each signal is timed here, as it
+        // arrives.
+        let wm_power = wm.clone();
+        let power_off = apps::observe_logout(mtm, move |name, signal| {
+            wm_power.logout_signal(name, signal, Instant::now());
+        });
+
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.
         let permissions = PermissionState::current();
         tracing::info!(
@@ -742,6 +787,7 @@ mod app {
             _workspace: workspace,
             _spaces: spaces,
             _appearance: appearance,
+            _power_off: power_off,
             _input: input_monitor,
             _timer: timer,
         };
@@ -771,9 +817,11 @@ mod app {
     }
 
     /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows.
+    /// Sampling (`--every MS --for MS`), `--focus` adds to each sample the window the keyboard
+    /// goes to (the frontmost app's focused window, through Accessibility) and when it was read.
     pub fn probe_windows(args: &[String]) -> ExitCode {
         let usage = || {
-            eprintln!("usage: stage-manager probe-windows [--every MS --for MS] <bundle-id>...");
+            eprintln!("usage: stage-manager probe-windows [--every MS --for MS [--focus]] <bundle-id>...");
             ExitCode::from(2)
         };
         let (sampling, args) = match args {
@@ -784,6 +832,10 @@ mod app {
                 }
             }
             _ => (None, args),
+        };
+        let (focus, args) = match args {
+            [flag, rest @ ..] if flag == "--focus" && sampling.is_some() => (true, rest),
+            _ => (false, args),
         };
         if args.is_empty() {
             return usage();
@@ -816,8 +868,14 @@ mod app {
             let start = Instant::now();
             let mut due = start;
             while start.elapsed() <= span {
-                let t = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-                samples.push(json!({ "t": t, "windows": look() }));
+                let clock = || SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+                let t = clock();
+                let mut sample = json!({ "t": t, "windows": look() });
+                if focus && let Some(obj) = sample.as_object_mut() {
+                    obj.insert("focused".into(), json!(controller::focused_window()));
+                    obj.insert("tf".into(), json!(clock()));
+                }
+                samples.push(sample);
                 due += every;
                 std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }

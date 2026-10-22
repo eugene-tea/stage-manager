@@ -218,8 +218,9 @@ pub struct AnimationStyle {
     pub snapshot_interval_ms: u64,
     pub snapshot_cache_mb: u64,
     /// An activation of an app in another stage (Cmd-Tab, Dock, a click on its sliver) grows
-    /// its windows from their card like a card click; off (the default), they come to their
-    /// frames at once, since macOS has already raised them in the park corner.
+    /// its windows from their card like a card click, as Apple's does (the default; the park
+    /// corner, where macOS has raised them, is covered meanwhile); off, they come to their
+    /// frames at once.
     pub activation_grows: bool,
 }
 
@@ -339,10 +340,20 @@ pub struct SugarConfig {
 }
 
 /// The `[stages]` section.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagesConfig {
     /// Named stages created at launch, in order.
     pub names: Vec<String>,
+    /// After a restart or a new login, saved windows not on screen yet wait in their stages
+    /// for their apps to reopen them (on by default); off is 1.2.0's behaviour. Read at
+    /// launch.
+    pub restore_after_restart: bool,
+}
+
+impl Default for StagesConfig {
+    fn default() -> Self {
+        Self { names: Vec::new(), restore_after_restart: true }
+    }
 }
 
 /// `[log] level`: how much the daily log keeps.
@@ -871,7 +882,7 @@ impl Config {
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
-            stages: StagesConfig { names },
+            stages: StagesConfig { names, restore_after_restart: v.flag("stages.restore_after_restart") },
             sugar: SugarConfig {
                 shift_brings_here: v.flag("sugar.shift_brings_here"),
                 launch_window_ms: v.uint("sugar.launch_window_ms"),
@@ -1085,6 +1096,13 @@ mod tests {
     }
 
     #[test]
+    fn restore_after_restart_can_be_turned_off() {
+        let p = parse("[stages]\nrestore_after_restart = false\n");
+        assert!(!p.config.stages.restore_after_restart && p.warnings.is_empty(), "{:?}", p.warnings);
+        assert!(parse("[stages]\nnames = [\"Mail\"]\n").config.stages.restore_after_restart);
+    }
+
+    #[test]
     fn the_rule_examples_parse_when_uncommented() {
         let uncommented: String = default_file()
             .lines()
@@ -1118,6 +1136,7 @@ mod tests {
         assert!(c.style.merge_on_drop, "invisible until a card is dropped on a card (the owner's word, 10-12)");
         assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
+        assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
         assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
@@ -1282,12 +1301,15 @@ shift_brings_here = false
 [animation]
 enabled = false
 unpark_at = 0.9
+activation_grows = false
 "##,
         );
         let c = p.config;
         assert_eq!(c.style.level, StripLevel::AboveWindows);
         assert!(!c.style.reorder && !c.style.merge_on_drop);
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
+        assert!(!c.style.animation.activation_grows, "kept: false brings an activation's windows at once");
+        assert!(Config::default().style.animation.activation_grows, "an activation grows from its card by default, as Apple's (8L)");
         assert_eq!(c.strip.order, StripOrder::Fixed);
         assert!(c.strip.show_active && c.style.show_numbers && c.strip.hide_while_desktop_shown);
         assert_eq!(c.strip.thumbnail_interval_ms, 2000);

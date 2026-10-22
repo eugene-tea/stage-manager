@@ -5,8 +5,9 @@
 //! - **Stage Manager** (Apple's own Customize sheet): whether Apple's Stage Manager is on
 //!   (with Turn Off), "Show recent apps", "Show windows from an application", and "Click
 //!   wallpaper to reveal desktop" (read only; its button opens Desktop & Dock).
-//! - **Extras:** merge by dropping a card on a card, Shift brings apps here, keeping windows
-//!   clear of the strip, keyboard shortcuts, animation speed.
+//! - **Extras:** stages back after a restart, merge by dropping a card on a card, Shift
+//!   brings apps here, keeping windows clear of the strip, keyboard shortcuts, animation
+//!   speed.
 //! - **Advanced:** the config file (open, reveal) and the note that an AI agent is the
 //!   easiest way to change anything else, with Copy Instructions for Agents.
 //!
@@ -66,6 +67,8 @@ pub struct SettingsValues {
     pub all_at_once: bool,
     /// Apple's "Click wallpaper to reveal desktop: Only in Stage Manager".
     pub wallpaper_only_in_stage_manager: bool,
+    /// `[stages] restore_after_restart`.
+    pub restore_after_restart: bool,
     pub merge_on_drop: bool,
     pub shift_brings_here: bool,
     pub fit: FitMode,
@@ -92,6 +95,7 @@ impl SettingsValues {
             show_recent_apps: flag("AutoHide", 0) == 0,
             all_at_once: flag("AppWindowGroupingBehavior", 1) != 0,
             wallpaper_only_in_stage_manager: flag("EnableStandardClickToShowDesktop", 1) == 0,
+            restore_after_restart: config.stages.restore_after_restart,
             merge_on_drop: config.style.merge_on_drop,
             shift_brings_here: config.sugar.shift_brings_here,
             fit: config.windows.fit,
@@ -128,6 +132,7 @@ pub enum Change {
     ShowRecentApps(bool),
     AllAtOnce(bool),
     OpenDesktopAndDock,
+    RestoreAfterRestart(bool),
     MergeOnDrop(bool),
     ShiftBringsHere(bool),
     Fit(FitMode),
@@ -157,6 +162,7 @@ mod tag {
     pub const REVEAL: isize = 16;
     pub const COPY: isize = 17;
     pub const INSTALL: isize = 18;
+    pub const RESTORE: isize = 19;
 }
 
 const FIT_TITLES: [&str; 3] = ["Off", "Move Windows", "Move and Narrow"];
@@ -170,6 +176,7 @@ struct Controls {
     install: Retained<NSSwitch>,
     recent: Retained<NSSwitch>,
     grouping: Retained<NSPopUpButton>,
+    restore: Retained<NSSwitch>,
     merge: Retained<NSSwitch>,
     shift: Retained<NSSwitch>,
     fit: Retained<NSPopUpButton>,
@@ -216,6 +223,7 @@ fn change_for(c: &Controls, t: isize) -> Option<Change> {
         tag::RECENT => Change::ShowRecentApps(on(&c.recent)),
         tag::GROUPING => Change::AllAtOnce(c.grouping.indexOfSelectedItem() == 0),
         tag::DESKTOP_DOCK => Change::OpenDesktopAndDock,
+        tag::RESTORE => Change::RestoreAfterRestart(on(&c.restore)),
         tag::MERGE => Change::MergeOnDrop(on(&c.merge)),
         tag::SHIFT => Change::ShiftBringsHere(on(&c.shift)),
         tag::FIT => Change::Fit(FIT_MODES[(c.fit.indexOfSelectedItem().max(0) as usize).min(2)]),
@@ -343,6 +351,7 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (R
 
     // Extras
     f.header("Extras");
+    let restore = sw(v.restore_after_restart, tag::RESTORE);
     let merge = sw(v.merge_on_drop, tag::MERGE);
     let shift = sw(v.shift_brings_here, tag::SHIFT);
     let fit_index = FIT_MODES.iter().position(|m| *m == v.fit).unwrap_or(0);
@@ -356,6 +365,8 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (R
     }
     speed_row.below = Some((speed_below, speed_h));
     f.group(vec![
+        Row::new("Bring stages back after a restart", Some(view(&restore)))
+            .detail("Windows go back to their stages as their apps reopen them. Off is Apple's: each app starts in a stage of its own. Applies at the next launch."),
         Row::new("Merge stages by dropping a card on a card", Some(view(&merge))),
         Row::new("Hold Shift to bring apps to the current stage", Some(view(&shift)))
             .detail("While opening an app, clicking it in the Dock, or clicking a card."),
@@ -388,7 +399,7 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (R
     f.footnote("Changes apply at once and are saved in the config file, keeping its comments.");
 
     let (view, height) = f.finish();
-    (view, height, Controls { login, icon, updates, install, recent, grouping, merge, shift, fit, hotkeys, speed, copy })
+    (view, height, Controls { login, icon, updates, install, recent, grouping, restore, merge, shift, fit, hotkeys, speed, copy })
 }
 
 /// Opens the window (or brings it to the front) with `values`; each change goes to
@@ -463,6 +474,7 @@ pub fn apply(values: SettingsValues) {
         c.install.setEnabled(values.app.check_for_updates);
         set_switch(&c.recent, values.show_recent_apps);
         c.grouping.selectItemAtIndex(if values.all_at_once { 0 } else { 1 });
+        set_switch(&c.restore, values.restore_after_restart);
         set_switch(&c.merge, values.merge_on_drop);
         set_switch(&c.shift, values.shift_brings_here);
         c.fit.selectItemAtIndex(FIT_MODES.iter().position(|m| *m == values.fit).unwrap_or(0) as isize);
@@ -543,6 +555,7 @@ mod tests {
         let v = SettingsValues::new(&config, &raw, LoginStatus::Off, "~/x".into(), None, "1.0.0".into());
         assert!(!v.show_recent_apps && !v.all_at_once && v.wallpaper_only_in_stage_manager && v.apple_on);
         assert!(v.merge_on_drop && v.shift_brings_here && v.fit == FitMode::Off && !v.hotkeys && v.speed == 1.0 && v.animations_on);
+        assert!(v.restore_after_restart, "stages come back after a restart by default");
     }
 
     #[test]
@@ -552,7 +565,7 @@ mod tests {
         let mut app = base.app;
         app.check_for_updates = false;
         app.install_updates = true;
-        let toggled = SettingsValues { merge_on_drop: false, speed: 2.0, app, ..base.clone() };
+        let toggled = SettingsValues { merge_on_drop: false, restore_after_restart: false, speed: 2.0, app, ..base.clone() };
         assert_eq!(base.shape(), toggled.shape(), "a switch or the slider updates in place");
         for other in [
             SettingsValues { login: LoginStatus::NeedsApproval, ..base.clone() },

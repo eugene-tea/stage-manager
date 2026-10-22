@@ -3,34 +3,66 @@
 //! A scripted test asks where a ghost really is on screen (not where our code thinks it put
 //! it): the overlay window is captured through ScreenCaptureKit at its native size and the
 //! bounds of its opaque pixels (alpha above half, so the soft shadows are left out) come back
-//! in global top-left points. Only our own overlay window is ever captured, and no image is
-//! kept.
+//! in global top-left points, with the mean colour within the region asked (round 8L4: the
+//! park corner's cover against the wallpaper). Only our own overlay window is ever captured,
+//! and no image is kept. Also reads a held picture's corner pixels for `ctl debug-strip`
+//! ([`corners`]).
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use block2::RcBlock;
-use objc2::AllocAnyThread;
-use objc2_core_foundation::CFRetained;
-use objc2_core_graphics::{CGBitmapInfo, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{CGDataProvider, CGImage};
 use objc2_foundation::NSError;
-use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration};
+use objc2_screen_capture_kit::{SCScreenshotManager, SCShareableContent};
+
+use super::capture::{WindowShot, display_frames, window_shot};
+use super::capture_frame::Extent;
+use super::capture_pixels::alpha_byte;
 
 use crate::engine::geometry::{Point, Rect};
 
-/// The bounds of what window `window` (our overlay, top-left corner at `origin`, global)
-/// draws, within `region` (global) when given; `None` when nothing opaque is there.
-pub fn opaque_bounds(window: u32, origin: Point, region: Option<Rect>, timeout: Duration) -> Result<Option<Rect>, String> {
-    let (image, scale) = capture(window, timeout)?;
-    let w = CGImage::width(Some(&image));
-    let h = CGImage::height(Some(&image));
-    let bpp = CGImage::bits_per_pixel(Some(&image));
-    let row = CGImage::bytes_per_row(Some(&image));
+/// What [`read_back`] found.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadBack {
+    /// The bounds of the opaque pixels (global), `None` when nothing opaque is there.
+    pub bounds: Option<Rect>,
+    /// The mean red, green, blue and alpha (0-255) within the region asked (round 8L4: the
+    /// switch's cover in the park corner compared with the wallpaper); `None` without one.
+    pub mean: Option<[f64; 4]>,
+}
+
+/// What window `window` (our overlay, top-left corner at `origin`, global) draws within
+/// `region` (global) when given: where its opaque pixels are, and their mean colour there.
+pub fn read_back(window: u32, origin: Point, region: Option<Rect>, timeout: Duration) -> Result<ReadBack, String> {
+    let (image, scale, extent) = capture(window, timeout)?;
+    // The image's top-left corner, global: the window's, less what reaches past it.
+    let size = Rect::new(0.0, 0.0, CGImage::width(Some(&image)) as f64 / scale, CGImage::height(Some(&image)) as f64 / scale);
+    let window_pts = extent.window_in(size);
+    let origin = Point::new(origin.x - window_pts.x, origin.y - window_pts.y);
+    let bounds = opaque_bounds(&image, scale, origin, region)?;
+    let mean = region.and_then(|r| {
+        let px = Rect::new(((r.x - origin.x) * scale).floor(), ((r.y - origin.y) * scale).floor(), (r.w * scale).ceil(), (r.h * scale).ceil());
+        let part = CGImage::with_image_in_rect(Some(&image), CGRect::new(CGPoint::new(px.x, px.y), CGSize::new(px.w, px.h)))?;
+        super::pixels::mean_rgba(&part)
+    });
+    Ok(ReadBack { bounds, mean })
+}
+
+/// The bounds of the opaque pixels of `image` (the overlay at `scale`, its top-left at
+/// `origin`), within `region` (global) when given.
+fn opaque_bounds(image: &CGImage, scale: f64, origin: Point, region: Option<Rect>) -> Result<Option<Rect>, String> {
+    let image = Some(image);
+    let w = CGImage::width(image);
+    let h = CGImage::height(image);
+    let bpp = CGImage::bits_per_pixel(image);
+    let row = CGImage::bytes_per_row(image);
     if bpp != 32 {
         return Err(format!("unexpected pixel format ({bpp} bits per pixel)"));
     }
-    let alpha = alpha_byte(CGImage::alpha_info(Some(&image)), CGImage::bitmap_info(Some(&image)));
-    let provider: Option<CFRetained<CGDataProvider>> = CGImage::data_provider(Some(&image));
+    let alpha = alpha_byte(CGImage::alpha_info(image), CGImage::bitmap_info(image));
+    let provider: Option<CFRetained<CGDataProvider>> = CGImage::data_provider(image);
     let data = CGDataProvider::data(provider.as_deref()).ok_or("no pixel data")?;
     let bytes = data.to_vec();
     // The region in image pixels.
@@ -59,19 +91,35 @@ pub fn opaque_bounds(window: u32, origin: Point, region: Option<Rect>, timeout: 
     }))
 }
 
-/// Which byte of a 32-bit pixel holds alpha.
-fn alpha_byte(info: CGImageAlphaInfo, bitmap: CGBitmapInfo) -> usize {
-    let first = matches!(info, CGImageAlphaInfo::First | CGImageAlphaInfo::PremultipliedFirst | CGImageAlphaInfo::NoneSkipFirst);
-    let little = (bitmap.0 & CGBitmapInfo::ByteOrderInfoMask.0) == CGImageByteOrderInfo::Order32Little.0;
-    match (first, little) {
-        (true, false) | (false, true) => 0,
-        (true, true) | (false, false) => 3,
+/// The corner pixels of `image` (2 px in from each corner: top-left, top-right, bottom-left,
+/// bottom-right), each `[alpha, mean of the color bytes]`, for a test asking whether the area
+/// a capture holds outside any window is clear; `None` for a pixel format it does not read.
+pub fn corners(image: &CGImage) -> Option<[[u8; 2]; 4]> {
+    let w = CGImage::width(Some(image));
+    let h = CGImage::height(Some(image));
+    if CGImage::bits_per_pixel(Some(image)) != 32 || w == 0 || h == 0 {
+        return None;
     }
+    let row = CGImage::bytes_per_row(Some(image));
+    let alpha = alpha_byte(CGImage::alpha_info(Some(image)), CGImage::bitmap_info(Some(image)));
+    let provider: Option<CFRetained<CGDataProvider>> = CGImage::data_provider(Some(image));
+    let bytes = CGDataProvider::data(provider.as_deref())?.to_vec();
+    let (l, r) = (2.min(w - 1), w.saturating_sub(3));
+    let (t, b) = (2.min(h - 1), h.saturating_sub(3));
+    let pixel = |x: usize, y: usize| -> Option<[u8; 2]> {
+        let at = y * row + x * 4;
+        let px = bytes.get(at..at + 4)?;
+        let color: u32 = (0..4).filter(|i| *i != alpha).map(|i| u32::from(px[i])).sum();
+        Some([px[alpha], (color / 3) as u8])
+    };
+    Some([pixel(l, t)?, pixel(r, t)?, pixel(l, b)?, pixel(r, b)?])
 }
 
-/// A still of window `window` at its native pixel size, and its points-to-pixels scale.
-fn capture(window: u32, timeout: Duration) -> Result<(CFRetained<CGImage>, f64), String> {
-    let (tx, rx) = mpsc::channel::<Result<(CFRetained<CGImage>, f64), String>>();
+
+/// A still of window `window` at its native pixel size, its points-to-pixels scale, and where
+/// the window is in it.
+fn capture(window: u32, timeout: Duration) -> Result<(CFRetained<CGImage>, f64, Extent), String> {
+    let (tx, rx) = mpsc::channel::<Result<(CFRetained<CGImage>, f64, Extent), String>>();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         // SAFETY: SCK passes a valid object or null for each argument.
         let (content, error) = unsafe { (content.as_ref(), error.as_ref()) };
@@ -81,28 +129,25 @@ fn capture(window: u32, timeout: Duration) -> Result<(CFRetained<CGImage>, f64),
             return;
         };
         // SAFETY: plain getters on live SCK objects.
-        let found = unsafe { content.windows() }.iter().find(|w| unsafe { w.windowID() } == window);
+        let windows = unsafe { content.windows() };
+        let found = windows.iter().find(|w| unsafe { w.windowID() } == window);
         let Some(found) = found else {
             let _ = tx.send(Err(format!("window {window} is not in the shareable content")));
             return;
         };
-        // SAFETY: designated initializer with a live SCWindow; plain setters and getters.
-        let (filter, config, scale) = unsafe {
-            let filter = SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &found);
-            let rect = filter.contentRect();
-            let scale = f64::from(filter.pointPixelScale()).max(1.0);
-            let config = SCStreamConfiguration::new();
-            config.setWidth((rect.size.width * scale).round().max(1.0) as usize);
-            config.setHeight((rect.size.height * scale).round().max(1.0) as usize);
+        // At its native size, set up as every window capture is (child windows included).
+        let WindowShot { filter, config, scale, extent, clear, .. } = window_shot(&found, &windows, &display_frames(content), (u32::MAX, u32::MAX));
+        // SAFETY: plain setters on a live configuration.
+        unsafe {
             config.setShowsCursor(false);
             config.setScalesToFit(false);
-            (filter, config, scale)
-        };
+        }
         let done = tx.clone();
         let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+            let _background = &clear;
             let reply = match std::ptr::NonNull::new(image) {
                 // SAFETY: SCK hands a valid CGImage for the duration of the block.
-                Some(ptr) => Ok((unsafe { CFRetained::retain(ptr) }, scale)),
+                Some(ptr) => Ok((unsafe { CFRetained::retain(ptr) }, scale, extent)),
                 // SAFETY: SCK passes a valid NSError or null.
                 None => Err(unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string()).unwrap_or_default()),
             };

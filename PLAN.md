@@ -99,6 +99,43 @@ guardian only ever moves a window out of the park zone, never into it, so the wo
 window shown that the new app meant to keep parked (until its next switch), never one left
 parked; and it lets go of each window at its next pass once the new app reports it adopted.
 
+Round 8N, the handoff (`engine::handoff`, `platform::handoff`): once the new app answers
+`adopted` with a list (it manages windows), the guardian hands it the rest of its watch
+(`ctl take-watch`: ids, pids, restore frames, park corners) and exits, logged once at info on
+both sides. The new app holds them as taken windows beside its registry: its parked file names
+them (its own guardian waits for them after a crash), its quit's leftovers check brings them
+back to their taken frames, and its WM thread watches them by the guardian's rules (seen back,
+gone, or in the model: let go; shown while parked: brought back). A quit with one still away is
+unclean, so its own guardian takes it over, and hands it on to the next copy. A copy that
+does not take the watch (an earlier version, one quitting) leaves the guardian watching as
+before, offered again a minute later; the offer is answered on the ctl thread, never the WM
+thread's. A window a guardian can never see again (10-21: a Chrome helper off screen) no longer
+keeps an old guardian waiting for days: it travels with the running copy instead, never dropped.
+
+Hidden tabs (8J, `engine::hidden_tab`): macOS window tabs are separate window-server windows;
+a tab not selected is off screen, not listed through Accessibility, and keeps its last frame
+(a park spot, say) until selected, when it takes its group's frame. Nothing can move one, nor
+needs to. A window is one when it is layer 0, off screen, not listed by its app (which must
+answer), and its app has another window of the same size (±2 pt) that vouches for it. Only by
+the tab's own signature (8J2): a real window judged a tab would stay parked with every safety
+path blind, a tab judged real only keeps a guardian waiting. So a window the model manages, one
+we registered and track, or one the model let go for any reason but one (it left its Space, was
+hidden, minimized) is real, never judged; a parked window the model let go because
+Accessibility reported it destroyed while the window server still listed it may be one, beside
+a same-size window Accessibility lists now or the model manages unparked; a window found in the
+park zone that we never registered (the 10-16 case) only beside one Accessibility lists now.
+Saved ids never vouch. The quit's leftovers check, the controller's retry of a parked window
+the model let go, and the guardian's watch skip a hidden tab (logged once at debug); every
+window the guardian's parked file names is never judged one. A group whose selected tab is on a
+Desktop not shown keeps its unregistered hidden tabs waited for until that Desktop shows.
+
+Round 8M widens it for windows we never parked: a window found in the park zone that we never
+registered nor manage, that this session's `state.json` does not name, off screen, whose app
+answers and does not list it through Accessibility, is another app's (Chrome's helper windows
+past the corner, a hidden tab whose selected tab is on another Desktop): the quit's check logs
+it at debug, never as still parked, and the guardian never waits on it. A registered window
+always waits; a saved one too.
+
 ## Testing hooks
 
 - `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).
@@ -162,6 +199,76 @@ Known gaps a review found and the owner accepted as rare, left as they are:
 - R15: `activation_frame` (`src/platform/controller.rs`), on a display whose only non-sticky
   shown window belongs to an app that posts no move notice, reads a horizontal-only user drag
   of that window as a Desktop slide and keeps its stale tracked frame.
+- 8E3 restore: an app that opens a window by itself, with no user action, during the first
+  5 minutes after a launch (the restore window, `src/engine/restore.rs`; it ends sooner at
+  the first click, key press, card or Dock click) has a window matching a saved window of an
+  inactive stage placed into that stage (a card, parked) rather than switched to: the
+  restore cannot tell it from the app reopening its saved windows. 8F: it ends sooner too,
+  once apps have been quiet 20 s and the login is a minute old.
+- 8F settling: after a restart, while the login settles, a window matching no saved one
+  (or a doubtful match) goes by Apple's rule without the switch: into its app's stage, or a
+  stage of its own as a card, never brought forward, except that while the saved active
+  stage is still empty (its app slow to open) a new stage takes the front and the saved
+  stage waits inactive, its windows parked there with a card when they come (8F2, M4); a
+  launch-time activation or focus switches nothing. Without the input monitor (no clicks or keys seen) settling ends only
+  when apps go quiet or after 5 minutes; the end's focus never takes the keyboard from a
+  window shown in the front stage.
+- 8F logout head start (8F2, M3): at `willPowerOffNotification` every window comes back,
+  the leftovers check runs and the stages are saved, but the app keeps running (strip
+  hidden, input ignored) until macOS's own quit, which then only exits. A logout another
+  app cancels sends no quit: a minute later (`LOGOUT_WAIT`) the app starts afresh from the
+  saved stages, as at a launch; meanwhile every window shows, with no strip.
+- 8H: the head start runs at the first logout signal (`loginwindow`'s distributed
+  `com.apple.logoutInitiated` / `restartInitiated` / `shutdownInitiated` /
+  `logoutContinued`, its notify(3) names, `willPowerOff` last); `logoutCancelled` resumes at
+  once; the hold waits two minutes after the latest signal (an early signal may come with the
+  confirmation dialog's one-minute countdown). An app's quit keeps its windows' entries in
+  `state.json` (`quit_at`) for two minutes, so the stages survive a logout whose early signal
+  never comes; a window reopened clamped against the park corner is matched by title and
+  goes to its saved frame, an unmatched one is left and counted ("N at the corner").
+- 8I: one pool after a restart. Native apps reopen their windows on their own saved
+  Desktops, non-native ones (Electron) on the Desktop shown at login (10-16). Each Desktop
+  still becomes its saved Desktop by its own windows (adoption unchanged); a stray, a window
+  matching another saved Desktop's waiting entry with confidence, recreates its saved stage on
+  the Desktop where it showed (a part; a stage split across two Desktops has a part on each),
+  and the entry leaves the other Desktop. Strip: the adopted Desktop's saved slots, then the
+  parts in their saved order. At the restore window's end by itself, the Desktop shown when
+  saved (if shown) brings its saved active stage forward. The line: "K from other Desktops".
+  8I2 (the review): with another saved Desktop waiting, the Desktop shown when saved also
+  takes two windows while the restore window is open (one, as before, when it is the only
+  saved Desktop or after the window); voters that can adopt nothing any more (another
+  Desktop taken, or the window's end) join their saved stages where they are, else stay and
+  their entries are forgotten; a saved Desktop's stages the pool emptied are never built at
+  its visit (its most recent stage left takes the front); own-Desktop entries are scored
+  first, other Desktops' only for a window nothing there takes with confidence.
+  8I3 (the review): the card pressed or the number key that ends the restore window keeps
+  its target: a voter alone in a stage of its own makes that stage its part (same id, number
+  and card); a voter whose stage still goes leaves the stage's id and number to follow its
+  window. Known, left: a part finds an existing stage by its saved stage's name
+  (`find_named`); two Desktops saved with stages of the same name both feed the one stage of
+  that name on the Desktop shown (the strays of two same-named stages share a part there).
+
+## 8G: the real-restart check
+
+With the owner, from the day's log (titles never leave it), besides the design's list:
+
+- "Reopen windows when logging back in" on: Stage Manager itself comes back at the login.
+  8F quit it at `willPowerOffNotification`, before loginwindow asked, which may have kept
+  macOS from reopening it; 8F2 waits for macOS's quit. The log shows "logout, restart or
+  shutdown coming: every window back …", then "asked to quit by the system" and "quitting
+  after the logout's head start", with no "the quit could not run at once".
+- Each app's windows reopen at their real frames (none in the park zone: no `warn` of a
+  window brought back from it at the login).
+- A logout cancelled by an app with an unsaved document: the stages are back at its cancel
+  signal, else two minutes after the latest one ("the logout was cancelled after its head
+  start").
+- 8H: the order of the logout signals: every "logout signal" line (name, ms since the first,
+  what it did). Which name comes first, and whether it comes before the first "app
+  terminated"; then trim `SIGNALS` to what arrives. The restore line's "N at the corner".
+- 8I: which apps' windows came back on another Desktop than their saved one (the "back in
+  its saved stage" lines with `from_other=true`) and the line's "K from other Desktops".
+- A slow app (Xcode, an Electron app) in the saved front stage: settling waits for its first
+  window (8F2, M2), or a new app's window takes the front meanwhile (M4).
 
 ## Out of scope (prototype)
 

@@ -17,13 +17,63 @@
 //                                      title bar, as Chrome and Telegram draw), titleless
 //                                      (toolbar, title hidden); scripts/probe_park.py measures
 //                                      what macOS keeps on screen of each when parked
+//   --delay-ms N | FIXTURE_DELAY_MS=N  open the windows N ms after launch (an app reopening
+//                                      its windows late after a login)
+//   --stagger-ms N | FIXTURE_STAGGER_MS=N  one window every N ms instead of all at once
+//   --reverse    | FIXTURE_REVERSE=1   open the windows last first (their window ids then come
+//                                      in the other order; each keeps its own title and frame)
+//   --retitle M  | FIXTURE_RETITLE=M   retitle windows once shown, "Old=New;Old2=New2" (whole
+//                                      titles, e.g. "Fixture 1=Fixture 1 — Edited")
+//   --retitle-after-ms N | FIXTURE_RETITLE_AFTER_MS=N  how long after a window shows (default 0)
+//   --minimized M | FIXTURE_MINIMIZED=M  open these windows minimized, "T 1;T 2" (whole
+//                                      titles: an app reopening a window that was minimized
+//                                      when it quit). They open at launch, before --delay-ms
+//                                      applies to the others: each is ordered in behind the
+//                                      other windows and minimized a moment later (AppKit
+//                                      minimizes a window that has been on screen; one never
+//                                      ordered in was never listed by Accessibility in the
+//                                      10-15 live run, and SIGHUP had nothing to un-minimize).
+//                                      A test starts this fixture before Stage Manager, so
+//                                      the moment on screen is not seen as a new window.
+//   --tabbed N   | FIXTURE_TABBED=N    the last N standard windows open as tabs of window 1
+//                                      (NSWindow tabbing), window 1 the selected tab: the
+//                                      others are hidden tabs, listed off screen by the window
+//                                      server, never through Accessibility (not with
+//                                      --delay-ms, --stagger-ms or --minimized)
+//   --child      | FIXTURE_CHILD=1     window 1 gets a "Details" button 100 pt in from its
+//                                      right edge that opens an NSPopover (as Calendar's event
+//                                      details are), 250 pt wide, its arrow on the button, so
+//                                      it sticks out ~150 pt past the window's right edge; it
+//                                      stays open (application-defined) and the button toggles
+//                                      it. The capture phase's card shows it beside the window.
+//                                      (A borderless panel added with addChildWindow was left
+//                                      out of ScreenCaptureKit's window capture, live 10-16.)
+//   --child-over N | FIXTURE_CHILD_OVER=N  with --child: the button sits 35% in from window 1's
+//                                      left edge and the popover (250 pt wide, to its right)
+//                                      stays inside the window across, its height the window's
+//                                      minus 120 plus N: 0 keeps it inside, N > 120 makes it
+//                                      reach past the window's top and bottom (Calendar's event
+//                                      popup on 10-21: 1242 pt beside a 1139 pt window, round 8M)
+//   --stray      | FIXTURE_STRAY=1     also create a borderless layer-0 window that is never
+//                                      shown, at 98,-16 pt past the main screen's bottom-right
+//                                      corner, 1516x139 (Chrome's helper windows on 10-21):
+//                                      listed off screen by the window server in the park zone,
+//                                      never through Accessibility (round 8M)
+//   --hang-ms N  | FIXTURE_HANG_MS=N   with SIGURG: how long the main thread blocks after the
+//                                      close (default 3000)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
+// SIGHUP un-minimizes the first minimized standard window (by title), as a Dock click would.
 // SIGWINCH stands in for "its Desktop is not shown": every visible standard window parked
 // in the screen's bottom-right corner is ordered out (the window server still lists it, off
 // screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
 // behind the other windows at the same frames (their Desktop shows), without activating.
+// SIGIO selects the next tab of every tab group (as ⌘⇧] would), without activating: the tab
+// selected before becomes a hidden tab where it was.
+// SIGURG closes the last standard window opened and lets it go (its window-server window is
+// destroyed), then blocks the main thread for --hang-ms: the app answers no Accessibility
+// message meanwhile (Home on 10-21, round 8M).
 import AppKit
 
 struct Options {
@@ -33,6 +83,26 @@ struct Options {
     var title = "Fixture"
     var frames: [[Double]] = []
     var styles: [String] = []
+    var delayMs = 0
+    var staggerMs = 0
+    var reverse = false
+    var retitle: [String: String] = [:]
+    var retitleAfterMs = 0
+    var minimized: Set<String> = []
+    var tabbed = 0
+    var child = false
+    var childOver: Double? = nil
+    var stray = false
+    var hangMs = 3000
+
+    static func parseRetitle(_ text: String) -> [String: String] {
+        var map: [String: String] = [:]
+        for part in text.split(separator: ";") {
+            let kv = part.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2, !kv[0].isEmpty { map[kv[0]] = kv[1] }
+        }
+        return map
+    }
 
     static func parseFrames(_ text: String) -> [[Double]] {
         text.split(separator: ";").compactMap { part in
@@ -50,6 +120,17 @@ struct Options {
         if let t = env["FIXTURE_TITLE"], !t.isEmpty { o.title = t }
         if let f = env["FIXTURE_FRAMES"] { o.frames = parseFrames(f) }
         if let s = env["FIXTURE_STYLES"] { o.styles = s.split(separator: ",").map(String.init) }
+        if let n = env["FIXTURE_DELAY_MS"].flatMap(Int.init) { o.delayMs = n }
+        if let n = env["FIXTURE_STAGGER_MS"].flatMap(Int.init) { o.staggerMs = n }
+        if env["FIXTURE_REVERSE"] == "1" { o.reverse = true }
+        if let r = env["FIXTURE_RETITLE"] { o.retitle = parseRetitle(r) }
+        if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
+        if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
+        if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
+        if env["FIXTURE_CHILD"] == "1" { o.child = true }
+        if let n = env["FIXTURE_CHILD_OVER"].flatMap(Double.init) { o.childOver = n }
+        if env["FIXTURE_STRAY"] == "1" { o.stray = true }
+        if let n = env["FIXTURE_HANG_MS"].flatMap(Int.init) { o.hangMs = n }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -59,10 +140,25 @@ struct Options {
             case "--title": if let t = args.next() { o.title = t }
             case "--frames": if let f = args.next() { o.frames = parseFrames(f) }
             case "--styles": if let s = args.next() { o.styles = s.split(separator: ",").map(String.init) }
+            case "--delay-ms": if let n = args.next().flatMap(Int.init) { o.delayMs = n }
+            case "--stagger-ms": if let n = args.next().flatMap(Int.init) { o.staggerMs = n }
+            case "--reverse": o.reverse = true
+            case "--retitle": if let r = args.next() { o.retitle = parseRetitle(r) }
+            case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
+            case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
+            case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
+            case "--child": o.child = true
+            case "--child-over": if let n = args.next().flatMap(Double.init) { o.childOver = n }
+            case "--stray": o.stray = true
+            case "--hang-ms": if let n = args.next().flatMap(Int.init) { o.hangMs = n }
             default: if let n = Int(a) { o.windows = n }
             }
         }
         o.windows = max(0, min(o.windows, 12))
+        o.delayMs = max(0, o.delayMs)
+        o.staggerMs = max(0, o.staggerMs)
+        o.retitleAfterMs = max(0, o.retitleAfterMs)
+        o.tabbed = max(0, min(o.tabbed, o.windows - 1))
         return o
     }
 }
@@ -109,14 +205,40 @@ final class LabelView: NSView {
     }
 }
 
+/// `--child`: the popover's content, a flat color labelled "Popup".
+final class PopupController: NSViewController {
+    let size: NSSize
+
+    init(size: NSSize) {
+        self.size = size
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func loadView() {
+        view = LabelView(frame: NSRect(origin: .zero, size: size), color: .systemTeal, label: "Popup")
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let options = Options.parse()
     var windows: [NSWindow] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        for i in 0..<options.windows {
-            show(makeWindow(i, area: area))
+        let all = options.reverse ? Array((0..<options.windows).reversed()) : Array(0..<options.windows)
+        // Windows reopened minimized go to the Dock at once; the others follow the delays.
+        for i in all where options.minimized.contains(title(i)) { open(i, area: area) }
+        let order = all.filter { !options.minimized.contains(title($0)) }
+        if options.delayMs == 0 && options.staggerMs == 0 {
+            for i in order { open(i, area: area) }
+            if options.tabbed > 0 && options.minimized.isEmpty { joinTabs() }
+        } else {
+            for (k, i) in order.enumerated() {
+                let ms = options.delayMs + k * options.staggerMs
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { self.open(i, area: area) }
+            }
         }
         if options.panel {
             let panel = NSPanel(
@@ -132,12 +254,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             show(panel)
             windows.append(panel)
         }
+        if options.child, let parent = windows.first(where: { $0.title == title(0) }) {
+            addPopup(to: parent)
+        }
+        if options.stray { makeStray() }
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
     }
 
+    /// `--child`: the popover and the button that toggles it.
+    var popover: NSPopover?
+    var popoverButton: NSButton?
+
+    /// `--child`: a "Details" button in `parent`, its right edge 100 pt in from the window's,
+    /// and an NSPopover from it (Calendar's event details are one) sticking out past the
+    /// window's right edge, shown a moment after the window is on screen. Application-defined,
+    /// so it stays open when the app is in the background or the window moves; it moves with
+    /// its window.
+    func addPopup(to parent: NSWindow) {
+        guard let content = parent.contentView else { return }
+        let button = NSButton(title: "Details", target: self, action: #selector(togglePopup(_:)))
+        button.bezelStyle = .rounded
+        button.sizeToFit()
+        let b = content.bounds
+        if options.childOver != nil {
+            // Over the window: the popover to the button's right stays inside it across.
+            button.setFrameOrigin(NSPoint(x: b.minX + b.width * 0.35 - button.frame.width, y: b.midY - button.frame.height / 2))
+        } else {
+            button.setFrameOrigin(NSPoint(x: b.maxX - 100 - button.frame.width, y: b.midY - button.frame.height / 2))
+        }
+        content.addSubview(button)
+        let popover = NSPopover()
+        popover.behavior = .applicationDefined
+        popover.animates = false
+        let size = NSSize(width: 250, height: max(40, parent.frame.height - 120 + CGFloat(options.childOver ?? 0)))
+        popover.contentSize = size
+        popover.contentViewController = PopupController(size: size)
+        self.popover = popover
+        popoverButton = button
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { self.showPopup() }
+    }
+
+    /// Shows the popover on its button (once its window is on screen).
+    func showPopup() {
+        guard let popover, let button = popoverButton, !popover.isShown else { return }
+        guard button.window?.isVisible == true else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) { self.showPopup() }
+            return
+        }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxX)
+    }
+
+    @objc func togglePopup(_ sender: NSButton) {
+        if popover?.isShown == true { popover?.performClose(sender) } else { showPopup() }
+    }
+
     var opened = 0
+
+    /// The title of window number i + 1.
+    func title(_ i: Int) -> String {
+        "\(options.title) \(i + 1)"
+    }
+
+    /// Window number i + 1, shown (or, when `--minimized` names it, ordered in behind the
+    /// others and minimized), then retitled when `--retitle` names its title.
+    func open(_ i: Int, area: NSRect) {
+        let window = makeWindow(i, area: area)
+        if options.minimized.contains(window.title) {
+            // Ordered in first: `miniaturize` on a window never on screen left it unknown to
+            // Accessibility and not minimized (the 10-15 live run). A moment later, so the
+            // window server has shown it, it goes to the Dock.
+            window.orderBack(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { window.miniaturize(nil) }
+        } else {
+            show(window)
+        }
+        guard let title = options.retitle[window.title] else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.retitleAfterMs)) { window.title = title }
+    }
 
     /// Window number i + 1: distinct frames, a diagonal cascade with varied sizes.
     func makeWindow(_ i: Int, area: NSRect) -> NSWindow {
@@ -151,14 +346,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fw = f[2] <= 0 ? area.width + f[2] : f[2]
             rect = NSRect(x: area.minX + f[0], y: area.maxY - f[1] - f[3], width: fw, height: f[3])
         }
-        let title = "\(options.title) \(i + 1)"
+        let name = title(i)
         let window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = title
+        window.title = name
         window.isReleasedWhenClosed = false
-        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: title)
+        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: name)
         if !options.styles.isEmpty {
             applyStyle(options.styles[i % options.styles.count], to: window)
         }
@@ -198,6 +393,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "\(window.title) \(style)"
     }
 
+    /// `--tabbed N`: the last N standard windows join window 1's tab group; window 1 stays the
+    /// selected tab, so the others are hidden tabs.
+    func joinTabs() {
+        let standard = windows.filter { !($0 is NSPanel) }.sorted { $0.title < $1.title }
+        guard let first = standard.first(where: { $0.title == title(0) }) else { return }
+        first.tabbingMode = .preferred
+        for i in (options.windows - options.tabbed)..<options.windows {
+            guard let tab = standard.first(where: { $0.title == title(i) }), tab !== first else { continue }
+            tab.tabbingMode = .preferred
+            first.addTabbedWindow(tab, ordered: .above)
+        }
+        first.tabGroup?.selectedWindow = first
+    }
+
+    /// SIGIO: the next tab of every tab group is selected.
+    func selectNextTabs() {
+        var seen = Set<ObjectIdentifier>()
+        for w in windows {
+            guard let group = w.tabGroup, group.windows.count > 1, seen.insert(ObjectIdentifier(group)).inserted,
+                  let selected = group.selectedWindow, let k = group.windows.firstIndex(of: selected) else { continue }
+            group.selectedWindow = group.windows[(k + 1) % group.windows.count]
+        }
+    }
+
+    /// `--stray`: a layer-0 window never shown, off screen past the main screen's bottom-right
+    /// corner (another app's helper window in the park zone, never ours).
+    var stray: NSWindow?
+
+    func makeStray() {
+        guard let screen = NSScreen.screens.first?.frame else { return }
+        // Top-left at (maxX + 98, 16 pt above the bottom) in the window server's coordinates.
+        let size = NSSize(width: 1516, height: 139)
+        let rect = NSRect(x: screen.maxX + 98, y: screen.minY + 16 - size.height, width: size.width, height: size.height)
+        let w = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.setFrame(rect, display: false)
+        stray = w
+    }
+
+    /// SIGURG: the last standard window opened is closed and let go (nothing keeps it, so its
+    /// window-server window goes), then the main thread blocks for --hang-ms.
+    func closeWhileHung() {
+        autoreleasepool {
+            guard let w = windows.last(where: { !($0 is NSPanel) && $0.isVisible }) else { return }
+            windows.removeAll { $0 === w }
+            w.close()
+        }
+        Thread.sleep(forTimeInterval: Double(max(0, options.hangMs)) / 1000)
+    }
+
     /// SIGUSR1: one more window, ordered front without activating the app.
     func openAnother() {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -208,6 +453,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func minimizeOne() {
         let wins = NSApp.windows.filter { $0.isVisible && !$0.isMiniaturized && !($0 is NSPanel) }
         wins.sorted { $0.title < $1.title }.first?.miniaturize(nil)
+    }
+
+    /// SIGHUP: un-minimize the first minimized standard window.
+    func unminimizeOne() {
+        let wins = NSApp.windows.filter { $0.isMiniaturized && !($0 is NSPanel) }
+        wins.sorted { $0.title < $1.title }.first?.deminiaturize(nil)
     }
 
     var away: [(NSWindow, NSRect)] = []
@@ -258,6 +509,10 @@ signal(SIGUSR2, SIG_IGN)
 let minimize = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
 minimize.setEventHandler { delegate.minimizeOne() }
 minimize.resume()
+signal(SIGHUP, SIG_IGN)
+let unminimize = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
+unminimize.setEventHandler { delegate.unminimizeOne() }
+unminimize.resume()
 signal(SIGWINCH, SIG_IGN)
 let sendAway = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
 sendAway.setEventHandler { delegate.sendParkedAway() }
@@ -266,4 +521,12 @@ signal(SIGINFO, SIG_IGN)
 let comeBack = DispatchSource.makeSignalSource(signal: SIGINFO, queue: .main)
 comeBack.setEventHandler { delegate.bringAwayBack() }
 comeBack.resume()
+signal(SIGURG, SIG_IGN)
+let closeHung = DispatchSource.makeSignalSource(signal: SIGURG, queue: .main)
+closeHung.setEventHandler { delegate.closeWhileHung() }
+closeHung.resume()
+signal(SIGIO, SIG_IGN)
+let nextTab = DispatchSource.makeSignalSource(signal: SIGIO, queue: .main)
+nextTab.setEventHandler { delegate.selectNextTabs() }
+nextTab.resume()
 app.run()

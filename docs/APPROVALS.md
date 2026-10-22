@@ -18,7 +18,9 @@ nothing, until it is off.
 
 ## Screen Recording — optional
 
-- **Why:** shows live pictures of your windows on the cards and in switches.
+- **Why:** shows live pictures of your windows on the cards and in switches (and, where
+  desktop icons lie in the bottom-right corner, a still of that corner of the desktop, kept
+  in memory only, to cover it while a switch runs).
 - **Without it:** cards show plain window shapes with the app's icon.
 - **Where:** System Settings → Privacy & Security → Screen & System Audio Recording.
 

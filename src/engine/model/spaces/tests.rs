@@ -475,7 +475,15 @@ fn a_first_launch_without_title_matches_uses_the_desktop_shown_when_saved() {
     again.focused = Some(w(21));
     again.go(0);
     assert_eq!(again.space(), d1);
-    assert_eq!(again.m.stages().len(), 2, "matched by app into the saved stages");
+    // The editor by app alone (low) into the saved active stage; the browser's only
+    // candidate is in an inactive stage: no low pick there (M3 of the 8E review), so it goes
+    // by Apple's rule at a launch (a stage of its own, a card), its saved window still
+    // pending in the saved stage (no card).
+    assert_eq!(again.m.stages().len(), 3);
+    assert_eq!(again.m.stage_of(w(21)), again.m.main_active_stage());
+    assert_eq!(again.m.restored_grade(w(22)), None);
+    assert!(again.strip().iter().any(|card| card == &vec![22]), "{:?}", again.strip());
+    assert_eq!(again.m.pending_count(), 2, "both saved windows still awaited: low matches leave them waiting");
 }
 
 #[test]

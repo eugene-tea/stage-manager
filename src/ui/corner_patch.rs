@@ -32,6 +32,7 @@
 //!   was right and is not any more.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
@@ -61,6 +62,9 @@ pub struct PatchPlan {
     pub reorder: u32,
     /// The WM thread's count of Space changes: a new one reads the wallpaper again.
     pub space: u64,
+    /// While hidden, keep the picture rendered for this rectangle anyway (round 8L4): a
+    /// switch's cover lays the desktop's still, when it holds the icons only, over it.
+    pub picture: Option<Rect>,
 }
 
 /// How often the wallpaper is read again while the patch is wanted.
@@ -217,7 +221,8 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
         };
         WAITING.with(|w| w.take());
         let patch = p.get_or_insert_with(|| Patch::new(mtm));
-        let fresh = plan.show.is_some() && (patch.plan.show.is_none() || plan.space != patch.plan.space);
+        let wants = |p: &PatchPlan| p.show.or(p.picture).is_some();
+        let fresh = wants(&plan) && (!wants(&patch.plan) || plan.space != patch.plan.space);
         patch.plan = plan;
         if fresh {
             patch.wall = None;
@@ -241,7 +246,7 @@ pub fn poll(mtm: MainThreadMarker) {
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else { return };
         let Some(patch) = p.as_mut() else { return };
-        if patch.plan.show.is_none() {
+        if patch.plan.show.is_none() && patch.plan.picture.is_none() {
             return;
         }
         let now = Instant::now();
@@ -271,6 +276,8 @@ pub fn appearance_changed(mtm: MainThreadMarker) {
 }
 
 fn settle(mtm: MainThreadMarker, why: &'static str) {
+    // A switch's still of the desktop is of the old Desktop or appearance (8L3).
+    crate::platform::desktop_shot::forget();
     let until = Instant::now() + SETTLE;
     let busy = PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else { return true };
@@ -320,9 +327,66 @@ fn settled() {
     });
 }
 
+/// Where a switch's cover can come from (round 8L2): the rendered block of the picture the
+/// patch would show now (the wallpaper read, its picture rendered for that read), and until
+/// when a Space or appearance change settles. Published by the main thread after every
+/// [`Patch::reconcile`]; read by the WM thread before a switch ([`cover_ready`]) and by the
+/// strip as it draws one ([`cover_image`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CoverSource {
+    /// The block rendered (screen-local), its scale, and the screen (global).
+    region: Rect,
+    scale: f64,
+    screen: Rect,
+}
+
+/// The cover's source and the settling deadline, for any thread.
+fn cover_slot() -> &'static Mutex<(Option<CoverSource>, Option<Instant>)> {
+    static S: OnceLock<Mutex<(Option<CoverSource>, Option<Instant>)>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new((None, None)))
+}
+
+thread_local! {
+    /// The picture of [`cover_slot`]'s source (main thread): the strip crops it without
+    /// borrowing the patch, which may be busy in a call into AppKit.
+    static COVER_PICTURE: std::cell::RefCell<Option<CFRetained<CGImage>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Why `rect` (global, top-left) could not be covered with the patch's picture now.
+fn cover_from(source: Option<CoverSource>, settle_until: Option<Instant>, rect: Rect, now: Instant) -> Result<CoverSource, &'static str> {
+    if settle_until.is_some_and(|t| now < t) {
+        return Err("a Space or appearance change settles");
+    }
+    let c = source.ok_or("the corner patch has no picture of the wallpaper now")?;
+    wp::crop_px(c.region, wp::local(rect, c.screen), c.scale).ok_or("the corner patch's picture does not hold the corner")?;
+    Ok(c)
+}
+
+/// Whether the switch's cover of `rect` (global, top-left, whole points) can be drawn now
+/// (any thread; round 8L2): the picture the patch would show holds it, and no Space or
+/// appearance change settles. The reason when not: an activation then arrives at once
+/// instead of growing (the WM thread decides before the strip is told).
+pub fn cover_ready(rect: Rect) -> Result<(), &'static str> {
+    let (source, settle) = cover_slot().lock().map(|g| *g).map_err(|_| "the corner patch's state is not readable")?;
+    cover_from(source, settle, rect, Instant::now()).map(|_| ())
+}
+
+/// The patch's picture of `rect` (global, top-left, whole points) and its scale, for a
+/// switch's motion overlay to cover the park corner while incoming windows wait there (round
+/// 8L, [`crate::engine::corner_patch::switch_cover`]); main thread. Only the picture the patch
+/// would show now ([`cover_ready`]). `None` otherwise: the corner is left as it is.
+pub fn cover_image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
+    let (source, settle) = cover_slot().lock().map(|g| *g).ok()?;
+    let c = cover_from(source, settle, rect, Instant::now()).ok()?;
+    let picture = COVER_PICTURE.with(|p| p.borrow().clone())?;
+    let image = crop_for(&picture, c.region, c.scale, c.screen, rect)?;
+    Some((image, c.scale))
+}
+
 /// The main display changed (size, scale, color space): read the wallpaper again (while the
 /// patch is busy, [`BUSY_RETRY`] later).
 pub fn display_changed(mtm: MainThreadMarker) {
+    crate::platform::desktop_shot::forget();
     PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
             if let Some(patch) = p.as_mut() {
@@ -398,9 +462,32 @@ impl Patch {
         }
     }
 
+    /// Brings the panel to the plan, then publishes where a switch's cover can come from
+    /// ([`cover_ready`]).
     fn reconcile(&mut self, mtm: MainThreadMarker) {
+        self.reconcile_panel(mtm);
+        self.publish_cover();
+    }
+
+    /// The picture the patch would show now, for a switch's cover ([`CoverSource`]).
+    fn publish_cover(&self) {
+        let wall = self.wall.as_ref().and_then(|(_, w)| w.outcome.as_ref().ok().map(|(_, job)| (w.screen, job.key())));
+        let picture = wall.and_then(|(screen, key)| self.picture.as_ref().filter(|p| p.key == key).map(|p| (screen, p)));
+        let source = picture.map(|(screen, p)| CoverSource { region: p.region, scale: p.scale, screen });
+        COVER_PICTURE.with(|c| {
+            if let Ok(mut c) = c.try_borrow_mut() {
+                *c = picture.map(|(_, p)| p.image.clone());
+            }
+        });
+        if let Ok(mut slot) = cover_slot().lock() {
+            *slot = (source, self.settle_until);
+        }
+    }
+
+    fn reconcile_panel(&mut self, mtm: MainThreadMarker) {
         let Some(rect) = self.plan.show else {
             self.hide();
+            self.prepare(mtm);
             return;
         };
         if self.wall.is_none() {
@@ -455,6 +542,30 @@ impl Patch {
         );
         self.show(mtm, rect, &image, job.scale);
         self.showing = Some((key, self.plan.clone()));
+    }
+
+    /// Hidden, keeps the picture rendered for the plan's `picture` rectangle (round 8L4: a
+    /// switch's cover lays the desktop's still of the icons over it); nothing is shown.
+    fn prepare(&mut self, mtm: MainThreadMarker) {
+        let Some(rect) = self.plan.picture else { return };
+        if self.wall.is_none() {
+            let wall = self.reader.read(mtm);
+            self.wall = Some((Instant::now(), wall));
+        }
+        let Some((_, wall)) = self.wall.clone() else { return };
+        let Ok((_, job)) = &wall.outcome else { return };
+        let key = job.key();
+        if self.picture.as_ref().is_some_and(|p| p.key != key) {
+            self.picture = None;
+        }
+        let local = wp::local(rect, wall.screen);
+        if self.picture.as_ref().is_some_and(|p| wp::crop_px(p.region, local, p.scale).is_some()) {
+            return;
+        }
+        let region = wp::region(Size::new(wall.screen.w, wall.screen.h), local);
+        if self.renders.want(&key, region) == Want::Start {
+            start_render(job.clone(), wall.screen, rect, region);
+        }
     }
 
     fn show(&mut self, mtm: MainThreadMarker, rect: Rect, image: &CGImage, scale: f64) {
@@ -540,6 +651,23 @@ fn start_render(job: Job, screen: Rect, rect: Rect, region: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_switch_cover_needs_the_picture_the_patch_would_show_holding_the_corner() {
+        // 8L2: decided on the WM thread before the switch; not ready means the activation
+        // arrives at once instead of growing.
+        let screen = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let source = CoverSource { region: Rect::new(2000.0, 900.0, 560.0, 540.0), scale: 2.0, screen };
+        let corner = Rect::new(2440.0, 1270.0, 120.0, 170.0);
+        let now = Instant::now();
+        assert_eq!(cover_from(Some(source), None, corner, now), Ok(source));
+        assert_eq!(cover_from(None, None, corner, now), Err("the corner patch has no picture of the wallpaper now"));
+        let outside = Rect::new(1900.0, 1270.0, 660.0, 170.0);
+        assert_eq!(cover_from(Some(source), None, outside, now), Err("the corner patch's picture does not hold the corner"));
+        let settling = Some(now + Duration::from_millis(200));
+        assert_eq!(cover_from(Some(source), settling, corner, now), Err("a Space or appearance change settles"));
+        assert_eq!(cover_from(Some(source), Some(now), corner, now), Ok(source), "settled");
+    }
 
     #[test]
     fn a_failed_render_is_not_tried_again_until_its_key_changes() {

@@ -28,8 +28,11 @@ pub enum Count {
     FullScreen,
     /// A thumbnail was captured.
     CaptureOk,
-    /// A thumbnail capture failed.
+    /// A thumbnail capture failed (one window, one round).
     CaptureFailed,
+    /// A capture round brought no picture back (every capture of it failed, or no answer in
+    /// time; round 8M): the day line counts rounds, not windows times rounds.
+    CaptureRoundFailed,
     /// A safety layer had to bring windows back (recovery scan, registry, panic resync).
     Recovery,
     /// A warning was logged.
@@ -41,7 +44,7 @@ pub enum Count {
 }
 
 /// Every counter, in the order they print.
-pub const ALL: [Count; 14] = [
+pub const ALL: [Count; 15] = [
     Count::Switch,
     Count::CardClick,
     Count::Drop,
@@ -52,6 +55,7 @@ pub const ALL: [Count; 14] = [
     Count::FullScreen,
     Count::CaptureOk,
     Count::CaptureFailed,
+    Count::CaptureRoundFailed,
     Count::Recovery,
     Count::Warning,
     Count::Error,
@@ -72,6 +76,7 @@ impl Count {
             Count::FullScreen => "full_screen",
             Count::CaptureOk => "captures_ok",
             Count::CaptureFailed => "captures_failed",
+            Count::CaptureRoundFailed => "capture_rounds_failed",
             Count::Recovery => "recoveries",
             Count::Warning => "warnings",
             Count::Error => "errors",
@@ -92,6 +97,7 @@ impl Count {
             Count::FullScreen => "full-screen entries",
             Count::CaptureOk => "captures ok",
             Count::CaptureFailed => "captures failed",
+            Count::CaptureRoundFailed => "capture rounds failed",
             Count::Recovery => "recoveries",
             Count::Warning => "warnings",
             Count::Error => "errors",

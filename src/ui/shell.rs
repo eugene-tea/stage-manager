@@ -372,6 +372,7 @@ impl Shell {
             Change::ShowRecentApps(on) => self.write_apple("AutoHide", i64::from(!on)),
             Change::AllAtOnce(all) => self.write_apple("AppWindowGroupingBehavior", i64::from(all)),
             Change::OpenDesktopAndDock => open_url(DESKTOP_DOCK_URL),
+            Change::RestoreAfterRestart(on) => self.write_config("stages.restore_after_restart", if on { "true" } else { "false" }),
             Change::MergeOnDrop(on) => self.write_config("strip.merge_on_drop", if on { "true" } else { "false" }),
             Change::ShiftBringsHere(on) => self.write_config("sugar.shift_brings_here", if on { "true" } else { "false" }),
             Change::Fit(mode) => {

@@ -4,6 +4,7 @@ use super::*;
 use crate::engine::model::{ModelOptions, Target};
 use crate::engine::rules::RuleAction;
 use crate::engine::testkit::*;
+use crate::engine::window_match::Grade;
 
 fn saved(bundle: &str, title: &str, z: usize) -> SavedWindow {
     SavedWindow {
@@ -16,6 +17,7 @@ fn saved(bundle: &str, title: &str, z: usize) -> SavedWindow {
         role: SavedRole::Standard,
         original: None,
         window: None,
+        ..Default::default()
     }
 }
 
@@ -36,10 +38,12 @@ fn state(stages: Vec<(Option<&str>, Vec<SavedWindow>)>, active: Option<usize>) -
             .map(|(name, windows)| SavedStage {
                 name: name.map(str::to_string),
                 windows,
+                ..Default::default()
             })
             .collect(),
         active_index: active,
         strip_slots: Vec::new(),
+        last_seen: None,
     }
 }
 
@@ -139,8 +143,13 @@ fn exact_title_matches_win_over_bundle_only() {
     assert!(a.unmatched.is_empty());
 }
 
+/// The design 8D: a match by app alone (low) goes to its saved stage only when that is the
+/// active stage, and the saved window stays pending; else the window goes by Apple's rule
+/// (formerly: bundle-only matches filled stages in saved order). M3 of the 8E review: the
+/// app's only candidate in an inactive stage is no exception (it would be parked on the app
+/// alone).
 #[test]
-fn bundle_only_fills_in_saved_order_after_exact_matches() {
+fn bundle_only_matches_take_only_the_active_stage() {
     let s = state(
         vec![
             (None, vec![saved("com.example.web", "Old tab", 0)]),
@@ -154,18 +163,32 @@ fn bundle_only_fills_in_saved_order_after_exact_matches() {
         ],
         Some(0),
     );
-    let live = [
+    let on_screen = [
         live(1, "com.example.web", "News"),
         live(2, "com.example.web", "Recipes"),
         live(3, "com.example.web", "Weather"),
     ];
-    let a = rematch(&s, &live);
-    assert_eq!(
-        ids(&a.stages[0]),
-        [1],
-        "first bundle-only match in saved order"
+    let a = rematch(&s, &on_screen);
+    assert_eq!(ids(&a.stages[0]), [1], "low, into the saved active stage");
+    assert_eq!(a.stages[0].windows[0].grade, Grade::Low);
+    assert_eq!(a.stages[0].pending.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["Old tab"], "low: still awaited");
+    assert_eq!(ids(&a.stages[1]), [2], "strong by title");
+    assert_eq!(a.unmatched, [WindowId(3)], "nothing left in the active stage: Apple's rule");
+    assert_eq!(a.stages[1].pending.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(), ["Other"]);
+    // One window and one saved window of the app left, in an inactive stage: Apple's rule.
+    let relive = [live(2, "com.example.web", "Recipes"), live(3, "com.example.web", "Weather")];
+    let s1 = state(
+        vec![
+            (None, vec![saved("com.example.ed", "Doc", 0)]),
+            (None, vec![saved("com.example.web", "Recipes", 0), saved("com.example.web", "Other", 1)]),
+        ],
+        Some(0),
     );
-    assert_eq!(ids(&a.stages[1]), [2, 3]);
+    let a = rematch(&s1, &relive);
+    assert_eq!(ids(&a.stages[1]), [2]);
+    assert_eq!(a.unmatched, [WindowId(3)]);
+    assert_eq!(a.stages[1].pending.len(), 1, "Other still waits");
+    assert_eq!(a.stages[0].pending.len(), 1, "the editor's window is pending");
 }
 
 #[test]
@@ -438,11 +461,15 @@ fn declared_stages_merge_with_saved_ones() {
     assert_eq!(m.main_active_stage(), Some(m.stages()[2].id));
 }
 
+/// H4: a saved stage whose windows are not on screen is kept, pending, with no card (it was
+/// dropped, and the next save wrote the loss); a saved stage with no window at all is still
+/// dropped unless active.
 #[test]
-fn empty_saved_stages_are_dropped_unless_active() {
+fn a_saved_stage_not_on_screen_stays_pending_and_an_empty_one_is_dropped() {
     let s = state(
         vec![
             (None, vec![saved("com.example.gone", "X", 0)]),
+            (None, vec![]),
             (None, vec![]),
         ],
         Some(1),
@@ -451,12 +478,18 @@ fn empty_saved_stages_are_dropped_unless_active() {
     let a = rematch(&s, &relive);
     let mut m = model();
     m.apply_assignment(&relive, &a, false);
-    assert_eq!(m.stages().len(), 1);
-    assert_eq!(
-        m.stages()[0].windows,
-        [WindowId(1)],
-        "unmatched joins the active stage"
-    );
+    assert_eq!(m.stages().len(), 2, "the empty inactive stage is gone");
+    let waiting = m.stages()[0].id;
+    assert!(m.stages()[0].windows.is_empty());
+    assert_eq!(m.pending_of(waiting).len(), 1);
+    assert!(m.pending_of(waiting)[0].pending.is_some(), "stamped pending");
+    assert_eq!(m.stages()[1].windows, [WindowId(1)], "unmatched joins the active stage");
+    assert!(m.strip().is_empty(), "a pending stage has no card");
+    // Saved again: the pending window is still there, flagged.
+    let file = m.to_state();
+    let back = &file.spaces[0].stages[0].windows;
+    assert_eq!((back.len(), back[0].title.as_str()), (1, "X"));
+    assert!(back[0].pending.is_some());
 }
 
 #[test]
@@ -780,4 +813,227 @@ fn the_session_is_kept_in_the_file() {
     assert_eq!(StateFile::from_json(&json).expect("parses"), file);
     let none = StateFile::single(SavedSpace::default());
     assert!(!none.to_json().expect("encodes").contains("session"), "absent when unknown");
+}
+
+// ----- fields added for the restore (design 8D, section 5) -----------------------------------
+
+#[test]
+fn the_restore_fields_round_trip() {
+    let mut s = state(
+        vec![(
+            Some("Work"),
+            vec![SavedWindow {
+                fp: Some("plan".into()),
+                pending: Some(Pending { since: "boot 1 session 257".into() }),
+                ..saved("com.example.ed", "Plan — Edited", 0)
+            }],
+        )],
+        Some(0),
+    );
+    s.stages[0].last_active = Some(42);
+    s.last_seen = Some(1_760_371_100);
+    let mut file = StateFile::single(s);
+    file.saved_at = Some(1_760_371_200);
+    file.display = Some(SavedDisplay { w: 1440.0, h: 900.0, key: None });
+    let json = file.to_json().expect("encodes");
+    assert_eq!(StateFile::from_json(&json).expect("parses"), file);
+    for want in ["\"version\": 2", "\"since\": \"boot 1 session 257\"", "\"last_active\": 42", "\"fp\": \"plan\"", "\"saved_at\""] {
+        assert!(json.contains(want), "{want} in {json}");
+    }
+    // Absent ones are not written at all.
+    let plain = StateFile::single(state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0))).to_json().expect("encodes");
+    for absent in ["pending", "fp", "last_active", "last_seen", "saved_at", "display"] {
+        assert!(!plain.contains(absent), "{absent} in {plain}");
+    }
+}
+
+/// `state.json` as v1.2.0 writes it: no restore fields.
+const FILE_1_2_0: &str = r#"{
+  "version": 2,
+  "session": "boot X session 1 audit 2",
+  "spaces": [{"id": 3, "current": true,
+    "stages": [{"name": null, "windows": [{"bundle_id": "com.example.ed", "title": "Plan",
+      "frame": {"x": 1.0, "y": 2.0, "w": 300.0, "h": 200.0}, "z": 0, "key": true, "pinned": false,
+      "role": "standard", "window": 77}]}],
+    "active_index": 0, "strip_slots": []}]
+}"#;
+
+/// v1.2.0's own types (src/engine/persist.rs at 5d9b12f, trimmed to what serde sees): no
+/// `deny_unknown_fields`, so it reads a file of this build and drops what it does not know.
+mod v1_2_0 {
+    use serde::Deserialize;
+
+    use crate::engine::geometry::Rect;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum SavedRole {
+        Standard,
+        Child,
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    pub struct SavedWindow {
+        pub bundle_id: String,
+        pub title: String,
+        pub frame: Rect,
+        pub z: usize,
+        pub key: bool,
+        pub pinned: bool,
+        pub role: SavedRole,
+        #[serde(default)]
+        pub original: Option<Rect>,
+        #[serde(default)]
+        pub window: Option<u32>,
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    pub struct SavedStage {
+        pub name: Option<String>,
+        pub windows: Vec<SavedWindow>,
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    pub struct SavedSpace {
+        pub id: u64,
+        #[serde(default)]
+        pub current: bool,
+        pub stages: Vec<SavedStage>,
+        pub active_index: Option<usize>,
+        #[serde(default)]
+        pub strip_slots: Vec<usize>,
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    pub struct StateFile {
+        pub version: u32,
+        #[serde(default)]
+        pub session: Option<String>,
+        pub spaces: Vec<SavedSpace>,
+    }
+}
+
+#[test]
+fn a_1_2_0_file_loads_and_1_2_0_reads_this_builds_file() {
+    let old = StateFile::from_json(FILE_1_2_0).expect("a 1.2.0 file loads");
+    let w = &old.spaces[0].stages[0].windows[0];
+    assert_eq!((w.window, w.pending.as_ref(), w.fp.as_deref()), (Some(77), None, None));
+    assert_eq!((old.saved_at, old.spaces[0].last_seen, old.spaces[0].stages[0].last_active), (None, None, None));
+    // This build's file, pending windows and all, read by 1.2.0's types.
+    let mut new = old.clone();
+    new.start_new_session();
+    new.stamp(1_760_371_200, &mut HashMap::new());
+    new.display = Some(SavedDisplay { w: 1440.0, h: 900.0, key: None });
+    let json = new.to_json().expect("encodes");
+    let read: v1_2_0::StateFile = serde_json::from_str(&json).expect("1.2.0 reads it");
+    assert_eq!(read.version, 2);
+    assert_eq!(read.spaces[0].stages[0].windows.len(), 1, "a pending window is an ordinary saved window to 1.2.0");
+}
+
+#[test]
+fn stamps_say_when_each_desktop_was_last_shown() {
+    let shown = SavedSpace { current: true, ..state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0)) };
+    let other = SavedSpace { id: 2, current: false, last_seen: Some(100), ..shown.clone() };
+    let third = SavedSpace { id: 3, current: false, ..shown.clone() };
+    let mut file = StateFile::single(shown);
+    file.spaces.push(other);
+    file.spaces.push(third);
+    let mut seen = HashMap::from([(3, 150)]);
+    file.stamp(200, &mut seen);
+    assert_eq!(file.saved_at, Some(200));
+    let times: Vec<Option<u64>> = file.spaces.iter().map(|s| s.last_seen).collect();
+    assert_eq!(times, [Some(200), Some(100), Some(150)]);
+    assert_eq!(seen.get(&1), Some(&200));
+    assert_eq!(file.seen_times(), HashMap::from([(1, 200), (2, 100), (3, 150)]));
+}
+
+#[test]
+fn a_same_session_load_marks_nothing_and_another_session_marks_everything_pending() {
+    let s = state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0));
+    let file = StateFile { session: Some("A".into()), ..StateFile::single(s) };
+    assert!(file.same_session(Some("A")));
+    assert!(!file.same_session(Some("B")) && !file.same_session(None));
+    assert!(!StateFile { session: None, ..file.clone() }.same_session(None), "an unknown session is another one");
+    let mut later = file.clone();
+    assert_eq!(later.start_new_session(), 0);
+    assert_eq!(later.pending_windows(), 1);
+    assert_eq!(later.spaces[0].stages[0].windows[0].pending, Some(Pending { since: "A".into() }));
+}
+
+// ----- windows of apps that quit (round 8H) ---------------------------------------------------
+
+/// A file saved at `saved_at` whose Chat window quit at `quit_at`, in a stage of its own (the
+/// strip's second card), beside the editor's active stage.
+fn with_a_quit_window(saved_at: Option<u64>, quit_at: u64) -> StateFile {
+    let chat = SavedWindow { quit_at: Some(quit_at), ..saved("com.example.chat", "Team", 0) };
+    let mut s = state(
+        vec![(None, vec![saved("com.example.ed", "Plan", 0)]), (None, vec![chat]), (None, vec![saved("com.example.web", "Recipes", 0)])],
+        Some(0),
+    );
+    s.strip_slots = vec![2, 1];
+    StateFile { session: Some("A".into()), saved_at, ..StateFile::single(s) }
+}
+
+fn titles(f: &StateFile) -> Vec<Vec<String>> {
+    f.spaces[0].stages.iter().map(|s| s.windows.iter().map(|w| w.title.clone()).collect()).collect()
+}
+
+#[test]
+fn a_window_that_quit_within_two_minutes_of_the_save_waits_after_a_restart() {
+    let t = 1_760_600_000;
+    for quit_at in [t - QUIT_KEEP.as_secs(), t - 3, t] {
+        let mut f = with_a_quit_window(Some(t), quit_at);
+        assert_eq!(f.settle_quit(true), (1, 0), "quit {}s before the save", t - quit_at);
+        assert_eq!(titles(&f), [vec!["Plan"], vec!["Team"], vec!["Recipes"]]);
+        assert!(f.all_stages().flat_map(|s| &s.windows).all(|w| w.quit_at.is_none()), "an ordinary saved window now");
+        f.start_new_session();
+        assert_eq!(f.pending_windows(), 3, "pending in its stage as any window not on screen");
+    }
+}
+
+#[test]
+fn an_older_quit_or_a_same_session_load_drops_it_and_its_stage() {
+    let t = 1_760_600_000;
+    let cases = [
+        (with_a_quit_window(Some(t), t - QUIT_KEEP.as_secs() - 1), true, "quit too long before the save"),
+        (with_a_quit_window(Some(t), t), false, "the same session: the user quit it"),
+        (with_a_quit_window(None, t), true, "a file that does not say when it was saved"),
+    ];
+    for (mut f, new_session, why) in cases {
+        assert_eq!(f.settle_quit(new_session), (0, 1), "{why}");
+        assert_eq!(titles(&f), [vec!["Plan"], vec!["Recipes"]], "{why}: its stage, left empty, goes");
+        assert_eq!((f.spaces[0].active_index, f.spaces[0].strip_slots.clone()), (Some(0), vec![1]), "{why}: indices follow");
+    }
+}
+
+#[test]
+fn removing_stages_keeps_the_active_index_and_slots_on_their_stages() {
+    let mut s = state(vec![(None, vec![]), (None, vec![]), (None, vec![]), (None, vec![])], Some(3));
+    s.strip_slots = vec![2, 0, 1];
+    s.remove_stages(&[0, 2]);
+    assert_eq!((s.stages.len(), s.active_index, s.strip_slots.clone()), (2, Some(1), vec![0]));
+    s.remove_stages(&[1]);
+    assert_eq!((s.active_index, s.strip_slots.clone()), (None, vec![0]), "the active one removed: none active");
+}
+
+#[test]
+fn quit_at_round_trips_and_1_2_0_reads_it_as_a_saved_window() {
+    let f = with_a_quit_window(Some(1_760_600_000), 1_760_599_990);
+    let json = f.to_json().expect("encodes");
+    assert!(json.contains("\"quit_at\": 1760599990"), "{json}");
+    assert_eq!(StateFile::from_json(&json).expect("parses"), f);
+    let plain = StateFile::single(state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0))).to_json().expect("encodes");
+    assert!(!plain.contains("quit_at"), "absent when not set");
+    // 1.1.0 and 1.2.0 (the same window fields): an ordinary saved window to them.
+    let read: v1_2_0::StateFile = serde_json::from_str(&json).expect("1.2.0 reads it");
+    assert_eq!(read.version, STATE_VERSION);
+    assert_eq!(read.spaces[0].stages[1].windows.len(), 1);
+    // A 1.2.0 file has none: nothing to settle.
+    let mut old = StateFile::from_json(FILE_1_2_0).expect("a 1.2.0 file loads");
+    assert_eq!(old.settle_quit(true), (0, 0));
+    assert_eq!(old.spaces[0].stages[0].windows.len(), 1);
 }
