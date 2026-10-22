@@ -38,7 +38,7 @@ pub(crate) mod testkit;
 pub use geometry::{Point, Rect, Size};
 pub use model::{
     Action, Display, DisplayId, Home, Model, ModelOptions, NativeTarget, Observation, Pid, Stage, StageId,
-    ActiveCard, StripCard, StripOptions, StripOrder, Target, WindowId, WindowMeta, WindowRole, WindowState,
+    ActiveCard, DockApp, StripCard, StripOptions, StripOrder, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 pub use persist::{Assignment, LaunchHints, StateFile, rematch};
 pub use rules::{Decision, Placement, RuleAction, RuleSet};

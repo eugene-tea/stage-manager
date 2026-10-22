@@ -9,7 +9,7 @@
 //!   (with Turn Off), "Show recent apps", "Show windows from an application", and "Click
 //!   wallpaper to reveal desktop" (read only; its button opens Desktop & Dock).
 //! - **Stages:** stages back after a restart, new apps in the current stage, Shift brings apps
-//!   here, merge by dropping a card on a card, keep stages in place.
+//!   here, merge by dropping a card on a card, the strip order (Apple's, in place, the Dock's).
 //! - **Windows:** keeping windows clear of the strip, animation speed, keyboard shortcuts.
 //! - **Advanced:** the config file (open, reveal) and the note that an AI agent is the
 //!   easiest way to change anything else, with Copy Instructions for Agents.
@@ -123,7 +123,7 @@ impl Pane {
         match self {
             Pane::General => &[LOGIN, LOGIN_ITEMS, ICON, UPDATES, INSTALL, CHECK],
             Pane::StageManager => &[TURN_OFF, RECENT, GROUPING, DESKTOP_DOCK],
-            Pane::Stages => &[RESTORE, NEW_APPS, SHIFT, MERGE, IN_PLACE],
+            Pane::Stages => &[RESTORE, NEW_APPS, SHIFT, MERGE, ORDER],
             Pane::Windows => &[FIT, SPEED, HOTKEYS],
             Pane::Advanced => &[REVEAL, OPEN, COPY],
         }
@@ -161,8 +161,8 @@ pub struct SettingsValues {
     pub new_apps_join_current: bool,
     pub merge_on_drop: bool,
     pub shift_brings_here: bool,
-    /// `[strip] order = "in_place"` (off: `"native"`, Apple's).
-    pub keep_in_place: bool,
+    /// `[strip] order`: Apple's, Keep in Place or Follow the Dock.
+    pub strip_order: StripOrder,
     pub fit: FitMode,
     pub hotkeys: bool,
     /// `[animation] speed` (1 = Apple's).
@@ -191,7 +191,7 @@ impl SettingsValues {
             new_apps_join_current: config.stages.new_apps_join_current,
             merge_on_drop: config.style.merge_on_drop,
             shift_brings_here: config.sugar.shift_brings_here,
-            keep_in_place: config.strip.order == StripOrder::InPlace,
+            strip_order: config.strip.order,
             fit: config.windows.fit,
             hotkeys: config.hotkeys.enabled,
             speed: config.style.animation.speed,
@@ -231,7 +231,8 @@ pub enum Change {
     NewAppsJoinCurrent(bool),
     MergeOnDrop(bool),
     ShiftBringsHere(bool),
-    KeepInPlace(bool),
+    /// `[strip] order` (the Strip order popup).
+    StripOrder(StripOrder),
     Fit(FitMode),
     Hotkeys(bool),
     Speed(f64),
@@ -263,14 +264,14 @@ mod tag {
     pub const INSTALL: isize = 18;
     pub const RESTORE: isize = 19;
     pub const NEW_APPS: isize = 20;
-    pub const IN_PLACE: isize = 21;
+    pub const ORDER: isize = 21;
     /// The toolbar items: `PANE + n` for the nth pane.
     pub const PANE: isize = 100;
     /// Every control's tag.
     #[cfg(test)]
     pub const ALL: [isize; 21] = [
         LOGIN, LOGIN_ITEMS, ICON, UPDATES, CHECK, TURN_OFF, RECENT, GROUPING, DESKTOP_DOCK, MERGE, SHIFT, FIT, HOTKEYS, SPEED,
-        OPEN, REVEAL, COPY, INSTALL, RESTORE, NEW_APPS, IN_PLACE,
+        OPEN, REVEAL, COPY, INSTALL, RESTORE, NEW_APPS, ORDER,
     ];
 }
 
@@ -293,7 +294,7 @@ fn tag_of(change: &Change) -> isize {
         Change::NewAppsJoinCurrent(_) => tag::NEW_APPS,
         Change::MergeOnDrop(_) => tag::MERGE,
         Change::ShiftBringsHere(_) => tag::SHIFT,
-        Change::KeepInPlace(_) => tag::IN_PLACE,
+        Change::StripOrder(_) => tag::ORDER,
         Change::Fit(_) => tag::FIT,
         Change::Hotkeys(_) => tag::HOTKEYS,
         Change::Speed(_) => tag::SPEED,
@@ -306,6 +307,18 @@ fn tag_of(change: &Change) -> isize {
 
 const FIT_TITLES: [&str; 3] = ["Off", "Move Windows", "Move and Narrow"];
 const FIT_MODES: [FitMode; 3] = [FitMode::Off, FitMode::Move, FitMode::Narrow];
+const ORDER_TITLES: [&str; 3] = ["Apple's", "Keep in Place", "Follow the Dock"];
+const ORDERS: [StripOrder; 3] = [StripOrder::Native, StripOrder::InPlace, StripOrder::Dock];
+
+/// The Strip order popup's item for `order`.
+fn order_index(order: StripOrder) -> usize {
+    ORDERS.iter().position(|o| *o == order).unwrap_or(0)
+}
+
+/// The change the Strip order popup's item `index` makes.
+fn order_change(index: isize) -> Change {
+    Change::StripOrder(ORDERS[(index.max(0) as usize).min(ORDERS.len() - 1)])
+}
 
 /// The footnote of the panes of extras (not in Apple's Stage Manager).
 const EXTRAS_NOTE: &str = "Not in Apple's Stage Manager. Each stays out of the way until you use it.";
@@ -322,7 +335,7 @@ struct Controls {
     new_apps: Retained<NSSwitch>,
     merge: Retained<NSSwitch>,
     shift: Retained<NSSwitch>,
-    in_place: Retained<NSSwitch>,
+    order: Retained<NSPopUpButton>,
     fit: Retained<NSPopUpButton>,
     hotkeys: Retained<NSSwitch>,
     speed: Retained<NSSlider>,
@@ -453,7 +466,7 @@ fn change_for(c: &Controls, t: isize) -> Option<Change> {
         tag::NEW_APPS => Change::NewAppsJoinCurrent(on(&c.new_apps)),
         tag::MERGE => Change::MergeOnDrop(on(&c.merge)),
         tag::SHIFT => Change::ShiftBringsHere(on(&c.shift)),
-        tag::IN_PLACE => Change::KeepInPlace(on(&c.in_place)),
+        tag::ORDER => order_change(c.order.indexOfSelectedItem()),
         tag::FIT => Change::Fit(FIT_MODES[(c.fit.indexOfSelectedItem().max(0) as usize).min(2)]),
         tag::HOTKEYS => Change::Hotkeys(on(&c.hotkeys)),
         tag::SPEED => Change::Speed(SPEEDS[(c.speed.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1)]),
@@ -610,12 +623,12 @@ fn stage_manager(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwi
 }
 
 /// The Stages pane: where windows and apps go.
-fn stages(f: &mut Form, m: &Maker, v: &SettingsValues) -> [Retained<NSSwitch>; 5] {
+fn stages(f: &mut Form, m: &Maker, v: &SettingsValues) -> ([Retained<NSSwitch>; 4], Retained<NSPopUpButton>) {
     let restore = m.switch(v.restore_after_restart, tag::RESTORE);
     let new_apps = m.switch(v.new_apps_join_current, tag::NEW_APPS);
     let shift = m.switch(v.shift_brings_here, tag::SHIFT);
     let merge = m.switch(v.merge_on_drop, tag::MERGE);
-    let in_place = m.switch(v.keep_in_place, tag::IN_PLACE);
+    let order = m.popup(&ORDER_TITLES, order_index(v.strip_order), tag::ORDER);
     f.group(vec![
         Row::new("Bring stages back after a restart", Some(view(&restore)))
             .detail("Windows go back to their stages as their apps reopen them. Off is Apple's: each app starts in a stage of its own. Applies at the next launch."),
@@ -627,11 +640,12 @@ fn stages(f: &mut Form, m: &Maker, v: &SettingsValues) -> [Retained<NSSwitch>; 5
             "Opening an app with Shift, Shift-clicking it in the Dock or Shift-clicking a card brings it to the current stage."
         }),
         Row::new("Merge stages by dropping a card on a card", Some(view(&merge))),
-        Row::new("Keep stages in place", Some(view(&in_place)))
-            .detail("Off is Apple's: the stage you leave takes the clicked card's place."),
+        Row::new("Strip order", Some(view(&order))).detail(
+            "Apple's: the stage you leave takes the clicked card's place. Keep in Place: each stage keeps its own. Follow the Dock: the Dock's order.",
+        ),
     ]);
     f.footnote(EXTRAS_NOTE);
-    [restore, new_apps, shift, merge, in_place]
+    ([restore, new_apps, shift, merge], order)
 }
 
 /// The Windows pane: how windows are placed and move.
@@ -711,7 +725,7 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (V
     let (recent, grouping) = stage_manager(&mut f, &maker(Pane::StageManager), v);
     add(Pane::StageManager, f);
     let mut f = Form::new(mtm, WIDTH);
-    let [restore, new_apps, shift, merge, in_place] = stages(&mut f, &maker(Pane::Stages), v);
+    let ([restore, new_apps, shift, merge], order) = stages(&mut f, &maker(Pane::Stages), v);
     add(Pane::Stages, f);
     let mut f = Form::new(mtm, WIDTH);
     let (fit, speed, hotkeys) = windows(&mut f, &maker(Pane::Windows), v);
@@ -720,7 +734,7 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (V
     let copy = advanced(&mut f, &maker(Pane::Advanced), v);
     add(Pane::Advanced, f);
 
-    let controls = Controls { login, icon, updates, install, recent, grouping, restore, new_apps, merge, shift, in_place, fit, hotkeys, speed, copy };
+    let controls = Controls { login, icon, updates, install, recent, grouping, restore, new_apps, merge, shift, order, fit, hotkeys, speed, copy };
     (panes, controls)
 }
 
@@ -851,7 +865,7 @@ pub fn apply(values: SettingsValues) {
         set_switch(&c.new_apps, values.new_apps_join_current);
         set_switch(&c.merge, values.merge_on_drop);
         set_switch(&c.shift, values.shift_brings_here);
-        set_switch(&c.in_place, values.keep_in_place);
+        c.order.selectItemAtIndex(order_index(values.strip_order) as isize);
         c.fit.selectItemAtIndex(FIT_MODES.iter().position(|m| *m == values.fit).unwrap_or(0) as isize);
         set_switch(&c.hotkeys, values.hotkeys);
         c.speed.setDoubleValue(speed_stop(values.speed) as f64);
@@ -935,11 +949,28 @@ mod tests {
         assert!(v.merge_on_drop && v.shift_brings_here && v.fit == FitMode::Off && !v.hotkeys && v.speed == 1.0 && v.animations_on);
         assert!(v.restore_after_restart, "stages come back after a restart by default");
         assert!(!v.new_apps_join_current, "Apple's: a newly opened app gets a stage of its own");
-        assert!(!v.keep_in_place, "Apple's: the stage you leave takes the clicked card's place");
+        assert_eq!(v.strip_order, StripOrder::Native, "Apple's: the stage you leave takes the clicked card's place");
         let in_place = Config::parse("[strip]\norder = \"in_place\"").expect("parses").config;
-        assert!(SettingsValues::new(&in_place, &raw, LoginStatus::Off, "~/x".into(), None, "1.0.0".into()).keep_in_place);
+        assert_eq!(SettingsValues::new(&in_place, &raw, LoginStatus::Off, "~/x".into(), None, "1.0.0".into()).strip_order, StripOrder::InPlace);
         let older = Config::parse("[strip]\norder = \"fixed\"").expect("parses").config;
-        assert!(SettingsValues::new(&older, &raw, LoginStatus::Off, "~/x".into(), None, "1.0.0".into()).keep_in_place, "the older name too");
+        assert_eq!(SettingsValues::new(&older, &raw, LoginStatus::Off, "~/x".into(), None, "1.0.0".into()).strip_order, StripOrder::InPlace, "the older name too");
+    }
+
+    #[test]
+    fn the_strip_order_popups_three_items_round_trip_through_change_and_the_file() {
+        assert_eq!(ORDER_TITLES, ["Apple's", "Keep in Place", "Follow the Dock"]);
+        for (i, order) in ORDERS.into_iter().enumerate() {
+            let change = order_change(i as isize);
+            assert_eq!(change, Change::StripOrder(order), "item {i}");
+            assert_eq!(tag_of(&change), tag::ORDER);
+            // What the shell writes, read back as the window shows it.
+            let Change::StripOrder(written) = change else { unreachable!() };
+            let config = Config::parse(&format!("[strip]\norder = \"{}\"", written.name())).expect("parses").config;
+            let v = SettingsValues::new(&config, &RawSettings::new(), LoginStatus::Off, "~/x".into(), None, "1.0.0".into());
+            assert_eq!(v.strip_order, order);
+            assert_eq!(order_index(v.strip_order), i, "the popup shows item {i} again");
+        }
+        assert_eq!(order_change(-1), Change::StripOrder(StripOrder::Native), "no selection: Apple's");
     }
 
     #[test]
@@ -952,7 +983,7 @@ mod tests {
         let toggled = SettingsValues {
             merge_on_drop: false,
             restore_after_restart: false,
-            keep_in_place: true,
+            strip_order: StripOrder::Dock,
             speed: 2.0,
             app,
             ..base.clone()
@@ -974,7 +1005,7 @@ mod tests {
         let titles: Vec<_> = Pane::ALL.iter().map(|p| p.title()).collect();
         assert_eq!(titles, ["General", "Stage Manager", "Stages", "Windows", "Advanced"]);
         assert_eq!(Pane::default(), Pane::General, "a first opening shows General");
-        assert_eq!(Pane::Stages.tags(), [tag::RESTORE, tag::NEW_APPS, tag::SHIFT, tag::MERGE, tag::IN_PLACE]);
+        assert_eq!(Pane::Stages.tags(), [tag::RESTORE, tag::NEW_APPS, tag::SHIFT, tag::MERGE, tag::ORDER]);
         assert_eq!(Pane::Windows.tags(), [tag::FIT, tag::SPEED, tag::HOTKEYS]);
         assert!(Pane::StageManager.tags().contains(&tag::GROUPING) && Pane::StageManager.tags().contains(&tag::RECENT));
         assert!(Pane::Advanced.tags().contains(&tag::OPEN) && Pane::General.tags().contains(&tag::CHECK));
@@ -1016,7 +1047,7 @@ mod tests {
             Change::NewAppsJoinCurrent(true),
             Change::MergeOnDrop(true),
             Change::ShiftBringsHere(true),
-            Change::KeepInPlace(true),
+            Change::StripOrder(StripOrder::Dock),
             Change::Fit(FitMode::Move),
             Change::Hotkeys(true),
             Change::Speed(2.0),

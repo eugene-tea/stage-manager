@@ -190,14 +190,14 @@ pub const KEYS: &[KeyDef] = &[
     k("app", "install_updates", Kind::Bool, "false",
         "Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first."),
     // [strip]
-    k("strip", "order", Kind::Choice(&["native", "in_place", "fixed"]), "\"native\"",
-        "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (Settings: Keep stages in place; \"fixed\" is its older name)."),
+    k("strip", "order", Kind::Choice(&["native", "in_place", "fixed", "dock"]), "\"native\"",
+        "Card order (Settings: Strip order): \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (\"fixed\" is its older name); \"dock\" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app; apps not in the Dock last), and a card cannot be dragged to another slot."),
     k("strip", "active", Kind::Choice(&["close", "gap", "card"]), "\"close\"",
-        "With order = \"in_place\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
+        "With order = \"in_place\" or \"dock\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
         "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
     k("strip", "reorder", Kind::Bool, "true",
-        "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
+        "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). Off while order = \"dock\"."),
     k("strip", "merge_on_drop", Kind::Bool, "true",
         "Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used)."),
     k("strip", "hide_while_desktop_shown", Kind::Bool, "false",
@@ -498,6 +498,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-13.toml"),
     include_str!("legacy/default-14.toml"),
     include_str!("legacy/default-15.toml"),
+    include_str!("legacy/default-16.toml"),
 ];
 
 #[cfg(test)]
