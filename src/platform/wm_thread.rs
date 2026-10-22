@@ -236,6 +236,8 @@ struct WmState {
     /// Apps a recovery scan could not read, and a display change's sweep, scanned in slices
     /// ([`Rescan`]).
     rescan: Rescan,
+    /// Apps a rescan found not answering, for one line at each end of their episode (8M).
+    rescan_unanswered: crate::engine::busy_apps::Unanswered,
     /// A stand-down's leftovers check left windows in the park zone: they are looked for
     /// again whenever a Desktop shows, as the held ones are, with what that check knew of
     /// them ([`safety::Ours`], each window left judged ours): by then `state.json` is dropped
@@ -382,6 +384,10 @@ impl WmState {
                     }
                     if !unanswered.is_empty() {
                         tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
+                        // Their episodes start here: the rescans log only their ends (8M).
+                        for &pid in &unanswered {
+                            self.rescan_unanswered.missed(pid, Instant::now());
+                        }
                         self.rescan.unanswered(unanswered, Why::Launch, Instant::now());
                     }
                 }
@@ -668,6 +674,8 @@ impl WmState {
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks.is_multiple_of(RETRY_EVERY) {
             self.observer.retry_pending(ax_callback);
+            // Windows closed while their app did not answer (8M): no destroyed notice came.
+            self.observer.sweep_closed();
         }
         self.sweep_after_display_change();
         self.rescan_pass();
@@ -688,6 +696,9 @@ impl WmState {
         let (pass, expired) = self.rescan.due(now, |p| observed.contains(&p));
         if !expired.is_empty() {
             let apps: Vec<i32> = expired.iter().map(|q| q.pid).collect();
+            for q in &expired {
+                self.rescan_unanswered.ended(q.pid, now);
+            }
             tracing::warn!(?apps, "apps still do not answer: their windows are not scanned for the park zone (the quit's check and the next launch are)");
         }
         if pass.is_empty() {
@@ -695,10 +706,21 @@ impl WmState {
         }
         let pids: Vec<i32> = pass.iter().map(|q| q.pid).collect();
         let reason = if pass.iter().all(|q| q.why == Why::Launch) { "launch, apps that did not answer" } else { "display change" };
-        let scope = safety::ScanScope { pids: Some(pids), skip: safety::registry_ids() };
+        let scope = safety::ScanScope { pids: Some(pids.clone()), skip: safety::registry_ids(), quiet: true };
         let (r, unanswered) = safety::recovery_scan_with(reason, &scope);
         if r.restored > 0 {
             tracing::warn!(reason, restored = r.restored, "windows left in the park zone were brought back");
+        }
+        // Each app's episode of not answering, once at each end (8M: a line every ~3.5 s).
+        let now = Instant::now();
+        for &pid in &pids {
+            if unanswered.contains(&pid) {
+                if self.rescan_unanswered.missed(pid, now) {
+                    tracing::info!(pid, reason, "an app did not answer the park-zone scan: scanned again for a while, nothing waits on it (logged again when it answers)");
+                }
+            } else if let Some(lasted) = self.rescan_unanswered.ended(pid, now) {
+                tracing::info!(pid, lasted_s = lasted.as_secs(), "an app that did not answer the park-zone scan answers again");
+            }
         }
         let missed: Vec<Queued> = pass.into_iter().filter(|q| unanswered.contains(&q.pid)).collect();
         self.rescan.done(&missed, Instant::now());
@@ -778,6 +800,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         displays: None,
         settings: None,
         rescan: Rescan::default(),
+        rescan_unanswered: Default::default(),
         stand_down_leftovers: None,
         display_sweep: None,
         logout: Logout::default(),

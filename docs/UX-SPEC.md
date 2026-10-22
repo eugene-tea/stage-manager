@@ -41,7 +41,10 @@ laptop, 6 on a 5K display. A popup open on a window (a popover, a child window s
 of it) shows on its card beside the window, at its true size and place, as on Apple's; the
 window keeps its own size on the card, and nothing outside a window is drawn. A palette
 far from its window (more than the window's own width or height past it, or on another
-display) is left off: the card shows the window alone.
+display) is left off: the card shows the window alone. So is a popup over a window that
+macOS's capture does not place (round 8M, Calendar's event popup reaching past the window's
+top: the capture's content said the window's frame, its image held both squeezed into the
+window's shape on a fill): never a fill around a window on a card.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot

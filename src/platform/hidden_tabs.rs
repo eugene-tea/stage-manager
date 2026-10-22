@@ -5,6 +5,10 @@
 //! to bring back: a hidden tab cannot be moved and needs not be, so none of them ever waits
 //! for one. The recovery scan reads windows through Accessibility, which never lists a
 //! hidden tab, so it never meets one.
+//!
+//! The same look also tells another app's off-screen window in the zone we never parked
+//! (round 8M, [`crate::engine::not_ours`]: Chrome's helpers, Terminal's hidden tabs whose
+//! selected tab is on another Desktop): the quit's check and the guardian leave it alone too.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -12,6 +16,7 @@ use std::sync::Mutex;
 use super::ax::{AxElement, AxError};
 use super::windows::CgWindow;
 use crate::engine::hidden_tab::{self, Candidate, TabListed};
+use crate::engine::not_ours;
 
 /// One look at the window server's list: each app's Accessibility answer is asked once, and
 /// only for a window that may be a hidden tab ([`hidden_tab::may_be_hidden_tab`]).
@@ -42,6 +47,23 @@ impl Tabs {
         }
         tab
     }
+
+    /// True when `w` (one of the list's, found in the park zone) is another app's off-screen
+    /// window we never parked ([`not_ours::not_ours`]); `saved`: this session's `state.json`
+    /// names it. Its app is asked through Accessibility only when nothing else rules it out.
+    /// Logged once per window, at debug.
+    pub fn is_not_ours(&mut self, w: &CgWindow, candidate: Candidate, saved: bool) -> bool {
+        let t = tab_listed(w);
+        if !not_ours::not_ours(&t, candidate, saved, Some(&[])) {
+            return false;
+        }
+        let ax = self.ax.entry(w.pid).or_insert_with(|| ax_window_ids(w.pid));
+        let foreign = not_ours::not_ours(&t, candidate, saved, ax.as_deref());
+        if foreign {
+            log_not_ours_once(w);
+        }
+        foreign
+    }
 }
 
 fn tab_listed(w: &CgWindow) -> TabListed {
@@ -64,6 +86,16 @@ fn ax_window_ids(pid: i32) -> Option<Vec<u32>> {
 
 /// Windows already logged as hidden tabs (this process).
 static LOGGED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// Windows already logged as not ours (this process).
+static LOGGED_NOT_OURS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+fn log_not_ours_once(w: &CgWindow) {
+    if LOGGED_NOT_OURS.lock().is_ok_and(|mut l| l.insert(w.id)) {
+        let bundle = super::safety::bundle_id_of(w.pid).unwrap_or_else(|| "?".into());
+        tracing::debug!(id = w.id, pid = w.pid, bundle, at = %w.bounds, "another app's off-screen window in the zone, not ours: left alone");
+    }
+}
 
 fn log_once(w: &CgWindow) {
     if LOGGED.lock().is_ok_and(|mut l| l.insert(w.id)) {

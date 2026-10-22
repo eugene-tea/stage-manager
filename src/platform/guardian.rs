@@ -29,8 +29,12 @@
 //!    registered is never judged one, and only a same-size window its app lists through
 //!    Accessibility now vouches for one (the review of 8J: saved ids never do; a group
 //!    whose selected tab is on a Desktop not shown waits until that Desktop shows).
+//! 5. Nor does another app's off-screen window found in the park zone that the app never
+//!    parked (round 8M, [`crate::engine::not_ours`]: never registered, not saved in this
+//!    session's `state.json`, its app answering and not listing it through Accessibility;
+//!    Chrome's helper windows, a hidden tab whose selected tab is on another Desktop).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -39,7 +43,7 @@ use std::time::{Duration, Instant};
 use super::ax::AxElement;
 use super::safety::{self, guarded};
 use super::{ctl, hidden_tabs, observe, paths, windows};
-use crate::engine::guard_watch::{Event, Look, Watch, Waiting};
+use crate::engine::guard_watch::{Event, Look, Release, Watch, Waiting};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use crate::logbook::UNCLEAN_EXIT;
@@ -225,8 +229,8 @@ fn watch_pass(
     let now = Instant::now();
     let list = windows::list_windows();
     let listed = listed_windows(&list);
-    // Hidden tabs first (8J): none joins, a waiting one is let go.
-    for e in w.hidden_tabs(&hidden_tabs_found(w, &list, &listed, &displays)) {
+    // Hidden tabs (8J) and windows not ours (8M) first: none joins, a waiting one is let go.
+    for e in w.leave_alone(&left_alone_found(w, &list, &listed, &displays)) {
         log_event(&e);
     }
     for e in w.observe(now, &listed, &displays) {
@@ -500,12 +504,18 @@ fn describe(w: &Waiting) -> String {
 }
 
 /// The windows found in the park zone this pass (layer 0, off screen, of an allowed app,
-/// never registered: those that would join, or wait, on suspicion alone) that are hidden tabs
-/// (8J, [`hidden_tabs`]): their group's selected tab is listed through Accessibility now (its
-/// Desktop shows). Nothing else vouches ([`Candidate::Unknown`], the review of 8J): not a
-/// registered window, not one saved in `state.json` (two real windows of the same size on
-/// a Desktop not shown would vouch for each other). A registered window is never judged one.
-fn hidden_tabs_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], displays: &ScanDisplays) -> BTreeSet<u32> {
+/// never registered: those that would join, or wait, on suspicion alone) that are left alone,
+/// with why:
+/// - hidden tabs (8J, [`hidden_tabs`]): their group's selected tab is listed through
+///   Accessibility now (its Desktop shows). Nothing else vouches ([`Candidate::Unknown`], the
+///   review of 8J): not a registered window, not one saved in `state.json` (two real windows
+///   of the same size on a Desktop not shown would vouch for each other);
+/// - another app's off-screen windows the app never parked (round 8M,
+///   [`crate::engine::not_ours`]): not saved in this session's `state.json` either (so the
+///   review of 8J's two saved windows still wait), their app answering and not listing them.
+///
+/// A registered window is never judged either.
+fn left_alone_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], displays: &ScanDisplays) -> BTreeMap<u32, Release> {
     let found: Vec<&windows::CgWindow> = list
         .iter()
         .filter(|c| {
@@ -517,10 +527,22 @@ fn hidden_tabs_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], d
         })
         .collect();
     if found.is_empty() {
-        return BTreeSet::new();
+        return BTreeMap::new();
     }
     let mut tabs = hidden_tabs::Tabs::new(list);
-    found.into_iter().filter(|c| tabs.is_hidden_tab(c, Candidate::Unknown, |_| false)).map(|c| c.id).collect()
+    let saved = safety::saved_window_ids();
+    found
+        .into_iter()
+        .filter_map(|c| {
+            if tabs.is_hidden_tab(c, Candidate::Unknown, |_| false) {
+                Some((c.id, Release::HiddenTab))
+            } else if tabs.is_not_ours(c, Candidate::Unknown, saved.contains(&c.id)) {
+                Some((c.id, Release::NotOurs))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// The window server's layer-0 windows on every Space (of `list`), with whether their app

@@ -8,7 +8,10 @@ every fixture window onscreen; the app and the fixture are quit at the end, what
 
 Phases: m3 (stages, switching, frames, z-order, merge, pin, reveal, children), safety (quit,
 SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it, a hidden tab left in
-the park zone: a clean quit, no guardian wait), m4 (rules, placement,
+the park zone: a clean quit, no guardian wait; round 8M: another app's off-screen window in the
+zone we never parked (the fixture's --stray) makes no "still parked" ERROR and no guardian wait,
+at a quit or a kill -9; a window closed while its app answers nothing (the fixture's SIGURG, the
+app ignoring destroyed notices) leaves the model and its card), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
 only when its own strip window is topmost at that point), native (Apple's defaults with three
@@ -341,8 +344,11 @@ def stage_titles(s):
     return {st["number"]: [titles[i] for i in st["windows"]] for st in s["stages"]}
 
 
-def all_onscreen(what):
+def all_onscreen(what, never_ours=()):
+    """Every fixture window out of the park zone, but `never_ours`: windows we never parked
+    and must leave where they are (the stray of the 8M drills: never shown, off screen)."""
     wins, d = fixture_windows()
+    wins = [w for w in wins if w["id"] not in set(never_ours)]
     if not wins:
         # A fixture that crashed, or a probe that failed, must not pass as "nothing parked".
         return check(False, f"{what}: every fixture window onscreen (the window server lists no fixture window)")
@@ -543,6 +549,118 @@ def phase_safety():
     all_onscreen("quit after the relaunch")
 
     drill_hidden_tab()
+    drill_not_ours()
+    drill_closed_unanswered()
+
+
+def drill_not_ours():
+    """Round 8M: every quit of the owner's week logged ERROR "windows still parked" for windows
+    we never parked (Chrome's helper windows off screen past the corner, Terminal's hidden tabs)
+    and the guardian waited on them. The fixture's --stray is such a window: layer 0, never
+    shown, 1516x139 past the main screen's bottom-right corner, never listed through
+    Accessibility. A quit stays clean and the guardian waits for nothing; after a kill -9 the
+    guardian brings back what we parked and never waits on the stray."""
+    say("-- drill: another app's off-screen window in the zone, never ours: no ERROR, no guardian wait (8M)")
+    stop_app()
+    start_fixture(2, "--stray")
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    managed = {w["id"] for w in (s or {}).get("windows", [])}
+
+    def stray():
+        wins, d = fixture_windows([FIX_ID])
+        return next((w for w in wins if w["id"] not in managed and not w["onscreen"] and is_parked(w["bounds"], d)), None)
+
+    found = wait_until(stray, 5, "the stray window listed in the park zone")
+    if s is None or found is None:
+        skip("the never-ours drill", "the window server does not list the fixture's never-shown window in the park zone"
+             if s is not None else "the app did not come up")
+        stop_app()
+        stop_fixture()
+        return
+    say(f"    the stray: {found['id']} at {fmt(found['bounds'])}, off screen")
+    check(found["id"] not in managed, "the stray is not managed (Accessibility does not list it)")
+    ensure_something_parked()
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    ctl("quit")
+    wait_gone(pid)
+    for g in guards:
+        wait_gone(g, 15)
+    text = log_text()
+    check("unparked every window" in text and "guardian: clean exit" in text, "never ours: the quit is clean")
+    check("windows still parked: the guardian" not in text and "guardian: waiting for" not in text,
+          "never ours: no \"still parked\" ERROR, and the guardian waits for nothing")
+    check("another app's off-screen window in the zone, not ours" in text and f"id={found['id']}" in text,
+          "never ours: the log says it was left alone (debug)")
+    check(not pids_of(f"stage-manager --guardian {pid}$"), "never ours: the guardian has ended")
+
+    say("-- drill: kill -9 with the stray in the zone: the guardian brings ours back and never waits on it (8M)")
+    start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    ensure_something_parked()
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    os.kill(pid, signal.SIGKILL)
+    wait_gone(pid)
+    for g in guards:
+        wait_gone(g, 15)
+    text = log_text()
+    check(bool(guards) and not pids_of(f"stage-manager --guardian {pid}$"), "kill -9: the guardian ended (nothing left to wait for)")
+    joined = [ln for ln in text.splitlines() if "joins the watch" in ln and f"id={found['id']} " in ln]
+    check(not joined, f"kill -9: the stray never joined the guardian's watch ({joined[:1]})")
+    all_onscreen("kill -9 with the stray", never_ours=[found["id"]])
+    stop_fixture()
+
+
+def drill_closed_unanswered():
+    """Round 8M, the owner's 10-21: Home closed a window while answering no Accessibility
+    message; no destroyed notification came and the model kept it (a gray card). The fixture's
+    SIGURG closes its last window and blocks its main thread; the app runs with
+    STAGE_MANAGER_DROP_AX_DESTROYED (test only: destroyed notifications ignored, as a hung app
+    sends none). The window leaves the model through the window server's list alone, within
+    about two seconds, its stage and card with it, and the log says so once."""
+    say("-- drill: a window closed while its app answers nothing leaves the model and its card (8M)")
+    stop_app()
+    start_fixture(3, "--hang-ms", "3000")
+    fixture = pids_of(FIX_EXE)
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_DROP_AX_DESTROYED": "1"})
+    t = by_title(s) if s else {}
+    last = t.get("Fixture 3")
+    if not check(s is not None and bool(fixture) and last is not None, "drill setup: Fixture 3 managed"):
+        stop_app()
+        stop_fixture()
+        return
+    do("new", last["id"])
+    do("switch", 1)
+    before = state()
+    stages_before = len(before["stages"])
+    check(any(last["id"] in st["windows"] for st in before["stages"]), "drill setup: Fixture 3 has a stage of its own")
+    t0 = time.time()
+    os.kill(fixture[0], signal.SIGURG)
+
+    def gone():
+        x = ctl("state")
+        return x if x.get("ok") and not any(w["id"] == last["id"] for w in x["windows"]) else None
+
+    after = wait_until(gone, 5, "Fixture 3 to leave the model")
+    took = time.time() - t0
+    listed = [w for w in fixture_windows([FIX_ID])[0] if w["id"] == last["id"]]
+    if after is None and listed:
+        skip("the closed-while-unanswered drill", "the window server still lists the closed window (the fixture did not let it go)")
+        time.sleep(3.0)
+        stop_app()
+        stop_fixture()
+        return
+    check(after is not None, f"the closed window left the model ({took:.1f} s after the close, the app still hung)")
+    if after is not None:
+        check(len(after["stages"]) == stages_before - 1, f"its stage went with it ({stages_before} -> {len(after['stages'])} stages)")
+        check(not any(not st["windows"] for st in after["stages"]), "no empty stage (no card without a window)")
+    lines = [ln for ln in log_text().splitlines() if "window closed while its app did not answer" in ln and f"id={last['id']} " in ln]
+    check(len(lines) == 1, f"the log says so once ({len(lines)} lines)")
+    time.sleep(max(0.0, 3.5 - (time.time() - t0)))  # the fixture answers again
+    consistent("after a window closed while its app answered nothing")
+    stop_app()
+    all_onscreen("closed while unanswered drill")
+    stop_fixture()
 
 
 def drill_hidden_tab():
@@ -1265,6 +1383,9 @@ def phase_native():
     consistent("first start")
 
     say("-- an activation with no click (as ⌘Tab) and a Dock click grow their stage from its card (8L)")
+    # The corner patch draws its first picture a moment after launch; an activation before it
+    # arrives at once by design ("the corner patch has no picture …", seen live 10-21).
+    wait_until(lambda: "corner patch: drawing" in log_text() or None, 5, "the corner patch's first picture")
     activation_grows_check("open", "a", "an activation of Alpha (no click, as ⌘Tab)")
     activation_grows_check("dock", "c", "a Dock click on Charlie")
     activate("b")
@@ -2414,6 +2535,74 @@ def phase_capture():
     check("bye" in text and "window captures on" in text, "a clean quit after captures ran")
     check("refused window captures" not in text, "macOS did not refuse a capture")
     all_onscreen("capture quit")
+    for over in (0, 230):
+        popup_over_check(over)
+
+
+def holds_fill(boxes, window_alone):
+    """capture_pixels::holds_fill over `ctl debug-strip`'s corner boxes ([alpha, mean, spread])."""
+    flat = all(a >= 240 and sp <= 6 for a, _, sp in boxes) and max(m for _, m, _ in boxes) - min(m for _, m, _ in boxes) <= 12
+    return flat or (window_alone and any(a < 64 for a, _, _ in boxes))
+
+
+def popup_over_check(over):
+    """Round 8M, the owner's Calendar card on 10-21: a popup over its window (inside it across,
+    reaching `over` - 120 pt past its top and bottom together; 0 keeps it inside) drew the card
+    as the window and its popup inside a flat gray fill larger than both. The card's picture of
+    Fixture 1 never holds a fill: no corner box opaque, flat and one colour, and, taken as the
+    window alone, none mostly see-through (where the card's gray plane would show)."""
+    say(f"-- capture: a popup over its window (--child-over {over}): no gray fill on the card (8M)")
+    stop_app()
+    start_fixture(3, "--child", "--child-over", str(over))
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    if not check(s is not None, f"child-over {over}: app up with captures on"):
+        return
+    t = by_title(s)
+    w1 = t["Fixture 1"]["id"]
+    do("send", 2, w1)
+    managed = {w["id"] for w in s["windows"]}
+
+    def popup():
+        wins = probe(FIX_ID)["windows"]
+        win = next((w["bounds"] for w in wins if w["id"] == w1), None)
+        pop = next((w["bounds"] for w in wins if w["id"] not in managed and win is not None
+                    and w["bounds"]["x"] < win["x"] + win["w"] and win["x"] < w["bounds"]["x"] + w["bounds"]["w"]
+                    and w["bounds"]["y"] < win["y"] + win["h"] and win["y"] < w["bounds"]["y"] + w["bounds"]["h"]), None)
+        return (win, pop) if pop else None
+
+    found = wait_until(popup, 5, "Fixture 1's popover over it")
+    if found is None:
+        skip(f"the popup-over check ({over})", "the popover is not listed over Fixture 1")
+        stop_app()
+        stop_fixture()
+        return
+    win, pop = found
+    say(f"    window {fmt(win)}, popover {fmt(pop)}")
+
+    def held():
+        pic = ((ctl("debug-strip").get("strip") or {}).get("pictures") or {}).get(str(w1))
+        return pic if pic and pic.get("corner_boxes") else None
+
+    pic = wait_until(held, 10, "Fixture 1's picture")
+    reads = [ln.split("platform::capture: ", 1)[-1] for ln in log_text().splitlines()
+             if "capture: a window of its app over it" in ln and f"window={w1} " in ln]
+    for ln in reads[-2:]:
+        say(f"    log: {ln}")
+    left_out = any("children_left_out=true" in ln for ln in reads)
+    if pic is None:
+        # A picture holding a fill is never used: the card keeps its plane; say why.
+        check(any("fill=true" in ln for ln in reads), f"child-over {over}: no picture, and the log says it held a fill")
+    else:
+        boxes = [b for b in pic["corner_boxes"] if b]
+        alone = all(v == 0.0 for v in pic["extent"].values())
+        check(len(boxes) == 4 and not holds_fill(boxes, alone),
+              f"child-over {over}: the card's picture holds no fill (corner boxes {boxes}, window alone {alone}, children left out {left_out})")
+        if alone:
+            aspect, want = pic["w"] / pic["h"], win["w"] / win["h"]
+            check(abs(aspect - want) / want <= 0.03, f"child-over {over}: the picture has the window's proportions ({aspect:.3f} vs {want:.3f})")
+    stop_app()
+    all_onscreen(f"popup over its window ({over})")
+    stop_fixture()
 
 
 # ----- visible: the stage area beside the strip, the edge tab, quit right after a start --

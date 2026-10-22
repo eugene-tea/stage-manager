@@ -30,6 +30,11 @@
 //! windows found in the park zone each pass ([`Watch::hidden_tabs`]); one judged a hidden tab
 //! never joins, and one already waiting is let go. Nothing can move a hidden tab, and it
 //! takes its group's frame once selected. A window the app registered is never let go as one.
+//!
+//! Nor is **another app's off-screen window we never parked** (round 8M,
+//! [`super::not_ours`]: Chrome's helpers, a hidden tab whose selected tab is on another
+//! Desktop): judged by the platform the same way ([`Watch::leave_alone`]), it never joins, and
+//! one waiting is let go. A registered window is never let go as one either.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -144,6 +149,9 @@ pub enum Release {
     Adopted,
     /// Found in the park zone (never registered), and a hidden tab (8J): nothing can move it.
     HiddenTab,
+    /// Found in the park zone (never registered), another app's off-screen window we never
+    /// parked (round 8M, [`super::not_ours`]).
+    NotOurs,
     /// Found in the park zone (never registered) while Stage Manager runs again: the new app
     /// judges it (it may have parked it itself).
     Successor,
@@ -166,6 +174,10 @@ impl fmt::Display for Release {
             ),
             Self::Adopted => write!(f, "Stage Manager runs again and has adopted it"),
             Self::Successor => write!(f, "found in the park zone, never registered; Stage Manager runs again and judges it"),
+            Self::NotOurs => write!(
+                f,
+                "another app's off-screen window in the zone, not ours (never registered, not saved, not listed through Accessibility by its app)"
+            ),
             Self::HiddenTab => write!(
                 f,
                 "a hidden tab (off screen, not listed through Accessibility, beside its group's selected tab): nothing can move it, and it takes its group's frame once selected"
@@ -249,8 +261,9 @@ pub struct Watch {
     blind: bool,
     /// Stage Manager runs again ([`Self::hand_over`]): no window found in the park zone joins.
     successor: bool,
-    /// The windows judged hidden tabs in the latest pass ([`Self::hidden_tabs`]): none joins.
-    tabs: BTreeSet<u32>,
+    /// The windows judged hidden tabs or not ours in the latest pass ([`Self::leave_alone`]),
+    /// with why: none joins.
+    tabs: BTreeMap<u32, Release>,
 }
 
 impl Watch {
@@ -273,13 +286,26 @@ impl Watch {
     /// [`Self::observe`], and a waiting one is let go. A registered window is never let go
     /// as one. Replaces the latest pass's set.
     pub fn hidden_tabs(&mut self, tabs: &BTreeSet<u32>) -> Vec<Event> {
-        self.tabs = tabs.iter().copied().filter(|id| !self.is_registered(*id)).collect();
-        let go: Vec<(u32, i32)> =
-            self.waiting.values().filter(|w| w.registered.is_none() && self.tabs.contains(&w.id)).map(|w| (w.id, w.pid)).collect();
+        self.leave_alone(&tabs.iter().map(|id| (*id, Release::HiddenTab)).collect())
+    }
+
+    /// The windows the platform judged left alone this pass, with why: hidden tabs (8J) and
+    /// another app's off-screen windows we never parked ([`Release::NotOurs`], round 8M), only
+    /// ever among windows the app never registered. None of them joins the watch at
+    /// [`Self::observe`], and a waiting one is let go; a registered window never is. Replaces
+    /// the latest pass's set.
+    pub fn leave_alone(&mut self, judged: &BTreeMap<u32, Release>) -> Vec<Event> {
+        self.tabs = judged.iter().filter(|(id, _)| !self.is_registered(**id)).map(|(id, why)| (*id, *why)).collect();
+        let go: Vec<(u32, i32, Release)> = self
+            .waiting
+            .values()
+            .filter(|w| w.registered.is_none())
+            .filter_map(|w| self.tabs.get(&w.id).map(|why| (w.id, w.pid, *why)))
+            .collect();
         go.into_iter()
-            .map(|(id, pid)| {
+            .map(|(id, pid, why)| {
                 self.waiting.remove(&id);
-                Event::LetGo { id, pid, why: Release::HiddenTab }
+                Event::LetGo { id, pid, why }
             })
             .collect()
     }
@@ -337,7 +363,7 @@ impl Watch {
         }
         let settled = self.settled(now);
         for l in listed {
-            if self.waiting.contains_key(&l.id) || self.tabs.contains(&l.id) {
+            if self.waiting.contains_key(&l.id) || self.tabs.contains_key(&l.id) {
                 continue;
             }
             let reg = self.registered.iter().find(|r| r.id == l.id);
@@ -909,6 +935,44 @@ mod tests {
         let mut w = Watch::new(&reg());
         for ms in [0, 500, 1000, 5000] {
             assert!(w.hidden_tabs(&[1].into()).is_empty());
+            w.observe(t0 + Duration::from_millis(ms), &listing, &displays());
+            assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1], "still waits");
+        }
+    }
+
+    /// Round 8M, the week's quits: Chrome's helper windows (116, 117) and Terminal's hidden
+    /// tabs whose selected tab is on another Desktop (83, 84), never registered, judged not
+    /// ours by the platform: none joins, one already waiting is let go; a registered window
+    /// parked on another Desktop judged the same way still waits.
+    #[test]
+    fn windows_not_ours_never_join_and_a_registered_one_still_waits() {
+        let t0 = Instant::now();
+        let chrome = |id, h| Listed { id, pid: 502, bounds: Rect::new(2658.0, 1424.0, 1516.0, h), onscreen: false, allowed: true };
+        let spot = Rect::new(2559.0, 1408.0, 1497.0, 1045.0);
+        let terminal = |id| Listed { id, pid: 501, bounds: spot, onscreen: false, allowed: true };
+        let foreign = [chrome(116, 139.0), chrome(117, 89.0), terminal(83), terminal(84)];
+        let listing: Vec<Listed> = foreign.iter().copied().chain([at(9, RESTORE, true)]).collect();
+        let judged: BTreeMap<u32, Release> = [116, 117, 83, 84].into_iter().map(|id| (id, Release::NotOurs)).collect();
+        let mut w = Watch::new(&[]);
+        assert!(w.leave_alone(&judged).is_empty());
+        let ev = w.observe(t0, &listing, &displays());
+        assert!(!ev.iter().any(|e| matches!(e, Event::Joined { .. })), "{ev:?}");
+        assert!(w.is_empty(), "the guardian has nothing to wait for");
+        // Judged after it joined (its app answered only now): let go.
+        let mut w = Watch::new(&[]);
+        w.observe(t0, &listing, &displays());
+        assert_eq!(w.waiting().count(), 4);
+        let ev = w.leave_alone(&judged);
+        assert_eq!(ev.len(), 4);
+        assert!(ev.iter().all(|e| matches!(e, Event::LetGo { why: Release::NotOurs, .. })));
+        assert!(w.is_empty());
+        // A registered window parked on another Desktop: waits, whatever the platform said.
+        let listing: Vec<Listed> = foreign.iter().copied().chain(on_desktop_1()).collect();
+        let mut w = Watch::new(&reg());
+        let mut all = judged.clone();
+        all.insert(1, Release::NotOurs);
+        for ms in [0, 500, 1000, 5000] {
+            assert!(w.leave_alone(&all).is_empty());
             w.observe(t0 + Duration::from_millis(ms), &listing, &displays());
             assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1], "still waits");
         }

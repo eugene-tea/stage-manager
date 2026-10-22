@@ -48,6 +48,19 @@
 //                                      it. The capture phase's card shows it beside the window.
 //                                      (A borderless panel added with addChildWindow was left
 //                                      out of ScreenCaptureKit's window capture, live 10-16.)
+//   --child-over N | FIXTURE_CHILD_OVER=N  with --child: the button sits 35% in from window 1's
+//                                      left edge and the popover (250 pt wide, to its right)
+//                                      stays inside the window across, its height the window's
+//                                      minus 120 plus N: 0 keeps it inside, N > 120 makes it
+//                                      reach past the window's top and bottom (Calendar's event
+//                                      popup on 10-21: 1242 pt beside a 1139 pt window, round 8M)
+//   --stray      | FIXTURE_STRAY=1     also create a borderless layer-0 window that is never
+//                                      shown, at 98,-16 pt past the main screen's bottom-right
+//                                      corner, 1516x139 (Chrome's helper windows on 10-21):
+//                                      listed off screen by the window server in the park zone,
+//                                      never through Accessibility (round 8M)
+//   --hang-ms N  | FIXTURE_HANG_MS=N   with SIGURG: how long the main thread blocks after the
+//                                      close (default 3000)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -58,6 +71,9 @@
 // behind the other windows at the same frames (their Desktop shows), without activating.
 // SIGIO selects the next tab of every tab group (as ⌘⇧] would), without activating: the tab
 // selected before becomes a hidden tab where it was.
+// SIGURG closes the last standard window opened and lets it go (its window-server window is
+// destroyed), then blocks the main thread for --hang-ms: the app answers no Accessibility
+// message meanwhile (Home on 10-21, round 8M).
 import AppKit
 
 struct Options {
@@ -75,6 +91,9 @@ struct Options {
     var minimized: Set<String> = []
     var tabbed = 0
     var child = false
+    var childOver: Double? = nil
+    var stray = false
+    var hangMs = 3000
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -109,6 +128,9 @@ struct Options {
         if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
         if env["FIXTURE_CHILD"] == "1" { o.child = true }
+        if let n = env["FIXTURE_CHILD_OVER"].flatMap(Double.init) { o.childOver = n }
+        if env["FIXTURE_STRAY"] == "1" { o.stray = true }
+        if let n = env["FIXTURE_HANG_MS"].flatMap(Int.init) { o.hangMs = n }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -126,6 +148,9 @@ struct Options {
             case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
             case "--child": o.child = true
+            case "--child-over": if let n = args.next().flatMap(Double.init) { o.childOver = n }
+            case "--stray": o.stray = true
+            case "--hang-ms": if let n = args.next().flatMap(Int.init) { o.hangMs = n }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -232,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if options.child, let parent = windows.first(where: { $0.title == title(0) }) {
             addPopup(to: parent)
         }
+        if options.stray { makeStray() }
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -252,12 +278,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.bezelStyle = .rounded
         button.sizeToFit()
         let b = content.bounds
-        button.setFrameOrigin(NSPoint(x: b.maxX - 100 - button.frame.width, y: b.midY - button.frame.height / 2))
+        if options.childOver != nil {
+            // Over the window: the popover to the button's right stays inside it across.
+            button.setFrameOrigin(NSPoint(x: b.minX + b.width * 0.35 - button.frame.width, y: b.midY - button.frame.height / 2))
+        } else {
+            button.setFrameOrigin(NSPoint(x: b.maxX - 100 - button.frame.width, y: b.midY - button.frame.height / 2))
+        }
         content.addSubview(button)
         let popover = NSPopover()
         popover.behavior = .applicationDefined
         popover.animates = false
-        let size = NSSize(width: 250, height: max(40, parent.frame.height - 120))
+        let size = NSSize(width: 250, height: max(40, parent.frame.height - 120 + CGFloat(options.childOver ?? 0)))
         popover.contentSize = size
         popover.contentViewController = PopupController(size: size)
         self.popover = popover
@@ -386,6 +417,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// `--stray`: a layer-0 window never shown, off screen past the main screen's bottom-right
+    /// corner (another app's helper window in the park zone, never ours).
+    var stray: NSWindow?
+
+    func makeStray() {
+        guard let screen = NSScreen.screens.first?.frame else { return }
+        // Top-left at (maxX + 98, 16 pt above the bottom) in the window server's coordinates.
+        let size = NSSize(width: 1516, height: 139)
+        let rect = NSRect(x: screen.maxX + 98, y: screen.minY + 16 - size.height, width: size.width, height: size.height)
+        let w = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.setFrame(rect, display: false)
+        stray = w
+    }
+
+    /// SIGURG: the last standard window opened is closed and let go (nothing keeps it, so its
+    /// window-server window goes), then the main thread blocks for --hang-ms.
+    func closeWhileHung() {
+        autoreleasepool {
+            guard let w = windows.last(where: { !($0 is NSPanel) && $0.isVisible }) else { return }
+            windows.removeAll { $0 === w }
+            w.close()
+        }
+        Thread.sleep(forTimeInterval: Double(max(0, options.hangMs)) / 1000)
+    }
+
     /// SIGUSR1: one more window, ordered front without activating the app.
     func openAnother() {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -464,6 +521,10 @@ signal(SIGINFO, SIG_IGN)
 let comeBack = DispatchSource.makeSignalSource(signal: SIGINFO, queue: .main)
 comeBack.setEventHandler { delegate.bringAwayBack() }
 comeBack.resume()
+signal(SIGURG, SIG_IGN)
+let closeHung = DispatchSource.makeSignalSource(signal: SIGURG, queue: .main)
+closeHung.setEventHandler { delegate.closeWhileHung() }
+closeHung.resume()
 signal(SIGIO, SIG_IGN)
 let nextTab = DispatchSource.makeSignalSource(signal: SIGIO, queue: .main)
 nextTab.setEventHandler { delegate.selectNextTabs() }
