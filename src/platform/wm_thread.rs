@@ -43,6 +43,7 @@ use objc2_core_foundation::{
 use super::apps::{AppEvent, AppInfo};
 use super::ax::AxElement;
 use super::controller::Controller;
+use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
 use super::native_settings::{self, RawSettings};
@@ -247,6 +248,8 @@ struct WmState {
     display_sweep: Option<Instant>,
     /// The logout's head start, while it holds.
     logout: Logout,
+    /// The windows taken from an old guardian (round 8N), watched until each is back.
+    taken: TakenWatch,
 }
 
 thread_local! {
@@ -467,7 +470,10 @@ impl WmState {
                 if failed > 0 {
                     tracing::info!(failed, unrestored, "restores that failed at quit, after the leftovers check");
                 }
-                let ok = back && unrestored == 0 && safety::registry_len() == 0;
+                // Windows taken from an old guardian (round 8N): those shown come back now;
+                // one still away leaves the exit unclean, so this app's guardian waits for it.
+                let taken_left = self.taken.last_look(&self.controller.model_window_ids());
+                let ok = back && unrestored == 0 && safety::registry_len() == 0 && taken_left == 0;
                 self.controller.save_now();
                 self.observer.stop();
                 let _ = self.observer.take_events();
@@ -676,6 +682,10 @@ impl WmState {
             self.observer.retry_pending(ax_callback);
             // Windows closed while their app did not answer (8M): no destroyed notice came.
             self.observer.sweep_closed();
+            // Windows taken from an old guardian (round 8N): its rules, about once a second.
+            if self.trusted {
+                self.taken.pass(&self.controller.model_window_ids());
+            }
         }
         self.sweep_after_display_change();
         self.rescan_pass();
@@ -804,6 +814,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         stand_down_leftovers: None,
         display_sweep: None,
         logout: Logout::default(),
+        taken: TakenWatch::default(),
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));

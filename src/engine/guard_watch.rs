@@ -35,6 +35,11 @@
 //! [`super::not_ours`]: Chrome's helpers, a hidden tab whose selected tab is on another
 //! Desktop): judged by the platform the same way ([`Watch::leave_alone`]), it never joins, and
 //! one waiting is let go. A registered window is never let go as one either.
+//!
+//! Round 8N: a guardian hands its registered windows to a running Stage Manager
+//! ([`super::handoff`], [`Release::HandedOff`]); the new app watches the windows it took with
+//! a watch of its own that never takes in a window found in the park zone
+//! ([`Watch::registered_only`]), letting go of one its model manages ([`Release::Managed`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -155,6 +160,12 @@ pub enum Release {
     /// Found in the park zone (never registered) while Stage Manager runs again: the new app
     /// judges it (it may have parked it itself).
     Successor,
+    /// Handed to the running Stage Manager with the rest of the watch (round 8N,
+    /// [`super::handoff`]): it waits for the window now.
+    HandedOff,
+    /// A window the app took from an old guardian is in its model now (round 8N): the model
+    /// brings it back, or parks it in its stage, itself.
+    Managed,
 }
 
 impl fmt::Display for Release {
@@ -173,6 +184,8 @@ impl fmt::Display for Release {
                 missing.as_secs_f64()
             ),
             Self::Adopted => write!(f, "Stage Manager runs again and has adopted it"),
+            Self::HandedOff => write!(f, "handed to the running Stage Manager, which waits for it now"),
+            Self::Managed => write!(f, "Stage Manager manages it now (in its model)"),
             Self::Successor => write!(f, "found in the park zone, never registered; Stage Manager runs again and judges it"),
             Self::NotOurs => write!(
                 f,
@@ -274,6 +287,38 @@ impl Watch {
             w.waiting.insert(r.id, Waiting { fitted: r.fitted, ..waiting(r.id, r.pid, Some(r.restore)) });
         }
         w
+    }
+
+    /// A watch over registered windows only (round 8N: the windows an app took from an old
+    /// guardian): no window found in the park zone ever joins.
+    pub fn registered_only(registered: &[Registered]) -> Self {
+        Self { successor: true, ..Self::new(registered) }
+    }
+
+    /// Adds a registered window (taken later); false when it is registered already.
+    pub fn add(&mut self, r: Registered) -> bool {
+        if self.is_registered(r.id) {
+            return false;
+        }
+        self.registered.push(r);
+        self.waiting.insert(r.id, Waiting { fitted: r.fitted, ..waiting(r.id, r.pid, Some(r.restore)) });
+        true
+    }
+
+    /// Drops window `id` from the watch, registered or not (another path saw to it).
+    pub fn forget(&mut self, id: u32) {
+        self.registered.retain(|r| r.id != id);
+        self.waiting.remove(&id);
+    }
+
+    /// Lets go of every waiting window of `ids`, for `why`.
+    pub fn let_go(&mut self, ids: &[u32], why: Release) -> Vec<Event> {
+        ids.iter().filter_map(|id| self.waiting.remove(id).map(|w| Event::LetGo { id: w.id, pid: w.pid, why })).collect()
+    }
+
+    /// The registered windows still waiting, as registered (what a handoff offers).
+    pub fn registered_waiting(&self) -> Vec<Registered> {
+        self.registered.iter().filter(|r| self.waiting.contains_key(&r.id)).copied().collect()
     }
 
     /// True when the app registered window `id` (its parked file).
@@ -855,6 +900,44 @@ mod tests {
         // Desktop 2 shows and the new app finds window 1 there: let go.
         assert_eq!(w.hand_over(&[1]), vec![Event::LetGo { id: 1, pid: 7, why: Release::Adopted }]);
         assert!(w.is_empty());
+    }
+
+    /// Round 8N: a guardian hands its registered windows over and lets each one go; a watch
+    /// of taken windows only (the new app's) never takes in a window found in the park zone,
+    /// grows as more are taken, and drops one another path saw to.
+    #[test]
+    fn a_watch_hands_over_and_a_taken_watch_holds_only_what_it_took() {
+        let t0 = Instant::now();
+        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false };
+        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true };
+        let mut w = Watch::new(&[r1, r2]);
+        let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
+        let mut listed = on_desktop_1();
+        listed.push(found);
+        w.observe(t0, &listed, &displays());
+        assert_eq!(w.waiting().count(), 3);
+        assert_eq!(w.registered_waiting(), vec![r1, r2], "only registered windows are offered");
+        assert!(w.hand_over(&[]).iter().all(|e| matches!(e, Event::LetGo { id: 30, .. })));
+        let ev = w.let_go(&[1, 2, 99], Release::HandedOff);
+        assert_eq!(ev, vec![
+            Event::LetGo { id: 1, pid: 7, why: Release::HandedOff },
+            Event::LetGo { id: 2, pid: 7, why: Release::HandedOff }
+        ]);
+        assert!(w.is_empty());
+        assert!(w.registered_waiting().is_empty());
+
+        let mut taken = Watch::registered_only(&[r1]);
+        let ev = taken.observe(t0, &listed, &displays());
+        assert!(!ev.iter().any(|e| matches!(e, Event::Joined { .. })), "{ev:?}");
+        assert_eq!(taken.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1]);
+        assert!(taken.add(r2));
+        assert!(!taken.add(r2), "once");
+        assert_eq!(taken.waiting().find(|x| x.id == 2).map(|x| x.fitted), Some(true));
+        taken.forget(1);
+        assert!(!taken.is_registered(1));
+        assert_eq!(taken.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(taken.let_go(&[2], Release::Managed).len(), 1);
+        assert!(taken.is_empty());
     }
 
     #[test]

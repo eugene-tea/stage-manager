@@ -11,7 +11,10 @@ SIGTERM, SIGINT, panic, kill -9 with the guardian, kill -9 without it, a hidden 
 the park zone: a clean quit, no guardian wait; round 8M: another app's off-screen window in the
 zone we never parked (the fixture's --stray) makes no "still parked" ERROR and no guardian wait,
 at a quit or a kill -9; a window closed while its app answers nothing (the fixture's SIGURG, the
-app ignoring destroyed notices) leaves the model and its card), m4 (rules, placement,
+app ignoring destroyed notices) leaves the model and its card; round 8N: a guardian waiting for
+a window on a Desktop not shown hands its watch to the next app and exits, that app's quit
+leaves the window to its own guardian, which hands it on again, and the last app's quit brings
+it back), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
 only when its own strip window is topmost at that point), native (Apple's defaults with three
@@ -529,6 +532,7 @@ def phase_safety():
     drill("kill -9 (the guardian restores)", lambda pid: os.kill(pid, signal.SIGKILL), ["guardian: recovery scan done", "recovery: window brought back reason=\"guardian\""])
 
     drill_away()
+    drill_handoff()
 
     say("-- drill: kill -9 of the app and the guardian (the next launch restores)")
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
@@ -785,6 +789,101 @@ def drill_away():
         wait_gone(g, 5)
     check(not pids_of(f"stage-manager --guardian {pid}$"), "the guardian ends once nothing is left parked")
     all_onscreen("kill -9 with a window away")
+
+
+def parked_file_ids(app):
+    """The window ids the parked file of app pid `app` names (what its guardian would wait for)."""
+    try:
+        with open(os.path.join(HOME, f".parked-{app}.json"), encoding="utf-8") as f:
+            return {w["id"] for w in json.load(f).get("windows", [])}
+    except (OSError, ValueError):
+        return set()
+
+
+def drill_handoff():
+    """Round 8N, the owner's 10-19…10-21: the guardian of a copy that died waited for hours for a
+    window it could never see again, asking the running copy "adopted?" every 3 s, and blocked
+    every live test. Now it hands its watch to the running copy and exits.
+
+    App A parks a window; its Desktop "not shown" is emulated as in drill_away (A frozen, the
+    fixture's SIGWINCH orders the window out), then kill -9 A: A's guardian waits. App B starts:
+    A's guardian hands the window over and exits, B holds it (`state` "taken", its parked file).
+    B quits with the window still away: its quit is unclean and B's own guardian waits for it.
+    App C starts: B's guardian hands it on and exits. The window's Desktop shows (SIGINFO), C
+    quits: the window is back, C's quit clean, no guardian left."""
+    say("-- drill: an old guardian hands its watch to the next app and exits (8N)")
+    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    ensure_something_parked()
+    time.sleep(1.0)
+    fixture = pids_of(FIX_EXE)
+    parked_ids = [w["id"] for w in state()["windows"] if w["parked"] and w["role"] == "standard"]
+    if not check(bool(fixture) and bool(parked_ids), "handoff drill setup: a parked fixture window"):
+        return
+    a = app_pid()
+    guards_a = guardian_pids(a)
+
+    def listed(ids):
+        wins, _ = fixture_windows([FIX_ID])
+        return [w for w in wins if w["id"] in ids]
+
+    os.kill(a, signal.SIGSTOP)
+    os.kill(fixture[0], signal.SIGWINCH)
+    away = wait_until(lambda: (lambda ws: ws if ws and not any(w["onscreen"] for w in ws) else None)(listed(parked_ids)), 3,
+                      "the parked windows to leave the screen")
+    os.kill(a, signal.SIGKILL)
+    wait_gone(a)
+    if not check(away is not None, "handoff: the parked windows are off screen (their Desktop not shown)"):
+        os.kill(fixture[0], signal.SIGINFO)
+        return
+    time.sleep(2.0)
+    check(bool(guards_a) and bool(pids_of(f"stage-manager --guardian {a}$")), "handoff: A's guardian waits for the window")
+
+    # App B: A's guardian hands over and exits.
+    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)
+    b = app_pid()
+    for g in guards_a:
+        wait_gone(g, 15)
+    check(not pids_of(f"stage-manager --guardian {a}$"), "handoff: A's guardian exits once B runs")
+    text = log_text()
+    check("guardian: handed its watch to the running Stage Manager" in text, "handoff: A's guardian logs the handoff")
+    check("took a crashed copy's guardian's watch" in text, "handoff: B logs that it took the watch")
+    taken = set(ctl("state").get("taken") or [])
+    check(set(parked_ids) <= taken, f"handoff: B's registry holds the window as taken ({sorted(taken)} ⊇ {parked_ids})")
+    check(set(parked_ids) <= parked_file_ids(b), "handoff: B's parked file names it (B's guardian would wait for it)")
+    _, d = fixture_windows([FIX_ID])
+    check(all(is_parked(w["bounds"], d) for w in listed(parked_ids)), "handoff: the window is still parked (nothing could reach it)")
+
+    # B quits with the window away: unclean, and B's own guardian waits for it.
+    guards_b = guardian_pids(b)
+    ctl("quit")
+    wait_gone(b)
+    time.sleep(2.0)
+    check(bool(guards_b) and bool(pids_of(f"stage-manager --guardian {b}$")), "handoff: B's quit leaves the window to B's guardian, which waits")
+    check("windows taken from an old guardian are not back yet" in log_text(), "handoff: B's quit says the taken window is not back")
+
+    # App C: B's guardian hands it on; the window shows; C's quit brings it back.
+    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)
+    c = app_pid()
+    for g in guards_b:
+        wait_gone(g, 15)
+    check(not pids_of(f"stage-manager --guardian {b}$"), "handoff: B's guardian hands on to C and exits")
+    check(set(parked_ids) <= set(ctl("state").get("taken") or []), "handoff: C holds the window")
+    os.kill(fixture[0], signal.SIGINFO)
+    wait_until(lambda: (lambda ws: ws if ws and all(w["onscreen"] for w in ws) else None)(listed(parked_ids)), 3,
+               "the window to show again")
+    guards_c = guardian_pids(c)
+    ctl("quit")
+    wait_gone(c)
+    for g in guards_c:
+        wait_gone(g, 15)
+    _, d = fixture_windows([FIX_ID])
+    back = listed(parked_ids)
+    check(bool(back) and not any(is_parked(w["bounds"], d) for w in back), "handoff: after C's quit the window is back")
+    after_c = log_text().rsplit("took a crashed copy's guardian's watch", 1)[-1]
+    check("guardian: clean exit" in after_c and "not every window could be restored" not in after_c,
+          "handoff: C's quit is clean (its guardian has nothing to do)")
+    check(not pids_of(f"stage-manager --guardian {c}$"), "handoff: no guardian is left waiting")
+    all_onscreen("handoff drill")
 
 
 CONFIG_M4 = f"""

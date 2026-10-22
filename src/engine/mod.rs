@@ -11,6 +11,7 @@ pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
 pub mod guard_watch;
+pub mod handoff;
 pub mod hidden_tab;
 pub mod hide;
 pub mod leftovers;

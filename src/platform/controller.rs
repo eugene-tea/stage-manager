@@ -4696,7 +4696,7 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::Ping | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
+            Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugDrag { .. }
             | Command::DebugStrip
@@ -4757,7 +4757,7 @@ impl Controller {
         // The desktop's still for a switch's cover (8L3-8L4) and the icons it is keyed by.
         let mut desktop_still = desktop_shot::status();
         desktop_still["icons"] = json!(self.patch_items.known);
-        json!({
+        let mut state = json!({
             "ok": true,
             "space": m.current_space(m.main_display().id).0,
             "fullscreen": self.fullscreen,
@@ -4807,7 +4807,11 @@ impl Controller {
             },
             "stages": stages,
             "windows": windows,
-        })
+        });
+        // The registry's windows, and those taken from an old guardian (round 8N).
+        state["registry_ids"] = json!(safety::registry_ids());
+        state["taken"] = json!(safety::taken_ids());
+        state
     }
 }
 

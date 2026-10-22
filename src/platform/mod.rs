@@ -20,6 +20,7 @@ pub mod desktop_shot;
 pub mod dock;
 pub mod durable;
 pub mod guardian;
+pub mod handoff;
 pub mod hidden_tabs;
 pub mod hotkeys;
 pub mod input;

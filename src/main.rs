@@ -112,7 +112,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -365,7 +365,8 @@ mod app {
     fn registry_then_leftovers(reason: &str) -> bool {
         let registry = safety::emergency_unpark(reason);
         let leftovers = safety::leftovers_back(reason, Default::default());
-        registry && leftovers
+        // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits.
+        registry && leftovers && safety::taken_len() == 0
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
@@ -416,6 +417,9 @@ mod app {
                 "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
                 "apple_stage_manager_on": native_settings::apple_stage_manager_enabled(&native_settings::current()),
             }),
+            // On this thread, never the WM thread's: a busy WM thread never keeps an old
+            // guardian waiting (round 8N).
+            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst)),
             Command::Settings => {
                 DispatchQueue::main().exec_async(shell::show_settings);
                 json!({ "ok": true })

@@ -2,7 +2,8 @@
 //! and answering each with one line of JSON. `stage-manager ctl <words...>` is the client.
 //!
 //! Commands: `ping`, `adopted ID…` (which of these windows the engine manages; the
-//! guardian's question), `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
+//! guardian's question), `take-watch OFFER` (an old guardian hands over the windows it waits
+//! for, round 8N: [`crate::engine::handoff`]), `dump`, `state`, `quit`, `switch N`, `send N [ID]`, `new [ID]`,
 //! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`, `mark [NOTE…]` (a problem mark
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
@@ -31,7 +32,9 @@
 //! signed as the app is, [`super::code_sign`]; never by its pid or path, which a process that
 //! exits can hand to another), as the `ctl` and `mark` clients, the guardian and the scripted
 //! checks are when they run the app's binary; any other process of the user
-//! gets only `ping` and `settings` (a second copy's launch check and hand-off). That keeps a
+//! gets only `ping` and `settings` (a second copy's launch check and hand-off), and a crashed
+//! copy's guardian `adopted` and `take-watch` (its binary may no longer be signed like this
+//! one: an update replaced it). That keeps a
 //! script or app without Accessibility from borrowing the app's; it is no wall against a
 //! process of the same user, which can run this binary as a client itself. Lines longer than
 //! [`MAX_LINE`] end the connection.
@@ -53,6 +56,7 @@ use super::logging::{self, Process};
 use super::paths;
 use super::space_keys::{Direction, Expose};
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::handoff::{self, Offer};
 
 /// A parsed ctl command.
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +66,9 @@ pub enum Command {
     /// Which of these window ids the engine manages (the guardian of a crashed copy asks
     /// before it lets a window go): `{"ok":true,"adopted":[...]}`.
     Adopted(Vec<u32>),
+    /// An old guardian hands over the windows it still waits for (round 8N): the app takes
+    /// them into its safety registry (`{"ok":true,"taken":[...],"pid":N}`).
+    TakeWatch(Offer),
     /// The Space shown as the engine sees it: its synthetic id, full screen, a change still
     /// settling, and how many Space changes were handled so far.
     Space,
@@ -289,6 +296,7 @@ impl Command {
                 .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
                 .collect::<Result<Vec<u32>, String>>()
                 .map(Self::Adopted),
+            [handoff::COMMAND, rest @ ..] => Offer::parse(rest).map(Self::TakeWatch),
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
@@ -344,9 +352,11 @@ impl Peer {
     pub fn may(self, cmd: &Command) -> bool {
         match self {
             Self::Ours => true,
-            // `adopted` too: a crashed copy's guardian asks it, and its binary may no longer be
-            // signed like this one (an update replaced it); it answers window ids only.
-            Self::SameUser => matches!(cmd, Command::Ping | Command::Settings | Command::Adopted(_)),
+            // `adopted` and `take-watch` too: a crashed copy's guardian asks them, and its
+            // binary may no longer be signed like this one (an update replaced it). `adopted`
+            // answers window ids only; `take-watch` makes this app wait for windows found in
+            // the park zone, and only ever moves one out of it.
+            Self::SameUser => matches!(cmd, Command::Ping | Command::Settings | Command::Adopted(_) | Command::TakeWatch(_)),
             Self::Stranger => false,
         }
     }
@@ -634,6 +644,10 @@ mod tests {
         assert_eq!(Command::parse("adopted 4 9"), Ok(Command::Adopted(vec![4, 9])));
         assert_eq!(Command::parse("adopted"), Ok(Command::Adopted(vec![])));
         assert!(Command::parse("adopted x").is_err());
+        let offer = Offer { app: 1, guardian: 2, corners: vec![], windows: vec![] };
+        assert_eq!(Command::parse(&offer.line().expect("line")), Ok(Command::TakeWatch(offer)));
+        assert!(Command::parse("take-watch").is_err());
+        assert!(Command::parse("take-watch 4 9").is_err());
         assert_eq!(Command::parse("  dump \n"), Ok(Command::Dump));
         assert_eq!(Command::parse("quit"), Ok(Command::Quit));
         assert_eq!(Command::parse("state"), Ok(Command::State));
@@ -727,8 +741,9 @@ mod tests {
         assert_eq!(Peer::judge(Some(501), 501, || false), Peer::SameUser, "signed otherwise, unsigned, or gone");
         assert_eq!(Peer::judge(Some(0), 501, never_asked), Peer::Stranger, "another account, root too");
         assert_eq!(Peer::judge(None, 501, never_asked), Peer::Stranger, "unreadable");
-        for cmd in [Command::Ping, Command::Settings] {
-            assert!(Peer::SameUser.may(&cmd) && Peer::Ours.may(&cmd) && !Peer::Stranger.may(&cmd));
+        let offer = Offer { app: 1, guardian: 2, corners: vec![], windows: vec![] };
+        for cmd in [Command::Ping, Command::Settings, Command::Adopted(vec![4]), Command::TakeWatch(offer)] {
+            assert!(Peer::SameUser.may(&cmd) && Peer::Ours.may(&cmd) && !Peer::Stranger.may(&cmd), "{cmd:?}");
         }
         for cmd in [Command::Dump, Command::State, Command::Send(1, None), Command::Quit, Command::UnparkAll, Command::DebugPanic] {
             assert!(!Peer::SameUser.may(&cmd), "{cmd:?}");
