@@ -281,6 +281,20 @@ impl<T> SnapshotCache<T> {
     }
 }
 
+/// Where a card's content starts a glide so the card is drawn exactly where it is now, when
+/// its hover scale `s` (`[cards] hover_scale`, about the middle of its slot) moves with the
+/// slot from `c_old` to `c_new`; `now` is the content's offset drawn now. The scale moves
+/// every point by `(1 - s)·(c - x)`: with the centre moved and the offset kept, a hovered
+/// card dropped `d` from its slot would jump `(s - 1)·d` further away before it glides back,
+/// past the slot it is headed for (round 9C).
+pub fn rescaled_start(now: Point, s: f64, c_old: Point, c_new: Point) -> Point {
+    if s == 1.0 || s <= 0.0 {
+        return now;
+    }
+    let k = (1.0 - s) / s;
+    Point::new(now.x + k * (c_old.x - c_new.x), now.y + k * (c_old.y - c_new.y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +429,24 @@ mod tests {
         assert_eq!(c.ids().collect::<Vec<_>>(), [1]);
         c.set_budget(10);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn a_hovered_card_whose_slot_moves_is_drawn_where_it_was() {
+        // Content point x drawn under a scale s about c: c + s·(x - c).
+        let drawn = |x: f64, s: f64, c: f64| c + s * (x - c);
+        let (built, s) = (100.0, 1.06);
+        // Dropped 30 pt below its slot: the scale was about the card where it followed the
+        // pointer, and now is about the slot.
+        let (c_old, c_new, now) = (160.0, 130.0, 30.0);
+        let before = drawn(built + 50.0 + now, s, c_old);
+        let from = rescaled_start(Point::new(0.0, now), s, Point::new(0.0, c_old), Point::new(0.0, c_new));
+        let after = drawn(built + 50.0 + from.y, s, c_new);
+        assert!((before - after).abs() < 1e-9, "{before} vs {after}");
+        // Without it the card would jump (s - 1)·30 = 1.8 pt past where it was, away from the slot.
+        let unscaled = drawn(built + 50.0 + now, s, c_new);
+        assert!((unscaled - before - 1.8).abs() < 1e-9);
+        // At rest size nothing changes.
+        assert_eq!(rescaled_start(Point::new(3.0, 4.0), 1.0, Point::new(0.0, 9.0), Point::new(0.0, 0.0)), Point::new(3.0, 4.0));
     }
 }

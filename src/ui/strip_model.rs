@@ -176,6 +176,47 @@ impl CardSnapshot {
     }
 }
 
+/// Moves the item `id` says is `stage` right above `before`'s (the bottom for `None`): the
+/// strip's own prediction of a card dragged to another slot, drawn at the release before the
+/// controller's snapshot comes (the engine's [`crate::engine::model::Model::move_card`] comes
+/// out the same in place: round 9C). True when the order changed.
+pub fn move_before<T>(items: &mut Vec<T>, id: impl Fn(&T) -> u64, stage: u64, before: Option<u64>) -> bool {
+    let Some(from) = items.iter().position(|c| id(c) == stage) else { return false };
+    let old: Vec<u64> = items.iter().map(&id).collect();
+    let item = items.remove(from);
+    let to = before.and_then(|b| items.iter().position(|c| id(c) == b)).unwrap_or(items.len());
+    items.insert(to, item);
+    items.iter().map(&id).collect::<Vec<_>>() != old
+}
+
+/// What a card's layers need for a new snapshot of the same stage's card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardChange {
+    /// Nothing drawn changed: the layers stay as they are.
+    None,
+    /// Only its hotkey number changed, and it is drawn (`[strip] show_numbers`): the badge's
+    /// text changes in place.
+    Number,
+    /// Its content changed: the layers are built again.
+    Rebuild,
+}
+
+impl CardSnapshot {
+    /// What `self`'s layers need to show `new`, with numbers drawn or not. A stage moved in
+    /// place renumbers the stages between its old and new place (numbers follow creation
+    /// order), so a number alone never rebuilds a card, nor moves one (round 9C).
+    pub fn change_to(&self, new: &CardSnapshot, numbers_drawn: bool) -> CardChange {
+        let same = CardSnapshot { number: new.number, ..self.clone() };
+        if same != *new {
+            CardChange::Rebuild
+        } else if self.number != new.number && numbers_drawn {
+            CardChange::Number
+        } else {
+            CardChange::None
+        }
+    }
+}
+
 /// A window shown on a card.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CardWindow {
@@ -494,6 +535,31 @@ pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_alone_never_rebuilds_a_card() {
+        let win = CardWindow { id: 5, pid: 50, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
+        let card = CardSnapshot { stage: 2, number: 5, windows: vec![win], apps: vec![50], ..Default::default() };
+        let renumbered = CardSnapshot { number: 6, ..card.clone() };
+        assert_eq!(card.change_to(&card, true), CardChange::None);
+        assert_eq!(card.change_to(&renumbered, false), CardChange::None, "no number drawn: nothing to do");
+        assert_eq!(card.change_to(&renumbered, true), CardChange::Number, "the badge's text only");
+        let other = CardSnapshot { windows: vec![win, CardWindow { id: 6, ..win }], ..renumbered.clone() };
+        assert_eq!(card.change_to(&other, false), CardChange::Rebuild, "a window more is a change");
+        let named = CardSnapshot { name: Some("Work".into()), ..card.clone() };
+        assert_eq!(card.change_to(&named, false), CardChange::Rebuild);
+    }
+
+    #[test]
+    fn a_card_moves_right_above_the_one_it_is_dropped_before() {
+        let mut v = vec![1u64, 2, 3, 4];
+        assert!(move_before(&mut v, |x| *x, 4, Some(2)));
+        assert_eq!(v, [1, 4, 2, 3]);
+        assert!(move_before(&mut v, |x| *x, 1, None));
+        assert_eq!(v, [4, 2, 3, 1]);
+        assert!(!move_before(&mut v, |x| *x, 3, Some(1)), "already right above it");
+        assert!(!move_before(&mut v, |x| *x, 9, None), "no such card");
+    }
 
     #[test]
     fn a_merged_card_keeps_its_windows_in_front_and_adds_the_dropped_ones_behind() {

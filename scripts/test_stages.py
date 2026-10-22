@@ -87,6 +87,7 @@ the native phase's apps are <id>.a, <id>.b and <id>.c.
 """
 
 import json
+import math
 import os
 import re
 import signal
@@ -2486,6 +2487,126 @@ def in_place_checks():
         time.sleep(1.0)
 
 
+def drop_settle_checks():
+    """Keep stages in place past the capacity (round 9C, the owner's 10-22 report: "a little
+    slide" after a drop right into a slot): a card dragged one slot and released. Sampled
+    every ~16 ms after the release (`ctl debug-strip`), the dropped card's drawn thumbnail only
+    moves toward its slot, never past it by more than 2 pt nor sideways; and the strip the
+    engine sends is the one drawn at the release (no other stage takes a slot)."""
+    say("-- keep stages in place past the capacity: a dropped card settles into its slot, no jerk")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(config_in_place("close").replace("[strip]", "[strip]\ncapacity = 4", 1))
+    ctl("reload")
+    time.sleep(1.0)
+    s = state()
+    n = len(s.get("strip_cards", []))
+    if not check(n >= 4, f"a full strip to drag in ({s['strip']}, capacity {s['strip_capacity']})"):
+        return
+    # The head's last card one slot down (its place goes to the stage after it in creation
+    # order: the 10-22 case), then the second card one slot up.
+    for slot, step, what in ((n - 2, 1, "the head's last card one slot down"), (1, -1, "the second card one slot up")):
+        s0 = state()
+        cards = s0.get("strip_cards", [])
+        if not check(len(cards) == n, f"{what}: the strip is full ({len(cards)} cards)"):
+            continue
+        ids = ids_by_number(s0)
+        order0 = [ids.get(c["number"]) for c in cards]
+        dragged = order0[slot]
+        want = [x for x in order0 if x != dragged]
+        want.insert(slot + step, dragged)
+        a, b = cards[slot]["frame"], cards[slot + step]["frame"]
+        start = center(a)
+        # Into the gap past the next card (outside its middle: a gap, not a merge).
+        y = b["y"] + b["h"] * (0.9 if step > 0 else 0.1)
+        path = [start, (start[0], start[1] + 12 * step), (start[0], y)]
+        words = [str(round(v, 1)) for p in path for v in p] + ["hold=300"]
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        out, _ = proc.communicate(timeout=20)
+        # Released: sample the dropped card's front thumbnail as drawn, about once a frame.
+        seen, end = [], time.time() + 1.2
+        while time.time() < end:
+            t = time.time()
+            p = strip_probe()
+            c = next((c for c in (p or {}).get("cards", []) if c.get("stage") == dragged and c.get("thumb")), None)
+            if c:
+                seen.append(center(c["thumb"]))
+            time.sleep(max(0.0, 0.016 - (time.time() - t)))
+        st = wait_state(lambda x: [ids_by_number(x).get(c["number"]) for c in x.get("strip_cards", [])] == want,
+                        f"{what}: the strip as drawn at the release", timeout=3)
+        got = [ids_by_number(state()).get(c["number"]) for c in state().get("strip_cards", [])]
+        check(st is not None, f"{what}: the engine's strip is the one drawn at the release ({order0} -> {got}, drawn {want})")
+        if not check(len(seen) >= 10, f"{what}: the dropped card sampled while it settles ({len(seen)} samples; {out.strip()[:80]})"):
+            continue
+        rest = seen[-1]
+        d0 = (seen[0][0] - rest[0], seen[0][1] - rest[1])
+        n0 = math.hypot(*d0)
+        u = (d0[0] / n0, d0[1] / n0) if n0 >= 1.0 else (0.0, 1.0)
+        bad, last = [], None
+        for i, q in enumerate(seen):
+            dx, dy = q[0] - rest[0], q[1] - rest[1]
+            along, side = dx * u[0] + dy * u[1], abs(dy * u[0] - dx * u[1])
+            if n0 < 1.0:
+                if math.hypot(dx, dy) > 2.0:
+                    bad.append(f"#{i} {math.hypot(dx, dy):.1f} pt off a slot it was dropped on")
+            elif along < -2.0:
+                bad.append(f"#{i} {-along:.1f} pt past its slot")
+            elif last is not None and along > max(last, 0.0) + 0.5:
+                bad.append(f"#{i} back away from its slot ({last:.1f} -> {along:.1f} pt)")
+            if side > 2.0:
+                bad.append(f"#{i} {side:.1f} pt sideways")
+            last = along if n0 >= 1.0 else None
+        check(not bad, f"{what}: the dropped card only settles toward its slot ({len(seen)} samples from "
+                       f"{n0:.1f} pt away)" + (f" ({'; '.join(bad[:4])})" if bad else ""))
+        time.sleep(0.5)
+
+
+def merge_hold_check():
+    """A card held over another card's middle (`[strip] merge_on_drop`; owner 10-22, round 9C:
+    "both windows render with the same content until I release"): the target previews the
+    merge, its own windows in front and the dragged card's behind, and each of its planes
+    shows its own window's picture (`shows` in `ctl debug-strip`: none while captures are
+    off), never another's; the dragged card, lying right over the target, fades to
+    `[drag] lifted_opacity` so the target's front window shows. Released there, the stages
+    merge."""
+    say("-- a card held over another card: the preview shows the target's own front window")
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if not check(len(cards) >= 2, f"two cards to merge ({len(cards)})"):
+        return
+    ids = ids_by_number(s0)
+    dragged, target = ids.get(cards[0]["number"]), ids.get(cards[1]["number"])
+    a, b = cards[0]["frame"], cards[1]["frame"]
+    start, over = center(a), center(b)
+    words = [str(round(v, 1)) for p in (start, (start[0], start[1] + 12), over) for v in p] + ["hold=1200"]
+    proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+    held = [p for p in sample_strip_during(proc, after=0.0) if p.get("merge_onto") == target]
+    if not check(len(held) >= 3, f"the card was held over the other ({len(held)} samples while held)"):
+        return
+    last = held[-1]
+    # A window's home is its stage's number.
+    mine = {w["id"] for w in s0["windows"] if w["home"] == cards[1]["number"] and w["role"] == "standard"}
+    theirs = {w["id"] for w in s0["windows"] if w["home"] == cards[0]["number"] and w["role"] == "standard"}
+    t = next((c for c in last["cards"] if c["stage"] == target), None)
+    d = next((c for c in last["cards"] if c["stage"] == dragged), None)
+    if not check(t is not None and d is not None, "both cards are drawn while held"):
+        return
+    planes = t["planes"]
+    front = planes[-1]["window"] if planes else None
+    check(front in mine and any(p["window"] in theirs for p in planes),
+          f"the target previews the merge: its own window in front ({front}), the dragged card's behind "
+          f"({[p['window'] for p in planes]})")
+    wrong = [(p["window"], p["shows"]) for h in held for c in h["cards"] for p in c["planes"]
+             if p.get("shows") is not None and p["shows"] != p["window"]]
+    check(not wrong, f"every plane shows its own window's picture ({wrong[:4]})")
+    lifted = 0.3
+    check(d["opacity"] <= lifted + 0.01, f"the dragged card fades over its target (opacity {d['opacity']:.2f})")
+    time.sleep(1.0)
+    st = state()
+    home = {w["id"]: w["home"] for w in st["windows"]}
+    into = {home.get(w) for w in mine}
+    check(len(into) == 1 and all(home.get(w) in into for w in theirs), f"released over the target, the stages merged ({into})")
+
+
 def phase_slots():
     say("\n== slots: a switch's snapshots land where they aim; clicks are clicks; a card drags whole ==")
     stop_app()
@@ -2671,6 +2792,8 @@ def phase_slots():
             check(g is not None and g.get("real") and b and off(g["end"], b) <= 1.0,
                   f"its last frame is within 1 pt of the window's (end {g and fmt(g['end'])}, window {b and fmt(b)})")
     in_place_checks()
+    drop_settle_checks()
+    merge_hold_check()
     stop_app()
     all_onscreen("slots quit")
     write_config(None)

@@ -88,7 +88,7 @@ use crate::platform::capture_frame::Extent;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
-use crate::ui::strip_model::{self, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
+use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
 use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
 
 #[path = "strip_motion.rs"]
@@ -130,6 +130,8 @@ const ACTIVE_RIM: f64 = 2.0;
 /// Depth of a card lifted above the others while it is dragged and while it glides into its
 /// slot after the release (its whole unit: thumbnails, icons, badge).
 const LIFTED_Z: f64 = 100.0;
+/// The animation key of a dragged card's fade while it is held over a card to merge into.
+const HELD_FADE: &str = "held";
 
 // ---------------------------------------------------------------------------------------
 // Main-thread state
@@ -572,6 +574,9 @@ struct CardLayers {
     images: Vec<(u32, Retained<CALayer>)>,
     /// App icon layers, in icon order.
     icons: Vec<Retained<CALayer>>,
+    /// The number badge and its label (`[strip] show_numbers`): a renumbered card changes
+    /// its text in place.
+    badge: Option<(Retained<CALayer>, Retained<CATextLayer>)>,
     /// The card's top-left corner when its content was built.
     built: Point,
     /// What the layers were built from.
@@ -653,28 +658,29 @@ fn ease(key: &str, from: &AnyObject, to: &AnyObject, seconds: f64) -> Retained<C
     anim
 }
 
-/// Moves `layer` to `to` along the spring, starting from where it is drawn now.
-fn spring_position(s: motion_math::Spring, layer: &CALayer, to: CGPoint) {
-    // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
-    let from = unsafe { layer.presentationLayer() }.map(|p| p.position()).unwrap_or_else(|| layer.position());
+/// Moves `layer` to `to`: along the spring `glide` from `from` (where it is drawn now), or at
+/// once with no spring (`None`: a card following the pointer, no animation), cancelling any
+/// glide under way.
+fn move_to(glide: Option<motion_math::Spring>, layer: &CALayer, from: CGPoint, to: CGPoint) {
+    let key = NSString::from_str("position");
     layer.setPosition(to);
-    if (from.x - to.x).abs() < 0.25 && (from.y - to.y).abs() < 0.25 {
-        return;
+    match glide {
+        Some(s) if (from.x - to.x).abs() >= 0.25 || (from.y - to.y).abs() >= 0.25 => {
+            let anim = spring(s, "position", &NSValue::new(from), &NSValue::new(to));
+            layer.addAnimation_forKey(&anim, Some(&key));
+        }
+        _ => layer.removeAnimationForKey(&key),
     }
-    let anim = spring(s, "position", &NSValue::new(from), &NSValue::new(to));
-    layer.addAnimation_forKey(&anim, Some(&NSString::from_str("position")));
 }
 
-/// Moves `layer` to `to` on the spring `glide`, or at once (`immediate`, or no animation:
-/// cancelling any glide).
-fn move_to(glide: Option<motion_math::Spring>, layer: &CALayer, to: CGPoint, immediate: bool) {
-    match glide.filter(|_| !immediate) {
-        Some(s) => spring_position(s, layer, to),
-        None => {
-            layer.removeAnimationForKey(&NSString::from_str("position"));
-            layer.setPosition(to);
-        }
-    }
+/// A card's number badge and its label, for `number`, on a card built at `origin`.
+fn set_badge(badge: &CALayer, label: &CATextLayer, number: usize, origin: Point) {
+    let text = number.to_string();
+    let w = 18.0_f64.max(8.0 + 7.0 * text.len() as f64);
+    badge.setFrame(CGRect::new(CGPoint::new(origin.x - 6.0, origin.y - 7.0), CGSize::new(w, 18.0)));
+    // SAFETY: an NSString is a valid `string` value.
+    unsafe { label.setString(Some(&NSString::from_str(&text))) };
+    label.setFrame(CGRect::new(CGPoint::new(0.0, 2.0), CGSize::new(w, 14.0)));
 }
 
 /// Moves `layer`'s `sublayerTransform` to `to` along the spring, from what is drawn now.
@@ -1592,9 +1598,16 @@ impl Strip {
                 Point::new(g.x + q.x, g.y + q.y)
             })
         };
-        let cards: Vec<serde_json::Value> = self
-            .snapshot
-            .cards
+        // Which window's picture an image layer holds (its contents are that picture's image).
+        let shows = |image: &CALayer| -> Option<u32> {
+            // SAFETY: reading a layer's contents, set only to CGImages here.
+            let contents = unsafe { image.contents() }?;
+            let at = Retained::as_ptr(&contents).cast::<std::ffi::c_void>();
+            self.thumbs.iter().find(|(_, p)| std::ptr::from_ref::<CGImage>(&p.image).cast::<std::ffi::c_void>() == at).map(|(id, _)| *id)
+        };
+        // The cards drawn: the snapshot's, or while a card is held over another, the preview.
+        let drawn_cards = self.shown_cards();
+        let cards: Vec<serde_json::Value> = drawn_cards
             .iter()
             .filter_map(|c| {
                 let l = self.pane.cards.get(&c.stage)?;
@@ -1607,7 +1620,9 @@ impl Strip {
                     .planes
                     .iter()
                     .zip(&l.images)
-                    .map(|((id, plane), (_, image))| serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image) }))
+                    .map(|((id, plane), (_, image))| {
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image), "shows": shows(image) })
+                    })
                     .collect();
                 Some(serde_json::json!({
                     "stage": c.stage,
@@ -1695,13 +1710,16 @@ impl Strip {
             }
             _ => Vec::new(),
         };
-        let rebuild = match self.pane.cards.get(&card.stage) {
+        let numbers = self.style.show_numbers;
+        let (rebuild, renumber) = match self.pane.cards.get(&card.stage) {
             Some(layers) => {
-                force_rebuild
-                    || layers.snapshot != *card
+                let change = layers.snapshot.change_to(card, numbers);
+                let rebuild = force_rebuild
+                    || change == CardChange::Rebuild
                     || layers.layout.thumbs.len() != layout.thumbs.len()
                     || layers.layout.thumbs.iter().zip(&layout.thumbs).any(|(a, b)| a.id != b.id || a.rect.size() != b.rect.size())
-                    || layers.layout.icons.len() != layout.icons.len()
+                    || layers.layout.icons.len() != layout.icons.len();
+                (rebuild, !rebuild && change == CardChange::Number)
             }
             None => {
                 let m = self.m().clone();
@@ -1729,41 +1747,53 @@ impl Strip {
                     planes: Vec::new(),
                     images: Vec::new(),
                     icons: Vec::new(),
+                    badge: None,
                     built: Point::new(layout.frame.x, layout.frame.y),
                     snapshot: card.clone(),
                     layout: layout.clone(),
                 };
                 self.pane.cards.insert(card.stage, layers);
-                true
+                (true, false)
             }
         };
-        if rebuild {
-            // Rebuilt for the new layout: the unit starts from where the card is drawn now and
-            // glides from there.
-            let drawn = self.pane.cards.get(&card.stage).map(|l| {
+        // Where the card's content is drawn now (panel coordinates, before its hover scale)
+        // and the middle its hover scale is about: read once, before anything changes, so a
+        // rebuild glides on from there (re-reading the presentation layer after the model
+        // changed in this transaction gave a start relative to the old build: round 9C).
+        let m = self.m().clone();
+        let (drawn, old_center) = match self.pane.cards.get(&card.stage) {
+            Some(l) => {
                 // SAFETY: presentationLayer returns a copy of the drawn state or nil.
                 let at = unsafe { l.unit.presentationLayer() }.map_or_else(|| l.unit.position(), |p| p.position());
-                Point::new(l.built.x + at.x, l.built.y + at.y)
-            });
+                (Point::new(l.built.x + at.x, l.built.y + at.y), l.layout.hover_center(&m))
+            }
+            None => (Point::new(layout.frame.x, layout.frame.y), layout.hover_center(&m)),
+        };
+        if rebuild {
             self.fill_card(card.stage, layout, card);
-            if let (Some(d), Some(l)) = (drawn, self.pane.cards.get(&card.stage)) {
-                CATransaction::begin();
-                CATransaction::setDisableActions(true);
-                l.unit.removeAnimationForKey(&NSString::from_str("position"));
-                l.unit.setPosition(CGPoint::new(d.x - l.built.x, d.y - l.built.y));
-                CATransaction::commit();
+            if let Some(l) = self.pane.cards.get(&card.stage) {
                 let fade = self.style.animation.seconds(self.style.cards.fade_ms);
                 for (_, plane) in l.planes.iter().filter(|(id, _)| fresh.contains(id)) {
                     fade_in(plane, fade);
                 }
             }
+        } else if renumber && let Some(l) = self.pane.cards.get(&card.stage) {
+            // Only its number changed: the badge says so in place; nothing moves.
+            if let Some((badge, label)) = &l.badge {
+                set_badge(badge, label, card.number, l.built);
+            }
         }
-        let glide = self.glide();
+        let glide = self.glide().filter(|_| !(immediate || self.instant));
         let hover = self.card_transform(layout);
+        let scale = self.card_scale(card.stage);
         if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
-            // The whole card glides to its new place as one unit.
+            // The whole card glides to its new place as one unit, from where it is drawn: its
+            // hover scale is about its slot's middle, so the start is put where the scale
+            // about the new slot draws it as now (a dropped card never jumps past its slot).
             let to = Self::unit_offset(layout, layers.built);
-            move_to(glide, &layers.unit, to, immediate || self.instant);
+            let now = Point::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
+            let from = motion_math::rescaled_start(now, scale, old_center, layout.hover_center(&m));
+            move_to(glide, &layers.unit, CGPoint::new(from.x, from.y), to);
             layers.card.setTransform(hover);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
@@ -1849,20 +1879,19 @@ impl Strip {
             icon_layers.push(icon);
         }
         let origin = Point::new(layout.frame.x, layout.frame.y);
+        let mut badge_layers = None;
         if style.show_numbers {
-            let text = card.number.to_string();
-            let w = 18.0_f64.max(8.0 + 7.0 * text.len() as f64);
             let badge = CALayer::new();
-            badge.setFrame(CGRect::new(CGPoint::new(origin.x - 6.0, origin.y - 7.0), CGSize::new(w, 18.0)));
             badge.setCornerRadius(9.0);
             badge.setBackgroundColor(Some(&color(0.08, 0.08, 0.1, 0.78)));
             badge.setBorderWidth(0.5);
             badge.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.35)));
-            let label = text_layer(&text, 11.0, self.scale, true);
-            label.setFrame(CGRect::new(CGPoint::new(0.0, 2.0), CGSize::new(w, 14.0)));
+            let label = text_layer(&card.number.to_string(), 11.0, self.scale, true);
+            set_badge(&badge, &label, card.number, origin);
             badge.addSublayer(&label);
             badge.setZPosition(1.0);
             unit.addSublayer(&badge);
+            badge_layers = Some((badge, label));
         }
         if style.show_names
             && let Some(name) = card.name.as_deref().filter(|n| !n.is_empty())
@@ -1884,6 +1913,7 @@ impl Strip {
             layers.planes = planes;
             layers.images = images;
             layers.icons = icon_layers;
+            layers.badge = badge_layers;
             layers.built = origin;
         }
     }
@@ -2076,8 +2106,27 @@ impl Strip {
     /// Sets a dragged card's opacity in the strip (lifted out, or back).
     fn set_card_opacity(&self, stage: u64, opacity: f32) {
         if let Some(layers) = self.pane.cards.get(&stage) {
+            layers.card.removeAnimationForKey(&NSString::from_str(HELD_FADE));
             layers.card.setOpacity(opacity);
         }
+    }
+
+    /// Eases a dragged card's opacity to `opacity` over `seconds` (0: at once) from what is
+    /// drawn now; nothing when it is there already.
+    fn fade_card(&self, stage: u64, opacity: f32, seconds: f64) {
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
+        if layers.card.opacity() == opacity {
+            return;
+        }
+        if seconds <= 0.0 {
+            self.set_card_opacity(stage, opacity);
+            return;
+        }
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let from = unsafe { layers.card.presentationLayer() }.map_or_else(|| layers.card.opacity(), |p| p.opacity());
+        layers.card.setOpacity(opacity);
+        let anim = ease("opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(opacity), seconds);
+        layers.card.addAnimation_forKey(&anim, Some(&NSString::from_str(HELD_FADE)));
     }
 
     fn mouse_dragged(&mut self) {
@@ -2117,7 +2166,14 @@ impl Strip {
         }
         match mode {
             DragMode::Reorder => {
-                self.set_card_opacity(stage, 1.0);
+                // Held over a card it would merge into, the dragged card fades as when it is
+                // dragged out: it lies right over the target, whose preview shows its own
+                // front window with the dragged card's windows behind; at full opacity the
+                // dragged card hid that front window, so the target seemed to show the
+                // dragged card's picture twice (owner 10-22, round 9C).
+                let held = if onto.is_some() { style.lifted_opacity as f32 } else { 1.0 };
+                let seconds = if was == DragMode::Reorder { self.style.animation.seconds(self.style.cards.hover_ms) } else { 0.0 };
+                self.fade_card(stage, held, seconds);
                 if was != DragMode::Reorder {
                     self.lift_card(stage);
                     self.set_hover(Some(stage));
@@ -2154,7 +2210,6 @@ impl Strip {
             && drag.mode != DragMode::Pressed
         {
             self.pressed = None;
-            self.set_card_opacity(drag.stage, 1.0);
             let at = self.pointer();
             if drag.mode == DragMode::Reorder
                 && let Some(into) = drag.onto
@@ -2170,6 +2225,7 @@ impl Strip {
                 self.update_targets();
                 return Some(StripEvent::CardMerged { stage: drag.stage, into });
             }
+            self.set_card_opacity(drag.stage, 1.0);
             if drag.mode == DragMode::Reorder {
                 // Put the card in its new slot now; the controller's snapshot agrees. It stays
                 // above the others until it has glided in.
@@ -2273,13 +2329,7 @@ impl Strip {
     /// Moves `stage`'s card above `before`'s (the bottom for `None`) in the snapshot; true when
     /// the order changed.
     fn reorder_locally(&mut self, stage: u64, before: Option<u64>) -> bool {
-        let cards = &mut self.snapshot.cards;
-        let Some(from) = cards.iter().position(|c| c.stage == stage) else { return false };
-        let old: Vec<u64> = cards.iter().map(|c| c.stage).collect();
-        let card = cards.remove(from);
-        let to = before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
-        cards.insert(to, card);
-        cards.iter().map(|c| c.stage).collect::<Vec<_>>() != old
+        strip_model::move_before(&mut self.snapshot.cards, |c| c.stage, stage, before)
     }
 
     /// Merges `stage`'s card into `into`'s in the snapshot (see
@@ -2313,12 +2363,16 @@ impl Strip {
             let d = self.drawn_offset(into);
             Point::new(c.x + d.x, c.y + d.y)
         });
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let shown = unsafe { layers.card.presentationLayer() }.map_or_else(|| layers.card.opacity(), |p| p.opacity());
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        layers.card.removeAnimationForKey(&NSString::from_str(HELD_FADE));
         layers.card.setOpacity(0.0);
         // At speed 0 no fade: a zero duration would mean Core Animation's default (R3 5).
+        // It fades from what is drawn: the card held over its target is faded already.
         if seconds > 0.0 {
-            let fade = ease("opacity", &NSNumber::new_f32(1.0), &NSNumber::new_f32(0.0), seconds);
+            let fade = ease("opacity", &NSNumber::new_f32(shown), &NSNumber::new_f32(0.0), seconds);
             layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
         }
         if let Some(c) = toward {
