@@ -96,13 +96,23 @@ own `NSPanel` strip.
 
 ## 3. Recommended first batch
 
-1. **Shift = bring here, everywhere (R1).** Finish the work in progress: Dock, Finder, Spotlight and Launchpad, new windows, card Shift-click. Settle ⌘Tab (watch out for ⌘⇧Tab).
-2. **Card context menu (R4).** Bring Here, New Stage, Keep on Every Stage, Name…, Close Window, Quit App. One easy item that also covers parts of R3, R7, R9 and pinning, without a single shortcut.
-3. **Stage names (R7).** Set from the menu, shown on hover, persisted.
-4. **Strip overflow and reorder (R5).** Scroll over the strip to reach older stages, with a "+N" mark; drag a card to reorder.
-5. **Merge by dragging a card onto a card (R3c).** Easy, and needs no change to the scope rule for windows. *(Built 10-12, on by default: `[strip] merge_on_drop`.)*
-6. **Quiet activations (R6).** No stage switch without recent user input; the card glows instead.
-7. **Stage list in the menu-bar menu, plus scroll over the strip (R2).** Switching without keys.
-8. *(Parity, before any sugar.)* Live checks of the gaps found in §1: One at a Time re-click cycling, ⌘M to the strip, clicking a card's app icon, Shift-click on a card with several apps, Option-click, and the strip count on a shorter display.
+Status as of 2026-10-22:
 
-Next once the owner lifts "no drag and drop": Apple's own window ↔ strip drags and dropping a window on a card (R3a, R3b, medium).
+1. **Shift = bring here, everywhere (R1).** *Built:* Shift-click a card, Shift while opening
+   an app or Shift-click in the Dock; and `[stages] new_apps_join_current` (off, Apple's).
+2. **Card context menu (R4).** Bring Here, New Stage, Keep on Every Stage, Name…, Close
+   Window, Quit App. One easy item that also covers parts of R3, R7, R9 and pinning. *Open.*
+3. **Stage names (R7).** Set from the menu, shown on hover, persisted. *Open* (names exist
+   in config only).
+4. **Strip overflow and reorder (R5).** *Reorder built:* drag a card, and `[strip] order`
+   (`in_place`, `dock`). *Open:* scroll over the strip to older stages, with a "+N" mark.
+5. **Merge by dragging a card onto a card (R3c).** *Built* (`[strip] merge_on_drop`, on).
+6. **Quiet activations (R6).** No stage switch without recent user input; the card glows
+   instead. *Open.*
+7. **Stage list in the menu-bar menu, plus scroll over the strip (R2).** *Open.*
+8. *(Parity, before any sugar.)* Live checks of the gaps found in §1: One at a Time re-click
+   cycling, clicking a card's app icon, Shift-click on a card with several apps,
+   Option-click, and the strip count on a shorter display. *Open* (⌘M to the strip is built).
+
+Apple's own window ↔ strip drags (R3a) are *built*: a card dragged into the middle, a window
+dragged onto the strip. Dropping a window on a card (R3b) is *open*.

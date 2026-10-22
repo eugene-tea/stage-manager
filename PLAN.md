@@ -3,13 +3,15 @@
 A floating-window stage manager for macOS: Apple's Stage Manager strip and floating
 windows, plus rules, hotkeys, named stages, pinning, placement and persistence.
 No tiling, no grids, no snapping; every window keeps the frame the user gives it.
+The defaults look and behave like Apple's; every extra is off until configured.
 
 App: `Stage Manager.app`, bundle ID `dev.eugene.stagemanager`, `LSUIElement`, binary
-`stage-manager`, crate `stage_manager`.
+`stage-manager`, crate `stage_manager`. Native behavior and every deviation:
+`docs/UX-SPEC.md`; user requests and research: `docs/FEATURE-REQUESTS.md`.
 
 ## Architecture
 
-```
+```text
 main thread (AppKit)          WM thread (CFRunLoop)            helpers
 ─────────────────────         ──────────────────────           ──────────────────────
 NSApplication run loop        AXObservers (all apps)            capture: SCScreenshotManager
@@ -28,251 +30,129 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   windows except the safety paths.
 - **Spaces by their windows.** No public API names a Space: the engine gives each a
   synthetic id and recognizes it on `activeSpaceDidChangeNotification` from the window
-  server's on-screen list (the shown Space's windows only, parked slivers included). A
-  window is given to the engine only once it shows on screen; until then it waits (another
-  Space, minimized, app hidden). A once-a-second check catches windows moved between
-  Spaces and Space changes the notification missed. No SkyLight/CGS calls.
+  server's on-screen list. A window is given to the engine only once it shows on screen
+  (another Space, minimized, app hidden: it waits). A once-a-second check catches moves
+  between Spaces and missed notifications. No SkyLight/CGS calls.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`): no Objective-C types, fully unit
-  tested. It takes observations (live frames, z-order, focus) and returns a list of
-  `Action`s (`Park`, `SetFrame`, `Raise`, `Focus`) that the platform layer executes.
-- **Platform layer** (`src/platform`): AX wrappers, CGWindowList, ScreenCaptureKit, Carbon
-  hotkeys, NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`.
-- **UI** (`src/ui`): status item and menu, strip panel (layer-backed NSView, CALayer cards).
+  tested. Observations in (frames, z-order, focus, the Dock's order), `Action`s out (`Park`,
+  `SetFrame`, `Raise`, `Focus`) for the platform layer to execute.
+- **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
+  NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`.
+- **UI** (`src/ui`): status item and menu, Settings, the strip panel (CALayer cards) and the
+  motion overlay. The overlay sits just below floating windows (an always-on-top player stays
+  over a switch), and above everything only while a dragged window's card shows.
 - **Threads:** AX can block on hung apps, so every AX call runs on the WM thread with a
-  0.25 s messaging timeout. The main thread never calls AX. Commands go main → WM through a
-  channel plus `CFRunLoopPerformBlock` + wake-up; strip snapshots go WM → main via GCD.
+  0.25 s messaging timeout; the main thread never calls AX. Commands go main → WM through a
+  channel plus `CFRunLoopPerformBlock`; strip snapshots go WM → main via GCD.
 
 ## macOS settings drive behavior
 
-The app is a polyfill for Apple's Stage Manager, so Apple's own settings
-(`com.apple.WindowManager`, read with `CFPreferencesCopyAppValue` and re-read when they change)
-are the source of truth wherever they exist: show an app's windows all at once or one at a
-time (`AppWindowGroupingBehavior`), hide recent apps (`AutoHide`), hide desktop items
-(`HideDesktop`), click wallpaper to reveal desktop (`EnableStandardClickToShowDesktop`), hide
-widgets. `config.toml` holds only what macOS lacks: rules, placement, hotkeys, named stages,
-pinning, persistence, strip extensions. It never duplicates a macOS setting.
+Apple's own settings (`com.apple.WindowManager`, read with `CFPreferencesCopyAppValue`,
+re-read on change; never written) are the source of truth wherever they exist: All at Once /
+One at a Time, hide recent apps, hide desktop items, click wallpaper to reveal desktop, hide
+widgets. `config.toml` holds only what macOS lacks and never duplicates a macOS setting.
 
 ## Safety: no window stays parked
 
-Defence in depth, because a parked window that never returns is the worst bug:
+A parked window that never returns is the worst bug. Defence in depth:
 
-1. **Registry.** A global registry holds every parked window's AX element and restore frame.
-2. **Quit** (menu) unparks everything, then reads the window server: every window of an allowed
-   app still in a park zone (known to this run or not) is brought back to its registry frame,
-   its `state.json` frame, or centered, before it exits; one it cannot reach leaves the exit
-   unclean for the guardian. A restore a busy app cannot answer (`CannotComplete`) is retried
-   quickly (three tries 75 ms apart, within 1.2 s) on an unpark only (quit, stand-down, the
-   safety paths), never in a switch. Every budget is a bound: the leftovers check takes at
-   most 4 s (a try starts only when it fits), the registry's quick retries 2 s in all. A
-   stand-down (Apple's Stage Manager turned on) ends with the same check; a window it cannot
-   reach is looked for again whenever a Desktop shows.
-3. **Panic hook** unparks (uses `try_lock`; falls back to a scan, below).
-4. **SIGTERM/SIGINT/SIGHUP** go through a self-pipe to a watcher thread that unparks and exits.
-5. **Guardian process.** At launch the app spawns itself as `stage-manager --guardian <pid>`.
-   When the parent dies without writing the clean-exit marker (SIGKILL, segfault, abort), the
-   guardian runs the recovery scan, then waits for every window still parked (those the
-   registry's parked file names, and any managed app's in the park zone) and moves each back
-   once its Space shows.
-6. **Recovery scan** (launch and guardian): every window of every app whose frame lies in a
-   park zone is moved back to its saved frame from `state.json`, or centered on the display.
-   After a main display change every app is scanned again (macOS puts windows back where
-   they were the last time that arrangement was in use, parked ones included), leaving the
-   windows we park alone; apps that do not answer, at launch or then, are scanned again for
-   30 s. The scans go in slices (two apps a pass; one that does not answer holds the next pass
-   off 3 s), so a busy app never holds the WM thread longer than that.
-   A thin sliver at the edge (at most 8 pt by 256 pt on screen, past the right or bottom edge)
-   counts as parked only for windows we manage or registered, and for apps with a window in
-   `state.json`; any other app's window must sit clearly in the park zone.
-7. **Restore frames are clamped** onto the visible display before being applied.
+1. **Registry** of every parked window's AX element and restore frame, across Spaces.
+2. **Quit** unparks everything, then reads the window server: any allowed app's window still
+   in a park zone comes back to its registry frame, its `state.json` frame, or centered. A
+   busy app's `CannotComplete` is retried (three tries 75 ms apart) on unparks only, never in
+   a switch. Bounds: the leftovers check ≤ 4 s, the registry's retries ≤ 2 s. Quit is clean
+   only when no managed window is in the park zone on any Space; otherwise the guardian
+   takes over. A stand-down (Apple's Stage Manager turned on) ends with the same check.
+3. **Panic hook** unparks (`try_lock`, falls back to the scan).
+4. **SIGTERM/SIGINT/SIGHUP** through a self-pipe to a watcher thread that unparks and exits.
+5. **Guardian** (`stage-manager --guardian <pid>`): when the parent dies without its
+   clean-exit marker, it runs the recovery scan, then waits for every window still parked and
+   moves each back once its Space shows. A window is done when seen back (AX, or the window
+   server in settled passes a second apart), gone (unlisted 3 s), or adopted by a running
+   copy. It only ever moves windows out of the park zone, so racing the new app is benign.
+   **Handoff (8N):** once the new copy reports `adopted`, the guardian hands it the rest of
+   its watch (`ctl take-watch`) and exits; the copy watches them by the same rules, and its
+   own quit and guardian carry them on. An earlier version is offered again a minute later.
+6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
+   a park zone goes back to its saved frame or centered; silent apps are retried for 30 s, in
+   slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
+   past the right or bottom edge) counts as parked only for windows we manage or registered,
+   or apps with a window in `state.json`.
+7. **Restore frames are clamped** onto the visible display.
 
-Across Spaces: the registry keeps every Space's parked windows (AX elements taken while
-their Space showed). Quit is clean only when the window server lists no managed window in
-the park zone on any Space; otherwise the guardian keeps watching after its scan and scans
-again whenever such a window shows (its Space was visited), retrying while it stays shown,
-since AX lists most apps' windows only on the shown Space. A window is done only when seen
-back (AX reads it outside the park zone, or the window server lists it on screen outside it
-in settled passes a second apart: a sliding Space can list in-between frames) or gone (not
-listed on any Space for 3 s), or adopted by Stage Manager running again (`ctl adopted`: in
-its model). It never exits while one waits; a new Stage Manager does not end the watch by
-itself running. The guardian and the new app moving the same window at once is benign: the
-guardian only ever moves a window out of the park zone, never into it, so the worst case is a
-window shown that the new app meant to keep parked (until its next switch), never one left
-parked; and it lets go of each window at its next pass once the new app reports it adopted.
+Windows that are never waited on (logged at debug): **hidden tabs** (8J; layer 0, off
+screen, unlisted by an answering app, vouched for by a same-size sibling; a managed,
+registered or saved window is never judged one), and **other apps' helpers** (8M; in the park
+zone, never registered, managed or saved, off screen, unlisted by an answering app). A
+registered or saved window always waits.
 
-Round 8N, the handoff (`engine::handoff`, `platform::handoff`): once the new app answers
-`adopted` with a list (it manages windows), the guardian hands it the rest of its watch
-(`ctl take-watch`: ids, pids, restore frames, park corners) and exits, logged once at info on
-both sides. The new app holds them as taken windows beside its registry: its parked file names
-them (its own guardian waits for them after a crash), its quit's leftovers check brings them
-back to their taken frames, and its WM thread watches them by the guardian's rules (seen back,
-gone, or in the model: let go; shown while parked: brought back). A quit with one still away is
-unclean, so its own guardian takes it over, and hands it on to the next copy. A copy that
-does not take the watch (an earlier version, one quitting) leaves the guardian watching as
-before, offered again a minute later; the offer is answered on the ctl thread, never the WM
-thread's. A window a guardian can never see again (10-21: a Chrome helper off screen) no longer
-keeps an old guardian waiting for days: it travels with the running copy instead, never dropped.
+## Strip order
 
-Hidden tabs (8J, `engine::hidden_tab`): macOS window tabs are separate window-server windows;
-a tab not selected is off screen, not listed through Accessibility, and keeps its last frame
-(a park spot, say) until selected, when it takes its group's frame. Nothing can move one, nor
-needs to. A window is one when it is layer 0, off screen, not listed by its app (which must
-answer), and its app has another window of the same size (±2 pt) that vouches for it. Only by
-the tab's own signature (8J2): a real window judged a tab would stay parked with every safety
-path blind, a tab judged real only keeps a guardian waiting. So a window the model manages, one
-we registered and track, or one the model let go for any reason but one (it left its Space, was
-hidden, minimized) is real, never judged; a parked window the model let go because
-Accessibility reported it destroyed while the window server still listed it may be one, beside
-a same-size window Accessibility lists now or the model manages unparked; a window found in the
-park zone that we never registered (the 10-16 case) only beside one Accessibility lists now.
-Saved ids never vouch. The quit's leftovers check, the controller's retry of a parked window
-the model let go, and the guardian's watch skip a hidden tab (logged once at debug); every
-window the guardian's parked file names is never judged one. A group whose selected tab is on a
-Desktop not shown keeps its unregistered hidden tabs waited for until that Desktop shows.
-
-Round 8M widens it for windows we never parked: a window found in the park zone that we never
-registered nor manage, that this session's `state.json` does not name, off screen, whose app
-answers and does not list it through Accessibility, is another app's (Chrome's helper windows
-past the corner, a hidden tab whose selected tab is on another Desktop): the quit's check logs
-it at debug, never as still parked, and the guardian never waits on it. A registered window
-always waits; a saved one too.
+`[strip] order`: `"native"` (default, Apple's swap with LRU eviction), `"in_place"` (stable
+places in creation order per Space; `"fixed"` is its old name) or `"dock"` (the in-place
+places sorted by each stage's leftmost Dock app, by bundle id then pid; apps without a Dock
+icon last; read through AX at launch, 0.5 s after an app launches or quits and every 2 s,
+never applied mid-transition; card drags spring back, merges still work). In place: past the
+capacity the first capacity−1 stages keep their places and the rest share the bottom slot by
+recency; `[strip] active` = close | gap | card.
 
 ## Testing hooks
 
-- `cargo test`: engine (rules, transitions, placement, serialization, park-zone math).
-- **ctl socket** (`~/.config/stage-manager/stage-manager.sock`, line protocol; not
-  `$TMPDIR`, which macOS prunes, like the single-instance lock beside it): `switch N`, `send N`, `new`,
-  `pin`, `dump` (with a `spaces` section), `unpark-all`. The `stage-manager ctl ...` subcommand talks to it. This lets
-  milestones be checked by script, not just by hand.
-- `STAGE_MANAGER_ONLY=<bundle ids>` limits management to listed apps, so automated runs touch
-  only a fixture app's windows (`scripts/fixture/`: a Swift app that opens titled windows).
+- `make check`: `cargo test` and clippy, clean.
+- **ctl socket** (`~/.config/stage-manager/stage-manager.sock`, beside the single-instance
+  lock; not `$TMPDIR`, which macOS prunes): `switch N`, `send N`, `new`, `pin`, `dump`,
+  `state`, `probe`, `unpark-all`, via `stage-manager ctl …`.
+- `STAGE_MANAGER_ONLY=<bundle ids>` limits management to fixture apps (`scripts/fixture/`),
+  so live phases (`scripts/test-stages.sh`) never touch real windows. No live phase while
+  another copy's guardian runs, or while the screen is locked.
 
-## Milestones
+## Accepted trade-offs
 
-1. **Skeleton:** Cargo project, `.app` bundle, stable self-signed identity
-   (`scripts/make-cert.sh`), Makefile (`make run`, `make install`), menu bar item,
-   permission checks (Accessibility, Screen Recording), Apple Stage Manager detection.
-2. **Observation:** enumerate manageable windows (bundle ID, title, frame, z-order, subrole);
-   log create/destroy/focus/activate live.
-3. **Engine:** stage model, park/restore, hotkeys, safety layers, ctl socket.
-4. **Rules + placement:** config TOML with hot reload, new-window rules, center and cascade.
-5. **Strip:** `docs/UX-SPEC.md` from the measurement session, then the panel with live
-   thumbnails, click to switch, auto-hide and edge reveal.
-6. **Persistence:** `state.json` on change, re-match windows on launch.
+Known gaps the owner accepted as rare:
 
-Each milestone ends with a commit and a manual test checklist; `cargo test` and
-`cargo clippy -- -D warnings` stay clean.
+- **Slivers (6X L3):** a user's window pushed almost wholly off the bottom-right edge
+  (≤ 8 × 256 pt on screen) of a managed app is taken as parked: a switch brings it back to its
+  last frame.
+- **R15:** `activation_frame` (`src/platform/controller.rs`), when the display's only shown
+  window belongs to an app that posts no move notice, reads a horizontal-only drag of it as a
+  Desktop slide.
+- **Restore window (8E3, 8F):** for up to 5 minutes after a launch (ending at the first
+  click, key, card or Dock click, or once apps are quiet 20 s and the login is a minute old),
+  a window an app opens by itself that matches a saved window of an inactive stage is placed
+  there, parked, not switched to. While settling, an unmatched window goes by Apple's rule
+  without the switch, except into an empty saved front stage's place (8F2).
+- **Logout head start (8F, 8H):** at the first logout signal every window comes back, the
+  leftovers check runs and stages are saved; the app idles until macOS's quit. A cancelled
+  logout resumes at `logoutCancelled`, else two minutes after the latest signal. An app's quit
+  keeps its entries in `state.json` two minutes (`quit_at`).
+- **One pool after a restart (8I):** Electron apps reopen on the Desktop shown at login; a
+  window matching another Desktop's saved entry with confidence recreates its stage as a part
+  where it shows. Left: two Desktops' same-named stages both feed the one stage of that name
+  (`find_named`).
 
-## Before public release
+## Open
 
-The owner runs a trial week on the daily log (`docs/DEVELOPMENT.md`, "Logs")
-before the first public release. Before that release:
+- **Live suite** on the current dev (about 15 min, his copy quit): m3 safety m4 m6 restore
+  strip native visible parity motion slots expose capture, with the new checks
+  (`apps_here_check`, `in_place_checks`, `drop_settle_checks`, `merge_hold_check`,
+  `dock_order_checks`).
+- **Real-restart check (8G)**, with the owner, from the day's log:
+  - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
+    coming …", "asked to quit by the system", "quitting after the logout's head start".
+  - No window reopens in the park zone; a cancelled logout restores at its signal.
+  - The order of "logout signal" lines vs the first "app terminated", then trim `SIGNALS`;
+    "N at the corner"; `from_other=true` lines and "K from other Desktops".
+  - A slow app (Xcode, Electron) in the saved front stage.
+- **Log caps** (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against real days
+  (`stage-manager log summary`); the suite's estimate is ~1 MB a normal day, 2–3 MB heavy.
+- **Overlay over a raised strip:** a switch while the strip is raised animates just under the
+  strip, the floating level, so an always-on-top window may still be covered then.
+- **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
+  stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
+  (R6), a stage list in the menu (R2), the parity checks of §1.
 
-- [x] Lower the default `[log] level` (to `"info"`, or `"warn"`), and with it hide Mark a
-  Problem by default (it shows only while the level is `debug` or `trace`). Done after
-  1.1.0: `"info"`.
-- [x] Decide which window titles the log keeps (all, none, or hashed) and say so in the guide.
-  Hashed (a short FNV-1a code), titles as they are only with `[log] titles = true`; marks'
-  state dumps the same; said in the guide's "Updates and privacy".
-- [ ] Revisit the caps (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against the
-  trial's real volume (`stage-manager log summary` for each day).
+## Out of scope
 
-Volume at the default level, measured 10-12 on the automated suite's logs (fixture apps
-only; 0.4 h of app time over 220 launches): about 117 bytes a line; the scripted work
-itself (switches, sends, clicks, drags, new windows, Space changes, ~780 focus changes) came
-to 12 000 lines and 1.6 MB an hour, about 10 lines per user action and 1-2 per focus change;
-each launch adds ~30 lines plus one per window found, each quit ~8. A person's working day
-(~300 switches, ~1500 focus changes, ~100 new windows, ~30 Space changes, a launch or two)
-is then about 7 000 lines, 1 MB; a heavy day 2-3 MB. Even the suite's machine pace for
-8 hours stays near 13 MB, well under the 100 MB day cap.
-
-## Accepted trade-offs (review rounds)
-
-Known gaps a review found and the owner accepted as rare, left as they are:
-
-- 6X review L3: the sliver rule (`src/engine/park.rs`, `Slivers`) still applies to every
-  window the model manages, since the model sees only managed apps' windows and must not
-  adopt a parked window macOS left a few points above the corner. A user's window pushed
-  almost wholly off the right or bottom edge in the display's bottom-right quarter, with at
-  most 8 pt by 256 pt on screen, is then taken as parked: its frame there is not recorded, a
-  stage switch brings it back to its last frame, and the launch's scan centers it when its
-  app has a window in `state.json`. Other apps' windows are judged without the rule.
-- R15: `activation_frame` (`src/platform/controller.rs`), on a display whose only non-sticky
-  shown window belongs to an app that posts no move notice, reads a horizontal-only user drag
-  of that window as a Desktop slide and keeps its stale tracked frame.
-- 8E3 restore: an app that opens a window by itself, with no user action, during the first
-  5 minutes after a launch (the restore window, `src/engine/restore.rs`; it ends sooner at
-  the first click, key press, card or Dock click) has a window matching a saved window of an
-  inactive stage placed into that stage (a card, parked) rather than switched to: the
-  restore cannot tell it from the app reopening its saved windows. 8F: it ends sooner too,
-  once apps have been quiet 20 s and the login is a minute old.
-- 8F settling: after a restart, while the login settles, a window matching no saved one
-  (or a doubtful match) goes by Apple's rule without the switch: into its app's stage, or a
-  stage of its own as a card, never brought forward, except that while the saved active
-  stage is still empty (its app slow to open) a new stage takes the front and the saved
-  stage waits inactive, its windows parked there with a card when they come (8F2, M4); a
-  launch-time activation or focus switches nothing. Without the input monitor (no clicks or keys seen) settling ends only
-  when apps go quiet or after 5 minutes; the end's focus never takes the keyboard from a
-  window shown in the front stage.
-- 8F logout head start (8F2, M3): at `willPowerOffNotification` every window comes back,
-  the leftovers check runs and the stages are saved, but the app keeps running (strip
-  hidden, input ignored) until macOS's own quit, which then only exits. A logout another
-  app cancels sends no quit: a minute later (`LOGOUT_WAIT`) the app starts afresh from the
-  saved stages, as at a launch; meanwhile every window shows, with no strip.
-- 8H: the head start runs at the first logout signal (`loginwindow`'s distributed
-  `com.apple.logoutInitiated` / `restartInitiated` / `shutdownInitiated` /
-  `logoutContinued`, its notify(3) names, `willPowerOff` last); `logoutCancelled` resumes at
-  once; the hold waits two minutes after the latest signal (an early signal may come with the
-  confirmation dialog's one-minute countdown). An app's quit keeps its windows' entries in
-  `state.json` (`quit_at`) for two minutes, so the stages survive a logout whose early signal
-  never comes; a window reopened clamped against the park corner is matched by title and
-  goes to its saved frame, an unmatched one is left and counted ("N at the corner").
-- 8I: one pool after a restart. Native apps reopen their windows on their own saved
-  Desktops, non-native ones (Electron) on the Desktop shown at login (10-16). Each Desktop
-  still becomes its saved Desktop by its own windows (adoption unchanged); a stray, a window
-  matching another saved Desktop's waiting entry with confidence, recreates its saved stage on
-  the Desktop where it showed (a part; a stage split across two Desktops has a part on each),
-  and the entry leaves the other Desktop. Strip: the adopted Desktop's saved slots, then the
-  parts in their saved order. At the restore window's end by itself, the Desktop shown when
-  saved (if shown) brings its saved active stage forward. The line: "K from other Desktops".
-  8I2 (the review): with another saved Desktop waiting, the Desktop shown when saved also
-  takes two windows while the restore window is open (one, as before, when it is the only
-  saved Desktop or after the window); voters that can adopt nothing any more (another
-  Desktop taken, or the window's end) join their saved stages where they are, else stay and
-  their entries are forgotten; a saved Desktop's stages the pool emptied are never built at
-  its visit (its most recent stage left takes the front); own-Desktop entries are scored
-  first, other Desktops' only for a window nothing there takes with confidence.
-  8I3 (the review): the card pressed or the number key that ends the restore window keeps
-  its target: a voter alone in a stage of its own makes that stage its part (same id, number
-  and card); a voter whose stage still goes leaves the stage's id and number to follow its
-  window. Known, left: a part finds an existing stage by its saved stage's name
-  (`find_named`); two Desktops saved with stages of the same name both feed the one stage of
-  that name on the Desktop shown (the strays of two same-named stages share a part there).
-
-## 8G: the real-restart check
-
-With the owner, from the day's log (titles never leave it), besides the design's list:
-
-- "Reopen windows when logging back in" on: Stage Manager itself comes back at the login.
-  8F quit it at `willPowerOffNotification`, before loginwindow asked, which may have kept
-  macOS from reopening it; 8F2 waits for macOS's quit. The log shows "logout, restart or
-  shutdown coming: every window back …", then "asked to quit by the system" and "quitting
-  after the logout's head start", with no "the quit could not run at once".
-- Each app's windows reopen at their real frames (none in the park zone: no `warn` of a
-  window brought back from it at the login).
-- A logout cancelled by an app with an unsaved document: the stages are back at its cancel
-  signal, else two minutes after the latest one ("the logout was cancelled after its head
-  start").
-- 8H: the order of the logout signals: every "logout signal" line (name, ms since the first,
-  what it did). Which name comes first, and whether it comes before the first "app
-  terminated"; then trim `SIGNALS` to what arrives. The restore line's "N at the corner".
-- 8I: which apps' windows came back on another Desktop than their saved one (the "back in
-  its saved stage" lines with `from_other=true`) and the line's "K from other Desktops".
-- A slow app (Xcode, an Electron app) in the saved front stage: settling waits for its first
-  window (8F2, M2), or a new app's window takes the front meanwhile (M4).
-
-## Out of scope (prototype)
-
-Multi-monitor beyond the main display (the model keys stages by display), fullscreen windows
-(ignored). (Switch animations, drawn with snapshots, and drag and drop came later; see
-`docs/UX-SPEC.md`; its measurement record of Apple's Stage Manager is that file as of
-commit 20665a3.)
+Multi-monitor beyond the main display (the model keys stages by display), fullscreen
+windows (ignored). UX-SPEC's measurement record of Apple's Stage Manager is that file as of
+commit 20665a3.
