@@ -132,6 +132,16 @@ impl Model {
                 cards
             };
         }
+        self.in_place_cards(space).into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// [`Model::strip_in`] in place ([`StripOrder::InPlace`]): each card with the stage whose
+    /// place it shows (the card's own stage, or with "One at a Time" the first stage of its
+    /// app's group).
+    fn in_place_cards(&self, space: SpaceId) -> Vec<(StageId, StripCard)> {
+        let opts = self.options.strip;
+        let active = self.active_stage_in(space);
+        let one_at_a_time = self.options.settings.app_windows == AppWindows::OneAtATime;
         // Every place, the active stage's too (while it shows windows).
         let places: Vec<StripCard> = self
             .stages
@@ -142,38 +152,98 @@ impl Model {
             })
             .filter_map(|s| self.card(s.id, Some(s.id) == active))
             .collect();
-        let places: Vec<StripCard> = if one_at_a_time {
-            self.group_one_at_a_time(space, places, true).into_iter().map(|(_, c)| c).collect()
+        let places: Vec<(StageId, StripCard)> = if one_at_a_time {
+            self.group_one_at_a_time(space, places, true)
         } else {
-            places
+            places.into_iter().map(|c| (c.stage, c)).collect()
         };
         let holds = |c: &StripCard| !c.active || opts.active != ActiveCard::Close;
         let capacity = opts.capacity;
-        let shown: Vec<StripCard> = if places.iter().filter(|c| holds(c)).count() <= capacity {
-            places.into_iter().filter(holds).collect()
+        let shown: Vec<(StageId, StripCard)> = if places.iter().filter(|(_, c)| holds(c)).count() <= capacity {
+            places.into_iter().filter(|(_, c)| holds(c)).collect()
         } else {
             let head = capacity.saturating_sub(1).min(places.len());
-            let room = capacity - places[..head].iter().filter(|c| holds(c)).count();
+            let room = capacity - places[..head].iter().filter(|(_, c)| holds(c)).count();
             let mut tail: Vec<(u64, usize)> = places
                 .iter()
                 .enumerate()
                 .skip(head)
-                .filter(|(_, c)| !c.active)
-                .map(|(i, c)| (self.card_recency(c), i))
+                .filter(|(_, (_, c))| !c.active)
+                .map(|(i, (_, c))| (self.card_recency(c), i))
                 .collect();
             tail.sort_by(|a, b| b.cmp(a));
             let keep: HashSet<usize> = tail.into_iter().take(room).map(|t| t.1).collect();
             places
                 .into_iter()
                 .enumerate()
-                .filter(|(i, c)| (*i < head && holds(c)) || keep.contains(i))
-                .map(|(_, c)| c)
+                .filter(|(i, (_, c))| (*i < head && holds(c)) || keep.contains(i))
+                .map(|(_, p)| p)
                 .collect()
         };
         shown
             .into_iter()
-            .map(|c| StripCard { gap: c.active && opts.active == ActiveCard::Gap, ..c })
+            .map(|(place, c)| (place, StripCard { gap: c.active && opts.active == ActiveCard::Gap, ..c }))
             .collect()
+    }
+
+    /// In place, `stage`'s card dragged right above `before`'s (the bottom for `None`), both
+    /// cards in the strip: the stages shown trade places among the places they hold, and the
+    /// stages out of view (and the active one with [`ActiveCard::Close`]) keep theirs and
+    /// their numbers. So the strip shows the same stages after the drop, in the order the drag
+    /// left them, which is what it drew at the release: the dropped card settles into the
+    /// slot it was dropped in and no other card changes (round 9C). A card that lands in the
+    /// bottom places, which go by recency, counts as used, as does one pushed down there.
+    ///
+    /// `None` when either card is not in the strip, or when the strip would come out other
+    /// than drawn ("One at a Time" groups): the caller moves the stage in creation order.
+    /// `Some(moved)` otherwise.
+    pub(crate) fn reorder_shown(&mut self, space: SpaceId, stage: StageId, before: Option<StageId>) -> Option<bool> {
+        let shown = self.in_place_cards(space);
+        let place_of = |s: StageId| shown.iter().find(|(_, c)| c.stage == s).map(|(p, _)| *p);
+        let from = place_of(stage)?;
+        let before = match before {
+            Some(b) => Some(place_of(b)?),
+            None => None,
+        };
+        let old: Vec<StageId> = shown.iter().map(|(p, _)| *p).collect();
+        let mut want: Vec<StageId> = old.iter().copied().filter(|&p| p != from).collect();
+        let at = before.and_then(|b| want.iter().position(|&p| p == b)).unwrap_or(want.len());
+        want.insert(at, from);
+        if want == old {
+            return Some(false);
+        }
+        let mut at: Vec<usize> = old.iter().filter_map(|p| self.stages.iter().position(|s| s.id == *p)).collect();
+        if at.len() != old.len() {
+            return None;
+        }
+        at.sort_unstable();
+        let saved = self.stages.clone();
+        let mut order: Vec<StageId> = self.stages.iter().map(|s| s.id).collect();
+        for (i, p) in at.iter().zip(&want) {
+            order[*i] = *p;
+        }
+        self.stages.sort_by_key(|s| order.iter().position(|id| *id == s.id));
+        let places = |m: &Model| m.in_place_cards(space).into_iter().map(|(p, _)| p).collect::<Vec<_>>();
+        if !self.is_active(stage) {
+            self.touch(stage);
+        }
+        let now = places(self);
+        if now != want {
+            // A card pushed down into the bottom places keeps showing: it counts as used.
+            let pushed: Vec<StageId> =
+                want.iter().copied().filter(|p| !now.contains(p) && *p != stage && !self.is_active(*p)).collect();
+            for p in pushed {
+                self.touch(p);
+            }
+            if !self.is_active(stage) {
+                self.touch(stage);
+            }
+        }
+        if places(self) != want {
+            self.stages = saved;
+            return None;
+        }
+        Some(true)
     }
 
     /// When a card's stages were last used: the most recent of the stages its windows sit in

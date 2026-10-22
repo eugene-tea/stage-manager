@@ -888,8 +888,12 @@ impl Model {
         obs: &Observation,
     ) -> Vec<Action> {
         let actions = self.drop_window_on_strip_as_new(id, pre_drag, obs);
-        if let Some(stage) = self.stage_of(id).filter(|s| !self.is_active(*s)) {
-            self.move_card(stage, before);
+        if let Some(stage) = self.stage_of(id).filter(|s| !self.is_active(*s))
+            && before != Some(stage)
+        {
+            // A new stage, not a card dragged among the cards shown: in place it moves in
+            // creation order.
+            self.place_card(stage, before, false);
         }
         actions
     }
@@ -925,16 +929,20 @@ impl Model {
     /// `before`'s card, or to the bottom when `before` is `None`. In Apple's order the slots
     /// change and the slot-stable rule carries on from them (a full strip drops its least
     /// recently used card, never the moved one); in place the stage moves in creation
-    /// order, so hotkey numbers follow what the strip shows. Returns
+    /// order, so hotkey numbers follow what the strip shows: among the places of the cards
+    /// shown when both cards are in the strip ([`Model::reorder_shown`]), so the strip shows
+    /// the same stages after the drop as it drew at the release. Returns
     /// [`Action::StateChanged`] when anything moved (the order is saved with the state).
     pub fn move_card(&mut self, stage: StageId, before: Option<StageId>) -> Vec<Action> {
-        if before == Some(stage) || !self.place_card(stage, before) {
+        if before == Some(stage) || !self.place_card(stage, before, true) {
             return Vec::new();
         }
         vec![Action::StateChanged]
     }
 
-    fn place_card(&mut self, stage: StageId, before: Option<StageId>) -> bool {
+    /// [`Model::move_card`]'s move; `among_shown`: in place, a card dragged within the strip
+    /// trades places with the cards shown ([`Model::reorder_shown`]).
+    fn place_card(&mut self, stage: StageId, before: Option<StageId>, among_shown: bool) -> bool {
         let Some(space) = self.stage(stage).map(|s| s.space) else {
             return false;
         };
@@ -971,6 +979,10 @@ impl Model {
                 *slots != old
             }
             StripOrder::InPlace => {
+                // A card dragged among the cards shown: the strip comes out as drawn.
+                if among_shown && let Some(moved) = self.reorder_shown(space, stage, before) {
+                    return moved;
+                }
                 let Some(from) = self.stages.iter().position(|s| s.id == stage) else {
                     return false;
                 };

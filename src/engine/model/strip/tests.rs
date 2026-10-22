@@ -380,3 +380,71 @@ fn past_the_capacity_a_window_dropped_on_the_strip_and_a_card_dragged_down_keep_
         assert!(e.m.strip().iter().any(|c| c.stage == first), "{mode:?}: a card dragged down still shows: {:?}", e.m.strip());
     }
 }
+
+#[test]
+fn past_the_capacity_a_dragged_card_lands_as_the_strip_drew_it_at_the_release() {
+    // The owner's report (10-22, round 9C): a card dragged to the bottom slot of a full strip
+    // was drawn there at the release, then the engine's strip swapped another card in above
+    // it (the stage after the head in creation order took the head's last place) and the
+    // dropped card slid. The strip predicts a drop with `move_before`; the engine agrees.
+    use crate::ui::strip_model::move_before;
+    for mode in MODES {
+        for capacity in [3, 4, 6] {
+            let n = Env::stages(mode, capacity, 9).m.strip().len();
+            for from in 0..n {
+                for to in 0..=n {
+                    let mut e = Env::stages(mode, capacity, 9);
+                    // Some use first, so the bottom places hold stages from all over.
+                    e.click_slot(n);
+                    e.click_slot(1);
+                    let strip = e.m.strip();
+                    let card = &strip[from];
+                    if card.gap || card.active {
+                        continue; // the active stage's place is no card to drag
+                    }
+                    let stage = card.stage;
+                    let before = strip.get(to).map(|c| c.stage);
+                    if before == Some(stage) {
+                        continue;
+                    }
+                    let mut drawn: Vec<u64> = strip.iter().map(|c| c.stage.0).collect();
+                    let kinds: Vec<char> = strip.iter().map(kind).collect();
+                    move_before(&mut drawn, |s| *s, stage.0, before.map(|b| b.0));
+                    let hidden: Vec<(StageId, Option<usize>)> = e
+                        .m
+                        .stages()
+                        .iter()
+                        .filter(|s| !strip.iter().any(|c| c.stage == s.id))
+                        .map(|s| (s.id, e.m.stage_number(s.id)))
+                        .collect();
+                    e.m.move_card(stage, before);
+                    let what = format!("{mode:?} capacity {capacity}: slot {from} dragged above slot {to}");
+                    let after = e.m.strip();
+                    assert_eq!(after.iter().map(|c| c.stage.0).collect::<Vec<_>>(), drawn, "{what}: the strip as drawn at the release");
+                    let mut moved_kinds = kinds.clone();
+                    let k = moved_kinds.remove(from);
+                    let at = before.and_then(|b| strip.iter().filter(|c| c.stage != stage).position(|c| c.stage == b));
+                    moved_kinds.insert(at.unwrap_or(moved_kinds.len()), k);
+                    assert_eq!(after.iter().map(kind).collect::<Vec<_>>(), moved_kinds, "{what}: the gap and the active card stay what they were");
+                    for (s, number) in hidden {
+                        assert_eq!(e.m.stage_number(s), number, "{what}: a stage out of view keeps its place and number");
+                    }
+                    let numbers: Vec<usize> = after.iter().filter_map(|c| e.m.stage_number(c.stage)).collect();
+                    assert!(numbers.windows(2).all(|p| p[0] < p[1]), "{what}: numbers follow the strip: {numbers:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_card_dragged_in_place_without_overflow_moves_as_before() {
+    // Every stage shows: a drag is the plain move in creation order it always was.
+    for mode in MODES {
+        let mut e = Env::stages(mode, 9, 5);
+        let (one, four) = (e.s(1), e.s(4));
+        assert_eq!(e.m.move_card(four, Some(one)), [Action::StateChanged]);
+        assert_eq!(e.m.stage_number(four), Some(1), "{mode:?}");
+        assert_eq!(e.places(), in_order(&e, mode), "{mode:?}: the strip is the creation order");
+    }
+}
