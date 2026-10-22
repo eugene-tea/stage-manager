@@ -1607,6 +1607,11 @@ impl Strip {
                     "h": CGImage::height(Some(&p.image)),
                     "extent": { "left": e.left, "top": e.top, "right": e.right, "bottom": e.bottom },
                     "corners": crate::platform::self_capture::corners(&p.image),
+                    // Each corner box's [alpha, mean, spread] (8M: a fill around the window).
+                    "corner_boxes": crate::platform::capture_pixels::read(&p.image).map(|px| {
+                        use crate::platform::capture_pixels::{corner_boxes, stats};
+                        corner_boxes(px.w, px.h).map(|r| stats(&px, r).map(|s| [s.alpha, s.mean, s.spread]))
+                    }),
                 }))
             })
             .collect();

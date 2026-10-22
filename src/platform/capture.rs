@@ -11,6 +11,16 @@
 //! never squeezed into its frame (10-16). Each picture goes to the main thread through
 //! GCD, keyed by window id. Parked windows still render, so they capture too.
 //!
+//! **A child over the window, not in its content** (round 8M, the owner's Calendar card on
+//! 10-21): when another window of the app overlaps the window and reaches past it, yet the
+//! filter's `contentRect` is the window's own frame, the image still holds the union (fitted
+//! into the window's proportions, a fill where no window is) and nothing tells where the window
+//! is in it. Then the child windows are left out (`SCStreamConfiguration.includeChildWindows`,
+//! macOS 14.2: "show the child windows … Child windows are included by default"), so the
+//! picture is the window's own pixels. A picture whose corners are an opaque flat fill while a
+//! window of its app overlaps it is not used either ([`capture_pixels::flat_fill`]); such
+//! captures log their corner and overlap boxes' numbers at debug, once per change.
+//!
 //! Only the requested windows are captured; the caller replaces the request whenever the
 //! strip changes and an empty request stops captures (the strip is hidden).
 //!
@@ -63,6 +73,7 @@ use objc2_screen_capture_kit::{
 };
 
 use super::capture_frame::{self, Extent};
+use super::capture_pixels::{self, PixelRect, Stats};
 use super::capture_gate::{Change, Gate, Outcome, Permit};
 use super::capture_pace::{self, Away, Pace};
 use super::permissions;
@@ -526,6 +537,14 @@ pub(crate) struct WindowShot {
     /// The configuration's background color: it does not retain it, so the caller keeps this
     /// until the capture answered.
     pub clear: Option<CFRetained<CGColor>>,
+    /// Where other windows of the app overlap the window, in the window's own points (top-left
+    /// origin); none for most (round 8M: the picture's numbers are read for these).
+    pub overlaps: Vec<Rect>,
+    /// The window's size in points.
+    pub size_pt: (f64, f64),
+    /// Child windows were left out of the picture (a child over the window that the content
+    /// rectangle does not show, round 8M).
+    pub children_left_out: bool,
 }
 
 /// Logs at info, once per process, how the first capture whose content is larger than its
@@ -626,6 +645,14 @@ pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, displa
     let reaching: Vec<Rect> =
         others.iter().filter(|o| o.intersect(&frame).is_some() && o.union(&frame) != frame).copied().collect();
     log_reading(id, Reading { frame, content, scale, plan }, &reaching);
+    let overlaps: Vec<Rect> = others
+        .iter()
+        .filter_map(|o| o.intersect(&frame))
+        .map(|i| Rect::new(i.x - frame.x, i.y - frame.y, i.w, i.h))
+        .collect();
+    // A child over the window and past it that the content rectangle does not show (10-21):
+    // the image would hold the union squeezed into the window's shape; the window alone.
+    let children_left_out = !reaching.is_empty() && plan.found.is_none() && plan.extent.is_none();
     // SAFETY: reading an immutable CoreGraphics constant.
     let clear = CGColor::constant_color(Some(unsafe { kCGColorClear }));
     // SAFETY: a plain initializer, then plain setters on the live configuration; the
@@ -642,7 +669,82 @@ pub(crate) fn window_shot(window: &SCWindow, windows: &NSArray<SCWindow>, displa
             config.setBackgroundColor(clear);
         }
     }
-    WindowShot { filter, config, scale: if scale.is_finite() { scale.max(1.0) } else { 1.0 }, extent: plan.extent, clear }
+    if children_left_out {
+        leave_children_out(&config, id);
+    }
+    WindowShot {
+        filter,
+        config,
+        scale: if scale.is_finite() { scale.max(1.0) } else { 1.0 },
+        extent: plan.extent,
+        clear,
+        overlaps,
+        size_pt: (frame.w, frame.h),
+        children_left_out,
+    }
+}
+
+/// Windows whose children were left out, logged once each (this process).
+static LEFT_OUT_SAID: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Leaves child windows out of `config`'s capture (macOS 14.2 and later; before, the
+/// picture's corners are still checked, [`capture_pixels::flat_fill`]).
+fn leave_children_out(config: &SCStreamConfiguration, id: u32) {
+    let sel = objc2::sel!(setIncludeChildWindows:);
+    // SAFETY: asking whether a live object responds to a selector.
+    let can: bool = unsafe { objc2::msg_send![config, respondsToSelector: sel] };
+    if can {
+        // SAFETY: a plain setter, present (checked above).
+        unsafe { config.setIncludeChildWindows(false) };
+    }
+    if LEFT_OUT_SAID.lock().is_ok_and(|mut s| s.len() < LAST_READ_CAP && s.insert(id)) {
+        tracing::debug!(window = id, applied = can, "capture: a child window over this window and past it is not in its content: child windows left out");
+    }
+}
+
+/// The numbers a picture with another window of its app over it last read, per window: logged
+/// when they change (round 8M).
+static LAST_FILL: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// For a picture of window `id` with other windows of its app over it (`overlaps`, window
+/// points; the window `size_pt`): the four corner boxes' and each overlap's mean alpha,
+/// brightness and spread (numbers only), logged at debug when they change. True when the
+/// picture holds a fill ([`capture_pixels::holds_fill`]): it is not used.
+fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_pt: (f64, f64), left_out: bool) -> bool {
+    let Some(px) = capture_pixels::read(image) else { return false };
+    let corners = capture_pixels::corner_boxes(px.w, px.h).map(|r| capture_pixels::stats(&px, r).unwrap_or_default());
+    // The window's part of the picture, then each overlap within it, in pixels.
+    let whole = Rect::new(0.0, 0.0, px.w as f64, px.h as f64);
+    let win = extent.window_in(whole);
+    let (kx, ky) = (win.w / size_pt.0.max(1.0), win.h / size_pt.1.max(1.0));
+    let over: Vec<Stats> = overlaps
+        .iter()
+        .filter_map(|o| {
+            let r = PixelRect {
+                x: (win.x + o.x * kx).max(0.0) as usize,
+                y: (win.y + o.y * ky).max(0.0) as usize,
+                w: (o.w * kx).round().max(1.0) as usize,
+                h: (o.h * ky).round().max(1.0) as usize,
+            };
+            capture_pixels::stats(&px, r)
+        })
+        .collect();
+    let flat = capture_pixels::holds_fill(&corners, extent.is_none());
+    let line = format!(
+        "corners=[{}] overlaps=[{}] fill={flat}",
+        corners.iter().map(Stats::to_string).collect::<Vec<_>>().join(", "),
+        over.iter().map(Stats::to_string).collect::<Vec<_>>().join(", ")
+    );
+    if let Ok(mut last) = LAST_FILL.lock() {
+        if last.len() >= LAST_READ_CAP {
+            last.clear();
+        }
+        if last.get(&id) != Some(&line) {
+            tracing::debug!(window = id, w = px.w, h = px.h, children_left_out = left_out, "capture: a window of its app over it: {line}");
+            last.insert(id, line);
+        }
+    }
+    flat
 }
 
 /// 32-bit BGRA with alpha ('BGRA'), ScreenCaptureKit's default, set so it stays so.
@@ -724,7 +826,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 shot.config.setIgnoreShadowsSingleWindow(true);
                 shot.config.setScalesToFit(true);
             }
-            let WindowShot { filter, config, clear, extent, .. } = shot;
+            let WindowShot { filter, config, clear, extent, overlaps, size_pt, children_left_out, .. } = shot;
             let id = t.id;
             let done_tx = content_tx.clone();
             let flight = InFlight::issue();
@@ -737,8 +839,13 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                         // SAFETY: SCK hands a valid CGImage for the duration of the block;
                         // retaining keeps it alive for the main thread.
                         let image = unsafe { CFRetained::retain(ptr) };
-                        IMAGES.fetch_add(1, Ordering::Relaxed);
-                        DispatchQueue::main().exec_async(move || deliver(id, Picture { image, extent }));
+                        // A window of its app over it: the numbers, and no fill on a card (8M).
+                        let fill = !overlaps.is_empty() && fill_check(id, &image, extent, &overlaps, size_pt, children_left_out);
+                        if !fill {
+                            IMAGES.fetch_add(1, Ordering::Relaxed);
+                            DispatchQueue::main().exec_async(move || deliver(id, Picture { image, extent }));
+                        }
+                        // ScreenCaptureKit answered: a picture not used is no failure.
                         (true, None)
                     }
                     None => {

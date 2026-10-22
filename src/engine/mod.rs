@@ -26,6 +26,7 @@ pub mod restore;
 pub mod rules;
 pub mod settings;
 pub mod sliver;
+pub mod vanished;
 pub mod stage_area;
 pub mod stand_down;
 pub mod wallpaper;

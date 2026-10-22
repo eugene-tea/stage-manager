@@ -674,6 +674,8 @@ impl WmState {
         self.ticks = self.ticks.wrapping_add(1);
         if self.ticks.is_multiple_of(RETRY_EVERY) {
             self.observer.retry_pending(ax_callback);
+            // Windows closed while their app did not answer (8M): no destroyed notice came.
+            self.observer.sweep_closed();
         }
         self.sweep_after_display_change();
         self.rescan_pass();

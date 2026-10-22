@@ -13,12 +13,13 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGBitmapInfo, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_graphics::{CGDataProvider, CGImage};
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{SCScreenshotManager, SCShareableContent};
 
 use super::capture::{WindowShot, display_frames, window_shot};
 use super::capture_frame::Extent;
+use super::capture_pixels::alpha_byte;
 
 use crate::engine::geometry::{Point, Rect};
 
@@ -114,15 +115,6 @@ pub fn corners(image: &CGImage) -> Option<[[u8; 2]; 4]> {
     Some([pixel(l, t)?, pixel(r, t)?, pixel(l, b)?, pixel(r, b)?])
 }
 
-/// Which byte of a 32-bit pixel holds alpha.
-fn alpha_byte(info: CGImageAlphaInfo, bitmap: CGBitmapInfo) -> usize {
-    let first = matches!(info, CGImageAlphaInfo::First | CGImageAlphaInfo::PremultipliedFirst | CGImageAlphaInfo::NoneSkipFirst);
-    let little = (bitmap.0 & CGBitmapInfo::ByteOrderInfoMask.0) == CGImageByteOrderInfo::Order32Little.0;
-    match (first, little) {
-        (true, false) | (false, true) => 0,
-        (true, true) | (false, false) => 3,
-    }
-}
 
 /// A still of window `window` at its native pixel size, its points-to-pixels scale, and where
 /// the window is in it.
@@ -144,7 +136,7 @@ fn capture(window: u32, timeout: Duration) -> Result<(CFRetained<CGImage>, f64, 
             return;
         };
         // At its native size, set up as every window capture is (child windows included).
-        let WindowShot { filter, config, scale, extent, clear } = window_shot(&found, &windows, &display_frames(content), (u32::MAX, u32::MAX));
+        let WindowShot { filter, config, scale, extent, clear, .. } = window_shot(&found, &windows, &display_frames(content), (u32::MAX, u32::MAX));
         // SAFETY: plain setters on a live configuration.
         unsafe {
             config.setShowsCursor(false);

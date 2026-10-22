@@ -15,6 +15,12 @@
 //! goes there ([`Observer::rescan_all`] on a Space change), and a tracked window that goes
 //! to another Space stays tracked (no destroy notification comes). Whether a window is on
 //! the current Space is the window server's on-screen flag, read by the controller.
+//!
+//! **Closed while its app did not answer** (round 8M, [`crate::engine::vanished`]): an app that
+//! stops answering Accessibility sends no destroyed notification for a window the user closes
+//! (Home, 10-21). About once a second ([`Observer::sweep_closed`]) the tracked windows are
+//! looked up in the window server's complete list (every Desktop, minimized and hidden
+//! windows included); one missing from it on two looks apart is reported destroyed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -33,6 +39,7 @@ use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
 use crate::engine::busy_apps::Reply;
 use crate::engine::geometry::Rect;
+use crate::engine::vanished::Vanished;
 
 /// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
 const MAX_ATTEMPTS: u32 = 10;
@@ -197,6 +204,8 @@ pub struct Observer {
     /// When the last regular app launched (any app, managed or not): the restore window's
     /// settling waits for launches to stop.
     last_launch: Option<Instant>,
+    /// Tracked windows the window server no longer lists ([`Self::sweep_closed`], 8M).
+    vanished: Vanished,
 }
 
 /// The AX callback type, installed by the WM thread.
@@ -229,6 +238,7 @@ impl Observer {
             events: Vec::new(),
             activated_at: HashMap::new(),
             last_launch: None,
+            vanished: Vanished::default(),
         }
     }
 
@@ -495,6 +505,45 @@ impl Observer {
             for id in self.observe_app_or_queue(pid, &cg, callback) {
                 self.found(id, "window found");
             }
+        }
+    }
+
+    /// Windows closed while their app did not answer (round 8M, [`crate::engine::vanished`]):
+    /// each tracked window of an app still observed and running that the window server's
+    /// complete list ([`windows::list_windows`]: `kCGWindowListOptionAll`, every Desktop,
+    /// minimized and hidden windows included) misses on two looks at least
+    /// [`crate::engine::vanished::LOOK_APART`] apart is dropped and reported destroyed, as a
+    /// destroyed notification would have (its stage drops it; an empty stage has no card).
+    /// Logged at info, once per window. Called about once a second.
+    pub fn sweep_closed(&mut self) {
+        if !self.observing || self.windows.is_empty() {
+            return;
+        }
+        let list = windows::list_windows();
+        // Nothing on screen at all: the window server answered nothing (or the session is not
+        // the console's): no observation.
+        let blind = !list.iter().any(|w| w.onscreen);
+        let listed: HashSet<u32> = list.iter().map(|w| w.id).collect();
+        let alive = |pid: i32| {
+            // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+            unsafe { libc::kill(pid, 0) == 0 }
+        };
+        let tracked: Vec<u32> =
+            self.windows.values().filter(|w| self.observed.contains_key(&w.pid) && alive(w.pid)).map(|w| w.id).collect();
+        for id in self.vanished.look(Instant::now(), tracked, &listed, blind) {
+            let Some(w) = self.windows.remove(&id) else { continue };
+            if let Some(app) = self.observed.get(&w.pid) {
+                for name in n::WINDOW_LEVEL {
+                    let _ = app.observer.remove(&w.element, name);
+                }
+            }
+            tracing::info!(
+                id,
+                pid = w.pid,
+                bundle = self.bundle_of(w.pid),
+                "window closed while its app did not answer: the window server no longer lists it on any Desktop and no destroyed notification came; dropped"
+            );
+            self.events.push(WinEvent::Destroyed(id));
         }
     }
 
