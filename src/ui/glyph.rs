@@ -3,10 +3,18 @@
 //!
 //! Original artwork drawn in code (no SF Symbol, no Apple image). It is a template image, so
 //! the menu bar tints it for light, dark and highlighted states. The proportions follow SF
-//! Symbols at the menu bar's default size, measured on the symbols themselves: a 14 pt tall
-//! image, 1 pt strokes, a landscape window like `macwindow` (15 × 11 pt, three dots at the top
-//! left) with a window's tight corners rather than a case's round ones. Straight edges sit on
-//! whole pixels at 2x; the dots are 3 px wide at 2x so they still read at 1x.
+//! Symbols at the menu bar's default size, measured on the symbols themselves: 1 pt strokes, a
+//! landscape window like `macwindow` (three dots at the top left) with a window's tight corners
+//! rather than a case's round ones. Straight edges sit on whole pixels at 2x; the dots are 3 px
+//! wide at 2x so they still read at 1x.
+//!
+//! Its height is its neighbours' (round 8N: the owner saw it shorter than every other menu bar
+//! icon). Measured offscreen at the menu bar's default configuration (the 13 pt menu bar font,
+//! which is also a symbol image's default; a 22 pt status bar), the ink of `macwindow`,
+//! `rectangle.3.group`, `wifi`, `battery.100`, `switch.2` and `rectangle.stack` is 12, 12,
+//! 10.5, 9, 12 and 14.5 pt tall: a median of 12 pt ([`INK_HEIGHT`]), where the glyph had 11.
+//! The window grew in proportion (14 × 11 to 15.5 × 12 pt), the cards' stack with it (their
+//! gaps 1 to 1.5 pt, so every edge stays on a whole pixel at 2x).
 //!
 //! [`shapes`] is the pure geometry (tested), parameterised by a [`Style`] so previews can
 //! compare variants; [`status_image`] draws [`Style::DEFAULT`].
@@ -17,17 +25,21 @@ use objc2::runtime::Bool;
 use objc2_app_kit::{NSBezierPath, NSColor, NSImage};
 use objc2_foundation::{NSPoint, NSRect, NSSize, ns_string};
 
-/// The image's size in points (width, height).
-pub const SIZE: (f64, f64) = (23.0, 14.0);
+/// The image's size in points (width, height): the ink and a 1.5 pt margin all round.
+pub const SIZE: (f64, f64) = (25.0, 15.0);
+
+/// The ink's height in points: the median of the SF Symbols beside it in the menu bar (module
+/// docs).
+pub const INK_HEIGHT: f64 = 12.0;
 
 /// The SF Symbols stroke at the menu bar's default size.
 pub const STROKE: f64 = 1.0;
 
 /// The window frame's outer edge: x, y, width, height (points, y down).
-const FRAME: (f64, f64, f64, f64) = (7.5, 1.5, 14.0, 11.0);
+const FRAME: (f64, f64, f64, f64) = (8.0, 1.5, 15.5, INK_HEIGHT);
 
 /// The line the cards stack on, and the eye height of their perspective.
-const MIDDLE_Y: f64 = 7.0;
+const MIDDLE_Y: f64 = FRAME.1 + FRAME.3 / 2.0;
 
 /// The look's two knobs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,8 +62,10 @@ impl Style {
     }
 }
 
-const CARD_WIDTH: f64 = 4.5;
+const CARD_WIDTH: f64 = 5.0;
 const CARD_HEIGHT: f64 = 3.0;
+/// Between two cards: three cards and two gaps span the window's height.
+const CARD_GAP: f64 = (FRAME.3 - 3.0 * CARD_HEIGHT) / 2.0;
 
 /// One shape of the glyph, in its coordinates (points, y down from the top).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,8 +105,8 @@ pub fn shapes(style: Style) -> Vec<Shape> {
     let dot = |i: f64| Shape::Dot { cx: fx + STROKE + 1.75 + i * 2.5, cy: fy + STROKE + 1.75, diameter: 1.5 };
     vec![
         card(fy),
-        card(fy + CARD_HEIGHT + 1.0),
-        card(fy + 2.0 * (CARD_HEIGHT + 1.0)),
+        card(fy + CARD_HEIGHT + CARD_GAP),
+        card(fy + 2.0 * (CARD_HEIGHT + CARD_GAP)),
         Shape::Rect {
             x: fx + half,
             y: fy + half,
@@ -193,6 +207,23 @@ mod tests {
         let right = boxes.iter().map(|b| b.2).fold(f64::MIN, f64::max);
         assert_eq!((top, SIZE.1 - bottom), (1.5, 1.5));
         assert_eq!((left, SIZE.0 - right), (1.5, 1.5));
+    }
+
+    /// Round 8N: as tall as its neighbours (the measured median), the cards' stack as tall as
+    /// the window, the proportions kept (the window as wide for its height as before, ±5 %).
+    #[test]
+    fn the_ink_is_as_tall_as_the_symbols_beside_it() {
+        let all = shapes(Style::DEFAULT);
+        let boxes: Vec<_> = all.iter().map(outer).collect();
+        let top = boxes.iter().map(|b| b.1).fold(f64::MAX, f64::min);
+        let bottom = boxes.iter().map(|b| b.3).fold(f64::MIN, f64::max);
+        assert_eq!(bottom - top, INK_HEIGHT);
+        let cards: Vec<_> = all.iter().filter(|s| matches!(s, Shape::Card { .. })).map(outer).collect();
+        let (_, ft, _, fb) = frame(&all);
+        assert_eq!((cards[0].1, cards[2].3), (ft, fb), "the stack spans the window");
+        let (l, t, r, b) = frame(&all);
+        let aspect = (r - l) / (b - t);
+        assert!((aspect / (14.0 / 11.0) - 1.0).abs() < 0.05, "the window's proportions kept: {aspect}");
     }
 
     #[test]

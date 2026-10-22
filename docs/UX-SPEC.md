@@ -104,7 +104,8 @@ in the slot under the pointer.
 
 **A menu bar icon.** Apple's Stage Manager has none; its toggle lives in Control Center. Ours
 gives a place for Settings, About, updates and Quit. It can be hidden, and opening the app
-again then shows Settings.
+again then shows Settings. Its glyph is original art, as tall as the SF Symbols beside it at
+the menu bar's default size (12 pt of ink, their median; round 8N).
 
 **Launch at login.** Apple's is part of macOS. Ours registers as a login item at its first
 launch from Applications, and Settings can turn that off.
