@@ -365,13 +365,19 @@ mod app {
     fn registry_then_leftovers(reason: &str) -> bool {
         let registry = safety::emergency_unpark(reason);
         let leftovers = safety::leftovers_back(reason, Default::default());
-        // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits.
-        registry && leftovers && safety::taken_len() == 0
+        // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits;
+        // when they are all that is left, passed on with a warning (no error).
+        let rest_back = registry && (leftovers || safety::left_not_taken() == 0) && safety::registry_len() == 0;
+        safety::set_passed_on(rest_back && safety::taken_len() > 0);
+        rest_back && safety::taken_len() == 0
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
         if ok {
             safety::mark_clean_exit();
+        } else if safety::passed_on() {
+            // Only handed-over windows still away (round 8N): this app's guardian takes them over.
+            tracing::info!("handed-over windows still away: this app's guardian takes them over");
         } else {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }

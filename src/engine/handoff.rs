@@ -17,14 +17,24 @@
 //! [`REOFFER_AFTER`] later ([`Offering`]); when it does not answer at all (gone, or quitting
 //! before it could take), at the guardian's next question. Two old guardians each hand over
 //! their own windows; a window offered twice keeps its first entry.
+//!
+//! A handed-over window never travels from copy to copy forever ([`TakenDrops`], the owner's
+//! word on 8N): the app drops it from its taken windows, logged once at info, when its app's
+//! process no longer runs, or when the window server's complete list no longer has it on two
+//! looks at least [`LOOK_APART`] apart (8M's rule, [`super::vanished`]). One that still exists
+//! and cannot be reached at a quit is passed on to the app's guardian as before (a warning,
+//! never the error of a window the app parked itself).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::park::Corner;
 use super::recovery::Registered;
+use super::vanished::Vanished;
+pub use super::vanished::LOOK_APART;
 
 /// The ctl command a guardian hands its watch over with: `take-watch <offer as JSON>`.
 pub const COMMAND: &str = "take-watch";
@@ -135,6 +145,62 @@ impl Offering {
     }
 }
 
+/// Why a handed-over window was dropped from the windows taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dropped {
+    /// Its app's process no longer runs.
+    AppGone,
+    /// The window server's complete list no longer has it (two looks [`LOOK_APART`] apart).
+    Vanished,
+}
+
+impl fmt::Display for Dropped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AppGone => write!(f, "its app no longer runs"),
+            Self::Vanished => write!(f, "the window server no longer lists it (closed)"),
+        }
+    }
+}
+
+/// The drop rules for handed-over windows, look by look.
+#[derive(Debug, Clone, Default)]
+pub struct TakenDrops {
+    vanished: Vanished,
+}
+
+impl TakenDrops {
+    /// One look at `now` at the windows `taken`: `listed`, the ids of the window server's
+    /// complete list (every Desktop, ordered-out windows included); `blind`, that list shows no
+    /// window on screen (no observation: nothing vanishes); `running`, whether a process runs.
+    /// Returns the windows to drop, each once, with why.
+    pub fn look(
+        &mut self,
+        now: Instant,
+        taken: &[Registered],
+        listed: &HashSet<u32>,
+        blind: bool,
+        running: impl Fn(i32) -> bool,
+    ) -> Vec<(Registered, Dropped)> {
+        let mut dropped = Vec::new();
+        let mut alive = Vec::new();
+        for r in taken {
+            // A pid never read (-1) says nothing: only the window list judges that window.
+            if r.pid > 0 && !running(r.pid) {
+                dropped.push((*r, Dropped::AppGone));
+            } else {
+                alive.push(r.id);
+            }
+        }
+        for id in self.vanished.look(now, alive, listed, blind) {
+            if let Some(r) = taken.iter().find(|r| r.id == id) {
+                dropped.push((*r, Dropped::Vanished));
+            }
+        }
+        dropped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +258,49 @@ mod tests {
         assert_eq!(held.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(held[&2].restore.x, 100.0, "the first offer's frame");
         assert_eq!(take(&mut held, &[]), (vec![], 0));
+    }
+
+    /// The owner's word on 8N: a handed-over window whose app quit is dropped at the first
+    /// look; a pid never read is judged by the window list alone.
+    #[test]
+    fn a_taken_window_whose_app_quit_is_dropped() {
+        let t0 = Instant::now();
+        let gone = Registered { pid: 900, ..reg(1, 100.0) };
+        let unknown = Registered { pid: -1, ..reg(3, 100.0) };
+        let listed: HashSet<u32> = [1, 2, 3].into();
+        let mut d = TakenDrops::default();
+        let out = d.look(t0, &[gone, reg(2, 100.0), unknown], &listed, false, |pid| pid != 900);
+        assert_eq!(out, vec![(gone, Dropped::AppGone)]);
+        let out = d.look(t0, &[reg(2, 100.0), unknown], &listed, false, |_| false);
+        assert_eq!(out, vec![(reg(2, 100.0), Dropped::AppGone)], "pid -1 is never judged by its pid");
+    }
+
+    /// 8M's rule: missing from the complete list on two looks at least half a second apart,
+    /// listed on neither between; one look, a blind look or a sighting between start over.
+    #[test]
+    fn a_taken_window_the_window_server_no_longer_lists_is_dropped() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let taken = [reg(1, 100.0), reg(2, 100.0)];
+        let with: HashSet<u32> = [1, 2].into();
+        let without: HashSet<u32> = [2].into();
+        let mut d = TakenDrops::default();
+        let run = |_| true;
+        assert!(d.look(ms(0), &taken, &without, false, run).is_empty(), "one look never drops");
+        assert!(d.look(ms(400), &taken, &without, false, run).is_empty(), "too soon");
+        assert_eq!(d.look(ms(500), &taken, &without, false, run), vec![(taken[0], Dropped::Vanished)]);
+        // Listed again between: the count starts over.
+        let mut d = TakenDrops::default();
+        d.look(ms(0), &taken, &without, false, run);
+        d.look(ms(300), &taken, &with, false, run);
+        assert!(d.look(ms(600), &taken, &without, false, run).is_empty());
+        assert_eq!(d.look(ms(1100), &taken, &without, false, run).len(), 1);
+        // A blind look is no observation.
+        let mut d = TakenDrops::default();
+        d.look(ms(0), &taken, &without, false, run);
+        assert!(d.look(ms(600), &taken, &HashSet::new(), true, run).is_empty());
+        assert!(d.look(ms(700), &taken, &without, false, run).is_empty(), "starts over after the blind look");
+        assert_eq!(d.look(ms(1200), &taken, &without, false, run).len(), 1);
     }
 
     /// A refusal (an earlier version) holds the next offer off for a minute; logged once.

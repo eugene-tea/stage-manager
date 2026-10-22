@@ -810,7 +810,8 @@ def drill_handoff():
     A's guardian hands the window over and exits, B holds it (`state` "taken", its parked file).
     B quits with the window still away: its quit is unclean and B's own guardian waits for it.
     App C starts: B's guardian hands it on and exits. The window's Desktop shows (SIGINFO), C
-    quits: the window is back, C's quit clean, no guardian left."""
+    quits: the window is back, C's quit clean, no guardian left. (A handed-over window whose app
+    quit, or that the window server no longer lists, is dropped: unit tests, engine::handoff.)"""
     say("-- drill: an old guardian hands its watch to the next app and exits (8N)")
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
     ensure_something_parked()
@@ -859,7 +860,10 @@ def drill_handoff():
     wait_gone(b)
     time.sleep(2.0)
     check(bool(guards_b) and bool(pids_of(f"stage-manager --guardian {b}$")), "handoff: B's quit leaves the window to B's guardian, which waits")
-    check("windows taken from an old guardian are not back yet" in log_text(), "handoff: B's quit says the taken window is not back")
+    after_b = log_text().rsplit("took a crashed copy's guardian's watch", 1)[-1]
+    check("a handed-over window still away; passed on" in after_b, "handoff: B's quit warns that the handed-over window is passed on")
+    check("not every window could be restored" not in after_b and "windows still parked: the guardian" not in after_b,
+          "handoff: B's quit logs no ERROR for a handed-over window (only for windows it parked itself)")
 
     # App C: B's guardian hands it on; the window shows; C's quit brings it back.
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"}, fresh_log=False)

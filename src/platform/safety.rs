@@ -49,7 +49,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -139,6 +139,29 @@ pub fn taken_ids() -> BTreeSet<u32> {
 /// A taken window's entry.
 fn taken_entry(id: u32) -> Option<Registered> {
     lock_taken().get(&id).copied()
+}
+
+/// Windows the latest leftovers check left in the park zone that were not handed over (taken
+/// from an old guardian): those keep a quit's error.
+static LEFT_NOT_TAKEN: AtomicUsize = AtomicUsize::new(0);
+
+/// How many windows the latest leftovers check left that were not handed over.
+pub fn left_not_taken() -> usize {
+    LEFT_NOT_TAKEN.load(Ordering::SeqCst)
+}
+
+/// Set by a quit whose only windows not back are handed-over ones still away: passed on to
+/// this app's guardian, a warning rather than an error.
+static PASSED_ON: AtomicBool = AtomicBool::new(false);
+
+/// Notes whether this quit passes handed-over windows on (and nothing else is left).
+pub fn set_passed_on(on: bool) {
+    PASSED_ON.store(on, Ordering::SeqCst);
+}
+
+/// True when this quit passes handed-over windows on and nothing else is left.
+pub fn passed_on() -> bool {
+    PASSED_ON.load(Ordering::SeqCst)
 }
 
 /// Lets go of taken windows (back, gone, or in the model now).
@@ -1083,6 +1106,7 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
     };
     let left = read(UNPARK_SETTLE);
     if left.is_empty() {
+        LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
         return None;
     }
     let seen: Vec<(u32, bool)> = left.iter().map(|w| (w.id, w.onscreen)).collect();
@@ -1094,10 +1118,19 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
     let took_ms = start.elapsed().as_millis() as u64;
     if after.is_empty() {
         tracing::info!(reason, back = left.len(), took_ms, "every window still parked after unparking is back");
+        LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
         return None;
     }
     let ids: Vec<u32> = after.iter().map(|w| w.id).collect();
-    tracing::error!(reason, windows = ?ids, unreached = ?unreached, took_ms, "windows still parked: the guardian brings each back once its Desktop shows or its app answers");
+    let taken = taken_ids();
+    let mine: Vec<u32> = ids.iter().copied().filter(|id| !taken.contains(id)).collect();
+    LEFT_NOT_TAKEN.store(mine.len(), Ordering::SeqCst);
+    if mine.is_empty() {
+        // Only windows handed over by an old guardian (round 8N): passed on, never an error.
+        tracing::info!(reason, windows = ?ids, took_ms, "handed-over windows still parked: passed on to the guardian");
+    } else {
+        tracing::error!(reason, windows = ?ids, unreached = ?unreached, took_ms, "windows still parked: the guardian brings each back once its Desktop shows or its app answers");
+    }
     Some(ours.kept_for_retry(&ids))
 }
 

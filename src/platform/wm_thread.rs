@@ -473,7 +473,12 @@ impl WmState {
                 // Windows taken from an old guardian (round 8N): those shown come back now;
                 // one still away leaves the exit unclean, so this app's guardian waits for it.
                 let taken_left = self.taken.last_look(&self.controller.model_window_ids());
-                let ok = back && unrestored == 0 && safety::registry_len() == 0 && taken_left == 0;
+                // Every window the leftovers check left was handed over (none this app parked).
+                let only_taken = back || safety::left_not_taken() == 0;
+                let rest_back = only_taken && unrestored == 0 && safety::registry_len() == 0;
+                let ok = rest_back && taken_left == 0;
+                // Handed-over windows still away and nothing else: passed on, a warning.
+                safety::set_passed_on(rest_back && taken_left > 0);
                 self.controller.save_now();
                 self.observer.stop();
                 let _ = self.observer.take_events();
