@@ -414,6 +414,14 @@ def do(*words):
 
 def phase_m3():
     say("\n== milestone 3: stages, switching, frames, z-order, merge, pin, reveal, children ==")
+    # A fresh start, as m4's: the safety drills before it (8M, 8N) leave a state.json whose
+    # saved stages a launch would rebuild (seen live 10-21: m3 failed after safety, passed alone).
+    stop_app()
+    stop_fixture()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
     with open(os.path.join(HOME, "config.toml"), "w") as f:
         f.write("[hotkeys]\nenabled = true\n")
     start_fixture(4, "--panel")
