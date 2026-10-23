@@ -25,6 +25,10 @@
 //!   and once more [`SETTLE`] later (NSWorkspace may still name the old Desktop's picture,
 //!   and the app's appearance may lag the notification, at the first read); nothing shows
 //!   before that second read.
+//! - **A switch's end** ([`shown_for`]): a switch's cover of the corner, on the motion
+//!   overlay, stays past the switch until the patch has been on screen a moment
+//!   ([`crate::engine::corner_patch::cover_holds`]), so the corner is never bare between the
+//!   two.
 //! - **Ordering**: just above the topmost parked window under it
 //!   (`orderWindow:relativeTo:` with that window's number); the WM thread checks the order
 //!   in the window server's list at every plan (the panel's number: [`window_number`]) and
@@ -190,6 +194,18 @@ impl RenderMemo {
     fn drop_in_flight(&mut self) {
         self.rendering = None;
     }
+}
+
+thread_local! {
+    /// When the panel was last ordered in at its rectangle (moved, or shown after hidden);
+    /// `None` while hidden. Apart from [`PATCH`], which may be busy in a call into AppKit.
+    static SHOWN_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// How long the patch has been on screen at its rectangle by `now` (main thread); `None`
+/// while hidden. A switch's cover of the corner waits on it ([`crate::engine::corner_patch::cover_holds`]).
+pub fn shown_for(now: Instant) -> Option<Duration> {
+    SHOWN_AT.with(|s| s.get()).map(|t| now.saturating_duration_since(t))
 }
 
 thread_local! {
@@ -446,6 +462,7 @@ impl Patch {
         ORDERED_AGAINST.store(NOT_ORDERED, Ordering::SeqCst);
         if self.shown.take().is_some() {
             self.panel.orderOut(None);
+            SHOWN_AT.with(|s| s.set(None));
             tracing::debug!("corner patch: hidden");
         }
     }
@@ -591,6 +608,7 @@ impl Patch {
             }
         }
         if self.shown != Some(rect) {
+            SHOWN_AT.with(|s| s.set(Some(Instant::now())));
             tracing::debug!(%rect, above = ?self.plan.above, "corner patch: shown");
         }
         self.shown = Some(rect);

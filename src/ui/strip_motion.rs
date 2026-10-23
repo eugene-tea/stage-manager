@@ -22,15 +22,18 @@
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
 //!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
-//!   stays hidden until its snapshots land, then everything goes in one frame. A new
-//!   transition cuts a running one short.
+//!   stays hidden until its snapshots land, then everything goes in one frame, except a
+//!   cover of the patch's picture while the corner patch is not drawn yet: it stays until
+//!   the patch has been on screen a moment, a few hundred milliseconds at most
+//!   ([`cover_holds`], 10-23: the slivers flashed between the cover and the patch). A new
+//!   transition cuts a running one short, and takes over a cover still held.
 //! - **A window dragged over the strip** is shown as a card-sized snapshot, turned like a
 //!   card, under the pointer (following every drag event through a global monitor); dropped
 //!   there, it shrinks into its new card's slot as the transition's outgoing snapshot.
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -40,7 +43,7 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTimer};
 
 use super::{Ghost as CardGhost, Strip, with_strip};
-use crate::engine::corner_patch::{CoverPicture, SwitchCover};
+use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, time_to_progress};
@@ -57,6 +60,8 @@ const SETTLED: f64 = 0.002;
 const LANDING_MAX: f64 = 1.0;
 /// Outgoing snapshots start shrinking after this at the latest, parked or not (seconds).
 const PARK_WAIT_MAX: f64 = 0.2;
+/// How often a landed switch's held cover looks whether the patch shows (seconds: a frame).
+const HOLD_POLL: f64 = 1.0 / 60.0;
 
 /// A running transition.
 struct Running {
@@ -71,6 +76,19 @@ struct Running {
     under: Option<u32>,
     /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
     corner: Option<Ghost>,
+    /// Where that cover is and what it shows.
+    corner_at: Option<(Rect, CoverPicture)>,
+    /// The incoming windows' frames: aimed at, then read back once in place.
+    arrived: Vec<(u32, Rect)>,
+}
+
+/// A landed switch's cover of the park corner, kept until the corner patch shows
+/// ([`cover_holds`]).
+struct Hold {
+    ghost: Ghost,
+    facts: HoldFacts,
+    since: Instant,
+    timer: Retained<NSTimer>,
 }
 
 /// The card shown under the pointer while a window is dragged over the strip.
@@ -104,6 +122,8 @@ pub(super) struct Motion {
     /// The pointer when the current window drag was first seen, and the window.
     drag_seen: Option<(u32, Point)>,
     drag_monitor: Option<Retained<AnyObject>>,
+    /// A landed switch's cover still over the corner.
+    hold: Option<Hold>,
 }
 
 impl Motion {
@@ -124,7 +144,45 @@ impl Motion {
             landing_seq: 0,
             drag_seen: None,
             drag_monitor: None,
+            hold: None,
         }
+    }
+
+    /// Nothing draws in the overlay: no transition, no dragged window's card, no held cover.
+    fn overlay_idle(&self) -> bool {
+        self.running.is_none() && self.window_card.is_none() && self.hold.is_none()
+    }
+
+    /// Takes a held cover off the corner now (the overlay hidden if nothing else is in it).
+    fn drop_hold(&mut self) {
+        let Some(h) = self.hold.take() else { return };
+        h.timer.invalidate();
+        objc2_quartz_core::CATransaction::begin();
+        objc2_quartz_core::CATransaction::setDisableActions(true);
+        h.ghost.remove();
+        objc2_quartz_core::CATransaction::commit();
+        if self.overlay_idle() {
+            self.overlay.hide();
+        }
+    }
+
+    /// A held cover looks again ([`HOLD_POLL`]): it goes once the patch is drawn or the hold
+    /// is over, else it looks again a frame later.
+    fn check_hold(&mut self) {
+        let now = Instant::now();
+        let Some(h) = self.hold.as_mut() else { return };
+        h.facts.held_for = now.saturating_duration_since(h.since);
+        h.facts.patch_shown_for = crate::ui::corner_patch::shown_for(now);
+        if cover_holds(&h.facts) {
+            h.timer = after(HOLD_POLL, poll_hold);
+            return;
+        }
+        tracing::debug!(
+            held_ms = h.facts.held_for.as_millis() as u64,
+            patch_shown_ms = h.facts.patch_shown_for.map(|t| t.as_millis() as u64),
+            "transition: the corner's cover leaves"
+        );
+        self.drop_hold();
     }
 
     /// True while `stage`'s card waits for its transition's snapshots to land.
@@ -136,6 +194,8 @@ impl Motion {
     /// Space shown when it is first ordered in (a panel ordered in before keeps going back
     /// to the Space it was on).
     pub(super) fn space_changed(&mut self, mtm: MainThreadMarker) {
+        // A cover held on the Desktop left goes with it.
+        self.drop_hold();
         if self.running.is_none() && self.window_card.is_none() {
             self.overlay.renew(mtm);
         }
@@ -177,6 +237,11 @@ impl Drop for Motion {
             unsafe { NSEvent::removeMonitor(&token) };
         }
     }
+}
+
+/// A held cover's look ([`Motion::check_hold`]), from its timer.
+fn poll_hold() {
+    with_strip(|s| s.motion.check_hold());
 }
 
 /// Runs `f` once on the main run loop after `seconds`, in every mode (also while a menu
@@ -324,7 +389,21 @@ impl Strip {
 
     /// Starts transition `t`: snapshots over the outgoing windows shrink into their cards,
     /// snapshots of the incoming ones grow from `starts`; tells the controller what is covered.
+    /// A running one cut short, or a cover still held from the last switch, goes once this
+    /// one is up: the overlay stays shown between the two (hidden after if nothing is in it).
     pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
+        let held = self.motion.hold.take();
+        self.start_transition(t, starts);
+        if let Some(h) = held {
+            self.motion.hold = Some(h);
+            self.motion.drop_hold();
+        }
+        if self.motion.overlay_idle() {
+            self.motion.overlay.hide();
+        }
+    }
+
+    fn start_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
         self.finish_transition(false);
         if !self.style.animation.animates() {
             strip_model::cover(t.id, Cover::default());
@@ -411,6 +490,8 @@ impl Strip {
         }
         // The park corner, under every snapshot, while the incoming windows wait there (8L).
         let corner = if cover.incoming { t.corner.clone().and_then(|c| self.corner_cover(t.id, c)) } else { None };
+        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.picture));
+        let arrived = t.incoming.iter().map(|w| (w.window.id, w.window.frame)).collect();
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
@@ -462,7 +543,7 @@ impl Strip {
             CoverPicture::Desktop => "desktop",
         });
         strip_model::publish_transition(TransitionReport { id, ghosts: report, order, corner: covered.map(|c| c.rect), corner_picture });
-        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner });
+        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner, corner_at, arrived });
     }
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
@@ -503,6 +584,9 @@ impl Strip {
         let corner = self.style.animation.corner_radius;
         if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
             for (window, real) in frames {
+                if let Some(a) = r.arrived.iter_mut().find(|(w, _)| w == window) {
+                    a.1 = *real;
+                }
                 let to = Plane::window(*real, o, corner);
                 for g in r.ghosts.iter_mut().filter(|g| g.window == *window && g.target.tilt == 0.0) {
                     let t = g.target;
@@ -599,11 +683,26 @@ impl Strip {
         }
     }
 
+    /// Ends the running transition: it `landed` (its corner's cover may stay a moment,
+    /// [`cover_holds`]), or a new one starts and hides the overlay itself if it draws nothing.
     fn finish_transition(&mut self, landed: bool) {
-        let Some(r) = self.motion.running.take() else { return };
+        let Some(mut r) = self.motion.running.take() else { return };
         for t in &r.timers {
             t.invalidate();
         }
+        // Landed with the corner covered by the patch's picture: the cover stays until the
+        // patch shows (10-23), unless nothing is to wait for.
+        let facts = match (landed, &r.corner, r.corner_at) {
+            (true, Some(_), Some((cover, picture))) => Some(HoldFacts {
+                cover,
+                picture,
+                arrived: r.arrived.iter().map(|(_, f)| *f).collect(),
+                patch_shown_for: crate::ui::corner_patch::shown_for(Instant::now()),
+                held_for: Duration::ZERO,
+            }),
+            _ => None,
+        };
+        let hold = facts.filter(cover_holds).and_then(|f| r.corner.take().map(|g| (g, f)));
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
         for g in r.ghosts.iter().chain(&r.corner) {
@@ -615,7 +714,18 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        if self.motion.window_card.is_none() {
+        if let Some((ghost, facts)) = hold {
+            tracing::debug!(id = r.id, cover = %facts.cover, "transition: landed; the corner's cover stays until the corner patch shows");
+            let timer = after(HOLD_POLL, poll_hold);
+            let old = self.motion.hold.replace(Hold { ghost, facts, since: Instant::now(), timer });
+            if let Some(old) = old {
+                // Never two (a new switch takes the last one's over), but never one left behind.
+                old.timer.invalidate();
+                old.ghost.remove();
+            }
+        }
+        // Cut short, the next transition hides it if it draws nothing ([`Self::begin_transition`]).
+        if landed && self.motion.overlay_idle() {
             self.motion.overlay.hide();
         }
         // A released card it held, still drawn pressed (its own click's transition, or
@@ -745,7 +855,7 @@ impl Strip {
             if self.motion.window_card.take().is_some_and(|c| {
                 c.ghost.remove();
                 true
-            }) && self.motion.running.is_none()
+            }) && self.motion.overlay_idle()
             {
                 self.motion.overlay.hide();
             }
@@ -759,6 +869,8 @@ impl Strip {
         let grab = if f.w > 1.0 && f.h > 1.0 { ((seen.x - f.x) / f.w, (seen.y - f.y) / f.h) } else { (0.5, 0.05) };
         let corner = self.style.cards.corner_radius * m.k;
         if self.motion.window_card.as_ref().is_none_or(|c| c.window != w.id) {
+            // The card goes above every window: a cover held over the corner goes first.
+            self.motion.drop_hold();
             self.place_overlay();
             let image = self.motion.cache.get(w.id).cloned().or_else(|| self.thumbs.get(&w.id).cloned());
             let o = self.motion.overlay.origin();
