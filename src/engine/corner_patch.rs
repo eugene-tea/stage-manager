@@ -37,11 +37,20 @@
 //!   lies (or the icons are not known), a still of the desktop instead (round 8L3). Never
 //!   more than the corner's own square ([`COVER_CAP`], round 8L6): the owner's covers of
 //!   2087x1316 pt painted his desktop over his windows for every switch.
+//! - **The cover's end** ([`cover_holds`]): the patch is often hidden while a switch runs
+//!   (the incoming windows wait in the corner, so no order of the patch is right) and shown
+//!   again only once a plan sees them gone from the corner, which may come after the switch
+//!   has landed and its cover gone (10-23: a frame or more of bare slivers at a switch's
+//!   end). A cover of the patch's picture therefore stays past the landing until the patch
+//!   has been on screen for [`PATCH_DRAWN`] (its first frames drawn), at most
+//!   [`COVER_HOLD_MAX`], and never where an arriving window landed over the corner (the cover
+//!   would paint over it).
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
 //!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
 //!   down (nothing parked).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use super::geometry::Rect;
 use super::park::Corner;
@@ -638,6 +647,40 @@ fn covered_by(r: Rect, parts: &[Rect]) -> bool {
     left.is_empty()
 }
 
+/// The longest a switch's cover of the patch's picture outlasts the switch, waiting for the
+/// patch to show ([`cover_holds`]).
+pub const COVER_HOLD_MAX: Duration = Duration::from_millis(300);
+
+/// How long the patch must have been on screen before a held cover leaves: its first frames
+/// drawn (three at 60 Hz).
+pub const PATCH_DRAWN: Duration = Duration::from_millis(50);
+
+/// What a landed switch's cover of the corner waits on ([`cover_holds`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldFacts {
+    /// Where the cover is (global, top-left).
+    pub cover: Rect,
+    /// What it shows.
+    pub picture: CoverPicture,
+    /// Where the switch's incoming windows are now (their frames, read back once in place).
+    pub arrived: Vec<Rect>,
+    /// How long the patch has been on screen at its rectangle now; `None` while hidden.
+    pub patch_shown_for: Option<Duration>,
+    /// How long the cover has outlasted the switch.
+    pub held_for: Duration,
+}
+
+/// Whether a landed switch's cover stays over the corner a moment more: only a cover of the
+/// patch's picture (a still of the desktop means icons lie there, so the patch stays off),
+/// only while no incoming window lies under it, until the patch has been on screen for
+/// [`PATCH_DRAWN`], and never past [`COVER_HOLD_MAX`].
+pub fn cover_holds(f: &HoldFacts) -> bool {
+    f.picture == CoverPicture::Wallpaper
+        && !f.arrived.iter().any(|w| w.intersect(&f.cover).is_some())
+        && f.patch_shown_for.is_none_or(|t| t < PATCH_DRAWN)
+        && f.held_for < COVER_HOLD_MAX
+}
+
 /// `a` without `b`: up to four rectangles.
 fn minus(a: Rect, b: Rect) -> Vec<Rect> {
     let Some(i) = a.intersect(&b) else { return vec![a] };
@@ -672,6 +715,30 @@ mod tests {
             items: Some(vec![Rect::new(2400.0, 40.0, 100.0, 100.0)]),
             ..CoverFacts::default()
         }
+    }
+
+    #[test]
+    fn a_landed_cover_holds_the_corner_until_the_patch_is_drawn() {
+        // 10-23: the patch shown again 5 ms after the incoming windows were in place, the
+        // corner bare between the cover and the patch's first frame.
+        let corner = Rect::new(2499.0, 1314.0, 61.0, 126.0);
+        let ms = Duration::from_millis;
+        let f = HoldFacts {
+            cover: corner,
+            picture: CoverPicture::Wallpaper,
+            arrived: vec![Rect::new(1265.0, 606.0, 1051.0, 734.0), Rect::new(376.0, 49.0, 1973.0, 1291.0)],
+            patch_shown_for: None,
+            held_for: ms(0),
+        };
+        assert!(cover_holds(&f), "the patch hidden: the cover stays");
+        assert!(cover_holds(&HoldFacts { patch_shown_for: Some(ms(10)), ..f.clone() }), "just ordered in: not drawn yet");
+        assert!(!cover_holds(&HoldFacts { patch_shown_for: Some(PATCH_DRAWN), ..f.clone() }), "drawn: the cover goes");
+        assert!(!cover_holds(&HoldFacts { patch_shown_for: Some(ms(5000)), ..f.clone() }), "shown all along: no hold at all");
+        assert!(cover_holds(&HoldFacts { held_for: COVER_HOLD_MAX - ms(1), ..f.clone() }));
+        assert!(!cover_holds(&HoldFacts { held_for: COVER_HOLD_MAX, ..f.clone() }), "never longer: the patch may stay off");
+        assert!(!cover_holds(&HoldFacts { picture: CoverPicture::Desktop, ..f.clone() }), "icons there: the patch stays off");
+        let over = Rect::new(1800.0, 900.0, 760.0, 540.0);
+        assert!(!cover_holds(&HoldFacts { arrived: vec![over], ..f }), "an arriving window landed over the corner");
     }
 
     #[test]

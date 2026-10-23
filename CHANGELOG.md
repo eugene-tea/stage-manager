@@ -5,6 +5,8 @@
 - The wallpaper patch now covers the parked windows' edges on a Desktop showing one of
   Apple's own dynamic wallpapers picked in System Settings (it stepped aside there, as if
   the wallpaper were an aerial), in the style picked for it.
+- The parked windows' edges no longer flash in the corner as a switch ends: the corner stays
+  covered until the wallpaper patch is back.
 - New apps can open in the current stage: turn on **Open new apps in the current stage**
   (Settings → Stages, or `[stages] new_apps_join_current`) and a newly opened app's windows
   join the stage you are in. Hold Shift while opening an app to give it a stage of its own.

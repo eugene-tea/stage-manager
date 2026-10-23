@@ -118,7 +118,9 @@ nears a card, so content that changed meanwhile can jump when the motion ends. A
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). Arriving windows wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
-raises an activated app's windows there), never over the menu bar or the Dock's bar, and
+raises an activated app's windows there) and the patch itself shows again (it is drawn a
+moment before the cover goes, at most 300 ms after the motion; never where an arriving window
+landed over the corner), never over the menu bar or the Dock's bar, and
 never more than the corner itself (a 320-point square; 10-16, covers of most of the screen
 painted the desktop over the owner's windows at every switch). Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
