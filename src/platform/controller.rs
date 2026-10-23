@@ -1499,14 +1499,20 @@ impl Controller {
                 // Only those listed in the park zone (8L6): one the model has parked but the
                 // window server lists elsewhere shows there, and grew the patch's rectangle
                 // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
-                let model_parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
+                // This Desktop's parked windows only: another Desktop's listed on screen means
+                // it slides in (or out) before the Space change's notice.
+                let here = m.current_space(main.id);
+                let model_parked: HashSet<u32> = m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0).collect();
+                let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
                 let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
-                // The Desktop slides before the Space change's notice (10-23: its parked
-                // windows listed at x=110, all together): the plan stays as it was, so the
-                // panel slides away with its Desktop drawn and is there when it slides back.
+                // A Desktop slides before the Space change's notice (10-23: the parked windows
+                // listed at x=110, all together; at 11:51 the next Desktop's listed in the zone
+                // and planned as this one's): the plan stays as it was, so the panel slides away
+                // with its Desktop drawn and is there when it slides back.
                 let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
+                let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
                 let now = Instant::now();
-                let slides = parked.is_empty() && desktop_slides(&listed_parked, main.frame, main.visible, main.corner);
+                let slides = (elsewhere || parked.is_empty()) && desktop_slides(&listed_parked, elsewhere, main.frame, main.visible, main.corner);
                 self.patch_slide_since = slides.then(|| self.patch_slide_since.unwrap_or(now));
                 let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
                 if slide_waits(self.patch_slide_since.map(|t| now.saturating_duration_since(t)), shown_now) {
@@ -1517,11 +1523,10 @@ impl Controller {
                     return Some(list);
                 }
                 let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let here = m.current_space(main.id).0;
-                let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rects.get(&here).copied(), r));
+                let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r));
                 match rect {
-                    Some(r) => self.patch_rects.insert(here, r),
-                    None => self.patch_rects.remove(&here),
+                    Some(r) => self.patch_rects.insert(here.0, r),
+                    None => self.patch_rects.remove(&here.0),
                 };
                 self.patch_rect = rect;
                 let listed: Vec<Listed> =
@@ -1597,7 +1602,10 @@ impl Controller {
                 // The test's forced still is compared with the patch's picture (`debug-overlay`).
                 let wanted = desktop_shot::needs_wallpaper() || cover_desktop_forced();
                 let picture = if show.is_none() && still && wanted { rect } else { None };
-                PatchPlan { show, above: show.and(above), reorder, space, picture, on: true, items: facts.items.clone() }
+                // The icons as last read well, whatever this plan's rectangle (none read for a
+                // plan with no sliver): they are the same on every Desktop, and other Desktops'
+                // panels are checked against them (10-23: `None` here hid them all).
+                PatchPlan { show, above: show.and(above), reorder, space, picture, on: true, items: self.patch_items.known.clone() }
             }
             _ => {
                 self.patch_rect = None;
