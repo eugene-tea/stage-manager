@@ -66,6 +66,9 @@ pub struct Wall {
     pub recheck_at: Option<Instant>,
     /// The appearance read was dark.
     pub dark: bool,
+    /// The picture's facts, when drawn: a Desktop's patch left drawn there tells by them
+    /// whether its frame is still the one macOS shows ([`wp::still_drawn`]).
+    pub image: Option<ImageFacts>,
 }
 
 /// Everything a render needs (sendable to a render thread).
@@ -141,7 +144,7 @@ impl Reader {
     pub fn read(&mut self, mtm: MainThreadMarker) -> Wall {
         let dark = dark_appearance(mtm);
         let Some(screen) = NSScreen::screens(mtm).firstObject() else {
-            return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, dark };
+            return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, dark, image: None };
         };
         let f = screen.frame();
         let frame = Rect::new(0.0, 0.0, f.size.width, f.size.height);
@@ -193,6 +196,7 @@ impl Reader {
             .ok()
             .and_then(|d| d.frame.recheck_in)
             .map(|s| Instant::now() + Duration::from_secs_f64(s.clamp(1.0, 86_400.0)));
+        let facts = image.clone().filter(|_| decided.is_ok());
         let outcome = match (decided, path.clone(), image) {
             (Ok(d), Some(path), Some(image)) => Ok((
                 d,
@@ -213,7 +217,7 @@ impl Reader {
             (Ok(_), _, _) => Err("the picture cannot be read".into()),
             (Err(why), _, _) => Err(why.into()),
         };
-        Wall { screen: frame, path, outcome, recheck_at, dark }
+        Wall { screen: frame, path, outcome, recheck_at, dark, image: facts }
     }
 
     /// The settings file's choices, parsed again only when its modification time changed;
@@ -253,7 +257,7 @@ impl Reader {
     }
 
     /// The clock, with the local time zone's place.
-    fn clock(&mut self) -> Clock {
+    pub fn clock(&mut self) -> Clock {
         let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
         let zone = NSTimeZone::localTimeZone().name().to_string();
         if self.zone.as_ref().is_none_or(|(z, _)| *z != zone) {

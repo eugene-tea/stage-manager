@@ -863,6 +863,12 @@ pub struct Controller {
     patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
     /// The corner patch's rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
     patch_rect: Option<Rect>,
+    /// The patch's rectangle in use on each Desktop (the engine's Space ids): each Desktop
+    /// has a panel of its own ([`crate::ui::corner_patch`]), steady on its own.
+    patch_rects: HashMap<u64, Rect>,
+    /// Since when the window server's list shows the Desktop sliding before the Space
+    /// change's notice ([`crate::engine::corner_patch::desktop_slides`]).
+    patch_slide_since: Option<Instant>,
     /// The patch's order as last checked ([`crate::engine::corner_patch::order_step`]).
     patch_order: crate::engine::corner_patch::OrderState,
     /// Why the last plan hid the patch (logged once a change).
@@ -1073,6 +1079,8 @@ impl Controller {
             hides: hide::Hides::default(),
             patch_sent: None,
             patch_rect: None,
+            patch_rects: HashMap::new(),
+            patch_slide_since: None,
             patch_order: Default::default(),
             patch_why: None,
             patch_honoured: false,
@@ -1450,7 +1458,9 @@ impl Controller {
     /// right and is not any more. Returns the list when it read one, for the rest of the tick
     /// ([`super::sliver_tap::refresh`]).
     fn update_patch(&mut self) -> Option<Vec<windows::CgWindow>> {
-        use crate::engine::corner_patch::{Listed, PatchFacts, order_step, ordered_right, patch_rect, steady_rect, visibility, would_be_right};
+        use crate::engine::corner_patch::{
+            Listed, PatchFacts, desktop_slides, order_step, ordered_right, patch_rect, slide_waits, steady_rect, visibility, would_be_right,
+        };
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
@@ -1467,6 +1477,13 @@ impl Controller {
         if on && !self.space_pending && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
             return None;
         }
+        // A Space change being recognized: no plan. Each Desktop has its own panel, which
+        // slides in with its Desktop as it was left; the main thread leaves it so until the
+        // first plan for that Desktop (its Space-change count is newer), so nothing meant
+        // for the Desktop left reaches it.
+        if on && self.space_pending && self.model.is_some() {
+            return None;
+        }
         let mut read = None;
         let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
         let plan = match &self.model {
@@ -1478,9 +1495,30 @@ impl Controller {
                 // Only those listed in the park zone (8L6): one the model has parked but the
                 // window server lists elsewhere shows there, and grew the patch's rectangle
                 // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
-                let parked = parked_in_zone(&list, m.windows().filter(|w| w.parked).map(|w| w.meta.id.0), main.frame, main.visible, main.corner);
+                let model_parked: HashSet<u32> = m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect();
+                let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
+                // The Desktop slides before the Space change's notice (10-23: its parked
+                // windows listed at x=110, all together): the plan stays as it was, so the
+                // panel slides away with its Desktop drawn and is there when it slides back.
+                let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
+                let now = Instant::now();
+                let slides = parked.is_empty() && desktop_slides(&listed_parked, main.frame, main.visible, main.corner);
+                self.patch_slide_since = slides.then(|| self.patch_slide_since.unwrap_or(now));
+                let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
+                if slide_waits(self.patch_slide_since.map(|t| now.saturating_duration_since(t)), shown_now) {
+                    if self.patch_why != Some("the Desktop slides") {
+                        tracing::debug!("corner patch: the Desktop slides; the plan stays as it was");
+                        self.patch_why = Some("the Desktop slides");
+                    }
+                    return Some(list);
+                }
                 let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rect, r));
+                let here = m.current_space(main.id).0;
+                let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rects.get(&here).copied(), r));
+                match rect {
+                    Some(r) => self.patch_rects.insert(here, r),
+                    None => self.patch_rects.remove(&here),
+                };
                 self.patch_rect = rect;
                 let listed: Vec<Listed> =
                     list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds, drawn: w.alpha > 0.0 && w.pid != own }).collect();
@@ -1519,7 +1557,6 @@ impl Controller {
                     tracing::debug!(?check, "corner patch: order checked");
                 }
                 let ordered = step.ordered;
-                let now = Instant::now();
                 let dragging = input::left_button_down() || self.drag.is_some();
                 let items = self.patch_items(rect, now, dragging || self.wants_fast_tick());
                 let facts = PatchFacts {
@@ -1556,16 +1593,18 @@ impl Controller {
                 // The test's forced still is compared with the patch's picture (`debug-overlay`).
                 let wanted = desktop_shot::needs_wallpaper() || cover_desktop_forced();
                 let picture = if show.is_none() && still && wanted { rect } else { None };
-                PatchPlan { show, above: show.and(above), reorder, space, picture }
+                PatchPlan { show, above: show.and(above), reorder, space, picture, on: true, items: facts.items.clone() }
             }
             _ => {
                 self.patch_rect = None;
+                self.patch_rects.clear();
+                self.patch_slide_since = None;
                 self.patch_order = Default::default();
                 self.patch_why = None;
                 // The icons known stay (they do not depend on the patch); a read is due when
                 // the patch is wanted again.
                 self.patch_items.read_for = None;
-                PatchPlan { show: None, above: None, reorder, space, picture: None }
+                PatchPlan { show: None, above: None, reorder, space, picture: None, on: false, items: None }
             }
         };
         if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {

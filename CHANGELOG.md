@@ -7,6 +7,8 @@
   the wallpaper were an aerial), in the style picked for it.
 - The parked windows' edges no longer flash in the corner as a switch ends: the corner stays
   covered until the wallpaper patch is back.
+- The parked windows' edges no longer show while a Desktop slides in: each Desktop keeps its
+  own wallpaper patch, which slides in with it.
 - New apps can open in the current stage: turn on **Open new apps in the current stage**
   (Settings → Stages, or `[stages] new_apps_join_current`) and a newly opened app's windows
   join the stage you are in. Hold Shift while opening an app to give it a stage of its own.

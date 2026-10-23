@@ -145,7 +145,12 @@ keep it ready is to move it almost off screen. macOS keeps a thin edge of each s
 visible in the bottom-right corner (another corner if a display sits beyond it). To keep
 the corner as clean as Apple's, those edges ignore clicks and a patch drawn from the
 wallpaper's own file covers them, without screen recording. The patch steps aside where it
-cannot match exactly.
+cannot match exactly. Each Desktop has its own patch, which stays on it and slides with it
+when you go to another Desktop and back, drawn as it was (nothing moves on a Desktop while
+you are away); it is checked again once the Desktop has arrived, and hidden while away if
+the picture's frame changed meanwhile (the sun, the appearance) or a desktop icon came
+under it. A Desktop's first visit still shows its edges for a moment, until its patch is
+drawn.
 
 **Dragging uses stand-ins.** A window dragged over the strip keeps its size under a
 card-sized picture of it, where Apple shrinks the window itself. A card dragged out is shown

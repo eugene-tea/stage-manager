@@ -1,11 +1,17 @@
 //! The wallpaper corner patch's panel and picture (`[windows] corner_patch`, on by
 //! default; the geometry and the rules are [`crate::engine::corner_patch`]).
 //!
-//! - **Panel**: borderless, non-activating, click-through, no shadow, opaque, at the normal
-//!   window level, never key or main; collection behavior [`panels::corner_patch`]
-//!   (`Transient`: hidden by Mission Control, App Exposé and Show Desktop; `IgnoresCycle`:
-//!   out of ⌘`). Its sharing type is left at the default, so screenshots show it as the
-//!   wallpaper it shows.
+//! - **Panels, one per Desktop** ([`Sheet`]): borderless, non-activating, click-through, no
+//!   shadow, opaque, at the normal window level, never key or main; collection behavior
+//!   [`panels::corner_patch`] (no Spaces flag: AppKit keeps it on the Desktop it is first
+//!   ordered in on, as the strip's panes; `Transient`: hidden by Mission Control, App Exposé
+//!   and Show Desktop; `IgnoresCycle`: out of ⌘`). Once ordered in, a Desktop's panel stays
+//!   ordered in there, shown or hidden by its alpha (ordered out and in again it would go
+//!   back to its Desktop, wherever the user is), so it slides in and out with its Desktop
+//!   drawn as it was left: nothing moves on a Desktop while the user is away. Which panel
+//!   is the shown Desktop's is read from the panels (`isOnActiveSpace`), never from the
+//!   engine's Space ids. Its sharing type is left at the default, so screenshots show it as
+//!   the wallpaper it shows.
 //! - **Picture**: the desktop picture drawn from its file, never captured
 //!   ([`crate::platform::wallpaper`], decided by [`crate::engine::wallpaper`]): no Screen
 //!   Recording, no menu bar recording indicator. A block of the corner is rendered once on
@@ -19,12 +25,21 @@
 //!   and options, the settings file's modification time, the picture's: cheap), and at a
 //!   time-of-day or solar frame's boundary. A read naming a different picture hides the
 //!   patch until the new one is rendered.
-//! - **Space and appearance changes** ([`space_changed`], [`appearance_changed`]): the patch
-//!   is ordered out at once (each Desktop may have its own picture; the frame may change
-//!   with the appearance), the Space's picture dropped, the wallpaper read again at once
-//!   and once more [`SETTLE`] later (NSWorkspace may still name the old Desktop's picture,
-//!   and the app's appearance may lag the notification, at the first read); nothing shows
-//!   before that second read.
+//! - **Space changes** ([`space_changed`]): the Desktop left keeps its panel as it is; the
+//!   arriving Desktop's panel (made on its first visit) is left as it slid in, untouched by
+//!   any plan meant for the Desktop left ([`arrival_waits`]), until the WM thread's first
+//!   plan for the new Desktop and the wallpaper's second read [`SETTLE`] after the change
+//!   (NSWorkspace may still name the old Desktop's picture at the first); then it is drawn
+//!   anew or hidden only if the picture, its frame, the rectangle or the order changed.
+//!   A Desktop's panel left drawn is hidden while away once its frame is no longer the one
+//!   macOS shows (the sun, the appearance: [`wp::still_drawn`]) or a desktop icon lies under
+//!   it, so it never slides back in wrong. Panels on other Desktops close on a display
+//!   change, when the patch is turned off, and past [`MAX_SHEETS`]; two on the Desktop shown
+//!   (a Desktop removed in Mission Control) leave one.
+//! - **Appearance changes** ([`appearance_changed`]): the patch is hidden at once (the frame
+//!   may change with the appearance), the wallpaper read again at once and once more
+//!   [`SETTLE`] later (the app's appearance may lag the notification); nothing shows before
+//!   that second read.
 //! - **A switch's end** ([`shown_for`]): a switch's cover of the corner, on the motion
 //!   overlay, stays past the switch until the patch has been on screen a moment
 //!   ([`crate::engine::corner_patch::cover_holds`]), so the corner is never bare between the
@@ -69,14 +84,35 @@ pub struct PatchPlan {
     /// While hidden, keep the picture rendered for this rectangle anyway (round 8L4): a
     /// switch's cover lays the desktop's still, when it holds the icons only, over it.
     pub picture: Option<Rect>,
+    /// `[windows] corner_patch` and the app managing windows: off, every other Desktop's
+    /// panel closes.
+    pub on: bool,
+    /// Finder's desktop icons as last read well (`None`: not known): they show on every
+    /// Desktop, so a panel left drawn on another one over an icon is hidden.
+    pub items: Option<Vec<Rect>>,
 }
 
 /// How often the wallpaper is read again while the patch is wanted.
 pub const READ_EVERY: Duration = Duration::from_secs(2);
 
 /// How long after a Space or appearance change the wallpaper is read the second time, the
-/// patch hidden until then.
+/// patch hidden (or, arriving on a Desktop, left as it slid in) until then.
 pub const SETTLE: Duration = Duration::from_millis(300);
+
+/// The longest an arriving Desktop's panel waits for the WM thread's first plan for that
+/// Desktop ([`arrival_waits`]); then the latest plan applies.
+pub const ARRIVAL_WAIT: Duration = Duration::from_secs(3);
+
+/// The most Desktops' panels kept (one per Desktop visited with the patch shown).
+pub const MAX_SHEETS: usize = 16;
+
+/// Whether an arriving Desktop's panel still waits for a plan meant for it: the arrival was
+/// noted when the latest plan applied carried the Space-change count `after`, and the WM
+/// thread counts the change only after the main thread hears of it, so a plan for the new
+/// Desktop carries a higher count. At most [`ARRIVAL_WAIT`].
+fn arrival_waits(arrival: Option<(u64, Instant)>, plan_space: u64, now: Instant) -> bool {
+    arrival.is_some_and(|(after, since)| plan_space <= after && now.saturating_duration_since(since) < ARRIVAL_WAIT)
+}
 
 /// The patch panel's window number once it exists (0 before).
 static NUMBER: AtomicU32 = AtomicU32::new(0);
@@ -126,25 +162,144 @@ pub fn crop_for(picture: &CGImage, region: Rect, scale: f64, screen: Rect, rect:
     wallpaper::crop(picture, px)
 }
 
-/// The patch's panel, its layer and its picture (main thread).
-struct Patch {
+/// What a Desktop's panel draws: the picture's facts, style and frame, to tell while away
+/// whether that frame is still the one macOS shows ([`wp::still_drawn`]).
+#[derive(Debug, Clone)]
+struct Drawn {
+    facts: wp::ImageFacts,
+    style: Option<wp::Style>,
+    index: usize,
+}
+
+/// One Desktop's patch panel (main thread): ordered in once on its Desktop, then shown or
+/// hidden there by its alpha.
+struct Sheet {
     panel: Retained<NSPanel>,
     layer: Retained<CALayer>,
-    plan: PatchPlan,
+    /// Ordered in once: it lives on that Desktop from then on.
+    placed: bool,
+    /// Drawn (alpha 1) at this rectangle.
     shown: Option<Rect>,
-    /// What the panel shows now (picture key and the plan), to skip a redundant show.
+    /// What it shows (picture key and the plan), to skip a redundant show.
     showing: Option<(String, PatchPlan)>,
+    /// The rendered block its crops come from (its Desktop's picture).
+    picture: Option<Picture>,
+    /// [`ORDERED_AGAINST`]'s value for it.
+    ordered: u64,
+    /// When it was shown at its rectangle ([`shown_for`]).
+    shown_at: Option<Instant>,
+    /// What it draws, while drawn.
+    drawn: Option<Drawn>,
+}
+
+impl Sheet {
+    fn new(mtm: MainThreadMarker) -> Self {
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0));
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            rect,
+            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        panel.setOpaque(true);
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setHasShadow(false);
+        panel.setLevel(NSNormalWindowLevel);
+        panel.setIgnoresMouseEvents(true);
+        // One Desktop: the one it is first ordered in on (no Spaces flag).
+        panel.setCollectionBehavior(panels::corner_patch());
+        panel.setHidesOnDeactivate(false);
+        panel.setAlphaValue(0.0);
+        // SAFETY: the panel lives as long as its sheet, which closes it when dropped.
+        unsafe { panel.setReleasedWhenClosed(false) };
+        let layer = CALayer::new();
+        if let Some(view) = panel.contentView() {
+            view.setWantsLayer(true);
+            view.setLayer(Some(&layer));
+        }
+        Self { panel, layer, placed: false, shown: None, showing: None, picture: None, ordered: NOT_ORDERED, shown_at: None, drawn: None }
+    }
+
+    /// Ordered in and on the Desktop shown now.
+    fn on_space_shown(&self) -> bool {
+        self.placed && self.panel.isVisible() && self.panel.isOnActiveSpace()
+    }
+
+    /// Hidden where it is (its alpha), still ordered in on its Desktop. True when it showed.
+    fn hide(&mut self) -> bool {
+        self.showing = None;
+        self.ordered = NOT_ORDERED;
+        self.shown_at = None;
+        self.drawn = None;
+        if self.shown.take().is_some() {
+            self.panel.setAlphaValue(0.0);
+            return true;
+        }
+        false
+    }
+
+    /// Shows `image` at `rect`, ordered just above `above` (or in front), and orders the panel
+    /// in on the Desktop shown when it never was. Only for the Desktop shown's sheet.
+    fn show(&mut self, mtm: MainThreadMarker, rect: Rect, image: &CGImage, scale: f64, above: Option<u32>, reorder: u32) {
+        let h = desktop::primary_height(mtm);
+        let frame = NSRect::new(NSPoint::new(rect.x, h - rect.y - rect.h), NSSize::new(rect.w, rect.h));
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        // SAFETY: a CGImage is accepted as a layer's contents; the layer retains it.
+        let contents = unsafe { &*(image as *const CGImage).cast::<AnyObject>() };
+        // SAFETY: as above.
+        unsafe { self.layer.setContents(Some(contents)) };
+        self.layer.setContentsScale(scale);
+        CATransaction::commit();
+        self.panel.setFrame_display(frame, false);
+        match above {
+            Some(id) => {
+                self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, id as isize);
+                self.ordered = (u64::from(id) << 32) | u64::from(reorder);
+            }
+            None => {
+                self.panel.orderFrontRegardless();
+                self.ordered = NOT_ORDERED;
+            }
+        }
+        self.panel.setAlphaValue(1.0);
+        self.placed = true;
+        if self.shown != Some(rect) {
+            self.shown_at = Some(Instant::now());
+            tracing::debug!(%rect, ?above, "corner patch: shown");
+        }
+        self.shown = Some(rect);
+    }
+}
+
+impl Drop for Sheet {
+    fn drop(&mut self) {
+        self.panel.orderOut(None);
+        self.panel.close();
+    }
+}
+
+/// The patch: the shown Desktop's panel, the others left on their Desktops, and what they
+/// share (main thread).
+struct Patch {
+    /// The panel of the Desktop shown (one never ordered in until it shows).
+    active: Sheet,
+    /// Other Desktops' panels, each ordered in on its own Desktop as it was left.
+    others: Vec<Sheet>,
+    plan: PatchPlan,
     reader: Reader,
     wall: Option<(Instant, Wall)>,
-    picture: Option<Picture>,
     /// The render in flight and the key that failed.
     renders: RenderMemo,
-    /// Nothing shows before this (a Space or appearance change settling, [`SETTLE`]).
+    /// Nothing new shows before this (a Space or appearance change settling, [`SETTLE`]).
     settle_until: Option<Instant>,
+    /// A Desktop arrived: the latest plan's Space-change count then, and when
+    /// ([`arrival_waits`]).
+    arrival: Option<(u64, Instant)>,
     /// What the log last said (a reason it is off, or what it draws).
     said: Option<String>,
 }
-
 /// The render in flight, and the picture key whose render failed (not tried again until
 /// the key changes: a new file version, frame, scale or screen).
 #[derive(Debug, Default, PartialEq)]
@@ -239,10 +394,15 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
         let patch = p.get_or_insert_with(|| Patch::new(mtm));
         let wants = |p: &PatchPlan| p.show.or(p.picture).is_some();
         let fresh = wants(&plan) && (!wants(&patch.plan) || plan.space != patch.plan.space);
+        if !plan.on && !patch.others.is_empty() {
+            tracing::debug!(closed = patch.others.len(), "corner patch: off; the other Desktops' panels close");
+            patch.others.clear();
+        }
         patch.plan = plan;
         if fresh {
             patch.wall = None;
         }
+        patch.check_others(mtm);
         patch.reconcile(mtm);
     });
 }
@@ -262,6 +422,7 @@ pub fn poll(mtm: MainThreadMarker) {
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else { return };
         let Some(patch) = p.as_mut() else { return };
+        patch.check_others(mtm);
         if patch.plan.show.is_none() && patch.plan.picture.is_none() {
             return;
         }
@@ -278,17 +439,41 @@ pub fn poll(mtm: MainThreadMarker) {
     });
 }
 
-/// The user went to another Space (main thread, at the notification): the patch goes at
-/// once, with the picture it showed (the new Desktop may have another); the wallpaper is
-/// read again now and once more [`SETTLE`] later, nothing shown before.
+/// The user went to another Space (main thread, at the notification): the Desktop left
+/// keeps its panel as it is, the arriving one's panel takes over as it slid in
+/// ([`Patch::arrive`]); the wallpaper is read again now and once more [`SETTLE`] later,
+/// nothing new shown before.
 pub fn space_changed(mtm: MainThreadMarker) {
-    settle(mtm, "a Space change");
+    // A switch's still of the desktop is of the old Desktop (8L3).
+    crate::platform::desktop_shot::forget();
+    let busy = PATCH.with(|p| {
+        let Ok(mut p) = p.try_borrow_mut() else { return true };
+        if let Some(patch) = p.as_mut() {
+            patch.arrive(mtm, "a Space change");
+        }
+        false
+    });
+    if busy {
+        // Busy (a call into AppKit that ran the main queue): once more shortly.
+        again_shortly(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                space_changed(mtm);
+            }
+        });
+    }
 }
 
-/// The appearance changed (main thread, at `AppleInterfaceThemeChangedNotification`): as
-/// [`space_changed`], the picture kept (a frame's key tells whether it is still the one).
+/// The appearance changed (main thread, at `AppleInterfaceThemeChangedNotification`): the
+/// patch hides until the wallpaper is read again, the picture kept (a frame's key tells
+/// whether it is still the one); other Desktops' panels whose frame changed hide.
 pub fn appearance_changed(mtm: MainThreadMarker) {
     settle(mtm, "an appearance change");
+}
+
+/// Reads the wallpaper again at once and once more after [`SETTLE`] ([`settled`]).
+fn settle_later() {
+    let when = dispatch2::DispatchTime::try_from(SETTLE).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = dispatch2::DispatchQueue::main().after(when, settled);
 }
 
 fn settle(mtm: MainThreadMarker, why: &'static str) {
@@ -300,12 +485,9 @@ fn settle(mtm: MainThreadMarker, why: &'static str) {
         if let Some(patch) = p.as_mut() {
             tracing::debug!(why, "corner patch: hidden until the wallpaper is read again");
             patch.hide();
-            if why == "a Space change" {
-                patch.picture = None;
-                patch.renders.drop_in_flight();
-            }
             patch.settle_until = Some(until);
             patch.wall = None;
+            patch.check_others(mtm);
             patch.reconcile(mtm);
         }
         false
@@ -320,8 +502,7 @@ fn settle(mtm: MainThreadMarker, why: &'static str) {
         });
         return;
     }
-    let when = dispatch2::DispatchTime::try_from(SETTLE).unwrap_or(dispatch2::DispatchTime::NOW);
-    let _ = dispatch2::DispatchQueue::main().after(when, settled);
+    settle_later();
 }
 
 /// [`SETTLE`] after a change: the second read, and the patch may show again.
@@ -406,6 +587,8 @@ pub fn display_changed(mtm: MainThreadMarker) {
     PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
             if let Some(patch) = p.as_mut() {
+                // Drawn for the old arrangement: other Desktops' panels go.
+                patch.others.clear();
                 patch.wall = None;
                 patch.reconcile(mtm);
             }
@@ -420,50 +603,93 @@ pub fn display_changed(mtm: MainThreadMarker) {
 
 impl Patch {
     fn new(mtm: MainThreadMarker) -> Self {
-        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0));
-        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            rect,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
-        panel.setOpaque(true);
-        panel.setBackgroundColor(Some(&NSColor::clearColor()));
-        panel.setHasShadow(false);
-        panel.setLevel(NSNormalWindowLevel);
-        panel.setIgnoresMouseEvents(true);
-        panel.setCollectionBehavior(panels::corner_patch());
-        panel.setHidesOnDeactivate(false);
-        // SAFETY: the panel lives for the process (kept in PATCH).
-        unsafe { panel.setReleasedWhenClosed(false) };
-        let layer = CALayer::new();
-        if let Some(view) = panel.contentView() {
-            view.setWantsLayer(true);
-            view.setLayer(Some(&layer));
-        }
         Self {
-            panel,
-            layer,
+            active: Sheet::new(mtm),
+            others: Vec::new(),
             plan: PatchPlan::default(),
-            shown: None,
-            showing: None,
             reader: Reader::default(),
             wall: None,
-            picture: None,
             renders: RenderMemo::default(),
             settle_until: None,
+            arrival: None,
             said: None,
         }
     }
 
+    /// Publishes the active panel's number, order and showing time for the WM thread's
+    /// order check and a switch's cover ([`window_number`], [`ordered_against`], [`shown_for`]).
+    fn publish_active(&self) {
+        let number = if self.active.placed { self.active.panel.windowNumber() as u32 } else { 0 };
+        NUMBER.store(number, Ordering::SeqCst);
+        ORDERED_AGAINST.store(self.active.ordered, Ordering::SeqCst);
+        SHOWN_AT.with(|s| s.set(self.active.shown_at));
+    }
+
     fn hide(&mut self) {
-        self.showing = None;
-        ORDERED_AGAINST.store(NOT_ORDERED, Ordering::SeqCst);
-        if self.shown.take().is_some() {
-            self.panel.orderOut(None);
-            SHOWN_AT.with(|s| s.set(None));
+        if self.active.hide() {
             tracing::debug!("corner patch: hidden");
+        }
+        self.publish_active();
+    }
+
+    /// Another Desktop shows (`why`): the panel of the Desktop left stays there as it is; the
+    /// one already on the Desktop shown takes over as it slid in, else a new one (ordered in
+    /// once it shows). Until a plan for this Desktop comes ([`arrival_waits`]) and the
+    /// wallpaper is read a second time ([`SETTLE`]), the panel taking over is left as it is.
+    fn arrive(&mut self, mtm: MainThreadMarker, why: &'static str) {
+        let now = Instant::now();
+        let left = self.active.placed && !self.active.on_space_shown();
+        if let Some(i) = self.others.iter().position(Sheet::on_space_shown) {
+            let next = self.others.swap_remove(i);
+            let old = std::mem::replace(&mut self.active, next);
+            if old.placed {
+                self.others.push(old);
+            }
+            tracing::debug!(why, shown = ?self.active.shown, panels = self.others.len() + 1, "corner patch: the Desktop shown's panel takes over");
+        } else if left {
+            let old = std::mem::replace(&mut self.active, Sheet::new(mtm));
+            self.others.push(old);
+            tracing::debug!(why, panels = self.others.len() + 1, "corner patch: a Desktop with no panel yet");
+        } else {
+            tracing::debug!(why, shown = ?self.active.shown, "corner patch: the Desktop shown keeps its panel");
+        }
+        // Two on the Desktop shown (a Desktop removed in Mission Control hands its windows
+        // to another): the active one stays.
+        let before = self.others.len();
+        self.others.retain(|s| !s.on_space_shown());
+        if self.others.len() != before {
+            tracing::info!(closed = before - self.others.len(), "corner patch: another panel on the Desktop shown; closed");
+        }
+        while self.others.len() > MAX_SHEETS - 1 {
+            self.others.remove(0);
+        }
+        self.renders.drop_in_flight();
+        self.arrival = Some((self.plan.space, now));
+        self.settle_until = Some(now + SETTLE);
+        self.wall = None;
+        self.publish_active();
+        self.reconcile(mtm);
+        settle_later();
+    }
+
+    /// Hides other Desktops' panels that would slide back in wrong: their frame is no longer
+    /// the one macOS shows ([`wp::still_drawn`]), or a desktop icon lies under them (or the
+    /// icons are not known).
+    fn check_others(&mut self, mtm: MainThreadMarker) {
+        if self.others.iter().all(|s| s.shown.is_none()) {
+            return;
+        }
+        let dark = wallpaper::dark_appearance(mtm);
+        let clock = self.reader.clock();
+        let items = self.plan.items.clone();
+        for s in self.others.iter_mut() {
+            let Some(rect) = s.shown else { continue };
+            let frame_right = s.drawn.as_ref().is_some_and(|d| wp::still_drawn(&d.facts, d.style, dark, &clock, d.index));
+            let icons_clear = items.as_ref().is_some_and(|i| !i.iter().any(|r| r.intersect(&rect).is_some()));
+            if !(frame_right && icons_clear) {
+                s.hide();
+                tracing::debug!(frame_right, icons_clear, "corner patch: another Desktop's panel hidden while away");
+            }
         }
     }
 
@@ -483,13 +709,14 @@ impl Patch {
     /// ([`cover_ready`]).
     fn reconcile(&mut self, mtm: MainThreadMarker) {
         self.reconcile_panel(mtm);
+        self.publish_active();
         self.publish_cover();
     }
 
     /// The picture the patch would show now, for a switch's cover ([`CoverSource`]).
     fn publish_cover(&self) {
         let wall = self.wall.as_ref().and_then(|(_, w)| w.outcome.as_ref().ok().map(|(_, job)| (w.screen, job.key())));
-        let picture = wall.and_then(|(screen, key)| self.picture.as_ref().filter(|p| p.key == key).map(|p| (screen, p)));
+        let picture = wall.and_then(|(screen, key)| self.active.picture.as_ref().filter(|p| p.key == key).map(|p| (screen, p)));
         let source = picture.map(|(screen, p)| CoverSource { region: p.region, scale: p.scale, screen });
         COVER_PICTURE.with(|c| {
             if let Ok(mut c) = c.try_borrow_mut() {
@@ -502,11 +729,22 @@ impl Patch {
     }
 
     fn reconcile_panel(&mut self, mtm: MainThreadMarker) {
+        let now = Instant::now();
+        if arrival_waits(self.arrival, self.plan.space, now) {
+            // The plan is the Desktop left's: the arriving panel stays as it slid in.
+            return;
+        }
+        self.arrival = None;
         let Some(rect) = self.plan.show else {
             self.hide();
             self.prepare(mtm);
             return;
         };
+        let settling = self.settle_until.is_some_and(|t| now < t);
+        if settling && self.active.shown.is_some() {
+            // Arrived drawn as it was left: changed only once the second read confirms.
+            return;
+        }
         if self.wall.is_none() {
             let wall = self.reader.read(mtm);
             self.wall = Some((Instant::now(), wall));
@@ -522,15 +760,15 @@ impl Patch {
             }
         };
         let key = job.key();
-        if self.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
+        if self.active.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
             return;
         }
-        if self.picture.as_ref().is_some_and(|p| p.key != key) {
+        if self.active.picture.as_ref().is_some_and(|p| p.key != key) {
             // Another picture or frame: never show the old one meanwhile.
-            self.picture = None;
+            self.active.picture = None;
             self.hide();
         }
-        let shown = self.picture.as_ref().and_then(|p| crop_for(&p.image, p.region, p.scale, wall.screen, rect));
+        let shown = self.active.picture.as_ref().and_then(|p| crop_for(&p.image, p.region, p.scale, wall.screen, rect));
         let Some(image) = shown else {
             self.hide();
             let region = wp::region(Size::new(wall.screen.w, wall.screen.h), wp::local(rect, wall.screen));
@@ -539,7 +777,7 @@ impl Patch {
             }
             return;
         };
-        if self.settle_until.is_some_and(|t| Instant::now() < t) {
+        if settling {
             // Rendered ahead; shown once the second read confirms the picture.
             self.hide();
             return;
@@ -557,8 +795,18 @@ impl Patch {
             ),
             false,
         );
-        self.show(mtm, rect, &image, job.scale);
-        self.showing = Some((key, self.plan.clone()));
+        let was_placed = self.active.placed;
+        self.active.show(mtm, rect, &image, job.scale, self.plan.above, self.plan.reorder);
+        self.active.showing = Some((key, self.plan.clone()));
+        self.active.drawn = wall.image.clone().map(|facts| Drawn { facts, style: decision.style, index: decision.frame.index });
+        if !was_placed && !self.active.panel.isOnActiveSpace() {
+            // Ordered in for the first time while a Desktop still slid: it went to another
+            // Desktop. Hidden there, it waits as that Desktop's; a new one for this Desktop.
+            tracing::debug!("corner patch: a new panel went to another Desktop; hidden there, a new one for this one");
+            self.active.hide();
+            let away = std::mem::replace(&mut self.active, Sheet::new(mtm));
+            self.others.push(away);
+        }
     }
 
     /// Hidden, keeps the picture rendered for the plan's `picture` rectangle (round 8L4: a
@@ -572,47 +820,17 @@ impl Patch {
         let Some((_, wall)) = self.wall.clone() else { return };
         let Ok((_, job)) = &wall.outcome else { return };
         let key = job.key();
-        if self.picture.as_ref().is_some_and(|p| p.key != key) {
-            self.picture = None;
+        if self.active.picture.as_ref().is_some_and(|p| p.key != key) {
+            self.active.picture = None;
         }
         let local = wp::local(rect, wall.screen);
-        if self.picture.as_ref().is_some_and(|p| wp::crop_px(p.region, local, p.scale).is_some()) {
+        if self.active.picture.as_ref().is_some_and(|p| wp::crop_px(p.region, local, p.scale).is_some()) {
             return;
         }
         let region = wp::region(Size::new(wall.screen.w, wall.screen.h), local);
         if self.renders.want(&key, region) == Want::Start {
             start_render(job.clone(), wall.screen, rect, region);
         }
-    }
-
-    fn show(&mut self, mtm: MainThreadMarker, rect: Rect, image: &CGImage, scale: f64) {
-        let h = desktop::primary_height(mtm);
-        let frame = NSRect::new(NSPoint::new(rect.x, h - rect.y - rect.h), NSSize::new(rect.w, rect.h));
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        // SAFETY: a CGImage is accepted as a layer's contents; the layer retains it.
-        let contents = unsafe { &*(image as *const CGImage).cast::<AnyObject>() };
-        // SAFETY: as above.
-        unsafe { self.layer.setContents(Some(contents)) };
-        self.layer.setContentsScale(scale);
-        CATransaction::commit();
-        self.panel.setFrame_display(frame, false);
-        match self.plan.above {
-            Some(id) => {
-                self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, id as isize);
-                ORDERED_AGAINST.store((u64::from(id) << 32) | u64::from(self.plan.reorder), Ordering::SeqCst);
-            }
-            None => {
-                self.panel.orderFrontRegardless();
-                ORDERED_AGAINST.store(NOT_ORDERED, Ordering::SeqCst);
-            }
-        }
-        if self.shown != Some(rect) {
-            SHOWN_AT.with(|s| s.set(Some(Instant::now())));
-            tracing::debug!(%rect, above = ?self.plan.above, "corner patch: shown");
-        }
-        self.shown = Some(rect);
-        NUMBER.store(self.panel.windowNumber() as u32, Ordering::SeqCst);
     }
 
     /// A render of `region` finished (main thread): keep it when it is still the one wanted.
@@ -622,7 +840,7 @@ impl Patch {
         }
         match result {
             Ok((region, image)) => {
-                self.picture = Some(Picture { key, region, scale, image });
+                self.active.picture = Some(Picture { key, region, scale, image });
                 self.reconcile(mtm);
             }
             Err(why) => {
@@ -685,6 +903,18 @@ mod tests {
         let settling = Some(now + Duration::from_millis(200));
         assert_eq!(cover_from(Some(source), settling, corner, now), Err("a Space or appearance change settles"));
         assert_eq!(cover_from(Some(source), Some(now), corner, now), Ok(source), "settled");
+    }
+
+    #[test]
+    fn an_arriving_panel_waits_only_for_a_plan_meant_for_its_desktop() {
+        let t0 = Instant::now();
+        // Arrived when the latest plan counted 7 Space changes.
+        let arrival = Some((7, t0));
+        assert!(arrival_waits(arrival, 7, t0), "the Desktop left's plan, sent before the WM thread counted the change");
+        assert!(arrival_waits(arrival, 6, t0 + Duration::from_millis(100)), "an older one in flight");
+        assert!(!arrival_waits(arrival, 8, t0), "the WM thread's first plan for the new Desktop");
+        assert!(!arrival_waits(arrival, 7, t0 + ARRIVAL_WAIT), "never longer");
+        assert!(!arrival_waits(None, 7, t0));
     }
 
     #[test]
