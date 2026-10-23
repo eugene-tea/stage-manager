@@ -345,6 +345,7 @@ fn hand_off(w: &mut Watch, handoff: &mut Handoff, now: Instant) -> bool {
                 return true;
             }
             let left: Vec<u32> = w.waiting().map(|x| x.id).collect();
+            handoff.offering.partly_taken(now);
             tracing::info!(app = ?pid, taken = ?ids, left = ?left, "guardian: the running Stage Manager took part of the watch; waiting for the rest");
             false
         }

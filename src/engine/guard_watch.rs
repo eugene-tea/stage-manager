@@ -259,7 +259,10 @@ pub struct Waiting {
     /// A window we had fitted clear of the strip ([`Registered::fitted`]): back only at its
     /// registered pre-fit frame, or once the guardian has moved it there (L3).
     pub fitted: bool,
-    /// How it looked in the latest pass (`None` before the first).
+    /// Taken from a guardian not signed like this app ([`Registered::unvouched`], R4):
+    /// reached only while listed on screen in the park zone, by any app's park test.
+    pub unvouched: bool,
+    /// How it looked in the latest pass (`None` before the first, and since a blind one).
     pub look: Option<Look>,
     /// The first settled on-screen sighting outside the park zone of the current streak.
     out_since: Option<Instant>,
@@ -287,7 +290,7 @@ impl Watch {
     pub fn new(registered: &[Registered]) -> Self {
         let mut w = Self { registered: registered.to_vec(), ..Self::default() };
         for r in registered {
-            w.waiting.insert(r.id, Waiting { fitted: r.fitted, ..waiting(r.id, r.pid, Some(r.restore)) });
+            w.waiting.insert(r.id, waiting_for(r));
         }
         w
     }
@@ -304,7 +307,7 @@ impl Watch {
             return false;
         }
         self.registered.push(r);
-        self.waiting.insert(r.id, Waiting { fitted: r.fitted, ..waiting(r.id, r.pid, Some(r.restore)) });
+        self.waiting.insert(r.id, waiting_for(&r));
         true
     }
 
@@ -369,15 +372,15 @@ impl Watch {
     }
 
     /// Waiting windows on screen in the latest pass (Accessibility can reach them): none
-    /// while blind (R3: no observation never authorizes a move).
+    /// while blind (R3: no observation never authorizes a move), and an unvouched one only
+    /// while listed in the park zone (R4).
     pub fn shown(&self) -> Vec<Waiting> {
-        self.waiting.values().filter(|w| !self.blind && w.shows()).cloned().collect()
+        self.waiting.values().filter(|w| !self.blind && w.reachable()).cloned().collect()
     }
 
-    /// True when a waiting window is on screen in the latest pass ([`Self::shown`] is not
-    /// empty).
+    /// True when a waiting window may be reached now ([`Self::shown`] is not empty).
     pub fn shows(&self) -> bool {
-        !self.blind && self.waiting.values().any(Waiting::shows)
+        !self.blind && self.waiting.values().any(Waiting::reachable)
     }
 
     /// Where a waiting window goes back: its registered frame made safe; `None` for one found
@@ -426,15 +429,14 @@ impl Watch {
             }
             let reg = self.registered.iter().find(|r| r.id == l.id);
             // A window the app registered is its own, however small, sliver or not (L4).
-            let known = if reg.is_some() { Known::Registered } else { Known::Unknown };
+            let known = reg.map_or(Known::Unknown, |r| if r.unvouched { Known::Unknown } else { Known::Registered });
             if !is_stranded(l.bounds, displays, known) {
                 continue;
             }
             // While Stage Manager runs again, a window in the park zone may be one it parked:
             // only the crashed app's own registered windows join.
             if reg.is_some() || (l.allowed && !self.successor) {
-                let fitted = reg.is_some_and(|r| r.fitted);
-                self.waiting.insert(l.id, Waiting { fitted, ..waiting(l.id, l.pid, reg.map(|r| r.restore)) });
+                self.waiting.insert(l.id, reg.map_or_else(|| waiting(l.id, l.pid, None), waiting_for));
                 events.push(Event::Joined { id: l.id, pid: l.pid, registered: reg.is_some() });
             }
         }
@@ -548,15 +550,26 @@ impl Waiting {
         self.look.is_some_and(|l| l.shown())
     }
 
+    /// May be reached through Accessibility now: on screen in the latest pass; an unvouched
+    /// one (R4) only while listed there in the park zone.
+    pub fn reachable(&self) -> bool {
+        if self.unvouched { matches!(self.look, Some(Look::Parked { shown: true, .. })) } else { self.shows() }
+    }
+
     /// What the park test knows of it: a window the app registered is its own (any size,
-    /// slivers count), one found in the park zone is any app's.
+    /// slivers count), one found in the park zone or taken unvouched (R4) is any app's.
     pub fn known(&self) -> Known {
-        if self.registered.is_some() { Known::Registered } else { Known::Unknown }
+        if self.registered.is_some() && !self.unvouched { Known::Registered } else { Known::Unknown }
     }
 }
 
 fn waiting(id: u32, pid: i32, registered: Option<Rect>) -> Waiting {
-    Waiting { id, pid, registered, fitted: false, look: None, out_since: None, missing_since: None }
+    Waiting { id, pid, registered, fitted: false, unvouched: false, look: None, out_since: None, missing_since: None }
+}
+
+/// A registered window, waiting: fitted only when vouched for (R4).
+fn waiting_for(r: &Registered) -> Waiting {
+    Waiting { fitted: r.fitted && !r.unvouched, unvouched: r.unvouched, ..waiting(r.id, r.pid, Some(r.restore)) }
 }
 
 /// True when a waiting window sits at its registered frame (as registered, or as the
@@ -586,7 +599,7 @@ mod tests {
     }
 
     fn reg() -> Vec<Registered> {
-        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false }]
+        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false }]
     }
 
     fn at(id: u32, bounds: Rect, onscreen: bool) -> Listed {
@@ -644,7 +657,7 @@ mod tests {
     fn a_small_registered_window_is_never_lost() {
         let d = displays();
         let small = Rect::new(2559.0, 1408.0, 40.0, 30.0);
-        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false };
+        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false, unvouched: false };
         let mut w = Watch::new(&[reg]);
         let listed = [
             Listed { id: 7, pid: 8, bounds: small, onscreen: false, allowed: true },
@@ -891,7 +904,7 @@ mod tests {
     #[test]
     fn a_fitted_window_waits_for_its_pre_fit_frame() {
         let fitted_at = Rect::new(216.0, 218.0, 600.0, 392.0);
-        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true }];
+        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, unvouched: false }];
         let t0 = Instant::now();
         let mut w = Watch::new(&r);
         pass(&mut w, t0, 0, &on_desktop_1());
@@ -910,6 +923,28 @@ mod tests {
         assert!(matches!(pass(&mut w, t0, 3500, &on_desktop_2(RESTORE)), Some(Release::SeenBack { .. })));
     }
 
+    /// The Codex review of 10-21, R4: a window taken unvouched (from a sender not signed like
+    /// this app) is reached only while listed on screen in the park zone. On screen anywhere
+    /// else it is never reached (seen back there, it is let go unmoved), and even an offer
+    /// that said fitted never makes it one.
+    #[test]
+    fn an_unvouched_window_is_reached_only_in_the_park_zone() {
+        let r = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, unvouched: true };
+        let t0 = Instant::now();
+        let mut w = Watch::registered_only(&[r]);
+        assert!(!w.waiting().next().is_some_and(|x| x.fitted), "never fitted");
+        assert_eq!(w.waiting().next().map(Waiting::known), Some(Known::Unknown));
+        pass(&mut w, t0, 0, &on_desktop_1());
+        assert!(w.shown().is_empty(), "on a Desktop not shown: waits");
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_2(parked())), None);
+        assert_eq!(w.shown().len(), 1, "listed on screen in the park zone: reachable");
+        let ordinary = Rect::new(300.0, 150.0, 700.0, 500.0);
+        assert_eq!(pass(&mut w, t0, 2000, &on_desktop_2(ordinary)), None);
+        assert!(w.shown().is_empty() && !w.shows(), "on screen outside the park zone: never reached");
+        assert_eq!(pass(&mut w, t0, 3000, &on_desktop_2(ordinary)), None);
+        assert!(matches!(pass(&mut w, t0, 4000, &on_desktop_2(ordinary)), Some(Release::SeenBack { .. })), "let go unmoved");
+    }
+
     /// Grok M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app
     /// that answers `ping` but has not adopted the crashed app's window (it is on a Desktop
     /// not shown, or the new app has not scanned yet) leaves it waiting; once adopted, it is
@@ -918,8 +953,8 @@ mod tests {
     fn a_new_app_running_takes_over_only_the_windows_it_adopted() {
         let t0 = Instant::now();
         let mut w = Watch::new(&[
-            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false },
-            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false },
+            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false },
+            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false },
         ]);
         let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
         let mut listed = on_desktop_1();
@@ -952,8 +987,8 @@ mod tests {
     #[test]
     fn a_watch_hands_over_and_a_taken_watch_holds_only_what_it_took() {
         let t0 = Instant::now();
-        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false };
-        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true };
+        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false };
+        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true, unvouched: false };
         let mut w = Watch::new(&[r1, r2]);
         let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
         let mut listed = on_desktop_1();
@@ -986,7 +1021,7 @@ mod tests {
 
     #[test]
     fn registered_restore_frames_are_made_safe() {
-        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false }];
+        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false, unvouched: false }];
         let w = Watch::new(&r);
         let f = w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())).unwrap_or_default();
         assert!(!is_stranded(f, &displays(), Known::Registered) && VISIBLE.contains_rect(&f), "{f:?}");

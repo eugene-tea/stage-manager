@@ -412,7 +412,7 @@ mod app {
     }
 
     fn ctl_handler(wm: WmHandle) -> ctl::Handler {
-        Arc::new(move |cmd| match cmd {
+        Arc::new(move |cmd, peer| match cmd {
             Command::Ping => json!({
                 "ok": true,
                 "pong": true,
@@ -425,7 +425,7 @@ mod app {
             }),
             // On this thread, never the WM thread's: a busy WM thread never keeps an old
             // guardian waiting (round 8N).
-            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst)),
+            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst), peer.trust()),
             Command::Settings => {
                 DispatchQueue::main().exec_async(shell::show_settings);
                 json!({ "ok": true })

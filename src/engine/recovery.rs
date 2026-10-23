@@ -210,6 +210,12 @@ pub struct Registered {
     /// it is back only once there (or once the guardian has moved it there).
     #[serde(default)]
     pub fitted: bool,
+    /// Taken from a guardian not signed like this app (the Codex review of 10-21, R4;
+    /// [`super::handoff::vet`]): nothing vouches that we parked it, so it is any app's window
+    /// to the park test (no sliver, no tiny size), never fitted, and reached only while the
+    /// window server lists it on screen in the park zone. False in files of earlier versions.
+    #[serde(default)]
+    pub unvouched: bool,
 }
 
 /// The parked file the app keeps for its guardian: the registered windows and the main
@@ -501,7 +507,7 @@ mod tests {
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
-            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true }],
+            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, unvouched: false }],
             corners: vec![Corner::BottomLeft],
             hidden: vec![HiddenApp { pid: 12, bundle: "com.example.a".into() }],
         };
