@@ -690,12 +690,19 @@ pub fn cover_holds(f: &HoldFacts) -> bool {
 /// ([`desktop_slides`]) before the Space change's notice comes ([`slide_waits`]).
 pub const SLIDE_HOLD: Duration = Duration::from_millis(600);
 
-/// Whether the window server's list shows the Desktop sliding (a Space change before its
-/// notice): the parked windows listed (`listed`, the model's parked ones on screen) are none
-/// in the park zone, but every one lies in it moved sideways only, all by the same distance
-/// (parked windows share their corner's edge; Show Desktop pushes windows apart).
-pub fn desktop_slides(listed: &[Rect], display: Rect, visible: Rect, corner: Corner) -> bool {
+/// Whether the window server's list shows a Desktop slide (a Space change before its
+/// notice): another Desktop's parked windows are listed on screen (`elsewhere`: the Desktop
+/// sliding in, in the zone or not; 10-23, its windows planned as this Desktop's slivers put
+/// this Desktop's panel at the other's rectangle), or this Desktop's (`here`, the model's
+/// parked ones of the Space shown, listed) are none in the park zone but every one lies in it
+/// moved sideways only, all by the same distance (parked windows share their corner's edge;
+/// Show Desktop pushes windows apart).
+pub fn desktop_slides(here: &[Rect], elsewhere: bool, display: Rect, visible: Rect, corner: Corner) -> bool {
     use super::park::is_parked_in_at;
+    if elsewhere {
+        return true;
+    }
+    let listed = here;
     if listed.is_empty() || listed.iter().any(|b| is_parked_in_at(*b, display, visible, corner)) {
         return false;
     }
@@ -758,14 +765,18 @@ mod tests {
         let visible = Rect::new(0.0, 25.0, 2560.0, 1415.0);
         // 10-23: the parked windows listed at x=110 as the Desktop slid, before the notice.
         let slid = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(110.0, 1408.0, 1497.0, 1030.0)];
-        assert!(desktop_slides(&slid, MAIN, visible, Corner::BottomRight));
+        assert!(desktop_slides(&slid, false, MAIN, visible, Corner::BottomRight));
         let parked = [Rect::new(2559.0, 1388.0, 1621.0, 1183.0)];
-        assert!(!desktop_slides(&parked, MAIN, visible, Corner::BottomRight), "in the zone: no slide");
+        assert!(!desktop_slides(&parked, false, MAIN, visible, Corner::BottomRight), "in the zone: no slide");
         let apart = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(900.0, 1408.0, 1497.0, 1030.0)];
-        assert!(!desktop_slides(&apart, MAIN, visible, Corner::BottomRight), "pushed apart: not a slide");
+        assert!(!desktop_slides(&apart, false, MAIN, visible, Corner::BottomRight), "pushed apart: not a slide");
         let lifted = [Rect::new(110.0, 600.0, 1621.0, 400.0)];
-        assert!(!desktop_slides(&lifted, MAIN, visible, Corner::BottomRight), "moved up: not a slide");
-        assert!(!desktop_slides(&[], MAIN, visible, Corner::BottomRight));
+        assert!(!desktop_slides(&lifted, false, MAIN, visible, Corner::BottomRight), "moved up: not a slide");
+        assert!(!desktop_slides(&[], false, MAIN, visible, Corner::BottomRight));
+        // 10-23, 11:51:01.093: the next Desktop's parked windows listed in the zone before the
+        // notice, this Desktop's slid off the display: a slide, whatever the geometry says.
+        assert!(desktop_slides(&[], true, MAIN, visible, Corner::BottomRight));
+        assert!(desktop_slides(&parked, true, MAIN, visible, Corner::BottomRight));
         let ms = Duration::from_millis;
         assert!(slide_waits(Some(ms(0)), true));
         assert!(!slide_waits(Some(SLIDE_HOLD), true), "never longer");
