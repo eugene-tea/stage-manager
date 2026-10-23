@@ -138,10 +138,17 @@ Known gaps the owner accepted as rare:
 
 ## Open
 
-- **Live suite** on the current dev (about 15 min, his copy quit): m3 safety m4 m6 restore
-  strip native visible parity motion slots expose capture, with the new checks
-  (`apps_here_check`, `in_place_checks`, `drop_settle_checks`, `merge_hold_check`,
-  `dock_order_checks`).
+- **Screens (after 1.4.0):** follow-up update for external and several screens.
+  - A strip and stages per screen, as Apple's (today only the main screen is managed; a
+    window on a second monitor is left alone). FEATURE-REQUESTS R8: medium.
+  - A login on another screen (10-23: laptop screen at login, then the lid closed onto the
+    external display): macOS reopens every window on one Desktop, and the other Desktop's
+    saved stages wait for windows that will not come. Let those saved stages form where
+    their windows are, and say so in the restore summary.
+  - The first launch after that login drew card switches wrong (the incoming window showed
+    at its place before its snapshot reached it; the log identical to a good run); a
+    relaunch cured it. Catch it with a screen recording if it comes back; check what the
+    overlay and the strip panels hold from a launch while the screens settle.
 - **Real-restart check (8G)**, with the owner, from the day's log:
   - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
     coming …", "asked to quit by the system", "quitting after the logout's head start".
