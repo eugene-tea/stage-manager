@@ -19,9 +19,18 @@
 //!   sun's position, so a place: without Location Services, the time zone's own place
 //!   (`/usr/share/zoneinfo/zone.tab`), and only while every place within
 //!   [`SOLAR_SLACK_DEG`] of it would show the same frame ([`solar_frame`]).
+//! - **Apple's own pictures** ([`resolve_system_pictures`]): System Settings names one of
+//!   Apple's dynamic wallpapers only by its description in `/System/Library/Desktop
+//!   Pictures` (a `.madesktop`, a choice of type `systemDesktopPicture`); the description's
+//!   `mobileAssetID` names the picture macOS downloaded for it
+//!   (`~/Library/Application Support/com.apple.mobileAssetDesktop/<id>.heic`), which is what
+//!   NSWorkspace reports. Such a choice stands for that file, and its provider
+//!   (`com.apple.wallpaper.choice.dynamic`) counts as a picture for it: the file carries the
+//!   frames and their schedule; the choice's style picks among them as for any picture.
 //! - **What is never drawn** ([`decide`]): videos and aerials, shuffles (a folder, Photos),
-//!   a system wallpaper description (`.madesktop`), a picture macOS's settings do not name
-//!   for the screen, Desktops with this picture set to different styles: the patch stays off.
+//!   a system wallpaper description NSWorkspace names itself (`.madesktop`), one with no
+//!   downloaded picture or no asset id, a picture macOS's settings do not name for the
+//!   screen, Desktops with this picture set to different styles: the patch stays off.
 //!   Exact or off: Center and Tile (their rule, the picture at its own size in points, is
 //!   not checked against the screen yet) and Fit with no fill colour (what macOS shows
 //!   around the picture then is unchecked) stay off until a live check covers them. With
@@ -586,10 +595,16 @@ fn iso6709(s: &str) -> Option<(f64, f64)> {
 /// file read as data, never written): per display, per Space, or for all.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StoreChoice {
-    /// The picture's path (from its file URL).
+    /// The picture's path (from its file URL; for one of Apple's pictures, the downloaded
+    /// file its description names, once [`resolve_system_pictures`] found it).
     pub path: String,
     /// The provider (`com.apple.wallpaper.choice.image` for a picture file).
     pub provider: String,
+    /// The configuration's type (`imageFile`, [`SYSTEM_PICTURE`]).
+    pub kind: Option<String>,
+    /// The path is the downloaded picture of one of Apple's descriptions
+    /// ([`resolve_system_pictures`]), no longer the description itself.
+    pub system: bool,
     /// The style picker's id (`automatic`, `dynamic`, `light`, `dark`).
     pub style: Option<String>,
     /// The placement picker's id (`Crop`, `Fit`, `Stretch`, `Center`, `Tile`).
@@ -653,6 +668,8 @@ pub fn store_choices(index: &Plist) -> Vec<StoreChoice> {
             out.push(StoreChoice {
                 path,
                 provider: choice.get("Provider").and_then(Plist::as_str).unwrap_or_default().to_owned(),
+                kind: choice.at(&["Configuration", "type"]).and_then(Plist::as_str).map(str::to_owned),
+                system: false,
                 style: picked("style"),
                 placement: picked("placement"),
                 shuffle,
@@ -673,9 +690,46 @@ pub struct StoreView {
     pub placement: Option<Placement>,
 }
 
-/// A provider whose picture is the file itself (a picture; a solid color's swatch).
-fn drawable_provider(p: &str) -> bool {
-    p.ends_with(".image") || p.to_ascii_lowercase().contains("color")
+/// The configuration type of a choice that names one of Apple's pictures by its description
+/// (`/System/Library/Desktop Pictures/<name>.madesktop`).
+pub const SYSTEM_PICTURE: &str = "systemDesktopPicture";
+
+/// The folder (under the home folder) where macOS keeps the pictures it downloaded for
+/// Apple's descriptions.
+pub const ASSET_FOLDER: &str = "Library/Application Support/com.apple.mobileAssetDesktop";
+
+/// The downloaded picture one of Apple's descriptions (a `.madesktop` property list) names:
+/// `<asset_dir>/<mobileAssetID>.heic`. `None` without an asset id, or with one that is not a
+/// plain file name.
+pub fn system_asset(description: &Plist, asset_dir: &str) -> Option<String> {
+    let id = description.get("mobileAssetID")?.as_str()?.trim();
+    let plain = !id.is_empty() && !id.contains('/') && !id.contains('\0') && id != "." && id != "..";
+    plain.then(|| format!("{}/{id}.heic", asset_dir.trim_end_matches('/')))
+}
+
+/// Puts each choice that names one of Apple's pictures by its description
+/// ([`SYSTEM_PICTURE`], a `.madesktop`) at the picture macOS downloaded for it
+/// ([`system_asset`]) when `exists` finds that file; `describe` reads a description (the
+/// platform's file read, so this stays pure). A description with no asset id, or whose
+/// picture is not there, leaves the choice as it was: it names no picture NSWorkspace shows.
+pub fn resolve_system_pictures(choices: &mut [StoreChoice], asset_dir: &str, mut describe: impl FnMut(&str) -> Option<Plist>, exists: impl Fn(&str) -> bool) {
+    for c in choices.iter_mut() {
+        let described = c.kind.as_deref() == Some(SYSTEM_PICTURE) && c.path.to_ascii_lowercase().ends_with(".madesktop");
+        if !described || c.system {
+            continue;
+        }
+        if let Some(asset) = describe(&c.path).and_then(|d| system_asset(&d, asset_dir)).filter(|a| exists(a)) {
+            c.path = asset;
+            c.system = true;
+        }
+    }
+}
+
+/// A choice whose picture is the file itself: a picture or a solid color's swatch, or one of
+/// Apple's dynamic pictures at its downloaded file ([`resolve_system_pictures`]).
+fn drawable(c: &StoreChoice) -> bool {
+    let p = &c.provider;
+    p.ends_with(".image") || p.to_ascii_lowercase().contains("color") || (c.system && p.ends_with(".dynamic"))
 }
 
 /// Consults the settings (`None`: unreadable or holding no choice at all) for the picture
@@ -691,7 +745,7 @@ pub fn consult(store: Option<&[StoreChoice]>, path: &str) -> Result<Option<Store
     if mine.iter().any(|c| c.shuffle) {
         return Err("a shuffling wallpaper");
     }
-    if mine.iter().any(|c| !drawable_provider(&c.provider)) {
+    if mine.iter().any(|c| !drawable(c)) {
         return Err("a wallpaper that is not a picture file");
     }
     let one = |vals: Vec<Option<&str>>| -> Result<Option<String>, ()> {
@@ -1042,32 +1096,36 @@ mod tests {
     /// A choice: its URL, provider, style, placement and whether it shuffles.
     type Row<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>, bool);
 
+    /// One `Content` entry of the settings file: a choice of `kind` at `url`.
+    fn content(url: &str, provider: &str, kind: &str, style: Option<&str>, placement: Option<&str>, shuffle: bool) -> Plist {
+        let picker = |id: &str| dict(&[("picker", dict(&[("_0", dict(&[("id", s(id))]))]))]);
+        let mut values = Vec::new();
+        if let Some(st) = style {
+            values.push(("style", picker(st)));
+        }
+        if let Some(p) = placement {
+            values.push(("placement", picker(p)));
+        }
+        dict(&[
+            (
+                "Choices",
+                Plist::Array(vec![dict(&[
+                    ("Configuration", dict(&[("type", s(kind)), ("url", dict(&[("relative", s(url))]))])),
+                    ("Provider", s(provider)),
+                ])]),
+            ),
+            ("EncodedOptionValues", dict(&[("values", dict(&values))])),
+            ("Shuffle", s(if shuffle { "{folder}" } else { "$null" })),
+        ])
+    }
+
     fn store_with(choices: &[Row]) -> Plist {
-        let content = |url: &str, provider: &str, style: Option<&str>, placement: Option<&str>, shuffle: bool| {
-            let picker = |id: &str| dict(&[("picker", dict(&[("_0", dict(&[("id", s(id))]))]))]);
-            let mut values = Vec::new();
-            if let Some(st) = style {
-                values.push(("style", picker(st)));
-            }
-            if let Some(p) = placement {
-                values.push(("placement", picker(p)));
-            }
-            dict(&[
-                (
-                    "Choices",
-                    Plist::Array(vec![dict(&[
-                        ("Configuration", dict(&[("type", s("imageFile")), ("url", dict(&[("relative", s(url))]))])),
-                        ("Provider", s(provider)),
-                    ])]),
-                ),
-                ("EncodedOptionValues", dict(&[("values", dict(&values))])),
-                ("Shuffle", s(if shuffle { "{folder}" } else { "$null" })),
-            ])
-        };
         let spaces: Vec<(String, Plist)> = choices
             .iter()
             .enumerate()
-            .map(|(i, (u, p, st, pl, sh))| (format!("space-{i}"), dict(&[("Default", dict(&[("Desktop", dict(&[("Content", content(u, p, *st, *pl, *sh))]))]))])))
+            .map(|(i, (u, p, st, pl, sh))| {
+                (format!("space-{i}"), dict(&[("Default", dict(&[("Desktop", dict(&[("Content", content(u, p, "imageFile", *st, *pl, *sh))]))]))]))
+            })
             .collect();
         dict(&[("Spaces", Plist::Dict(spaces)), ("AllSpacesAndDisplays", dict(&[("Idle", dict(&[]))]))])
     }
@@ -1157,6 +1215,123 @@ mod tests {
         assert!(decide(&with(Some(Placement::Fit), false)).is_err());
         assert!(decide(&with(Some(Placement::Fill), false)).is_ok());
         assert!(decide(&with(Some(Placement::Stretch), false)).is_ok());
+    }
+
+    // ----- Apple's own pictures, named by their descriptions -----------------------------
+
+    const ASSETS: &str = "/Users/someone/Library/Application Support/com.apple.mobileAssetDesktop";
+    const DYNAMIC: &str = "com.apple.wallpaper.choice.dynamic";
+    /// A made-up description of one of Apple's pictures (the name invented).
+    const DESC: &str = "file:///System/Library/Desktop%20Pictures/Harbor%20Graphic.madesktop";
+    const DESC_PATH: &str = "/System/Library/Desktop Pictures/Harbor Graphic.madesktop";
+    const ASSET: &str = "/Users/someone/Library/Application Support/com.apple.mobileAssetDesktop/Harbor Graphic.heic";
+    const OTHER_DESC: &str = "file:///System/Library/Desktop%20Pictures/Dune%20Graphic.madesktop";
+    const OTHER_ASSET: &str = "/Users/someone/Library/Application Support/com.apple.mobileAssetDesktop/Dune Graphic.heic";
+
+    fn description(id: Option<&str>) -> Plist {
+        let mut e = vec![("isDynamic", n(1.0)), ("isSolar", n(1.0)), ("width", n(6016.0)), ("height", n(6016.0))];
+        if let Some(id) = id {
+            e.push(("mobileAssetID", s(id)));
+        }
+        dict(&e)
+    }
+
+    /// The descriptions on a made-up Mac: Harbor and Dune name their pictures, Blank names none.
+    fn describe(path: &str) -> Option<Plist> {
+        let name = path.rsplit('/').next()?.strip_suffix(".madesktop")?;
+        Some(description((name != "Blank").then_some(name)))
+    }
+
+    /// A settings file with one Desktop (and a screen saver, `Idle`, beside it).
+    fn desktop_and_idle(desktop: Plist, idle: Plist) -> Plist {
+        let space = dict(&[("Desktop", dict(&[("Content", desktop)])), ("Idle", dict(&[("Content", idle)]))]);
+        dict(&[("Spaces", dict(&[("space-0", dict(&[("Default", space)]))]))])
+    }
+
+    fn resolved(index: &Plist, downloaded: &[&str]) -> Vec<StoreChoice> {
+        let mut choices = store_choices(index);
+        resolve_system_pictures(&mut choices, ASSETS, describe, |p| downloaded.contains(&p));
+        choices
+    }
+
+    #[test]
+    fn a_description_names_its_downloaded_picture() {
+        assert_eq!(system_asset(&description(Some("Harbor Graphic")), ASSETS).as_deref(), Some(ASSET));
+        assert_eq!(system_asset(&description(Some("Harbor Graphic")), &format!("{ASSETS}/")).as_deref(), Some(ASSET));
+        assert_eq!(system_asset(&description(None), ASSETS), None, "no asset id");
+        for bad in ["", "  ", "..", "a/b", "../Harbor"] {
+            assert_eq!(system_asset(&description(Some(bad)), ASSETS), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_system_choice_stands_for_its_picture_only_once_downloaded() {
+        let store = desktop_and_idle(content(DESC, DYNAMIC, SYSTEM_PICTURE, Some("dynamic"), Some("Crop"), false), dict(&[]));
+        let choices = resolved(&store, &[ASSET]);
+        assert_eq!(choices.len(), 1);
+        assert_eq!((choices[0].path.as_str(), choices[0].system), (ASSET, true));
+        let view = consult(Some(&choices), ASSET).expect("drawable").expect("read");
+        assert_eq!(view, StoreView { style: Some(Style::Dynamic), placement: Some(Placement::Fill) });
+        // Not downloaded: the choice still names the description, which NSWorkspace never shows.
+        let absent = resolved(&store, &[]);
+        assert_eq!((absent[0].path.as_str(), absent[0].system), (DESC_PATH, false));
+        assert!(consult(Some(&absent), ASSET).is_err());
+        // A description with no asset id names no picture.
+        let blank = desktop_and_idle(
+            content("file:///System/Library/Desktop%20Pictures/Blank.madesktop", DYNAMIC, SYSTEM_PICTURE, Some("dynamic"), None, false),
+            dict(&[]),
+        );
+        assert!(!resolved(&blank, &[ASSET])[0].system);
+        // A picture file of the dynamic provider (not a description): still not a picture choice.
+        let odd = desktop_and_idle(content(&format!("file://{}", ASSET.replace(' ', "%20")), DYNAMIC, "imageFile", Some("dynamic"), None, false), dict(&[]));
+        assert!(consult(Some(&resolved(&odd, &[ASSET])), ASSET).is_err());
+    }
+
+    #[test]
+    fn aerials_and_shuffles_stay_off_even_described() {
+        let aerial = desktop_and_idle(content(DESC, "com.apple.wallpaper.choice.aerials", SYSTEM_PICTURE, None, None, false), dict(&[]));
+        assert!(consult(Some(&resolved(&aerial, &[ASSET])), ASSET).is_err());
+        let shuffled = desktop_and_idle(content(DESC, DYNAMIC, SYSTEM_PICTURE, Some("dynamic"), None, true), dict(&[]));
+        assert!(consult(Some(&resolved(&shuffled, &[ASSET])), ASSET).is_err());
+    }
+
+    #[test]
+    fn the_screen_savers_choice_is_never_taken_for_the_desktops() {
+        // The Desktop shows Harbor (dynamic); the screen saver names Dune (dark), downloaded too.
+        let store = desktop_and_idle(
+            content(DESC, DYNAMIC, SYSTEM_PICTURE, Some("dynamic"), Some("Crop"), false),
+            content(OTHER_DESC, DYNAMIC, SYSTEM_PICTURE, Some("dark"), None, false),
+        );
+        let choices = resolved(&store, &[ASSET, OTHER_ASSET]);
+        assert_eq!(choices.len(), 1, "the Desktop's only");
+        assert!(consult(Some(&choices), OTHER_ASSET).is_err(), "the screen saver's picture is not the Desktop's");
+        // The screen saver naming the Desktop's own picture in another style mixes nothing in.
+        let same = desktop_and_idle(
+            content(DESC, DYNAMIC, SYSTEM_PICTURE, Some("dynamic"), Some("Crop"), false),
+            content(DESC, DYNAMIC, SYSTEM_PICTURE, Some("dark"), None, false),
+        );
+        let view = consult(Some(&resolved(&same, &[ASSET])), ASSET).expect("drawable").expect("read");
+        assert_eq!(view.style, Some(Style::Dynamic));
+    }
+
+    #[test]
+    fn the_decision_draws_a_described_solar_picture_by_the_sun() {
+        let store = desktop_and_idle(content(DESC, DYNAMIC, SYSTEM_PICTURE, Some("dynamic"), Some("Crop"), false), dict(&[]));
+        let choices = resolved(&store, &[ASSET]);
+        let solar = facts(schedule(None, None, Some(&ventura_solar())), 5);
+        let noon = 1_782_072_000.0;
+        let at = |unix: f64| Inputs { clock: clock(unix, 0.5), ..inputs(ASSET, Some(&choices), Some(&solar)) };
+        let d = decide(&at(noon)).expect("drawn");
+        assert_eq!((d.placement, d.frame.index, d.style, d.kind), (Placement::Fill, 0, Some(Style::Dynamic), "solar"));
+        assert_eq!(d.frame.recheck_in, Some(SOLAR_RECHECK));
+        assert_eq!(decide(&at(noon + 12.0 * 3600.0)).map(|d| d.frame.index), Ok(1), "midnight: the night frame");
+        // Another Desktop shows a picture the settings name only as a plain file in another
+        // style: the two differ, so which one shows is unknown.
+        let mut mixed = choices.clone();
+        mixed.push(StoreChoice { path: ASSET.into(), provider: IMAGE.into(), kind: Some("imageFile".into()), style: Some("dark".into()), ..Default::default() });
+        assert!(decide(&Inputs { store: Some(&mixed), ..at(noon) }).is_err());
+        // NSWorkspace naming the description itself is still refused.
+        assert!(decide(&inputs(DESC_PATH, Some(&choices), Some(&solar))).is_err());
     }
 
     #[test]
