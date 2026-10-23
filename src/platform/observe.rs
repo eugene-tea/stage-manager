@@ -21,7 +21,15 @@
 //! (Home, 10-21). About once a second ([`Observer::sweep_closed`]) the tracked windows are
 //! looked up in the window server's complete list (every Desktop, minimized and hidden
 //! windows included); one missing from it on two looks apart is reported destroyed.
+//!
+//! **Quit without a notice** (round missed-quit, [`crate::engine::gone`]): Home quit on 10-23
+//! (and earlier days) and no "app terminated" ever reached us. The pids of apps with tracked
+//! windows (about once a second) and of apps whose Accessibility calls failed or timed out
+//! (each pass) are tested ([`Observer::reap_gone`]); a process that no longer exists goes the
+//! way of a termination notice. A termination notice for a pid we do not know is logged, and
+//! taken for the known apps of its bundle id whose process is gone.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -39,6 +47,7 @@ use super::native_settings::RawSettings;
 use super::windows::{self, CgWindow};
 use crate::engine::busy_apps::Reply;
 use crate::engine::geometry::Rect;
+use crate::engine::gone::{self, GoneCheck};
 use crate::engine::vanished::Vanished;
 
 /// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
@@ -216,6 +225,9 @@ pub struct Observer {
     last_launch: Option<Instant>,
     /// Tracked windows the window server no longer lists ([`Self::sweep_closed`], 8M).
     vanished: Vanished,
+    /// Apps whose Accessibility calls failed or timed out: their process is tested at the next
+    /// pass ([`Self::reap_gone`]). A cell: the failures are seen on `&self` paths.
+    gone: RefCell<GoneCheck>,
 }
 
 /// The AX callback type, installed by the WM thread.
@@ -249,6 +261,7 @@ impl Observer {
             activated_at: HashMap::new(),
             last_launch: None,
             vanished: Vanished::default(),
+            gone: RefCell::new(GoneCheck::default()),
         }
     }
 
@@ -405,6 +418,7 @@ impl Observer {
         self.windows.clear();
         self.pending.clear();
         self.recheck.clear();
+        self.gone.borrow_mut().clear();
         if was {
             self.events.push(WinEvent::Stopped);
         }
@@ -670,18 +684,61 @@ impl Observer {
     /// reason?", and an unknown answer must never count a window as gone from its Space (the
     /// review's L4).
     pub fn minimized_reply(&self, id: u32) -> Reply {
-        self.windows.get(&id).map_or(Reply::No, |w| reply(w.element.is_minimized()))
+        self.windows.get(&id).map_or(Reply::No, |w| self.noted(w.pid, reply(w.element.is_minimized())))
     }
 
     /// Whether the window is in full screen now (on its own Space; asked through AX, which
     /// still reaches a tracked window off the shown Space for the apps measured).
     pub fn fullscreen_reply(&self, id: u32) -> Reply {
-        self.windows.get(&id).map_or(Reply::No, |w| reply(w.element.is_fullscreen()))
+        self.windows.get(&id).map_or(Reply::No, |w| self.noted(w.pid, reply(w.element.is_fullscreen())))
     }
 
     /// Whether app `pid` is hidden now (⌘H; asked through AX).
     pub fn app_hidden_reply(&self, pid: i32) -> Reply {
-        self.observed.get(&pid).map_or(Reply::No, |a| reply(a.element.is_hidden()))
+        self.observed.get(&pid).map_or(Reply::No, |a| self.noted(pid, reply(a.element.is_hidden())))
+    }
+
+    /// `answer` from app `pid`: a timeout or a "cannot tell" makes it a suspect
+    /// ([`Self::suspect`]).
+    fn noted(&self, pid: i32, answer: Reply) -> Reply {
+        if matches!(answer, Reply::TimedOut | Reply::CannotTell) {
+            self.suspect(pid);
+        }
+        answer
+    }
+
+    /// An Accessibility call to app `pid` failed or timed out: whether its process still
+    /// exists is tested at the next pass ([`Self::reap_gone`]).
+    pub fn suspect(&self, pid: i32) {
+        self.gone.borrow_mut().suspect(pid);
+    }
+
+    /// Apps gone without a termination notice (round missed-quit, [`crate::engine::gone`]):
+    /// tests the pids of apps whose Accessibility calls failed or timed out since the last
+    /// pass, and on a `full` pass (about once a second) the pids of apps with tracked windows;
+    /// a process that no longer exists is handled as its termination notice would be (its
+    /// windows reported destroyed, then the app terminated), logged at info. Returns how many.
+    pub fn reap_gone(&mut self, full: bool) -> usize {
+        if !self.observing {
+            self.gone.borrow_mut().clear();
+            return 0;
+        }
+        let window_pids: Vec<i32> = self.windows.values().map(|w| w.pid).collect();
+        let candidates = self.gone.borrow_mut().candidates(window_pids, full, |p| {
+            self.apps.contains_key(&p) || self.observed.contains_key(&p) || self.pending.contains_key(&p)
+        });
+        let dead = gone::gone(candidates, process_gone);
+        for &pid in &dead {
+            let app = self.apps.get(&pid).cloned().unwrap_or(AppInfo { pid, bundle_id: None, name: None });
+            tracing::info!(
+                pid,
+                bundle = app.bundle_or_unknown(),
+                name = app.name.as_deref().unwrap_or("?"),
+                "app gone without a termination notice: its process no longer exists; handled as its quit"
+            );
+            self.terminated(app);
+        }
+        dead.len()
     }
 
     /// Handles one AX notification for app `pid`.
@@ -782,12 +839,25 @@ impl Observer {
                 }
             }
             AppEvent::Terminated(app) => {
-                self.activated_at.remove(&app.pid);
-                let known = self.apps.remove(&app.pid).is_some();
+                let known = self.apps.contains_key(&app.pid) || self.observed.contains_key(&app.pid);
                 if known {
                     self.log_app("app terminated", &app);
+                    self.terminated(app);
+                    return;
                 }
-                self.unobserve_app(app.pid);
+                // A notice for a pid we never knew (any app quitting: the notice covers every
+                // activation policy). Logged, so a missed quit tells which side lost it; the
+                // known apps of its bundle id whose process is gone quit with it.
+                tracing::debug!(pid = app.pid, bundle = app.bundle_or_unknown(), "app terminated: a pid not known");
+                if let Some(bundle) = app.bundle_id.as_deref() {
+                    for pid in self.pids_with_bundle(bundle) {
+                        if process_gone(pid) {
+                            let info = self.apps.get(&pid).cloned().unwrap_or(AppInfo { pid, ..app.clone() });
+                            tracing::info!(pid, notice_pid = app.pid, bundle, "app terminated: the notice named another pid of its bundle id; this one is gone too");
+                            self.terminated(info);
+                        }
+                    }
+                }
                 if self.observing {
                     self.events.push(WinEvent::AppTerminated(app.pid));
                 }
@@ -821,6 +891,17 @@ impl Observer {
                     self.events.push(WinEvent::AppUnhidden(app.pid));
                 }
             }
+        }
+    }
+
+    /// App `app` quit (a termination notice, or its process found gone): forgotten, its
+    /// windows reported destroyed, then [`WinEvent::AppTerminated`].
+    fn terminated(&mut self, app: AppInfo) {
+        self.activated_at.remove(&app.pid);
+        self.apps.remove(&app.pid);
+        self.unobserve_app(app.pid);
+        if self.observing {
+            self.events.push(WinEvent::AppTerminated(app.pid));
         }
     }
 
@@ -901,6 +982,17 @@ impl Observer {
     }
 }
 
+/// True when process `pid` no longer exists: the kernel answers "no such process" (a process
+/// of another user answers "not permitted": it exists).
+fn process_gone(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 fn cg_lookup() -> HashMap<u32, CgWindow> {
     windows::list_windows().into_iter().map(|w| (w.id, w)).collect()
 }
@@ -944,6 +1036,66 @@ mod tests {
         ob.on_app_event(AppEvent::Hidden(terminal.clone()), never);
         assert!(ob.take_events().is_empty(), "nothing for any controller");
         assert!(!ob.observing());
+    }
+
+    unsafe extern "C-unwind" fn no_callback(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
+
+    /// The pid of a process that has exited (a child run and waited for).
+    fn a_gone_pid() -> i32 {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().expect("runs /usr/bin/true");
+        let pid = child.id() as i32;
+        child.wait().expect("waits for it");
+        pid
+    }
+
+    /// An observer that observes, knowing `apps` (none of them observed through AX).
+    fn observing(apps: Vec<AppInfo>) -> Observer {
+        let mut ob = Observer::new(1, None);
+        ob.set_apps(apps, no_callback);
+        ob.observing = true;
+        ob
+    }
+
+    #[test]
+    fn a_suspect_whose_process_is_gone_quits_once_and_a_live_one_stays() {
+        // 10-23: Home quit and no termination notice came; its calls failed.
+        let gone = a_gone_pid();
+        let me = std::process::id() as i32;
+        let home = AppInfo { pid: gone, bundle_id: Some("com.example.home".into()), name: Some("Home".into()) };
+        let busy = AppInfo { pid: me, bundle_id: Some("com.example.busy".into()), name: Some("Busy".into()) };
+        let mut ob = observing(vec![home, busy]);
+        ob.suspect(gone);
+        ob.suspect(me);
+        assert_eq!(ob.reap_gone(false), 1);
+        assert_eq!(ob.take_events(), vec![WinEvent::AppTerminated(gone)]);
+        assert!(ob.bundle_id(gone).is_none(), "forgotten");
+        assert_eq!(ob.bundle_id(me), Some("com.example.busy"), "a live app stays");
+        ob.suspect(gone);
+        assert_eq!(ob.reap_gone(true), 0, "handled once");
+        assert!(ob.take_events().is_empty());
+    }
+
+    #[test]
+    fn nothing_is_reaped_while_not_observing() {
+        let gone = a_gone_pid();
+        let mut ob = Observer::new(1, None);
+        ob.set_apps(vec![AppInfo { pid: gone, bundle_id: None, name: None }], no_callback);
+        ob.suspect(gone);
+        assert_eq!(ob.reap_gone(true), 0);
+        assert!(ob.take_events().is_empty());
+    }
+
+    #[test]
+    fn a_notice_for_an_unknown_pid_takes_the_gone_apps_of_its_bundle() {
+        let gone = a_gone_pid();
+        let me = std::process::id() as i32;
+        let home = AppInfo { pid: gone, bundle_id: Some("com.example.home".into()), name: Some("Home".into()) };
+        let other = AppInfo { pid: me, bundle_id: Some("com.example.home".into()), name: Some("Home".into()) };
+        let mut ob = observing(vec![home.clone(), other]);
+        let notice = AppInfo { pid: 999_999, ..home };
+        ob.on_app_event(AppEvent::Terminated(notice), no_callback);
+        assert_eq!(ob.take_events(), vec![WinEvent::AppTerminated(gone), WinEvent::AppTerminated(999_999)]);
+        assert_eq!(ob.pids_with_bundle("com.example.home"), vec![me], "the live one of the bundle stays");
     }
 
     #[test]

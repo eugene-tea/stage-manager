@@ -227,3 +227,138 @@ fn a_stage_that_left_goes_back_before_the_first_stage_made_after_it() {
     let w: Vec<(&str, usize, bool)> = stages[0].windows.iter().map(|w| (w.title.as_str(), w.z, w.key)).collect();
     assert_eq!(w, [("Two C", 0, true), ("Two A", 1, false)]);
 }
+
+// ----- a quit found late (round missed-quit) ---------------------------------------------------
+
+const HOME_APP: &str = "com.example.home";
+const F_HOME: Rect = Rect::new(300.0, 90.0, 800.0, 600.0);
+
+/// A window of a new app as the platform adds it with `[stages] new_apps_join_current` on.
+fn add_joining(m: &mut Model, x: WindowMeta) -> Vec<Action> {
+    let (decision, _) = Decision::default().for_new_window(m.app_is_new(x.pid), true, false);
+    m.add_window(x, &decision, &Observation::default())
+}
+
+/// [`desk`] with the home app's window in a stage of its own (opened before the key was on),
+/// the editor's stage in front again.
+fn desk_with_home() -> Model {
+    let mut m = desk();
+    add(&mut m, win(91, 90, HOME_APP, "Home", F_HOME));
+    let editor = m.stage_of(w(11)).expect("the editor's stage");
+    m.switch_to(editor, &Observation::default());
+    assert_ne!(m.stage_of(w(91)), Some(editor), "a stage of its own");
+    m
+}
+
+/// The file as a save in session "A" at `at` writes it.
+fn saved_file(m: &Model, at: u64) -> StateFile {
+    let mut file = m.to_state();
+    file.session = Some("A".into());
+    file.saved_at = Some(at);
+    StateFile::from_json(&file.to_json().expect("encodes")).expect("parses")
+}
+
+/// A relaunch of ours in the same window server session (as `load_state` does), the five
+/// windows of [`desk`] still open, the restore window ended.
+fn relaunched_same_session(mut file: StateFile) -> Model {
+    file.settle_quit(false);
+    let (file, _) = file.for_session(Some("A"));
+    let mut m = model();
+    m.set_restore(Restore::same_session("A"));
+    m.restore_spaces(file.spaces);
+    let live = [
+        win(11, 10, EDITOR, "Plan.txt", F_PLAN),
+        win(12, 10, EDITOR, "Notes.txt", F_NOTES),
+        win(21, 20, CHAT, "Team", F_TEAM),
+        win(31, 30, BROWSER, "Recipes — Example Browser", F_RECIPES),
+        win(41, 40, MAIL, "Inbox", F_INBOX),
+    ];
+    m.arrive(MAIN, &live, &[], &LaunchHints::default());
+    m.end_restore();
+    m
+}
+
+#[test]
+fn an_app_found_gone_quits_as_with_a_notice_and_its_next_launch_joins_the_current_stage() {
+    // 10-23: Home quit with its last window and no notice came. Its process found gone runs
+    // the termination path: its windows leave (destroyed, then the app's quit).
+    let mut m = desk_with_home();
+    let stages = m.stages().len();
+    quit_app(&mut m, &[91], T);
+    assert!(m.window(w(91)).is_none(), "the window left the model");
+    assert!(m.strip().iter().all(|c| !c.windows.contains(&w(91))), "no gray card left behind");
+    assert_eq!(m.stages().len(), stages - 1, "its stage, left empty, went as Apple's does");
+    let entry = m.to_state().spaces[0].stages.iter().flat_map(|s| &s.windows).find(|x| x.bundle_id == HOME_APP).cloned();
+    assert_eq!(entry.and_then(|x| x.quit_at), Some(T), "its entry has its quit_at");
+
+    // Launched again later in this session (any time: the entries kept for the file are never
+    // matched in the session): the key's rule, the current stage.
+    let editor = m.stage_of(w(11));
+    add_joining(&mut m, win(92, 95, HOME_APP, "Home", F_HOME));
+    assert_eq!(m.stage_of(w(92)), editor, "joins the current stage");
+    assert_eq!(m.main_active_stage(), editor, "no switch");
+    assert!(m.restored_grade(w(92)).is_none(), "nothing restored");
+    assert!(m.quit_windows().is_empty(), "its app is back: the entry from its quit goes");
+}
+
+#[test]
+fn a_relaunch_of_ours_after_the_quit_never_restores_its_window() {
+    // Two minutes and more after the quit, or any time in the same window server session: a
+    // load drops the entry, so the app's next window goes by the new-window rules.
+    let mut m = desk_with_home();
+    quit_app(&mut m, &[91], T);
+    let file = saved_file(&m, T + QUIT_KEEP.as_secs() + 60);
+    let mut m = relaunched_same_session(file);
+    assert_eq!(m.pending_count(), 0, "nothing of the home app waits");
+    let editor = m.stage_of(w(11));
+    add_joining(&mut m, win(92, 95, HOME_APP, "Home", F_HOME));
+    assert_eq!(m.stage_of(w(92)), editor, "joins the current stage");
+    assert!(m.restored_grade(w(92)).is_none());
+}
+
+#[test]
+fn without_its_quit_the_dead_apps_window_was_saved_live_and_came_back_to_its_old_stage() {
+    // The bug as it was: the window of the app that quit stayed in the model, was saved as a
+    // live window (no quit_at), waited after our next launch and took the app's next window
+    // back into its old stage, over the key.
+    let m = desk_with_home();
+    let file = saved_file(&m, T);
+    let mut m = relaunched_same_session(file);
+    assert_eq!(m.pending_count(), 1, "the home app's window waits, as any saved window not on screen");
+    let editor = m.stage_of(w(11));
+    add_joining(&mut m, win(92, 95, HOME_APP, "Home", F_HOME));
+    assert!(m.restored_grade(w(92)).is_some_and(|g| g.confident()), "back in its saved stage");
+    assert_ne!(m.stage_of(w(92)), editor, "not the current stage");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(92)), "switched there");
+}
+
+#[test]
+fn a_saved_window_whose_app_was_not_reopened_waits_all_session_today() {
+    // The rule as it stands (round missed-quit, item 3: reported, not changed): after a
+    // restart, a saved window whose app macOS did not reopen waits in its stage all session,
+    // past the restore window; the app launched an hour later goes back into that stage and
+    // switches there, over `[stages] new_apps_join_current`.
+    let mut m = desk_with_home();
+    quit_app(&mut m, &[91], T); // at the logout, a few seconds before the save
+    let mut file = saved_file(&m, T + 5);
+    assert_eq!(file.settle_quit(true), (1, 0), "quit within two minutes of the save: it waits");
+    file.start_new_session();
+    let (file, _) = file.for_session(Some("B"));
+    let mut m = model();
+    m.set_restore(Restore::after_restart("B"));
+    m.restore_spaces(file.spaces);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    // Every app but the home app reopens.
+    add(&mut m, win(51, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(52, 50, EDITOR, "Notes.txt", F_NOTES));
+    add(&mut m, win(61, 60, CHAT, "Team", F_TEAM));
+    add(&mut m, win(71, 70, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    add(&mut m, win(81, 80, MAIL, "Inbox", F_INBOX));
+    m.end_restore();
+    assert_eq!(m.pending_bundles(), [HOME_APP], "the home app's window still waits");
+    let front = m.main_active_stage();
+    add_joining(&mut m, win(92, 95, HOME_APP, "Home", F_HOME));
+    assert!(m.restored_grade(w(92)).is_some_and(|g| g.confident()), "back in its saved stage");
+    assert_ne!(m.stage_of(w(92)), front, "not the current stage");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(92)), "switched there");
+}

@@ -10,6 +10,7 @@ pub mod displays;
 pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
+pub mod gone;
 pub mod guard_watch;
 pub mod handoff;
 pub mod hidden_tab;
