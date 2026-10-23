@@ -3969,6 +3969,19 @@ def stage_sets_restore(s, n):
     return {base_title(x) for x in stage_titles(s).get(n, [])}
 
 
+def given_up_at_end():
+    """(dropped, apps) of the restore-end give-up line (merge restore-end: at the restore
+    window's end the saved windows of apps not running are given up) logged after the day
+    log's latest "the restore window ends", or None while there is none. `apps` is the logged
+    list as written (`"bundle", …`)."""
+    text = log_text()
+    ends = [m.end() for m in re.finditer(r"restore: the restore window ends", text)]
+    if not ends:
+        return None
+    m = re.search(r"restore: saved windows given up \(.*?\) dropped=(\d+) apps=\[(.*?)\]", text[ends[-1]:])
+    return (int(m.group(1)), m.group(2)) if m else None
+
+
 def phase_restore():
     say("\n== restore after a restart (simulated: STAGE_MANAGER_SESSION) ==")
     stop_app()
@@ -4145,6 +4158,21 @@ def phase_restore():
         check(s.get("focused") in key_ids, f"the saved key window has the keyboard (focused {s.get('focused')}, key {key_ids})")
         consistent("settled")
 
+    say("-- Charlie never reopened: given up at the restore window's end (restore-end)")
+    c_bundle = EXTRA["c"][0]
+    gave = wait_until(given_up_at_end, 5, "the give-up line")
+    check(gave == (1, f'"{c_bundle}"'), f"Charlie's one saved window given up, the line naming its bundle id only ({gave})")
+    s = state()
+    check(not any(st["pending"] and not st["windows"] for st in s["stages"]), "Charlie's stage, which only held it, went")
+    check(charlie_n not in s["strip"], f"no card for it ({s['strip']})")
+    t = by_title(s)
+    check("Alpha 2" not in t and next((st["pending"] for st in s["stages"] if st["number"] == mail), 0) == 1,
+          "Alpha (running) keeps its minimized window's entry in Mail")
+    f = wait_until(lambda: (lambda x: x if x and not any(base_title(w) == "Charlie 1" for w, _ in saved_windows(x)) else None)(read_state_file()),
+                   5, "state.json saved without Charlie 1")
+    titles = sorted(base_title(x) for x, _ in saved_windows(f))
+    check(titles == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"state.json: Charlie's entry gone, the others kept ({titles})")
+
     say("-- after the restore window: an un-minimized window brings its stage forward")
     do("switch", s["active"])
     s = state()
@@ -4172,7 +4200,12 @@ def phase_restore():
         s = state()
         f1 = by_title(s)["Fixture 1"]
         check(f1.get("restored") is None, "matched to no saved window")
-        check(stage_titles(s).get(f1["home"]) == ["Fixture 1"] and f1["home"] not in want, "a stage of its own")
+        # A stage's number is its place (1-based), not an id: with Charlie's stage given up
+        # (restore-end) the new stage is the third, the number Charlie's had in session A. So
+        # the stage is told apart from the restored ones by their windows, not by `want`.
+        restored_homes = {w["home"] for w in s["windows"] if w.get("restored")}
+        check(stage_titles(s).get(f1["home"]) == ["Fixture 1"] and f1["home"] not in restored_homes,
+              f"a stage of its own ({f1['home']}, restored stages {sorted(map(str, restored_homes))})")
         check(s["active"] == f1["home"] and not f1["parked"], "shown, its stage in front, as Apple's does")
         check(stage_sets_restore(s, mail) == {"Alpha 1", "Alpha 2"}, "the restored stages untouched")
         consistent("unmatched app")
@@ -4180,9 +4213,11 @@ def phase_restore():
     stop_fixture()
     wait_state(lambda x: "Fixture 1" not in by_title(x), "Fixture 1 gone")
 
-    say("-- give up: Charlie never reopens")
+    say("-- Charlie stays given up: a relaunch and a new session")
     stop_app()
     all_onscreen("session B quit")
+    f = read_state_file()
+    check("Charlie 1" not in [base_title(x) for x, _ in saved_windows(f)], "the quit's save does not bring Charlie's entry back")
     s = start_app(5, extra_env=session["B"])
     if not check(s is not None, "relaunch in session B"):
         return
@@ -4192,23 +4227,36 @@ def phase_restore():
 
     want_sets = sorted(sorted(v) for v in want.values() if v != {"Charlie 1"})
     check(stage_sets_now(s) == want_sets, f"the same-session relaunch keeps the stages ({stage_sets_now(s)})")
-    check(any(st["pending"] and not st["windows"] for st in s["stages"]), "Charlie's stage still waits")
+    check(not any(st["pending"] and not st["windows"] for st in s["stages"]), "no stage waits for Charlie")
     time.sleep(1.5)
     stop_app()
     f = read_state_file()
-    check(("Charlie 1", session["A"]["STAGE_MANAGER_SESSION"]) in saved_windows(f),
-          "Charlie's window is kept through the relaunch, pending since session A")
+    check("Charlie 1" not in [base_title(x) for x, _ in saved_windows(f)], "nor after the relaunch's save")
     s = start_app(5, extra_env=session["C"])
     if not check(s is not None, "launch in session C"):
         return
     f = wait_until(lambda: (lambda x: x if x and x.get("session") == session["C"]["STAGE_MANAGER_SESSION"] else None)(read_state_file()),
                    10, "state.json saved in session C")
     titles = [base_title(x) for x, _ in saved_windows(f)]
-    check("Charlie 1" not in titles, "after two sessions without Charlie its window is given up")
+    check("Charlie 1" not in titles, "session C: Charlie's window stays given up")
     check(sorted(titles) == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"the others are kept ({titles})")
     check(stage_sets_now(s) == want_sets, f"session C: the stages matched again ({stage_sets_now(s)})")
     check(not any(st["pending"] for st in s["stages"]), "session C: nothing pending")
     consistent("session C")
+
+    say("-- Charlie launched later: the new-window rules, nothing restored")
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x), "Charlie 1 managed", timeout=8)
+    if check(s is not None, "Charlie's late window is managed"):
+        time.sleep(1.0)
+        s = state()
+        c1 = by_title(s)["Charlie 1"]
+        check(c1.get("restored") is None, "matched to no saved window")
+        check(stage_titles(s).get(c1["home"]) == ["Charlie 1"], "a stage of its own (Apple's rule)")
+        others = sorted(v for v in stage_sets_now(s) if v != ["Charlie 1"])
+        check(others == want_sets, f"the restored stages untouched ({others})")
+        consistent("Charlie late")
+    stop_extra("c")
     stop_app()
     all_onscreen("restore phase quit")
     stop_all_fixtures()
@@ -4227,8 +4275,10 @@ def restore_pool(run_id):
     stage and Alpha 3 in another, and Desktop 2 (id 8) with Bravo 1 (active) and Bravo 2. In
     session Q the login shows "Desktop 2": Bravo's windows (natives) adopt it, then Alpha's
     (strays of Desktop 1) come to the same Desktop and go back into their saved stages there;
-    Charlie (a native of Desktop 1, never reopened here) keeps waiting for Desktop 1's visit.
-    The phase cannot switch Desktops, so every fixture window shows on the one shown."""
+    Charlie (a native of Desktop 1, never reopened here) waits for Desktop 1's visit through the
+    restore window and is given up at its end, not running then (restore-end); Desktop 1, left
+    with no window, leaves the save. The phase cannot switch Desktops, so every fixture window
+    shows on the one shown."""
     say("\n-- one pool after a restart (8I): strays of Desktop 1 on the Desktop shown go back to their saved stages")
     stop_app()
     stop_all_fixtures()
@@ -4315,7 +4365,21 @@ def restore_pool(run_id):
         check(re.search(r"restore: \d+ windows? into .*; 3 from other Desktops", log_text()) is not None,
               "the restore's line counts the three from another Desktop")
         check({base_title(x) for x in active_titles(s)} == {"Bravo 1"}, "Desktop 2's front stays (Desktop 1 is not the one shown)")
-        check((s.get("restore") or {}).get("pending_unvisited") == 1, "Charlie 1 still waits: the window's end gives up nothing")
+        # Restore-end: Charlie is not running when the window ends, so its entry on Desktop 1
+        # (not visited) is given up there. Charlie is not made running to keep the old wait:
+        # running with no window it keeps the login busy (restore::still_opening) to the 5-minute
+        # cap, and a fixture cannot open a window on a Desktop not shown. A running app's entries
+        # on a saved Desktop not visited are kept by the rule, checked in
+        # engine::model::pool::tests (a_saved_desktops_windows_of_apps_not_running_…).
+        gave = wait_until(given_up_at_end, 5, "the give-up line")
+        check(gave == (1, f'"{c}"'), f"Charlie 1 given up at the window's end, not running: the line names its bundle id only ({gave})")
+        s = state()
+        check((s.get("restore") or {}).get("pending_unvisited") == 0, "nothing waits for Desktop 1's visit any more")
+        f = wait_until(lambda: (lambda x: x if x and not any(t == "Charlie 1" for t, _ in saved_windows(x)) else None)(read_state_file()),
+                       5, "state.json saved without Charlie 1")
+        titles = sorted(base_title(x) for x, _ in saved_windows(f))
+        check(titles == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"state.json: the others kept ({titles})")
+        check(not any(sp["id"] == 4 for sp in (f or {}).get("spaces", [])), "Desktop 1, left with no window, leaves the save")
         consistent("pool settled")
 
     say("-- a relaunch in the same session keeps the stages, no pool")
