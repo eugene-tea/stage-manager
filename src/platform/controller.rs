@@ -230,6 +230,9 @@ pub enum UiUpdate {
     Config {
         /// The load error, if the file is bad.
         error: Option<String>,
+        /// The whole config in force (the last good one after an error): the shell takes
+        /// this, never a read of its own, so both sides agree (review R2).
+        config: Box<Config>,
         /// Hotkeys to register.
         hotkeys: HotkeyConfig,
         /// The strip's thumbnail refresh interval.
@@ -1130,6 +1133,7 @@ impl Controller {
         let config = self.store.config();
         notify_ui(UiUpdate::Config {
             error: self.config_error.clone(),
+            config: Box::new(config.clone()),
             hotkeys: config.hotkeys.clone(),
             thumbnail_interval_ms: config.strip.thumbnail_interval_ms,
             capture: config.strip.capture,

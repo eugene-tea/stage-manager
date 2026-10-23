@@ -184,8 +184,30 @@ fn reveal_config() {
 
 /// The config file's parse, or `None` when it does not load (the last good one stays).
 fn read_config() -> Option<Config> {
-    let text = std::fs::read_to_string(paths::config_file()).unwrap_or_default();
-    Config::parse(&text).ok().map(|p| p.config)
+    parse_read(std::fs::read_to_string(paths::config_file()))
+}
+
+/// A read of the config file, parsed: `None` when it could not be read (missing, not UTF-8,
+/// a folder) or does not parse. Only a readable file that is empty means the defaults
+/// (review R2).
+fn parse_read(read: std::io::Result<String>) -> Option<Config> {
+    Config::parse(&read.ok()?).ok().map(|p| p.config)
+}
+
+/// What a change of `[app]` asks of the shell: the menu bar icon to show, and the login item
+/// to set (each `None` when unchanged).
+#[derive(Debug, PartialEq, Eq)]
+struct AppEffects {
+    menu_icon: Option<bool>,
+    login_item: Option<bool>,
+}
+
+fn app_effects(before: &config::AppConfig, after: &config::AppConfig) -> AppEffects {
+    let changed = |b: bool, a: bool| (b != a).then_some(a);
+    AppEffects {
+        menu_icon: changed(before.show_menu_bar_icon, after.show_menu_bar_icon),
+        login_item: changed(before.launch_at_login, after.launch_at_login),
+    }
 }
 
 /// Starts the shell. Call once the status menu exists.
@@ -479,27 +501,22 @@ pub fn poll(permissions: PermissionState, raw: &RawSettings, capture_refused: bo
     }
 }
 
-/// The config was reloaded (by the WM thread): fresh `[app]` keys and Settings values.
-pub fn config_changed(error: Option<String>) {
-    let Some(config) = read_config() else {
-        with(|s| {
-            s.config_error = error;
-            s.refresh_settings();
-        });
-        return;
-    };
+/// The config was reloaded (by the WM thread): `config` is the one in force there (the last
+/// good one after an error), so the shell never reads a different version of the file.
+pub fn config_changed(error: Option<String>, config: Config) {
     with(|s| {
-        let before = s.config.app;
+        let effects = app_effects(&s.config.app, &config.app);
         s.config_error = error;
         s.config = config;
-        let after = s.config.app;
-        if before.show_menu_bar_icon != after.show_menu_bar_icon {
+        if let Some(icon) = effects.menu_icon {
             let hooks = s.hooks;
-            later(move || (hooks.set_menu_icon)(after.show_menu_bar_icon));
+            later(move || (hooks.set_menu_icon)(icon));
         }
-        if before.launch_at_login != after.launch_at_login && login_item::refusal().is_none() {
+        if let Some(on) = effects.login_item
+            && login_item::refusal().is_none()
+        {
             // An edit of the file (an agent's) turns the login item on or off too.
-            let _ = login_item::set(after.launch_at_login);
+            let _ = login_item::set(on);
         }
         s.refresh_settings();
     });
@@ -908,6 +925,47 @@ mod tests {
         assert!(p.contains("\"/Applications/Stage Manager.app/Contents/MacOS/stage-manager\" config check"));
         assert!(p.contains("state.json"));
         assert!(p.trim_end().ends_with("What I want:"));
+    }
+
+    /// Review R2: a config read that fails keeps the last good config on both sides; only a
+    /// readable empty file means the defaults.
+    #[test]
+    fn an_unreadable_config_keeps_the_last_good_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("config.toml");
+        std::fs::write(&file, "[app]\nlaunch_at_login = false\ncheck_for_updates = false\nshow_menu_bar_icon = false\n").expect("write");
+        let (mut store, opened) = config::ConfigStore::open(file.clone());
+        assert!(opened.is_ok());
+        let good = store.config().clone();
+        assert!(!good.app.launch_at_login && !good.app.check_for_updates);
+
+        let read = || std::fs::read_to_string(&file);
+        std::fs::write(&file, [0xff]).expect("write");
+        assert!(store.reload().is_err(), "not UTF-8");
+        assert_eq!(parse_read(read()), None, "the shell's own read gives nothing either");
+        std::fs::remove_file(&file).expect("remove");
+        assert!(store.reload().is_err(), "missing");
+        assert_eq!(parse_read(read()), None);
+        std::fs::create_dir(&file).expect("mkdir");
+        assert!(store.reload().is_err(), "a folder");
+        assert_eq!(parse_read(read()), None);
+        // What the WM sends after each failure is the last good config: nothing changes.
+        assert_eq!(store.config(), &good);
+        assert_eq!(app_effects(&good.app, &store.config().app), AppEffects { menu_icon: None, login_item: None });
+
+        std::fs::remove_dir(&file).expect("rmdir");
+        std::fs::write(&file, "").expect("write");
+        assert!(store.reload().is_ok(), "an empty file is valid");
+        assert_eq!(parse_read(read()), Some(Config::default()));
+        assert_eq!(store.config(), &Config::default());
+        let defaults = Config::default().app;
+        assert_eq!(
+            app_effects(&good.app, &store.config().app),
+            AppEffects {
+                menu_icon: Some(defaults.show_menu_bar_icon),
+                login_item: Some(defaults.launch_at_login)
+            }
+        );
     }
 
     #[test]

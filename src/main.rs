@@ -261,8 +261,8 @@ mod app {
 
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
-                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms, capture: on } => {
-                    shell::config_changed(error.clone());
+                UiUpdate::Config { error, config, hotkeys, thumbnail_interval_ms, capture: on } => {
+                    shell::config_changed(error.clone(), *config);
                     self.config_error = error;
                     capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
