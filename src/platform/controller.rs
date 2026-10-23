@@ -1512,7 +1512,7 @@ impl Controller {
                 let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
                 let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
                 let now = Instant::now();
-                let slides = (elsewhere || parked.is_empty()) && desktop_slides(&listed_parked, elsewhere, main.frame, main.visible, main.corner);
+                let slides = (elsewhere || parked.is_empty()) && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
                 self.patch_slide_since = slides.then(|| self.patch_slide_since.unwrap_or(now));
                 let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
                 if slide_waits(self.patch_slide_since.map(|t| now.saturating_duration_since(t)), shown_now) {
