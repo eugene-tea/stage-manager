@@ -1,6 +1,6 @@
 //! Installing an update, pure: what a downloaded app must prove before it may replace the
 //! running one, where it may go, and the swap as a transaction that puts the old app back on
-//! any failure.
+//! any failure (or, when even that fails, says where each copy is).
 //!
 //! The platform side (`platform::updater`) downloads the release's disk image, mounts it
 //! read-only, runs `codesign` and `spctl`, and hands their output here; the helper process it
@@ -21,6 +21,11 @@ use crate::updates::Version;
 pub const APP_NAME: &str = "Stage Manager.app";
 /// The hidden working folder beside the installed app (same volume, so the swap is a rename).
 pub const WORK_DIR: &str = ".Stage Manager update";
+/// Where the three-rename exchange sets the installed app aside, in the working folder.
+pub const ASIDE_NAME: &str = "old.app";
+/// A file the helper leaves in the working folder when it holds a copy of the app that could
+/// not be put back: the folder is kept (never cleaned at launch) until the next update.
+pub const KEEP_MARK: &str = "kept.txt";
 /// Gatekeeper's word for a notarized Developer ID app.
 pub const NOTARIZED_SOURCE: &str = "Notarized Developer ID";
 
@@ -421,8 +426,8 @@ pub trait SwapOps {
     /// Checks the staged copy's signature against the requirement.
     fn verify_staged(&mut self) -> Result<(), String>;
     /// Exchanges the staged copy and the installed app (each takes the other's path). Either
-    /// both moved or neither did.
-    fn exchange(&mut self) -> Result<(), String>;
+    /// both moved, or neither did, or the error says where each one is.
+    fn exchange(&mut self) -> Result<(), ExchangeError>;
     /// Opens the app at the installed path.
     fn launch(&mut self) -> Result<(), String>;
     /// Waits for the app just opened to answer with the expected version.
@@ -443,8 +448,61 @@ pub enum SwapOutcome {
     InstalledOldLeft(String),
     /// A step failed; the old app is back in place and was opened again (`relaunched`).
     RolledBack { step: Step, why: String, relaunched: Result<(), String> },
-    /// A step failed and the old app could not be put back: the new one stays and is opened.
+    /// A step failed and the old app could not be put back: the new one stays and is opened;
+    /// the old one is left at the staged path (the working folder is kept).
     RollbackFailed { step: Step, why: String, undo: String },
+    /// A step failed and an exchange (the swap's, or the undo's) stopped part way: the old app
+    /// is not at the installed path. `old` and `new` say where each one is; the working folder
+    /// is kept. Whatever is at the installed path, if anything, was opened (`relaunched`).
+    Stranded { step: Step, why: String, old: Place, new: Place, relaunched: Result<(), String> },
+}
+
+impl SwapOutcome {
+    /// Whether the working folder must stay: it may hold the only copy of the old app (review
+    /// R1). Only an installed new app, or the old one back in place, lets it go.
+    pub fn keeps_work(&self) -> bool {
+        matches!(self, Self::RollbackFailed { .. } | Self::Stranded { .. })
+    }
+}
+
+/// Where one bundle is after an exchange stopped part way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// The installed app's path.
+    Target,
+    /// The staged copy's path (in the working folder).
+    Staged,
+    /// The aside path of the three-rename exchange ([`ASIDE_NAME`], in the working folder).
+    Aside,
+}
+
+impl Place {
+    /// The path this place names, for an update from `staged` onto `target`.
+    pub fn path(self, target: &Path, staged: &Path) -> PathBuf {
+        match self {
+            Self::Target => target.to_path_buf(),
+            Self::Staged => staged.to_path_buf(),
+            Self::Aside => staged.with_file_name(ASIDE_NAME),
+        }
+    }
+}
+
+/// Why an exchange failed, and where the two bundles are after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeError {
+    /// Nothing moved: each bundle is still at its own path.
+    Unchanged(String),
+    /// Part of the exchange happened and its undo failed: where the bundle that was at the
+    /// installed path (`was_target`) and the one that was at the staged path are now.
+    Stranded { why: String, was_target: Place, was_staged: Place },
+}
+
+impl std::fmt::Display for ExchangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unchanged(why) | Self::Stranded { why, .. } => f.write_str(why),
+        }
+    }
 }
 
 /// What [`SwapOutcome::RollbackFailed`]'s `undo` says when the unconfirmed new app would not
@@ -454,13 +512,20 @@ pub const NEW_APP_STILL_RUNS: &str = "the new version did not stop, so the old o
 /// Runs the swap: verify, exchange, launch, confirm, then remove the old app. A failure at
 /// any step before the old app is removed puts it back (undoing the exchange) and opens it;
 /// except when the unconfirmed new app cannot be stopped: then nothing is undone under it
-/// (review 8C #2).
+/// (review 8C #2). An exchange that stops part way is reported where each app is, never as
+/// rolled back unless the old app is at the installed path (review R1).
 pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
     if let Err(why) = ops.verify_staged() {
         return SwapOutcome::RolledBack { step: Step::Verify, why, relaunched: ops.launch() };
     }
-    if let Err(why) = ops.exchange() {
-        return SwapOutcome::RolledBack { step: Step::Exchange, why, relaunched: ops.launch() };
+    match ops.exchange() {
+        Ok(()) => {}
+        Err(ExchangeError::Unchanged(why)) => {
+            return SwapOutcome::RolledBack { step: Step::Exchange, why, relaunched: ops.launch() };
+        }
+        Err(ExchangeError::Stranded { why, was_target, was_staged }) => {
+            return stranded(ops, Step::Exchange, why, was_target, was_staged);
+        }
     }
     let failed = match ops.launch() {
         Err(why) => Some((Step::Launch, why)),
@@ -477,10 +542,14 @@ pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
     if let Some((step, why)) = failed {
         return match ops.exchange() {
             Ok(()) => SwapOutcome::RolledBack { step, why, relaunched: ops.launch() },
-            Err(undo) => {
+            Err(ExchangeError::Unchanged(undo)) => {
                 // The new app stays in place: open it rather than leave no app running.
                 let _ = ops.launch();
                 SwapOutcome::RollbackFailed { step, why, undo }
+            }
+            // The undo's exchange runs with the new app installed: its `was_target` is the new.
+            Err(ExchangeError::Stranded { why: undo, was_target, was_staged }) => {
+                stranded(ops, step, format!("{why}; and putting the old version back: {undo}"), was_staged, was_target)
             }
         };
     }
@@ -490,28 +559,48 @@ pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
     }
 }
 
+/// The outcome of an exchange that stopped part way with the old app at `old` and the new at
+/// `new`: rolled back when the old app is at the installed path anyway, else stranded. Either
+/// way, whatever is at the installed path is opened.
+fn stranded(ops: &mut dyn SwapOps, step: Step, why: String, old: Place, new: Place) -> SwapOutcome {
+    let relaunched = ops.launch();
+    if old == Place::Target {
+        SwapOutcome::RolledBack { step, why, relaunched }
+    } else {
+        SwapOutcome::Stranded { step, why, old, new, relaunched }
+    }
+}
+
 /// An exchange of `a` and `b` by three renames through `aside`, for volumes without an atomic
 /// swap: `a → aside`, `b → a`, `aside → b`. A failure undoes the renames already made, so
-/// either both moved or neither did (unless an undo fails too, which the error says).
+/// either both moved or neither did; when an undo fails too, the error says where each bundle
+/// is ([`Place::Target`] is `a`, [`Place::Staged`] is `b`).
 pub fn exchange_by_renames(
     rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>,
     a: &Path,
     b: &Path,
     aside: &Path,
-) -> Result<(), String> {
-    rename(a, aside).map_err(|e| format!("cannot move {} aside: {e}", a.display()))?;
+) -> Result<(), ExchangeError> {
+    use ExchangeError::{Stranded, Unchanged};
+    rename(a, aside).map_err(|e| Unchanged(format!("cannot move {} aside: {e}", a.display())))?;
     if let Err(e) = rename(b, a) {
-        let undo = rename(aside, a);
-        return Err(match undo {
-            Ok(()) => format!("cannot move {} in: {e}", b.display()),
-            Err(u) => format!("cannot move {} in: {e}; and cannot put {} back: {u}", b.display(), a.display()),
+        return Err(match rename(aside, a) {
+            Ok(()) => Unchanged(format!("cannot move {} in: {e}", b.display())),
+            Err(u) => Stranded {
+                why: format!("cannot move {} in: {e}; and cannot put {} back: {u}", b.display(), a.display()),
+                was_target: Place::Aside,
+                was_staged: Place::Staged,
+            },
         });
     }
     if let Err(e) = rename(aside, b) {
-        let undo = rename(a, b).and_then(|_| rename(aside, a));
-        return Err(match undo {
-            Ok(()) => format!("cannot finish the exchange: {e}"),
-            Err(u) => format!("cannot finish the exchange: {e}; and cannot undo it: {u}"),
+        let why = |u| format!("cannot finish the exchange: {e}; and cannot undo it: {u}");
+        if let Err(u) = rename(a, b) {
+            return Err(Stranded { why: why(u), was_target: Place::Aside, was_staged: Place::Target });
+        }
+        return Err(match rename(aside, a) {
+            Ok(()) => Unchanged(format!("cannot finish the exchange: {e}")),
+            Err(u) => Stranded { why: why(u), was_target: Place::Aside, was_staged: Place::Staged },
         });
     }
     Ok(())
@@ -827,11 +916,11 @@ Runtime Version=26.0.0";
         fn verify_staged(&mut self) -> Result<(), String> {
             if self.fail == Some(Step::Verify) { Err("bad".into()) } else { Ok(()) }
         }
-        fn exchange(&mut self) -> Result<(), String> {
+        fn exchange(&mut self) -> Result<(), ExchangeError> {
             self.exchanges += 1;
             let undo_fails = self.fail_exchange_from.is_some_and(|n| self.exchanges >= n);
             if (self.fail == Some(Step::Exchange) && self.exchanges == 1) || undo_fails {
-                return Err("no swap".into());
+                return Err(ExchangeError::Unchanged("no swap".into()));
             }
             std::mem::swap(&mut self.target, &mut self.staged);
             Ok(())
@@ -920,7 +1009,7 @@ Runtime Version=26.0.0";
     }
 
     /// A fake folder for the three-rename exchange, failing at the nth rename.
-    fn renames(fail_at: Option<usize>) -> (HashMap<PathBuf, &'static str>, Result<(), String>) {
+    fn renames(fail_at: Option<usize>) -> (HashMap<PathBuf, &'static str>, Result<(), ExchangeError>) {
         let (a, b, aside) = (Path::new("/A"), Path::new("/B"), Path::new("/aside"));
         let mut fs: HashMap<PathBuf, &'static str> = HashMap::from([(a.to_path_buf(), "old"), (b.to_path_buf(), "new")]);
         let mut n = 0;
@@ -951,5 +1040,167 @@ Runtime Version=26.0.0";
             assert_eq!(fs.get(Path::new("/B")), Some(&"new"), "rename {fail}: undone");
             assert_eq!(fs.len(), 2, "rename {fail}: nothing left aside");
         }
+    }
+
+    /// The bundle each place holds after [`exchange_by_renames`] failed at the given renames.
+    fn renames_failing(fails: &[usize]) -> (HashMap<PathBuf, &'static str>, Result<(), ExchangeError>) {
+        let (a, b, aside) = (Path::new("/A"), Path::new("/B"), Path::new("/aside"));
+        let mut fs: HashMap<PathBuf, &'static str> = HashMap::from([(a.to_path_buf(), "old"), (b.to_path_buf(), "new")]);
+        let mut n = 0;
+        let r = exchange_by_renames(
+            &mut |from: &Path, to: &Path| {
+                n += 1;
+                if fails.contains(&n) || fs.contains_key(to) {
+                    return Err(std::io::Error::other("refused"));
+                }
+                let v = fs.remove(from).ok_or_else(|| std::io::Error::other("missing"))?;
+                fs.insert(to.to_path_buf(), v);
+                Ok(())
+            },
+            a,
+            b,
+            aside,
+        );
+        (fs, r)
+    }
+
+    /// Review R1: a failed undo says where each bundle is, and says it truly.
+    #[test]
+    fn a_failed_undo_says_where_each_bundle_is() {
+        let at = |p: Place| PathBuf::from(match p {
+            Place::Target => "/A",
+            Place::Staged => "/B",
+            Place::Aside => "/aside",
+        });
+        for mask in 0u32..32 {
+            let fails: Vec<usize> = (1..=5).filter(|i| mask & (1 << (i - 1)) != 0).collect();
+            let (fs, r) = renames_failing(&fails);
+            assert_eq!(fs.len(), 2, "{fails:?}: both bundles survive");
+            match r {
+                Ok(()) => assert_eq!((fs[Path::new("/A")], fs[Path::new("/B")]), ("new", "old")),
+                Err(ExchangeError::Unchanged(_)) => {
+                    assert_eq!((fs[Path::new("/A")], fs[Path::new("/B")]), ("old", "new"), "{fails:?}")
+                }
+                Err(ExchangeError::Stranded { was_target, was_staged, .. }) => {
+                    assert_eq!(fs.get(&at(was_target)), Some(&"old"), "{fails:?}");
+                    assert_eq!(fs.get(&at(was_staged)), Some(&"new"), "{fails:?}");
+                }
+            }
+        }
+        let (_, r) = renames_failing(&[2, 3]);
+        assert!(matches!(r, Err(ExchangeError::Stranded { was_target: Place::Aside, was_staged: Place::Staged, .. })), "{r:?}");
+    }
+
+    /// The swap over a real scratch folder, the three-rename exchange failing at chosen renames
+    /// (the swap's and the undo's, and their compensating renames).
+    struct Disk {
+        target: PathBuf,
+        staged: PathBuf,
+        fails: Vec<usize>,
+        renames: usize,
+        fail: Option<Step>,
+    }
+
+    impl Disk {
+        fn holds(path: &Path) -> Option<String> {
+            std::fs::read_to_string(path.join("version")).ok()
+        }
+    }
+
+    impl SwapOps for Disk {
+        fn verify_staged(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn exchange(&mut self) -> Result<(), ExchangeError> {
+            let aside = Place::Aside.path(&self.target, &self.staged);
+            let (fails, n) = (&self.fails, &mut self.renames);
+            exchange_by_renames(
+                &mut |from, to| {
+                    *n += 1;
+                    if fails.contains(n) {
+                        return Err(std::io::Error::other("injected"));
+                    }
+                    std::fs::rename(from, to)
+                },
+                &self.target,
+                &self.staged,
+                &aside,
+            )
+        }
+        fn launch(&mut self) -> Result<(), String> {
+            match Self::holds(&self.target).as_deref() {
+                None => Err("nothing there".into()),
+                Some("new") if self.fail == Some(Step::Launch) => Err("open failed".into()),
+                Some(_) => Ok(()),
+            }
+        }
+        fn confirm(&mut self) -> Result<(), String> {
+            if self.fail == Some(Step::Confirm) { Err("no answer".into()) } else { Ok(()) }
+        }
+        fn stop_launched(&mut self) -> bool {
+            true
+        }
+        fn remove_old(&mut self) -> Result<(), String> {
+            std::fs::remove_dir_all(self.staged.parent().unwrap()).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Review R1: whichever renames fail, at least one whole app survives the helper's cleanup,
+    /// and the outcome says where it is.
+    #[test]
+    fn a_stranded_exchange_never_loses_the_last_app() {
+        for fail in [None, Some(Step::Launch), Some(Step::Confirm)] {
+            for mask in 0u32..(1 << 10) {
+                let fails: Vec<usize> = (1..=10).filter(|i| mask & (1 << (i - 1)) != 0).collect();
+                let tmp = tempfile::tempdir().unwrap();
+                let work = tmp.path().join(WORK_DIR);
+                let mut d = Disk { target: tmp.path().join(APP_NAME), staged: work.join(APP_NAME), fails: fails.clone(), renames: 0, fail };
+                for (path, v) in [(&d.target, "old"), (&d.staged, "new")] {
+                    std::fs::create_dir_all(path).unwrap();
+                    std::fs::write(path.join("version"), v).unwrap();
+                }
+                let out = run_swap(&mut d);
+                // The helper's cleanup.
+                if matches!(out, SwapOutcome::RolledBack { .. }) {
+                    let _ = std::fs::remove_dir_all(&work);
+                }
+                assert_eq!(out.keeps_work(), work.exists(), "{fail:?} {fails:?}: {out:?}");
+                let (target, staged) = (Disk::holds(&d.target), Disk::holds(&d.staged));
+                let ctx = format!("{fail:?} {fails:?}: {out:?}");
+                match &out {
+                    SwapOutcome::Installed | SwapOutcome::InstalledOldLeft(_) => assert_eq!(target.as_deref(), Some("new"), "{ctx}"),
+                    SwapOutcome::RolledBack { .. } => assert_eq!(target.as_deref(), Some("old"), "{ctx}"),
+                    SwapOutcome::RollbackFailed { .. } => {
+                        assert_eq!((target.as_deref(), staged.as_deref()), (Some("new"), Some("old")), "{ctx}")
+                    }
+                    SwapOutcome::Stranded { old, new, relaunched, .. } => {
+                        assert_eq!(Disk::holds(&old.path(&d.target, &d.staged)).as_deref(), Some("old"), "{ctx}");
+                        assert_eq!(Disk::holds(&new.path(&d.target, &d.staged)).as_deref(), Some("new"), "{ctx}");
+                        assert_ne!(*old, Place::Target, "{ctx}");
+                        assert!(*new == Place::Target || relaunched.is_err(), "{ctx}: nothing to open");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Review R1's case: the fallback's second rename and its undo fail; the old app is only in
+    /// the working folder, so it is not called rolled back and the folder stays.
+    #[test]
+    fn the_review_case_keeps_the_old_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join(WORK_DIR);
+        let mut d = Disk { target: tmp.path().join(APP_NAME), staged: work.join(APP_NAME), fails: (2..=10).collect(), renames: 0, fail: None };
+        for (path, v) in [(&d.target, "old"), (&d.staged, "new")] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("version"), v).unwrap();
+        }
+        let out = run_swap(&mut d);
+        assert!(
+            matches!(&out, SwapOutcome::Stranded { step: Step::Exchange, old: Place::Aside, new: Place::Staged, relaunched: Err(_), .. }),
+            "{out:?}"
+        );
+        assert!(out.keeps_work());
+        assert_eq!(Disk::holds(&work.join(ASIDE_NAME)).as_deref(), Some("old"));
     }
 }
