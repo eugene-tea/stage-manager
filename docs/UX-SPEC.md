@@ -77,7 +77,10 @@ opens its next window.
 windows. The same app can have stages on several Desktops. A card click never changes the
 Desktop. ⌘-Tab and the Dock switch Desktops as macOS's own setting says ("When switching to
 an application, switch to a Space with open windows for the application"), and the arriving
-Desktop shows that window's stage. Full-screen apps have no strip.
+Desktop shows that window's stage. An app macOS activates as a Desktop slides in (a swipe,
+⌃-arrow) never switches a stage on the Desktop being left: it is decided once the new
+Desktop is recognized, as Apple's never touches the Desktop left. Full-screen apps have no
+strip.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. The strip never appears in ⌘-Tab or the ⌘\`

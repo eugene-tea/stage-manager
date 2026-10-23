@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Going to another Desktop no longer pulls you back: an app macOS activates as the next
+  Desktop slides in, with a window waiting in a stage of the Desktop you left, no longer
+  brings that stage forward there.
 - The wallpaper patch now covers the parked windows' edges on a Desktop showing one of
   Apple's own dynamic wallpapers picked in System Settings (it stepped aside there, as if
   the wallpaper were an aerial), in the style picked for it.
