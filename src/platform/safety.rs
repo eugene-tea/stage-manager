@@ -339,6 +339,7 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
             restore: e.restore,
             child: e.child,
             fitted: e.fitted,
+            unvouched: false,
         })
         .collect();
     listed.extend(lock_taken().values().filter(|r| !map.contains_key(&r.id)).copied());
@@ -592,11 +593,12 @@ pub struct Ours {
 }
 
 impl Ours {
-    /// The registry now (the windows taken from an old guardian too), `managed` (the model's
-    /// windows, when the caller has them) and `state.json` (its bundles and frames).
+    /// The registry now (the windows taken from an old guardian too, but for unvouched ones:
+    /// any app's to the park test, R4), `managed` (the model's windows, when the caller has
+    /// them) and `state.json` (its bundles and frames).
     pub fn now(managed: BTreeSet<u32>) -> Self {
         let mut registered = registry_ids();
-        registered.extend(taken_ids());
+        registered.extend(lock_taken().values().filter(|r| !r.unvouched).map(|r| r.id));
         Self::from_parts(registered, managed, read_state("safety"))
     }
 

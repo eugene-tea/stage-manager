@@ -276,6 +276,7 @@ fn to_state_saves_stages_frames_key_children_and_pins() {
     let d = |a| Decision {
         action: a,
         placement: Default::default(),
+        ..Decision::default()
     };
     m.add_window(live(1, "com.example.a", "A"), &d(RuleAction::Current), &obs);
     m.add_window(live(2, "com.example.b", "B"), &d(RuleAction::Current), &obs);
@@ -312,6 +313,7 @@ fn save_rematch_and_apply_rebuilds_the_same_stages() {
     let d = |a| Decision {
         action: a,
         placement: Default::default(),
+        ..Decision::default()
     };
     m.add_window(
         live(1, "com.example.ed", "Plan.txt"),

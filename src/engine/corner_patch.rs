@@ -37,11 +37,25 @@
 //!   lies (or the icons are not known), a still of the desktop instead (round 8L3). Never
 //!   more than the corner's own square ([`COVER_CAP`], round 8L6): the owner's covers of
 //!   2087x1316 pt painted his desktop over his windows for every switch.
+//! - **The cover's end** ([`cover_holds`]): the patch is often hidden while a switch runs
+//!   (the incoming windows wait in the corner, so no order of the patch is right) and shown
+//!   again only once a plan sees them gone from the corner, which may come after the switch
+//!   has landed and its cover gone (10-23: a frame or more of bare slivers at a switch's
+//!   end). A cover of the patch's picture therefore stays past the landing until the patch
+//!   has been on screen for [`PATCH_DRAWN`] (its first frames drawn), at most
+//!   [`COVER_HOLD_MAX`], and never where an arriving window landed over the corner (the cover
+//!   would paint over it).
+//! - **Desktops.** Each Desktop has a patch panel of its own, which slides with it
+//!   ([`crate::ui::corner_patch`]). Before a Space change's notice the window server already
+//!   lists the parked windows slid aside ([`desktop_slides`]); the plan then stays as it was
+//!   ([`slide_waits`]), so the panel slides away drawn and is there when its Desktop slides
+//!   back in. While the change is recognized no plan is made at all.
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
 //!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
 //!   down (nothing parked).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use super::geometry::Rect;
 use super::park::Corner;
@@ -638,6 +652,84 @@ fn covered_by(r: Rect, parts: &[Rect]) -> bool {
     left.is_empty()
 }
 
+/// The longest a switch's cover of the patch's picture outlasts the switch, waiting for the
+/// patch to show ([`cover_holds`]).
+pub const COVER_HOLD_MAX: Duration = Duration::from_millis(300);
+
+/// How long the patch must have been on screen before a held cover leaves: its first frames
+/// drawn (three at 60 Hz).
+pub const PATCH_DRAWN: Duration = Duration::from_millis(50);
+
+/// What a landed switch's cover of the corner waits on ([`cover_holds`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldFacts {
+    /// Where the cover is (global, top-left).
+    pub cover: Rect,
+    /// What it shows.
+    pub picture: CoverPicture,
+    /// Where the switch's incoming windows are now (their frames, read back once in place).
+    pub arrived: Vec<Rect>,
+    /// How long the patch has been on screen at its rectangle now; `None` while hidden.
+    pub patch_shown_for: Option<Duration>,
+    /// How long the cover has outlasted the switch.
+    pub held_for: Duration,
+}
+
+/// Whether a landed switch's cover stays over the corner a moment more: only a cover of the
+/// patch's picture (a still of the desktop means icons lie there, so the patch stays off),
+/// only while no incoming window lies under it, until the patch has been on screen for
+/// [`PATCH_DRAWN`], and never past [`COVER_HOLD_MAX`].
+pub fn cover_holds(f: &HoldFacts) -> bool {
+    f.picture == CoverPicture::Wallpaper
+        && !f.arrived.iter().any(|w| w.intersect(&f.cover).is_some())
+        && f.patch_shown_for.is_none_or(|t| t < PATCH_DRAWN)
+        && f.held_for < COVER_HOLD_MAX
+}
+
+/// How long the plan may stay as it was while the parked windows are listed slid aside
+/// ([`desktop_slides`]) before the Space change's notice comes ([`slide_waits`]).
+pub const SLIDE_HOLD: Duration = Duration::from_millis(600);
+
+/// Whether the window server's list shows a Desktop slide (a Space change before its
+/// notice): another Desktop's parked windows are listed on screen (`elsewhere`: the Desktop
+/// sliding in, in the zone or not; 10-23, its windows planned as this Desktop's slivers put
+/// this Desktop's panel at the other's rectangle), or this Desktop's (`here`, the model's
+/// parked ones of the Space shown, listed) are none in the park zone but every one lies in it
+/// moved sideways only, all by the same distance (parked windows share their corner's edge;
+/// Show Desktop pushes windows apart), or the model parks windows on this Desktop
+/// (`parked_here`) and the list shows none of them at all (slid off the display at a slide's
+/// start, before the next Desktop's are listed: 10-23, 11:56:09.906, 'no sliver shows' hid the
+/// panel of the Desktop being left, which came back bare). With no window parked here, no
+/// sliver is just that.
+pub fn desktop_slides(parked_here: usize, here: &[Rect], elsewhere: bool, display: Rect, visible: Rect, corner: Corner) -> bool {
+    use super::park::is_parked_in_at;
+    if elsewhere {
+        return true;
+    }
+    let listed = here;
+    if listed.iter().any(|b| is_parked_in_at(*b, display, visible, corner)) {
+        return false;
+    }
+    if listed.is_empty() {
+        return parked_here > 0;
+    }
+    // Where its corner's edge would put each one: a sliver's width on the display.
+    let edge = |b: &Rect| if corner.right() { display.max_x() - 1.0 } else { display.x + 1.0 - b.w };
+    let shifts: Vec<f64> = listed.iter().map(|b| edge(b) - b.x).collect();
+    let first = shifts[0];
+    first.abs() >= 1.0
+        && shifts.iter().all(|d| (d - first).abs() <= 1.0)
+        && listed.iter().all(|b| is_parked_in_at(Rect::new(edge(b), b.y, b.w, b.h), display, visible, corner))
+}
+
+/// Whether the patch's plan stays as it was (nothing sent): the Desktop slides
+/// ([`desktop_slides`]) for at most [`SLIDE_HOLD`] while the patch shows. The patch belongs
+/// to its Desktop and slides with it; hidden by the plan, it would be gone on that Desktop
+/// when the user comes back, its slivers bare as it slides in.
+pub fn slide_waits(slides_for: Option<Duration>, shown: bool) -> bool {
+    shown && slides_for.is_some_and(|t| t < SLIDE_HOLD)
+}
+
 /// `a` without `b`: up to four rectangles.
 fn minus(a: Rect, b: Rect) -> Vec<Rect> {
     let Some(i) = a.intersect(&b) else { return vec![a] };
@@ -672,6 +764,56 @@ mod tests {
             items: Some(vec![Rect::new(2400.0, 40.0, 100.0, 100.0)]),
             ..CoverFacts::default()
         }
+    }
+
+    #[test]
+    fn a_desktop_sliding_away_is_told_from_windows_pushed_apart() {
+        use crate::engine::park::Corner;
+        let visible = Rect::new(0.0, 25.0, 2560.0, 1415.0);
+        // 10-23: the parked windows listed at x=110 as the Desktop slid, before the notice.
+        let slid = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(110.0, 1408.0, 1497.0, 1030.0)];
+        assert!(desktop_slides(1, &slid, false, MAIN, visible, Corner::BottomRight));
+        let parked = [Rect::new(2559.0, 1388.0, 1621.0, 1183.0)];
+        assert!(!desktop_slides(1, &parked, false, MAIN, visible, Corner::BottomRight), "in the zone: no slide");
+        let apart = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(900.0, 1408.0, 1497.0, 1030.0)];
+        assert!(!desktop_slides(1, &apart, false, MAIN, visible, Corner::BottomRight), "pushed apart: not a slide");
+        let lifted = [Rect::new(110.0, 600.0, 1621.0, 400.0)];
+        assert!(!desktop_slides(1, &lifted, false, MAIN, visible, Corner::BottomRight), "moved up: not a slide");
+        assert!(desktop_slides(1, &[], false, MAIN, visible, Corner::BottomRight), "parked here, none listed: slid off");
+        assert!(!desktop_slides(0, &[], false, MAIN, visible, Corner::BottomRight), "nothing parked here: no sliver indeed");
+        // 10-23, 11:51:01.093: the next Desktop's parked windows listed in the zone before the
+        // notice, this Desktop's slid off the display: a slide, whatever the geometry says.
+        assert!(desktop_slides(1, &[], true, MAIN, visible, Corner::BottomRight));
+        assert!(desktop_slides(1, &parked, true, MAIN, visible, Corner::BottomRight));
+        let ms = Duration::from_millis;
+        assert!(slide_waits(Some(ms(0)), true));
+        assert!(!slide_waits(Some(SLIDE_HOLD), true), "never longer");
+        assert!(!slide_waits(Some(ms(10)), false), "nothing shown to keep");
+        assert!(!slide_waits(None, true));
+    }
+
+    #[test]
+    fn a_landed_cover_holds_the_corner_until_the_patch_is_drawn() {
+        // 10-23: the patch shown again 5 ms after the incoming windows were in place, the
+        // corner bare between the cover and the patch's first frame.
+        let corner = Rect::new(2499.0, 1314.0, 61.0, 126.0);
+        let ms = Duration::from_millis;
+        let f = HoldFacts {
+            cover: corner,
+            picture: CoverPicture::Wallpaper,
+            arrived: vec![Rect::new(1265.0, 606.0, 1051.0, 734.0), Rect::new(376.0, 49.0, 1973.0, 1291.0)],
+            patch_shown_for: None,
+            held_for: ms(0),
+        };
+        assert!(cover_holds(&f), "the patch hidden: the cover stays");
+        assert!(cover_holds(&HoldFacts { patch_shown_for: Some(ms(10)), ..f.clone() }), "just ordered in: not drawn yet");
+        assert!(!cover_holds(&HoldFacts { patch_shown_for: Some(PATCH_DRAWN), ..f.clone() }), "drawn: the cover goes");
+        assert!(!cover_holds(&HoldFacts { patch_shown_for: Some(ms(5000)), ..f.clone() }), "shown all along: no hold at all");
+        assert!(cover_holds(&HoldFacts { held_for: COVER_HOLD_MAX - ms(1), ..f.clone() }));
+        assert!(!cover_holds(&HoldFacts { held_for: COVER_HOLD_MAX, ..f.clone() }), "never longer: the patch may stay off");
+        assert!(!cover_holds(&HoldFacts { picture: CoverPicture::Desktop, ..f.clone() }), "icons there: the patch stays off");
+        let over = Rect::new(1800.0, 900.0, 760.0, 540.0);
+        assert!(!cover_holds(&HoldFacts { arrived: vec![over], ..f }), "an arriving window landed over the corner");
     }
 
     #[test]

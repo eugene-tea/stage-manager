@@ -56,7 +56,7 @@ use super::logging::{self, Process};
 use super::paths;
 use super::space_keys::{Direction, Expose};
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::handoff::{self, Offer};
+use crate::engine::handoff::{self, Offer, Trust};
 
 /// A parsed ctl command.
 #[derive(Clone, Debug, PartialEq)]
@@ -310,8 +310,9 @@ impl Command {
 /// How long `debug-space` waits for the Space change after typing the shortcut.
 pub const SPACE_WAIT: Duration = Duration::from_secs(6);
 
-/// Answers a command; runs on a ctl connection thread.
-pub type Handler = Arc<dyn Fn(Command) -> serde_json::Value + Send + Sync>;
+/// Answers a command from a peer allowed to send it ([`Peer::may`]); runs on a ctl
+/// connection thread.
+pub type Handler = Arc<dyn Fn(Command, Peer) -> serde_json::Value + Send + Sync>;
 
 /// Error reply in the protocol's shape.
 pub fn error_reply(message: &str) -> serde_json::Value {
@@ -354,11 +355,19 @@ impl Peer {
             Self::Ours => true,
             // `adopted` and `take-watch` too: a crashed copy's guardian asks them, and its
             // binary may no longer be signed like this one (an update replaced it). `adopted`
-            // answers window ids only; `take-watch` makes this app wait for windows found in
-            // the park zone, and only ever moves one out of it.
+            // answers window ids only; from such a peer `take-watch` takes only windows this
+            // app sees parked, of apps it manages ([`Self::trust`], `handoff::vet`), and only
+            // ever moves one out of the park zone.
             Self::SameUser => matches!(cmd, Command::Ping | Command::Settings | Command::Adopted(_) | Command::TakeWatch(_)),
             Self::Stranger => false,
         }
+    }
+}
+
+impl Peer {
+    /// How far a handoff from this peer is believed: [`Trust::Signed`] only for our own code.
+    pub fn trust(self) -> Trust {
+        if self == Self::Ours { Trust::Signed } else { Trust::Unsigned }
     }
 }
 
@@ -508,7 +517,7 @@ fn serve_connection(stream: UnixStream, handler: &Handler) {
             }
             Ok(cmd) => {
                 tracing::debug!("ctl: {line}");
-                handler(cmd)
+                handler(cmd, peer)
             }
             Err(e) => error_reply(&e),
         };
@@ -749,6 +758,10 @@ mod tests {
             assert!(!Peer::SameUser.may(&cmd), "{cmd:?}");
             assert!(Peer::Ours.may(&cmd), "{cmd:?}");
         }
+        // A handoff from a program not signed like us is believed only for parked windows
+        // (the Codex review of 10-21, R4; `handoff::vet`).
+        assert_eq!(Peer::Ours.trust(), Trust::Signed);
+        assert_eq!(Peer::SameUser.trust(), Trust::Unsigned);
     }
 
     #[test]

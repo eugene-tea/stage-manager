@@ -1,6 +1,11 @@
 //! The motion overlay: a click-through, transparent panel over the whole main display, above
-//! every window, where window snapshots ("ghosts") move while the real windows jump behind
-//! them (`[animation]`). Main thread only.
+//! every normal window, where window snapshots ("ghosts") move while the real windows jump
+//! behind them (`[animation]`). Main thread only.
+//!
+//! It stays below floating windows ([`OVER_WINDOWS`]): an always-on-top window (a music
+//! player in a corner) stays on top through a switch, as with Apple's, which animates each
+//! window at its own level. At the status level it drew the park corner's wallpaper cover
+//! over such a window for the length of every switch (the owner's report, 10-22).
 //!
 //! The overlay shows only while something moves; it stays on the active Space (it moves
 //! there when shown, it never joins every Space). Its layers repeat the strip's perspective:
@@ -21,7 +26,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSNormalWindowLevel, NSPanel, NSStatusWindowLevel, NSView, NSWindowOrderingMode,
+    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSNormalWindowLevel, NSPanel, NSStatusWindowLevel, NSView,
+    NSWindowOrderingMode,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -40,6 +46,11 @@ use crate::ui::motion_math::{Plane, Spring};
 use crate::ui::panels;
 
 /// Every key path a ghost animates.
+/// The overlay's level when no window is given to go under: above every normal window (so
+/// the real windows jump behind the ghosts), below floating ones (always-on-top windows, and
+/// the strip while it is raised over windows).
+const OVER_WINDOWS: isize = NSFloatingWindowLevel - 1;
+
 const KEYS: [&str; 4] = ["position", "bounds", "transform", "cornerRadius"];
 
 fn as_object<T>(cf: &T) -> &AnyObject {
@@ -264,7 +275,7 @@ impl OverlayView {
     }
 }
 
-/// The overlay's panel: click-through, transparent, above every window.
+/// The overlay's panel: click-through, transparent, above every normal window.
 fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
@@ -276,7 +287,7 @@ fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     panel.setOpaque(false);
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
     panel.setHasShadow(false);
-    panel.setLevel(NSStatusWindowLevel);
+    panel.setLevel(OVER_WINDOWS);
     panel.setIgnoresMouseEvents(true);
     // On the active Space only: it moves there when shown, and is renewed on a Space change;
     // hidden by Mission Control.
@@ -299,6 +310,9 @@ pub struct Overlay {
     /// The window the overlay is ordered just under (at the normal window level), while a
     /// transition's snapshots pass under a window already in place ([`Self::show_under`]).
     under: Option<u32>,
+    /// Above every window, floating ones and the raised strip included ([`Self::show_on_top`]):
+    /// only while a window dragged over the strip shows its card.
+    top: bool,
 }
 
 impl Overlay {
@@ -315,7 +329,7 @@ impl Overlay {
         let space = CALayer::new();
         root.addSublayer(&space);
         panel.setContentView(Some(&view));
-        Self { panel, view, root, space, origin: Point::new(0.0, 0.0), shown: false, under: None }
+        Self { panel, view, root, space, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false }
     }
 
     /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them) and sets
@@ -350,22 +364,23 @@ impl Overlay {
         self.origin
     }
 
-    /// Shows the overlay (above every window, on the active Space).
+    /// Shows the overlay (above every normal window, on the active Space).
     pub fn show(&mut self) {
         self.show_under(None);
     }
 
     /// Shows the overlay just under window `under` (another app's, at the normal level), so
     /// snapshots pass behind a window already in place, as Apple's do behind a window just
-    /// opened or activated; `None`: above every window.
+    /// opened or activated; `None`: above every normal window.
     pub fn show_under(&mut self, under: Option<u32>) {
         self.show_below(under.map(|id| (id, NSNormalWindowLevel)));
     }
 
     /// Shows the overlay just under window `below.0` at level `below.1` (the window's own:
-    /// ordering is per level); `None`: above every window.
+    /// ordering is per level); `None`: above every normal window.
     pub fn show_below(&mut self, below: Option<(u32, isize)>) {
         if let Some((id, level)) = below {
+            self.top = false;
             self.panel.setLevel(level);
             self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Below, id as isize);
             if self.panel.isVisible() {
@@ -373,15 +388,32 @@ impl Overlay {
                 self.under = Some(id);
                 return;
             }
-            // The window is gone (closed, or off the Space shown): above every window.
-            tracing::debug!(id, "motion overlay: cannot go under that window; above every window");
+            // The window is gone (closed, or off the Space shown): above every normal window.
+            tracing::debug!(id, "motion overlay: cannot go under that window; above every normal window");
             self.under = Some(id);
             self.shown = false;
         }
-        if self.under.take().is_some() {
+        if self.under.take().is_some() || self.top {
+            self.top = false;
+            self.panel.setLevel(OVER_WINDOWS);
+            self.shown = false;
+        }
+        self.order_front();
+    }
+
+    /// Shows the overlay above every window, floating ones and the raised strip included:
+    /// for the card of a window dragged over the strip, which follows the pointer over the
+    /// cards.
+    pub fn show_on_top(&mut self) {
+        if self.under.take().is_some() || !self.top {
+            self.top = true;
             self.panel.setLevel(NSStatusWindowLevel);
             self.shown = false;
         }
+        self.order_front();
+    }
+
+    fn order_front(&mut self) {
         if !self.shown {
             self.shown = true;
             self.panel.orderFrontRegardless();
@@ -402,6 +434,7 @@ impl Overlay {
         let old = std::mem::replace(&mut self.panel, panel);
         old.close();
         self.under = None;
+        self.top = false;
     }
 
     /// Hides the overlay.

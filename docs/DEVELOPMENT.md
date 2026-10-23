@@ -48,7 +48,10 @@ terminal has its approvals checked against the terminal, not the app.
 | `make release` | the public, notarized DMG and Homebrew cask ([RELEASING.md](RELEASING.md)) |
 
 Dev runs and tests always launch from the fixed dev copy. macOS approves screen capture per
-app location, so one location means one approval for every worktree.
+app location, so one location means one approval for every worktree. A copy running from
+there (any home) is never replaced, and `make run` refuses before copying when a copy answers
+in its home; the new copy is made beside the old one and swapped in, so a failed copy keeps
+the old one (`python3 scripts/test_dev_app_unit.py` checks this offline).
 
 `make run` passes `RUST_LOG`, `STAGE_MANAGER_NO_PROMPT`, `STAGE_MANAGER_ONLY`,
 `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST` through to the app.
@@ -63,8 +66,8 @@ its ctl socket and reading the window server's view of the windows:
 
 ```sh
 scripts/test-stages.sh                    # every phase
-scripts/test-stages.sh m3 safety          # some phases: m3 safety m4 m6 strip native visible
-                                          # parity motion expose capture
+scripts/test-stages.sh m3 safety          # some phases: m3 safety m4 m6 restore strip native
+                                          # visible parity motion slots expose capture
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
@@ -75,11 +78,14 @@ Rules for every run that manages windows:
 - Limit management to fixture apps with `STAGE_MANAGER_ONLY=<bundle ids>`. Never move,
   park or close anyone's real windows.
 - Use a separate home with `STAGE_MANAGER_HOME` (the script makes a new `/tmp/sm-test.*`).
+  The script builds its own fixtures (`SM Fixture Stages.app`, and A, B and C for the
+  `native` phase).
 - Turn off Apple's Stage Manager: while it is on it rescales other apps' windows.
 - Keep window captures off (`STAGE_MANAGER_NO_CAPTURE=1`). Only the `capture` phase turns
   them on, because a capture can raise macOS's screen-access alert.
 - Turn on an extra in the test's own `config.toml`, never the user's.
-- The script refuses to run while an installed Stage Manager is running.
+- No phase runs while the installed Stage Manager (`~/Applications`) is running, and
+  `dev-app.sh` never replaces a dev copy that runs.
 
 Synthetic clicks and drags are posted only where the app's own or a fixture's windows are
 topmost along the whole path, and the pointer is put back afterwards.
@@ -117,17 +123,17 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 ## The ctl socket
 
 The running app listens on `~/.config/stage-manager/stage-manager.sock` (or in
-`$STAGE_MANAGER_HOME`; up to 1.1.0 it was `$TMPDIR/stage-manager.sock`): one command per line,
+`$STAGE_MANAGER_HOME`): one command per line,
 one line of JSON per reply. The running copy's own binary is the client. The socket is the
 user's only (`0600`), and the app serves every command only to code signed as it is, judged by
 the connection's audit token: its own binary, or another copy of the bundle signed with the
 same identity. Any other program, `target/debug/stage-manager` (ad hoc signed) included, gets
-`ping` and `settings` only, and the refusal names the binary that would be served. Use the
-binary of the copy that runs:
+`ping` and `settings` only (and a crashed copy's guardian `adopted` and `take-watch`), and the
+refusal names the binary that would be served. Use a binary signed like the copy that runs:
 
 ```sh
 B=stage-manager                                              # the Homebrew install (its symlink)
-B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # the dev app (make run)
+B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make sign)
 "$B" ctl state | jq '.stages'
 ```
 
@@ -154,7 +160,7 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
 
 ## Other tools
 
-- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--png FILE]`
+- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--png FILE]`
   opens one of the app's windows alone, or draws it to a PNG, without managing anything.
 - `stage-manager strip-demo` runs the strip alone, fed from the live window list, and never
   moves a window. Its variables (`STAGE_MANAGER_DEMO_*`, and an offscreen render with

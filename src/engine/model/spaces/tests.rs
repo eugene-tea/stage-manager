@@ -951,6 +951,185 @@ mod focus_on_arrival {
     }
 }
 
+// ----- an activation while a Desktop slides, before the notice (10-23) -------------------
+
+mod slide_activation {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::engine::focus_replay::{FocusReplay, Wanted};
+    use crate::engine::slide_hold::{SlideHold, Step, Wait, activation_waits, asks_focus, slide_listed};
+
+    /// The owner's case (10-23, 11:57:50): the editor (pid 10, his browser that day) has a
+    /// window on each Desktop. Desktop 1 shows the editor's stage (window 1); on Desktop 2 the
+    /// chat's stage shows and the editor's window 3 waits parked. The user is on Desktop 2.
+    fn editor_parked_on_desktop_2() -> Mac {
+        let mut mac = two_desktops();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        assert!(!mac.parked(1) && mac.parked(2), "Desktop 1 shows the editor's stage");
+        mac.focused = Some(w(4));
+        mac.go(1);
+        let chat = mac.m.stage_of(w(4)).expect("chat stage");
+        mac.click(chat);
+        assert!(mac.parked(3) && !mac.parked(4), "Desktop 2: the editor's window waits parked");
+        mac.elsewhere.clear();
+        mac
+    }
+
+    /// The window server's on-screen list as the platform reads it: the shown Desktop's
+    /// windows at their frames, each moved `dx` (a slide), plus `extra`.
+    fn listed(mac: &Mac, dx: f64, extra: &[(u32, Rect)]) -> Vec<(u32, Rect)> {
+        let mut out: Vec<(u32, Rect)> = mac
+            .wins
+            .iter()
+            .filter(|(id, _)| mac.on_screen(**id))
+            .map(|(id, (_, f, _))| (*id, Rect::new(f.x + dx, f.y, f.w, f.h)))
+            .collect();
+        out.extend_from_slice(extra);
+        out
+    }
+
+    /// What the controller does with an activation that would switch stages: held when it
+    /// waits ([`activation_waits`]), else decided at once (`Model::app_activated`).
+    fn activation(mac: &mut Mac, replay: &mut FocusReplay, pid: Pid, list: &[(u32, Rect)], ax: Option<u32>, now: Instant) -> Option<Wait> {
+        let focused = asks_focus(&mac.m, pid).then_some(ax.map(w)).flatten();
+        if let Some(why) = activation_waits(&mac.m, slide_listed(&mac.m, list), focused) {
+            let wanted = match why {
+                Wait::FocusElsewhere(id) => Wanted::Window { id, pid },
+                Wait::Slides => Wanted::App(pid),
+            };
+            replay.hold(wanted, now);
+            return Some(why);
+        }
+        let obs = mac.obs();
+        let a = mac.m.app_activated(pid, &obs);
+        mac.run(a);
+        None
+    }
+
+    /// Desktop 1 recognized: AX asked now (`ax_now`), the held event replayed.
+    fn arrive_on_desktop_1(mac: &mut Mac, replay: &mut FocusReplay, ax_now: Option<u32>, now: Instant) {
+        mac.shown = 0;
+        mac.focused = ax_now.map(w);
+        mac.arrive();
+        let held = replay.take(now);
+        let obs = Observation { focused: ax_now.map(w), ..mac.obs() };
+        let a = mac.m.bring_focus_forward(ax_now.map(w), held, &obs);
+        mac.run(a);
+    }
+
+    #[test]
+    fn decided_at_once_mid_slide_it_switches_on_the_desktop_being_left() {
+        // The failure: the model still shows Desktop 2, so the editor's activation brought
+        // its parked window 3 there and focused it; macOS slid back to Desktop 2.
+        let mut mac = editor_parked_on_desktop_2();
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        assert!(a.contains(&Action::Focus { id: w(3) }), "{a:?}");
+    }
+
+    #[test]
+    fn an_activation_mid_slide_is_held_and_resolved_on_the_new_desktop() {
+        let mut mac = editor_parked_on_desktop_2();
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        // Mid-slide toward Desktop 1: Desktop 2's windows listed moved aside, Desktop 1's
+        // window 1 listed sliding in.
+        let one = Rect::new(-300.0, 80.0, 600.0, 400.0);
+        let list = listed(&mac, 1240.0, &[(1, one)]);
+        let why = activation(&mut mac, &mut replay, 10, &list, None, t0);
+        assert_eq!(why, Some(Wait::Slides));
+        assert!(mac.parked(3) && !mac.parked(4), "nothing switched on the Desktop being left");
+        assert_eq!(mac.focused, Some(w(4)), "nothing focused there");
+        // The Space change: Desktop 1 recognized; macOS shows the editor's window 1 there.
+        arrive_on_desktop_1(&mut mac, &mut replay, Some(1), t0 + Duration::from_millis(400));
+        assert!(!mac.parked(1) && mac.parked(2), "Desktop 1 as macOS shows it");
+        assert!(mac.elsewhere.is_empty(), "Desktop 2 never touched: {:?}", mac.elsewhere);
+        mac.shown = 1;
+        assert!(mac.parked(3) && !mac.parked(4), "Desktop 2 as it was left");
+    }
+
+    #[test]
+    fn an_activation_whose_window_is_on_another_desktop_is_held_before_any_slide_shows() {
+        // 12:00:29: the activation came before the list showed the slide; the app's focused
+        // window says where it goes. Desktop 1 shows the browser, the editor parked there:
+        // on arrival the editor's stage comes (Apple's rule).
+        let mut mac = editor_parked_on_desktop_2();
+        mac.shown = 0;
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.arrive();
+        mac.click(browser);
+        mac.focused = Some(w(4));
+        mac.go(1);
+        assert!(mac.parked(3));
+        mac.elsewhere.clear();
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        let list = listed(&mac, 0.0, &[]);
+        assert!(!slide_listed(&mac.m, &list), "no slide listed yet");
+        let why = activation(&mut mac, &mut replay, 10, &list, Some(1), t0);
+        assert_eq!(why, Some(Wait::FocusElsewhere(w(1))));
+        assert!(mac.parked(3) && mac.elsewhere.is_empty(), "nothing switched on Desktop 2");
+        arrive_on_desktop_1(&mut mac, &mut replay, Some(1), t0 + Duration::from_millis(300));
+        assert!(!mac.parked(1) && mac.parked(2), "the editor's stage on Desktop 1");
+        mac.shown = 1;
+        assert!(mac.parked(3) && !mac.parked(4), "Desktop 2 as it was left");
+    }
+
+    #[test]
+    fn without_a_slide_an_activation_switches_at_once_as_before() {
+        // AX names the editor's window here (or nothing): switched at once.
+        for ax in [Some(3), None] {
+            let mut mac = editor_parked_on_desktop_2();
+            let t0 = Instant::now();
+            let mut replay = FocusReplay::default();
+            let list = listed(&mac, 0.0, &[]);
+            assert!(!slide_listed(&mac.m, &list), "Desktop 2's windows where they are, parked in the zone");
+            let why = activation(&mut mac, &mut replay, 10, &list, ax, t0);
+            assert_eq!(why, None, "AX {ax:?}");
+            assert!(!mac.parked(3), "the editor's stage on the Desktop shown");
+            assert_eq!(replay.peek(t0), None, "nothing held");
+            assert!(mac.elsewhere.is_empty());
+        }
+        // An app with no window on another Desktop is never asked.
+        let mac = editor_parked_on_desktop_2();
+        assert!(asks_focus(&mac.m, 10));
+        assert!(!asks_focus(&mac.m, 30), "the chat lives on Desktop 2 only");
+    }
+
+    #[test]
+    fn the_desktop_being_lefts_parked_windows_slid_together_are_a_slide() {
+        let mac = editor_parked_on_desktop_2();
+        let three = mac.wins[&3].1;
+        let parked_only = |dx: f64| vec![(3, Rect::new(three.x + dx, three.y, three.w, three.h))];
+        assert!(!slide_listed(&mac.m, &parked_only(0.0)), "in the zone: no slide");
+        assert!(slide_listed(&mac.m, &parked_only(-700.0)), "moved sideways out of the zone");
+        assert!(!slide_listed(&mac.m, &[]), "none listed (a hidden app's): no slide");
+    }
+
+    #[test]
+    fn a_held_activation_with_no_space_change_is_decided_after_the_hold() {
+        let mut mac = editor_parked_on_desktop_2();
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        let one = Rect::new(-300.0, 80.0, 600.0, 400.0);
+        let list = listed(&mac, 1240.0, &[(1, one)]);
+        assert_eq!(activation(&mut mac, &mut replay, 10, &list, None, t0), Some(Wait::Slides));
+        let hold = SlideHold { wanted: Wanted::App(10), activation: true, came: t0, changes: 0 };
+        assert_eq!(hold.step(t0 + Duration::from_millis(200), 0, || true), Step::Wait);
+        // The slide given up: the list shows Desktop 2 as it was; decided as before.
+        let back = listed(&mac, 0.0, &[]);
+        let now = t0 + Duration::from_millis(520);
+        assert_eq!(hold.step(now, 0, || slide_listed(&mac.m, &back)), Step::Decide);
+        assert_eq!(replay.take(now), Some(Wanted::App(10)));
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        assert!(!mac.parked(3), "the editor's stage on Desktop 2, as an activation always did");
+    }
+}
+
 // ----- the Desktop arranged ahead of its arrival (round 6T) --------------------------------
 
 mod arranged_ahead {

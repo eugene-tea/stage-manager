@@ -48,7 +48,7 @@ impl Env {
         let obs = self.d.obs();
         let a = self
             .m
-            .add_window(meta, &Decision { action, placement }, &obs);
+            .add_window(meta, &Decision { action, placement, ..Decision::default() }, &obs);
         self.run(a)
     }
 
@@ -223,6 +223,7 @@ fn named_stage_parks_unfocused_windows_and_follows_focused_ones() {
         &Decision {
             action: RuleAction::Stage("Chat".into()),
             placement: Placement::AsIs,
+            ..Decision::default()
         },
         &obs,
     );
@@ -1252,18 +1253,18 @@ fn capacity_shrinks_by_evicting_the_oldest_and_grows_back() {
 }
 
 #[test]
-fn fixed_order_lists_creation_order_and_can_show_the_active_stage() {
+fn in_place_lists_creation_order_and_can_show_the_active_stage() {
     let mut e = stages(4, 6);
     e.switch(2);
     e.m.set_strip_options(StripOptions {
-        order: StripOrder::Fixed,
-        show_active: false,
+        order: StripOrder::InPlace,
+        active: ActiveCard::Close,
         capacity: 6,
     });
     assert_eq!(e.slot_numbers(), [1, 3, 4]);
     e.m.set_strip_options(StripOptions {
-        order: StripOrder::Fixed,
-        show_active: true,
+        order: StripOrder::InPlace,
+        active: ActiveCard::Card,
         capacity: 6,
     });
     let cards = e.m.strip();
@@ -1271,14 +1272,21 @@ fn fixed_order_lists_creation_order_and_can_show_the_active_stage() {
         cards.iter().map(|c| c.number).collect::<Vec<_>>(),
         [1, 2, 3, 4]
     );
-    assert!(cards[1].active);
+    assert!(cards[1].active && !cards[1].gap);
+    e.m.set_strip_options(StripOptions {
+        order: StripOrder::InPlace,
+        active: ActiveCard::Gap,
+        capacity: 6,
+    });
+    let cards = e.m.strip();
+    assert_eq!(cards.iter().map(|c| (c.number, c.gap)).collect::<Vec<_>>(), [(1, false), (2, true), (3, false), (4, false)]);
     e.m.set_strip_options(StripOptions {
         order: StripOrder::Native,
-        show_active: true,
+        active: ActiveCard::Card,
         capacity: 6,
     });
     assert!(
-        e.m.strip().iter().all(|c| !c.active),
+        e.m.strip().iter().all(|c| !c.active && !c.gap),
         "native never shows the active stage"
     );
 }
@@ -1498,7 +1506,7 @@ fn merging_into_the_active_stage_restores_and_the_active_card_never_moves() {
     assert!(e.m.merge_stages(s1, s1, &obs).is_empty(), "onto itself");
     assert!(e.m.merge_stages(s1, StageId(99), &obs).is_empty(), "onto an unknown stage");
     assert!(e.m.merge_stages(StageId(99), s1, &obs).is_empty(), "an unknown stage");
-    // Onto the active stage's card (fixed order with show_active): a shift-click merge.
+    // Onto the active stage's card (in place with `active = "card"`): a shift-click merge.
     let a = e.m.merge_stages(s2, s3, &obs);
     e.run(a);
     assert!(e.m.stage(s2).is_none());
@@ -1684,7 +1692,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                     log.push(format!("add {next_id} {action}"));
                     next_id += 1;
                     let obs = e.d.obs();
-                    let a = e.m.add_window(m, &Decision { action, placement }, &obs);
+                    let a = e.m.add_window(m, &Decision { action, placement, ..Decision::default() }, &obs);
                     e.run(a);
                 }
                 3 => {
@@ -1796,6 +1804,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                             &Decision {
                                 action: RuleAction::New,
                                 placement: Placement::Center,
+                                ..Decision::default()
                             },
                             &obs,
                         );
@@ -2031,6 +2040,119 @@ fn native_with_one_at_a_time_gives_a_parked_apps_new_window_its_own_stage() {
     assert_eq!(e.number_of(4), 3);
 }
 
+// ----- [stages] new_apps_join_current ---------------------------------------------------------
+
+impl Env {
+    /// Adds `meta` with the rules' `decision` after the key (`join`) and Shift
+    /// ([`Decision::for_new_window`]), as the platform does.
+    fn add_new(&mut self, meta: WindowMeta, decision: Decision, join: bool, shift: bool) -> Vec<Action> {
+        let new_app = self.m.app_is_new(meta.pid);
+        let (decision, _) = decision.for_new_window(new_app, join, shift);
+        self.d.open(&meta);
+        let obs = self.d.obs();
+        let a = self.m.add_window(meta, &decision, &obs);
+        self.run(a)
+    }
+}
+
+#[test]
+fn new_apps_join_current_off_is_apples_rule() {
+    let mut e = Env::new();
+    e.add_new(meta(1, 10, "com.example.a"), Decision::default(), false, false);
+    e.add_new(meta(2, 11, "com.example.b"), Decision::default(), false, false);
+    assert_eq!(e.m.stages().len(), 2, "a stage of its own");
+    assert_eq!(e.active_number(), 2);
+}
+
+#[test]
+fn new_apps_join_current_on_a_new_app_joins_the_active_stage() {
+    let mut e = Env::new();
+    e.add_new(meta(1, 10, "com.example.a"), Decision::default(), true, false);
+    let a = e.add_new(meta(2, 11, "com.example.b"), Decision::default(), true, false);
+    assert_eq!(e.m.stages().len(), 1, "no stage of its own");
+    assert_eq!(titles(&e, 1), [2, 1], "in front of the stage");
+    assert_eq!(e.m.stage(e.m.main_active_stage().expect("active")).and_then(|s| s.key), Some(w(2)));
+    assert!(!e.d.parked(w(1)) && !e.d.parked(w(2)), "nothing parked: {a:?}");
+    // Its next window joins it there (Apple's rule: its app is in the active stage).
+    e.add_new(meta(3, 11, "com.example.b"), Decision::default(), true, false);
+    assert_eq!(titles(&e, 1), [3, 2, 1]);
+}
+
+#[test]
+fn new_apps_join_current_with_shift_gives_the_new_app_a_stage_of_its_own() {
+    let mut e = Env::new();
+    e.add_new(meta(1, 10, "com.example.a"), Decision::default(), true, false);
+    let a = e.add_new(meta(2, 11, "com.example.b"), Decision::default(), true, true);
+    assert_eq!(e.m.stages().len(), 2);
+    assert_eq!(e.active_number(), 2, "switched to it, as Apple's");
+    assert!(e.d.parked(w(1)));
+    assert!(a.contains(&Action::Focus { id: w(2) }));
+    // Without the key, Shift brings the new app here (unchanged).
+    let mut e = Env::new();
+    e.add_new(meta(1, 10, "com.example.a"), Decision::default(), false, false);
+    e.add_new(meta(2, 11, "com.example.b"), Decision::default(), false, true);
+    assert_eq!(e.m.stages().len(), 1);
+}
+
+#[test]
+fn new_apps_join_current_leaves_an_app_already_in_a_stage_to_apples_rule() {
+    let mut e = Env::new();
+    e.add_new(meta(1, 10, "com.example.a"), Decision::default(), false, false);
+    e.add_new(meta(2, 11, "com.example.b"), Decision::default(), false, false);
+    assert_eq!(e.active_number(), 2);
+    // App a's stage is parked: its new window joins it there, which comes forward.
+    e.add_new(meta(3, 10, "com.example.a"), Decision::default(), true, false);
+    assert_eq!(e.number_of(3), 1);
+    assert_eq!(e.active_number(), 1);
+    // With One at a Time a parked app's new window gets a stage of its own, key or not.
+    let mut options = ModelOptions::default();
+    options.settings.app_windows = AppWindows::OneAtATime;
+    let mut e = Env::with(options);
+    e.add_new(meta(1, 10, "com.example.a"), Decision::default(), false, false);
+    e.add_new(meta(2, 11, "com.example.b"), Decision::default(), false, false);
+    e.add_new(meta(3, 10, "com.example.a"), Decision::default(), true, false);
+    assert_eq!(e.m.stages().len(), 3);
+    assert_eq!(e.number_of(3), 3);
+    // A flag set by hand for an app already managed changes nothing either.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    let forced = Decision { new_app_joins_current: true, ..Decision::default() };
+    e.d.open(&meta(3, 10, "com.example.a"));
+    let obs = e.d.obs();
+    let a = e.m.add_window(meta(3, 10, "com.example.a"), &forced, &obs);
+    e.run(a);
+    assert_eq!(e.number_of(3), 1, "its app's stage");
+}
+
+#[test]
+fn new_apps_join_current_yields_to_a_matching_rule() {
+    use crate::engine::rules::{Rule, RuleSet};
+    let rules = RuleSet::new(
+        vec![
+            Rule::parse("com.example.chat", None, Some("new"), None).expect("rule"),
+            Rule::parse("com.example.notes", None, Some("stage:Notes"), None).expect("rule"),
+            Rule::parse("com.example.clock", None, Some("float"), None).expect("rule"),
+        ],
+        Decision::default(),
+    );
+    let mut e = Env::new();
+    e.add_new(meta(1, 10, "com.example.a"), rules.decide("com.example.a", ""), true, false);
+    e.add_new(meta(2, 11, "com.example.chat"), rules.decide("com.example.chat", ""), true, false);
+    assert_eq!(e.m.stages().len(), 2, "the rule's new stage");
+    assert_eq!(e.number_of(2), 2);
+    e.add_new(meta(3, 12, "com.example.notes"), rules.decide("com.example.notes", ""), true, false);
+    assert_eq!(e.m.stage(e.m.stage_of(w(3)).expect("staged")).and_then(|s| s.name.clone()).as_deref(), Some("Notes"));
+    e.add_new(meta(4, 13, "com.example.clock"), rules.decide("com.example.clock", ""), true, false);
+    assert_eq!(e.m.window(w(4)).map(|x| x.home), Some(Home::Pinned));
+    // A non-native default action wins too.
+    let mut e = Env::new();
+    let new = Decision { action: RuleAction::New, ..Decision::default() };
+    e.add_new(meta(1, 10, "com.example.a"), new.clone(), true, false);
+    e.add_new(meta(2, 11, "com.example.b"), new, true, false);
+    assert_ne!(e.m.stage_of(w(1)), e.m.stage_of(w(2)));
+}
+
 #[test]
 fn bring_app_here_moves_every_window_of_the_app() {
     let mut e = Env::new();
@@ -2194,9 +2316,9 @@ fn a_card_dragged_to_another_slot_stays_there_and_the_swap_rule_carries_on() {
 }
 
 #[test]
-fn in_fixed_order_a_dragged_card_moves_in_creation_order() {
+fn in_place_a_dragged_card_moves_in_creation_order() {
     let mut e = Env::with(ModelOptions {
-        strip: StripOptions { order: StripOrder::Fixed, show_active: false, capacity: 6 },
+        strip: StripOptions { order: StripOrder::InPlace, active: ActiveCard::Close, capacity: 6 },
         ..ModelOptions::default()
     });
     for (id, pid) in [(1, 10), (2, 11), (3, 12), (4, 13)] {

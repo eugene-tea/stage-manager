@@ -9,8 +9,6 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-APP="$(scripts/dev-app.sh)" || exit 1
-BIN="$APP/Contents/MacOS/stage-manager"
 if [ -n "${STAGE_MANAGER_HOME:-}" ]; then
   mkdir -p "$STAGE_MANAGER_HOME"
   STAGE_MANAGER_HOME="$(cd "$STAGE_MANAGER_HOME" && pwd)"
@@ -22,10 +20,16 @@ fi
 [ -n "${STAGE_MANAGER_LOG_DIR:-}" ] && LOG_DIR="$STAGE_MANAGER_LOG_DIR"
 LOG="$LOG_DIR/$(date +%Y-%m-%d).log"
 
-if "$BIN" ctl ping >/dev/null 2>&1; then
-  echo "Stage Manager is already running; quit it first (\"$BIN\" ctl quit)." >&2
+# A copy already answering in this home: refuse before the dev copy is touched (review R7),
+# asking with the fresh build (any copy's ctl reaches the socket).
+BUILT="target/Stage Manager.app/Contents/MacOS/stage-manager"
+if "$BUILT" ctl ping >/dev/null 2>&1; then
+  echo "Stage Manager is already running; quit it first (\"$PWD/$BUILT\" ctl quit)." >&2
   exit 1
 fi
+
+APP="$(scripts/dev-app.sh)" || exit 1
+BIN="$APP/Contents/MacOS/stage-manager"
 
 mkdir -p "$LOG_DIR"
 touch "$LOG"

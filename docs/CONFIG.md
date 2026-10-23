@@ -2,7 +2,7 @@
 
 Every option lives in `~/.config/stage-manager/config.toml`. The file lists every key below,
 commented out with its default; remove the `#` to change one. Saved changes apply within a
-second, and a mistake keeps the last working settings. Settings already in System Settings →
+second; a mistake, or a file that can't be read, keeps the last working settings. Settings already in System Settings →
 Desktop & Dock (show recent apps, show an app's windows all at once or one at a time, click
 wallpaper to reveal desktop) are read from there and are not repeated here. The
 [user guide](GUIDE.md#the-config-file) shows how to edit the file, with examples.
@@ -18,8 +18,15 @@ stage-manager config --reference           # the table below
 ```
 
 Rules for new windows are `[[rule]]` tables, checked in order; the first match wins. `app` is
-a bundle ID or `"*"`, `title` an optional regular expression, and `action` and `placement`
-take the same values as `[defaults]` below:
+a bundle ID (exact) or `"*"`, and `title` an optional regular expression, matched anywhere in
+the title the window has when it appears (anchor it with `^…$`). `action` and `placement` take
+the same values as `[defaults]` below; a rule that leaves one out uses `[defaults]`:
+
+- `action`: `"native"` (Apple's: the app's stage, or a stage of its own for a newly opened
+  app), `"current"` (the stage shown), `"new"` (a new stage, shown), `"stage:<name>"` (that
+  stage, made if missing), `"float"` (pinned: shown on every stage), `"ignore"` (left alone).
+- `placement`: `"as-is"` (where the app puts it), `"center"` (centered on the screen, same
+  size), `"cascade"` (a step down and right of the front window, so the edges behind show).
 
 ```toml
 [[rule]]
@@ -38,11 +45,11 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings. |
 | `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
 | `app.install_updates` | `false` | true or false | Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first. |
-| `strip.order` | `"native"` | "native", "fixed" | Card order: "native" is Apple's (the stage you leave takes the clicked card's slot); "fixed" is creation order. |
+| `strip.order` | `"native"` | "native", "in_place", "fixed", "dock" | Card order (Settings: Strip order): "native" is Apple's (the stage you leave takes the clicked card's slot); "in_place" keeps every stage in a place of its own, in creation order, whatever you click ("fixed" is its older name); "dock" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app; apps not in the Dock last), and a card cannot be dragged to another slot. |
+| `strip.active` | `"close"` | "close", "gap", "card" | With order = "in_place" or "dock", the active stage's place: "close" shows no card and the cards below close up; "gap" leaves its slot empty so no other card moves; "card" shows it as a highlighted card. |
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
-| `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). |
+| `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). Off while order = "dock". |
 | `strip.merge_on_drop` | `true` | true or false | Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used). |
-| `strip.show_active` | `false` | true or false | Also show the active stage as a card (fixed order only; Apple never does). |
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
@@ -136,7 +143,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture), so the corner is clean as Apple's; it steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. |
 | `windows.corner_patch_reach` | `60.0` | number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow. |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
-| `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
+| `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
 | `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |
 | `hotkeys.enabled` | `false` | true or false | Register the hotkeys below. |
@@ -147,6 +154,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `hotkeys.toggle_strip` | `"ctrl+alt+s"` | hotkey such as "ctrl+alt+n", or "" for none | Show or hide the strip. |
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
 | `stages.restore_after_restart` | `true` | true or false | After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's "Reopen windows when logging back in"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch. |
+| `stages.new_apps_join_current` | `false` | true or false | A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
 | `log.level` | `"info"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "info" the main events, "debug" every decision (and shows Mark a Problem in the menu). |

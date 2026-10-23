@@ -342,7 +342,7 @@ mod tests {
                 CardWindow { id, pid, frame: Rect::new(0.0, 0.0, w, h) }
             })
             .collect();
-        CardSnapshot { stage, number: stage as usize, name: None, windows, apps }
+        CardSnapshot { stage, number: stage as usize, name: None, windows, apps, ..Default::default() }
     }
 
     /// His laptop: visible 0,39 1800 × 1130 in a 1800 × 1169 display; the panel starts at

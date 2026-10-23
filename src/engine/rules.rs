@@ -107,6 +107,57 @@ pub struct Decision {
     pub action: RuleAction,
     /// Where it goes on screen.
     pub placement: Placement,
+    /// With `native`: a newly opened app's window (its app has no managed standard window)
+    /// joins the active stage instead of a stage of its own (`[stages] new_apps_join_current`).
+    /// The model still sends a window matching a saved one back to its saved stage, and
+    /// ignores this while the restore window is open (`Model::add_window`).
+    pub new_app_joins_current: bool,
+}
+
+/// What Shift did to a new standard window's decision ([`Decision::for_new_window`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShiftEffect {
+    /// Nothing (not held, or not counted for this window).
+    None,
+    /// `[sugar] shift_brings_here`: the window joins the current stage.
+    BringsHere,
+    /// With `[stages] new_apps_join_current` on, a newly opened app gets a stage of its own
+    /// (Apple's rule, once).
+    OwnStage,
+}
+
+impl Decision {
+    /// The decision for a new standard window after `[stages] new_apps_join_current`
+    /// (`join_current`) and Shift (`shift`: held within its window, with
+    /// `[sugar] shift_brings_here` on, for an action [`RuleAction::shift_counts`]).
+    /// `new_app`: the window's app has no managed standard window yet.
+    ///
+    /// The key changes only Apple's rule (`native`) for a newly opened app: its window joins
+    /// the active stage; Shift then gives it a stage of its own instead (the key inverted).
+    /// Every other case is as without the key: Shift brings the window into the current
+    /// stage. A rule's or `[defaults]`'s other action wins over the key, as over Shift.
+    pub fn for_new_window(mut self, new_app: bool, join_current: bool, shift: bool) -> (Self, ShiftEffect) {
+        if join_current && new_app && self.action == RuleAction::Native {
+            if shift {
+                return (self, ShiftEffect::OwnStage);
+            }
+            self.new_app_joins_current = true;
+            return (self, ShiftEffect::None);
+        }
+        if shift && self.action.shift_counts() {
+            self.action = RuleAction::Current;
+            return (self, ShiftEffect::BringsHere);
+        }
+        (self, ShiftEffect::None)
+    }
+}
+
+impl RuleAction {
+    /// Whether Shift held while the window opens changes this action (`native`, `new`,
+    /// `stage:<name>`; never `current`, `float` or `ignore`).
+    pub fn shift_counts(&self) -> bool {
+        matches!(self, Self::Native | Self::New | Self::Stage(_))
+    }
 }
 
 /// Which apps a rule applies to.
@@ -198,6 +249,7 @@ impl RuleSet {
                     .clone()
                     .unwrap_or_else(|| self.defaults.action.clone()),
                 placement: rule.placement.unwrap_or(self.defaults.placement),
+                new_app_joins_current: false,
             },
             None => self.defaults.clone(),
         }
@@ -240,6 +292,30 @@ mod tests {
     }
 
     #[test]
+    fn new_apps_join_current_and_shift() {
+        let native = Decision::default();
+        let with = |action: RuleAction| Decision { action, ..Decision::default() };
+        let joined = Decision { new_app_joins_current: true, ..Decision::default() };
+        // The key off: Apple's rule; Shift brings the window here.
+        assert_eq!(native.clone().for_new_window(true, false, false), (native.clone(), ShiftEffect::None));
+        assert_eq!(native.clone().for_new_window(true, false, true), (with(RuleAction::Current), ShiftEffect::BringsHere));
+        // On: a newly opened app joins the current stage; Shift gives it a stage of its own.
+        assert_eq!(native.clone().for_new_window(true, true, false), (joined, ShiftEffect::None));
+        assert_eq!(native.clone().for_new_window(true, true, true), (native.clone(), ShiftEffect::OwnStage));
+        // An app already in a stage: the key changes nothing; Shift still brings it here.
+        assert_eq!(native.clone().for_new_window(false, true, false), (native.clone(), ShiftEffect::None));
+        assert_eq!(native.clone().for_new_window(false, true, true), (with(RuleAction::Current), ShiftEffect::BringsHere));
+        // A rule's (or [defaults]') own action wins over the key, as over Shift where Shift
+        // never counted.
+        for action in [RuleAction::New, RuleAction::Stage("Chat".into()), RuleAction::Current, RuleAction::Float] {
+            assert_eq!(with(action.clone()).for_new_window(true, true, false), (with(action.clone()), ShiftEffect::None), "{action}");
+        }
+        assert_eq!(with(RuleAction::New).for_new_window(true, true, true), (with(RuleAction::Current), ShiftEffect::BringsHere));
+        assert!(!RuleAction::Float.shift_counts() && !RuleAction::Ignore.shift_counts() && !RuleAction::Current.shift_counts());
+        assert!(RuleAction::Native.shift_counts() && RuleAction::New.shift_counts() && RuleAction::Stage("x".into()).shift_counts());
+    }
+
+    #[test]
     fn first_match_wins() {
         let set = RuleSet::new(
             vec![
@@ -259,6 +335,7 @@ mod tests {
         let defaults = Decision {
             action: RuleAction::New,
             placement: Placement::Center,
+            ..Decision::default()
         };
         let set = RuleSet::new(
             vec![rule("com.example.a", None, Some("float"), None)],
@@ -272,6 +349,7 @@ mod tests {
         let defaults = Decision {
             action: RuleAction::Current,
             placement: Placement::Cascade,
+            ..Decision::default()
         };
         let set = RuleSet::new(
             vec![
@@ -284,14 +362,16 @@ mod tests {
             set.decide("com.example.a", ""),
             Decision {
                 action: RuleAction::Current,
-                placement: Placement::Center
+                placement: Placement::Center,
+                ..Decision::default()
             }
         );
         assert_eq!(
             set.decide("com.example.b", ""),
             Decision {
                 action: RuleAction::New,
-                placement: Placement::Cascade
+                placement: Placement::Cascade,
+                ..Decision::default()
             }
         );
     }

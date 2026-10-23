@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.0 — 2026-10-23
+
+- New apps can open in the current stage: turn on **Open new apps in the current stage**
+  (Settings → Stages) and a newly opened app joins the stage you are in. Hold Shift while
+  opening an app to give it a stage of its own. Off by default, as Apple's.
+- Stages can keep their places: set **Strip order** to **Keep in Place** (Settings → Stages)
+  and each stage stays in its own place in the strip, whichever card you click.
+- Or the strip can follow your Dock: **Strip order** → **Follow the Dock** puts the stages in
+  the order their apps sit in the Dock. Rearrange the Dock and the cards follow.
+- Settings has a toolbar of panes, as Mac apps' settings do: General, Stage Manager, Stages,
+  Windows and Advanced.
+- Going to another Desktop no longer pulls you back to the one you left.
+- The edges of hidden windows no longer show in the corner while a Desktop slides in or a
+  switch ends, including on Apple's dynamic wallpapers.
+- An app that quits without macOS saying so (Home, which quits with its last window) no
+  longer leaves a gray card behind.
+- After a restart, an app macOS did not reopen opens where any new app does when you open it
+  later, instead of going back into an old stage.
+- A config file that can't be read no longer turns Settings back to the defaults: the last
+  good config stays.
+- An update that cannot put the previous version back no longer removes it: both copies stay,
+  and the note at the next launch says where.
+
 ## 1.3.0 — 2026-10-21
 
 - Your stages come back after a restart. When you log out, restart or shut down, Stage

@@ -410,6 +410,12 @@ impl Model {
 
     /// The stage of `space` that takes a window of `origin` (see the module docs).
     fn part_for(&mut self, space: SpaceId, origin: &Origin, obs: Option<&Observation>, actions: &mut Vec<Action>) -> StageId {
+        // Merged into another stage here (R5): the merge stands.
+        if let Some(&s) = self.merged.get(&origin.root)
+            && self.stage(s).is_some_and(|st| st.space == space)
+        {
+            return s;
+        }
         if let Some(s) = self.stages.iter().find(|s| s.space == space && self.kin.get(&s.id) == Some(&origin.root)) {
             return s.id;
         }

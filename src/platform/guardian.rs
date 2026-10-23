@@ -262,7 +262,7 @@ fn watch_pass(
     let ids: Vec<u32> = w.waiting().map(|x| x.id).collect();
     // Asked every pass while a waiting window shows (it may be moved now), else every
     // ASK_EVERY: a window on a Desktop never visited keeps the guardian waiting for long.
-    let shows = w.waiting().any(|x| x.look.is_some_and(|l| l.shown()));
+    let shows = w.shows();
     let due = shows || asked.is_none_or(|t| now.duration_since(t) >= ASK_EVERY);
     let answer = if due {
         *asked = Some(now);
@@ -309,7 +309,7 @@ fn watch_pass(
             }
         }
     }
-    let now_state: Vec<(u32, bool)> = w.waiting().map(|x| (x.id, x.look.is_some_and(|l| l.shown()))).collect();
+    let now_state: Vec<(u32, bool)> = w.waiting().map(|x| (x.id, x.shows())).collect();
     if reported.as_ref() != Some(&now_state) {
         report(w);
         *reported = Some(now_state);
@@ -345,6 +345,7 @@ fn hand_off(w: &mut Watch, handoff: &mut Handoff, now: Instant) -> bool {
                 return true;
             }
             let left: Vec<u32> = w.waiting().map(|x| x.id).collect();
+            handoff.offering.partly_taken(now);
             tracing::info!(app = ?pid, taken = ?ids, left = ?left, "guardian: the running Stage Manager took part of the watch; waiting for the rest");
             false
         }

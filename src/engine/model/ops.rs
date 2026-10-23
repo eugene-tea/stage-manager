@@ -30,6 +30,12 @@ impl Model {
     /// unmanaged. Placement (`center`, `cascade` from the stage's front window) applies before
     /// any switch.
     ///
+    /// `[stages] new_apps_join_current` ([`Decision::new_app_joins_current`]): a window of an
+    /// app with no managed standard window, which `native` gives a stage of its own, joins the
+    /// active stage instead, unless it goes back to a saved stage (below) or the restore window
+    /// is open (apps macOS reopens at a login, or that open by themselves after a launch, keep
+    /// Apple's rule: piling them into one stage would undo the restore).
+    ///
     /// Before Apple's default (`native`), a saved window still pending on this Space is looked
     /// for ([`Model::place_from_pending`]): a confident match goes back to its saved stage and
     /// frame; into an inactive stage it is parked there with no switch while the restore
@@ -134,6 +140,9 @@ impl Model {
             RuleAction::Native => match self.native_target(meta.pid, display) {
                 NativeTarget::Join(s) => (Home::Stage(s), false, true),
                 NativeTarget::Fresh if self.stage_is_empty(active) => {
+                    (Home::Stage(active), false, false)
+                }
+                NativeTarget::Fresh if self.new_app_joins(&meta, decision) => {
                     (Home::Stage(active), false, false)
                 }
                 NativeTarget::Fresh => (Home::Stage(self.create_stage(space, None)), true, true),
@@ -410,7 +419,8 @@ impl Model {
     /// Moves every window of `stage` into the active stage of its Space (a shift-click on a
     /// strip card). The moved windows go in front, keep their order, are restored and raised
     /// back to front, and the moved stage's key window is focused last. The emptied stage
-    /// goes away unless it is declared in config. A no-op for the active stage, an unknown
+    /// goes away unless it is declared in config. Its windows still awaited after a restart
+    /// move with it, in front, in saved order (R5). A no-op for the active stage, an unknown
     /// one or one on a Space not shown now. Pinned windows are untouched.
     pub fn merge_into_active(&mut self, stage: StageId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -430,6 +440,7 @@ impl Model {
         }
         self.revealed.remove(&space);
         self.capture(active, obs);
+        self.merge_pending(stage, active, true);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
@@ -581,6 +592,19 @@ impl Model {
             .filter(|s| s.space == space)
             .max_by_key(|s| s.last_active)
             .map_or(NativeTarget::Fresh, |s| NativeTarget::Join(s.id))
+    }
+
+    /// True when app `pid` has no managed standard window (on any Desktop): a window of it
+    /// shows a newly opened app (or one whose windows were all closed).
+    pub fn app_is_new(&self, pid: Pid) -> bool {
+        !self.windows.values().any(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard)
+    }
+
+    /// Whether `meta`'s window, which Apple's rule gives a stage of its own, joins the active
+    /// stage instead ([`Decision::new_app_joins_current`]): its app is new and the restore
+    /// window is closed.
+    fn new_app_joins(&self, meta: &WindowMeta, decision: &Decision) -> bool {
+        decision.new_app_joins_current && !self.restore.restoring && self.app_is_new(meta.pid)
     }
 
     /// True when a stage has no window and none pending (a stage waiting for its windows is
@@ -751,9 +775,10 @@ impl Model {
     /// moves on screen: the windows stay parked with their saved frames. `into` keeps its
     /// slot, name and key window (an empty one takes `stage`'s) and the more recent of the
     /// two recencies; `stage`'s slot frees by the slot rule (the cards below close up, and a
-    /// free slot takes the most recent stage out of view). The emptied stage goes away
+    /// free slot takes the most recent stage out of view). `stage`'s windows still awaited
+    /// after a restart move with it, behind, in saved order (R5). The emptied stage goes away
     /// unless it is declared in config. Into the active stage (a card of it shows only in
-    /// fixed order with `show_active`) it is [`Model::merge_into_active`]. A no-op for one
+    /// place with `[strip] active = "card"`) it is [`Model::merge_into_active`]. A no-op for one
     /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
     /// Spaces, or a Space not shown now.
     ///
@@ -821,6 +846,7 @@ impl Model {
         let members = src.windows.clone();
         let src_key = src.key.filter(|k| members.contains(k));
         let recency = src.last_active.max(dest.last_active);
+        self.merge_pending(stage, into, false);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
@@ -856,8 +882,9 @@ impl Model {
     /// its own (parked, its card in the strip), and its restore frame is `pre_drag`, the
     /// frame it had before the drag, not where it was dropped. Its children move back by the
     /// same offset. Its card takes the slot it was dropped into: right above `before`'s card,
-    /// or the bottom when `before` is `None` (see [`Model::move_card`]). Same as
-    /// [`Model::send_window`] with [`Target::New`] otherwise.
+    /// or the bottom when `before` is `None` (see [`Model::move_card`]); following the Dock
+    /// ([`StripOrder::Dock`]) its Dock place instead. Same as [`Model::send_window`] with
+    /// [`Target::New`] otherwise.
     pub fn drop_window_on_strip(
         &mut self,
         id: WindowId,
@@ -866,8 +893,12 @@ impl Model {
         obs: &Observation,
     ) -> Vec<Action> {
         let actions = self.drop_window_on_strip_as_new(id, pre_drag, obs);
-        if let Some(stage) = self.stage_of(id).filter(|s| !self.is_active(*s)) {
-            self.move_card(stage, before);
+        if let Some(stage) = self.stage_of(id).filter(|s| !self.is_active(*s))
+            && before != Some(stage)
+        {
+            // A new stage, not a card dragged among the cards shown: in place it moves in
+            // creation order; following the Dock it takes its Dock place.
+            self.place_card(stage, before, false);
         }
         actions
     }
@@ -902,17 +933,23 @@ impl Model {
     /// A card dragged to another slot of the strip (`[strip] reorder`): it goes right above
     /// `before`'s card, or to the bottom when `before` is `None`. In Apple's order the slots
     /// change and the slot-stable rule carries on from them (a full strip drops its least
-    /// recently used card, never the moved one); in fixed order the stage moves in creation
-    /// order, so hotkey numbers follow what the strip shows. Returns
-    /// [`Action::StateChanged`] when anything moved (the order is saved with the state).
+    /// recently used card, never the moved one); in place the stage moves in creation
+    /// order, so hotkey numbers follow what the strip shows: among the places of the cards
+    /// shown when both cards are in the strip ([`Model::reorder_shown`]), so the strip shows
+    /// the same stages after the drop as it drew at the release. Following the Dock
+    /// ([`StripOrder::Dock`]) nothing moves: the Dock decides, and the card springs back.
+    /// Returns [`Action::StateChanged`] when anything moved (the order is saved with the
+    /// state).
     pub fn move_card(&mut self, stage: StageId, before: Option<StageId>) -> Vec<Action> {
-        if before == Some(stage) || !self.place_card(stage, before) {
+        if before == Some(stage) || !self.place_card(stage, before, true) {
             return Vec::new();
         }
         vec![Action::StateChanged]
     }
 
-    fn place_card(&mut self, stage: StageId, before: Option<StageId>) -> bool {
+    /// [`Model::move_card`]'s move; `among_shown`: in place, a card dragged within the strip
+    /// trades places with the cards shown ([`Model::reorder_shown`]).
+    fn place_card(&mut self, stage: StageId, before: Option<StageId>, among_shown: bool) -> bool {
         let Some(space) = self.stage(stage).map(|s| s.space) else {
             return false;
         };
@@ -948,7 +985,11 @@ impl Model {
                 }
                 *slots != old
             }
-            StripOrder::Fixed => {
+            StripOrder::InPlace => {
+                // A card dragged among the cards shown: the strip comes out as drawn.
+                if among_shown && let Some(moved) = self.reorder_shown(space, stage, before) {
+                    return moved;
+                }
                 let Some(from) = self.stages.iter().position(|s| s.id == stage) else {
                     return false;
                 };
@@ -957,7 +998,20 @@ impl Model {
                     .and_then(|b| self.stages.iter().position(|s| s.id == b))
                     .unwrap_or(self.stages.len());
                 self.stages.insert(at, moved);
+                // Put where the user can see it: past the capacity the bottom places go
+                // by recency, so a card dragged (or a window dropped) there keeps showing.
+                if !self.is_active(stage) {
+                    self.touch(stage);
+                }
                 at != from
+            }
+            StripOrder::Dock => {
+                // The Dock decides the place. A window dropped on the strip still counts as
+                // used, so past the capacity its new stage shows (see the arm above).
+                if !among_shown && !self.is_active(stage) {
+                    self.touch(stage);
+                }
+                false
             }
         }
     }

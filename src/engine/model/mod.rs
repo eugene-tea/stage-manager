@@ -46,7 +46,7 @@ pub use pool::NumberRef;
 pub(crate) use pool::Kin;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
-pub use strip::{StripCard, StripOptions, StripOrder};
+pub use strip::{ActiveCard, DockApp, StripCard, StripOptions, StripOrder};
 
 /// A process ID.
 pub type Pid = i32;
@@ -329,6 +329,10 @@ pub struct Model {
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
     pub(crate) pooled_out: HashSet<(u64, usize)>,
+    /// Saved stages merged into another stage (the Codex review of 10-21, R5): a stray of one
+    /// (`pool.rs`) joins the stage it was merged into, when that is on its Desktop, instead
+    /// of making the old stage again.
+    pub(crate) merged: HashMap<pool::Kin, StageId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -340,6 +344,9 @@ pub struct Model {
     pub(crate) restore: super::restore::Restore,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
+    /// The Dock's application items in order, as the platform last read them ("Follow the
+    /// Dock", [`StripOrder::Dock`]).
+    pub(crate) dock: Vec<DockApp>,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -382,10 +389,12 @@ impl Model {
             pool_rank: HashMap::new(),
             pooled: HashMap::new(),
             pooled_out: HashSet::new(),
+            merged: HashMap::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
+            dock: Vec::new(),
             clock: 0,
             next_stage: 1,
             options,
@@ -428,14 +437,11 @@ impl Model {
         self.stages.iter().find(|s| s.id == id)
     }
 
-    /// The 1-based hotkey number of a stage: its place among its Space's stages.
+    /// The 1-based hotkey number of a stage: its place among its Space's stages
+    /// ([`Model::place_order`]).
     pub fn stage_number(&self, id: StageId) -> Option<usize> {
         let space = self.stage(id)?.space;
-        self.stages
-            .iter()
-            .filter(|s| s.space == space)
-            .position(|s| s.id == id)
-            .map(|i| i + 1)
+        self.place_order(space).iter().position(|s| s.id == id).map(|i| i + 1)
     }
 
     /// The active stage of a display (on the Space it shows now).

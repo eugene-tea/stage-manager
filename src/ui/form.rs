@@ -413,8 +413,10 @@ pub fn centered(field: &NSTextField) {
     field.setAlignment(NSTextAlignment::Center);
 }
 
-/// Makes `window` the app's front window (an accessory app activates first).
+/// Makes `window` the app's front window (an accessory app activates first), on the Desktop
+/// shown.
 pub fn bring_to_front(mtm: MainThreadMarker, window: &NSWindow) {
+    window.setCollectionBehavior(super::panels::app_window());
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     app.activate();
     window.makeKeyAndOrderFront(None);

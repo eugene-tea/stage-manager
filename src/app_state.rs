@@ -1,7 +1,7 @@
 //! What the app remembers about itself between launches (not configuration): whether the
-//! welcome was shown, whether the login item was set up once, the last update check and a
-//! skipped version. `app-state.json` beside `config.toml` (so `STAGE_MANAGER_HOME` moves it
-//! too). A missing or unreadable file is a first launch.
+//! welcome was shown, whether the login item was set up once, the last update check, a
+//! skipped version and the Settings pane shown last. `app-state.json` beside `config.toml`
+//! (so `STAGE_MANAGER_HOME` moves it too). A missing or unreadable file is a first launch.
 
 use std::path::Path;
 
@@ -20,6 +20,8 @@ pub struct AppState {
     pub last_update_check: Option<u64>,
     /// "Skip This Version": automatic checks stay quiet about this version and older.
     pub skipped_version: Option<String>,
+    /// The Settings pane shown last (its id), shown again at the next opening.
+    pub settings_pane: Option<String>,
 }
 
 impl AppState {
@@ -61,7 +63,13 @@ mod tests {
         assert_eq!(AppState::load(&path), AppState::default());
         std::fs::write(&path, "{ nope").expect("writes");
         assert_eq!(AppState::load(&path), AppState::default());
-        let s = AppState { welcomed: true, login_item_set_up: true, last_update_check: Some(42), skipped_version: Some("1.2.0".into()) };
+        let s = AppState {
+            welcomed: true,
+            login_item_set_up: true,
+            last_update_check: Some(42),
+            skipped_version: Some("1.2.0".into()),
+            settings_pane: Some("stages".into()),
+        };
         s.save(&path);
         assert_eq!(AppState::load(&path), s);
         assert!(!path.with_extension("json.tmp").exists(), "written through a temporary file");

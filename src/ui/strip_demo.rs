@@ -134,6 +134,7 @@ pub fn demo_snapshot(windows: &[DemoWindow], flags: DemoFlags, style: Arc<StripS
                 name: (!flags.native && i % 3 == 2).then(|| format!("Stage {}", i + 1)),
                 windows: s.iter().map(|w| CardWindow { id: w.id, pid: w.pid, frame: w.frame }).collect(),
                 apps,
+                ..Default::default()
             }
         })
         .collect();

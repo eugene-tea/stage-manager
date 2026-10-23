@@ -15,8 +15,10 @@
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -25,6 +27,12 @@ pub type Key = [u8; 16];
 
 /// The key's file in the config folder: 32 hex digits, owner-only.
 pub const KEY_FILE: &str = "title-key";
+
+/// How old a malformed key file must be before it is replaced: a younger one may be an
+/// earlier version's key still being written (it wrote in place).
+const MALFORMED_AFTER: Duration = Duration::from_secs(5);
+/// How often a young malformed key file is read again.
+const MALFORMED_POLL: Duration = Duration::from_millis(50);
 
 static KEY: OnceLock<Key> = OnceLock::new();
 
@@ -49,34 +57,85 @@ fn key() -> &'static Key {
 }
 
 /// The key kept in `dir` ([`KEY_FILE`]); made with `random` and written owner-only (`0600`)
-/// when there is none or it is unreadable. Two processes making it at once agree: the file is
-/// created only when absent, and the one that loses reads the winner's.
+/// when there is none or it is malformed. Two processes making it at once agree (review R8):
+/// a key is written whole to a file of its own and then linked to [`KEY_FILE`], which fails
+/// when one is there, so the name only ever shows a whole key and the loser reads the
+/// winner's. A malformed file is replaced only once it is [`MALFORMED_AFTER`] old (until
+/// then it is read again), and under a lock, so two repairs never remove each other's key.
 pub fn load_or_create_key(dir: &Path, random: impl Fn() -> Key) -> io::Result<Key> {
     let path = dir.join(KEY_FILE);
-    for _ in 0..3 {
+    let deadline = Instant::now() + MALFORMED_AFTER * 2;
+    for _ in 0..1000 {
         match read_key(&path) {
             Ok(Some(key)) => return Ok(key),
-            Ok(None) => {
-                // Malformed (cut short, edited): replaced.
-                let _ = std::fs::remove_file(&path);
+            Ok(None) if !stale(&path) => {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(MALFORMED_POLL);
+                continue;
             }
+            Ok(None) => remove_malformed(dir, &path)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        crate::private_files::ensure_dir(dir)?;
         let key = random();
-        let created = OpenOptions::new().write(true).create_new(true).mode(crate::private_files::FILE_MODE).open(&path);
-        match created {
-            Ok(mut file) => {
-                file.write_all(format!("{}\n", hex(&key)).as_bytes())?;
-                file.sync_all()?;
-                return Ok(key);
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
+        if publish(dir, &path, &key)? {
+            return Ok(key);
         }
     }
     Err(io::Error::other("the title key file keeps changing"))
+}
+
+/// Whether the file at `path` was last written [`MALFORMED_AFTER`] ago or more (or in the
+/// future: a clock that moved). A file gone is not stale: it is read again.
+fn stale(path: &Path) -> bool {
+    std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().map_or(true, |age| age >= MALFORMED_AFTER))
+}
+
+/// Removes a stale malformed key file, under `dir`'s repair lock and only when it is still
+/// malformed there: a repair that waited finds the first one's key instead.
+fn remove_malformed(dir: &Path, path: &Path) -> io::Result<()> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(crate::private_files::FILE_MODE)
+        .open(dir.join(format!("{KEY_FILE}.lock")))?;
+    // SAFETY: flock on a descriptor `lock` owns until it drops (which unlocks).
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if matches!(read_key(path), Ok(None)) && stale(path) {
+        tracing::warn!("log: the title key file is malformed; it is replaced");
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Writes `key` whole to a file of its own and links it to `path`: `true` when it is the key
+/// on file now, `false` when another was there first.
+fn publish(dir: &Path, path: &Path, key: &Key) -> io::Result<bool> {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    crate::private_files::ensure_dir(dir)?;
+    let temp: PathBuf =
+        dir.join(format!(".{KEY_FILE}.{}.{}", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed)));
+    let written = (|| {
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(crate::private_files::FILE_MODE).open(&temp)?;
+        file.write_all(format!("{}\n", hex(key)).as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&temp, path)
+    })();
+    let _ = std::fs::remove_file(&temp);
+    match written {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// The key in `path`; `None` when the file is not one (`Err` when it cannot be read).
@@ -234,11 +293,85 @@ mod tests {
         assert_eq!(crate::private_files::mode(&path).expect("mode"), 0o600);
         let never = || -> Key { panic!("a key on file is never made again") };
         assert_eq!(load_or_create_key(&config, never).expect("read"), first, "the next process reads it");
-        // A broken file is replaced.
+        // A broken file, quiet for a while, is replaced.
         std::fs::write(&path, "not a key\n").expect("writes");
+        age(&path);
         assert_eq!(load_or_create_key(&config, || [9; 16]).expect("remade"), [9; 16]);
         assert_eq!(load_or_create_key(&config, never).expect("read"), [9; 16]);
         assert_eq!(crate::private_files::mode(&path).expect("mode"), 0o600);
+    }
+
+    /// Dates `path` a minute back: a malformed key that old is no longer being written.
+    fn age(path: &Path) {
+        let file = std::fs::File::options().write(true).open(path).expect("open");
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(60)).expect("mtime");
+    }
+
+    /// Review R8: processes making the key at once all get the one key on file.
+    #[test]
+    fn simultaneous_makers_agree() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..25 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let barrier = Arc::new(Barrier::new(32));
+            let handles: Vec<_> = (1..=32u8)
+                .map(|n| {
+                    let (barrier, dir) = (barrier.clone(), dir.path().to_owned());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create_key(&dir, || [n; 16])
+                    })
+                })
+                .collect();
+            let keys: Vec<Key> = handles.into_iter().map(|h| h.join().expect("joins").expect("a key")).collect();
+            let on_file = read_key(&dir.path().join(KEY_FILE)).expect("reads").expect("whole");
+            assert!(keys.iter().all(|k| *k == on_file), "round {round}: every maker has the key on file");
+            let names: Vec<_> = std::fs::read_dir(dir.path()).expect("lists").map(|e| e.expect("entry").file_name()).collect();
+            assert_eq!(names, vec![std::ffi::OsString::from(KEY_FILE)], "round {round}: no temporary file left");
+        }
+    }
+
+    /// A malformed key file that is still young is never removed: it may be mid-write.
+    #[test]
+    fn a_young_malformed_key_is_waited_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(KEY_FILE);
+        std::fs::write(&path, "").expect("writes");
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                std::fs::write(&path, format!("{}\n", hex(&[5; 16]))).expect("writes");
+            })
+        };
+        let never = || -> Key { panic!("a key being written is never replaced") };
+        assert_eq!(load_or_create_key(dir.path(), never).expect("read"), [5; 16]);
+        writer.join().expect("joins");
+    }
+
+    /// Two repairs of one stale malformed key agree on the new one.
+    #[test]
+    fn repairs_at_once_agree() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..10 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(KEY_FILE);
+            std::fs::write(&path, "cut sh").expect("writes");
+            age(&path);
+            let barrier = Arc::new(Barrier::new(16));
+            let handles: Vec<_> = (1..=16u8)
+                .map(|n| {
+                    let (barrier, dir) = (barrier.clone(), dir.path().to_owned());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create_key(&dir, || [n; 16])
+                    })
+                })
+                .collect();
+            let keys: Vec<Key> = handles.into_iter().map(|h| h.join().expect("joins").expect("a key")).collect();
+            let on_file = read_key(&path).expect("reads").expect("whole");
+            assert!(keys.iter().all(|k| *k == on_file), "round {round}");
+        }
     }
 
     #[test]

@@ -17,7 +17,8 @@
 //! shows no window on screen at all is **blind** (the window server answered nothing, or the
 //! session is not the console's): it is no observation, and every streak starts again after
 //! it. Only windows of apps still observed are looked at (an app that quit drops its windows
-//! itself), and only windows tracked, which the window server listed when they were tracked,
+//! itself, by its termination notice or its process found gone, [`crate::engine::gone`]), and
+//! only windows tracked, which the window server listed when they were tracked,
 //! so an app still launching (its windows not listed yet) is never judged.
 
 use std::collections::{HashMap, HashSet};

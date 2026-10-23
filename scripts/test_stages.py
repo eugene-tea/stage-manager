@@ -18,7 +18,8 @@ it back), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
 only when its own strip window is topmost at that point), native (Apple's defaults with three
-more fixture apps: first start, new windows, Shift sugar, card drag and window drag; every
+more fixture apps: first start, new windows, Shift sugar, `[stages] new_apps_join_current`
+with and without Shift, card drag and window drag; every
 synthetic click and drag is posted only where our own or a fixture's windows are topmost
 along the whole path, and the pointer is put back; an activation with no click and a Dock
 click to a parked app grow its stage from its card, the corner never showing it, the window
@@ -44,7 +45,14 @@ landing on the card or window it aimed at; a click on the slot a transition is s
 in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
 above the others; with SM_PIXELS=1, a window dragged over the strip shows its card under the
 pointer at the top and bottom quarter and a slowed switch's snapshot lands on its window, read
-back from the overlay's pixels), capture (the one phase with window
+back from the overlay's pixels; then "Keep stages in place", `order = "fixed"` in the phase's own
+config, in each `active` mode: clicks on slots 1, 3 and 6 leave every stage in creation order,
+the stage left shrinks into its own place, with "gap" no other card moves, and in a slowed
+click no two cards share a slot mid-flight; then "Follow the Dock", `order = "dock"`, in each
+`active` mode: three more fixture apps' stages, made in another order than the Dock shows
+them, sit in the Dock's order as the app read it from the Dock (never pinned or moved), clicks
+keep it, a card dragged down springs back with no switch, and the strip still follows after
+an app quits), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
 its card as Apple's thumbnails show it, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
@@ -83,6 +91,7 @@ the native phase's apps are <id>.a, <id>.b and <id>.c.
 """
 
 import json
+import math
 import os
 import re
 import signal
@@ -1390,7 +1399,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
             return False
         if corner and overlay_up(x) and contains(corner, sliver):
             return False
-        return not any(p["pid"] == ours_pid and p["onscreen"] and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
+        return not any(p["pid"] == ours_pid and p["onscreen"] and p.get("alpha", 1.0) > 0 and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
                        and p["z"] is not None and w["z"] is not None and p["z"] < w["z"] and contains(p["bounds"], sliver)
                        for p in x["windows"])
 
@@ -1398,7 +1407,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     seen = [x["t"] for x in samples for w in x["windows"] if w["id"] in arrived and exposed(x, w)]
     out_t = [(x["t"], overlay_up(x)) for x in samples for w in x["windows"]
              if w["id"] in arrived and w["onscreen"] and not is_parked(w["bounds"], display)]
-    patch_before = any(p["pid"] == ours_pid and p["onscreen"] and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
+    patch_before = any(p["pid"] == ours_pid and p["onscreen"] and p.get("alpha", 1.0) > 0 and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
                        for x in samples[:5] for p in x["windows"])
     rel = lambda v: "-" if v is None or t_ov is None else f"{(v - t_ov) * 1000:+.0f} ms"  # noqa: E731
     say(f"    {len(samples)} looks: overlay up {'-' if t_ov is None else f'{(t_ov - t_sent) * 1000:.0f} ms'} after the "
@@ -1539,6 +1548,9 @@ def phase_native():
               f"a Shift launch joins the current stage ({stage_titles(s) if s else None})")
     consistent("Shift launch")
 
+    say("-- [stages] new_apps_join_current: a new app joins the current stage; Shift gives it its own")
+    apps_here_check()
+
     say("-- Shift held on an activation: the app's windows come here")
     time.sleep(0.8)
     pt = topmost_point("Alpha")
@@ -1611,6 +1623,61 @@ def phase_native():
     all_onscreen("native quit")
     stop_all_fixtures()
     native_wallpaper()
+
+
+def set_config_live(text):
+    """Writes config.toml in the test home while the app runs (state.json stays, unlike
+    `write_config`) and waits for the app to reload it."""
+    before = log_text().count("config reloaded")
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write(text)
+    return wait_until(lambda: log_text().count("config reloaded") > before or None, 5, "the config reload")
+
+
+def apps_here_check():
+    """`[stages] new_apps_join_current` (9A): with the key on, a newly opened app's first window
+    joins the active stage, no stage of its own; Shift held while opening it gives it a stage of
+    its own, in front (Apple's rule once). Starts and ends as the Shift launch left the stages:
+    Charlie beside Alpha in the active stage, Bravo in a stage of its own; the key off again."""
+    if not check(set_config_live("[stages]\nnew_apps_join_current = true\n"), "the key turned on"):
+        return
+    stop_extra("c")
+    wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie to go")
+    time.sleep(0.8)
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x), "Charlie 1 managed")
+    check(s is not None and {"Alpha 1", "Charlie 1"} <= active_titles(s) and len(s["stages"]) == 2,
+          f"key on: a newly opened app's first window joins the current stage ({stage_titles(s) if s else None})")
+    consistent("key on: new app")
+
+    stop_extra("c")
+    wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie to go")
+    time.sleep(0.8)
+    pt = topmost_point("Alpha")
+    r = ctl("debug-click", pt[0], pt[1], "shift") if pt else {"ok": False, "error": "no Alpha window"}
+    shifted = not blocked(r, "the Shift launch with the key on (its click, a stage of its own)")
+    if shifted:
+        check(r.get("ok"), f"shift-clicked an Alpha window ({r.get('error', 'ok')})")
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x) and (not shifted or active_titles(x) == {"Charlie 1"}),
+                   "Charlie 1 managed")
+    if shifted:
+        check(s is not None and active_titles(s) == {"Charlie 1"} and len(s["stages"]) == 3,
+              f"key on, Shift held: the new app gets a stage of its own, in front ({stage_titles(s) if s else None})")
+    consistent("key on: Shift launch")
+
+    # Back to what the next checks start from: Charlie beside Alpha (the key still on), then
+    # the key off.
+    stop_extra("c")
+    wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie to go")
+    activate("a")
+    wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage in front")
+    time.sleep(0.8)  # past the activation echo window
+    start_extra("c", 1)
+    s = wait_state(lambda x: {"Alpha 1", "Charlie 1"} <= active_titles(x), "Charlie beside Alpha again")
+    check(s is not None and len(s["stages"]) == 2, f"key on: Charlie joins Alpha's stage again ({stage_titles(s) if s else None})")
+    check(set_config_live(""), "the key turned off")
+    consistent("key off again")
 
 
 # ----- native: wallpaper clicks and Finder ----------------------------------------------
@@ -2211,6 +2278,16 @@ level = "above_windows"
 # A slow spring (about ten times Apple's), so the overlay can be read back while it moves.
 CONFIG_SLOW = CONFIG_SLOTS.replace("[strip]", "[animation]\nspring_stiffness = 6.0\nspring_damping = 4.9\n\n[strip]")
 
+def config_in_place(active, slow=False):
+    """The slots config with "Keep stages in place" (its older name, `fixed`, read as an
+    alias) and `[strip] active`; `slow` slows the switch and the cards' glide about ten times."""
+    text = CONFIG_SLOTS.replace("[strip]", f'[strip]\norder = "fixed"\nactive = "{active}"')
+    if slow:
+        text = ("[animation]\nspring_stiffness = 6.0\nspring_damping = 4.9\n\n"
+                "[motion]\nspring_stiffness = 6.0\nspring_damping = 4.9\n") + text
+    return text
+
+
 CLICK_RE = re.compile(r"card click in slot stage=(\d+) slot=Some\((\d+)\)")
 
 
@@ -2313,6 +2390,445 @@ def sample_strip_during(proc, after=0.8):
         if p:
             seen.append(p)
     return seen
+
+
+def in_place_want(s, mode, key=None):
+    """The cards `strip` lists in place (PLAN, "Strip order"; the engine's `in_place_cards`):
+    every stage of the shown Desktop holding windows has a place in creation order (hotkey
+    numbers follow it), the active stage's place holding its card or the gap unless active =
+    "close". Past the capacity the first capacity - 1 places keep theirs (the active one's
+    included, whatever it shows) and the stages after them share the room left at the bottom:
+    the most recently used of them (`last_active`, the later place on a tie) show, in
+    creation order. The gap is no card, so "gap" leaves the active stage out. `key` orders
+    the places instead (follow the Dock: `dock_strip`), creation order among ties."""
+    places = [st for st in s["stages"] if st["space"] == s["space"] and st["windows"]]
+    places.sort(key=key or (lambda st: st["number"]))
+    active, cap = s["active"], s["strip_capacity"]
+
+    def holds(st):
+        return st["number"] != active or mode != "close"
+
+    if sum(1 for st in places if holds(st)) <= cap:
+        shown = [st for st in places if holds(st)]
+    else:
+        head = min(cap - 1, len(places))
+        room = cap - sum(1 for st in places[:head] if holds(st))
+        tail = sorted(((st.get("last_active", 0), i) for i, st in enumerate(places)
+                       if i >= head and st["number"] != active), reverse=True)
+        keep = {i for _, i in tail[:room]}
+        shown = [st for i, st in enumerate(places) if (i < head and holds(st)) or i in keep]
+    return [st["number"] for st in shown if not (mode == "gap" and st["number"] == active)]
+
+
+def in_place_checks():
+    """Keep stages in place (9B), in each `[strip] active` mode: clicks on slots 1, 3 and 6
+    (and back to the first) keep creation order and every stage its place, past the capacity
+    too ([`in_place_want`]: with 7 stages and room for 6, "gap" and "card" give the active
+    stage's place one of them, so one of the stages past the head waits out of view); the
+    stage left shrinks into its own place, and with "gap" every other card stays exactly where
+    it was. Then one slowed click: no two cards drawn in one slot while they move."""
+    def frames(s):
+        return {c["number"]: c["frame"] for c in s.get("strip_cards", [])}
+
+    for mode in ("close", "gap", "card"):
+        say(f"-- keep stages in place, active = \"{mode}\"")
+        with open(os.path.join(HOME, "config.toml"), "w") as fh:
+            fh.write(config_in_place(mode))
+        ctl("reload")
+        s = wait_state(lambda x: x.get("strip_order") == "InPlace", f"{mode}: the in-place order to load")
+        if not check(s is not None, f"{mode}: [strip] order = \"fixed\" reads as in place"):
+            return
+        time.sleep(1.0)
+        for slot in (0, 2, 5, 0):
+            s0 = state()
+            cards, order0, active0 = s0.get("strip_cards", []), s0["strip"], s0["active"]
+            if mode == "card":
+                pick = [i for i, c in enumerate(cards) if c["number"] != active0]
+            else:
+                pick = list(range(len(cards)))
+            if not pick:
+                break
+            at = pick[min(slot, len(pick) - 1)]
+            target = cards[at]["number"]
+            what = f"{mode}, slot {slot + 1} (stage {target})"
+            f0 = frames(s0)
+            t0 = (s0.get("last_transition") or {}).get("id")
+            ctl("debug-click", *center(cards[at]["frame"]))
+            if not check(wait_state(lambda x: x["active"] == target, f"{what}: the switch") is not None, f"{what}: switched"):
+                continue
+            time.sleep(1.2)
+            s = state()
+            order, f1 = s["strip"], frames(s)
+            check(order == sorted(order), f"{what}: the cards in creation order ({order0} -> {order})")
+            check(active0 in order, f"{what}: the stage left ({active0}) has its card")
+            want = in_place_want(s, mode)
+            check(order == want, f"{what}: every stage in its place ({order}, want {want})")
+            if mode == "gap" and s.get("strip_gap") is not None:
+                g = s["strip_gap"]
+                check(all(n < s["active"] for n in order[:g]) and all(n > s["active"] for n in order[g:]),
+                      f"{what}: the gap is the active stage's own slot ({order}, gap {g})")
+            # Past the capacity too: the slots stay put, only the bottom one changes hands.
+            if mode == "gap":
+                moved = [n for n in f1 if n in f0 and n not in (active0, target) and off(f0[n], f1[n]) > 1.0]
+                check(not moved, f"{what}: no other card moved ({moved})")
+            t = s.get("last_transition") or {}
+            if not check(t.get("id") and t.get("id") != t0, f"{what}: a transition was drawn"):
+                continue
+            num = numbers_by_id(s)
+            bad = []
+            for gh in t["ghosts"]:
+                if gh["aimed_slot"] != gh["slot"]:
+                    bad.append(f"{gh['window']} aimed at slot {gh['aimed_slot']}, the engine's is {gh['slot']}")
+                if gh["outgoing"]:
+                    if num.get(gh["stage"]) != active0:
+                        bad.append(f"outgoing {gh['window']} into stage {num.get(gh['stage'])}, not {active0}")
+                    if active0 in f1 and not inside(center(gh["end"]), f1[active0], 4):
+                        bad.append(f"outgoing {gh['window']} ends at {fmt(gh['end'])}, its own card is at {fmt(f1[active0])}")
+                elif num.get(gh["stage"]) != target:
+                    bad.append(f"incoming {gh['window']} from stage {num.get(gh['stage'])}, not {target}")
+            check(not bad, f"{what}: the stage left shrank into its own place, the clicked one grew from its card" + (f" ({'; '.join(bad)})" if bad else ""))
+
+    say("-- keep stages in place, slowed: never two cards in one slot mid-flight")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(config_in_place("close", slow=True))
+    ctl("reload")
+    time.sleep(1.0)
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if check(len(cards) >= 3, f"cards to click ({len(cards)})"):
+        target = cards[-1]["number"]
+        ctl("debug-click", *center(cards[-1]["frame"]))
+        seen, end = [], time.time() + 5
+        while time.time() < end:
+            p = strip_probe()
+            if p:
+                seen.append(p)
+        clash = []
+        for p in seen:
+            shown = [c for c in p.get("cards", []) if c.get("thumb") and c.get("opacity", 1) > 0.1]
+            for i, a in enumerate(shown):
+                for b in shown[i + 1:]:
+                    ta, tb = a["thumb"], b["thumb"]
+                    over = min(ta["y"] + ta["h"], tb["y"] + tb["h"]) - max(ta["y"], tb["y"])
+                    if over > 0.5 * min(ta["h"], tb["h"]):
+                        clash.append((a["stage"], b["stage"], round(over)))
+        check(len(seen) >= 5 and not clash, f"no two cards drawn in one slot while they glide ({len(seen)} samples; {clash[:3]})")
+        wait_state(lambda x: x["active"] == target, "the slowed switch", timeout=10)
+        time.sleep(1.0)
+
+
+def config_dock(active):
+    """The slots config following the Dock (`[strip] order = "dock"`, round 9D), without the
+    backdrop's `ignore` rule: Charlie is one of the three apps managed here."""
+    return CONFIG_SLOTS.replace(CONFIG_BACKDROP, "").replace("[strip]", f'[strip]\norder = "dock"\nactive = "{active}"')
+
+
+def slots_baseline(what, need):
+    """The slots phase's starting point, set up again for a check that needs `need` cards (so
+    one check's early return never starves the next): no extra app but the backdrop (an
+    unmanaged Charlie), every fixture window in a stage of its own, a fixture stage active
+    with its windows in front, and the strip drawing its cards. The state, or None."""
+    for k in ("a", "b"):
+        if extra_pid(k):
+            stop_extra(k)
+    if any(w["bundle_id"] == EXTRA["c"][0] for w in state()["windows"]):
+        stop_extra("c")  # a managed Charlie (the Dock's checks): not the backdrop
+    if not extra_pid("c"):
+        start_backdrop(state())
+    s = state()
+    fix = sorted((w for w in s["windows"] if w["bundle_id"] == FIX_ID and w["role"] == "standard"),
+                 key=lambda w: w["id"])
+    homes = set()
+    for w in fix:
+        if w["home"] in homes:
+            do("new", w["id"])
+        homes.add(w["home"])
+    s = state()
+    homes = {w["home"] for w in s["windows"] if w["bundle_id"] == FIX_ID and w["role"] == "standard"
+             and isinstance(w["home"], int)}
+    if s["active"] not in homes and homes:
+        do("switch", min(homes))
+        wait_state(lambda x: x["active"] in homes, f"{what}: a fixture stage in front")
+    # In front of the backdrop (a frame set to itself raises the window).
+    s = state()
+    for w in s["windows"]:
+        if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]:
+            r = w["restore"]
+            ctl("debug-frame", w["id"], r["x"], r["y"], r["w"], r["h"])
+    time.sleep(1.0)
+    return wait_state(lambda x: len(x.get("strip_cards", [])) >= need, f"{what}: {need} cards drawn", timeout=4)
+
+
+def dock_strip(s):
+    """(the strip's stage ids as the engine lists them, the ids the Dock's order gives): every
+    stage of the shown Desktop holding windows at the leftmost Dock position among its
+    windows' apps (bundle id, else pid; `dock_order` as the app read it from the Dock),
+    creation order among ties and for apps with no Dock icon (last); past the capacity as in
+    place ([`in_place_want`] in that order)."""
+    dock = s.get("dock_order") or []
+    by_bundle = {}
+    by_pid = {}
+    for i, d in enumerate(dock):
+        if d.get("bundle"):
+            by_bundle.setdefault(d["bundle"], i)
+        if d.get("pid") is not None:
+            by_pid.setdefault(d["pid"], i)
+    wins = {w["id"]: w for w in s["windows"]}
+
+    def place(st):
+        spots = []
+        for wid in st["windows"]:
+            w = wins.get(wid) or {}
+            spot = by_bundle.get(w.get("bundle_id")) if w.get("bundle_id") else None
+            if spot is None:
+                spot = by_pid.get(w.get("pid"))
+            if spot is not None:
+                spots.append(spot)
+        return min(spots) if spots else len(dock)
+
+    ids = ids_by_number(s)
+    mode = (s.get("strip_active") or "Close").lower()
+    want = [ids.get(n) for n in in_place_want(s, mode, key=place)]
+    got = [ids.get(n) for n in s["strip"]]
+    return got, want
+
+
+def dock_order_checks():
+    """Follow the Dock (9D), in each `[strip] active` mode: the fixture apps' order is whatever
+    the Dock shows (read from the Dock by the app, `dock_order` in `ctl state`; never pinned,
+    unpinned or moved here). Three more fixture apps, launched C, A, B (their icons appear in
+    that order unless the Dock keeps them elsewhere), get stages made B, A, C: the strip lists
+    the stages in the Dock's order, not creation order, and hotkey numbers follow it; clicks
+    keep it; a card dragged one slot down springs back and switches nothing; an app that quits
+    takes its icon, and the strip still follows the Dock read after."""
+    say("-- follow the Dock")
+    try:
+        dock_order_body()
+    finally:
+        # Back to the slots phase's own apps: the backdrop again, managed fixtures only.
+        for k in EXTRA:
+            stop_extra(k)
+        with open(os.path.join(HOME, "config.toml"), "w") as fh:
+            fh.write(config_in_place("close"))
+        ctl("reload")
+        wait_state(lambda x: x.get("strip_order") == "InPlace", "the in-place order back")
+        start_backdrop(state())
+
+
+def dock_order_body():
+    """[`dock_order_checks`] past its say and before its clean-up."""
+    # Charlie managed (the backdrop's `ignore` rule out) before it opens: a rule applies to
+    # a window when it is made. Each window clear of the strip, as the fixtures', so the
+    # active one never hides the strip.
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(config_dock("close"))
+    ctl("reload")
+    s = wait_state(lambda x: x.get("strip_order") == "Dock", "the Dock's order to load")
+    clear = f"{(s or state())['strip_width'] + 60:.0f},60,520,392"
+    for k in ("c", "a", "b"):
+        start_extra_frames(k, 1, clear)
+        time.sleep(0.5)
+    time.sleep(1.0)
+    s = state()
+    extra = {k: next((w for w in s["windows"] if w["bundle_id"] == EXTRA[k][0] and w["role"] == "standard"), None) for k in EXTRA}
+    if not check(all(extra.values()), f"the three fixture apps' windows are managed ({ {k: bool(v) for k, v in extra.items()} })"):
+        return
+    for k in ("b", "a", "c"):
+        do("new", extra[k]["id"])
+    time.sleep(1.0)
+    for mode in ("close", "gap", "card"):
+        what = f"dock, active = \"{mode}\""
+        with open(os.path.join(HOME, "config.toml"), "w") as fh:
+            fh.write(config_dock(mode))
+        ctl("reload")
+        s = wait_state(lambda x: x.get("strip_order") == "Dock" and x.get("dock_order"), f"{what}: the Dock's order to load")
+        if not check(s is not None, f"{what}: [strip] order = \"dock\" reads the Dock"):
+            return
+        bundles = [d.get("bundle") for d in s["dock_order"]]
+        check(all(EXTRA[k][0] in bundles for k in EXTRA) and FIX_ID in bundles,
+              f"{what}: the running fixture apps are in the Dock's order as read ({len(bundles)} items)")
+        time.sleep(1.0)
+        s = state()
+        got, want = dock_strip(s)
+        check(got == want, f"{what}: the strip follows the Dock ({got}, want {want})")
+        check(s["strip"] == sorted(s["strip"]), f"{what}: hotkey numbers follow the strip ({s['strip']})")
+        made = [extra[k]["id"] for k in ("b", "a", "c")]
+        stage_of = {w: next((st["id"] for st in s["stages"] if w in st["windows"]), None) for w in made}
+        bundle_of = {wn["id"]: wn["bundle_id"] for wn in s["windows"]}
+        known = all(bundle_of.get(w) in bundles for w in made)
+        docked = sorted(made, key=lambda w: bundles.index(bundle_of[w])) if known else made
+        if docked != made:
+            order = [stage_of[w] for w in docked]
+            shown = [x for x in got if x in order]
+            check(shown == [x for x in order if x in shown], f"{what}: the extra apps' stages in Dock order, not creation order ({shown}, Dock {order})")
+        # Two clicks: every stage keeps its Dock place.
+        for slot in (0, -1):
+            cards = state().get("strip_cards", [])
+            pick = [c for c in cards if c["number"] != state()["active"]]
+            if not pick:
+                break
+            target = pick[slot]["number"]
+            ctl("debug-click", *center(pick[slot]["frame"]))
+            if not check(wait_state(lambda x: x["active"] == target, f"{what}: the switch") is not None, f"{what}: switched to {target}"):
+                continue
+            time.sleep(1.2)
+            s = state()
+            got, want = dock_strip(s)
+            check(got == want, f"{what}, after a click: every stage in its Dock place ({got}, want {want})")
+
+    say("-- follow the Dock: a card dragged one slot down springs back, no switch")
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if check(len(cards) >= 3, f"cards to drag ({len(cards)})"):
+        order0, active0 = s0["strip"], s0["active"]
+        a, b = cards[0]["frame"], cards[1]["frame"]
+        start = center(a)
+        y = b["y"] + b["h"] * 0.9
+        words = [str(round(v, 1)) for p in (start, (start[0], start[1] + 12), (start[0], y)) for v in p] + ["hold=300"]
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        proc.communicate(timeout=20)
+        time.sleep(1.2)
+        s = state()
+        check(s["strip"] == order0 and s["active"] == active0,
+              f"the order and the active stage are unchanged ({order0} -> {s['strip']}, active {active0} -> {s['active']})")
+
+    say("-- follow the Dock: an app quits, its icon goes, the strip still follows")
+    stop_extra("a")
+    time.sleep(3.0)
+    s = state()
+    got, want = dock_strip(s)
+    check(got == want, f"after a quit: the strip follows the Dock read after it ({got}, want {want})")
+
+
+# In place, close, room for four cards: the strip past its capacity (drop_settle_checks,
+# merge_hold_check).
+CONFIG_DROP = config_in_place("close").replace("[strip]", "[strip]\ncapacity = 4", 1)
+
+
+def drop_settle_checks():
+    """Keep stages in place past the capacity (round 9C, the owner's 10-22 report: "a little
+    slide" after a drop right into a slot): a card dragged one slot and released. Sampled
+    every ~16 ms after the release (`ctl debug-strip`), the dropped card's drawn thumbnail only
+    moves toward its slot, never past it by more than 2 pt nor sideways; and the strip the
+    engine sends is the one drawn at the release (no other stage takes a slot)."""
+    say("-- keep stages in place past the capacity: a dropped card settles into its slot, no jerk")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(CONFIG_DROP)
+    ctl("reload")
+    time.sleep(1.0)
+    slots_baseline("a full strip", 4)
+    s = state()
+    n = len(s.get("strip_cards", []))
+    if not check(n >= 4, f"a full strip to drag in ({s['strip']}, {n} drawn, capacity {s['strip_capacity']})"):
+        return
+    # The head's last card one slot down (its place goes to the stage after it in creation
+    # order: the 10-22 case), then the second card one slot up.
+    for slot, step, what in ((n - 2, 1, "the head's last card one slot down"), (1, -1, "the second card one slot up")):
+        s0 = state()
+        cards = s0.get("strip_cards", [])
+        if not check(len(cards) == n, f"{what}: the strip is full ({len(cards)} cards)"):
+            continue
+        ids = ids_by_number(s0)
+        order0 = [ids.get(c["number"]) for c in cards]
+        dragged = order0[slot]
+        want = [x for x in order0 if x != dragged]
+        want.insert(slot + step, dragged)
+        a, b = cards[slot]["frame"], cards[slot + step]["frame"]
+        start = center(a)
+        # Into the gap past the next card (outside its middle: a gap, not a merge).
+        y = b["y"] + b["h"] * (0.9 if step > 0 else 0.1)
+        path = [start, (start[0], start[1] + 12 * step), (start[0], y)]
+        words = [str(round(v, 1)) for p in path for v in p] + ["hold=300"]
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        out, _ = proc.communicate(timeout=20)
+        # Released: sample the dropped card's front thumbnail as drawn, about once a frame.
+        seen, end = [], time.time() + 1.2
+        while time.time() < end:
+            t = time.time()
+            p = strip_probe()
+            c = next((c for c in (p or {}).get("cards", []) if c.get("stage") == dragged and c.get("thumb")), None)
+            if c:
+                seen.append(center(c["thumb"]))
+            time.sleep(max(0.0, 0.016 - (time.time() - t)))
+        st = wait_state(lambda x: [ids_by_number(x).get(c["number"]) for c in x.get("strip_cards", [])] == want,
+                        f"{what}: the strip as drawn at the release", timeout=3)
+        got = [ids_by_number(state()).get(c["number"]) for c in state().get("strip_cards", [])]
+        check(st is not None, f"{what}: the engine's strip is the one drawn at the release ({order0} -> {got}, drawn {want})")
+        if not check(len(seen) >= 10, f"{what}: the dropped card sampled while it settles ({len(seen)} samples; {out.strip()[:80]})"):
+            continue
+        rest = seen[-1]
+        d0 = (seen[0][0] - rest[0], seen[0][1] - rest[1])
+        n0 = math.hypot(*d0)
+        u = (d0[0] / n0, d0[1] / n0) if n0 >= 1.0 else (0.0, 1.0)
+        bad, last = [], None
+        for i, q in enumerate(seen):
+            dx, dy = q[0] - rest[0], q[1] - rest[1]
+            along, side = dx * u[0] + dy * u[1], abs(dy * u[0] - dx * u[1])
+            if n0 < 1.0:
+                if math.hypot(dx, dy) > 2.0:
+                    bad.append(f"#{i} {math.hypot(dx, dy):.1f} pt off a slot it was dropped on")
+            elif along < -2.0:
+                bad.append(f"#{i} {-along:.1f} pt past its slot")
+            elif last is not None and along > max(last, 0.0) + 0.5:
+                bad.append(f"#{i} back away from its slot ({last:.1f} -> {along:.1f} pt)")
+            if side > 2.0:
+                bad.append(f"#{i} {side:.1f} pt sideways")
+            last = along if n0 >= 1.0 else None
+        check(not bad, f"{what}: the dropped card only settles toward its slot ({len(seen)} samples from "
+                       f"{n0:.1f} pt away)" + (f" ({'; '.join(bad[:4])})" if bad else ""))
+        time.sleep(0.5)
+
+
+def merge_hold_check():
+    """A card held over another card's middle (`[strip] merge_on_drop`; owner 10-22, round 9C:
+    "both windows render with the same content until I release"): the target previews the
+    merge, its own windows in front and the dragged card's behind, and each of its planes
+    shows its own window's picture (`shows` in `ctl debug-strip`: none while captures are
+    off), never another's; the dragged card, lying right over the target, fades to
+    `[drag] lifted_opacity` so the target's front window shows. Released there, the stages
+    merge."""
+    say("-- a card held over another card: the preview shows the target's own front window")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(CONFIG_DROP)
+    ctl("reload")
+    time.sleep(1.0)
+    slots_baseline("two cards", 2)
+    s0 = state()
+    cards = s0.get("strip_cards", [])
+    if not check(len(cards) >= 2, f"two cards to merge ({len(cards)})"):
+        return
+    ids = ids_by_number(s0)
+    dragged, target = ids.get(cards[0]["number"]), ids.get(cards[1]["number"])
+    a, b = cards[0]["frame"], cards[1]["frame"]
+    start, over = center(a), center(b)
+    words = [str(round(v, 1)) for p in (start, (start[0], start[1] + 12), over) for v in p] + ["hold=1200"]
+    proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+    held = [p for p in sample_strip_during(proc, after=0.0) if p.get("merge_onto") == target]
+    if not check(len(held) >= 3, f"the card was held over the other ({len(held)} samples while held)"):
+        return
+    last = held[-1]
+    # A window's home is its stage's number.
+    mine = {w["id"] for w in s0["windows"] if w["home"] == cards[1]["number"] and w["role"] == "standard"}
+    theirs = {w["id"] for w in s0["windows"] if w["home"] == cards[0]["number"] and w["role"] == "standard"}
+    t = next((c for c in last["cards"] if c["stage"] == target), None)
+    d = next((c for c in last["cards"] if c["stage"] == dragged), None)
+    if not check(t is not None and d is not None, "both cards are drawn while held"):
+        return
+    planes = t["planes"]
+    front = planes[-1]["window"] if planes else None
+    check(front in mine and any(p["window"] in theirs for p in planes),
+          f"the target previews the merge: its own window in front ({front}), the dragged card's behind "
+          f"({[p['window'] for p in planes]})")
+    wrong = [(p["window"], p["shows"]) for h in held for c in h["cards"] for p in c["planes"]
+             if p.get("shows") is not None and p["shows"] != p["window"]]
+    check(not wrong, f"every plane shows its own window's picture ({wrong[:4]})")
+    lifted = 0.3
+    check(d["opacity"] <= lifted + 0.01, f"the dragged card fades over its target (opacity {d['opacity']:.2f})")
+    time.sleep(1.0)
+    st = state()
+    home = {w["id"]: w["home"] for w in st["windows"]}
+    into = {home.get(w) for w in mine}
+    check(len(into) == 1 and all(home.get(w) in into for w in theirs), f"released over the target, the stages merged ({into})")
 
 
 def phase_slots():
@@ -2499,6 +3015,10 @@ def phase_slots():
             g = next((g for g in t.get("ghosts", []) if g["window"] == win["id"]), None)
             check(g is not None and g.get("real") and b and off(g["end"], b) <= 1.0,
                   f"its last frame is within 1 pt of the window's (end {g and fmt(g['end'])}, window {b and fmt(b)})")
+    in_place_checks()
+    dock_order_checks()
+    drop_settle_checks()
+    merge_hold_check()
     stop_app()
     all_onscreen("slots quit")
     write_config(None)
@@ -3449,6 +3969,19 @@ def stage_sets_restore(s, n):
     return {base_title(x) for x in stage_titles(s).get(n, [])}
 
 
+def given_up_at_end():
+    """(dropped, apps) of the restore-end give-up line (merge restore-end: at the restore
+    window's end the saved windows of apps not running are given up) logged after the day
+    log's latest "the restore window ends", or None while there is none. `apps` is the logged
+    list as written (`"bundle", …`)."""
+    text = log_text()
+    ends = [m.end() for m in re.finditer(r"restore: the restore window ends", text)]
+    if not ends:
+        return None
+    m = re.search(r"restore: saved windows given up \(.*?\) dropped=(\d+) apps=\[(.*?)\]", text[ends[-1]:])
+    return (int(m.group(1)), m.group(2)) if m else None
+
+
 def phase_restore():
     say("\n== restore after a restart (simulated: STAGE_MANAGER_SESSION) ==")
     stop_app()
@@ -3625,6 +4158,21 @@ def phase_restore():
         check(s.get("focused") in key_ids, f"the saved key window has the keyboard (focused {s.get('focused')}, key {key_ids})")
         consistent("settled")
 
+    say("-- Charlie never reopened: given up at the restore window's end (restore-end)")
+    c_bundle = EXTRA["c"][0]
+    gave = wait_until(given_up_at_end, 5, "the give-up line")
+    check(gave == (1, f'"{c_bundle}"'), f"Charlie's one saved window given up, the line naming its bundle id only ({gave})")
+    s = state()
+    check(not any(st["pending"] and not st["windows"] for st in s["stages"]), "Charlie's stage, which only held it, went")
+    check(charlie_n not in s["strip"], f"no card for it ({s['strip']})")
+    t = by_title(s)
+    check("Alpha 2" not in t and next((st["pending"] for st in s["stages"] if st["number"] == mail), 0) == 1,
+          "Alpha (running) keeps its minimized window's entry in Mail")
+    f = wait_until(lambda: (lambda x: x if x and not any(base_title(w) == "Charlie 1" for w, _ in saved_windows(x)) else None)(read_state_file()),
+                   5, "state.json saved without Charlie 1")
+    titles = sorted(base_title(x) for x, _ in saved_windows(f))
+    check(titles == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"state.json: Charlie's entry gone, the others kept ({titles})")
+
     say("-- after the restore window: an un-minimized window brings its stage forward")
     do("switch", s["active"])
     s = state()
@@ -3652,7 +4200,12 @@ def phase_restore():
         s = state()
         f1 = by_title(s)["Fixture 1"]
         check(f1.get("restored") is None, "matched to no saved window")
-        check(stage_titles(s).get(f1["home"]) == ["Fixture 1"] and f1["home"] not in want, "a stage of its own")
+        # A stage's number is its place (1-based), not an id: with Charlie's stage given up
+        # (restore-end) the new stage is the third, the number Charlie's had in session A. So
+        # the stage is told apart from the restored ones by their windows, not by `want`.
+        restored_homes = {w["home"] for w in s["windows"] if w.get("restored")}
+        check(stage_titles(s).get(f1["home"]) == ["Fixture 1"] and f1["home"] not in restored_homes,
+              f"a stage of its own ({f1['home']}, restored stages {sorted(map(str, restored_homes))})")
         check(s["active"] == f1["home"] and not f1["parked"], "shown, its stage in front, as Apple's does")
         check(stage_sets_restore(s, mail) == {"Alpha 1", "Alpha 2"}, "the restored stages untouched")
         consistent("unmatched app")
@@ -3660,9 +4213,11 @@ def phase_restore():
     stop_fixture()
     wait_state(lambda x: "Fixture 1" not in by_title(x), "Fixture 1 gone")
 
-    say("-- give up: Charlie never reopens")
+    say("-- Charlie stays given up: a relaunch and a new session")
     stop_app()
     all_onscreen("session B quit")
+    f = read_state_file()
+    check("Charlie 1" not in [base_title(x) for x, _ in saved_windows(f)], "the quit's save does not bring Charlie's entry back")
     s = start_app(5, extra_env=session["B"])
     if not check(s is not None, "relaunch in session B"):
         return
@@ -3672,23 +4227,36 @@ def phase_restore():
 
     want_sets = sorted(sorted(v) for v in want.values() if v != {"Charlie 1"})
     check(stage_sets_now(s) == want_sets, f"the same-session relaunch keeps the stages ({stage_sets_now(s)})")
-    check(any(st["pending"] and not st["windows"] for st in s["stages"]), "Charlie's stage still waits")
+    check(not any(st["pending"] and not st["windows"] for st in s["stages"]), "no stage waits for Charlie")
     time.sleep(1.5)
     stop_app()
     f = read_state_file()
-    check(("Charlie 1", session["A"]["STAGE_MANAGER_SESSION"]) in saved_windows(f),
-          "Charlie's window is kept through the relaunch, pending since session A")
+    check("Charlie 1" not in [base_title(x) for x, _ in saved_windows(f)], "nor after the relaunch's save")
     s = start_app(5, extra_env=session["C"])
     if not check(s is not None, "launch in session C"):
         return
     f = wait_until(lambda: (lambda x: x if x and x.get("session") == session["C"]["STAGE_MANAGER_SESSION"] else None)(read_state_file()),
                    10, "state.json saved in session C")
     titles = [base_title(x) for x, _ in saved_windows(f)]
-    check("Charlie 1" not in titles, "after two sessions without Charlie its window is given up")
+    check("Charlie 1" not in titles, "session C: Charlie's window stays given up")
     check(sorted(titles) == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"the others are kept ({titles})")
     check(stage_sets_now(s) == want_sets, f"session C: the stages matched again ({stage_sets_now(s)})")
     check(not any(st["pending"] for st in s["stages"]), "session C: nothing pending")
     consistent("session C")
+
+    say("-- Charlie launched later: the new-window rules, nothing restored")
+    start_extra("c", 1)
+    s = wait_state(lambda x: "Charlie 1" in by_title(x), "Charlie 1 managed", timeout=8)
+    if check(s is not None, "Charlie's late window is managed"):
+        time.sleep(1.0)
+        s = state()
+        c1 = by_title(s)["Charlie 1"]
+        check(c1.get("restored") is None, "matched to no saved window")
+        check(stage_titles(s).get(c1["home"]) == ["Charlie 1"], "a stage of its own (Apple's rule)")
+        others = sorted(v for v in stage_sets_now(s) if v != ["Charlie 1"])
+        check(others == want_sets, f"the restored stages untouched ({others})")
+        consistent("Charlie late")
+    stop_extra("c")
     stop_app()
     all_onscreen("restore phase quit")
     stop_all_fixtures()
@@ -3707,8 +4275,10 @@ def restore_pool(run_id):
     stage and Alpha 3 in another, and Desktop 2 (id 8) with Bravo 1 (active) and Bravo 2. In
     session Q the login shows "Desktop 2": Bravo's windows (natives) adopt it, then Alpha's
     (strays of Desktop 1) come to the same Desktop and go back into their saved stages there;
-    Charlie (a native of Desktop 1, never reopened here) keeps waiting for Desktop 1's visit.
-    The phase cannot switch Desktops, so every fixture window shows on the one shown."""
+    Charlie (a native of Desktop 1, never reopened here) waits for Desktop 1's visit through the
+    restore window and is given up at its end, not running then (restore-end); Desktop 1, left
+    with no window, leaves the save. The phase cannot switch Desktops, so every fixture window
+    shows on the one shown."""
     say("\n-- one pool after a restart (8I): strays of Desktop 1 on the Desktop shown go back to their saved stages")
     stop_app()
     stop_all_fixtures()
@@ -3795,7 +4365,21 @@ def restore_pool(run_id):
         check(re.search(r"restore: \d+ windows? into .*; 3 from other Desktops", log_text()) is not None,
               "the restore's line counts the three from another Desktop")
         check({base_title(x) for x in active_titles(s)} == {"Bravo 1"}, "Desktop 2's front stays (Desktop 1 is not the one shown)")
-        check((s.get("restore") or {}).get("pending_unvisited") == 1, "Charlie 1 still waits: the window's end gives up nothing")
+        # Restore-end: Charlie is not running when the window ends, so its entry on Desktop 1
+        # (not visited) is given up there. Charlie is not made running to keep the old wait:
+        # running with no window it keeps the login busy (restore::still_opening) to the 5-minute
+        # cap, and a fixture cannot open a window on a Desktop not shown. A running app's entries
+        # on a saved Desktop not visited are kept by the rule, checked in
+        # engine::model::pool::tests (a_saved_desktops_windows_of_apps_not_running_…).
+        gave = wait_until(given_up_at_end, 5, "the give-up line")
+        check(gave == (1, f'"{c}"'), f"Charlie 1 given up at the window's end, not running: the line names its bundle id only ({gave})")
+        s = state()
+        check((s.get("restore") or {}).get("pending_unvisited") == 0, "nothing waits for Desktop 1's visit any more")
+        f = wait_until(lambda: (lambda x: x if x and not any(t == "Charlie 1" for t, _ in saved_windows(x)) else None)(read_state_file()),
+                       5, "state.json saved without Charlie 1")
+        titles = sorted(base_title(x) for x, _ in saved_windows(f))
+        check(titles == ["Alpha 1", "Alpha 2", "Alpha 3", "Bravo 1", "Bravo 2"], f"state.json: the others kept ({titles})")
+        check(not any(sp["id"] == 4 for sp in (f or {}).get("spaces", [])), "Desktop 1, left with no window, leaves the save")
         consistent("pool settled")
 
     say("-- a relaunch in the same session keeps the stages, no pool")

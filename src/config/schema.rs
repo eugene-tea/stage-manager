@@ -190,15 +190,16 @@ pub const KEYS: &[KeyDef] = &[
     k("app", "install_updates", Kind::Bool, "false",
         "Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first."),
     // [strip]
-    k("strip", "order", Kind::Choice(&["native", "fixed"]), "\"native\"",
-        "Card order: \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"fixed\" is creation order."),
+    k("strip", "order", Kind::Choice(&["native", "in_place", "fixed", "dock"]), "\"native\"",
+        "Card order (Settings: Strip order): \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (\"fixed\" is its older name); \"dock\" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app; apps not in the Dock last), and a card cannot be dragged to another slot."),
+    k("strip", "active", Kind::Choice(&["close", "gap", "card"]), "\"close\"",
+        "With order = \"in_place\" or \"dock\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
         "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
     k("strip", "reorder", Kind::Bool, "true",
-        "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used)."),
+        "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). Off while order = \"dock\"."),
     k("strip", "merge_on_drop", Kind::Bool, "true",
         "Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used)."),
-    k("strip", "show_active", Kind::Bool, "false", "Also show the active stage as a card (fixed order only; Apple never does)."),
     k("strip", "hide_while_desktop_shown", Kind::Bool, "false",
         "Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown."),
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
@@ -332,7 +333,7 @@ pub const KEYS: &[KeyDef] = &[
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
-        "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here."),
+        "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),
     k("sugar", "launch_window_ms", i(0, 60_000), "10000", "A newly opened app's first window counts a Shift held this long before."),
     k("sugar", "activation_window_ms", i(0, 60_000), "2000", "An activation counts a Shift held this long before."),
     // [hotkeys]
@@ -347,6 +348,8 @@ pub const KEYS: &[KeyDef] = &[
         "Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty."),
     k("stages", "restore_after_restart", Kind::Bool, "true",
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
+    k("stages", "new_apps_join_current", Kind::Bool, "false",
+        "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
     // [defaults]
     k("defaults", "action", Kind::Action, "\"native\"",
         "\"native\" is Apple's: a window joins its app's stage, a newly opened app gets its own."),
@@ -493,6 +496,10 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-11.toml"),
     include_str!("legacy/default-12.toml"),
     include_str!("legacy/default-13.toml"),
+    include_str!("legacy/default-14.toml"),
+    include_str!("legacy/default-15.toml"),
+    include_str!("legacy/default-16.toml"),
+    include_str!("legacy/default-17.toml"),
 ];
 
 #[cfg(test)]

@@ -41,13 +41,22 @@ pub fn motion_overlay() -> B {
     B::MoveToActiveSpace | B::Transient | B::IgnoresCycle
 }
 
-/// The wallpaper corner patch (`[windows] corner_patch`): like the motion overlay, on the
-/// Space shown (moves there when shown), hidden by Mission Control, App Exposé and Show
-/// Desktop, out of ⌘` and the Window menu's cycle; never on a full-screen Space. Its panel
-/// is non-activating and click-through, never key or main, so ⌘Tab and switchers that list
-/// apps never see it (an accessory app with no window that can be key).
+/// A Desktop's wallpaper corner patch (`[windows] corner_patch`): as a Desktop's strip pane,
+/// on the one Desktop it is first ordered in on (no Spaces flag), so it slides with that
+/// Desktop and is there, drawn, when the Desktop slides back in (it moved to the Space shown
+/// before, and was ordered out at every Space change); hidden by Mission Control, App Exposé
+/// and Show Desktop, out of ⌘` and the Window menu's cycle; never on a full-screen Space.
+/// Its panel is non-activating and click-through, never key or main, so ⌘Tab and switchers
+/// that list apps never see it (an accessory app with no window that can be key).
 pub fn corner_patch() -> B {
-    B::MoveToActiveSpace | B::Transient | B::IgnoresCycle
+    desktop_panel()
+}
+
+/// Our own windows (Settings, Welcome, alerts): shown on the Desktop the user is on. Without
+/// it, a window closed (only hidden, kept for the next opening) still belongs to the Desktop it
+/// was last on, and opening it again takes the user there (the owner's report of 10-22).
+pub fn app_window() -> B {
+    B::MoveToActiveSpace
 }
 
 /// The names of the flags set in `bits` (for `ctl state` and logs), in a fixed order.
@@ -105,7 +114,7 @@ mod tests {
     #[test]
     fn the_corner_patch_never_shows_in_switchers_or_overviews() {
         let b = corner_patch();
-        assert_eq!(names(b.0), ["move_to_active_space", "transient", "ignores_cycle"]);
+        assert_eq!(names(b.0), ["transient", "ignores_cycle"], "one Desktop's, as a strip pane");
         assert!(!b.contains(B::Managed) && !b.contains(B::Stationary), "never laid out or kept by Exposé");
         assert!(!b.contains(B::FullScreenAuxiliary) && !b.contains(B::CanJoinAllSpaces));
     }

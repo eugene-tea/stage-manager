@@ -281,7 +281,7 @@ fn fast_tick() {
     if safety::quit_requested() {
         return;
     }
-    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&s.observer));
+    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&mut s.observer));
     arm_fast_tick();
 }
 
@@ -307,6 +307,7 @@ fn tick() {
         return;
     }
     guarded_state("the WM tick", WmState::tick);
+    arm_fast_tick();
 }
 
 /// The AX observer callback. `refcon` carries the app's pid.
@@ -327,6 +328,8 @@ unsafe extern "C-unwind" fn ax_callback(
             s.pump();
         }
     });
+    // A focus held for a Desktop slide is looked at on the fast tick.
+    arm_fast_tick();
 }
 
 impl WmState {
@@ -683,7 +686,11 @@ impl WmState {
             self.logout_cancelled("no quit came in time");
         }
         self.ticks = self.ticks.wrapping_add(1);
-        if self.ticks.is_multiple_of(RETRY_EVERY) {
+        let full = self.ticks.is_multiple_of(RETRY_EVERY);
+        // Apps gone without a termination notice (round missed-quit): the pids whose calls
+        // failed each tick, the apps with tracked windows about once a second.
+        self.observer.reap_gone(full);
+        if full {
             self.observer.retry_pending(ax_callback);
             // Windows closed while their app did not answer (8M): no destroyed notice came.
             self.observer.sweep_closed();

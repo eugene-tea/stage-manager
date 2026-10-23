@@ -237,6 +237,42 @@ fn a_stage_split_across_two_desktops_makes_its_part_on_each() {
 }
 
 #[test]
+fn a_saved_desktops_windows_of_apps_not_running_at_the_end_are_given_up() {
+    // Desktop 1, not visited, waits for the terminal's build, music and mail's inbox. Music is
+    // not running when the restore window ends: its entry goes, and its stage with it.
+    let mut m = login_on_desktop_2();
+    let d2 = m.current_space(MAIN);
+    m.end_restore();
+    assert_eq!(m.pending_unvisited(), 3);
+    let (actions, apps, dropped) = m.give_up_absent(|b| b != MUSIC);
+    assert_eq!((apps, dropped), (vec![MUSIC.to_string()], 1));
+    assert!(actions.contains(&Action::StateChanged));
+    assert_eq!(m.pending_unvisited(), 2);
+    assert!(titles(&m).iter().all(|(t, _)| t != "Library"), "no save lists it");
+    let file = m.to_state();
+    assert_eq!(file.spaces.iter().find(|s| s.id == 4).map(|d| d.stages.len()), Some(2), "build's and inbox's stages");
+    // Music launched later: a stage of its own by Apple's rule, nothing restored.
+    add(&mut m, win(55, 32, MUSIC, "Library", r(4.0)));
+    assert!(m.restored_grade(w(55)).is_none() && !m.is_pooled(w(55)));
+    assert_eq!(m.window(w(55)).map(|x| x.space), Some(d2));
+    // He goes to Desktop 1: no stage is built for the one given up.
+    let natives = [win(51, 30, TERM, "build", r(2.0)), win(53, 12, MAIL, "Inbox", r(7.0))];
+    let shown: Vec<WindowId> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &natives, &shown, &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 4);
+    assert_eq!(m.stages_in(SpaceId(4)).count(), 2, "build and inbox");
+
+    // None of its apps running (Mail quit with its archive): the saved Desktop goes whole.
+    let mut m = login_on_desktop_2();
+    m.remove_window(w(83));
+    m.end_restore();
+    let (_, _, dropped) = m.give_up_absent(|b| ![TERM, MUSIC, MAIL].contains(&b));
+    assert_eq!(dropped, 3);
+    assert_eq!(m.unvisited_saved_spaces(), 0);
+    assert!(m.to_state().spaces.iter().all(|s| s.id != 4), "no save lists it");
+}
+
+#[test]
 fn the_desktop_shown_when_saved_brings_its_saved_active_stage_forward_at_the_end() {
     // The login shows Desktop 1 itself. An app with no saved window opens first and takes the
     // empty front; Desktop 1's terminal (in its saved active stage) then adopts it, parked

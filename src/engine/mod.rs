@@ -10,6 +10,7 @@ pub mod displays;
 pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
+pub mod gone;
 pub mod guard_watch;
 pub mod handoff;
 pub mod hidden_tab;
@@ -26,6 +27,7 @@ pub mod rescan;
 pub mod restore;
 pub mod rules;
 pub mod settings;
+pub mod slide_hold;
 pub mod sliver;
 pub mod vanished;
 pub mod stage_area;
@@ -38,7 +40,7 @@ pub(crate) mod testkit;
 pub use geometry::{Point, Rect, Size};
 pub use model::{
     Action, Display, DisplayId, Home, Model, ModelOptions, NativeTarget, Observation, Pid, Stage, StageId,
-    StripCard, StripOptions, StripOrder, Target, WindowId, WindowMeta, WindowRole, WindowState,
+    ActiveCard, DockApp, StripCard, StripOptions, StripOrder, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 pub use persist::{Assignment, LaunchHints, StateFile, rematch};
 pub use rules::{Decision, Placement, RuleAction, RuleSet};

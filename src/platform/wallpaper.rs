@@ -6,7 +6,9 @@
 //!   space), NSWorkspace's picture URL and options for it, macOS's wallpaper settings file
 //!   (`~/Library/Application Support/com.apple.wallpaper/Store/Index.plist`: undocumented,
 //!   read as data only when its modification time changes, never written; it alone names
-//!   Tile and the style of a dynamic picture), the picture's ImageIO facts and
+//!   Tile and the style of a dynamic picture; a choice of one of Apple's pictures by its
+//!   description, a `.madesktop` in `/System/Library/Desktop Pictures`, is put at the picture
+//!   macOS downloaded for it at every read, so a download is seen), the picture's ImageIO facts and
 //!   `apple_desktop` metadata (once per file version), the effective appearance, the clock
 //!   and the time zone's place (`/usr/share/zoneinfo/zone.tab`, once). The engine decides.
 //! - **Render** ([`render`], any thread): the chosen frame, decoded by ImageIO, drawn into
@@ -16,6 +18,7 @@
 //!   which gives exactly the pixels of a draw over the whole screen.
 //! - **Crop** ([`crop`]): the patch's whole pixels of a render, shared, not copied.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -63,6 +66,9 @@ pub struct Wall {
     pub recheck_at: Option<Instant>,
     /// The appearance read was dark.
     pub dark: bool,
+    /// The picture's facts, when drawn: a Desktop's patch left drawn there tells by them
+    /// whether its frame is still the one macOS shows ([`wp::still_drawn`]).
+    pub image: Option<ImageFacts>,
 }
 
 /// Everything a render needs (sendable to a render thread).
@@ -127,6 +133,8 @@ pub fn file_name(path: &str) -> String {
 #[derive(Default)]
 pub struct Reader {
     store: Option<(Option<SystemTime>, Option<Vec<StoreChoice>>)>,
+    /// Apple's descriptions read (`/System`: they change only with macOS).
+    descriptions: HashMap<String, Option<Plist>>,
     image: Option<(String, (u128, u64), Option<ImageFacts>)>,
     zone: Option<(String, Option<(f64, f64)>)>,
 }
@@ -136,7 +144,7 @@ impl Reader {
     pub fn read(&mut self, mtm: MainThreadMarker) -> Wall {
         let dark = dark_appearance(mtm);
         let Some(screen) = NSScreen::screens(mtm).firstObject() else {
-            return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, dark };
+            return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, dark, image: None };
         };
         let f = screen.frame();
         let frame = Rect::new(0.0, 0.0, f.size.width, f.size.height);
@@ -188,6 +196,7 @@ impl Reader {
             .ok()
             .and_then(|d| d.frame.recheck_in)
             .map(|s| Instant::now() + Duration::from_secs_f64(s.clamp(1.0, 86_400.0)));
+        let facts = image.clone().filter(|_| decided.is_ok());
         let outcome = match (decided, path.clone(), image) {
             (Ok(d), Some(path), Some(image)) => Ok((
                 d,
@@ -208,24 +217,30 @@ impl Reader {
             (Ok(_), _, _) => Err("the picture cannot be read".into()),
             (Err(why), _, _) => Err(why.into()),
         };
-        Wall { screen: frame, path, outcome, recheck_at, dark }
+        Wall { screen: frame, path, outcome, recheck_at, dark, image: facts }
     }
 
-    /// The settings file's choices, parsed again only when its modification time changed.
+    /// The settings file's choices, parsed again only when its modification time changed;
+    /// Apple's pictures named by their descriptions put at their downloaded files
+    /// ([`wp::resolve_system_pictures`]) at every read.
     fn store(&mut self) -> Option<Vec<StoreChoice>> {
-        let path = std::env::var_os("HOME").map(|h| Path::new(&h).join(STORE))?;
+        let home = std::env::var_os("HOME")?;
+        let path = Path::new(&home).join(STORE);
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if let Some((at, choices)) = &self.store
-            && *at == mtime
-        {
-            return choices.clone();
+        let fresh = self.store.as_ref().is_some_and(|(at, _)| *at == mtime);
+        if !fresh {
+            let choices = std::fs::read(&path).ok().and_then(|b| plist_from_bytes(&b)).map(|p| wp::store_choices(&p));
+            if choices.is_none() {
+                tracing::debug!("corner patch: macOS's wallpaper settings are unreadable; NSWorkspace alone");
+            }
+            self.store = Some((mtime, choices));
         }
-        let choices = std::fs::read(&path).ok().and_then(|b| plist_from_bytes(&b)).map(|p| wp::store_choices(&p));
-        if choices.is_none() {
-            tracing::debug!("corner patch: macOS's wallpaper settings are unreadable; NSWorkspace alone");
-        }
-        self.store = Some((mtime, choices.clone()));
-        choices
+        let mut choices = self.store.as_ref().and_then(|(_, c)| c.clone())?;
+        let assets = Path::new(&home).join(wp::ASSET_FOLDER);
+        let descriptions = &mut self.descriptions;
+        let describe = |p: &str| descriptions.entry(p.to_owned()).or_insert_with(|| read_description(p)).clone();
+        wp::resolve_system_pictures(&mut choices, &assets.to_string_lossy(), describe, |p| Path::new(p).is_file());
+        Some(choices)
     }
 
     /// The picture's facts, read again only for a new file or version.
@@ -242,7 +257,7 @@ impl Reader {
     }
 
     /// The clock, with the local time zone's place.
-    fn clock(&mut self) -> Clock {
+    pub fn clock(&mut self) -> Clock {
         let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
         let zone = NSTimeZone::localTimeZone().name().to_string();
         if self.zone.as_ref().is_none_or(|(z, _)| *z != zone) {
@@ -251,6 +266,17 @@ impl Reader {
         }
         Clock { unix, day_fraction: local_day_fraction(unix), place: self.zone.as_ref().and_then(|(_, p)| *p) }
     }
+}
+
+/// The largest description read (they are a few hundred bytes).
+const DESCRIPTION_MAX: u64 = 64 * 1024;
+
+/// One of Apple's picture descriptions (a `.madesktop` property list); `None` when it cannot
+/// be read or is not one.
+fn read_description(path: &str) -> Option<Plist> {
+    std::fs::metadata(path).ok().filter(|m| m.is_file() && m.len() <= DESCRIPTION_MAX)?;
+    let bytes = std::fs::read(path).ok().filter(|b| b.len() as u64 <= DESCRIPTION_MAX)?;
+    plist_from_bytes(&bytes).filter(|p| matches!(p, Plist::Dict(_)))
 }
 
 fn stamp_of(m: &std::fs::Metadata) -> (u128, u64) {

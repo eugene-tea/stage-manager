@@ -13,7 +13,7 @@
 //!   --reference` validates a file (errors with line numbers), prints the commented default
 //!   config, explains a key, or prints the configuration table of `docs/CONFIG.md`.
 //! - `stage-manager preview settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate [--dark|--light]
-//!   [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
+//!   [--pane PANE] [--png FILE]` opens one of the app's windows alone (nothing managed, no event monitor,
 //!   no Accessibility, no login item), or renders it to a PNG and exits.
 //! - `stage-manager probe-windows <bundle-id>...` prints those apps' windows as the window
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts;
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
             );
             ExitCode::from(2)
         }
@@ -261,8 +261,8 @@ mod app {
 
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
-                UiUpdate::Config { error, hotkeys, thumbnail_interval_ms, capture: on } => {
-                    shell::config_changed(error.clone());
+                UiUpdate::Config { error, config, hotkeys, thumbnail_interval_ms, capture: on } => {
+                    shell::config_changed(error.clone(), *config);
                     self.config_error = error;
                     capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
@@ -412,7 +412,7 @@ mod app {
     }
 
     fn ctl_handler(wm: WmHandle) -> ctl::Handler {
-        Arc::new(move |cmd| match cmd {
+        Arc::new(move |cmd, peer| match cmd {
             Command::Ping => json!({
                 "ok": true,
                 "pong": true,
@@ -425,7 +425,7 @@ mod app {
             }),
             // On this thread, never the WM thread's: a busy WM thread never keeps an old
             // guardian waiting (round 8N).
-            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst)),
+            Command::TakeWatch(offer) => handoff::take(&offer, QUITTING.load(Ordering::SeqCst), peer.trust()),
             Command::Settings => {
                 DispatchQueue::main().exec_async(shell::show_settings);
                 json!({ "ok": true })

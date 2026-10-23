@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use super::guardian::{self, Attempts};
 use super::{ctl, safety, windows};
 use crate::engine::guard_watch::{Event, Release, Watch};
-use crate::engine::handoff::{Answer, Offer, TakenDrops, answer_from_reply};
+use crate::engine::handoff::{Answer, Offer, TakenDrops, Trust, answer_from_reply, vet};
 use crate::engine::recovery::Registered;
 
 /// How long a guardian waits for the answer to its offer (the app answers on the ctl thread).
@@ -52,9 +52,11 @@ pub fn offer(app: u32, windows: Vec<Registered>) -> Answer {
     }
 }
 
-/// The app's answer to an old guardian's offer (`ctl take-watch`): takes every window, unless
-/// it is `quitting` (the guardian keeps them).
-pub fn take(offer: &Offer, quitting: bool) -> Value {
+/// The app's answer to an old guardian's offer (`ctl take-watch`): takes every window the
+/// sender's `trust` vouches for ([`vet`]: from a sender not signed like this app, only parked
+/// windows of apps it may manage), unless it is `quitting` (the guardian keeps them). A window
+/// not taken stays with the guardian.
+pub fn take(offer: &Offer, quitting: bool, trust: Trust) -> Value {
     if quitting {
         tracing::info!(
             guardian = offer.guardian,
@@ -63,12 +65,20 @@ pub fn take(offer: &Offer, quitting: bool) -> Value {
         );
         return ctl::error_reply("quitting: the watch is not taken");
     }
-    let (ids, new) = safety::take_watch(&offer.windows, &offer.corners);
+    let vetted = match trust {
+        Trust::Signed => vet(offer, trust, &[], &safety::scan_displays()),
+        Trust::Unsigned => vet(offer, trust, &guardian::listed_windows(&windows::list_windows()), &safety::scan_displays()),
+    };
+    for (id, why) in &vetted.refused {
+        tracing::info!(guardian = offer.guardian, id, "a handoff from a program not signed like this app: a window not taken ({why}); its guardian keeps it");
+    }
+    let (ids, new) = safety::take_watch(&vetted.windows, &vetted.corners);
     tracing::info!(
         guardian = offer.guardian,
         crashed_app = offer.app,
         windows = ?ids,
         new,
+        ?trust,
         "took a crashed copy's guardian's watch: these windows are this app's to bring back now (its quit, its guardian, its watch)"
     );
     json!({ "ok": true, "taken": ids, "pid": std::process::id() })
