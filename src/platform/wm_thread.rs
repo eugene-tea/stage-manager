@@ -281,7 +281,7 @@ fn fast_tick() {
     if safety::quit_requested() {
         return;
     }
-    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&s.observer));
+    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&mut s.observer));
     arm_fast_tick();
 }
 
@@ -307,6 +307,7 @@ fn tick() {
         return;
     }
     guarded_state("the WM tick", WmState::tick);
+    arm_fast_tick();
 }
 
 /// The AX observer callback. `refcon` carries the app's pid.
@@ -327,6 +328,8 @@ unsafe extern "C-unwind" fn ax_callback(
             s.pump();
         }
     });
+    // A focus held for a Desktop slide is looked at on the fast tick.
+    arm_fast_tick();
 }
 
 impl WmState {

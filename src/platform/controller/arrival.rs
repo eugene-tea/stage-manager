@@ -982,13 +982,15 @@ impl Controller {
 
     /// True while the WM thread's fast tick has work: an arrangement's moves to check.
     pub fn wants_fast_tick(&self) -> bool {
-        self.verify.as_ref().is_some_and(|v| v.polling)
+        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
     /// when due ([`Self::check_arrangement`]; after its Desktop's arrival,
-    /// [`Self::arrival_round`]).
-    pub fn fast_tick(&mut self, ob: &Observer) {
+    /// [`Self::arrival_round`]), and an activation held for a Desktop slide looked at
+    /// ([`Self::slide_hold_step`]).
+    pub fn fast_tick(&mut self, ob: &mut Observer) {
+        self.slide_hold_step(ob);
         let now = Instant::now();
         if self.model.is_none() {
             self.verify = None;

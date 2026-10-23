@@ -92,6 +92,7 @@ use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::on_other_display;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
+use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::park::{Corner, ParkRequest, choose_corner};
@@ -929,6 +930,10 @@ pub struct Controller {
     /// Desktop not shown, not known yet, or a Space change settling): replayed on arrival
     /// ([`FocusReplay`], [`Model::bring_focus_forward`]).
     focus_replay: FocusReplay,
+    /// An activation or focus held because a Desktop slides before the Space change's notice
+    /// ([`slide_hold`]): the arrival replays it, or it is decided once the hold is over
+    /// ([`Self::slide_hold_step`]).
+    slide_hold: Option<SlideHold>,
     /// The held window's Desktop, arranged before it was recognized ([`arrival`]).
     ahead: Option<arrival::AheadSent>,
     /// A left mouse-down on an application item of the Dock, until its mouse-up.
@@ -1107,6 +1112,7 @@ impl Controller {
             arrival_held: false,
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
+            slide_hold: None,
             ahead: None,
             dock_press: None,
             dock_pid: None,
@@ -1197,9 +1203,13 @@ impl Controller {
     /// Live frames of every shown managed window of the shown Space, the z-order and the
     /// focused window.
     fn observe(&self, ob: &mut Observer) -> Observation {
+        self.observe_with(ob, &windows::list_windows())
+    }
+
+    /// [`Self::observe`] with the window server's list already read (`list`).
+    fn observe_with(&self, ob: &mut Observer, list: &[windows::CgWindow]) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
         let space = m.current_space(m.main_display().id);
-        let list = windows::list_windows();
         let z_order: Vec<WindowId> = list
             .iter()
             .filter(|w| w.onscreen && w.layer == 0)
@@ -1222,15 +1232,14 @@ impl Controller {
     /// listed on screen keeps its tracked frame, kept current by its move and resize
     /// notices), and the focused window only when the switch depends on it
     /// ([`Model::activation_needs_focus`]), asked of the activated app alone with a bounded
-    /// timeout. [`Self::observe`] asked every shown window's frame and the system-wide focus
+    /// timeout (`focused`, asked by the caller). [`Self::observe`] asked every shown window's frame and the system-wide focus
     /// through Accessibility, which for an app busy activating (and the one it took over
     /// from) cost most of the activation's gap (6V). The tracked frame alone is not enough:
     /// an app that posts no move notice would get its windows back where they were before
     /// the user moved them (the switch keeps these frames as their restore frames).
-    fn observe_activation(&self, ob: &Observer, pid: i32, needs_focus: bool) -> Observation {
+    fn observe_activation(&self, ob: &Observer, list: &[windows::CgWindow], focused: Option<WindowId>) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
         let space = m.current_space(m.main_display().id);
-        let list = windows::list_windows();
         let z_order: Vec<WindowId> = list
             .iter()
             .filter(|w| w.onscreen && w.layer == 0)
@@ -1269,7 +1278,6 @@ impl Controller {
                 (w.meta.id, frame)
             })
             .collect();
-        let focused = if needs_focus { arrival::focused_window_of(pid) } else { None };
         Observation { frames, z_order, focused }
     }
 
@@ -2752,7 +2760,18 @@ impl Controller {
                     self.focus_after_press = Some(id);
                     return;
                 }
-                let obs = self.observe(ob);
+                let list = windows::list_windows();
+                if let Some(pid) = pid
+                    && self.window_elsewhere(id)
+                    && self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &listed_bounds(&list)))
+                {
+                    // A Desktop slides before its notice: a stage switch here would raise and
+                    // focus a window of the Desktop being left, and macOS would slide back.
+                    tracing::info!(id, pid, "focus held: a Desktop slides; decided once the Space is recognized");
+                    self.hold_for_slide(ob, Wanted::Window { id: WindowId(id), pid }, false, now);
+                    return;
+                }
+                let obs = self.observe_with(ob, &list);
                 if let Some(pid) = ob.window(id).map(|w| w.pid)
                     && self.window_elsewhere(id)
                     && self.bring_here_if_shift(ob, pid, &obs, now)
@@ -2815,37 +2834,119 @@ impl Controller {
                     self.after_hold(ob, now);
                     return;
                 }
-                let needs_focus = self.model.as_ref().is_none_or(|m| m.activation_needs_focus(pid));
-                let obs = self.observe_activation(ob, pid, needs_focus);
-                if self.bring_here_if_shift(ob, pid, &obs, now) {
-                    self.forget_held(ob);
-                    return;
-                }
-                let present = self.app_present(pid);
-                let since = ob.activated_at(pid);
-                if let Some(m) = self.model.as_mut() {
-                    let actions = m.app_activated(pid, &obs);
-                    if actions.is_empty() && !present {
-                        // Nothing to show here: macOS may be on its way to the app's window
-                        // on another Desktop (its focus may have come first and be held).
-                        self.focus_replay.hold(Wanted::App(pid), now);
-                        self.after_hold(ob, now);
-                    } else if actions.is_empty() && self.held_is_of(pid, now) {
-                        // The app's own activation, its window's focus held (either order):
-                        // that focus still says where the user goes (R5 2).
-                        tracing::debug!(pid, "activation of the app whose window focus is held; the focus stays held");
-                    } else {
-                        if !actions.is_empty() {
-                            let since_activation_ms = since.map(|t| t.elapsed().as_millis() as u64);
-                            let decide_ms = now.elapsed().as_millis() as u64;
-                            tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
-                        }
-                        self.forget_held(ob);
-                    }
-                    self.activation = self.activation_for(pid, &actions, ob);
-                    self.execute_animated(ob, actions);
-                }
+                self.decide_activation(ob, pid, now, true);
             }
+        }
+    }
+
+    /// App `pid`'s activation decided (`now`: when it came): its stage on the Desktop shown,
+    /// Shift's bring-here, or held. With `watch_slide`, an activation that would switch
+    /// stages first looks for a Desktop slide under way ([`slide_hold::activation_waits`]:
+    /// the window list it reads for the switch anyway, and, only for an app with a window on
+    /// a Desktop not shown, the app's focused window) and is held for the Space change
+    /// instead ([`Self::hold_for_slide`]); one held so is decided again without it.
+    fn decide_activation(&mut self, ob: &mut Observer, pid: i32, now: Instant, watch_slide: bool) {
+        let list = windows::list_windows();
+        let present = self.app_present(pid);
+        let needs_focus = self.model.as_ref().is_none_or(|m| m.activation_needs_focus(pid));
+        let watch = watch_slide && !present;
+        let asks = watch && self.model.as_ref().is_some_and(|m| slide_hold::asks_focus(m, pid));
+        let focused = if needs_focus || asks { arrival::focused_window_of(pid) } else { None };
+        let wait = if watch {
+            self.model.as_ref().and_then(|m| slide_hold::activation_waits(m, slide_hold::slide_listed(m, &listed_bounds(&list)), focused))
+        } else {
+            None
+        };
+        if let Some(why) = wait {
+            let wanted = match why {
+                slide_hold::Wait::FocusElsewhere(id) => Wanted::Window { id, pid },
+                slide_hold::Wait::Slides => Wanted::App(pid),
+            };
+            let decide_ms = now.elapsed().as_millis() as u64;
+            tracing::info!(
+                pid,
+                why = why.name(),
+                ax_focused = ?focused.map(|f| f.0),
+                decide_ms,
+                "activation held: it belongs to the Desktop sliding in; decided once the Space is recognized"
+            );
+            self.hold_for_slide(ob, wanted, true, now);
+            return;
+        }
+        let obs = self.observe_activation(ob, &list, focused.filter(|_| needs_focus));
+        if self.bring_here_if_shift(ob, pid, &obs, now) {
+            self.forget_held(ob);
+            return;
+        }
+        let since = ob.activated_at(pid);
+        if let Some(m) = self.model.as_mut() {
+            let actions = m.app_activated(pid, &obs);
+            if actions.is_empty() && !present {
+                // Nothing to show here: macOS may be on its way to the app's window
+                // on another Desktop (its focus may have come first and be held).
+                self.focus_replay.hold(Wanted::App(pid), now);
+                self.after_hold(ob, now);
+            } else if actions.is_empty() && self.held_is_of(pid, now) {
+                // The app's own activation, its window's focus held (either order):
+                // that focus still says where the user goes (R5 2).
+                tracing::debug!(pid, "activation of the app whose window focus is held; the focus stays held");
+            } else {
+                if !actions.is_empty() {
+                    let since_activation_ms = since.map(|t| t.elapsed().as_millis() as u64);
+                    let decide_ms = now.elapsed().as_millis() as u64;
+                    tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
+                }
+                self.forget_held(ob);
+            }
+            self.activation = self.activation_for(pid, &actions, ob);
+            self.execute_animated(ob, actions);
+        }
+    }
+
+    /// Holds `wanted` (an activation, else a window focus) for a Desktop slide: the focus
+    /// replay keeps it for the Space change's arrival ([`Self::bring_focus_forward`]); with
+    /// no change, [`Self::slide_hold_step`] decides it after the hold.
+    fn hold_for_slide(&mut self, ob: &Observer, wanted: Wanted, activation: bool, now: Instant) {
+        self.focus_replay.hold(wanted, now);
+        self.slide_hold = Some(SlideHold { wanted, activation, came: now, changes: self.space_changes });
+        self.after_hold(ob, now);
+    }
+
+    /// True while a slide hold waits ([`Self::slide_hold_step`] on the fast tick).
+    pub(super) fn slide_held(&self) -> bool {
+        self.slide_hold.is_some()
+    }
+
+    /// A slide hold looked at (the fast tick, and every tick): a Space change notified since
+    /// takes it over (its arrival replays what is held); with none, once the hold is over
+    /// ([`SlideHold::step`]) and the user did nothing meanwhile (it is still what the focus
+    /// replay holds), it is decided as it would have been: an activation as any activation,
+    /// a focus as a held focus whose wait ended.
+    pub(super) fn slide_hold_step(&mut self, ob: &mut Observer) {
+        let Some(hold) = self.slide_hold else { return };
+        let now = Instant::now();
+        let step = hold.step(now, self.space_changes, || {
+            self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &listed_bounds(&windows::on_screen())))
+        });
+        match step {
+            slide_hold::Step::Wait => return,
+            slide_hold::Step::Arrived | slide_hold::Step::Decide => self.slide_hold = None,
+        }
+        if step == slide_hold::Step::Arrived
+            || self.frozen()
+            || self.focus_replay.peek(now).map(Wanted::pid) != Some(hold.wanted.pid())
+        {
+            // A Space change came (its arrival replays what is held), or the user acted
+            // meanwhile.
+            return;
+        }
+        let held_ms = now.saturating_duration_since(hold.came).as_millis() as u64;
+        tracing::info!(pid = hold.wanted.pid(), held_ms, activation = hold.activation, "slide hold over with no Space change: decided now");
+        if hold.activation {
+            self.focus_replay.clear();
+            self.decide_activation(ob, hold.wanted.pid(), hold.came, false);
+        } else {
+            self.bring_focus_forward(ob, "a slide hold ended", None);
         }
     }
 
@@ -4491,6 +4592,7 @@ impl Controller {
                 self.update_patch();
             }
             self.expire_ahead(ob, now);
+            self.slide_hold_step(ob);
             if self.absent_due.is_some_and(|t| now >= t) {
                 self.give_up_absent(ob);
             }
@@ -5009,6 +5111,12 @@ fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::
 
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
+}
+
+/// The windows `list` shows on screen (layer 0), with their bounds: what
+/// [`slide_hold::slide_listed`] reads.
+fn listed_bounds(list: &[windows::CgWindow]) -> Vec<(u32, Rect)> {
+    list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect()
 }
 
 /// The strip's cards of `space`, in slot order.
