@@ -145,7 +145,8 @@ shows at login rather than their own; their stages are made again there.
 What it cannot do:
 
 - It does not open apps. macOS does that when "Reopen windows when logging back in" is on
-  in the Log Out or Restart dialog; an app you open later still finds its windows' stages.
+  in the Log Out or Restart dialog. An app macOS did not reopen loses its saved windows
+  once things settle: opened later, it goes where any app you open goes.
 - It cannot move a window to another Desktop. A Desktop's stages come back as far as macOS
   puts their windows there.
 - A window it is not sure about (two of one app with the same name, say) stays in view and

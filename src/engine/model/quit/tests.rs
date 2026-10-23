@@ -332,14 +332,11 @@ fn without_its_quit_the_dead_apps_window_was_saved_live_and_came_back_to_its_old
     assert_eq!(m.main_active_stage(), m.stage_of(w(92)), "switched there");
 }
 
-#[test]
-fn a_saved_window_whose_app_was_not_reopened_waits_all_session_today() {
-    // The rule as it stands (round missed-quit, item 3: reported, not changed): after a
-    // restart, a saved window whose app macOS did not reopen waits in its stage all session,
-    // past the restore window; the app launched an hour later goes back into that stage and
-    // switches there, over `[stages] new_apps_join_current`.
+/// After a restart (the home app quit at the logout, a few seconds before the save), the
+/// restore window open: the stages rebuilt pending, none of the apps reopened yet.
+fn restarted_with_home() -> Model {
     let mut m = desk_with_home();
-    quit_app(&mut m, &[91], T); // at the logout, a few seconds before the save
+    quit_app(&mut m, &[91], T);
     let mut file = saved_file(&m, T + 5);
     assert_eq!(file.settle_quit(true), (1, 0), "quit within two minutes of the save: it waits");
     file.start_new_session();
@@ -348,17 +345,92 @@ fn a_saved_window_whose_app_was_not_reopened_waits_all_session_today() {
     m.set_restore(Restore::after_restart("B"));
     m.restore_spaces(file.spaces);
     m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m
+}
+
+/// Every title `state.json` would write for `bundle`.
+fn saved_titles(m: &Model, bundle: &str) -> Vec<String> {
+    let file = m.to_state();
+    file.spaces.iter().flat_map(|s| &s.stages).flat_map(|s| &s.windows).filter(|x| x.bundle_id == bundle).map(|x| x.title.clone()).collect()
+}
+
+#[test]
+fn a_saved_window_whose_app_was_not_reopened_is_given_up_when_the_restore_window_ends() {
+    // The gap of round missed-quit (item 3), closed: after a restart, a saved window whose app
+    // macOS did not reopen waited all session, and the app launched an hour later went back
+    // into that stage and switched there, over `[stages] new_apps_join_current`. Now its entry
+    // is given up when the restore window ends, and the late launch goes by the new-window
+    // rules.
+    let mut m = restarted_with_home();
     // Every app but the home app reopens.
     add(&mut m, win(51, 50, EDITOR, "Plan.txt", F_PLAN));
     add(&mut m, win(52, 50, EDITOR, "Notes.txt", F_NOTES));
     add(&mut m, win(61, 60, CHAT, "Team", F_TEAM));
     add(&mut m, win(71, 70, BROWSER, "Recipes — Example Browser", F_RECIPES));
     add(&mut m, win(81, 80, MAIL, "Inbox", F_INBOX));
+    let stages = m.stages().len();
     m.end_restore();
-    assert_eq!(m.pending_bundles(), [HOME_APP], "the home app's window still waits");
+    assert_eq!(m.pending_bundles(), [HOME_APP], "it waits until the give-up");
+    let (actions, apps, dropped) = m.give_up_absent(|b| b != HOME_APP);
+    assert_eq!((apps, dropped), (vec![HOME_APP.to_string()], 1), "the home app's one entry");
+    assert!(actions.contains(&Action::StateChanged), "saved");
+    assert_eq!(m.pending_count(), 0);
+    assert_eq!(m.stages().len(), stages - 1, "its stage, which only held it, went");
+    assert!(saved_titles(&m, HOME_APP).is_empty(), "a save after the drop no longer lists it");
+    // A second look finds nothing more.
+    assert_eq!(m.give_up_absent(|b| b != HOME_APP).2, 0);
+
+    // The owner opens the home app an hour later: the key's rule, the current stage.
     let front = m.main_active_stage();
     add_joining(&mut m, win(92, 95, HOME_APP, "Home", F_HOME));
-    assert!(m.restored_grade(w(92)).is_some_and(|g| g.confident()), "back in its saved stage");
-    assert_ne!(m.stage_of(w(92)), front, "not the current stage");
-    assert_eq!(m.main_active_stage(), m.stage_of(w(92)), "switched there");
+    assert_eq!(m.stage_of(w(92)), front, "joins the current stage");
+    assert_eq!(m.main_active_stage(), front, "no switch");
+    assert!(m.restored_grade(w(92)).is_none(), "nothing restored");
+}
+
+#[test]
+fn a_running_app_keeps_its_saved_windows_at_the_restore_windows_end() {
+    // Mail runs with its window not shown yet (hidden, or still opening): its entry is not
+    // given up; its window, when it shows after the restore window, goes back to its stage as
+    // before (Apple's rule: its stage comes forward).
+    let mut m = restarted_with_home();
+    add(&mut m, win(51, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(52, 50, EDITOR, "Notes.txt", F_NOTES));
+    add(&mut m, win(61, 60, CHAT, "Team", F_TEAM));
+    add(&mut m, win(71, 70, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    m.end_restore();
+    let running = |b: &str| b != HOME_APP;
+    let (_, apps, dropped) = m.give_up_absent(running);
+    assert_eq!((apps, dropped), (vec![HOME_APP.to_string()], 1), "only the app not running");
+    assert_eq!(m.pending_bundles(), [MAIL], "Mail, running, keeps its entry");
+    assert_eq!(saved_titles(&m, MAIL), ["Inbox"], "and its save");
+    add(&mut m, win(81, 80, MAIL, "Inbox", F_INBOX));
+    assert!(m.restored_grade(w(81)).is_some_and(|g| g.confident()), "back in its saved stage");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(81)), "its stage came forward");
+}
+
+#[test]
+fn an_app_launched_in_the_restore_window_keeps_its_minute() {
+    // The editor launched during the restore window and is still opening its windows when it
+    // ends: Plan.txt is back, Notes.txt not yet. Running, it keeps Notes.txt's entry; its own
+    // quiet minute gives it up (`AppQuiet`), as before.
+    let mut m = restarted_with_home();
+    add(&mut m, win(51, 50, EDITOR, "Plan.txt", F_PLAN));
+    m.end_restore();
+    let running = |b: &str| b == EDITOR;
+    let (_, mut apps, _) = m.give_up_absent(running);
+    apps.sort();
+    let mut absent = vec![CHAT, BROWSER, MAIL, HOME_APP];
+    absent.sort();
+    assert_eq!(apps, absent, "every app not running");
+    assert_eq!(m.pending_bundles(), [EDITOR], "the editor keeps Notes.txt");
+    let t0 = std::time::Instant::now();
+    let mut quiet = crate::engine::restore::AppQuiet::default();
+    quiet.window(EDITOR, t0);
+    assert!(quiet.settled(t0 + crate::engine::restore::QUIET / 2).is_empty(), "within its minute");
+    let settled = quiet.settled(t0 + crate::engine::restore::QUIET);
+    assert_eq!(settled, [EDITOR]);
+    let (_, dropped) = m.expire_pending(&settled);
+    assert_eq!(dropped, 1, "its minute up: Notes.txt given up");
+    assert_eq!(m.pending_count(), 0);
 }

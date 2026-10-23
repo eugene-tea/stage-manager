@@ -9,6 +9,14 @@
 //! - its app has shown a window and then opened none for [`QUIET`] (the window was closed
 //!   inside the app's own session, or was an unsaved document): the platform asks
 //!   [`AppQuiet`]; an app with no window yet is never quiet;
+//! - its app is not running when the restore window ends (macOS did not reopen it; the user
+//!   may launch it later, and its windows then go by the new-window rules, never back to a
+//!   stage of the last session): the platform asks
+//!   [`crate::engine::model::Model::give_up_apps`] at the end, but no sooner than
+//!   [`SETTLE_AFTER_LOGIN`] after the login ([`Settling::give_up_absent_at`]: a click at the
+//!   login screen's heels ends the window while macOS is still reopening apps). An app
+//!   running then keeps its entries under the rule above (one launched during the window and
+//!   still opening keeps them until its own minute is up);
 //! - it was pending through a whole window server session already (its app never brought it
 //!   back): [`crate::engine::persist::StateFile::start_new_session`] drops it at the next one.
 //!
@@ -23,7 +31,7 @@
 //! to come. After it, no Desktop becomes provisional, and a window matched to an inactive
 //! stage brings that stage forward, as Apple's rule does for an app whose windows are in
 //! another stage (the window shows because of the user: an activation, an un-minimize, a
-//! Dock click). Pending windows are matched all session either way. At its end a saved
+//! Dock click). Pending windows of running apps are matched all session either way. At its end a saved
 //! active stage still empty (its windows still to come) while other stages have windows gives
 //! way to the focused window's stage, else the most recent one with windows
 //! ([`crate::engine::model::Model::front_after_restore`]): never an empty front stage with
@@ -232,6 +240,13 @@ impl Settling {
     /// How long since the launch, at `now`.
     pub fn age(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.started)
+    }
+
+    /// When the waiting entries of apps not running are given up, for a window ending at
+    /// `now`: then, but no sooner than [`SETTLE_AFTER_LOGIN`] after the login (macOS may still
+    /// be reopening apps after an early click).
+    pub fn give_up_absent_at(&self, now: Instant) -> Instant {
+        now.max(self.login + SETTLE_AFTER_LOGIN)
     }
 }
 
@@ -462,6 +477,24 @@ mod tests {
         assert_eq!(c.due(s(4019)), None);
         assert_eq!(c.due(s(4020)), Some(End::Quiet));
         assert_eq!(c.age(s(4020)), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn apps_not_running_are_given_up_at_the_end_but_never_within_the_login_minute() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        // A click 8 s after the login ends the window; macOS may still be reopening apps.
+        let c = Settling::new(s(3), Some(t0));
+        assert_eq!(c.give_up_absent_at(s(8)), s(60), "a minute after the login");
+        // Quiet or time up: at the end itself (always past the login minute).
+        assert_eq!(c.give_up_absent_at(s(75)), s(75));
+        assert_eq!(c.give_up_absent_at(s(3) + WINDOW), s(3) + WINDOW);
+        // A relaunch long after the login: at the end.
+        let c = Settling::new(s(4000), Some(t0));
+        assert_eq!(c.give_up_absent_at(s(4002)), s(4002));
+        // Login unknown: the launch stands for it.
+        let c = Settling::new(s(100), None);
+        assert_eq!(c.give_up_absent_at(s(110)), s(160));
     }
 
     #[test]
