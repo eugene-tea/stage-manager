@@ -635,9 +635,9 @@ fn stages(f: &mut Form, m: &Maker, v: &SettingsValues) -> ([Retained<NSSwitch>; 
         Row::new("Open new apps in the current stage", Some(view(&new_apps)))
             .detail("Off is Apple's: a newly opened app gets a stage of its own."),
         Row::new("Hold Shift to choose the stage", Some(view(&shift))).detail(if v.new_apps_join_current {
-            "Opening an app with Shift gives it a stage of its own. Shift-clicking an app in the Dock or a card brings it to the current stage."
+            "Opening an app with Shift gives it a stage of its own. Shift-clicking it in the Dock brings it to the current stage."
         } else {
-            "Opening an app with Shift, Shift-clicking it in the Dock or Shift-clicking a card brings it to the current stage."
+            "Opening an app with Shift, or Shift-clicking it in the Dock, brings it to the current stage."
         }),
         Row::new("Merge stages by dropping a card on a card", Some(view(&merge))),
         Row::new("Strip order", Some(view(&order))).detail(
