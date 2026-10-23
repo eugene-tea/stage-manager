@@ -2392,16 +2392,17 @@ def sample_strip_during(proc, after=0.8):
     return seen
 
 
-def in_place_want(s, mode):
+def in_place_want(s, mode, key=None):
     """The cards `strip` lists in place (PLAN, "Strip order"; the engine's `in_place_cards`):
     every stage of the shown Desktop holding windows has a place in creation order (hotkey
     numbers follow it), the active stage's place holding its card or the gap unless active =
     "close". Past the capacity the first capacity - 1 places keep theirs (the active one's
     included, whatever it shows) and the stages after them share the room left at the bottom:
     the most recently used of them (`last_active`, the later place on a tie) show, in
-    creation order. The gap is no card, so "gap" leaves the active stage out."""
-    places = sorted((st for st in s["stages"] if st["space"] == s["space"] and st["windows"]),
-                    key=lambda st: st["number"])
+    creation order. The gap is no card, so "gap" leaves the active stage out. `key` orders
+    the places instead (follow the Dock: `dock_strip`), creation order among ties."""
+    places = [st for st in s["stages"] if st["space"] == s["space"] and st["windows"]]
+    places.sort(key=key or (lambda st: st["number"]))
     active, cap = s["active"], s["strip_capacity"]
 
     def holds(st):
@@ -2562,8 +2563,8 @@ def dock_strip(s):
     """(the strip's stage ids as the engine lists them, the ids the Dock's order gives): every
     stage of the shown Desktop holding windows at the leftmost Dock position among its
     windows' apps (bundle id, else pid; `dock_order` as the app read it from the Dock),
-    creation order among ties and for apps with no Dock icon (last); the active stage left
-    out but with active = "card"."""
+    creation order among ties and for apps with no Dock icon (last); past the capacity as in
+    place ([`in_place_want`] in that order)."""
     dock = s.get("dock_order") or []
     by_bundle = {}
     by_pid = {}
@@ -2585,12 +2586,9 @@ def dock_strip(s):
                 spots.append(spot)
         return min(spots) if spots else len(dock)
 
-    here = [st for st in s["stages"] if st["space"] == s["space"] and st["windows"]]
-    here.sort(key=place)  # stable: ties keep creation order (`stages` lists it)
     ids = ids_by_number(s)
-    active = ids.get(s["active"])
-    show_active = s.get("strip_active") == "Card"
-    want = [st["id"] for st in here if show_active or st["id"] != active]
+    mode = (s.get("strip_active") or "Close").lower()
+    want = [ids.get(n) for n in in_place_want(s, mode, key=place)]
     got = [ids.get(n) for n in s["strip"]]
     return got, want
 
@@ -2651,10 +2649,8 @@ def dock_order_body():
               f"{what}: the running fixture apps are in the Dock's order as read ({len(bundles)} items)")
         time.sleep(1.0)
         s = state()
-        fits = len(s["strip"]) < s["strip_capacity"]
         got, want = dock_strip(s)
-        if fits:
-            check(got == want, f"{what}: the strip follows the Dock ({got}, want {want})")
+        check(got == want, f"{what}: the strip follows the Dock ({got}, want {want})")
         check(s["strip"] == sorted(s["strip"]), f"{what}: hotkey numbers follow the strip ({s['strip']})")
         made = [extra[k]["id"] for k in ("b", "a", "c")]
         stage_of = {w: next((st["id"] for st in s["stages"] if w in st["windows"]), None) for w in made}
@@ -2678,8 +2674,7 @@ def dock_order_body():
             time.sleep(1.2)
             s = state()
             got, want = dock_strip(s)
-            if len(s["strip"]) < s["strip_capacity"]:
-                check(got == want, f"{what}, after a click: every stage in its Dock place ({got}, want {want})")
+            check(got == want, f"{what}, after a click: every stage in its Dock place ({got}, want {want})")
 
     say("-- follow the Dock: a card dragged one slot down springs back, no switch")
     s0 = state()
@@ -2702,8 +2697,7 @@ def dock_order_body():
     time.sleep(3.0)
     s = state()
     got, want = dock_strip(s)
-    if len(s["strip"]) < s["strip_capacity"]:
-        check(got == want, f"after a quit: the strip follows the Dock read after it ({got}, want {want})")
+    check(got == want, f"after a quit: the strip follows the Dock read after it ({got}, want {want})")
 
 
 # In place, close, room for four cards: the strip past its capacity (drop_settle_checks,
