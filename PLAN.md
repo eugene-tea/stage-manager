@@ -123,7 +123,10 @@ Known gaps the owner accepted as rare:
   click, key, card or Dock click, or once apps are quiet 20 s and the login is a minute old),
   a window an app opens by itself that matches a saved window of an inactive stage is placed
   there, parked, not switched to. While settling, an unmatched window goes by Apple's rule
-  without the switch, except into an empty saved front stage's place (8F2).
+  without the switch, except into an empty saved front stage's place (8F2). When it ends
+  (no sooner than a minute after the login), the waiting entries of apps not running then are
+  given up (in stages and on saved Desktops not visited); running apps keep theirs under their
+  own quiet minute.
 - **Logout head start (8F, 8H):** at the first logout signal every window comes back, the
   leftovers check runs and stages are saved; the app idles until macOS's quit. A cancelled
   logout resumes at `logoutCancelled`, else two minutes after the latest signal. An app's quit

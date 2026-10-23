@@ -238,7 +238,11 @@ squeezed into the park corner goes to its saved frame when it is matched, and is
 it is (and counted) when it is not. A window an app reopens on another Desktop than the one
 it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
 again on the Desktop where it shows. No apps are relaunched (that is macOS's
-"Reopen windows when logging back in") and no window moves between Desktops. Off, a restart
+"Reopen windows when logging back in") and no window moves between Desktops. When the
+restore window ends (no sooner than a minute after the login), the saved windows of apps
+not running then are given up (one log line names them): an app opened later goes by the
+new-window rules, never back to a stage of the last session. A running app keeps its saved
+windows until it has opened none for a minute. Off, a restart
 starts every app in a stage of its own, as Apple's does. One log line sums it up
 (`stage-manager log summary` repeats it).
 

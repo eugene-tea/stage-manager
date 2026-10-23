@@ -34,6 +34,9 @@
   longer leaves a gray card behind: once its process is gone its windows leave and its stage
   goes, as for any quit, and its next launch opens by the new-window rules instead of going
   back to its old stage.
+- After a restart, an app macOS did not reopen no longer pulls its windows back into an old
+  stage when you open it later: once the login settles, the saved windows of apps not running
+  are let go, and the app opens where any new app does.
 
 ## 1.3.0 — 2026-10-21
 

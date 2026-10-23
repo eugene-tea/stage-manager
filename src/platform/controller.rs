@@ -991,6 +991,9 @@ pub struct Controller {
     /// [`crate::engine::restore::WINDOW`] after the stages were built from `state.json`); `None` once closed
     /// or when there is none.
     settling: Option<Settling>,
+    /// When the waiting entries of apps not running are given up, once the restore window
+    /// ended ([`Settling::give_up_absent_at`], [`Controller::give_up_absent`]).
+    absent_due: Option<Instant>,
     /// The restore window ended (or a give-up after it emptied the front stage): at the next
     /// tick a still-empty saved active stage gives way to a stage with windows
     /// ([`Model::front_after_restore`]), after the user's action that ended it had its say.
@@ -1121,6 +1124,7 @@ impl Controller {
             quiet_checked: Instant::now(),
             seen_times: HashMap::new(),
             settling: None,
+            absent_due: None,
             front_after_restore: false,
             focus_after_restore: false,
         };
@@ -4440,6 +4444,9 @@ impl Controller {
                 self.update_patch();
             }
             self.expire_ahead(ob, now);
+            if self.absent_due.is_some_and(|t| now >= t) {
+                self.give_up_absent(ob);
+            }
             if now.duration_since(self.quiet_checked) >= Duration::from_secs(1) {
                 self.quiet_checked = now;
                 self.give_up_pending(ob, now);
@@ -4509,12 +4516,16 @@ impl Controller {
     /// restore's line is logged (`log summary` repeats it).
     fn end_restore(&mut self, ob: &Observer, why: &str, end: End) {
         let Some(clock) = self.settling.take() else { return };
+        let now = Instant::now();
+        // The entries of apps not running then: given up at the next tick (or the login's
+        // minute), before a still-empty front gives way (`front_after_restore`).
+        self.absent_due = Some(clock.give_up_absent_at(now));
         let mut voters = Vec::new();
         if let Some(m) = self.model.as_mut()
             && let Some(actions) = m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
-            if let Some(line) = m.restore_line(clock.age(Instant::now()).as_secs()) {
+            if let Some(line) = m.restore_line(clock.age(now).as_secs()) {
                 tracing::info!("{line}");
             }
             self.front_after_restore = end.brings_front();
@@ -4563,6 +4574,27 @@ impl Controller {
                 // A saved active stage emptied for good after the window: it gives way too.
                 self.front_after_restore = true;
             }
+        }
+    }
+
+    /// After the restore window (at `absent_due`): the waiting
+    /// entries of apps not running are given up, in the model's stages and on the saved
+    /// Desktops not visited ([`Model::give_up_absent`]): macOS did not reopen those apps, and a
+    /// later launch goes by the new-window rules. Running apps keep theirs under their own
+    /// quiet minute ([`Self::give_up_pending`]). Waits while the screen is locked or a stage
+    /// change is frozen, and while no running app is known yet.
+    fn give_up_absent(&mut self, ob: &mut Observer) {
+        if self.frozen() || !ob.knows_apps() {
+            return;
+        }
+        self.absent_due = None;
+        let Some(m) = self.model.as_mut() else { return };
+        let (actions, absent, dropped) = m.give_up_absent(|b| !ob.pids_with_bundle(b).is_empty());
+        if dropped > 0 {
+            tracing::info!(dropped, apps = ?absent, "restore: saved windows given up (their apps were not running when the restore window ended)");
+            self.execute(ob, actions);
+            // A saved active stage emptied for good gives way too.
+            self.front_after_restore = true;
         }
     }
 

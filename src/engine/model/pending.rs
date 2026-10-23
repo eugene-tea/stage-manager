@@ -325,6 +325,69 @@ impl Model {
         (actions, dropped)
     }
 
+    /// The apps with saved windows still waiting anywhere: in the model's stages and on the
+    /// saved Desktops not visited yet. Sorted.
+    pub fn waiting_bundles(&self) -> Vec<String> {
+        let saved = self.leftovers.iter().flat_map(|l| l.stages.iter().flat_map(|s| s.windows.iter()));
+        let mut out = self.pending_bundles();
+        out.extend(saved.filter(|w| w.role == SavedRole::Standard).map(|w| w.bundle_id.clone()));
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// After the restore window: gives up every waiting entry of the apps `running` says are
+    /// not running ([`crate::engine::restore`]; macOS did not reopen them): the pending
+    /// windows of the model's stages, as [`Model::expire_pending`] does, and those of the
+    /// saved Desktops not visited yet (a stage left with no standard window is emptied and
+    /// not built at the visit, a Desktop left with none is dropped), so a later launch of the
+    /// app goes by the new-window rules. A running app keeps its entries. Returns the
+    /// actions, the apps given up and how many entries went.
+    pub fn give_up_absent(&mut self, running: impl Fn(&str) -> bool) -> (Vec<Action>, Vec<String>, usize) {
+        let absent: Vec<String> = self.waiting_bundles().into_iter().filter(|b| !running(b)).collect();
+        if absent.is_empty() {
+            return (Vec::new(), absent, 0);
+        }
+        let (actions, dropped) = self.give_up_apps(&absent);
+        (actions, absent, dropped)
+    }
+
+    /// Gives up every waiting entry of apps `bundles`, in the model's stages and on the saved
+    /// Desktops not visited ([`Model::give_up_absent`]). Returns the actions and how many
+    /// were given up.
+    fn give_up_apps(&mut self, bundles: &[String]) -> (Vec<Action>, usize) {
+        let (mut actions, mut dropped) = self.expire_pending(bundles);
+        let mut emptied = Vec::new();
+        for l in &mut self.leftovers {
+            let before = l.standard_windows();
+            for (j, st) in l.stages.iter_mut().enumerate() {
+                let had = st.windows.iter().any(|w| w.role == SavedRole::Standard);
+                st.windows.retain(|w| !bundles.contains(&w.bundle_id));
+                if had && !st.windows.iter().any(|w| w.role == SavedRole::Standard) {
+                    st.windows.clear();
+                    self.pooled_out.insert((l.id, j));
+                }
+            }
+            let after = l.standard_windows();
+            dropped += before - after;
+            if before > 0 && after == 0 {
+                emptied.push(l.id);
+            }
+        }
+        if !emptied.is_empty() {
+            self.leftovers.retain(|l| !emptied.contains(&l.id));
+            self.pooled_out.retain(|(d, _)| !emptied.contains(d));
+            for votes in self.adopt_votes.values_mut() {
+                votes.retain(|v| !emptied.contains(&v.0));
+            }
+            self.adopt_votes.retain(|_, v| !v.is_empty());
+        }
+        if dropped > 0 && !actions.contains(&Action::StateChanged) {
+            actions.push(Action::StateChanged);
+        }
+        (actions, dropped)
+    }
+
     /// Forgets saved strip orders of Spaces with nothing pending any more.
     pub(crate) fn tidy_slot_order(&mut self) {
         let keep: Vec<SpaceId> = self.slot_order.keys().copied().filter(|&s| self.space_has_pending(s)).collect();
