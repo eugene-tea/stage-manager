@@ -1,47 +1,27 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-10-23
 
-- Going to another Desktop no longer pulls you back: an app macOS activates as the next
-  Desktop slides in, with a window waiting in a stage of the Desktop you left, no longer
-  brings that stage forward there.
-- The wallpaper patch now covers the parked windows' edges on a Desktop showing one of
-  Apple's own dynamic wallpapers picked in System Settings (it stepped aside there, as if
-  the wallpaper were an aerial), in the style picked for it.
-- The parked windows' edges no longer flash in the corner as a switch ends: the corner stays
-  covered until the wallpaper patch is back.
-- The parked windows' edges no longer show while a Desktop slides in: each Desktop keeps its
-  own wallpaper patch, which slides in with it.
 - New apps can open in the current stage: turn on **Open new apps in the current stage**
-  (Settings → Stages, or `[stages] new_apps_join_current`) and a newly opened app's windows
-  join the stage you are in. Hold Shift while opening an app to give it a stage of its own.
-  Off by default, as Apple's.
-- Stages can keep their places: set **Strip order** to **Keep in Place** (Settings → Stages, or
-  `[strip] order = "in_place"`) and each stage keeps its own place in the strip, in the order
-  the stages were made, whichever card you click; the stage you leave goes back to its own
-  place. `[strip] active` chooses how the active stage's place shows: no card (the default),
-  an empty slot (`"gap"`) or a highlighted card (`"card"`). With more stages than fit, the
-  last place shows the one you used most recently. Off by default: Apple's strip swaps.
-- The strip can follow your Dock: set **Strip order** to **Follow the Dock** (Settings →
-  Stages, or `[strip] order = "dock"`) and the stages sit from top to bottom in the order
-  their apps sit in the Dock from left to right; a stage of several apps sits at the one
-  furthest left, and apps without a Dock icon come last. Rearrange the Dock and the cards
-  follow. A card can't be dragged to another place in this order; dropping it on a card still
-  merges. Off by default.
+  (Settings → Stages) and a newly opened app joins the stage you are in. Hold Shift while
+  opening an app to give it a stage of its own. Off by default, as Apple's.
+- Stages can keep their places: set **Strip order** to **Keep in Place** (Settings → Stages)
+  and each stage stays in its own place in the strip, whichever card you click.
+- Or the strip can follow your Dock: **Strip order** → **Follow the Dock** puts the stages in
+  the order their apps sit in the Dock. Rearrange the Dock and the cards follow.
 - Settings has a toolbar of panes, as Mac apps' settings do: General, Stage Manager, Stages,
-  Windows and Advanced. It opens on the pane you used last.
-- An update that cannot put the previous version back no longer removes it: both copies stay
-  in the hidden update folder beside the app, and the note at the next launch says where.
-- A config file that can't be read (missing, not text, a folder) no longer turns Settings
-  back to the defaults, or the login item back on: the last good config stays, as it does
-  for the windows.
-- An app that quits without macOS telling us (Home, which quits with its last window) no
-  longer leaves a gray card behind: once its process is gone its windows leave and its stage
-  goes, as for any quit, and its next launch opens by the new-window rules instead of going
-  back to its old stage.
-- After a restart, an app macOS did not reopen no longer pulls its windows back into an old
-  stage when you open it later: once the login settles, the saved windows of apps not running
-  are let go, and the app opens where any new app does.
+  Windows and Advanced.
+- Going to another Desktop no longer pulls you back to the one you left.
+- The edges of hidden windows no longer show in the corner while a Desktop slides in or a
+  switch ends, including on Apple's dynamic wallpapers.
+- An app that quits without macOS saying so (Home, which quits with its last window) no
+  longer leaves a gray card behind.
+- After a restart, an app macOS did not reopen opens where any new app does when you open it
+  later, instead of going back into an old stage.
+- A config file that can't be read no longer turns Settings back to the defaults: the last
+  good config stays.
+- An update that cannot put the previous version back no longer removes it: both copies stay,
+  and the note at the next launch says where.
 
 ## 1.3.0 — 2026-10-21
 

@@ -11,17 +11,32 @@
 · signed and notarized · Apple silicon, macOS 14 Sonoma or later<br>
 or <code>brew install eugene-tea/tap/stage-manager</code></p>
 
-## What it does
+## Like Apple's. Then more.
 
-- Looks and works like Apple's Stage Manager out of the box: the strip of stages on the
-  left, floating windows in the middle, each at the size and place you gave it.
-- Gives every Desktop its own stages and strip, and switches by click, ⌘-Tab or the Dock.
-- Merges stages when you drop one card onto another, and lets you reorder the strip.
-- Sends new windows where you want them with rules: a named stage, a new stage, or pinned to
-  every stage.
-- Offers keyboard shortcuts if you want them; nothing needs one.
-- Your stages come back after a restart. No window is ever left hidden, even after a crash.
-- Keeps every option in one config file, easiest changed by asking an AI assistant.
+Out of the box it looks and works like Apple's Stage Manager. Everything extra waits until
+you turn it on in Settings.
+
+- **Survives a restart.** Your stages, their order and the stage in front come back after a
+  reboot.
+- **Merge with a drop.** Drop one card on another to make one stage. Drag a window to the
+  strip to split it off.
+- **A strip that stays put.** Each stage keeps its place, or follows your Dock's order.
+  Windows can keep clear of the strip.
+- **New apps join you.** Open an app straight into the stage you are in. Hold Shift to give
+  it a stage of its own.
+- **Shortcuts if you want them.** ⌃⌥1–9 to switch stages or send a window. Nothing needs one.
+- **Never loses a window.** Quit, crash or update: every hidden window comes back.
+
+## More in the config file
+
+Everything else lives in one plain file. Ask an AI assistant to change it; Settings →
+Advanced shows how.
+
+- **Rules for new windows:** by app and title, a named stage, every stage, centred or cascaded.
+- **Named stages:** names and numbers on the cards.
+- **The strip:** width, size, tilt, an edge tab, above or below windows.
+- **Motion:** every animation's timing, measured from Apple's.
+- **More shortcuts:** new stage, pin a window, show or hide the strip.
 
 ## First launch
 
