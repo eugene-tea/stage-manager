@@ -201,6 +201,11 @@ pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
 /// by descending score (ties: the nearer frame, then saved order, then live order), each
 /// tested for ambiguity; then the low picks `low` allows (into the group shown). See the
 /// module docs.
+///
+/// The candidates are indexed by live window and saved group (the Codex review of 10-21,
+/// R6): a pick's runner-up is the best unused candidate at the head of each other group's
+/// list for that live window, not a scan of every pair, so a large ambiguous restore (many
+/// windows of one app with the same title and frame) stays cheap.
 pub fn assign(saved: &[Saved], live: &[Live], low: LowRule) -> Vec<Option<Pick>> {
     let mut pairs: Vec<(usize, usize, Score)> = Vec::new();
     for (i, l) in live.iter().enumerate() {
@@ -218,17 +223,14 @@ pub fn assign(saved: &[Saved], live: &[Live], low: LowRule) -> Vec<Option<Pick>>
             .then(a.0.cmp(&b.0))
     };
     pairs.sort_by(order);
+    let mut index = Rivals::new(&pairs, saved, live.len());
     let mut used_saved = vec![false; saved.len()];
     let mut out: Vec<Option<Pick>> = vec![None; live.len()];
     for &(i, k, sc) in &pairs {
         if out[i].is_some() || used_saved[k] {
             continue;
         }
-        let rival = pairs
-            .iter()
-            .filter(|(i2, k2, _)| *i2 == i && *k2 != k && !used_saved[*k2] && saved[*k2].group != saved[k].group)
-            .map(|(_, _, r)| *r)
-            .max_by(|a, b| a.points.cmp(&b.points).then(b.distance.total_cmp(&a.distance)));
+        let rival = index.rival(i, saved[k].group, &used_saved);
         let ambiguous = rival.is_some_and(|r| {
             r.points + AMBIGUOUS_WITHIN >= sc.points && !(sc.frame && r.frame && sc.distance < r.distance)
         });
@@ -244,16 +246,78 @@ pub fn assign(saved: &[Saved], live: &[Live], low: LowRule) -> Vec<Option<Pick>>
         if pick.is_some() {
             continue;
         }
-        let best = pairs
-            .iter()
-            .filter(|(i2, k, _)| *i2 == i && !used_saved[*k] && saved[*k].group == shown)
-            .min_by(|a, b| order(a, b));
-        if let Some(&(_, k, sc)) = best {
+        // A live window's candidates in `pairs` order: the first one usable is the best.
+        let best = index.by_live[i].iter().map(|&p| pairs[p]).find(|(_, k, _)| !used_saved[*k] && saved[*k].group == shown);
+        if let Some((_, k, sc)) = best {
             used_saved[k] = true;
             *pick = Some(Pick { saved: k, grade: Grade::Low, points: sc.points });
         }
     }
     out
+}
+
+/// One saved group's candidates for one live window, best runner-up first, with a cursor
+/// past those already used (a saved window once used stays used).
+struct GroupList {
+    group: u64,
+    /// `(saved index, score)`, by points (more first), then distance (nearer first), then
+    /// saved index (later first: the old full scan kept the last of equal runners-up).
+    cands: Vec<(usize, Score)>,
+    cursor: usize,
+}
+
+/// The candidates of [`assign`], by live window: in `pairs` order (indices into it), and
+/// per saved group.
+struct Rivals {
+    by_live: Vec<Vec<usize>>,
+    groups: Vec<Vec<GroupList>>,
+}
+
+impl Rivals {
+    fn new(pairs: &[(usize, usize, Score)], saved: &[Saved], lives: usize) -> Self {
+        let mut by_live: Vec<Vec<usize>> = vec![Vec::new(); lives];
+        let mut groups: Vec<Vec<GroupList>> = (0..lives).map(|_| Vec::new()).collect();
+        for (p, &(i, k, sc)) in pairs.iter().enumerate() {
+            by_live[i].push(p);
+            let g = saved[k].group;
+            let lists = &mut groups[i];
+            match lists.iter_mut().find(|l| l.group == g) {
+                Some(l) => l.cands.push((k, sc)),
+                None => lists.push(GroupList { group: g, cands: vec![(k, sc)], cursor: 0 }),
+            }
+        }
+        for l in groups.iter_mut().flatten() {
+            l.cands.sort_by(|a, b| rival_order(b, a));
+        }
+        Self { by_live, groups }
+    }
+
+    /// Live window `i`'s best unused candidate of a group other than `group` (the pick's
+    /// runner-up), as the full scan chose it: most points, then the nearer frame, then the
+    /// later saved window.
+    fn rival(&mut self, i: usize, group: u64, used: &[bool]) -> Option<Score> {
+        let mut best: Option<(usize, Score)> = None;
+        for l in &mut self.groups[i] {
+            if l.group == group {
+                continue;
+            }
+            while l.cands.get(l.cursor).is_some_and(|(k, _)| used[*k]) {
+                l.cursor += 1;
+            }
+            if let Some(&c) = l.cands.get(l.cursor)
+                && best.is_none_or(|b| rival_order(&c, &b).is_gt())
+            {
+                best = Some(c);
+            }
+        }
+        best.map(|b| b.1)
+    }
+}
+
+/// The runner-up order (greater is better): points, then the nearer frame, then the later
+/// saved window.
+fn rival_order(a: &(usize, Score), b: &(usize, Score)) -> std::cmp::Ordering {
+    a.1.points.cmp(&b.1.points).then(b.1.distance.total_cmp(&a.1.distance)).then(a.0.cmp(&b.0))
 }
 
 #[cfg(test)]
@@ -273,6 +337,63 @@ mod tests {
     }
 
     const OTHER: Rect = Rect::new(500.0, 300.0, 800.0, 450.0);
+
+    /// The matcher before R6, kept to check [`assign`] against: for each pick, a scan of
+    /// every pair for its runner-up, and of every pair for each low pick.
+    fn assign_full_scan(saved: &[Saved], live: &[Live], low: LowRule) -> Vec<Option<Pick>> {
+        let mut pairs: Vec<(usize, usize, Score)> = Vec::new();
+        for (i, l) in live.iter().enumerate() {
+            for (k, s) in saved.iter().enumerate() {
+                if let Some(sc) = score(s, l) {
+                    pairs.push((i, k, sc));
+                }
+            }
+        }
+        let order = |a: &(usize, usize, Score), b: &(usize, usize, Score)| {
+            b.2.points
+                .cmp(&a.2.points)
+                .then(a.2.distance.total_cmp(&b.2.distance))
+                .then(a.1.cmp(&b.1))
+                .then(a.0.cmp(&b.0))
+        };
+        pairs.sort_by(order);
+        let mut used_saved = vec![false; saved.len()];
+        let mut out: Vec<Option<Pick>> = vec![None; live.len()];
+        for &(i, k, sc) in &pairs {
+            if out[i].is_some() || used_saved[k] {
+                continue;
+            }
+            let rival = pairs
+                .iter()
+                .filter(|(i2, k2, _)| *i2 == i && *k2 != k && !used_saved[*k2] && saved[*k2].group != saved[k].group)
+                .map(|(_, _, r)| *r)
+                .max_by(|a, b| a.points.cmp(&b.points).then(b.distance.total_cmp(&a.distance)));
+            let ambiguous = rival.is_some_and(|r| {
+                r.points + AMBIGUOUS_WITHIN >= sc.points && !(sc.frame && r.frame && sc.distance < r.distance)
+            });
+            let grade = if ambiguous { Grade::Low } else { Grade::of(sc.points) };
+            if grade.confident() {
+                used_saved[k] = true;
+                out[i] = Some(Pick { saved: k, grade, points: sc.points });
+            }
+        }
+        // Low picks: into the group shown only (never parked).
+        let Some(shown) = low.shown else { return out };
+        for (i, pick) in out.iter_mut().enumerate() {
+            if pick.is_some() {
+                continue;
+            }
+            let best = pairs
+                .iter()
+                .filter(|(i2, k, _)| *i2 == i && !used_saved[*k] && saved[*k].group == shown)
+                .min_by(|a, b| order(a, b));
+            if let Some(&(_, k, sc)) = best {
+                used_saved[k] = true;
+                *pick = Some(Pick { saved: k, grade: Grade::Low, points: sc.points });
+            }
+        }
+        out
+    }
 
     #[test]
     fn the_score_table() {
@@ -388,5 +509,79 @@ mod tests {
         // A number that names the window is another name.
         let s = saved("com.example.books", "Invoice 101", F1, 1);
         assert_eq!(score(&s, &live(5, "com.example.books", "Invoice 102", F1)).map(|x| x.points), Some(25));
+    }
+
+    /// A small deterministic generator (xorshift64*), so a failing case can be replayed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// The Codex review of 10-21, R6: the indexed matcher gives exactly the full scan's
+    /// picks (saved window, grade, points; ambiguity and every tie-break) over thousands of
+    /// small random cases built to collide: few apps, titles, frames and groups, ids reused,
+    /// frames within the tolerance, unusable live frames, any group shown.
+    #[test]
+    fn the_indexed_matcher_matches_the_full_scan() {
+        const BUNDLES: [&str; 3] = ["com.example.a", "com.example.b", ""];
+        const TITLES: [&str; 6] = ["Untitled", "Untitled 2", "Plan", "Plan — Edited", "", "Invoice 101"];
+        let frames = [F1, F2, OTHER, Rect { x: 101.5, ..F1 }, Rect { x: 900.0, ..F1 }, Rect::new(0.0, 0.0, 0.0, 0.0)];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for case in 0..5000 {
+            let n_saved = rng.below(9);
+            let n_live = rng.below(9);
+            let groups = 1 + rng.below(4) as u64;
+            let saved: Vec<Saved> = (0..n_saved)
+                .map(|_| {
+                    let title = TITLES[rng.below(TITLES.len())];
+                    let pre_fit = (rng.below(4) == 0).then(|| frames[rng.below(frames.len())]);
+                    let apps = 2 + usize::from(rng.below(8) == 0);
+                    Saved {
+                        bundle: BUNDLES[rng.below(apps)],
+                        title,
+                        fp: fingerprint(title),
+                        id: (rng.below(3) == 0).then(|| rng.below(6) as u32),
+                        frames: [Some(frames[rng.below(frames.len())]), pre_fit],
+                        group: rng.below(groups as usize) as u64,
+                    }
+                })
+                .collect();
+            let live: Vec<Live> = (0..n_live)
+                .map(|_| {
+                    let title = TITLES[rng.below(TITLES.len())];
+                    Live {
+                        bundle: BUNDLES[rng.below(2)],
+                        title,
+                        fp: fingerprint(title),
+                        id: rng.below(6) as u32,
+                        frame: frames[rng.below(frames.len())],
+                        frame_usable: rng.below(5) != 0,
+                    }
+                })
+                .collect();
+            let low = LowRule { shown: (rng.below(3) != 0).then(|| rng.below(groups as usize + 1) as u64) };
+            assert_eq!(assign(&saved, &live, low), assign_full_scan(&saved, &live, low), "case {case}: {saved:?} {live:?} {low:?}");
+        }
+    }
+
+    /// The review's adversarial restore (one app, the same title and frame everywhere, five
+    /// saved stages), small enough for a test: both matchers find nothing confident.
+    #[test]
+    fn a_large_ambiguous_restore_matches_nothing_either_way() {
+        let saved: Vec<Saved> = (0..40).map(|i| saved("com.example.editor", "Untitled", F1, i % 5)).collect();
+        let live: Vec<Live> = (0..40).map(|i| live(1000 + i, "com.example.editor", "Untitled", F1)).collect();
+        let got = assign(&saved, &live, LowRule::default());
+        assert!(got.iter().all(Option::is_none));
+        assert_eq!(got, assign_full_scan(&saved, &live, LowRule::default()));
     }
 }

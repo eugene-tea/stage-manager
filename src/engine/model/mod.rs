@@ -329,6 +329,10 @@ pub struct Model {
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
     pub(crate) pooled_out: HashSet<(u64, usize)>,
+    /// Saved stages merged into another stage (the Codex review of 10-21, R5): a stray of one
+    /// (`pool.rs`) joins the stage it was merged into, when that is on its Desktop, instead
+    /// of making the old stage again.
+    pub(crate) merged: HashMap<pool::Kin, StageId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -385,6 +389,7 @@ impl Model {
             pool_rank: HashMap::new(),
             pooled: HashMap::new(),
             pooled_out: HashSet::new(),
+            merged: HashMap::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             restore: super::restore::Restore::default(),

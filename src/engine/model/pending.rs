@@ -337,6 +337,64 @@ impl Model {
     /// focused there keeps the stage's key; after the restore window a match into an inactive
     /// stage switches to it). Actions go to `actions` (adoption's too, when the window itself
     /// then goes by Apple's rule). True when the window was placed.
+    /// A merge of stage `source` into `into` (the Codex review of 10-21, R5), before its live
+    /// windows move: `source`'s pending windows move too, in their saved order, in front of
+    /// `into`'s (`in_front`: a merge into the active stage, whose moved windows go in front)
+    /// or behind them, so a window that comes back later lands in `into` at its place in the
+    /// merged order. Saved places (`z`) of the side that goes behind are shifted past the
+    /// other's; a moved entry is never the key (the merge chose it). A stray of `source`'s
+    /// saved stage on another Desktop joins `into` too (`merged`).
+    pub(crate) fn merge_pending(&mut self, source: StageId, into: StageId, in_front: bool) {
+        let root = self.root_of(source);
+        self.merged.insert(root, into);
+        for to in self.merged.values_mut() {
+            if *to == source {
+                *to = into;
+            }
+        }
+        let mut moved = self.pending.remove(&source).unwrap_or_default();
+        if moved.is_empty() {
+            return;
+        }
+        let members = |m: &Self, s: StageId| m.stage(s).map(|st| st.windows.clone()).unwrap_or_default();
+        let span = |m: &Self, entries: &[SavedWindow], windows: &[WindowId]| {
+            entries
+                .iter()
+                .map(|w| w.z + 1)
+                .chain(windows.iter().filter_map(|w| m.restored.get(w).map(|r| r.z + 1)))
+                .max()
+                .unwrap_or(0)
+        };
+        let (src_windows, dest_windows) = (members(self, source), members(self, into));
+        let mut kept = self.pending.remove(&into).unwrap_or_default();
+        let (behind, windows_behind, by) = if in_front {
+            let by = span(self, &moved, &src_windows);
+            (&mut kept, dest_windows, by)
+        } else {
+            let by = span(self, &kept, &dest_windows);
+            (&mut moved, src_windows, by)
+        };
+        for w in behind.iter_mut() {
+            w.z += by;
+        }
+        for id in &windows_behind {
+            if let Some(r) = self.restored.get_mut(id) {
+                r.z += by;
+            }
+        }
+        for w in &mut moved {
+            w.key = false;
+        }
+        let list = if in_front {
+            moved.extend(kept);
+            moved
+        } else {
+            kept.extend(moved);
+            kept
+        };
+        self.pending.insert(into, list);
+    }
+
     pub(crate) fn place_from_pending(&mut self, meta: &WindowMeta, space: SpaceId, obs: &Observation, actions: &mut Vec<Action>) -> bool {
         let mut space = space;
         let mut adopted = None;

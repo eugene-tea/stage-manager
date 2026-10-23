@@ -1283,3 +1283,138 @@ fn new_apps_join_current_waits_for_the_restore_window_to_close() {
     m.add_window(win(62, 71, "com.example.memo", "Memo", DEFAULT), &joins(), &focused(62));
     assert_eq!(m.stage_of(w(62)), front);
 }
+
+/// The Codex review of 10-21, R5: Desktop 7 as saved, the editor's stage active, Mail, and
+/// the browser's three windows.
+fn desktop_7() -> SavedSpace {
+    SavedSpace {
+        id: 7,
+        current: true,
+        stages: vec![
+            stage(None, vec![sw(EDITOR, "Plan.txt", F_PLAN, 0)]),
+            stage(None, vec![sw(CHAT, "Mail", F_TEAM, 0)]),
+            stage(
+                None,
+                vec![
+                    sw(BROWSER, "Recipes", F_RECIPES, 0),
+                    sw(BROWSER, "Travel", Rect::new(320.0, 160.0, 720.0, 470.0), 1),
+                    sw(BROWSER, "Maps", Rect::new(360.0, 200.0, 760.0, 480.0), 2),
+                ],
+            ),
+        ],
+        active_index: Some(0),
+        strip_slots: vec![2, 1],
+        last_seen: None,
+    }
+}
+
+/// Desktop 7 after a restart with Plan.txt, Mail and Recipes back, Travel and Maps still
+/// pending, the restore window over: (model, editor's stage, Mail's, the browser's).
+fn partly_restored() -> (Model, StageId, StageId, StageId) {
+    let mut m = restoring(vec![desktop_7()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(1, 50, EDITOR, "Plan.txt", F_PLAN));
+    add(&mut m, win(2, 30, CHAT, "Mail", F_TEAM));
+    add(&mut m, win(3, 40, BROWSER, "Recipes", F_RECIPES));
+    m.end_restore();
+    let ids = [1, 2, 3].map(|i| m.stage_of(w(i)).expect("placed"));
+    assert_eq!(m.main_active_stage(), Some(ids[0]));
+    assert_eq!(m.pending_of(ids[2]).len(), 2, "Travel and Maps still awaited");
+    (m, ids[0], ids[1], ids[2])
+}
+
+fn travel() -> WindowMeta {
+    win(4, 40, BROWSER, "Travel", Rect::new(320.0, 160.0, 720.0, 470.0))
+}
+
+fn maps() -> WindowMeta {
+    win(5, 40, BROWSER, "Maps", Rect::new(360.0, 200.0, 760.0, 480.0))
+}
+
+/// R5, into the active stage (the review's demo, fixed): the merged stage's pending windows
+/// move with it, so a late one lands in the merge's stage, in front of its windows in saved
+/// order, and the old stage neither comes back nor takes the front.
+#[test]
+fn merging_a_partly_restored_stage_into_the_active_one_takes_its_pending_windows() {
+    let (mut m, editor, _, browser) = partly_restored();
+    m.merge_stages(browser, editor, &Observation::default());
+    assert_eq!(m.stage_of(w(3)), Some(editor));
+    assert!(m.stage(browser).is_none(), "the emptied stage is gone");
+    assert!(!m.has_pending(browser));
+    assert_eq!(m.pending_of(editor).iter().map(|x| x.title.as_str()).collect::<Vec<_>>(), ["Travel", "Maps"]);
+    add(&mut m, maps());
+    add(&mut m, travel());
+    assert_eq!(m.stage_of(w(4)), Some(editor));
+    assert_eq!(m.stage_of(w(5)), Some(editor));
+    assert_eq!(m.main_active_stage(), Some(editor), "the old stage never takes the front");
+    assert_eq!(m.stage(editor).map(|s| s.windows.clone()), Some(vec![w(3), w(4), w(5), w(1)]), "moved in front, in saved order");
+    assert_eq!(m.stage(editor).and_then(|s| s.key), Some(w(3)), "the merge's key stays");
+    assert_eq!(m.pending_count(), 0);
+}
+
+/// R5, into an inactive stage (a card dropped on a card): the pending windows go behind the
+/// destination's, in saved order; saved and launched again, it is one stage.
+#[test]
+fn merging_a_partly_restored_stage_into_an_inactive_one_takes_its_pending_windows() {
+    let (mut m, editor, mail, browser) = partly_restored();
+    m.merge_stages(browser, mail, &Observation::default());
+    assert_eq!(m.stage_of(w(3)), Some(mail));
+    assert!(m.stage(browser).is_none());
+    assert_eq!(m.pending_of(mail).len(), 2);
+    assert!(m.pending_of(mail).iter().all(|x| !x.key), "the merge keeps Mail's key");
+
+    // Saved now: one stage holds Mail, Recipes and the two awaited windows, no duplicates.
+    let file = m.to_state();
+    let saved = file.spaces.iter().find(|s| s.id == 7).expect("Desktop 7");
+    assert_eq!(saved.stages.len(), 2);
+    let titles = |s: &SavedStage| s.windows.iter().map(|x| x.title.clone()).collect::<Vec<_>>();
+    assert_eq!(titles(&saved.stages[1]), ["Mail", "Recipes", "Travel", "Maps"]);
+
+    // The late windows land in Mail's stage, behind its windows, in saved order; after the
+    // restore window that stage comes forward, as any stage a late window joins.
+    add(&mut m, maps());
+    assert_eq!(m.main_active_stage(), Some(mail));
+    assert_ne!(m.main_active_stage(), Some(editor));
+    add(&mut m, travel());
+    assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(2), w(3), w(4), w(5)]));
+    assert_eq!(m.stages_in(m.current_space(MAIN)).count(), 2, "the old stage is not made again");
+
+    // Launched again after another restart from the file saved mid-way: one combined stage.
+    let mut again = restoring(file.spaces);
+    again.arrive(MAIN, &[], &[], &LaunchHints::default());
+    for x in [win(11, 50, EDITOR, "Plan.txt", F_PLAN), win(12, 30, CHAT, "Mail", F_TEAM), win(13, 40, BROWSER, "Recipes", F_RECIPES), travel(), maps()] {
+        add(&mut again, x);
+    }
+    let combined = again.stage_of(w(12)).expect("Mail");
+    for id in [13, 4, 5] {
+        assert_eq!(again.stage_of(w(id)), Some(combined), "window {id}");
+    }
+    assert_eq!(again.stage(combined).map(|s| s.windows.clone()), Some(vec![w(12), w(13), w(4), w(5)]));
+}
+
+/// R5 and the pool: a stray's part merged into a stage here keeps the merge; the next stray
+/// of the same saved stage joins the stage it was merged into, not a part made again.
+#[test]
+fn a_stray_of_a_merged_part_joins_the_merge() {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0), sw(CHAT, "Family", F_TEAM, 1)])];
+    d6.strip_slots = vec![];
+    let mut m = restoring(vec![desktop_5(), d6]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    add(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    add(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    assert_eq!(m.current_space(MAIN).0, 5);
+    add(&mut m, win(41, 30, CHAT, "Family", Rect::new(500.0, 200.0, 650.0, 450.0)));
+    assert!(m.is_pooled(w(41)));
+    let part = m.stage_of(w(41)).expect("its part");
+    let chat = m.stage_of(w(21)).expect("Chat");
+    assert_ne!(part, chat);
+    m.merge_stages(part, chat, &Observation::default());
+    assert_eq!(m.stage_of(w(41)), Some(chat));
+    add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
+    assert!(m.is_pooled(w(42)));
+    assert_eq!(m.stage_of(w(42)), Some(chat), "the merge stands for its saved stage's other windows");
+}

@@ -73,6 +73,9 @@ A parked window that never returns is the worst bug. Defence in depth:
    **Handoff (8N):** once the new copy reports `adopted`, the guardian hands it the rest of
    its watch (`ctl take-watch`) and exits; the copy watches them by the same rules, and its
    own quit and guardian carry them on. An earlier version is offered again a minute later.
+   From a sender not signed like the app, only windows the app itself sees parked are taken
+   (never fitted, its corners ignored, reached only while listed in the park zone). A pass
+   that lists nothing on screen is blind: nothing is reached until one sees again.
 6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
    a park zone goes back to its saved frame or centered; silent apps are retried for 30 s, in
    slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
