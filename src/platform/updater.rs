@@ -20,7 +20,9 @@
 //!    (`renamex_np(RENAME_SWAP)`, or three renames that undo themselves), opens it, waits
 //!    for it to answer on the ctl socket with the new version, and only then removes the old
 //!    app. Any failure puts the old app back and opens it ([`self_update::run_swap`]), and
-//!    leaves a note the app shows at its next launch ([`take_note`]).
+//!    leaves a note the app shows at its next launch ([`take_note`]). When the old app cannot
+//!    be put back, the working folder is kept (marked, so a launch does not clean it) and the
+//!    log and the note say where each copy is (review R1).
 //!
 //! Test builds only (the `update-test` feature): `STAGE_MANAGER_UPDATE_DMG=<file>` takes a
 //! local disk image instead of downloading one, and a running app with a local (not
@@ -48,7 +50,7 @@ use objc2_foundation::{
 
 use super::{ctl, logging, paths};
 use crate::self_update::{
-    self, Assessment, Candidate, HelperArgs, Refusal, SwapOps, SwapOutcome, Trust, APP_NAME,
+    self, Assessment, Candidate, ExchangeError, HelperArgs, Place, Refusal, SwapOps, SwapOutcome, Trust, APP_NAME,
 };
 use crate::updates::{self, Release, Version};
 
@@ -612,6 +614,10 @@ pub fn clean_stale_work() {
             tracing::info!("update: an installer helper runs; its working folder stays");
             return;
         }
+        if work.join(self_update::KEEP_MARK).exists() {
+            tracing::warn!("update: {} holds a copy an update could not put back; it stays until the next update", work.display());
+            return;
+        }
         match remove_any(&work) {
             Ok(()) => tracing::info!("update: removed a working folder an earlier update left behind"),
             Err(e) => tracing::warn!("update: cannot remove {}: {e}", work.display()),
@@ -825,20 +831,18 @@ impl SwapOps for RealSwap {
         }
     }
 
-    fn exchange(&mut self) -> Result<(), String> {
+    fn exchange(&mut self) -> Result<(), ExchangeError> {
         let _signals = SignalsIgnored::now();
         let (a, b) = (&self.args.target, &self.args.staged);
-        let (ca, cb) = (
-            CString::new(a.as_os_str().as_bytes()).map_err(|e| e.to_string())?,
-            CString::new(b.as_os_str().as_bytes()).map_err(|e| e.to_string())?,
-        );
+        let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(|e| ExchangeError::Unchanged(e.to_string()));
+        let (ca, cb) = (c(a)?, c(b)?);
         // SAFETY: two valid NUL-terminated paths.
         if unsafe { libc::renamex_np(cb.as_ptr(), ca.as_ptr(), libc::RENAME_SWAP) } == 0 {
             return Ok(());
         }
         let err = std::io::Error::last_os_error();
         tracing::info!("updater: no atomic swap here ({err}); exchanging by renames");
-        let aside = b.with_file_name("old.app");
+        let aside = Place::Aside.path(a, b);
         let _ = remove_any(&aside);
         self_update::exchange_by_renames(&mut |from, to| std::fs::rename(from, to), a, b, &aside)
     }
@@ -930,6 +934,8 @@ pub fn run_helper(args: &[String]) -> ExitCode {
         SwapOutcome::Installed => tracing::info!(version = %args.version, "updater: installed"),
         SwapOutcome::InstalledOldLeft(e) => tracing::warn!("updater: installed; the old version stays in the working folder: {e}"),
         SwapOutcome::RolledBack { step, why, relaunched } => {
+            // Only when the old app is at the installed path (`run_swap`): the folder holds
+            // nothing but the new copy.
             tracing::error!(?step, why, ?relaunched, "updater: not installed; the old version is back");
             let _ = remove_any(args.staged.parent().unwrap_or(&args.staged));
             let _ = std::fs::write(
@@ -938,17 +944,46 @@ pub fn run_helper(args: &[String]) -> ExitCode {
             );
         }
         SwapOutcome::RollbackFailed { step, why, undo } => {
-            tracing::error!(?step, why, undo, "updater: not installed, and the old version could not be put back");
+            let old = args.staged.display();
+            tracing::error!(?step, why, undo, %old, "updater: not installed, and the old version could not be put back; it is kept");
             let note = if undo == self_update::NEW_APP_STILL_RUNS {
                 format!(
-                    "Stage Manager {} did not answer after it was installed ({why}) and would not quit, so it was left in place. If something is wrong, quit it and download it again from GitHub.",
+                    "Stage Manager {} did not answer after it was installed ({why}) and would not quit, so it was left in place. The previous version is kept at {old}. If something is wrong, quit it and download it again from GitHub.",
                     args.version
                 )
             } else {
-                format!("Stage Manager {} may not have installed cleanly ({why}). If something is wrong, download it again from GitHub.", args.version)
+                format!(
+                    "Stage Manager {} may not have installed cleanly ({why}). The previous version is kept at {old}. If something is wrong, download it again from GitHub.",
+                    args.version
+                )
             };
             let _ = std::fs::write(note_path(), note);
         }
+        SwapOutcome::Stranded { step, why, old, new, relaunched } => {
+            let at = |p: &Place| p.path(&args.target, &args.staged);
+            let (old, new) = (at(old), at(new));
+            tracing::error!(?step, why, old = %old.display(), new = %new.display(), ?relaunched, "updater: the exchange stopped part way; both copies are kept");
+            let note = if new == args.target {
+                format!(
+                    "Stage Manager {} may not have installed cleanly ({why}). The previous version is kept at {}. If something is wrong, download it again from GitHub.",
+                    args.version,
+                    old.display()
+                )
+            } else {
+                format!(
+                    "Stage Manager {} could not be installed ({why}), and the previous version could not be put back: it is at {}. Move it to {}, or download Stage Manager again from GitHub.",
+                    args.version,
+                    old.display(),
+                    args.target.display()
+                )
+            };
+            let _ = std::fs::write(note_path(), note);
+        }
+    }
+    if outcome.keeps_work()
+        && let Some(work) = args.staged.parent()
+    {
+        let _ = std::fs::write(work.join(self_update::KEEP_MARK), format!("{outcome:?}\n"));
     }
     if matches!(outcome, SwapOutcome::Installed | SwapOutcome::InstalledOldLeft(_)) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }

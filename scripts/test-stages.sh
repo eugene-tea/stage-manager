@@ -58,6 +58,7 @@ if [ "${1:-}" = "spaces" ]; then
   esac
   exec python3 scripts/test_spaces.py "${@:2}"
 fi
-# The app runs from the fixed dev copy (one screen-access approval for every worktree).
+# The app runs from the fixed dev copy (one screen-access approval for every worktree);
+# dev-app.sh refuses to replace a copy running from there, whichever home it uses.
 scripts/dev-app.sh >/dev/null || exit 1
 exec python3 scripts/test_stages.py "$@"

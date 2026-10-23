@@ -20,6 +20,11 @@
   merges. Off by default.
 - Settings has a toolbar of panes, as Mac apps' settings do: General, Stage Manager, Stages,
   Windows and Advanced. It opens on the pane you used last.
+- An update that cannot put the previous version back no longer removes it: both copies stay
+  in the hidden update folder beside the app, and the note at the next launch says where.
+- A config file that can't be read (missing, not text, a folder) no longer turns Settings
+  back to the defaults, or the login item back on: the last good config stays, as it does
+  for the windows.
 
 ## 1.3.0 — 2026-10-21
 

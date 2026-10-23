@@ -48,7 +48,10 @@ terminal has its approvals checked against the terminal, not the app.
 | `make release` | the public, notarized DMG and Homebrew cask ([RELEASING.md](RELEASING.md)) |
 
 Dev runs and tests always launch from the fixed dev copy. macOS approves screen capture per
-app location, so one location means one approval for every worktree.
+app location, so one location means one approval for every worktree. A copy running from
+there (any home) is never replaced, and `make run` refuses before copying when a copy answers
+in its home; the new copy is made beside the old one and swapped in, so a failed copy keeps
+the old one (`python3 scripts/test_dev_app_unit.py` checks this offline).
 
 `make run` passes `RUST_LOG`, `STAGE_MANAGER_NO_PROMPT`, `STAGE_MANAGER_ONLY`,
 `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST` through to the app.
