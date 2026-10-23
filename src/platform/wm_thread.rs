@@ -683,7 +683,11 @@ impl WmState {
             self.logout_cancelled("no quit came in time");
         }
         self.ticks = self.ticks.wrapping_add(1);
-        if self.ticks.is_multiple_of(RETRY_EVERY) {
+        let full = self.ticks.is_multiple_of(RETRY_EVERY);
+        // Apps gone without a termination notice (round missed-quit): the pids whose calls
+        // failed each tick, the apps with tracked windows about once a second.
+        self.observer.reap_gone(full);
+        if full {
             self.observer.retry_pending(ax_callback);
             // Windows closed while their app did not answer (8M): no destroyed notice came.
             self.observer.sweep_closed();

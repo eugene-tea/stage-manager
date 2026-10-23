@@ -1673,6 +1673,8 @@ impl Controller {
             if let Err(e) = result {
                 failed += 1;
                 tracing::warn!(id, ?action, "action failed: {e}");
+                // Its app may have quit with no notice (round missed-quit): tested next tick.
+                ob.suspect(w.pid);
                 if let Action::SetFrame { frame, .. } = action {
                     let child = w.kind == WindowKind::Child;
                     self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false });

@@ -25,6 +25,10 @@
 - A config file that can't be read (missing, not text, a folder) no longer turns Settings
   back to the defaults, or the login item back on: the last good config stays, as it does
   for the windows.
+- An app that quits without macOS telling us (Home, which quits with its last window) no
+  longer leaves a gray card behind: once its process is gone its windows leave and its stage
+  goes, as for any quit, and its next launch opens by the new-window rules instead of going
+  back to its old stage.
 
 ## 1.3.0 — 2026-10-21
 
