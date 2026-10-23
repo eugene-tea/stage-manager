@@ -419,7 +419,8 @@ impl Model {
     /// Moves every window of `stage` into the active stage of its Space (a shift-click on a
     /// strip card). The moved windows go in front, keep their order, are restored and raised
     /// back to front, and the moved stage's key window is focused last. The emptied stage
-    /// goes away unless it is declared in config. A no-op for the active stage, an unknown
+    /// goes away unless it is declared in config. Its windows still awaited after a restart
+    /// move with it, in front, in saved order (R5). A no-op for the active stage, an unknown
     /// one or one on a Space not shown now. Pinned windows are untouched.
     pub fn merge_into_active(&mut self, stage: StageId, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -439,6 +440,7 @@ impl Model {
         }
         self.revealed.remove(&space);
         self.capture(active, obs);
+        self.merge_pending(stage, active, true);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
@@ -773,7 +775,8 @@ impl Model {
     /// moves on screen: the windows stay parked with their saved frames. `into` keeps its
     /// slot, name and key window (an empty one takes `stage`'s) and the more recent of the
     /// two recencies; `stage`'s slot frees by the slot rule (the cards below close up, and a
-    /// free slot takes the most recent stage out of view). The emptied stage goes away
+    /// free slot takes the most recent stage out of view). `stage`'s windows still awaited
+    /// after a restart move with it, behind, in saved order (R5). The emptied stage goes away
     /// unless it is declared in config. Into the active stage (a card of it shows only in
     /// place with `[strip] active = "card"`) it is [`Model::merge_into_active`]. A no-op for one
     /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
@@ -843,6 +846,7 @@ impl Model {
         let members = src.windows.clone();
         let src_key = src.key.filter(|k| members.contains(k));
         let recency = src.last_active.max(dest.last_active);
+        self.merge_pending(stage, into, false);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
