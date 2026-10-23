@@ -13,8 +13,8 @@ or <code>brew install eugene-tea/tap/stage-manager</code></p>
 
 ## Like Apple's. Then more.
 
-Out of the box it looks and works like Apple's Stage Manager. Everything extra waits until
-you turn it on in Settings.
+Out of the box it looks and works like Apple's Stage Manager, never against it. Improvements
+that fit Apple's way are on; the rest are a switch away in Settings.
 
 - **Survives a restart.** Your stages, their order and the stage in front come back after a
   reboot.
