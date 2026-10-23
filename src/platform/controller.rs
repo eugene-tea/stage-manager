@@ -4752,6 +4752,9 @@ impl Controller {
                     "key": s.key.map(|k| k.0),
                     "windows": s.windows.iter().map(|w| w.0).collect::<Vec<_>>(),
                     "pending": m.pending_of(s.id).len(),
+                    // When it was last active: past the capacity, in place, the bottom
+                    // places go by it (`Model::strip_in`).
+                    "last_active": s.last_active,
                 })
             })
             .collect();

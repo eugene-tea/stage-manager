@@ -2392,14 +2392,40 @@ def sample_strip_during(proc, after=0.8):
     return seen
 
 
+def in_place_want(s, mode):
+    """The cards `strip` lists in place (PLAN, "Strip order"; the engine's `in_place_cards`):
+    every stage of the shown Desktop holding windows has a place in creation order (hotkey
+    numbers follow it), the active stage's place holding its card or the gap unless active =
+    "close". Past the capacity the first capacity - 1 places keep theirs (the active one's
+    included, whatever it shows) and the stages after them share the room left at the bottom:
+    the most recently used of them (`last_active`, the later place on a tie) show, in
+    creation order. The gap is no card, so "gap" leaves the active stage out."""
+    places = sorted((st for st in s["stages"] if st["space"] == s["space"] and st["windows"]),
+                    key=lambda st: st["number"])
+    active, cap = s["active"], s["strip_capacity"]
+
+    def holds(st):
+        return st["number"] != active or mode != "close"
+
+    if sum(1 for st in places if holds(st)) <= cap:
+        shown = [st for st in places if holds(st)]
+    else:
+        head = min(cap - 1, len(places))
+        room = cap - sum(1 for st in places[:head] if holds(st))
+        tail = sorted(((st.get("last_active", 0), i) for i, st in enumerate(places)
+                       if i >= head and st["number"] != active), reverse=True)
+        keep = {i for _, i in tail[:room]}
+        shown = [st for i, st in enumerate(places) if (i < head and holds(st)) or i in keep]
+    return [st["number"] for st in shown if not (mode == "gap" and st["number"] == active)]
+
+
 def in_place_checks():
     """Keep stages in place (9B), in each `[strip] active` mode: clicks on slots 1, 3 and 6
-    (and back to the first) keep creation order, the stage left shrinks into its own place, and
-    with "gap" every other card stays exactly where it was. Then one slowed click: no two
-    cards drawn in one slot while they move."""
-    def here(s):
-        return sorted(st["number"] for st in s["stages"] if st["space"] == s["space"] and st["windows"])
-
+    (and back to the first) keep creation order and every stage its place, past the capacity
+    too ([`in_place_want`]: with 7 stages and room for 6, "gap" and "card" give the active
+    stage's place one of them, so one of the stages past the head waits out of view); the
+    stage left shrinks into its own place, and with "gap" every other card stays exactly where
+    it was. Then one slowed click: no two cards drawn in one slot while they move."""
     def frames(s):
         return {c["number"]: c["frame"] for c in s.get("strip_cards", [])}
 
@@ -2434,15 +2460,14 @@ def in_place_checks():
             order, f1 = s["strip"], frames(s)
             check(order == sorted(order), f"{what}: the cards in creation order ({order0} -> {order})")
             check(active0 in order, f"{what}: the stage left ({active0}) has its card")
-            fits = len(here(s)) - (0 if mode == "card" else 1) <= s["strip_capacity"]
-            if fits:
-                want = [n for n in here(s) if mode == "card" or n != s["active"]]
-                check(order == want, f"{what}: every stage in its place ({order}, want {want})")
+            want = in_place_want(s, mode)
+            check(order == want, f"{what}: every stage in its place ({order}, want {want})")
             if mode == "gap" and s.get("strip_gap") is not None:
                 g = s["strip_gap"]
                 check(all(n < s["active"] for n in order[:g]) and all(n > s["active"] for n in order[g:]),
                       f"{what}: the gap is the active stage's own slot ({order}, gap {g})")
-            if mode == "gap" and fits:
+            # Past the capacity too: the slots stay put, only the bottom one changes hands.
+            if mode == "gap":
                 moved = [n for n in f1 if n in f0 and n not in (active0, target) and off(f0[n], f1[n]) > 1.0]
                 check(not moved, f"{what}: no other card moved ({moved})")
             t = s.get("last_transition") or {}
@@ -2492,8 +2517,45 @@ def in_place_checks():
 
 
 def config_dock(active):
-    """The slots config following the Dock (`[strip] order = "dock"`, round 9D)."""
-    return CONFIG_SLOTS.replace("[strip]", f'[strip]\norder = "dock"\nactive = "{active}"')
+    """The slots config following the Dock (`[strip] order = "dock"`, round 9D), without the
+    backdrop's `ignore` rule: Charlie is one of the three apps managed here."""
+    return CONFIG_SLOTS.replace(CONFIG_BACKDROP, "").replace("[strip]", f'[strip]\norder = "dock"\nactive = "{active}"')
+
+
+def slots_baseline(what, need):
+    """The slots phase's starting point, set up again for a check that needs `need` cards (so
+    one check's early return never starves the next): no extra app but the backdrop (an
+    unmanaged Charlie), every fixture window in a stage of its own, a fixture stage active
+    with its windows in front, and the strip drawing its cards. The state, or None."""
+    for k in ("a", "b"):
+        if extra_pid(k):
+            stop_extra(k)
+    if any(w["bundle_id"] == EXTRA["c"][0] for w in state()["windows"]):
+        stop_extra("c")  # a managed Charlie (the Dock's checks): not the backdrop
+    if not extra_pid("c"):
+        start_backdrop(state())
+    s = state()
+    fix = sorted((w for w in s["windows"] if w["bundle_id"] == FIX_ID and w["role"] == "standard"),
+                 key=lambda w: w["id"])
+    homes = set()
+    for w in fix:
+        if w["home"] in homes:
+            do("new", w["id"])
+        homes.add(w["home"])
+    s = state()
+    homes = {w["home"] for w in s["windows"] if w["bundle_id"] == FIX_ID and w["role"] == "standard"
+             and isinstance(w["home"], int)}
+    if s["active"] not in homes and homes:
+        do("switch", min(homes))
+        wait_state(lambda x: x["active"] in homes, f"{what}: a fixture stage in front")
+    # In front of the backdrop (a frame set to itself raises the window).
+    s = state()
+    for w in s["windows"]:
+        if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]:
+            r = w["restore"]
+            ctl("debug-frame", w["id"], r["x"], r["y"], r["w"], r["h"])
+    time.sleep(1.0)
+    return wait_state(lambda x: len(x.get("strip_cards", [])) >= need, f"{what}: {need} cards drawn", timeout=4)
 
 
 def dock_strip(s):
@@ -2542,8 +2604,31 @@ def dock_order_checks():
     keep it; a card dragged one slot down springs back and switches nothing; an app that quits
     takes its icon, and the strip still follows the Dock read after."""
     say("-- follow the Dock")
+    try:
+        dock_order_body()
+    finally:
+        # Back to the slots phase's own apps: the backdrop again, managed fixtures only.
+        for k in EXTRA:
+            stop_extra(k)
+        with open(os.path.join(HOME, "config.toml"), "w") as fh:
+            fh.write(config_in_place("close"))
+        ctl("reload")
+        wait_state(lambda x: x.get("strip_order") == "InPlace", "the in-place order back")
+        start_backdrop(state())
+
+
+def dock_order_body():
+    """[`dock_order_checks`] past its say and before its clean-up."""
+    # Charlie managed (the backdrop's `ignore` rule out) before it opens: a rule applies to
+    # a window when it is made. Each window clear of the strip, as the fixtures', so the
+    # active one never hides the strip.
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(config_dock("close"))
+    ctl("reload")
+    s = wait_state(lambda x: x.get("strip_order") == "Dock", "the Dock's order to load")
+    clear = f"{(s or state())['strip_width'] + 60:.0f},60,520,392"
     for k in ("c", "a", "b"):
-        start_extra(k, 1)
+        start_extra_frames(k, 1, clear)
         time.sleep(0.5)
     time.sleep(1.0)
     s = state()
@@ -2619,9 +2704,11 @@ def dock_order_checks():
     got, want = dock_strip(s)
     if len(s["strip"]) < s["strip_capacity"]:
         check(got == want, f"after a quit: the strip follows the Dock read after it ({got}, want {want})")
-    stop_extra("b")
-    stop_extra("c")
-    time.sleep(1.0)
+
+
+# In place, close, room for four cards: the strip past its capacity (drop_settle_checks,
+# merge_hold_check).
+CONFIG_DROP = config_in_place("close").replace("[strip]", "[strip]\ncapacity = 4", 1)
 
 
 def drop_settle_checks():
@@ -2632,12 +2719,13 @@ def drop_settle_checks():
     engine sends is the one drawn at the release (no other stage takes a slot)."""
     say("-- keep stages in place past the capacity: a dropped card settles into its slot, no jerk")
     with open(os.path.join(HOME, "config.toml"), "w") as fh:
-        fh.write(config_in_place("close").replace("[strip]", "[strip]\ncapacity = 4", 1))
+        fh.write(CONFIG_DROP)
     ctl("reload")
     time.sleep(1.0)
+    slots_baseline("a full strip", 4)
     s = state()
     n = len(s.get("strip_cards", []))
-    if not check(n >= 4, f"a full strip to drag in ({s['strip']}, capacity {s['strip_capacity']})"):
+    if not check(n >= 4, f"a full strip to drag in ({s['strip']}, {n} drawn, capacity {s['strip_capacity']})"):
         return
     # The head's last card one slot down (its place goes to the stage after it in creation
     # order: the 10-22 case), then the second card one slot up.
@@ -2706,6 +2794,11 @@ def merge_hold_check():
     `[drag] lifted_opacity` so the target's front window shows. Released there, the stages
     merge."""
     say("-- a card held over another card: the preview shows the target's own front window")
+    with open(os.path.join(HOME, "config.toml"), "w") as fh:
+        fh.write(CONFIG_DROP)
+    ctl("reload")
+    time.sleep(1.0)
+    slots_baseline("two cards", 2)
     s0 = state()
     cards = s0.get("strip_cards", [])
     if not check(len(cards) >= 2, f"two cards to merge ({len(cards)})"):
