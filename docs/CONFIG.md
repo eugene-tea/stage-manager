@@ -2,7 +2,7 @@
 
 Every option lives in `~/.config/stage-manager/config.toml`. The file lists every key below,
 commented out with its default; remove the `#` to change one. Saved changes apply within a
-second, and a mistake keeps the last working settings. Settings already in System Settings →
+second; a mistake, or a file that can't be read, keeps the last working settings. Settings already in System Settings →
 Desktop & Dock (show recent apps, show an app's windows all at once or one at a time, click
 wallpaper to reveal desktop) are read from there and are not repeated here. The
 [user guide](GUIDE.md#the-config-file) shows how to edit the file, with examples.
@@ -18,8 +18,15 @@ stage-manager config --reference           # the table below
 ```
 
 Rules for new windows are `[[rule]]` tables, checked in order; the first match wins. `app` is
-a bundle ID or `"*"`, `title` an optional regular expression, and `action` and `placement`
-take the same values as `[defaults]` below:
+a bundle ID (exact) or `"*"`, and `title` an optional regular expression, matched anywhere in
+the title the window has when it appears (anchor it with `^…$`). `action` and `placement` take
+the same values as `[defaults]` below; a rule that leaves one out uses `[defaults]`:
+
+- `action`: `"native"` (Apple's: the app's stage, or a stage of its own for a newly opened
+  app), `"current"` (the stage shown), `"new"` (a new stage, shown), `"stage:<name>"` (that
+  stage, made if missing), `"float"` (pinned: shown on every stage), `"ignore"` (left alone).
+- `placement`: `"as-is"` (where the app puts it), `"center"` (centered on the screen, same
+  size), `"cascade"` (a step down and right of the front window, so the edges behind show).
 
 ```toml
 [[rule]]
@@ -136,7 +143,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop picture under them, drawn from the wallpaper's file (no screen capture), so the corner is clean as Apple's; it steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. |
 | `windows.corner_patch_reach` | `60.0` | number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow. |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
-| `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here. |
+| `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
 | `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |
 | `hotkeys.enabled` | `false` | true or false | Register the hotkeys below. |

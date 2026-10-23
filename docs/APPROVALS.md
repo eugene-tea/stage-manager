@@ -28,7 +28,7 @@ nothing, until it is off.
 
 - **Input Monitoring.** Stage Manager installs no keyboard tap. Its standard event monitor
   sees clicks and drags (no approval needed) and, under Accessibility, key presses only to
-  notice ⌘Tab and ⌘\`; nothing you type is recorded.
+  notice ⌘Tab, ⌘\` and Shift, and that someone is at the Mac; nothing you type is recorded.
 
 ## How the app asks
 

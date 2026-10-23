@@ -22,7 +22,8 @@ B="/Applications/Stage Manager.app/Contents/MacOS/stage-manager"
 - **To change a key, uncomment its line and set the value.** To go back to the default,
   comment it out again (or delete it). Keep the user's other lines and comments as they are.
 - New-window rules are `[[rule]]` tables (`app` = bundle ID or `"*"`, optional `title`
-  regex, `action`, `placement`); commented examples follow the `[defaults]` section.
+  regex, `action`, `placement`); commented examples follow the `[defaults]` section, and
+  [CONFIG.md](CONFIG.md) lists the actions and placements.
 - Every key with its type, range and default: `"$B" config --print-defaults` (the
   commented file), `"$B" config --explain section.key` (one key), or the table in
   [CONFIG.md](CONFIG.md) (generated from the same source).
@@ -31,8 +32,8 @@ B="/Applications/Stage Manager.app/Contents/MacOS/stage-manager"
 
 - Saved changes apply **within a second** (the app polls the file's modification time).
   Do not restart the app. `"$B" ctl reload` forces a reload.
-- A value of the wrong type keeps the **last good config** in force; the error shows in the
-  menu, in Settings and in the log. Unknown keys and out-of-range numbers only warn
+- A value of the wrong type, or a file that cannot be read, keeps the **last good config**
+  in force; the error shows in the menu, in Settings and in the log. Unknown keys and out-of-range numbers only warn
   (numbers are clamped).
 - The Settings window writes the same file (it uncomments a changed key in place and
   comments it out again at the default); your edits show there at once.
@@ -78,8 +79,9 @@ anywhere outside this conversation.
 
 ## Never
 
-- Never edit `state.json` or `app-state.json` beside the config: they are the app's own
-  memory (stages, first-launch facts) and are rewritten while it runs.
+- Never edit `state.json`, `app-state.json` or `title-key` beside the config: they are the
+  app's own memory (stages, first-launch facts, the log's title key) and are rewritten while
+  it runs.
 - Never move, resize, hide or close the user's windows, or script clicks, to "test" a
   change; never call the `ctl debug-*` commands.
 - Never write `com.apple.WindowManager` (`defaults write …`) or turn Apple's Stage Manager

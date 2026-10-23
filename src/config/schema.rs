@@ -333,7 +333,7 @@ pub const KEYS: &[KeyDef] = &[
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
-        "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here."),
+        "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),
     k("sugar", "launch_window_ms", i(0, 60_000), "10000", "A newly opened app's first window counts a Shift held this long before."),
     k("sugar", "activation_window_ms", i(0, 60_000), "2000", "An activation counts a Shift held this long before."),
     // [hotkeys]
@@ -499,6 +499,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-14.toml"),
     include_str!("legacy/default-15.toml"),
     include_str!("legacy/default-16.toml"),
+    include_str!("legacy/default-17.toml"),
 ];
 
 #[cfg(test)]

@@ -50,8 +50,8 @@ soon as it is done, and you never need to restart the app.
    and while stages switch. Without it, cards show plain window shapes with the app's icon.
    It is in System Settings → Privacy & Security → Screen & System Audio Recording.
 
-Stage Manager never needs Input Monitoring. It watches key presses only to notice ⌘-Tab and
-⌘-\`, and records nothing you type.
+Stage Manager never needs Input Monitoring. It watches key presses only to notice ⌘-Tab,
+⌘-\` and Shift, and that you are at the Mac; it records nothing you type.
 
 If you close the welcome window early, the menu bar icon's menu keeps reminding you what is
 missing, with an **Allow…** item for each.
@@ -114,8 +114,8 @@ you just left is always there.
 
 ### New windows
 
-A new window joins its app's stage. If the app is not on screen yet, it gets a stage of its
-own. Sheets and dialogs always stay with their window.
+A new window joins its app's stage, and that stage comes forward. An app with no windows yet
+gets a stage of its own. Sheets and dialogs always stay with their window.
 
 ### Desktops
 
@@ -151,7 +151,7 @@ What it cannot do:
   puts their windows there.
 - A window it is not sure about (two of one app with the same name, say) stays in view and
   goes where a new window of its app would.
-- On a main display of another size, windows keep the places their apps give them.
+- On a main screen of another size, windows keep the places their apps give them.
 
 `[stages] restore_after_restart = false` (or **Bring stages back after a restart** in
 Settings → Stages) turns it off: after a restart every app starts in a stage of its own, as
@@ -165,15 +165,16 @@ with Apple's.
 - **Drop a card onto another card** to merge the two stages. To split them again, open the
   merged stage and drag a window onto the strip.
 
-Shift-click a card to bring its windows into the current stage without leaving it. Hold
-Shift while you open an app, or Shift-click it in the Dock, to bring it here too.
+Shift-click a card to bring its windows into the current stage without leaving it, as with
+Apple's. Hold Shift while you open an app, or Shift-click it in the Dock, to bring it here too
+(**Hold Shift to choose the stage** in Settings → Stages turns this off).
 
 ### New apps in the current stage
 
 As with Apple's, a newly opened app gets a stage of its own. Turn on **Open new apps in the
 current stage** (Settings → Stages, or `[stages] new_apps_join_current = true`) and a new
-app's first windows join the stage you are in instead; hold Shift while you open it to give
-it a stage of its own after all. An app already in a stage still opens its new windows
+app's first windows join the stage you are in instead. Shift then does the opposite: hold it
+while you open an app to give it a stage of its own after all. An app already in a stage still opens its new windows
 there, rules in the config file come first, and while your stages come back after a
 restart the apps macOS reopens go back to their own stages.
 
@@ -191,22 +192,26 @@ desktop".
 To hide a stage, Stage Manager moves its windows into the bottom-right corner of the
 screen. macOS always keeps a thin edge of each window on screen. Stage Manager makes those
 edges ignore clicks and covers them with a matching piece of your wallpaper, so the corner
-looks empty. If another display sits beyond that corner, a free corner is used instead.
+looks empty. If a second screen sits beyond that corner, a free corner is used instead.
+Each Desktop has its own patch, which slides in with it.
 
 ## Settings
 
 Open Settings from the menu bar icon. If you hid the icon, open Stage Manager again from
 Applications and Settings appears. The buttons along its top switch between five panes:
 
-- **General:** start at login, show the menu bar icon, check for updates, install them automatically.
-- **Stage Manager:** the same options as Apple's Stage Manager — show recent apps, and show
-  an app's windows all at once or one at a time. These are macOS's own settings, so they
-  stay in step with System Settings.
+- **General:** launch at login, the menu bar icon, checking for updates and installing them
+  automatically, and **Check for Updates…**.
+- **Stage Manager:** the same options as Apple's Stage Manager: show recent apps, and show
+  an app's windows all at once or one at a time, plus a button to System Settings for
+  clicking the wallpaper. These are macOS's own settings, so they stay in step with System
+  Settings. If Apple's Stage Manager is on, **Turn Off** is here too.
 - **Stages:** bringing stages back after a restart, opening new apps in the current stage,
-  Shift to bring apps here, merging stages by dropping cards, and the strip order (Apple's, Keep
-  in Place or Follow the Dock).
+  holding Shift to choose the stage, merging stages by dropping cards, and the strip order
+  (Apple's, Keep in Place or Follow the Dock).
 - **Windows:** keeping windows clear of the strip, animation speed, and keyboard shortcuts.
-- **Advanced:** the config file, and help for asking an AI assistant to change it.
+- **Advanced:** the config file (open it, or reveal it in Finder), and help for asking an AI
+  assistant to change it.
 
 Changes apply at once.
 
@@ -223,8 +228,8 @@ switched off with a `#` and showing its default value, with a short explanation 
 To change one, remove the `#` and edit the value. To go back to the default, put the `#`
 back. Changes apply within a second of saving.
 
-If you make a mistake, Stage Manager keeps your last working settings and shows the error in
-its menu and in Settings.
+If you make a mistake, or the file can't be read, Stage Manager keeps your last working
+settings and shows the error in its menu and in Settings.
 
 **The easy way: ask an AI assistant.** In Settings → Advanced, click **Copy Instructions for
 Agents** and paste them into Claude Code, Codex or a similar tool, followed by what you want.
@@ -271,7 +276,8 @@ Stage Manager checks GitHub for a new version once a day. When one is out, it as
 version from GitHub and checks that it is signed by the same developer and notarized by
 Apple before anything is replaced. Then every window comes back from the corner, the new
 version takes the old one's place and opens, and your Accessibility and Screen Recording
-approvals stay. If any step fails, the old version stays (or is put back) and says why.
+approvals stay. If any step fails, the old version stays (or is put back) and says why. If
+even putting it back fails, both copies are kept and the note at the next launch says where.
 
 Turn on **Install updates automatically** in Settings to skip the question: an update then
 installs while you are away from the Mac, never in the middle of a drag or a switch. You
@@ -287,7 +293,7 @@ Nothing about your windows leaves your Mac. Stage Manager keeps a daily log in
 `~/Library/Logs/Stage Manager` to help find problems. It names windows by app and number,
 never by title: where a title matters, the log shows a short code made from it instead
 (`[log] titles = true` writes titles as they are, for debugging). Only your user account can
-read the log, logs are deleted after 14 days, and nothing sends them anywhere. Your saved
+read the log, logs are deleted after 14 days (`[log] days`), and nothing sends them anywhere. Your saved
 stages in `~/.config/stage-manager` do keep window titles, to find the windows again after a
 restart, and are likewise readable by your account only.
 
@@ -321,7 +327,9 @@ place.
 
 **Thin window edges show in the corner.** The wallpaper patch steps aside when it cannot
 match your wallpaper exactly: video and aerial wallpapers, shuffled or Photos wallpapers,
-the Center and Tile placements, or a desktop icon in the corner. A desktop widget in that
+the Center and Tile placements, Fit with no fill color, or a desktop icon in the corner.
+Pictures that change with the time of day or with light and dark, Apple's own included,
+are usually matched. A Desktop you visit for the first time may show the edges for a moment. A desktop widget in that
 corner may be covered by the patch. You can turn the patch off with `[windows] corner_patch
 = false`.
 
@@ -331,7 +339,8 @@ launch checks the corner again.
 
 Some limits to know about:
 
-- Only the main display is managed. Windows on other displays are left alone.
+- Only the main screen is managed: windows on a second monitor are left alone. Every
+  Desktop on the main screen has its own stages.
 - Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
   jump when the motion ends. Card pictures refresh every 1.5 seconds rather than live.
 - With ⌘M, macOS may show a short animation toward the corner.
