@@ -1399,7 +1399,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
             return False
         if corner and overlay_up(x) and contains(corner, sliver):
             return False
-        return not any(p["pid"] == ours_pid and p["onscreen"] and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
+        return not any(p["pid"] == ours_pid and p["onscreen"] and p.get("alpha", 1.0) > 0 and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
                        and p["z"] is not None and w["z"] is not None and p["z"] < w["z"] and contains(p["bounds"], sliver)
                        for p in x["windows"])
 
@@ -1407,7 +1407,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     seen = [x["t"] for x in samples for w in x["windows"] if w["id"] in arrived and exposed(x, w)]
     out_t = [(x["t"], overlay_up(x)) for x in samples for w in x["windows"]
              if w["id"] in arrived and w["onscreen"] and not is_parked(w["bounds"], display)]
-    patch_before = any(p["pid"] == ours_pid and p["onscreen"] and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
+    patch_before = any(p["pid"] == ours_pid and p["onscreen"] and p.get("alpha", 1.0) > 0 and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
                        for x in samples[:5] for p in x["windows"])
     rel = lambda v: "-" if v is None or t_ov is None else f"{(v - t_ov) * 1000:+.0f} ms"  # noqa: E731
     say(f"    {len(samples)} looks: overlay up {'-' if t_ov is None else f'{(t_ov - t_sent) * 1000:.0f} ms'} after the "

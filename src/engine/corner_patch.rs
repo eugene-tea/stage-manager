@@ -45,6 +45,11 @@
 //!   has been on screen for [`PATCH_DRAWN`] (its first frames drawn), at most
 //!   [`COVER_HOLD_MAX`], and never where an arriving window landed over the corner (the cover
 //!   would paint over it).
+//! - **Desktops.** Each Desktop has a patch panel of its own, which slides with it
+//!   ([`crate::ui::corner_patch`]). Before a Space change's notice the window server already
+//!   lists the parked windows slid aside ([`desktop_slides`]); the plan then stays as it was
+//!   ([`slide_waits`]), so the panel slides away drawn and is there when its Desktop slides
+//!   back in. While the change is recognized no plan is made at all.
 //! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
 //!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
 //!   down (nothing parked).
@@ -681,6 +686,36 @@ pub fn cover_holds(f: &HoldFacts) -> bool {
         && f.held_for < COVER_HOLD_MAX
 }
 
+/// How long the plan may stay as it was while the parked windows are listed slid aside
+/// ([`desktop_slides`]) before the Space change's notice comes ([`slide_waits`]).
+pub const SLIDE_HOLD: Duration = Duration::from_millis(600);
+
+/// Whether the window server's list shows the Desktop sliding (a Space change before its
+/// notice): the parked windows listed (`listed`, the model's parked ones on screen) are none
+/// in the park zone, but every one lies in it moved sideways only, all by the same distance
+/// (parked windows share their corner's edge; Show Desktop pushes windows apart).
+pub fn desktop_slides(listed: &[Rect], display: Rect, visible: Rect, corner: Corner) -> bool {
+    use super::park::is_parked_in_at;
+    if listed.is_empty() || listed.iter().any(|b| is_parked_in_at(*b, display, visible, corner)) {
+        return false;
+    }
+    // Where its corner's edge would put each one: a sliver's width on the display.
+    let edge = |b: &Rect| if corner.right() { display.max_x() - 1.0 } else { display.x + 1.0 - b.w };
+    let shifts: Vec<f64> = listed.iter().map(|b| edge(b) - b.x).collect();
+    let first = shifts[0];
+    first.abs() >= 1.0
+        && shifts.iter().all(|d| (d - first).abs() <= 1.0)
+        && listed.iter().all(|b| is_parked_in_at(Rect::new(edge(b), b.y, b.w, b.h), display, visible, corner))
+}
+
+/// Whether the patch's plan stays as it was (nothing sent): the Desktop slides
+/// ([`desktop_slides`]) for at most [`SLIDE_HOLD`] while the patch shows. The patch belongs
+/// to its Desktop and slides with it; hidden by the plan, it would be gone on that Desktop
+/// when the user comes back, its slivers bare as it slides in.
+pub fn slide_waits(slides_for: Option<Duration>, shown: bool) -> bool {
+    shown && slides_for.is_some_and(|t| t < SLIDE_HOLD)
+}
+
 /// `a` without `b`: up to four rectangles.
 fn minus(a: Rect, b: Rect) -> Vec<Rect> {
     let Some(i) = a.intersect(&b) else { return vec![a] };
@@ -715,6 +750,27 @@ mod tests {
             items: Some(vec![Rect::new(2400.0, 40.0, 100.0, 100.0)]),
             ..CoverFacts::default()
         }
+    }
+
+    #[test]
+    fn a_desktop_sliding_away_is_told_from_windows_pushed_apart() {
+        use crate::engine::park::Corner;
+        let visible = Rect::new(0.0, 25.0, 2560.0, 1415.0);
+        // 10-23: the parked windows listed at x=110 as the Desktop slid, before the notice.
+        let slid = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(110.0, 1408.0, 1497.0, 1030.0)];
+        assert!(desktop_slides(&slid, MAIN, visible, Corner::BottomRight));
+        let parked = [Rect::new(2559.0, 1388.0, 1621.0, 1183.0)];
+        assert!(!desktop_slides(&parked, MAIN, visible, Corner::BottomRight), "in the zone: no slide");
+        let apart = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(900.0, 1408.0, 1497.0, 1030.0)];
+        assert!(!desktop_slides(&apart, MAIN, visible, Corner::BottomRight), "pushed apart: not a slide");
+        let lifted = [Rect::new(110.0, 600.0, 1621.0, 400.0)];
+        assert!(!desktop_slides(&lifted, MAIN, visible, Corner::BottomRight), "moved up: not a slide");
+        assert!(!desktop_slides(&[], MAIN, visible, Corner::BottomRight));
+        let ms = Duration::from_millis;
+        assert!(slide_waits(Some(ms(0)), true));
+        assert!(!slide_waits(Some(SLIDE_HOLD), true), "never longer");
+        assert!(!slide_waits(Some(ms(10)), false), "nothing shown to keep");
+        assert!(!slide_waits(None, true));
     }
 
     #[test]

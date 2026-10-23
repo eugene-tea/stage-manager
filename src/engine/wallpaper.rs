@@ -506,6 +506,15 @@ pub fn frame(schedule: &Schedule, style: Option<Style>, dark: bool, clock: &Cloc
     if f.index < count { Ok(f) } else { Err("the picture's metadata names a frame the file lacks") }
 }
 
+/// Whether a picture drawn at frame `index` under `style` is still the frame macOS shows by
+/// `clock` and the appearance (`dark`): a Desktop's patch left drawn there while the user is
+/// on another one is hidden once it is not (the sun moved past a frame, the appearance
+/// changed), so it never slides back in with a frame macOS no longer shows.
+pub fn still_drawn(facts: &ImageFacts, style: Option<Style>, dark: bool, clock: &Clock, index: usize) -> bool {
+    let Ok(schedule) = &facts.schedule else { return false };
+    frame(schedule, style, dark, clock, facts.primary, facts.count).is_ok_and(|f| f.index == index)
+}
+
 /// The time-of-day frame at `fraction` of the day: the last entry at or before it (the
 /// day's last one before the first entry), and the seconds to the next entry.
 pub fn time_frame(times: &[(f64, usize)], fraction: f64) -> Frame {
@@ -1215,6 +1224,19 @@ mod tests {
         assert!(decide(&with(Some(Placement::Fit), false)).is_err());
         assert!(decide(&with(Some(Placement::Fill), false)).is_ok());
         assert!(decide(&with(Some(Placement::Stretch), false)).is_ok());
+    }
+
+    #[test]
+    fn a_frame_left_drawn_is_still_drawn_only_while_macos_shows_it() {
+        let solar = facts(schedule(None, None, Some(&ventura_solar())), 5);
+        let noon = 1_782_072_000.0;
+        assert!(still_drawn(&solar, Some(Style::Dynamic), false, &clock(noon, 0.5), 0));
+        assert!(!still_drawn(&solar, Some(Style::Dynamic), false, &clock(noon + 12.0 * 3600.0, 0.5), 0), "night came");
+        assert!(still_drawn(&solar, Some(Style::Automatic), true, &clock(noon, 0.5), 1));
+        assert!(!still_drawn(&solar, Some(Style::Automatic), false, &clock(noon, 0.5), 1), "the appearance turned light");
+        assert!(still_drawn(&solar, Some(Style::Dark), false, &clock(noon, 0.5), 1), "pinned dark: whatever the appearance");
+        assert!(!still_drawn(&facts(Err("unreadable"), 5), Some(Style::Dark), false, &clock(noon, 0.5), 1));
+        assert!(still_drawn(&facts(Ok(Schedule::Still), 1), None, true, &clock(noon, 0.5), 0), "a still never changes");
     }
 
     // ----- Apple's own pictures, named by their descriptions -----------------------------
