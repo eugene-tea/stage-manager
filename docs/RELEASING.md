@@ -94,8 +94,9 @@ named `Stage-Manager.dmg` on the release; the same Developer ID team (the runnin
 its own team and designated requirement and the new app must match both); the bundle ID
 `dev.eugene.stagemanager`; the DMG signed with `-i dev.eugene.stagemanager.dmg`; the app
 notarized with its ticket stapled (`make release` does both); a higher version, and a release
-version: a tag with a pre-release part (`v1.3.0-rc.1`) is never offered or installed. The first lines of the release notes show in the update alert (up to six
-lines, Markdown reduced to plain text), so lead with what users will notice.
+version: a tag with a pre-release part (`v1.3.0-rc.1`) is never offered or installed. The
+first lines of the release notes show in the update alert (up to six lines, Markdown reduced
+to plain text), so lead with what users will notice.
 
 The tag, the release, the tap and the Pages deploy are public: each one only on the owner's
 word.
@@ -107,8 +108,8 @@ word.
   fallback `resources/AppIcon.icns` and the info page's icons). The outputs are committed, so
   building needs no Xcode. `ICON_VARIANT=graphite|aurora` builds another variant. The
   `.icon` opens in Icon Composer (`/Applications/Xcode.app/Contents/Applications/Icon
-  Composer.app`) for hand tuning; then compile it with `ICON_FROM_DOCUMENT=1 make icon` (plain `make icon`
-  regenerates the document from the script and drops such edits).
+  Composer.app`) for hand tuning; then compile it with `ICON_FROM_DOCUMENT=1 make icon`
+  (plain `make icon` regenerates the document from the script and drops such edits).
 - `make dmg-art` re-renders the DMG window's background (light and dark, 1x and 2x) from
   `art/dmg.py` and the words in `art/dmg/text.json`, with headless Chrome. Keep the words in
   step with the approvals the app asks for and honest about the network (the update check).

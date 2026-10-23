@@ -37,14 +37,13 @@ brings every window back at exactly its own frame, even where it overlaps the st
 away. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
-laptop, 6 on a 5K display. A popup open on a window (a popover, a child window sticking out
+laptop, 6 on a 5K screen. A popup open on a window (a popover, a child window sticking out
 of it) shows on its card beside the window, at its true size and place, as on Apple's; the
 window keeps its own size on the card, and nothing outside a window is drawn. A palette
 far from its window (more than the window's own width or height past it, or on another
-display) is left off: the card shows the window alone. So is a popup over a window that
-macOS's capture does not place (round 8M, Calendar's event popup reaching past the window's
-top: the capture's content said the window's frame, its image held both squeezed into the
-window's shape on a fill): never a fill around a window on a card.
+screen) is left off: the card shows the window alone. So is a popup over a window that
+macOS's capture does not place (a calendar's event popup reaching past the window's top):
+never a fill around a window on a card.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
@@ -52,7 +51,7 @@ of the least recently used card. (Keep stages in place, an extra below, orders i
 
 **Switching.** The pressed card eases back on mouse-down. On release, the windows you leave
 shrink into their card's slot and the new stage grows from its card, on Apple's spring.
-Shift-click a card to bring its windows into the current stage; Option-click does nothing.
+Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
 Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
@@ -62,7 +61,8 @@ windows grow from their card. The keyboard goes to the app's window at once.
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
 extra, off by default, puts it in the current stage instead: see Extras).
-Sheets and dialogs follow their window.
+Sheets and dialogs follow their window. An app that quits takes its windows out of their
+stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.
@@ -109,7 +109,7 @@ in the slot under the pointer.
 **A menu bar icon.** Apple's Stage Manager has none; its toggle lives in Control Center. Ours
 gives a place for Settings, About, updates and Quit. It can be hidden, and opening the app
 again then shows Settings. Its glyph is original art, as tall as the SF Symbols beside it at
-the menu bar's default size (12 pt of ink, their median; round 8N).
+the menu bar's default size (12 pt of ink, their median).
 
 **Launch at login.** Apple's is part of macOS. Ours registers as a login item at its first
 launch from Applications, and Settings can turn that off.
@@ -124,8 +124,7 @@ that corner is covered with the wallpaper patch's picture until they are in plac
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window
 landed over the corner), never over the menu bar or the Dock's bar, and
-never more than the corner itself (a 320-point square; 10-16, covers of most of the screen
-painted the desktop over the owner's windows at every switch). Where
+never more than the corner itself (a 320-point square). Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
 desktop there (only the desktop's own layers: the picture and its icons, never a window,
 even one that appears as it is taken; laid over the patch's picture when macOS leaves the
@@ -136,7 +135,8 @@ under it too for the moment of the motion. A window that stays shown through the
 reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
 the cover from its own picture, so it looks as it is (that corner of it holds still for the
 motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
-windows land); the outgoing stage's windows never count. Where it cannot be covered at all (the patch off, card captures off with icons there,
+windows land); the outgoing stage's windows never count. Where it cannot be covered at all
+(the patch off, card captures off with icons there,
 no picture ready yet, a staying window with no picture of it, such as another app's the
 app does not manage, an activated window macOS put outside that square), an activated app's
 windows come to their places at once instead of growing.
@@ -145,10 +145,12 @@ windows come to their places at once instead of growing.
 
 **Hidden stages wait in a corner.** Without private APIs, the only way to hide a window but
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
-visible in the bottom-right corner (another corner if a display sits beyond it). To keep
+visible in the bottom-right corner (another corner if a second screen sits beyond it). To keep
 the corner as clean as Apple's, those edges ignore clicks and a patch drawn from the
-wallpaper's own file covers them, without screen recording. The patch steps aside where it
-cannot match exactly. Each Desktop has its own patch, which stays on it and slides with it
+wallpaper's own file covers them, without screen recording. Dynamic pictures (by time of
+day, by the sun, light and dark, Apple's own downloaded ones included) are drawn at the frame
+macOS shows. The patch steps aside where it cannot match exactly (see the GUIDE's
+troubleshooting). Each Desktop has its own patch, which stays on it and slides with it
 when you go to another Desktop and back, drawn as it was (nothing moves on a Desktop while
 you are away); it is checked again once the Desktop has arrived, and hidden while away if
 the picture's frame changed meanwhile (the sun, the appearance) or a desktop icon came
@@ -188,8 +190,7 @@ until used; the rest are off.
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
 
 **Keep stages in place** (Settings → Stages → Strip order: Keep in Place; `[strip] order =
-"in_place"`, round 9B). Apple's
-swap leaves the stages in click order, so a stage's place cannot be predicted. In place,
+"in_place"`). Apple's swap leaves the stages in click order, so a stage's place cannot be predicted. In place,
 every stage has a place of its own in creation order per Desktop (hotkey numbers follow it;
 a new stage goes last, a closed one leaves no gap, a dragged card moves its stage in that
 order, a restart brings the order back). The stage you leave shrinks into its own place and
@@ -206,7 +207,7 @@ and two of the rest show). Cards keep Apple's one size. "One at a Time" shows an
 in the place of its first stage, whichever of its windows is shown.
 
 **Follow the Dock** (Settings → Stages → Strip order: Follow the Dock; `[strip] order =
-"dock"`, round 9D). The places of Keep stages in place, ordered by the Dock: the strip's
+"dock"`). The places of Keep stages in place, ordered by the Dock: the strip's
 top-to-bottom order is the Dock's left-to-right order (top to bottom for a Dock on the side).
 The Dock's application items are read through Accessibility (its lists' `AXDockItem`
 children and their `AXURL`), so running apps that are not kept in the Dock count where their
@@ -225,7 +226,7 @@ Dock place, not the drop position.
 
 **After a restart.** The restore is invisible when it works and Apple's behaviour when it
 cannot match. Saved windows not on screen at launch wait, with no card, in their stages; as
-apps reopen them each goes back to its stage, at its saved frame when the main display has
+apps reopen them each goes back to its stage, at its saved frame when the main screen has
 the saved size, parked only on a confident match (a doubtful one goes by Apple's rule and
 stays in view or gets a card of its own). While the login settles (until apps have been
 quiet for 20 s, none still opening its first window, and the login is a minute old; the
@@ -256,7 +257,8 @@ starts every app in a stage of its own, as Apple's does. One log line sums it up
 
 ## Known gaps
 
-- Only the main display is managed.
+- Only the main screen is managed: windows on a second monitor are left alone. Every
+  Desktop on the main screen has its own stages.
 - No public API names a Desktop, so Desktops are told apart by their windows. An empty
   Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
   looks new until one of them shows.
@@ -267,8 +269,8 @@ starts every app in a stage of its own, as Apple's does. One log line sums it up
   in with it.
 - A dialog's parent window is a guess: the app's frontmost window at the time.
 - New windows are matched to rules by the title they have when they appear.
-- Windows of a relaunched app are matched to their stages by title, so two with the same
-  title may swap.
+- Windows of a relaunched app are matched to their stages by title and frame; two of one
+  app with the same title and no telling frame stay in view rather than guess.
 - With "Click wallpaper: Only in Stage Manager", a click on a desktop icon also counts as a
   wallpaper click.
 - Since macOS 15, macOS asks about once a month whether the app may capture windows

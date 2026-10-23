@@ -12,17 +12,19 @@ click, a drag, the Dock, ⌘Tab, a menu, the strip), it is preferred over a new 
 
 ## 1. Apple's documented behavior (corrects or confirms UX-SPEC)
 
-| Behavior | What Apple (or the best source) says | UX-SPEC today |
+The last column is the state as of 1.4.0.
+
+| Behavior | What Apple (or the best source) says | Status |
 |---|---|---|
-| **Shift-click a strip card** | Apple's original article *Use Stage Manager to organize apps and windows on Mac* (HT213315, 2022–23): "To create a group of windows in the center, drag a thumbnail to the center window, or **press the Shift key while clicking the thumbnail**" (quoted in [Apple Community, 2023](https://discussions.apple.com/thread/255102446)). The current guide ([support.apple.com/102355](https://support.apple.com/en-us/102355)) no longer mentions Shift. It still works: in [MPU, Dec 2025](https://talk.macpowerusers.com/t/how-to-get-one-app-at-a-time-focus-using-stage-manger-without-the-screenclutter/43776) a user says to "hold Shift when clicking an app to keep several in view". [MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/) agrees: "click on one while holding down Shift to add it to the current stage". It works only for apps already in the strip, not for launching an app ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3)). | "Not captured". **Confirmed: it adds the card to the current stage.** Still open: on a card holding several apps, does Shift-click add the whole card or only the app under the pointer? Our merge takes the whole card. One live check settles it. |
-| **Option-click a strip card** | Neither Apple nor any third party documents it. The only Option-click related to Stage Manager is on its Control Center button, which turns it off and on again ([MacMost 2022](https://macmost.com/the-comprehensive-guide-to-mac-stage-manager.html)). | Unknown. It looks free for sugar, but check live that it does nothing. |
+| **Shift-click a strip card** | Apple's original article *Use Stage Manager to organize apps and windows on Mac* (HT213315, 2022–23): "To create a group of windows in the center, drag a thumbnail to the center window, or **press the Shift key while clicking the thumbnail**" (quoted in [Apple Community, 2023](https://discussions.apple.com/thread/255102446)). The current guide ([support.apple.com/102355](https://support.apple.com/en-us/102355)) no longer mentions Shift. It still works: in [MPU, Dec 2025](https://talk.macpowerusers.com/t/how-to-get-one-app-at-a-time-focus-using-stage-manger-without-the-screenclutter/43776) a user says to "hold Shift when clicking an app to keep several in view". [MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/) agrees: "click on one while holding down Shift to add it to the current stage". It works only for apps already in the strip, not for launching an app ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3)). | **Done (1.0.0):** Shift-click adds the card to the current stage. Still open: on a card holding several apps, does Shift-click add the whole card or only the app under the pointer? Ours takes the whole card. One live check settles it. |
+| **Option-click a strip card** | Neither Apple nor any third party documents it. The only Option-click related to Stage Manager is on its Control Center button, which turns it off and on again ([MacMost 2022](https://macmost.com/the-comprehensive-guide-to-mac-stage-manager.html)). | Ours takes it as a plain click. Not checked live on Apple's. |
 | **Drag a card into the center** | Apple: "Drag an app from the left side of the screen to add it to a group of apps in the center of the screen" ([Apple guide](https://support.apple.com/guide/mac-help/use-stage-manager-mchl534ba392/mac)). From a card holding several apps, "you can only drag the top app in the pile" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)). | Matches what was observed. |
-| **Drag a window to the strip** | Apple: "Drag an app to the left side of the screen to remove it from the group" ([Apple guide](https://support.apple.com/guide/mac-help/use-stage-manager-mchl534ba392/mac)). A dragged item can also hover over a card until that stage comes forward, then be dropped there (spring loading, [Setapp, updated 2026](https://setapp.com/how-to/stage-manager-on-mac)). | We observed "becomes its own stage". **Spring loading onto a card was not captured.** |
-| **One at a Time** | "Show only the most recently used window for an app when you switch to it … **click the app on the left again to open the next available window**" ([Apple guide](https://support.apple.com/en-us/102355); [Desktop & Dock settings](https://support.apple.com/guide/mac-help/change-desktop-dock-settings-mchlp1119/mac)). | **Correction:** clicking the same app's card again cycles to its next window. UX-SPEC only covers activation. |
+| **Drag a window to the strip** | Apple: "Drag an app to the left side of the screen to remove it from the group" ([Apple guide](https://support.apple.com/guide/mac-help/use-stage-manager-mchl534ba392/mac)). A dragged item can also hover over a card until that stage comes forward, then be dropped there (spring loading, [Setapp, updated 2026](https://setapp.com/how-to/stage-manager-on-mac)). | **Done (1.0.0):** a window dropped on the strip becomes its own stage. **Spring loading onto a card is not built.** |
+| **One at a Time** | "Show only the most recently used window for an app when you switch to it … **click the app on the left again to open the next available window**" ([Apple guide](https://support.apple.com/en-us/102355); [Desktop & Dock settings](https://support.apple.com/guide/mac-help/change-desktop-dock-settings-mchlp1119/mac)). | **Done (1.0.0):** clicking the app's card again opens its next window (UX-SPEC). |
 | **Click the wallpaper** | "Always": "Clicking the wallpaper moves all windows out of the way to show your desktop items and widgets." "Only in Stage Manager": "When Stage Manager is turned on, clicking the wallpaper moves all windows out of the way" ([Desktop & Dock settings](https://support.apple.com/guide/mac-help/change-desktop-dock-settings-mchlp1119/mac)). | Confirmed. |
-| **How many recent apps** | Apple gives no number ("Your recently used apps are neatly arranged along the left side"). Reviewers counted 4 on an M1 MacBook Air and 6 on a Studio Display ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)), 5 on a 13″ Air with up to 6 ([Intego 2022](https://www.intego.com/mac-security-blog/stage-manager-offers-a-new-way-to-work-with-windows-in-macos-ventura-and-ipados-16/)), and "up to six … you can't rearrange or resize" ([Setapp 2026](https://setapp.com/how-to/stage-manager-on-mac)). | Confirms 6 at 1440 pt. **Check that the count drops on shorter displays (4 on a laptop).** |
+| **How many recent apps** | Apple gives no number ("Your recently used apps are neatly arranged along the left side"). Reviewers counted 4 on an M1 MacBook Air and 6 on a Studio Display ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)), 5 on a 13″ Air with up to 6 ([Intego 2022](https://www.intego.com/mac-security-blog/stage-manager-offers-a-new-way-to-work-with-windows-in-macos-ventura-and-ipados-16/)), and "up to six … you can't rearrange or resize" ([Setapp 2026](https://setapp.com/how-to/stage-manager-on-mac)). | Ours: 5 at 1130 pt, 6 at 1410 pt (`[strip] capacity`). **Check the count on a shorter screen (4 on a laptop?).** |
 | **Recent apps hidden** | "recently used apps are hidden—move the pointer to the left edge of the screen to briefly show them" ([Apple guide](https://support.apple.com/en-us/102355)). The strip also hides while a window is dragged over it ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)) and when two windows sit side by side ([MacSales 2025](https://eshop.macsales.com/blog/97454-on-the-eve-of-macos-tahoe-has-stage-manager-improved/)). | Confirmed. |
-| Native behaviors not in Apple's docs | **⌘M** sends the window to the strip within its set, not to the Dock. **⌘H** removes the app from the strip until it is unhidden. **Clicking a card's app icon** spreads out all of that app's windows, including those in other sets. **⌘`** cycles the windows of the current set ([MacMost 2022](https://macmost.com/the-comprehensive-guide-to-mac-stage-manager.html)). A Stage Manager on/off hotkey can be assigned under Keyboard Shortcuts → Mission Control ([Setapp 2026](https://setapp.com/how-to/stage-manager-on-mac)). | **Not in UX-SPEC.** These are parity items. Check them live before matching. |
+| Native behaviors not in Apple's docs | **⌘M** sends the window to the strip within its set, not to the Dock. **⌘H** removes the app from the strip until it is unhidden. **Clicking a card's app icon** spreads out all of that app's windows, including those in other sets. **⌘`** cycles the windows of the current set ([MacMost 2022](https://macmost.com/the-comprehensive-guide-to-mac-stage-manager.html)). A Stage Manager on/off hotkey can be assigned under Keyboard Shortcuts → Mission Control ([Setapp 2026](https://setapp.com/how-to/stage-manager-on-mac)). | **Done (1.0.0):** ⌘M to the strip and a card's app icon (UX-SPEC). ⌘H and ⌘\` not checked live. |
 
 ## 2. Requests, ranked by how often and for how long people have asked
 
@@ -32,21 +34,21 @@ own `NSPanel` strip.
 ### R1. Put an app or window into the current stage, not a new one (2022 → 2025, the most common request)
 - **Sources:** new Finder window or IB library "throws me into a new stage" (ObjC4Life on [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); "a shortcut for opening an app in the current stage" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); developers cannot open a helper window into the caller's stage ([Apple Dev Forums 2022](https://developer.apple.com/forums/thread/719749)); Calculator from the Dock pushes Safari aside ([Apple Community 2023](https://discussions.apple.com/thread/255102446)); adding to a set is the "Achilles heel" ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)); Shift-click should launch apps and work from Spotlight ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3)). A MacRumors search excerpt suggests "Option-click when opening an app to place it in the current stage".
 - **Gap:** Stage Manager offers no "here" when launching or activating. Shift-click only works on cards already in the strip.
-- **Sugar (in progress):** Shift held means "bring here" wherever an app is opened or activated: a Dock click, a Finder double-click, Spotlight or Launchpad Return, a new window appearing, and Shift-click on a card (native). A plain click keeps Apple's behavior.
+- **Sugar (done, 1.0.0; 1.4.0 for new apps):** Shift held means "bring here" wherever an app is opened or activated: a Dock click, a Finder double-click, Spotlight or Launchpad Return, a new window appearing, and Shift-click on a card (native). A plain click keeps Apple's behavior. `[stages] new_apps_join_current` (off) opens every new app here, and Shift then gives it a stage of its own.
 - **Watch out:** ⌘⇧Tab already means "cycle backward", so "Shift on ⌘Tab" is ambiguous. Either leave ⌘Tab out, or read Shift only at the moment ⌘ is released.
 - **Feasibility: medium.** Read `CGEventSourceFlagsState` when the activation or `kAXWindowCreated` arrives. A cold launch needs a short window (about 2–5 s) that remembers "Shift was down at launch" per PID.
 
 ### R2. Switch between stages from the keyboard (2022 → 2024)
 - **Sources:** "desperate need of keyboard shortcuts" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); "lack of proper keyboard shortcuts to switch between groups", Rui Carmo ([Tsai, 2023 update](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); feedback FB12194002 ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)); iPad has more shortcuts than the Mac ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3)); competitors fill the gap ([rcmd Stages](https://lowtechguys.com/rcmd/)).
 - **Gap:** the only ways to switch are a mouse click on a card, the Dock, and ⌘Tab by app.
-- **Sugar:** the ⌃⌥1…9 hotkeys already exist. For the owner, without new keys: scroll or two-finger swipe over the strip to step through stages, and a stage list in the menu-bar menu (click to switch).
+- **Sugar:** the ⌃⌥1…9 hotkeys exist (done, 1.0.0; off by default). Open, without new keys: scroll or two-finger swipe over the strip to step through stages, and a stage list in the menu-bar menu (click to switch).
 - **Feasibility: easy** (scroll events on our own panel; `NSMenu`). A global trackpad swipe anywhere on screen is **hard** (no public API for global gestures).
 
 ### R3. Move a window between stages, or take it out, without drag gymnastics (2022 → 2025)
 - **Sources:** only the top app of a pile can be dragged ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); changing a group needs "awkward workarounds" (Rui Carmo, [Tsai 2023](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); "is there a way to dismiss the app from the stage?" and "Moving app windows between stages seems a little clumsy" ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3), [page 2](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=2)); "It would be amazing … to drag items from the strip from one set to the other" ([MacSales 2025](https://eshop.macsales.com/blog/97454-on-the-eve-of-macos-tahoe-has-stage-manager-improved/)).
 - **Gap:** membership changes only by dragging through the center, one top app at a time.
 - **Sugar:** (a) Apple's own drags, for parity: drag a window onto the strip to make its own stage, and drag a card into the center to join. (b) Drop a dragged window on a card to join that stage (Apple's spring loading, made direct). (c) Drag one card onto another to merge the two stages. (d) Context-menu items (R4) for anyone who would rather not drag.
-- **Feasibility:** card onto card is **easy** (it all happens inside our panel). A window dropped on the strip or a card is **medium**: AX move notifications plus a global mouse-up monitor, hit-tested against the card rectangles. A card dragged into the center is **medium**: an `NSDraggingSession` from the panel, then restore at the drop point. SPEC lists drag and drop as out of scope, so this needs the owner's word.
+- **Status:** (a) and (c) done (1.0.0). (b) and (d) open. Dropping a window on a card is **medium**: AX move notifications plus a global mouse-up monitor, hit-tested against the card rectangles.
 
 ### R4. A right-click menu on cards: close, quit, peek (2022 → 2026)
 - **Sources:** "a right-click menu" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); right-clicking a thumbnail "shows no options; you can't close a window or quit an app" ([Setapp 2026](https://setapp.com/how-to/stage-manager-on-mac)); a paid add-on, Stage View, sells exactly previews plus close and minimize from them ([ifun 2022](https://www.ifun.de/stage-manager-am-mac-zusatz-app-will-apples-werksfunktion-verbessern-198529/)).
@@ -57,7 +59,7 @@ own `NSPanel` strip.
 ### R5. A strip that shows more, and in the user's order (2022 → 2026)
 - **Sources:** thumbnails "too small" ([HN 2022](https://news.ycombinator.com/item?id=33337549)); a seventh app drops out of sight ([Intego 2022](https://www.intego.com/mac-security-blog/stage-manager-offers-a-new-way-to-work-with-windows-in-macos-ventura-and-ipados-16/)); "takes up a lot of real estate", wants bigger icons and smaller previews ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3)); icons can't be made "smaller and less intrusive" ([MPU Dec 2025](https://talk.macpowerusers.com/t/how-to-get-one-app-at-a-time-focus-using-stage-manger-without-the-screenclutter/43776)); "you can't rearrange or resize them" ([Setapp 2026](https://setapp.com/how-to/stage-manager-on-mac)).
 - **Gap:** stages beyond the sixth (fourth on a laptop) are reachable only through the Dock or ⌘Tab, and the order is fixed by recency.
-- **Sugar:** keep Apple's count and slot order. Scrolling over the strip reveals older stages, and a "+N" mark shows that more exist. Drag a card to reorder (it keeps that slot). An optional `strip.scale` in `config.toml`, since macOS has no such setting.
+- **Sugar:** keep Apple's count and slot order. Scrolling over the strip reveals older stages, and a "+N" mark shows that more exist (open). Drag a card to reorder (done, 1.0.0), stages that keep their places or follow the Dock (`[strip] order`, done, 1.4.0), and `[strip] scale` (done, 1.0.0).
 - **Feasibility: easy** (all inside our panel and layout code).
 
 ### R6. No unasked stage switches (2022 → 2023, and still in 2026 reports)
@@ -75,19 +77,18 @@ own `NSPanel` strip.
 ### R8. Multiple displays: leave the others alone (2022 → 2024)
 - **Sources:** two displays make it "in the way of any productivity" (Philip on [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); moving a window to another display "creates a new group" ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)); "I wish the Stage Manager will only work with my main monitor" (Topre) and "treated as a single, unified stage" (iPersuade), both in [MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=2).
 - **Gap:** Apple's per-display stages cannot be turned off.
-- **Sugar:** we are main-display-only already, which is exactly Topre's wish. A window dragged to another display leaves its stage instead of spawning one. Confirm what ours does now.
+- **Sugar (done, 1.0.0):** ours manages the main screen only, which is exactly Topre's wish: a window moved to a second monitor leaves its stage and is left alone.
 - **Feasibility: easy** for "leave alone". Per-display strips are **medium**. A unified stage across displays is **hard**.
 
 ### R9. Minimize to the Dock when I mean the Dock (2022 → 2025)
 - **Sources:** it "sends things to the strip more often than I'd like" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); how do I minimize to the Dock with Stage Manager on? Answer: you can't ([Apple Community 2023](https://discussions.apple.com/thread/254954825)); minimized windows can't be moved between sets ([MacSales 2025](https://eshop.macsales.com/blog/97454-on-the-eve-of-macos-tahoe-has-stage-manager-improved/)).
 - **Gap:** with Stage Manager on, ⌘M never reaches the Dock.
-- **Sugar:** the default matches Apple: on `AXWindowMiniaturized`, unminimize the window and send it to the strip. "Minimize to Dock" stays in the card menu (R4). Avoid Option on the yellow button: it already means "minimize all of this app's windows".
+- **Sugar:** the default matches Apple: on `AXWindowMiniaturized`, unminimize the window and send it to the strip (done, 1.0.0; `[windows] minimize_to_strip = false` sends it to the Dock). "Minimize to Dock" for one window stays in the card menu (R4). Avoid Option on the yellow button: it already means "minimize all of this app's windows".
 - **Feasibility: medium.** Expect a visible minimize-then-restore flash.
 
 ### R10. Faster switching (2022 → 2023)
 - **Sources:** "the animations could be made faster" (Peter Ammon, [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); "I wish I could make the transition faster", worked around with Reduce Motion ([HN 2023](https://news.ycombinator.com/item?id=35026126)); "whooshing" windows ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)).
-- **Gap and sugar:** our windows already jump (UX-SPEC deviation 1), which is what these users want. Only the strip's card glide is animated; skip it when Reduce Motion is on.
-- **Feasibility: easy.**
+- **Done (1.0.0):** switches animate on Apple's measured springs by default; Settings → Windows → Animation speed (`[animation] speed`, 0 for none) makes them faster or turns them off. Open: follow Reduce Motion.
 
 ### R11. Automation through Shortcuts or AppleScript (2022 → 2026)
 - **Sources:** no AppleScript or Shortcuts actions (Jack Wellborn, [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); MacStories wants actions that build and tear down sets ([2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); a user asks for a supported way to script a window layout ([Apple Community, Feb 2026](https://communities.apple.com/de/thread/256236489)).
@@ -96,23 +97,26 @@ own `NSPanel` strip.
 
 ## 3. Recommended first batch
 
-Status as of 2026-10-22:
+Status as of 1.4.0:
 
-1. **Shift = bring here, everywhere (R1).** *Built:* Shift-click a card, Shift while opening
-   an app or Shift-click in the Dock; and `[stages] new_apps_join_current` (off, Apple's).
+1. **Shift = bring here, everywhere (R1).** *Done:* Shift-click a card, Shift while opening
+   an app or Shift-clicking it in the Dock (1.0.0); `[stages] new_apps_join_current`, off,
+   Apple's (1.4.0).
 2. **Card context menu (R4).** Bring Here, New Stage, Keep on Every Stage, Name…, Close
    Window, Quit App. One easy item that also covers parts of R3, R7, R9 and pinning. *Open.*
 3. **Stage names (R7).** Set from the menu, shown on hover, persisted. *Open* (names exist
    in config only).
-4. **Strip overflow and reorder (R5).** *Reorder built:* drag a card, and `[strip] order`
-   (`in_place`, `dock`). *Open:* scroll over the strip to older stages, with a "+N" mark.
-5. **Merge by dragging a card onto a card (R3c).** *Built* (`[strip] merge_on_drop`, on).
+4. **Strip overflow and reorder (R5).** *Done:* drag a card (1.0.0); `[strip] order`
+   `in_place` and `dock` (1.4.0). *Open:* scroll over the strip to older stages, with a "+N"
+   mark.
+5. **Merge by dragging a card onto a card (R3c).** *Done* (1.0.0, `[strip] merge_on_drop`,
+   on).
 6. **Quiet activations (R6).** No stage switch without recent user input; the card glows
    instead. *Open.*
 7. **Stage list in the menu-bar menu, plus scroll over the strip (R2).** *Open.*
-8. *(Parity, before any sugar.)* Live checks of the gaps found in §1: One at a Time re-click
-   cycling, clicking a card's app icon, Shift-click on a card with several apps,
-   Option-click, and the strip count on a shorter display. *Open* (⌘M to the strip is built).
+8. *(Parity, before any sugar.)* Live checks of the gaps found in §1: Shift-click on a card
+   with several apps, Option-click, ⌘H, ⌘\`, and the strip count on a shorter screen.
+   *Open* (One at a Time re-click, a card's app icon and ⌘M to the strip are done).
 
-Apple's own window ↔ strip drags (R3a) are *built*: a card dragged into the middle, a window
-dragged onto the strip. Dropping a window on a card (R3b) is *open*.
+Apple's own window ↔ strip drags (R3a) are *done* (1.0.0): a card dragged into the middle, a
+window dragged onto the strip. Dropping a window on a card (R3b) is *open*.
