@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stage Manager</title>
-<meta name="description" content="Stage Manager for macOS. Free and open source.">
+<meta name="description" content="Stage Manager for macOS: looks and works like Apple’s, then more. Your stages survive a restart. Free and open source.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" type="image/png" href="assets/app-icon.png">
 <link rel="apple-touch-icon" href="assets/app-icon.png">
@@ -74,6 +74,16 @@
   .download:hover { background: var(--accent-hover); text-decoration: none; }
   .meta { color: var(--secondary); font-size: 14px; margin-top: 14px; }
   .brew { margin-top: 10px; font-size: 14px; color: var(--secondary); }
+  .shot { max-width: 1180px; margin: 0 auto; padding: 0 22px 72px; }
+  .shot video { display: block; width: 100%; height: auto; aspect-ratio: 2420 / 1240; border-radius: 14px;
+                box-shadow: 0 24px 60px rgba(0, 0, 0, 0.18), 0 0 0 1px var(--edge); background: var(--bg-alt); }
+  .steps { list-style: none; padding: 0; margin: 0 auto; max-width: 760px; }
+  .steps li { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; align-items: baseline;
+              padding: 14px 0; border-bottom: 1px solid var(--edge); }
+  .steps li:last-child { border-bottom: none; }
+  .steps b { font-weight: 600; text-align: right; }
+  .steps li > span { color: var(--secondary); text-align: left; }
+  .steps .tag { margin: 0 0 0 8px; display: inline; }
   code { overflow-wrap: anywhere; font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--code); padding: 3px 7px; border-radius: 6px; letter-spacing: 0; }
 
   section { padding: 64px 0; }
@@ -98,6 +108,9 @@
 
   @media (max-width: 640px) {
     .grid.two { grid-template-columns: 1fr; }
+    .shot { padding-bottom: 48px; }
+    .steps li { display: block; text-align: center; }
+    .steps b, .steps li > span { display: block; text-align: center; }
     header.hero { padding: 48px 0 44px; }
     .hero img { width: 128px; height: 128px; }
     h1 { font-size: 40px; }
@@ -115,34 +128,52 @@
   </picture>
   <h1>Stage Manager</h1>
   <a class="download" href="https://github.com/eugene-tea/stage-manager/releases/latest/download/Stage-Manager.dmg">Download</a>
-  <div class="meta">Free and open source · Apple silicon · macOS 14 Sonoma or later</div>
+  <div class="meta">Free and open source · Signed and notarized · Apple silicon · macOS 14 Sonoma or later</div>
   <div class="brew">or with Homebrew: <code>brew install eugene-tea/tap/stage-manager</code></div>
 </header>
+
+<div class="shot">
+  <video autoplay muted loop playsinline preload="auto"
+         aria-label="Stage Manager on a Mac: a map and a note in front, four more stages in the strip on the left. A click on a card brings its stage in; another brings the first one back.">
+    <source src="assets/demo.webm" type="video/webm">
+    <source src="assets/demo.mp4" type="video/mp4">
+  </video>
+</div>
 
 <section class="alt">
   <div class="wrap">
     <h2>Like Apple’s. Then more.</h2>
-    <p class="lede">Out of the box it looks and behaves like Apple’s own Stage Manager. Every addition stays out of sight until you reach for it.</p>
-    <div class="grid two">
+    <p class="lede">Out of the box it looks and works like Apple’s Stage Manager. Everything extra waits until you turn it on.</p>
+    <div class="grid">
       <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h3.5M3 12h3.5M3 18.5h3.5"/><rect x="9.5" y="3.5" width="12" height="17" rx="3"/><path d="M9.5 8h12"/></svg>
-        <h3>The strip you know</h3>
-        <p>Stages on the left, floating, overlapping windows in the middle. Every Desktop keeps its own stages, as on your Mac today.</p>
-      </div>
-      <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9h10M7 12.5h6M7 16h8"/></svg>
-        <h3>Rules for new windows</h3>
-        <p>Send an app to its own stage, a named stage or the current one; pin a window to every stage; open windows centred or cascaded.</p>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4h-4"/></svg>
+        <h3>Survives a restart</h3>
+        <p>Your stages, their order and the stage in front come back after a reboot.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="12" height="12" rx="2.5"/><rect x="9" y="3" width="12" height="12" rx="2.5"/></svg>
-        <h3>Group by hand</h3>
-        <p>Drag a stage onto another to merge them, or reorder the strip. Your stages come back after a restart.</p>
+        <h3>Merge with a drop</h3>
+        <p>Drop one card on another to make one stage. Drag a window to the strip to split it off.</p>
       </div>
       <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3.5H7.5a3 3 0 0 0-3 3v11a3 3 0 0 0 3 3h9a3 3 0 0 0 3-3V9z"/><path d="M14 3.5V9h5.5M8.5 13h7M8.5 16.5h5"/></svg>
-        <h3>Every knob in one file</h3>
-        <p>Settings for the essentials; everything else in a plain config file, easiest changed by asking an AI agent. Hotkeys if you want them, never required.</p>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h3.5M3 12h3.5M3 18.5h3.5"/><rect x="9.5" y="3.5" width="12" height="17" rx="3"/><path d="M9.5 8h12"/></svg>
+        <h3>A strip that stays put</h3>
+        <p>Each stage keeps its place, or follows your Dock’s order. Windows can keep clear of the strip.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+        <h3>New apps join you</h3>
+        <p>Open an app straight into the stage you are in. Hold Shift to give it a stage of its own.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/></svg>
+        <h3>Shortcuts if you want them</h3>
+        <p>⌃⌥1–9 to switch stages or send a window. Nothing needs one.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4.5 6v5.5c0 4.5 3.2 8.2 7.5 9.5 4.3-1.3 7.5-5 7.5-9.5V6z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/></svg>
+        <h3>Never loses a window</h3>
+        <p>Quit, crash or update: every hidden window comes back.</p>
       </div>
     </div>
   </div>
@@ -150,29 +181,28 @@
 
 <section>
   <div class="wrap">
-    <h2>What it asks for, and why</h2>
-    <p class="lede">The first time you open it, a small welcome window walks you through these, one row each.</p>
-    <div class="grid">
-      <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="7" width="19" height="10" rx="5"/><circle cx="7.5" cy="12" r="3" fill="currentColor" stroke="none"/></svg>
-        <div class="tag">Before you start</div>
-        <h3>Turn off Apple’s Stage Manager</h3>
-        <p>This one takes over from it. Stage Manager offers to turn Apple’s off for you, and moves nothing until it is off.</p>
-      </div>
-      <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="3.5"/><path d="M2.5 8.5h19"/><path d="M12 11v7M8.5 14.5h7M10.5 12.5 12 11l1.5 1.5M10.5 16.5 12 18l1.5-1.5M10 13l-1.5 1.5L10 16M14 13l1.5 1.5L14 16"/></svg>
-        <div class="tag">Required</div>
-        <h3>Accessibility</h3>
-        <p>Lets Stage Manager move, hide and bring back your windows. Without it, nothing can be arranged; it waits until access is allowed.</p>
-      </div>
-      <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="3.5"/><path d="M2.5 8.5h19"/><circle cx="12" cy="14.25" r="3" fill="currentColor" stroke="none"/></svg>
-        <div class="tag">Optional</div>
-        <h3>Screen Recording</h3>
-        <p>Live pictures of your windows on the cards and in switches. Without it, cards show plain window shapes with the app’s icon.</p>
-      </div>
-    </div>
-    <p class="privacy">Nothing about your windows leaves your Mac. Stage Manager checks for updates once a day, from GitHub, and downloads one from there when it installs it; nothing about you or this Mac is sent, and Settings can turn the check off.</p>
+    <h2>More in the config file</h2>
+    <p class="lede">Everything else lives in one plain file. Ask an AI assistant to change it; Settings → Advanced shows how.</p>
+    <ul class="steps">
+      <li><b>Rules for new windows</b><span>By app and title: a named stage, every stage, centred or cascaded.</span></li>
+      <li><b>Named stages</b><span>Names and numbers on the cards.</span></li>
+      <li><b>The strip</b><span>Width, size, tilt, an edge tab, above or below windows.</span></li>
+      <li><b>Motion</b><span>Every animation’s timing, measured from Apple’s.</span></li>
+      <li><b>More shortcuts</b><span>New stage, pin a window, show or hide the strip.</span></li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>First launch</h2>
+    <p class="lede">A small welcome window walks you through it.</p>
+    <ul class="steps">
+      <li><b>Turn off Apple’s Stage Manager</b><span>It offers to do it for you.</span></li>
+      <li><b>Accessibility <span class="tag">Required</span></b><span>To move your windows.</span></li>
+      <li><b>Screen Recording <span class="tag">Optional</span></b><span>For live pictures on the cards.</span></li>
+    </ul>
+    <p class="privacy">Nothing about your windows leaves your Mac. One daily update check on GitHub, which you can turn off.</p>
   </div>
 </section>
 
@@ -183,7 +213,7 @@
       <a href="https://github.com/eugene-tea/stage-manager">Source</a>
       <a href="https://github.com/eugene-tea/stage-manager/releases">Releases</a>
     </nav>
-    <p>By eugene-tea. Stage Manager is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. Apple, Mac and macOS are trademarks of Apple Inc.</p>
+    <p>By <a href="https://github.com/eugene-tea">Eugene T</a>. Stage Manager is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. Apple, Mac and macOS are trademarks of Apple Inc.</p>
   </div>
 </footer>
 
