@@ -16,7 +16,10 @@
 //! A pass whose listing shows no window on screen at all (the window server answered nothing,
 //! or the session is not the console's: fast user switching, the login window, a sleeping
 //! display) is **blind**: it is no observation, so nothing is let go and every streak starts
-//! again after it. `GONE_AFTER` counts only passes that listed something.
+//! again after it. `GONE_AFTER` counts only passes that listed something. A blind pass also
+//! forgets how each waiting window looked (the Codex review of 10-21, R3): nothing is
+//! [`Watch::shown`], so nothing is reached, until a pass that sees again (registered frames
+//! and ownership stay).
 //!
 //! The window server's list alone is never final. While a Space slides in it may list a
 //! window at an in-between frame, or not at all, for a pass (hands-free Desktop run 2, 10-12:
@@ -365,9 +368,16 @@ impl Watch {
         self.waiting.values()
     }
 
-    /// Waiting windows on screen in the latest pass (Accessibility can reach them).
+    /// Waiting windows on screen in the latest pass (Accessibility can reach them): none
+    /// while blind (R3: no observation never authorizes a move).
     pub fn shown(&self) -> Vec<Waiting> {
-        self.waiting.values().filter(|w| w.look.is_some_and(|l| l.shown())).cloned().collect()
+        self.waiting.values().filter(|w| !self.blind && w.shows()).cloned().collect()
+    }
+
+    /// True when a waiting window is on screen in the latest pass ([`Self::shown`] is not
+    /// empty).
+    pub fn shows(&self) -> bool {
+        !self.blind && self.waiting.values().any(Waiting::shows)
     }
 
     /// Where a waiting window goes back: its registered frame made safe; `None` for one found
@@ -393,9 +403,12 @@ impl Watch {
             }
             self.blind = true;
             self.on_screen = None;
+            // Nor does an earlier look stand (R3): a window seen on screen before is not
+            // reachable on its strength; registered frames and ownership stay.
             for w in self.waiting.values_mut() {
                 w.missing_since = None;
                 w.out_since = None;
+                w.look = None;
             }
             return events;
         }
@@ -530,6 +543,11 @@ impl Watch {
 }
 
 impl Waiting {
+    /// On screen in the latest pass (none since a blind one).
+    pub fn shows(&self) -> bool {
+        self.look.is_some_and(|l| l.shown())
+    }
+
     /// What the park test knows of it: a window the app registered is its own (any size,
     /// slivers count), one found in the park zone is any app's.
     pub fn known(&self) -> Known {
@@ -823,6 +841,32 @@ mod tests {
         assert_eq!(pass(&mut w, t0, 20_500, &without), None, "the blind stretch does not count");
         assert_eq!(pass(&mut w, t0, 22_500, &without), None);
         assert!(matches!(pass(&mut w, t0, 23_500, &without), Some(Release::Gone { .. })));
+    }
+
+    /// The Codex review of 10-21, R3: a window seen parked on screen is not reachable on the
+    /// strength of that look once a pass is blind (nothing listed, or nothing on screen); it
+    /// is again after a pass that sees it, and it keeps its registered frame throughout.
+    #[test]
+    fn a_blind_pass_leaves_nothing_reachable() {
+        let t0 = Instant::now();
+        let mut w = Watch::new(&reg());
+        assert_eq!(pass(&mut w, t0, 0, &on_desktop_2(parked())), None);
+        assert_eq!(w.shown().len(), 1, "shown parked: reachable");
+        assert!(w.shows());
+        assert_eq!(pass(&mut w, t0, 500, &[]), None);
+        assert!(w.shown().is_empty(), "blind (nothing listed): nothing reachable");
+        assert!(!w.shows());
+        let off: Vec<Listed> = on_desktop_2(parked()).into_iter().map(|l| Listed { onscreen: false, ..l }).collect();
+        assert_eq!(pass(&mut w, t0, 1000, &off), None);
+        assert!(w.shown().is_empty(), "blind (only off screen): nothing reachable");
+        assert!(!w.shows());
+        let x = w.waiting().next().cloned();
+        assert_eq!(x.as_ref().map(|x| x.registered), Some(Some(RESTORE)), "the registered frame stays");
+        assert!(w.is_registered(1));
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_2(parked())), None);
+        let shown = w.shown();
+        assert_eq!(shown.len(), 1, "seen again: reachable again");
+        assert_eq!(Watch::restore_frame(&shown[0], &displays()), Some(RESTORE));
     }
 
     /// The review's S1 for the guardian: with a Dock at the bottom macOS keeps the parked
