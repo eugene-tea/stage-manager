@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The corner stays clean at dawn and dusk on wallpapers that follow the sun.
+
 ## 1.4.0 — 2026-10-23
 
 - New apps can open in the current stage: turn on **Open new apps in the current stage**

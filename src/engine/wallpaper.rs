@@ -17,8 +17,12 @@
 //!   Settings (Automatic, Dynamic, Light, Dark: [`Style`]), which only macOS's wallpaper
 //!   settings file holds; without it a dynamic picture is not drawn. Solar frames need the
 //!   sun's position, so a place: without Location Services, the time zone's own place
-//!   (`/usr/share/zoneinfo/zone.tab`), and only while every place within
-//!   [`SOLAR_SLACK_DEG`] of it would show the same frame ([`solar_frame`]).
+//!   (`/usr/share/zoneinfo/zone.tab`). Exact while every place within [`SOLAR_SLACK_DEG`]
+//!   of it would show the same frame ([`solar_frame`]); near a frame change the places
+//!   disagree and the frame is one of a few candidates ([`solar_candidates`],
+//!   [`Decision::candidates`]), settled by the pictures themselves
+//!   ([`super::solar_settle`]: the candidates look alike in the corner, or one still of
+//!   the desktop matches one of them) or not drawn.
 //! - **Apple's own pictures** ([`resolve_system_pictures`]): System Settings names one of
 //!   Apple's dynamic wallpapers only by its description in `/System/Library/Desktop
 //!   Pictures` (a `.madesktop`, a choice of type `systemDesktopPicture`); the description's
@@ -471,12 +475,49 @@ pub struct Frame {
 /// for a solar frame to be drawn: every place that far off must show the same frame.
 pub const SOLAR_SLACK_DEG: f64 = 6.0;
 
-/// How often a solar frame is picked again (seconds).
+/// How often a solar frame is picked again (seconds); near a frame change, also how often a
+/// still of the desktop settles it again ([`super::solar_settle`]).
 pub const SOLAR_RECHECK: f64 = 60.0;
 
+/// Why a solar frame is not known exactly: the time zone's area straddles a frame change.
+pub const NEAR_CHANGE: &str = "the sun is near a frame change for the time zone's area; off until it passes";
+
 /// The frame macOS shows of a picture with `schedule`, `count` frames and primary frame
-/// `primary`, under `style` (from macOS's settings), the appearance (`dark`) and `clock`.
+/// `primary`, under `style` (from macOS's settings), the appearance (`dark`) and `clock`;
+/// [`NEAR_CHANGE`] when it is one of several ([`frame_candidates`]).
 pub fn frame(schedule: &Schedule, style: Option<Style>, dark: bool, clock: &Clock, primary: usize, count: usize) -> Result<Frame, &'static str> {
+    match frame_candidates(schedule, style, dark, clock, primary, count)? {
+        (f, c) if c.is_empty() => Ok(f),
+        _ => Err(NEAR_CHANGE),
+    }
+}
+
+/// The frame macOS shows, as [`frame`], or near a solar frame change the frames it may show:
+/// the frame and no candidates when it is known; otherwise two or more candidates (each one
+/// the file has, the time zone's own place's first) and `frame` the first of them, which is
+/// never drawn until settled ([`super::solar_settle`]).
+pub fn frame_candidates(
+    schedule: &Schedule,
+    style: Option<Style>,
+    dark: bool,
+    clock: &Clock,
+    primary: usize,
+    count: usize,
+) -> Result<(Frame, Vec<usize>), &'static str> {
+    if let (Schedule::Solar { suns, .. }, Some(Style::Dynamic)) = (schedule, style) {
+        let place = clock.place.ok_or("a solar picture needs a place; the time zone has none")?;
+        let candidates = solar_candidates(suns, clock.unix, place)?;
+        if candidates.iter().any(|i| *i >= count) {
+            return Err("the picture's metadata names a frame the file lacks");
+        }
+        let f = Frame { index: candidates[0], recheck_in: Some(SOLAR_RECHECK) };
+        return Ok((f, if candidates.len() > 1 { candidates } else { Vec::new() }));
+    }
+    single_frame(schedule, style, dark, clock, primary, count).map(|f| (f, Vec::new()))
+}
+
+/// The frame of every schedule but a solar one under the Dynamic style.
+fn single_frame(schedule: &Schedule, style: Option<Style>, dark: bool, clock: &Clock, primary: usize, count: usize) -> Result<Frame, &'static str> {
     let still = |i: Option<usize>| i.map(|index| Frame { index, recheck_in: None }).ok_or("the picture's metadata has no light or dark frame");
     let by_look = |light: Option<usize>, d: Option<usize>| match style {
         Some(Style::Light) => still(light),
@@ -506,13 +547,30 @@ pub fn frame(schedule: &Schedule, style: Option<Style>, dark: bool, clock: &Cloc
     if f.index < count { Ok(f) } else { Err("the picture's metadata names a frame the file lacks") }
 }
 
+/// Whether a frame left drawn is still the one macOS shows ([`still_drawn`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StillShown {
+    /// It is the frame macOS shows.
+    Yes,
+    /// It is not (or the frame cannot be known).
+    No,
+    /// macOS shows one of these frames (near a solar frame change), the one drawn among
+    /// them: it is right only if they all look alike there ([`super::solar_settle::alike`]).
+    IfAlike(Vec<usize>),
+}
+
 /// Whether a picture drawn at frame `index` under `style` is still the frame macOS shows by
 /// `clock` and the appearance (`dark`): a Desktop's patch left drawn there while the user is
 /// on another one is hidden once it is not (the sun moved past a frame, the appearance
-/// changed), so it never slides back in with a frame macOS no longer shows.
-pub fn still_drawn(facts: &ImageFacts, style: Option<Style>, dark: bool, clock: &Clock, index: usize) -> bool {
-    let Ok(schedule) = &facts.schedule else { return false };
-    frame(schedule, style, dark, clock, facts.primary, facts.count).is_ok_and(|f| f.index == index)
+/// changed), so it never slides back in with a frame macOS no longer shows. Near a solar
+/// frame change, the candidates when `index` is one of them.
+pub fn still_drawn(facts: &ImageFacts, style: Option<Style>, dark: bool, clock: &Clock, index: usize) -> StillShown {
+    let Ok(schedule) = &facts.schedule else { return StillShown::No };
+    match frame_candidates(schedule, style, dark, clock, facts.primary, facts.count) {
+        Ok((f, c)) if c.is_empty() && f.index == index => StillShown::Yes,
+        Ok((_, c)) if c.contains(&index) => StillShown::IfAlike(c),
+        _ => StillShown::No,
+    }
 }
 
 /// The time-of-day frame at `fraction` of the day: the last entry at or before it (the
@@ -554,20 +612,30 @@ fn nearest(suns: &[SunFrame], alt: f64, az: f64) -> Option<usize> {
 
 /// The solar frame at `unix` for a place near `place`: the frame whose sun lies nearest the
 /// sun's place in the sky (great-circle distance), the same for every place within
-/// [`SOLAR_SLACK_DEG`] of `place`; otherwise the frame cannot be known exactly.
+/// [`SOLAR_SLACK_DEG`] of `place`; otherwise ([`NEAR_CHANGE`]) the frame cannot be known
+/// from the clock alone ([`solar_candidates`]).
 pub fn solar_frame(suns: &[SunFrame], unix: f64, place: (f64, f64)) -> Result<usize, &'static str> {
-    let mut picked = None;
-    for dlat in [-SOLAR_SLACK_DEG, 0.0, SOLAR_SLACK_DEG] {
-        for dlon in [-SOLAR_SLACK_DEG, 0.0, SOLAR_SLACK_DEG] {
-            let (alt, az) = sun_position(unix, (place.0 + dlat).clamp(-89.0, 89.0), place.1 + dlon);
-            let i = nearest(suns, alt, az).ok_or("the picture's solar metadata names no frames")?;
-            if picked.is_some_and(|p| p != i) {
-                return Err("the sun is near a frame change for the time zone's area; off until it passes");
-            }
-            picked = Some(i);
+    match solar_candidates(suns, unix, place)?.as_slice() {
+        [one] => Ok(*one),
+        _ => Err(NEAR_CHANGE),
+    }
+}
+
+/// The distinct solar frames over the places within [`SOLAR_SLACK_DEG`] of `place` (a grid
+/// of nine: the place itself and its slack in latitude and longitude) at `unix`: the place's
+/// own frame first, then the others in grid order. One frame: it is known exactly.
+pub fn solar_candidates(suns: &[SunFrame], unix: f64, place: (f64, f64)) -> Result<Vec<usize>, &'static str> {
+    let s = SOLAR_SLACK_DEG;
+    let grid = [(0.0, 0.0), (-s, -s), (-s, 0.0), (-s, s), (0.0, -s), (0.0, s), (s, -s), (s, 0.0), (s, s)];
+    let mut out: Vec<usize> = Vec::with_capacity(2);
+    for (dlat, dlon) in grid {
+        let (alt, az) = sun_position(unix, (place.0 + dlat).clamp(-89.0, 89.0), place.1 + dlon);
+        let i = nearest(suns, alt, az).ok_or("the picture's solar metadata names no frames")?;
+        if !out.contains(&i) {
+            out.push(i);
         }
     }
-    picked.ok_or("the picture's solar metadata names no frames")
+    Ok(out)
 }
 
 /// The place (latitude, longitude) of `zone` in a tz `zone.tab` file.
@@ -811,12 +879,16 @@ pub struct Inputs<'a> {
 }
 
 /// What to draw.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     /// How the picture lands.
     pub placement: Placement,
-    /// Which frame.
+    /// Which frame (with [`Decision::candidates`], only the first candidate).
     pub frame: Frame,
+    /// Empty when the frame is known. Near a solar frame change, the frames macOS may show
+    /// (two or more, [`frame_candidates`]): none is drawn until the pictures settle which
+    /// ([`super::solar_settle`]).
+    pub candidates: Vec<usize>,
     /// The style macOS's settings name.
     pub style: Option<Style>,
     /// The picture's schedule kind ([`Schedule::kind`]).
@@ -851,8 +923,8 @@ pub fn decide(i: &Inputs) -> Result<Decision, &'static str> {
         Placement::Fit if !i.fill => return Err("Fit with no fill colour: what macOS shows around the picture is unverified"),
         Placement::Fill | Placement::Fit | Placement::Stretch => {}
     }
-    let frame = frame(schedule, style, i.dark, &i.clock, image.primary, image.count)?;
-    Ok(Decision { placement, frame, style, kind: schedule.kind() })
+    let (frame, candidates) = frame_candidates(schedule, style, i.dark, &i.clock, image.primary, image.count)?;
+    Ok(Decision { placement, frame, candidates, style, kind: schedule.kind() })
 }
 
 #[cfg(test)]
@@ -1042,7 +1114,31 @@ mod tests {
             }
         }
         assert!(off > 0 && off < 240, "{off}");
-        let sched = Schedule::Solar { light: Some(0), dark: Some(1), suns };
+        // Each such minute carries its candidates: distinct, the time zone's own frame first,
+        // two or more; a known minute has one, the frame itself.
+        for minute in 0..240 {
+            let t = noon + 5.0 * 3600.0 + f64::from(minute) * 60.0;
+            let c = solar_candidates(&suns, t, la).expect("candidates");
+            let own = nearest(&suns, sun_position(t, la.0, la.1).0, sun_position(t, la.0, la.1).1).expect("a frame");
+            assert_eq!(c[0], own, "the place's own frame first");
+            let mut d = c.clone();
+            d.sort_unstable();
+            d.dedup();
+            assert_eq!(d.len(), c.len(), "distinct");
+            match solar_frame(&suns, t, la) {
+                Ok(i) => assert_eq!(c, vec![i]),
+                Err(why) => assert!(c.len() > 1 && why == NEAR_CHANGE, "{c:?}"),
+            }
+        }
+        let sched = Schedule::Solar { light: Some(0), dark: Some(1), suns: suns.clone() };
+        // The decision's frame near sunset: the candidates, the first as its frame.
+        let dusk = (0..240).map(|m| noon + 5.0 * 3600.0 + f64::from(m) * 60.0).find(|t| solar_frame(&suns, *t, la).is_err()).expect("dusk");
+        let (f, c) = frame_candidates(&sched, Some(Style::Dynamic), false, &clock(dusk, 0.5), 0, 5).expect("candidates");
+        assert!(c.len() > 1 && f.index == c[0] && f.recheck_in == Some(SOLAR_RECHECK), "{f:?} {c:?}");
+        assert_eq!(frame(&sched, Some(Style::Dynamic), false, &clock(dusk, 0.5), 0, 5), Err(NEAR_CHANGE), "exact or not at all");
+        assert!(frame_candidates(&sched, Some(Style::Dynamic), false, &clock(dusk, 0.5), 0, 2).is_err(), "a candidate the file lacks");
+        let (_, c) = frame_candidates(&sched, Some(Style::Dark), false, &clock(dusk, 0.5), 0, 5).expect("pinned");
+        assert!(c.is_empty(), "a pinned style knows its frame");
         let f = frame(&sched, Some(Style::Dynamic), false, &clock(noon, 0.5), 0, 5).expect("noon");
         assert_eq!(f, Frame { index: 0, recheck_in: Some(SOLAR_RECHECK) });
         let nowhere = Clock { place: None, ..clock(noon, 0.5) };
@@ -1230,13 +1326,24 @@ mod tests {
     fn a_frame_left_drawn_is_still_drawn_only_while_macos_shows_it() {
         let solar = facts(schedule(None, None, Some(&ventura_solar())), 5);
         let noon = 1_782_072_000.0;
-        assert!(still_drawn(&solar, Some(Style::Dynamic), false, &clock(noon, 0.5), 0));
-        assert!(!still_drawn(&solar, Some(Style::Dynamic), false, &clock(noon + 12.0 * 3600.0, 0.5), 0), "night came");
-        assert!(still_drawn(&solar, Some(Style::Automatic), true, &clock(noon, 0.5), 1));
-        assert!(!still_drawn(&solar, Some(Style::Automatic), false, &clock(noon, 0.5), 1), "the appearance turned light");
-        assert!(still_drawn(&solar, Some(Style::Dark), false, &clock(noon, 0.5), 1), "pinned dark: whatever the appearance");
-        assert!(!still_drawn(&facts(Err("unreadable"), 5), Some(Style::Dark), false, &clock(noon, 0.5), 1));
-        assert!(still_drawn(&facts(Ok(Schedule::Still), 1), None, true, &clock(noon, 0.5), 0), "a still never changes");
+        let yes = |f: &ImageFacts, st: Style, dark: bool, unix: f64, i: usize| still_drawn(f, Some(st), dark, &clock(unix, 0.5), i) == StillShown::Yes;
+        assert!(yes(&solar, Style::Dynamic, false, noon, 0));
+        assert!(!yes(&solar, Style::Dynamic, false, noon + 12.0 * 3600.0, 0), "night came");
+        assert_eq!(still_drawn(&solar, Some(Style::Dynamic), false, &clock(noon + 12.0 * 3600.0, 0.5), 0), StillShown::No);
+        assert!(yes(&solar, Style::Automatic, true, noon, 1));
+        assert!(!yes(&solar, Style::Automatic, false, noon, 1), "the appearance turned light");
+        assert!(yes(&solar, Style::Dark, false, noon, 1), "pinned dark: whatever the appearance");
+        assert_eq!(still_drawn(&facts(Err("unreadable"), 5), Some(Style::Dark), false, &clock(noon, 0.5), 1), StillShown::No);
+        assert_eq!(still_drawn(&facts(Ok(Schedule::Still), 1), None, true, &clock(noon, 0.5), 0), StillShown::Yes, "a still never changes");
+        // Near sunset the area disagrees: a frame among the candidates is right only if they
+        // look alike; one outside them is wrong.
+        let Ok(Schedule::Solar { suns, .. }) = &solar.schedule else { panic!() };
+        let la = (34.05, -118.24);
+        let dusk = (0..240).map(|m| noon + 5.0 * 3600.0 + f64::from(m) * 60.0).find(|t| solar_candidates(suns, *t, la).is_ok_and(|c| c.len() > 1)).expect("an ambiguous minute");
+        let c = solar_candidates(suns, dusk, la).expect("candidates");
+        assert_eq!(still_drawn(&solar, Some(Style::Dynamic), false, &clock(dusk, 0.5), c[1]), StillShown::IfAlike(c.clone()));
+        let outside = (0..5).find(|i| !c.contains(i)).expect("a frame not among them");
+        assert_eq!(still_drawn(&solar, Some(Style::Dynamic), false, &clock(dusk, 0.5), outside), StillShown::No);
     }
 
     // ----- Apple's own pictures, named by their descriptions -----------------------------

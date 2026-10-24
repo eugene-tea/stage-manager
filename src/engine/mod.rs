@@ -28,6 +28,7 @@ pub mod restore;
 pub mod rules;
 pub mod settings;
 pub mod slide_hold;
+pub mod solar_settle;
 pub mod sliver;
 pub mod vanished;
 pub mod stage_area;

@@ -25,7 +25,9 @@
 //! - `stage-manager probe-patch [--out FILE.png] [--rect X,Y,W,H] [--reach PT] [--placement P]` renders what
 //!   the wallpaper corner patch would show over the main display's corner right now (the
 //!   patch's own code path, from the wallpaper's file; no screen capture) to a PNG (default
-//!   `/tmp/stage-manager-patch.png`) and prints what it drew, one JSON line.
+//!   `/tmp/stage-manager-patch.png`) and prints what it drew, one JSON line, with which way
+//!   its frame settled (`exact`; near a solar frame change `alike`, or `off`: the running
+//!   app settles that with one still of the desktop).
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
 //!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
 //!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.

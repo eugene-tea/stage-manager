@@ -3,8 +3,11 @@
 //! the wallpaper corner patch would show over the main display's corner right now, through
 //! the patch's own code path ([`super::corner_patch::picture_for`] and
 //! [`super::corner_patch::crop_for`] on a fresh [`crate::platform::wallpaper::Reader`]), to
-//! a PNG, and prints what it drew as one JSON line. For the live check: compare the PNG
-//! pixel by pixel with a screen capture of the same rectangle taken by hand.
+//! a PNG, and prints what it drew as one JSON line, with which way its frame settled
+//! (`settled`: `exact`; near a solar frame change `alike` when every candidate frame renders
+//! the block alike, else `off`: only the running app settles that, with one still of the
+//! desktop, [`super::corner_settle`]). For the live check: compare the PNG pixel by pixel
+//! with a screen capture of the same rectangle taken by hand.
 //!
 //! The rectangle is `--rect` (global points, top-left), else the parked windows' slivers
 //! on screen now grown by the reach ([`crate::engine::corner_patch::patch_rect`]), else a
@@ -23,10 +26,11 @@ use serde_json::json;
 
 use super::corner_patch::{crop_for, picture_for};
 use crate::engine::corner_patch::{DEFAULT_REACH, DesktopIcons, item_reach, patch_rect};
-use crate::engine::geometry::Rect;
+use crate::engine::geometry::{Rect, Size};
+use crate::engine::solar_settle::{self, Thumb};
 use crate::engine::park::is_parked_in_at;
 use crate::engine::wallpaper::Placement;
-use crate::platform::wallpaper::{self, Reader};
+use crate::platform::wallpaper::{self, Job, Reader};
 use crate::platform::{desktop, desktop_items, windows};
 
 /// Where the PNG goes by default.
@@ -132,6 +136,32 @@ pub fn run(args: &[String]) -> ExitCode {
         job.placement = p;
     }
     let started = Instant::now();
+    let mut settled = json!({ "way": "exact" });
+    if !decision.candidates.is_empty() {
+        // Near a solar frame change: the candidates' renders of the block, compared as the
+        // patch compares them.
+        let region = crate::engine::wallpaper::region(Size::new(wall.screen.w, wall.screen.h), crate::engine::wallpaper::local(rect, wall.screen));
+        let size = Size::new(region.w, region.h);
+        let thumbs: Vec<Option<Thumb>> = decision
+            .candidates
+            .iter()
+            .map(|i| wallpaper::render(&Job { index: *i, ..job.clone() }, region).ok().and_then(|img| wallpaper::thumb(&img, job.space.as_deref(), size)))
+            .collect();
+        let read: Vec<&Thumb> = thumbs.iter().flatten().collect();
+        let alike = read.len() == thumbs.len() && solar_settle::alike(&read);
+        let spread = read.windows(2).filter_map(|w| solar_settle::max_diff(w[0], w[1])).fold(0.0, f64::max);
+        settled = json!({
+            "way": if alike { "alike" } else { "off" },
+            "candidates": decision.candidates,
+            "max_cell_diff": (spread * 10.0).round() / 10.0,
+            "alike_levels": solar_settle::ALIKE_LEVELS,
+        });
+        if !alike {
+            let why = "the candidate frames differ here; the running app settles that with one still of the desktop";
+            println!("{}", json!({ "ok": false, "why": why, "settled": settled, "probe": base }));
+            return ExitCode::FAILURE;
+        }
+    }
     let drawn = picture_for(&job, wall.screen, rect).and_then(|(region, picture)| {
         crop_for(&picture, region, job.scale, wall.screen, rect).map(|c| (region, c)).ok_or_else(|| "the crop is outside the render".to_string())
     });
@@ -157,6 +187,7 @@ pub fn run(args: &[String]) -> ExitCode {
             "scale": job.scale,
             "kind": decision.kind,
             "frame": decision.frame.index,
+            "settled": settled,
             "style": decision.style.map(|s| format!("{s:?}").to_lowercase()),
             "placement": decision.placement.name(),
             "color_space": job.space_key,
