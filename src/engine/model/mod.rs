@@ -859,6 +859,18 @@ impl Model {
         };
     }
 
+    /// Makes standard member `id` of `stage` its key window and its front member (first in
+    /// `windows`), as the user asked for it (an activation of its app, its focus, a sliver let
+    /// go): the stage's next show raises it last and focuses it. A no-op for a window that is
+    /// not a standard member of `stage`.
+    pub(crate) fn make_key(&mut self, stage: StageId, id: WindowId) {
+        let Some(s) = self.stage_mut(stage) else { return };
+        let Some(at) = s.windows.iter().position(|&w| w == id) else { return };
+        let w = s.windows.remove(at);
+        s.windows.insert(0, w);
+        s.key = Some(id);
+    }
+
     /// Parks a stage's members and children.
     pub(crate) fn park_stage(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
@@ -870,7 +882,9 @@ impl Model {
     }
 
     /// Shows a stage: restore frames, raise back to front (each window's children right after
-    /// it), focus the key window last.
+    /// it), the key window and its children raised last whatever their place in the order,
+    /// then focus the key window: no other window, of its app or another, is raised between
+    /// the key's raise and its focus.
     pub(crate) fn show_stage(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let members = s.windows.clone();
@@ -884,11 +898,15 @@ impl Model {
             .filter(|&c| self.resolve_standard(c).is_none())
             .collect();
         let mut order = Vec::new();
-        for &m in members.iter().rev() {
+        for &m in members.iter().rev().filter(|&&m| Some(m) != key) {
             order.push(m);
             order.extend(self.children_of(m));
         }
         order.extend(orphans);
+        if let Some(k) = key {
+            order.push(k);
+            order.extend(self.children_of(k));
+        }
         for &id in &order {
             self.restore_window(id, actions);
         }

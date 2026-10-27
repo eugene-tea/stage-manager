@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
+  front with the keyboard, also when it shares its stage with other apps.
+
 ## 1.4.0 — 2026-10-23
 
 - New apps can open in the current stage: turn on **Open new apps in the current stage**

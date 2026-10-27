@@ -874,6 +874,114 @@ fn focusing_a_parked_window_switches_to_its_stage() {
     assert!(e.m.window_focused(w(1), &obs).is_empty());
 }
 
+/// The raises of a batch, in order.
+fn raises(actions: &[Action]) -> Vec<u32> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Raise { id } => Some(id.0),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Asserts the batch focuses `key` once, after every raise, the last raises being `last`.
+fn ends_with_key(actions: &[Action], key: u32, last: &[u32]) {
+    let focus: Vec<u32> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Focus { id } => Some(id.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(focus, vec![key], "{actions:?}");
+    let f = first_index(actions, |a| matches!(a, Action::Focus { .. })).expect("a focus");
+    assert!(actions[f + 1..].iter().all(|a| !matches!(a, Action::Raise { .. })), "a raise after the focus: {actions:?}");
+    assert!(raises(actions).ends_with(last), "raises {:?} should end with {last:?}", raises(actions));
+}
+
+/// Stage 1 shares app A's window 1 (with its sheet 4) and app B's window 2, B's the key (in
+/// front, focused when the stage was left); stage 2 (app C's window 3) is active.
+fn shared_stage() -> Env {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(child(4, 10, Some(1)), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    assert_eq!(e.active_number(), 2);
+    assert_eq!(e.members(1), vec![2, 1]);
+    assert_eq!(e.m.stages()[0].key, Some(w(2)));
+    e
+}
+
+#[test]
+fn activating_the_other_app_of_a_shared_stage_brings_its_window_in_front() {
+    // His 10-27 Dock click: Calendar (A) clicked, its stage's key Mail's (B). Apple's comes
+    // with the clicked app's window in front and focused.
+    let mut e = shared_stage();
+    let obs = Observation { focused: None, ..e.d.obs() };
+    let a = e.m.app_activated(10, &obs);
+    ends_with_key(&a, 1, &[2, 1, 4]);
+    e.run(a);
+    assert_eq!(e.active_number(), 1);
+    assert_eq!(e.m.stages()[0].key, Some(w(1)), "the stage's key is the activated app's window");
+    assert_eq!(e.members(1), vec![1, 2]);
+    assert_eq!(e.d.focused, Some(w(1)));
+    // Back and forth: the next activation of B gives B the key again.
+    let obs = e.d.obs();
+    let a = e.m.switch_to_number(2, &obs);
+    e.run(a);
+    let obs = Observation { focused: None, ..e.d.obs() };
+    let a = e.m.app_activated(11, &obs);
+    ends_with_key(&a, 2, &[1, 4, 2]);
+    e.run(a);
+    assert_eq!(e.m.stages()[0].key, Some(w(2)));
+}
+
+#[test]
+fn an_activation_keys_the_apps_focused_window_else_its_front_one() {
+    let mut e = shared_stage();
+    e.add(meta(5, 10, "com.example.a"), RuleAction::Current);
+    // Window 5 (A's second) is in the active stage now; send it to stage 1 behind window 1.
+    let obs = e.d.obs();
+    let a = e.m.send_window(w(5), Target::Number(1), &obs);
+    e.run(a);
+    let order = e.members(1);
+    assert_eq!(order[0], 5, "a sent window comes in front as its stage's key");
+    let mut m = e.m.clone();
+    // Its focused window, a sheet standing for its parent.
+    let obs = Observation { focused: Some(w(4)), ..e.d.obs() };
+    ends_with_key(&e.m.app_activated(10, &obs), 1, &[1, 4]);
+    // No focus asked: the stage's key, the app's.
+    let obs = Observation { focused: None, ..e.d.obs() };
+    ends_with_key(&m.app_activated(10, &obs), 5, &[5]);
+}
+
+#[test]
+fn focusing_a_window_of_another_stage_makes_it_that_stages_key() {
+    // A click on window 1's sliver (or ⌘` to it): it comes in front with the keyboard, not
+    // the stage's key, B's window 2.
+    let mut e = shared_stage();
+    let obs = e.d.obs();
+    let a = e.m.window_focused(w(4), &obs);
+    ends_with_key(&a, 1, &[2, 1, 4]);
+    e.run(a);
+    assert_eq!(e.m.stages()[0].key, Some(w(1)));
+    assert_eq!(e.d.focused, Some(w(1)));
+}
+
+#[test]
+fn a_shown_stage_raises_its_key_last_whatever_its_place() {
+    let mut e = shared_stage();
+    let s = e.m.stages()[0].id;
+    if let Some(st) = e.m.stage_mut(s) {
+        st.key = Some(w(1));
+    }
+    assert_eq!(e.members(1), vec![2, 1], "the key behind another member");
+    let a = e.switch(1);
+    ends_with_key(&a, 1, &[2, 1, 4]);
+}
+
 #[test]
 fn a_parked_window_dragged_out_by_its_sliver_stays_where_it_was_dropped() {
     // Stage 1: A's windows 1 and 3 (3 key); stage 2: B's window 2, active. The user grabs
