@@ -386,6 +386,14 @@ pub fn wallpaper_click(s: &NativeSettings, clicks: i64) -> WallpaperClick {
 /// as after a Dock click). The arriving frames, the raises and the focus again (after the
 /// raises, so the key window ends in front) wait. An activation's early focus
 /// ([`Controller::focus_now`]) comes before all this and changes none of it.
+///
+/// The raises all wait, another app's windows' too, even after the early focus gave the
+/// activated app the keyboard: raised now they would rise in the park corner, over the corner
+/// patch, beside the cover drawn for the activated app's. An `AXRaise` of another app's window
+/// reorders it without activating that app (10-27: Mail's window raised after Calendar's early
+/// focus noted a focused-window change in Mail, no activation), and the batch raises the key
+/// window and its children last ([`crate::engine::model::Model::show_stage`]), right before
+/// the focus, which raises the key again: the activated window ends in front.
 fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>, Vec<Action>) {
     let focus: Vec<Action> = actions.iter().copied().filter(|a| matches!(a, Action::Focus { .. })).collect();
     let (later, mut now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
@@ -5555,12 +5563,43 @@ mod tests {
         assert!(run.now.is_empty(), "no window taken out of the transition: every incoming one grows from its card");
         assert_eq!(run.focus, Some(WindowId(3)), "the keyboard goes to the activated window as the transition is sent");
         assert_eq!(run.fallback, [3, 4].into(), "brought at once should the corner not be coverable");
-        // The switch's focus on another app's window (a stage of two apps): not hurried, so
-        // that app is not raised in the corner before the overlay covers it.
+        // The switch's focus on another app's window: not hurried, so that app is not raised
+        // in the corner before the overlay covers it. (An activation's own switch keys the
+        // activated app's window, so this is only a batch the activation did not choose.)
         let other = |id: u32| Some(if id == 3 { 10 } else { 30 });
         assert_eq!(activation_run(true, 30, &activation_batch(), other).focus, None);
         // Nothing to switch: nothing to do.
         assert_eq!(activation_run(true, 30, &[], pid_of), ActivationRun::default());
+    }
+
+    #[test]
+    fn a_dock_click_on_the_other_app_of_a_shared_stage_gives_it_the_keyboard_and_the_front() {
+        // His 10-27 log: one stage holds Mail (B, the key) and Calendar (A); a Dock click on
+        // Calendar switched with Mail's key, no early focus, and our focus activated Mail.
+        use crate::engine::model::ModelOptions;
+        use crate::engine::rules::{Decision, Placement, RuleAction};
+        use crate::engine::testkit::{Desk, child, meta, model_with};
+        let mut m = model_with(ModelOptions::default());
+        let mut d = Desk::default();
+        let a = meta(1, 10, "com.example.a");
+        let sheet = child(4, 10, Some(1));
+        let b = meta(2, 11, "com.example.b");
+        let c = meta(3, 12, "com.example.c");
+        for (w, action) in [(a, RuleAction::Current), (sheet, RuleAction::Current), (b, RuleAction::Current), (c, RuleAction::New)] {
+            d.open(&w);
+            let batch = m.add_window(w, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &d.obs());
+            d.apply(&batch);
+        }
+        let pid_of = |id: u32| m.window(WindowId(id)).map(|w| w.meta.pid);
+        let mut m2 = m.clone();
+        let batch = m2.app_activated(10, &Observation { focused: None, ..d.obs() });
+        let run = activation_run(true, 10, &batch, pid_of);
+        assert_eq!(run.focus, Some(WindowId(1)), "the keyboard goes to the clicked app's window before the motion");
+        let arriving: HashSet<u32> = [1, 2, 4].into();
+        let (now, later) = split_covered(batch, &arriving);
+        assert_eq!(ids(&now).last().map(String::as_str), Some("focus 1"));
+        let tail: Vec<String> = ids(&later).into_iter().filter(|a| a.starts_with("raise") || a.starts_with("focus")).collect();
+        assert_eq!(tail, ["raise 2", "raise 1", "raise 4", "focus 1"], "the other app's window raised first, the key and its sheet last");
     }
 
     #[test]

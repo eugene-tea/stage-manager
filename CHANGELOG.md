@@ -3,6 +3,8 @@
 ## Unreleased
 
 - The corner stays clean at dawn and dusk on wallpapers that follow the sun.
+- Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
+  front with the keyboard, also when it shares its stage with other apps.
 
 ## 1.4.0 — 2026-10-23
 

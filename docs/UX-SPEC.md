@@ -56,7 +56,10 @@ Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
 stage, animated as a card click: the stage you leave shrinks into the strip and the app's
-windows grow from their card. The keyboard goes to the app's window at once.
+windows grow from their card. The keyboard goes to the app's window at once. In a stage
+shared with other apps, the activated app's window comes in front with the keyboard,
+whichever window was focused when the stage was left; a click on a waiting window's edge
+does the same for that window.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
