@@ -6,8 +6,11 @@
 //! a PNG, and prints what it drew as one JSON line, with which way its frame settled
 //! (`settled`: `exact`; near a solar frame change `alike` when every candidate frame renders
 //! the block alike, else `off`: only the running app settles that, with one still of the
-//! desktop, [`super::corner_settle`]). For the live check: compare the PNG pixel by pixel
-//! with a screen capture of the same rectangle taken by hand.
+//! desktop, [`super::corner_settle`]). A solar frame is decided by the clock's unnarrowed
+//! model (`hypotheses`: how many stand; the probe takes no still, so it never narrows): the
+//! running app's model, narrowed by its stills, may name fewer candidates. For the live
+//! check: compare the PNG pixel by pixel with a screen capture of the same rectangle taken by
+//! hand.
 //!
 //! The rectangle is `--rect` (global points, top-left), else the parked windows' slivers
 //! on screen now grown by the reach ([`crate::engine::corner_patch::patch_rect`]), else a
@@ -136,7 +139,8 @@ pub fn run(args: &[String]) -> ExitCode {
         job.placement = p;
     }
     let started = Instant::now();
-    let mut settled = json!({ "way": "exact" });
+    let hypotheses = decision.sun.as_ref().map(|s| s.surviving);
+    let mut settled = json!({ "way": "exact", "hypotheses": hypotheses });
     if !decision.candidates.is_empty() {
         // Near a solar frame change: the candidates' renders of the block, compared as the
         // patch compares them.
@@ -153,6 +157,7 @@ pub fn run(args: &[String]) -> ExitCode {
         settled = json!({
             "way": if alike { "alike" } else { "off" },
             "candidates": decision.candidates,
+            "hypotheses": hypotheses,
             "max_cell_diff": (spread * 10.0).round() / 10.0,
             "alike_levels": solar_settle::ALIKE_LEVELS,
         });
