@@ -172,6 +172,17 @@ pub fn since_last_input() -> Duration {
     Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO)
 }
 
+/// Since the user last pressed a mouse button in this login session (any thread): unlike
+/// [`since_last_input`], a pointer move, a scroll or a key does not count.
+pub fn since_last_click() -> Duration {
+    [CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown]
+        .into_iter()
+        .map(|kind| CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, kind))
+        .filter_map(|secs| Duration::try_from_secs_f64(secs).ok())
+        .min()
+        .unwrap_or(Duration::MAX)
+}
+
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)
