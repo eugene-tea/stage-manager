@@ -141,6 +141,14 @@ impl Metrics {
         [Point::new(x, top), Point::new(rx, ry(top)), Point::new(rx, ry(top + v)), Point::new(x, top + v)]
     }
 
+    /// The depth (toward the eye) of the turned plane whose left edge is at `x`, at the point
+    /// it covers `px` across before the projection: `-(px - x) tan tilt`. Of two planes over
+    /// the same point the one with the greater depth is nearer the eye, and the turn is the
+    /// same for every plane, so the one whose left edge is further right always is.
+    pub fn depth_at(&self, x: f64, px: f64) -> f64 {
+        -(px - x) * self.tilt.tan()
+    }
+
     /// The bounding box of [`Metrics::project`].
     pub fn projected_bounds(&self, x: f64, top: f64, u: f64, v: f64) -> Rect {
         let q = self.project(x, top, u, v);
@@ -177,6 +185,15 @@ pub struct CardLayout {
 }
 
 impl CardLayout {
+    /// The thumbnails in the order the card draws them, back to front: the list reversed, so
+    /// the front window is on top, then the others in their order, within an app's group and
+    /// across apps. The turn alone would stack them by depth instead: wherever two overlap,
+    /// the one whose left edge is further right is nearer the eye
+    /// ([`Metrics::depth_at`]), and a second app's windows sit `second_app_dx` right.
+    pub fn draw_order(&self) -> Vec<ThumbSlot> {
+        self.thumbs.iter().rev().copied().collect()
+    }
+
     /// What the card covers on screen (panel coordinates): its turned thumbnails and icons.
     pub fn bounds(&self, m: &Metrics) -> Rect {
         let mut r: Option<Rect> = None;
@@ -366,6 +383,24 @@ mod tests {
         let top = if y < eye { y } else { eye + (y - eye) / f } - panel_top;
         let b = m.projected_bounds(m.card_x, top, s.w, s.h);
         (b.w, b.h)
+    }
+
+    #[test]
+    fn a_card_draws_its_front_window_on_top_then_the_others_in_order() {
+        // The front window (app 10), a second app's window (20), then another of app 10's.
+        let m = laptop();
+        let c = card(1, &[(1, 10, 1200.0, 900.0), (2, 20, 1200.0, 900.0), (3, 10, 1000.0, 800.0)]);
+        let l = &layout_column(&[c], 1130.0, &m)[0];
+        let drawn: Vec<u32> = l.draw_order().iter().map(|t| t.id).collect();
+        assert_eq!(drawn, [3, 2, 1], "back to front: the list reversed, the front window last");
+        // Why the order has to be given: the turn alone puts the second app's plane nearer
+        // the eye wherever it overlaps the front one (its left edge is further right).
+        let (front, second) = (l.thumbs[0], l.thumbs[1]);
+        assert!(second.rect.x > front.rect.x);
+        let x = l.frame.x;
+        let px = x + second.rect.x + 1.0;
+        assert!(px < x + front.rect.x + front.rect.w, "the two overlap there");
+        assert!(m.depth_at(x + second.rect.x, px) > m.depth_at(x + front.rect.x, px));
     }
 
     #[test]

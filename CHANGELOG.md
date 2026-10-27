@@ -4,6 +4,8 @@
 
 - Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
   front with the keyboard, also when it shares its stage with other apps.
+- A card shows its front window on top, also when its stage holds two apps, and the windows
+  keep that order as they grow from the card.
 
 ## 1.4.0 — 2026-10-23
 

@@ -5,12 +5,16 @@
 //!   thread; everything here runs on the main thread. Each snapshot carries the
 //!   [`StripStyle`] (config), so look and motion follow config edits live.
 //! - **Cards** ([`strip_layout`]): each window's thumbnail is its own plane, turned about
-//!   its left edge inside its card's perspective container, whose eye sits at the display's
-//!   vertical middle. A card is **one unit**: its planes, app icons, badge and name sit in
-//!   one 3D group (`CATransformLayer`, so the planes keep their perspective) that moves as a
-//!   whole, so an icon never drifts from its thumbnail (with the icons in a separate flat
-//!   layer they did, by the hover scale times the distance travelled, owner 10-12); the icons
-//!   are flat at depth 0, where the perspective leaves them as they are.
+//!   its left edge in a perspective whose eye sits at the display's vertical middle. A card
+//!   is **one unit**: its planes, app icons, badge and name move as a whole, so an icon never
+//!   drifts from its thumbnail (with the icons in a separate flat layer they did, by the hover
+//!   scale times the distance travelled, owner 10-12); the icons are flat at depth 0, where
+//!   the perspective leaves them as they are. Each plane sits in a **depth** of its own (a
+//!   perspective container holding a 3D group, `Depth`), the icons in a top one, and the card
+//!   draws them back to front, so the front window is on top: in one shared 3D group Core
+//!   Animation stacked the planes by depth, and a second app's window, further right, covered
+//!   the front one (owner, 10-27). Every depth gets the same slide and the same glide in one
+//!   transaction, which keeps the card one unit.
 //! - **Hover** grows the card about its center (eased); a click acts on mouse-up in the same
 //!   card and goes out as [`StripEvent::CardClicked`], or [`StripEvent::IconClicked`] on its
 //!   app icon.
@@ -563,15 +567,59 @@ impl Geometry {
 // ---------------------------------------------------------------------------------------
 // Layers
 
+/// One depth of a card: a perspective container of its own holding a 3D group.
+///
+/// Core Animation sorts turned planes that share one perspective container by depth, not by
+/// their order: a plane whose left edge is further right is nearer the eye, so a second app's
+/// window (`second_app_dx` to the right) was drawn over the front window (owner, 10-27). A
+/// plain layer flattens what it holds, so each window's plane gets a container of its own and
+/// the card draws them in their order, back to front, with the same transforms as before.
+struct Depth {
+    /// Covers the panel, anchored at the eye; its `sublayerTransform` is the strip's slide
+    /// and the perspective ([`perspective`]).
+    space: Retained<CALayer>,
+    /// The 3D group inside it: its `position` is the card's offset from where its content
+    /// was built. Every depth of a card gets the same position and glide in the same
+    /// transaction, so the card moves as one unit.
+    unit: Retained<CATransformLayer>,
+}
+
+impl Depth {
+    /// A new depth on `card`, `index` among its sublayers, its slide at `dx`; a slide under
+    /// way on `like` (another depth's container) carries on in it.
+    fn new(card: &CALayer, index: u32, m: &Metrics, dx: f64, like: Option<&CALayer>) -> Self {
+        let bounds = card.bounds();
+        let anchor = card.anchorPoint();
+        let space = CALayer::new();
+        space.setBounds(bounds);
+        space.setAnchorPoint(anchor);
+        space.setPosition(CGPoint::new(bounds.size.width * anchor.x, bounds.size.height * anchor.y));
+        space.setSublayerTransform(perspective(m, dx));
+        let key = NSString::from_str("sublayerTransform");
+        // SAFETY: reading a layer's animation by key; nil when there is none.
+        if let Some(anim) = like.and_then(|l| unsafe { l.animationForKey(&key) }) {
+            space.addAnimation_forKey(&anim, Some(&key));
+        }
+        let unit = CATransformLayer::new();
+        unit.setBounds(bounds);
+        unit.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        unit.setPosition(CGPoint::new(0.0, 0.0));
+        space.addSublayer(&unit);
+        card.insertSublayer_atIndex(&space, index);
+        Self { space, unit }
+    }
+}
+
 /// One card's layers.
 struct CardLayers {
-    /// The card's perspective container: covers the panel, anchored at the eye; its
-    /// `sublayerTransform` is the slide and the perspective, its `transform` the hover.
+    /// The card: covers the panel, anchored at the eye, flat; its `transform` is the hover.
+    /// It draws its depths in their order.
     card: Retained<CALayer>,
-    /// The card's content as one unit (planes, icons, badge, name), a 3D group inside the
-    /// container: its `position` is the card's offset from where its content was built, so a
-    /// glide moves everything together.
-    unit: Retained<CATransformLayer>,
+    /// The thumbnails' depths, back to front, one per plane.
+    depths: Vec<Depth>,
+    /// The top depth, over the thumbnails: the icons, badge and name. With [`Self::depths`]
+    /// it is the card's content as one unit.
+    top: Depth,
     /// Thumbnail planes per window id (back to front), each turned about its left edge.
     planes: Vec<(u32, Retained<CALayer>)>,
     /// Image layer per window id.
@@ -586,6 +634,34 @@ struct CardLayers {
     /// What the layers were built from.
     snapshot: CardSnapshot,
     layout: CardLayout,
+}
+
+impl CardLayers {
+    /// Every depth, back to front, the top one last.
+    fn all_depths(&self) -> impl Iterator<Item = &Depth> {
+        self.depths.iter().chain(std::iter::once(&self.top))
+    }
+
+    /// Moves the card's content to offset `to` (from `from`, as [`move_to`] does), every
+    /// depth alike.
+    fn move_units(&self, glide: Option<motion_math::Spring>, from: CGPoint, to: CGPoint) {
+        for d in self.all_depths() {
+            move_to(glide, &d.unit, from, to);
+        }
+    }
+
+    /// Slides every depth to `dx`: on the spring `s`, or at once.
+    fn slide_to(&self, s: Option<motion_math::Spring>, m: &Metrics, dx: f64) {
+        for d in self.all_depths() {
+            match s {
+                Some(s) => spring_sublayer_transform(s, &d.space, perspective(m, dx)),
+                None => {
+                    d.space.removeAnimationForKey(&NSString::from_str("sublayerTransform"));
+                    d.space.setSublayerTransform(perspective(m, dx));
+                }
+            }
+        }
+    }
 }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
@@ -1734,12 +1810,8 @@ impl Strip {
                 card_layer.setBounds(bounds);
                 card_layer.setAnchorPoint(CGPoint::new(m.eye.x / size.width.max(1.0), m.eye.y / size.height.max(1.0)));
                 card_layer.setPosition(CGPoint::new(m.eye.x, m.eye.y));
-                card_layer.setSublayerTransform(perspective(&m, self.current_dx()));
-                let unit = CATransformLayer::new();
-                unit.setBounds(bounds);
-                unit.setAnchorPoint(CGPoint::new(0.0, 0.0));
-                unit.setPosition(CGPoint::new(0.0, 0.0));
-                card_layer.addSublayer(&unit);
+                // The thumbnails' depths come with its content (`fill_card`), under this one.
+                let top = Depth::new(&card_layer, 0, &m, self.current_dx(), None);
                 self.pane.cards_root.addSublayer(&card_layer);
                 let fade = self.style.animation.seconds(self.style.cards.fade_ms);
                 if self.motion.holds(card.stage) {
@@ -1750,7 +1822,8 @@ impl Strip {
                 }
                 let layers = CardLayers {
                     card: card_layer,
-                    unit,
+                    depths: Vec::new(),
+                    top,
                     planes: Vec::new(),
                     images: Vec::new(),
                     icons: Vec::new(),
@@ -1771,7 +1844,7 @@ impl Strip {
         let (drawn, old_center) = match self.pane.cards.get(&card.stage) {
             Some(l) => {
                 // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-                let at = unsafe { l.unit.presentationLayer() }.map_or_else(|| l.unit.position(), |p| p.position());
+                let at = unsafe { l.top.unit.presentationLayer() }.map_or_else(|| l.top.unit.position(), |p| p.position());
                 (Point::new(l.built.x + at.x, l.built.y + at.y), l.layout.hover_center(&m))
             }
             None => (Point::new(layout.frame.x, layout.frame.y), layout.hover_center(&m)),
@@ -1800,7 +1873,7 @@ impl Strip {
             let to = Self::unit_offset(layout, layers.built);
             let now = Point::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
             let from = motion_math::rescaled_start(now, scale, old_center, layout.hover_center(&m));
-            move_to(glide, &layers.unit, CGPoint::new(from.x, from.y), to);
+            layers.move_units(glide, CGPoint::new(from.x, from.y), to);
             layers.card.setTransform(hover);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
@@ -1809,20 +1882,30 @@ impl Strip {
 
     /// (Re)builds a card's thumbnail planes, icons, badge and name.
     fn fill_card(&mut self, stage: u64, layout: &CardLayout, card: &CardSnapshot) {
-        let Some(layers) = self.pane.cards.get(&stage) else { return };
-        let unit = layers.unit.clone();
         let m = self.m().clone();
-        let style = self.style.clone();
-        let c = &style.cards;
-        let k = m.k;
+        let dx = self.current_dx();
+        let Some(layers) = self.pane.cards.get_mut(&stage) else { return };
+        let unit = layers.top.unit.clone();
         // SAFETY: setting no sublayers removes the old children.
         unsafe { unit.setSublayers(None) };
         unit.removeAnimationForKey(&NSString::from_str("position"));
         unit.setPosition(CGPoint::new(0.0, 0.0));
+        for d in layers.depths.drain(..) {
+            d.space.removeFromSuperlayer();
+        }
+        // Thumbnails back to front, each a plane turned about its left edge in a depth of its
+        // own (see `Depth`), so the front window is drawn on top.
+        let order = layout.draw_order();
+        let depths: Vec<Depth> =
+            (0..order.len()).map(|i| Depth::new(&layers.card, i as u32, &m, dx, Some(&layers.top.space))).collect();
+        layers.depths = depths;
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
+        let style = self.style.clone();
+        let c = &style.cards;
+        let k = m.k;
         let mut planes = Vec::new();
         let mut images = Vec::new();
-        // Thumbnails back to front, each a plane turned about its left edge.
-        for slot in layout.thumbs.iter().rev() {
+        for (slot, depth) in order.into_iter().zip(&layers.depths) {
             let plane = CALayer::new();
             plane.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(slot.rect.w, slot.rect.h)));
             plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
@@ -1830,6 +1913,10 @@ impl Strip {
             plane.setTransform(turn(&m));
             plane.setCornerRadius(c.corner_radius * k);
             plane.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 1.0)));
+            #[cfg(feature = "debug-render")]
+            if let Some((r, g, b)) = crate::ui::strip_demo::fake_color(slot.id) {
+                plane.setBackgroundColor(Some(&color(r, g, b, 1.0)));
+            }
             if card.active {
                 // The active stage's card (`[strip] active = "card"`): a light rim marks it.
                 plane.setBorderWidth(ACTIVE_RIM * k);
@@ -1860,7 +1947,7 @@ impl Strip {
                 tracing::debug!(stage, window = slot.id, "card drawn with a thumbnail that has no picture yet");
             }
             plane.addSublayer(&image);
-            unit.addSublayer(&plane);
+            depth.unit.addSublayer(&plane);
             planes.push((slot.id, plane));
             images.push((slot.id, image));
         }
@@ -2021,9 +2108,9 @@ impl Strip {
     /// How far `stage`'s card is drawn from its slot (on its way there).
     fn drawn_offset(&self, stage: u64) -> Point {
         let Some(l) = self.pane.cards.get(&stage) else { return Point::new(0.0, 0.0) };
-        let model = l.unit.position();
+        let model = l.top.unit.position();
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-        let drawn = unsafe { l.unit.presentationLayer() }.map_or(model, |p| p.position());
+        let drawn = unsafe { l.top.unit.presentationLayer() }.map_or(model, |p| p.position());
         Point::new(drawn.x - model.x, drawn.y - model.y)
     }
 
@@ -2651,13 +2738,7 @@ impl Strip {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
-            match slide {
-                Some(s) => spring_sublayer_transform(s, &layers.card, perspective(&m, dx)),
-                None => {
-                    layers.card.removeAnimationForKey(&NSString::from_str("sublayerTransform"));
-                    layers.card.setSublayerTransform(perspective(&m, dx));
-                }
-            }
+            layers.slide_to(slide, &m, dx);
         }
         CATransaction::commit();
     }
@@ -2697,4 +2778,50 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
         }
     }
     starts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::StripStyle;
+    use crate::engine::geometry::Size;
+
+    /// `v` (a row vector, `w` = 1) times `t`, as Core Animation applies a transform.
+    fn apply(t: &CATransform3D, v: [f64; 3]) -> [f64; 4] {
+        let [x, y, z] = v;
+        [
+            x * t.m11 + y * t.m21 + z * t.m31 + t.m41,
+            x * t.m12 + y * t.m22 + z * t.m32 + t.m42,
+            x * t.m13 + y * t.m23 + z * t.m33 + t.m43,
+            x * t.m14 + y * t.m24 + z * t.m34 + t.m44,
+        ]
+    }
+
+    /// Where the point `p` of a thumbnail plane (its bounds coordinates) is drawn: through
+    /// the transforms `fill_card` and `Depth::new` set (the plane's turn about its left edge's
+    /// middle, its position, then its depth's slide and perspective about the eye).
+    fn drawn(m: &Metrics, x: f64, top: f64, size: Size, p: Point, dx: f64) -> Point {
+        let turned = apply(&turn(m), [p.x, p.y - size.h / 2.0, 0.0]);
+        let at = [x + turned[0] - m.eye.x, top + size.h / 2.0 + turned[1] - m.eye.y, turned[2]];
+        let q = apply(&perspective(m, dx), at);
+        Point::new(m.eye.x + q[0] / q[3], m.eye.y + q[1] / q[3])
+    }
+
+    #[test]
+    fn a_plane_in_its_own_depth_is_drawn_where_the_layout_projects_it() {
+        // His laptop's strip (see strip_layout's tests): planes above, at and below the eye,
+        // at rest and slid partly out.
+        let m = Metrics::new(&StripStyle::default(), Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0);
+        for (x, top, u, v) in [(15.0, 120.0, 140.0, 105.0), (32.0, 480.0, 120.0, 90.0), (83.0, 900.0, 161.0, 120.0)] {
+            for dx in [0.0, -60.0] {
+                let size = Size::new(u, v);
+                let corners = [Point::new(0.0, 0.0), Point::new(u, 0.0), Point::new(u, v), Point::new(0.0, v)];
+                let want = m.project(x + dx, top, u, v);
+                for (c, w) in corners.into_iter().zip(want) {
+                    let got = drawn(&m, x, top, size, c, dx);
+                    assert!((got.x - w.x).abs() < 1e-6 && (got.y - w.y).abs() < 1e-6, "{c:?} of {x},{top}: {got:?} vs {w:?}");
+                }
+            }
+        }
+    }
 }
