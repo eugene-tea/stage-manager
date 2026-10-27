@@ -68,6 +68,9 @@
 //!   their backstop passes (the expected unveil at the configured speed plus a margin,
 //!   1.5 to 3 s: `motion_math::unveil_backstop`). The batch's focus does not wait: the keyboard goes to the new
 //!   stage at once, as Apple's does (`split_covered`).
+//! - **Raise order** (`raise_order`): after a batch that raised windows of two or more apps,
+//!   the window server's order of them is read for a moment; windows that landed out of the
+//!   order asked (an app's late reorder) are raised again, back to front, the key last.
 //! - **Space settle gate**: while a Space change waits out a full-screen animation, nothing
 //!   changes stages: window events, strip input, hotkeys, wallpaper clicks and ctl stage
 //!   commands are held off (`Controller::frozen`).
@@ -116,6 +119,7 @@ use crate::ui::{motion_math, transition_plan};
 mod arrival;
 mod dock_order;
 mod hide;
+mod raise_order;
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
@@ -1677,6 +1681,9 @@ impl Controller {
         let mut changed = false;
         let mut interrupted = false;
         let total = actions.len();
+        // What the batch raises and focuses, for the order check after it (`raise_order`; an
+        // unveil's runs once the strip has its note, [`Self::flush_pending`]).
+        let (raises, focus) = raise_order::raises_and_focus(&actions);
         for (done, action) in actions.into_iter().enumerate() {
             if interruptible && !interrupted && action != Action::StateChanged && safety::quit_requested() {
                 tracing::info!(done, total, "quit requested: the rest of this batch runs only its window restores");
@@ -1757,6 +1764,10 @@ impl Controller {
             safety::registry_replace(self.parked_entries(ob));
         }
         self.after_batch_hides(unhide);
+        // Two apps' raises can land in either order: the stage's windows end as asked.
+        if !interrupted && batch == Batch::User {
+            self.settle_raise_order(ob, &raises, focus, now);
+        }
         self.publish_shield();
         self.update_patch();
         self.remember();
@@ -2385,6 +2396,7 @@ impl Controller {
                     _ => None,
                 })
                 .collect();
+            let (raises, focus) = raise_order::raises_and_focus(&p.actions);
             self.execute_batch(ob, p.actions, Batch::Unveil);
             // Where the windows really are now: their snapshots land exactly there.
             let mut arrived = Vec::new();
@@ -2398,6 +2410,9 @@ impl Controller {
                 self.arrived_note = Some((p.id, arrived));
                 self.present();
             }
+            // The strip has its note: now the order its card shows (`raise_order`), unless the
+            // user clicked since the switch began (this flush may be his next click's).
+            self.settle_raise_order(ob, &raises, focus, p.since);
         }
     }
 

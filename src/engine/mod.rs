@@ -22,6 +22,7 @@ pub mod overview;
 pub mod park;
 pub mod persist;
 pub mod placement;
+pub mod raise_order;
 pub mod recovery;
 pub mod rescan;
 pub mod restore;

@@ -4602,8 +4602,66 @@ def restore_after_logout(run_id):
     stop_all_fixtures()
 
 
+# ----- raise order: a stage of three apps lands in its card's order ----------------------
+
+
+def phase_raise():
+    """Round raise-order (10-27: Mail and Safari landed swapped on every other arrival): a
+    stage holding Alpha, Bravo and Charlie (one window each), Alpha's windows answering
+    AXRaise at once and reordering 40 ms later (`--raise-delay-ms`), lands in its card's
+    order on every arrival, by ctl (at once) and by a card click (animated)."""
+    say("\n== raise order: a stage of three apps lands in its card's order ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(1)
+    start_extra_args("a", 1, "--raise-delay-ms", "40")
+    start_extra("b", 1)
+    start_extra("c", 1)
+    activate("c")
+    time.sleep(1.0)
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with the fixture and three fixture apps"):
+        return
+    for title in ("Alpha 1", "Bravo 1"):
+        n = number_of(state(), title)
+        if n is not None and n != state()["active"]:
+            do("merge", n)
+    s = wait_state(lambda x: active_titles(x) == {"Alpha 1", "Bravo 1", "Charlie 1"}, "one stage of Alpha, Bravo and Charlie")
+    if not check(s is not None, "Alpha, Bravo and Charlie share the active stage"):
+        return
+    want = stage_titles(s)[s["active"]]
+    say(f"  the card's order, front to back: {want}")
+    before = log_text().count("raise order:")
+    for i in range(4):
+        do("switch", number_of(state(), "Fixture 1"))
+        time.sleep(0.4)
+        how = "ctl" if i % 2 == 0 else "card"
+        if how == "ctl":
+            do("switch", number_of(state(), "Charlie 1"))
+        elif not click_card(state(), "Charlie 1", "the three apps' card"):
+            continue
+        s = wait_state(lambda x: active_titles(x) == set(want), "the three apps' stage back")
+        time.sleep(0.6)  # past the unveil and the order check
+        got = z_titles(want)
+        check(got == want, f"arrival {i + 1} ({how}): the windows stack as the card shows ({got}, wanted {want})")
+        check(s is not None and stage_titles(s)[s["active"]] == want, f"arrival {i + 1}: the card keeps its order")
+    lines = [ln for ln in log_text().splitlines() if "raise order:" in ln][before:]
+    say(f"  order fixes logged: {len(lines)}")
+    for ln in lines:
+        say(f"    {ln[ln.find('raise order:'):]}")
+    if not lines:
+        skip("raise order: a late raise", "the fixture's late AXRaise never landed out of order (no fix logged): the check went untested")
+    else:
+        check(all("fixed=true" in ln for ln in lines), "every order fix logged ended in the order asked")
+    consistent("raise order")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -4620,7 +4678,7 @@ def main():
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
-             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore}[p]()
+             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
