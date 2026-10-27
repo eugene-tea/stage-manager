@@ -140,7 +140,9 @@ pub fn file_name(path: &str) -> String {
     crate::logbook::titles::picture_name(path, super::logging::titles_shown())
 }
 
-/// Reads [`Wall`]s, keeping what only changes with a file (settings, picture facts, zone).
+/// Reads [`Wall`]s, keeping what only changes with a file (settings, picture facts, zone),
+/// and the clock's solar models as stills narrowed them ([`wp::SolarMemory`]: in memory
+/// only, forgotten when the time zone changes).
 #[derive(Default)]
 pub struct Reader {
     store: Option<(Option<SystemTime>, Option<Vec<StoreChoice>>)>,
@@ -148,6 +150,7 @@ pub struct Reader {
     descriptions: HashMap<String, Option<Plist>>,
     image: Option<(String, (u128, u64), Option<ImageFacts>)>,
     zone: Option<(String, Option<(f64, f64)>)>,
+    solar: wp::SolarMemory,
 }
 
 impl Reader {
@@ -191,6 +194,7 @@ impl Reader {
             _ => None,
         };
         let clock = self.clock();
+        let solar = path.as_deref().zip(clock.place).and_then(|(p, place)| self.solar.get(p, place));
         let inputs = Inputs {
             path: path.as_deref(),
             is_dir,
@@ -200,6 +204,7 @@ impl Reader {
             fill: fill.is_some(),
             dark,
             clock,
+            solar,
         };
         let decided = wp::decide(&inputs);
         let recheck_at = decided
@@ -273,9 +278,30 @@ impl Reader {
         let zone = NSTimeZone::localTimeZone().name().to_string();
         if self.zone.as_ref().is_none_or(|(z, _)| *z != zone) {
             let place = std::fs::read_to_string(ZONE_TAB).ok().and_then(|tab| wp::zone_place(&tab, &zone));
+            if self.zone.take().is_some() {
+                tracing::debug!("corner patch: the time zone changed; the clock's solar models start over");
+                self.solar.clear();
+            }
             self.zone = Some((zone, place));
         }
         Clock { unix, day_fraction: local_day_fraction(unix), place: self.zone.as_ref().and_then(|(_, p)| *p) }
+    }
+
+    /// The clock's model for the picture at `path`, as stills narrowed it (`None`:
+    /// unnarrowed), for the time zone read last.
+    pub fn solar_model(&self, path: &str) -> Option<&wp::SolarModel> {
+        let place = self.zone.as_ref().and_then(|(_, p)| *p)?;
+        self.solar.get(path, place)
+    }
+
+    /// A still of the desktop at `unix` showed the picture at `path` at one of the frames
+    /// `seen`: its solar model narrowed. `None` when the picture read last is another one or
+    /// not picked by the sun, or the time zone has no place.
+    pub fn observe(&mut self, path: &str, unix: f64, seen: &[usize]) -> Option<wp::Narrowed> {
+        let place = self.zone.as_ref().and_then(|(_, p)| *p)?;
+        let (p, _, facts) = self.image.as_ref()?;
+        let Some(ImageFacts { schedule: Ok(wp::Schedule::Solar { suns, .. }), .. }) = facts.as_ref().filter(|_| p == path) else { return None };
+        Some(self.solar.observe(path, place, suns, unix, seen))
     }
 }
 

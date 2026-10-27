@@ -1,24 +1,28 @@
-//! Settling a solar frame near a frame change (the corner patch, [`super::wallpaper`]).
+//! Settling a solar frame (the corner patch, [`super::wallpaper`]).
 //!
-//! Without Location Services the sun is placed at the time zone's place, and every place
-//! within [`super::wallpaper::SOLAR_SLACK_DEG`] of it must agree on the frame. Near a frame
-//! change they do not, and the frame is one of a few candidates
-//! ([`super::wallpaper::solar_candidates`]); on a dusk-heavy schedule that is hours a day.
-//! The patch still draws only from the picture's file, exact or off; two ways settle which
-//! frame macOS shows:
+//! Without Location Services, and with Apple's rule unpublished, the clock is a model
+//! ([`super::wallpaper::SolarModel`]: rules at places around the time zone's, macOS allowed
+//! to switch late). Near a frame change its hypotheses disagree and the frame is one of a
+//! few candidates ([`super::wallpaper::Decision::candidates`]). The patch still draws only
+//! from the picture's file, exact or off; two ways settle which frame macOS shows:
 //!
 //! 1. **Alike** ([`alike`]): every candidate renders the patch's block the same within
 //!    [`ALIKE_LEVELS`] in every cell of a [`CELL_PT`] grid ([`Thumb`]): any of them is exact.
 //!    Pure, no capture.
-//! 2. **One still** ([`best_match`]): otherwise, a still of the desktop's block (the picture
-//!    and what lies on it, never a window), taken only where window captures already work,
-//!    is compared with each candidate's render on the same grid, both drawn in the display's
+//! 2. **One still** ([`seen`]): otherwise, a still of the desktop's block (the picture and
+//!    what lies on it, never a window), taken only where window captures already work, is
+//!    compared with every frame's render on the same grid, both drawn in the display's
 //!    colour space. Desktop icons are masked out ([`mask`]). The best must be clearly close
-//!    ([`MATCH_LEVELS`]) and clearly better than the next ([`MATCH_RATIO`], [`MATCH_GAP`]);
-//!    no clear match is off. The still picks the frame only: what is drawn is the file's.
+//!    ([`MATCH_LEVELS`]); the frames not clearly worse ([`MATCH_RATIO`], [`MATCH_GAP`]) are
+//!    what the still saw. One candidate among them is drawn; none, or two, is off. The still
+//!    picks the frame only: what is drawn is the file's.
 //!
-//! [`next`] decides from what is known which way the frame settles now, when a still is
-//! due (at most one in flight, again only after [`RECHECK`]), and why it is off.
+//! Every still that saw clearly also narrows the clock's model
+//! ([`super::wallpaper::SolarMemory::observe`]), and on arrival at a Desktop one still
+//! checks even a frame the model names exactly ([`check_due`]): one that contradicts it
+//! narrows the model, and the frame is decided again, so a model that misses is caught at
+//! once. [`next`] decides from what is known which way the frame settles now, when a still
+//! is due (at most one in flight, again only after [`RECHECK`]), and why it is off.
 
 use std::time::Duration;
 
@@ -176,7 +180,31 @@ pub struct Matched {
 /// `mask`: the best clearly close ([`MATCH_LEVELS`]) and clearly better than the next
 /// ([`MATCH_RATIO`], [`MATCH_GAP`]); why not otherwise.
 pub fn best_match(still: &Thumb, candidates: &[(usize, &Thumb)], mask: &[bool]) -> Result<Matched, &'static str> {
-    if candidates.len() < 2 {
+    match seen(still, candidates, mask)? {
+        Seen { frames, best, next } if frames.len() == 1 => Ok(Matched { index: frames[0], best, next }),
+        _ => Err(NEARLY_ALIKE),
+    }
+}
+
+/// Why a still settles no frame: two it may show look nearly alike.
+pub const NEARLY_ALIKE: &str = "the desktop's still matches two candidate frames nearly alike";
+
+/// What a still of the desktop saw ([`seen`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seen {
+    /// The frames it may show: the best, then every frame not clearly worse.
+    pub frames: Vec<usize>,
+    /// The best frame's difference from the still (0-255).
+    pub best: f64,
+    /// The next frame's past those (infinite when none).
+    pub next: f64,
+}
+
+/// What a still of a block saw among every frame's render of it (`(frame, render)`), its
+/// cells kept by `mask`: the best clearly close ([`MATCH_LEVELS`]) and every frame not
+/// clearly worse ([`MATCH_RATIO`], [`MATCH_GAP`]); why none otherwise.
+pub fn seen(still: &Thumb, frames: &[(usize, &Thumb)], mask: &[bool]) -> Result<Seen, &'static str> {
+    if frames.len() < 2 {
         return Err("fewer than two candidate frames to tell apart");
     }
     if mask.len() != still.rgb.len() {
@@ -189,19 +217,19 @@ pub fn best_match(still: &Thumb, candidates: &[(usize, &Thumb)], mask: &[bool]) 
     if still.alpha.iter().zip(mask).any(|(a, k)| *k && *a < OPAQUE) {
         return Err("the desktop's still does not hold the picture there");
     }
-    let mut scored: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
-    for (index, t) in candidates {
+    let mut scored: Vec<(usize, f64)> = Vec::with_capacity(frames.len());
+    for (index, t) in frames {
         scored.push((*index, mean_diff(still, t, mask).ok_or("the desktop's still is not of the candidates' block")?));
     }
     scored.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let ((index, best), next) = (scored[0], scored[1].1);
+    let best = scored[0].1;
     if best > MATCH_LEVELS {
         return Err("the desktop's still matches none of the candidate frames");
     }
-    if next < (best * MATCH_RATIO).max(best + MATCH_GAP) {
-        return Err("the desktop's still matches two candidate frames nearly alike");
-    }
-    Ok(Matched { index, best, next })
+    let near = (best * MATCH_RATIO).max(best + MATCH_GAP);
+    let n = scored.iter().take_while(|(_, d)| *d < near).count();
+    let next = scored.get(n).map_or(f64::INFINITY, |s| s.1);
+    Ok(Seen { frames: scored[..n].iter().map(|s| s.0).collect(), best, next })
 }
 
 /// Which way a frame was settled.
@@ -220,8 +248,9 @@ pub struct Facts<'a> {
     pub candidates: &'a [usize],
     /// Whether their renders look alike; `None` while they render.
     pub alike: Option<bool>,
-    /// The last still for this picture: the frame it matched or why none, and its age.
-    pub last_still: Option<(Result<usize, &'static str>, Duration)>,
+    /// The last still for this picture: the frames it saw ([`Seen::frames`]) or why none,
+    /// and its age.
+    pub last_still: Option<(Result<Vec<usize>, &'static str>, Duration)>,
     /// A still is in flight.
     pub in_flight: bool,
     /// Whether a still may be taken now (the capture gate, the screen, the icons), why not.
@@ -253,35 +282,48 @@ pub enum Step {
 
 /// Which way the frame settles now. Alike candidates draw (the last still's frame when it
 /// is one of them and fresh, else the first). Otherwise a still's frame stands for
-/// [`RECHECK`], then a new still is taken; the old frame is kept while it is in flight, at
-/// most [`STALL`] more. No still before [`RECHECK`] has passed since the last one.
+/// [`RECHECK`] when exactly one candidate is among what it saw, then a new still is taken;
+/// the old frame is kept while it is in flight, at most [`STALL`] more. No still before
+/// [`RECHECK`] has passed since the last one.
 pub fn next(f: &Facts) -> Step {
     let Some(alike) = f.alike else { return Step::Render };
     let age = f.last_still.as_ref().map(|(_, a)| *a);
     let fresh = |a: Duration| a < RECHECK + STALL;
-    let stilled = f.last_still.as_ref().and_then(|(r, a)| r.ok().filter(|i| fresh(*a) && f.candidates.contains(i)));
+    let among: Option<Vec<usize>> = f
+        .last_still
+        .as_ref()
+        .and_then(|(r, a)| r.as_ref().ok().filter(|_| fresh(*a)))
+        .map(|seen| seen.iter().copied().filter(|i| f.candidates.contains(i)).collect());
     if alike {
-        let index = stilled.unwrap_or(f.candidates[0]);
+        let index = among.as_ref().and_then(|a| a.first().copied()).unwrap_or(f.candidates[0]);
         return Step::Draw { index, way: Way::Alike, take: false };
     }
     let due = !f.in_flight && f.may_take.is_ok() && age.is_none_or(|a| a >= RECHECK);
-    if let Some(index) = stilled {
-        return Step::Draw { index, way: Way::Still, take: due };
+    if let Some([index]) = among.as_deref() {
+        return Step::Draw { index: *index, way: Way::Still, take: due };
     }
     let why = match (&f.last_still, f.may_take) {
         _ if due || f.in_flight => "its candidate frames differ here; a still of the desktop settles which",
         (_, Err(why)) => why,
         (Some((Err(why), _)), Ok(())) => why,
+        (Some((Ok(_), _)), Ok(())) if among.as_ref().is_some_and(|a| a.len() > 1) => NEARLY_ALIKE,
         (Some((Ok(_), _)), Ok(())) => "the frame the last still of the desktop matched is no candidate now",
         (None, Ok(())) => "its candidate frames differ here",
     };
     Step::Off { why, take: due }
 }
 
+/// Whether a still is due to check a frame the clock names exactly, on arrival at a Desktop:
+/// none in flight, none for this picture within [`RECHECK`] (`last_age`), and one may be
+/// taken now.
+pub fn check_due(last_age: Option<Duration>, in_flight: bool, may_take: Result<(), &'static str>) -> bool {
+    !in_flight && may_take.is_ok() && last_age.is_none_or(|a| a >= RECHECK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::wallpaper::{SunFrame, solar_candidates};
+    use crate::engine::wallpaper::{SolarModel, SunFrame, sun_position};
 
     const BLOCK: Size = Size::new(480.0, 560.0);
 
@@ -412,17 +454,17 @@ mod tests {
         let flying = Facts { in_flight: true, ..differ.clone() };
         assert!(matches!(next(&flying), Step::Off { take: false, .. }), "at most one in flight");
         // The still matched 4: drawn for a minute, then rechecked, kept while the recheck flies.
-        let s = |r: Result<usize, &'static str>, secs: u64| Some((r, Duration::from_secs(secs)));
-        let settled = Facts { last_still: s(Ok(4), 10), ..differ.clone() };
+        let s = |r: Result<Vec<usize>, &'static str>, secs: u64| Some((r, Duration::from_secs(secs)));
+        let settled = Facts { last_still: s(Ok(vec![4]), 10), ..differ.clone() };
         assert_eq!(next(&settled), Step::Draw { index: 4, way: Way::Still, take: false });
-        let stale = Facts { last_still: s(Ok(4), 60), ..differ.clone() };
+        let stale = Facts { last_still: s(Ok(vec![4]), 60), ..differ.clone() };
         assert_eq!(next(&stale), Step::Draw { index: 4, way: Way::Still, take: true }, "a recheck at SOLAR_RECHECK");
         let waiting = Facts { in_flight: true, ..stale.clone() };
         assert_eq!(next(&waiting), Step::Draw { index: 4, way: Way::Still, take: false });
-        let lost = Facts { last_still: s(Ok(4), 66), in_flight: true, ..differ.clone() };
+        let lost = Facts { last_still: s(Ok(vec![4]), 66), in_flight: true, ..differ.clone() };
         assert!(matches!(next(&lost), Step::Off { take: false, .. }), "past the stall: off");
         // A still's frame that is no candidate now is not drawn; a new still waits its minute.
-        let moved = Facts { last_still: s(Ok(2), 10), ..differ.clone() };
+        let moved = Facts { last_still: s(Ok(vec![2]), 10), ..differ.clone() };
         assert_eq!(next(&moved), Step::Off { why: "the frame the last still of the desktop matched is no candidate now", take: false });
         // No clear match: off, and no new still before the minute.
         let unclear = Facts { last_still: s(Err("the desktop's still matches none of the candidate frames"), 20), ..differ.clone() };
@@ -437,14 +479,66 @@ mod tests {
         assert_eq!(next(&both), Step::Draw { index: 4, way: Way::Alike, take: false });
     }
 
+    #[test]
+    fn a_still_sees_every_frame_not_clearly_worse_than_the_best() {
+        let dusk = thumb(2.0, sky(0.6));
+        let near = thumb(2.0, sky(0.615));
+        let night = thumb(2.0, sky(0.25));
+        let day = thumb(2.0, sky(0.95));
+        let all = vec![true; dusk.rgb.len()];
+        let frames = [(1, &night), (3, &dusk), (4, &near), (0, &day)];
+        // The dusk frame shows: it and its near twin are what the still saw, the best first.
+        let still = thumb(2.0, |x, y| sky(0.6)(x + 0.5, y));
+        let s = seen(&still, &frames, &all).expect("seen");
+        assert_eq!(s.frames, vec![3, 4]);
+        assert!(s.best < 1.0 && s.next > 20.0, "{s:?}");
+        // Among candidates without the twin it is one frame; with it, two nearly alike.
+        assert_eq!(best_match(&still, &[(3, &dusk), (1, &night)], &all).map(|m| m.index), Ok(3));
+        assert_eq!(best_match(&still, &[(3, &dusk), (4, &near)], &all), Err(NEARLY_ALIKE));
+        // Night shows: one frame.
+        let s = seen(&thumb(2.0, sky(0.25)), &frames, &all).expect("seen");
+        assert_eq!((s.frames, s.next.is_finite()), (vec![1], true));
+        // Nothing close: none.
+        assert!(seen(&thumb(2.0, sky(0.425)), &frames, &all).is_err());
+    }
+
+    #[test]
+    fn what_a_still_saw_settles_the_one_candidate_among_it() {
+        let c = [0, 4];
+        let s = |r: Result<Vec<usize>, &'static str>, secs: u64| Some((r, Duration::from_secs(secs)));
+        let differ = facts(&c, Some(false));
+        // The still saw 4 and a frame that is no candidate (its twin up the sky): 4.
+        let twin = Facts { last_still: s(Ok(vec![4, 5]), 10), ..differ.clone() };
+        assert_eq!(next(&twin), Step::Draw { index: 4, way: Way::Still, take: false });
+        // It saw both candidates nearly alike: off, and why.
+        let both = Facts { last_still: s(Ok(vec![0, 4]), 10), ..differ.clone() };
+        assert_eq!(next(&both), Step::Off { why: NEARLY_ALIKE, take: false });
+        // Alike candidates take the best of them the still saw.
+        let alike_both = Facts { alike: Some(true), ..both };
+        assert_eq!(next(&alike_both), Step::Draw { index: 0, way: Way::Alike, take: false });
+    }
+
+    #[test]
+    fn an_arrival_checks_once_a_minute_when_a_still_may_be_taken() {
+        assert!(check_due(None, false, Ok(())), "never checked: now");
+        assert!(!check_due(None, true, Ok(())), "one in flight");
+        assert!(!check_due(None, false, Err("window captures are off")), "no still may be taken: later");
+        assert!(!check_due(Some(Duration::from_secs(30)), false, Ok(())), "checked within the minute");
+        assert!(check_due(Some(RECHECK), false, Ok(())));
+    }
+
     /// A dusk-heavy schedule (Apple's solar pictures crowd frames about the horizon, both
-    /// ways): over a day at the owner's place, the minutes off for want of an exact frame
-    /// drop once candidates that render alike are drawn. Dusk frames come in runs of four
-    /// that look the same in the corner (frames a few degrees apart differing only up the
-    /// sky, out of the corner).
+    /// ways): over a day at the owner's place, once stills narrowed the clock (a day of them,
+    /// the screen following the nearest frame at the place itself), the minutes off for want
+    /// of an exact frame drop when candidates that render alike are drawn. Dusk frames come in
+    /// runs of four that look the same in the corner (frames a few degrees apart differing
+    /// only up the sky, out of the corner).
     #[test]
     fn a_day_on_a_dusk_heavy_schedule_is_off_far_less_when_alike_candidates_draw() {
-        let mut suns = vec![SunFrame { altitude: 60.0, azimuth: 180.0, index: 0 }, SunFrame { altitude: -40.0, azimuth: 0.0, index: 1 }];
+        // Day and night on both sides of the sky, so either rule reads them.
+        let mut suns = [(60.0, 150.0, 0), (60.0, 210.0, 0), (-40.0, 20.0, 1), (-40.0, 340.0, 1)]
+            .map(|(altitude, azimuth, index)| SunFrame { altitude, azimuth, index })
+            .to_vec();
         let mut i = 2;
         for (az0, step) in [(95.0, 1.0), (265.0, -1.0)] {
             for k in 0..8 {
@@ -458,22 +552,44 @@ mod tests {
         let look = |f: usize| if f < 2 { f as f64 * 0.9 } else { 0.2 + ((f - 2) / 4) as f64 * 0.15 };
         let thumbs: Vec<Thumb> = (0..i).map(|f| thumb(0.25, sky(look(f)))).collect();
         let la = (34.05, -118.24);
+        // What the screen shows: the frame nearest the sun in the sky, at the place itself.
+        let shown = |t: f64| {
+            let (alt, az) = sun_position(t, la.0, la.1);
+            let d = |s: &SunFrame| {
+                let (a, b) = (alt.to_radians(), s.altitude.to_radians());
+                a.sin() * b.sin() + a.cos() * b.cos() * (az - s.azimuth).to_radians().cos()
+            };
+            suns.iter().max_by(|x, y| d(x).total_cmp(&d(y))).map(|s| s.index).expect("a frame")
+        };
         let start = 1_792_738_800.0; // 2026-10-23 07:00 UTC, midnight in Los Angeles
-        let (mut before, mut after) = (0, 0);
-        for minute in 0..1440 {
-            let c = solar_candidates(&suns, start + f64::from(minute) * 60.0, la).expect("frames");
-            if c.len() > 1 {
-                before += 1;
-                let t: Vec<&Thumb> = c.iter().map(|f| &thumbs[*f]).collect();
-                if alike(&t) {
-                    assert!(c.iter().all(|f| look(*f) == look(c[0])), "alike only when they look the same: {c:?}");
-                } else {
-                    after += 1;
-                }
+        let mut model = SolarModel::new(la);
+        let (mut first, mut before, mut after) = (0, 0, 0);
+        // Every five minutes of two days: the first narrows the clock by a still at each
+        // step it is unsure; the second is counted.
+        for step in 0..576 {
+            let t = start + f64::from(step) * 300.0;
+            let c = model.frames(&suns, t);
+            if c.len() < 2 {
+                assert_eq!(c, vec![shown(t)], "the clock names only what shows");
+                continue;
+            }
+            if step < 288 {
+                first += 1;
+                model.observe(&suns, t, &[shown(t)]);
+                continue;
+            }
+            before += 1;
+            let th: Vec<&Thumb> = c.iter().map(|f| &thumbs[*f]).collect();
+            if alike(&th) {
+                assert!(c.iter().all(|f| look(*f) == look(c[0])), "alike only when they look the same: {c:?}");
+            } else {
+                after += 1;
+                model.observe(&suns, t, &[shown(t)]);
             }
         }
-        assert!(before > 120, "hours off by the clock alone: {before} min");
-        // 10-23 at Los Angeles: 642 min before, 363 after; at least a quarter less.
-        assert!(after * 4 < before * 3, "alike candidates draw: {before} min off before, {after} after");
+        assert!(model.fits() && first > before, "the first day narrows: {first} steps unsure, then {before}");
+        // 10-23 then 10-24 at Los Angeles: 102 steps unsure, then 71, of them 24 off once
+        // alike candidates draw; at least a quarter less.
+        assert!(after * 4 < before * 3, "alike candidates draw: {before} steps off before, {after} after");
     }
 }
