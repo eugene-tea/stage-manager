@@ -43,6 +43,9 @@ use crate::ui::strip_model::{self, CardSnapshot, CardWindow, MovingWindow, Strip
 const MAX_CARDS: usize = 6;
 /// Window list refresh period.
 const REFRESH_SECONDS: f64 = 1.0;
+/// The first fake window's id (`STAGE_MANAGER_DEMO_FAKE`).
+#[cfg(feature = "debug-render")]
+const FAKE_ID: u32 = 900_000;
 /// Windows smaller than this are helpers, not documents.
 const MIN_SIDE: f64 = 60.0;
 
@@ -267,7 +270,7 @@ impl Demo {
             .firstObject()
             .map_or(-(i as i32) - 1, |a| a.processIdentifier());
             let frame = Rect::new(300.0, 100.0, w.parse().ok()?, h.parse().ok()?);
-            out.push(DemoWindow { id: 900_000 + i as u32, pid, frame, onscreen: true });
+            out.push(DemoWindow { id: FAKE_ID + i as u32, pid, frame, onscreen: true });
         }
         Some(out)
     }
@@ -345,6 +348,16 @@ impl Demo {
 
 fn env_flag(name: &str) -> Option<bool> {
     std::env::var(name).ok().map(|v| v != "0" && !v.is_empty())
+}
+
+/// With `debug-render`: the color a fake window's thumbnail is drawn in (it has no picture),
+/// a different one per entry of `STAGE_MANAGER_DEMO_FAKE`, so a render shows which window's
+/// plane is on top where two overlap.
+#[cfg(feature = "debug-render")]
+pub fn fake_color(id: u32) -> Option<(f64, f64, f64)> {
+    const COLORS: [(f64, f64, f64); 4] = [(0.9, 0.1, 0.1), (0.1, 0.2, 0.95), (0.1, 0.8, 0.2), (0.95, 0.85, 0.1)];
+    let i = id.checked_sub(FAKE_ID)? as usize;
+    COLORS.get(i).copied()
 }
 
 /// Runs the demo until Quit (menu) or a signal.
