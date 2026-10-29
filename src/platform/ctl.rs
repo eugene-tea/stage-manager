@@ -36,8 +36,10 @@
 //! copy's guardian `adopted` and `take-watch` (its binary may no longer be signed like this
 //! one: an update replaced it). That keeps a
 //! script or app without Accessibility from borrowing the app's; it is no wall against a
-//! process of the same user, which can run this binary as a client itself. Lines longer than
-//! [`MAX_LINE`] end the connection.
+//! process of the same user, which can run this binary as a client itself (so `adopted`'s
+//! window ids and `settings` stay open to such a process: review S11 found nothing they give
+//! that the binary would not). Lines longer than [`MAX_LINE`] end the connection; at most
+//! [`MAX_CONNECTIONS`] are served at once.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -47,6 +49,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -456,6 +459,44 @@ pub fn bind() -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// How many connections are served at once; more are answered with an error and closed, so
+/// a process that opens connections in a loop cannot spawn threads without bound (review
+/// S11). The app's own clients hold one each, briefly.
+const MAX_CONNECTIONS: usize = 16;
+
+/// Connections being served now, up to a limit.
+struct Slots {
+    used: AtomicUsize,
+    max: usize,
+}
+
+/// One connection's place in [`Slots`], given back when dropped.
+struct Slot(&'static Slots);
+
+impl Slots {
+    const fn new(max: usize) -> Self {
+        Self { used: AtomicUsize::new(0), max }
+    }
+
+    /// A place, or `None` when every one is taken.
+    fn take(&'static self) -> Option<Slot> {
+        if self.used.fetch_add(1, Ordering::AcqRel) < self.max {
+            Some(Slot(self))
+        } else {
+            self.used.fetch_sub(1, Ordering::AcqRel);
+            None
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+static CONNECTIONS: Slots = Slots::new(MAX_CONNECTIONS);
+
 /// Serves the bound socket ([`bind`]) on a background thread.
 pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
     std::thread::Builder::new().name("ctl".into()).spawn(move || {
@@ -464,9 +505,16 @@ pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
         let accept = || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
+                        let Some(slot) = CONNECTIONS.take() else {
+                            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                            let _ = writeln!(stream, "{}", error_reply("too many connections at once; try again"));
+                            tracing::warn!(max = MAX_CONNECTIONS, "ctl: a connection refused: too many at once");
+                            continue;
+                        };
                         let handler = handler.clone();
                         let spawned = std::thread::Builder::new().name("ctl-conn".into()).spawn(move || {
+                            let _slot = slot;
                             let _ = super::safety::guarded("a ctl connection", || serve_connection(stream, &handler));
                         });
                         if let Err(e) = spawned {
@@ -833,6 +881,19 @@ mod tests {
         let _listener = bind_private(&path).expect("binds");
         assert_eq!(crate::private_files::mode(&path).expect("mode"), 0o600);
         assert_eq!(crate::private_files::mode(&home).expect("mode"), 0o700);
+    }
+
+    /// Review S11: connections past the limit get no thread; a closed one gives its place back.
+    #[test]
+    fn connections_are_served_up_to_a_limit() {
+        static SLOTS: Slots = Slots::new(2);
+        let a = SLOTS.take().expect("first");
+        let b = SLOTS.take().expect("second");
+        assert!(SLOTS.take().is_none(), "the third waits");
+        drop(a);
+        let c = SLOTS.take().expect("a place came back");
+        drop((b, c));
+        assert_eq!(SLOTS.used.load(Ordering::Acquire), 0);
     }
 
     #[test]
