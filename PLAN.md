@@ -167,6 +167,32 @@ Known gaps the owner accepted as rare:
   (`stage-manager log summary`); the suite's estimate is ~1 MB a normal day, 2–3 MB heavy.
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the
   strip, the floating level, so an always-on-top window may still be covered then.
+- **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
+  - **`hide_parked_apps` trial on the owner's Mac** (on in his config since 10-29; the live
+    `hide` phase 65/0). Decide the default after a few days, from how ⌘Tab and the Dock feel.
+  - **The controller's state as one enum** (ARCHITECTURE §3): `Steady`, `SpaceChanging`,
+    `Overview`, `FullScreen` and `Switching`, with the holds derived from it. A Fable round,
+    the live suite before and after.
+  - **Deferred findings:**
+    - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
+    - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
+      needs a look at the screen.
+    - L6: measure the shadow's reach.
+    - C4: a step journal for non-APFS swaps.
+  - **Skipped, with reasons in the rounds' reports:** E6, W6, the S11 peer rule.
+  - **Live checks the rounds named but never wrote:**
+    - restore-frames: an off-edge window, a window tucked by the corner, a Dock change,
+      a dialog born parked;
+    - quit-frames: a late answer at quit, `kill -9` with a dialog, a fitted move after a
+      crash, a reopen at the corner frame;
+    - config-tools: a broken config at launch, with and without the last good copy;
+    - ui-perf: the strip hidden stops captures, edge reveal, the tab across Spaces.
+  - **The suite and macOS's notification layer:** a banner (iCloud, 10-29) puts
+    NotificationCenter's full-screen layer-21 window over the strip for minutes, and every
+    click check then refuses. Have the suite wait for it to go, and name it when it
+    doesn't.
+  - **The CHANGELOG's Unreleased list** (about 35 lines) to be trimmed to a short user
+    list before 1.5.0.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.
