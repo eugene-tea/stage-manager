@@ -14,15 +14,24 @@
 //! differs from the order asked ([`asked_order`]) raises again the windows above the longest
 //! bottom run already stacked right ([`to_raise_again`]), one at a time, back to front, each
 //! waited for until it shows above those below it ([`shows_above`]), and ends with the key's
-//! raise and focus as the batch did. Bounded ([`CHECK_CAP`]), and given up at once when the
-//! user acts meanwhile: a mouse button pressed since the switch began, or another window
-//! brought in front ([`front_moved`]: ⌘Tab, ⌘`). Typing into the key window stops nothing.
+//! raise and focus as the batch did. After a fix the order is watched longer
+//! ([`WATCH_AFTER_FIX`], [`calm_needed`]): the app whose late reorder needed the fix may
+//! answer its own raise just as late, after the key's raise and focus, and land on top of it
+//! again; the second fix (and last, [`MAX_FIXES`]) then puts the key back. Bounded
+//! ([`CHECK_CAP`]), and given up at once when the user acts meanwhile: a mouse button pressed
+//! since the switch began, or another window brought in front ([`front_moved`]: ⌘Tab, ⌘`).
+//! Typing into the key window stops nothing.
 
 use std::time::Duration;
 
-/// How long the order is watched after the batch (and after each fix) for a late reorder
-/// before it counts as settled.
+/// How long the order is watched after the batch for a late reorder before it counts as
+/// settled.
 pub const WATCH: Duration = Duration::from_millis(60);
+
+/// How long the order is watched after a fix: a fix means an app reorders late, and its
+/// answer to a raise of ours can land after the key's raise and focus (the fixture's 40 ms
+/// lag landed inside [`WATCH`]; a slow app's need not).
+pub const WATCH_AFTER_FIX: Duration = Duration::from_millis(150);
 
 /// How often the window server's order is read while watching or waiting.
 pub const POLL: Duration = Duration::from_millis(4);
@@ -31,11 +40,17 @@ pub const POLL: Duration = Duration::from_millis(4);
 pub const PER_WINDOW: Duration = Duration::from_millis(60);
 
 /// The whole check's budget, watching included: the WM thread is never held longer.
-pub const CHECK_CAP: Duration = Duration::from_millis(250);
+pub const CHECK_CAP: Duration = Duration::from_millis(400);
 
 /// At most this many fixes per batch (a late reorder of the batch's own raises may undo the
 /// first one).
 pub const MAX_FIXES: u32 = 2;
+
+/// How long the order must stay right after `fixes` fixes before the check ends: [`WATCH`]
+/// with none, [`WATCH_AFTER_FIX`] once a late app has shown itself.
+pub fn calm_needed(fixes: u32) -> Duration {
+    if fixes == 0 { WATCH } else { WATCH_AFTER_FIX }
+}
 
 /// The order a batch asks for, back to front: its raises (`raises`, in the order sent; a
 /// window raised twice counts where it was raised last), the standard windows only
@@ -99,6 +114,17 @@ pub fn below(asked: &[u32], id: u32) -> &[u32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A late app, once seen, is watched for longer than its lag after the fix, within the cap
+    /// with the fixes' own waits ([`MAX_FIXES`] fixes of [`PER_WINDOW`] each for a window).
+    #[test]
+    fn a_fix_is_watched_longer_than_the_batch() {
+        assert_eq!(calm_needed(0), WATCH);
+        assert_eq!(calm_needed(1), WATCH_AFTER_FIX);
+        assert_eq!(calm_needed(MAX_FIXES), WATCH_AFTER_FIX);
+        assert!(WATCH_AFTER_FIX > WATCH);
+        assert!(WATCH + MAX_FIXES * PER_WINDOW + WATCH_AFTER_FIX <= CHECK_CAP, "two fixes of one window each and the watch after fit the cap");
+    }
 
     #[test]
     fn asked_order_is_the_raises_with_the_focus_last() {

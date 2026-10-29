@@ -4842,6 +4842,12 @@ def phase_raise():
         return
     want = stage_titles(s)[s["active"]]
     say(f"  the card's order, front to back: {want}")
+    # The premise: the screen stacks as the card shows before the first leave (a leave saves
+    # the screen's order into the card; 10-29's rerun: Alpha's late raise had put it in front
+    # after the merges, the first leave saved that, and every arrival then landed as the new
+    # card asked while the check still wanted the old one).
+    s = wait_until(lambda: (lambda st: st if z_titles(want) == want else None)(state()), 3, "the screen in the card's order")
+    check(s is not None, f"before the arrivals, the windows stack as the card shows ({z_titles(want)}, card {want})")
     before = log_text().count("raise order:")
     for i in range(4):
         do("switch", number_of(state(), "Fixture 1"))
@@ -4852,10 +4858,11 @@ def phase_raise():
         elif not click_card(state(), "Charlie 1", "the three apps' card"):
             continue
         s = wait_state(lambda x: active_titles(x) == set(want), "the three apps' stage back")
-        time.sleep(0.6)  # past the unveil and the order check
+        time.sleep(0.6)  # past the unveil and the order check (its cap is 0.4 s)
+        card = stage_titles(s)[s["active"]] if s is not None else want
         got = z_titles(want)
-        check(got == want, f"arrival {i + 1} ({how}): the windows stack as the card shows ({got}, wanted {want})")
-        check(s is not None and stage_titles(s)[s["active"]] == want, f"arrival {i + 1}: the card keeps its order")
+        check(got == card, f"arrival {i + 1} ({how}): the windows stack as the card shows ({got}, card {card})")
+        check(card == want, f"arrival {i + 1}: the card keeps its order ({card}, was {want})")
     lines = [ln for ln in log_text().splitlines() if "raise order:" in ln][before:]
     say(f"  order fixes logged: {len(lines)}")
     for ln in lines:

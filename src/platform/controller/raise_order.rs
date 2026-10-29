@@ -7,9 +7,10 @@
 //! [`Controller::flush_pending`]), a switch run at once, and `finish_ahead`'s raises
 //! ([`Controller::execute_batch`]). The keyboard is not held up: the early focus and the
 //! batch's own focus have run before it. It holds the WM thread at most
-//! [`order::CHECK_CAP`], mostly [`order::WATCH`] polling a right order, and never fights the
-//! user: a mouse button pressed since the switch began, or another window brought in front,
-//! stops it at once.
+//! [`order::CHECK_CAP`], mostly [`order::WATCH`] polling a right order (longer after a fix,
+//! [`order::WATCH_AFTER_FIX`]: the late app's answer to the fix's raise may land after the
+//! key's), and never fights the user: a mouse button pressed since the switch began, or
+//! another window brought in front, stops it at once.
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -49,9 +50,9 @@ impl UserWatch<'_> {
 impl Controller {
     /// After a batch that raised `raises` (in the order sent) and focused `focus`, the user's
     /// action counting from `since`: watches the window server's order of those windows for
-    /// [`order::WATCH`], and when it is not the order asked raises the misplaced ones again,
-    /// back to front, each waited for, and ends with the key's raise and focus. One log line
-    /// when the order needed fixing.
+    /// [`order::WATCH`] ([`order::WATCH_AFTER_FIX`] once fixed), and when it is not the order
+    /// asked raises the misplaced ones again, back to front, each waited for, and ends with
+    /// the key's raise and focus. One log line when the order needed fixing.
     pub(super) fn settle_raise_order(&mut self, ob: &Observer, raises: &[u32], focus: Option<u32>, since: Instant) {
         if raises.len() < 2 || safety::quit_requested() {
             return;
@@ -81,7 +82,7 @@ impl Controller {
                 break got;
             }
             if again.is_empty() {
-                if now.duration_since(calm_since) >= order::WATCH || now >= deadline {
+                if now.duration_since(calm_since) >= order::calm_needed(fixes) || now >= deadline {
                     break got;
                 }
                 std::thread::sleep(order::POLL.min(deadline - now));
