@@ -201,7 +201,8 @@ fn title_key() {
         unsafe { libc::arc4random_buf(key.as_mut_ptr().cast(), key.len()) };
         key
     };
-    match crate::logbook::titles::load_or_create_key(&paths::config_dir(), random) {
+    let titles = crate::logbook::titles::LAUNCH_WAIT;
+    match crate::logbook::titles::load_or_create_key_within(&paths::config_dir(), random, titles) {
         Ok(key) => {
             crate::logbook::titles::set_key(key);
         }
