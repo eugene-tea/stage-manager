@@ -41,6 +41,8 @@
   it sat mid-screen with no card until you changed Desktop.
 - A hidden window that could not be moved into the corner (its app busy) is tried again, with
   pauses, rather than counted hidden while it stays on screen.
+- A window you minimize with ⌘M keeps its card in the strip: it no longer rejoins the stage
+  by itself a moment later.
 - A window dragged out of the corner right after you log in stays where you dropped it.
 - While a window that did not come back from the corner is tried again, its edge stays
   covered and ignores clicks.

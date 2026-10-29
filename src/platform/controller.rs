@@ -1047,6 +1047,11 @@ pub struct Controller {
     /// zone, or whose park failed: parked again or adopted every tick
     /// ([`Self::reconcile_parked`], [`crate::engine::park_reconcile`]).
     strays: BTreeMap<u32, Stray>,
+    /// When the user last focused each window (a focus event that was not our echo), kept
+    /// until our next park of it: the reconciler adopts a parked window the user focused
+    /// since it was parked, never one macOS focused at an un-minimize or our own focus
+    /// ([`Self::reconcile_parked`]).
+    user_focus: HashMap<u32, Instant>,
     /// Until when the corner patch is planned again on the fast tick after a focus or an
     /// activation ([`Self::replan_patch`]).
     patch_fast_until: Option<Instant>,
@@ -1220,6 +1225,7 @@ impl Controller {
             unparked: BTreeMap::new(),
             unrestored_checked: Instant::now(),
             strays: BTreeMap::new(),
+            user_focus: HashMap::new(),
             patch_fast_until: None,
             active_off_screen: BTreeSet::new(),
             macos_reveal_at: None,
@@ -1847,6 +1853,10 @@ impl Controller {
                 continue;
             };
             self.echoes.touch_window(id, now);
+            if matches!(action, Action::Park { .. }) {
+                // A focus before this park is not the user's choice about where it is now.
+                self.user_focus.remove(&id);
+            }
             let result = match action {
                 // An unpark (quit, stand-down) tries a busy app again quickly (6X).
                 Action::SetFrame { frame, .. } if retrying => safety::set_frame_retrying(&w.element, id, frame, leftovers::RESTORE_RETRY.budget),
@@ -1941,11 +1951,14 @@ impl Controller {
     /// lists outside the park zone, or whose park failed, is parked again or adopted as shown
     /// ([`crate::engine::park_reconcile`]; the Fable review's L1, K2, S5: until now only a
     /// Space arrival's `match_screen` reconciled the two, and such a window sat mid-screen,
-    /// counted parked, with no card, until the next Desktop change). The focused window, or
-    /// one the user moved while parked, joins the active stage where it is
-    /// ([`Model::adopt_shown`]); any other is parked again, echo-touched through the batch,
-    /// with a backoff, and given up after a few tries (said once at info). `list`: the
-    /// tick's read of the on-screen list, when it made one.
+    /// counted parked, with no card, until the next Desktop change). A window the user
+    /// focused since its park ([`Self::user_focus`]), or moved while parked, joins the active
+    /// stage where it is ([`Model::adopt_shown`]); any other is parked again once it rests
+    /// (nothing is judged while our own park, raise or un-minimize may still be landing, nor
+    /// while its listed frame changes: live 10-29, ⌘M's un-minimize focused the window and
+    /// set it down out of the zone, and "focused" adopted it out of its new card),
+    /// echo-touched through the batch, with a backoff, and given up after a few tries (said
+    /// once at info). `list`: the tick's read of the on-screen list, when it made one.
     ///
     /// Not while the list cannot be trusted: a Space change settling or a full-screen Space,
     /// Mission Control and its settle, a Desktop slide before its notice (the parked windows
@@ -2017,7 +2030,7 @@ impl Controller {
                 // Nothing to settle unless it is known: a parked window off screen (its app
                 // hidden) or in the zone is as it should be.
                 if let Some(s) = self.strays.get_mut(&id)
-                    && step(s, Facts { seen, focused: false, user_moved: false, busy: false, echo: false }, now) == Verdict::Settled
+                    && step(s, Facts { seen, ..Facts::out_at(Rect::default()) }, now) == Verdict::Settled
                 {
                     tracing::debug!(id, "a stray window is listed in the park zone: settled");
                     self.strays.remove(&id);
@@ -2025,10 +2038,14 @@ impl Controller {
                 continue;
             }
             let bounds = listed.map(|w| w.bounds).unwrap_or_default();
+            // The user's choice only: focused now, and by a focus of theirs since our park
+            // (macOS's focus at an un-minimize, or our own, counts for nothing).
             let is_focused = *focused.get_or_insert_with(focused_window) == Some(id);
+            let user_focused = is_focused && self.user_focus.contains_key(&id);
             let facts = Facts {
                 seen,
-                focused: is_focused,
+                bounds,
+                focused: user_focused,
                 user_moved: false,
                 busy: self.busy_apps.borrow().busy(pid, now),
                 echo: self.echoes.is_window_echo(id, now),
@@ -2969,6 +2986,7 @@ impl Controller {
             WinEvent::Destroyed(id) => {
                 self.unplaced.remove(&id);
                 self.absent.remove(&id);
+                self.user_focus.remove(&id);
                 let kept = self.parked_entries_of(&[id]);
                 // Its saved entry as it is now, should its app be quitting (round 8H).
                 if let Some(c) = self.model.as_ref().and_then(|m| m.closing(WindowId(id))) {
@@ -3021,6 +3039,8 @@ impl Controller {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
+                // Not our echo: the user's (or an app's own), remembered for the reconciler.
+                self.user_focus.insert(id, now);
                 let bundle = ob.window(id).and_then(|w| ob.bundle_id(w.pid));
                 if self.desktop_echo.classify(bundle, now) == Cause::WallpaperEcho {
                     tracing::debug!(id, "Finder window focus after a wallpaper click: ignored (the desktop is Finder's)");

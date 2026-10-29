@@ -3753,6 +3753,14 @@ def phase_parity():
         check(stage_titles(s)[a1["home"]] == ["Alpha 1"] and a1["home"] in s["strip"], "as a card of its own")
         check(s["active"] == alpha and "Alpha 2" in active_titles(s), "the view stays on the current stage")
         check(close(a1["restore"], t["Alpha 1"]["restore"]), "its frame is kept for its return")
+        # The un-minimize sets the window down and focuses it (10-29: the tick adopted it as
+        # "focused" 0.7 s later, and the card went away): once that has settled, parked still.
+        time.sleep(1.5)
+        s = state()
+        a1 = by_title(s)["Alpha 1"]
+        check(a1["parked"] and stage_titles(s)[a1["home"]] == ["Alpha 1"] and a1["home"] in s["strip"],
+              f"1.5 s on, the card is still there: Alpha 1 parked in its own stage ({stage_titles(s)}, strip {s['strip']})")
+        check(s["active"] == alpha, "and the view still on the current stage")
     consistent("Cmd-M")
     wins, d = fixture_windows([EXTRA["a"][0]])
     check(len([w for w in wins if w["bounds"]["h"] > 60]) == 2, "the window is not left in the Dock (both Alpha windows listed)")

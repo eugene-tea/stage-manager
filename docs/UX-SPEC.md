@@ -189,7 +189,10 @@ card-sized picture of it, where Apple shrinks the window itself. A card dragged 
 by a growing picture of its front window.
 
 **⌘M** parks the window and then un-minimizes it there, so macOS may show its restore
-animation toward the corner. Apple's window shrinks straight into the strip.
+animation toward the corner. Apple's window shrinks straight into the strip. macOS's
+un-minimize focuses the window and may set it down short of the corner: it is parked again
+where it rests, never taken for a window you brought out (only a focus or a drag of yours
+after the park counts as that).
 
 **Desktop items are left alone.** Hiding Finder's desktop icons is outside a window
 manager's reach through public API.
