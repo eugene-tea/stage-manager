@@ -33,7 +33,7 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
 use super::paths;
-use crate::config::{Config, LogConfig};
+use crate::config::LogConfig;
 use crate::logbook::counters::{self, Count};
 use crate::logbook::retention::{self, LEGACY_NAMES, LogFile};
 use crate::logbook::ring::Ring;
@@ -140,12 +140,9 @@ pub fn day_file(date: Date) -> PathBuf {
     paths::log_dir().join(date.file_name())
 }
 
+/// `[log]` as the file says, else as its last good copy says (review C1).
 fn read_config() -> LogConfig {
-    std::fs::read_to_string(paths::config_file())
-        .ok()
-        .and_then(|t| Config::parse(&t).ok())
-        .map(|p| p.config.log)
-        .unwrap_or_default()
+    crate::config::last_good::read_in_force(&paths::config_file()).log
 }
 
 fn targets(directives: &str) -> Targets {

@@ -8,6 +8,9 @@
 - A card shows its front window on top, also when its stage holds two apps, and the windows
   keep that order as they grow from the card.
 - A stage's windows land in the order its card shows, also with three apps.
+- A config file with a mistake in it no longer brings back the defaults when Stage Manager
+  starts: your last working settings stay, and update checks stay off if they can't be read.
+- Whole-number settings accept a number written like `50.0`.
 
 ## 1.4.0 — 2026-10-23
 

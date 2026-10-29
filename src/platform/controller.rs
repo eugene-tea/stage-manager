@@ -1064,7 +1064,8 @@ impl Controller {
                 None
             }
             Err(e) => {
-                tracing::error!("config: {e}; using the built-in defaults");
+                let using = store.fallback().map_or("the built-in defaults", |s| s.describe());
+                tracing::error!("config: {e}; using {using}");
                 Some(e.to_string())
             }
         };
