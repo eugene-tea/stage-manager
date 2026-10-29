@@ -16,6 +16,14 @@
   just before it, as apps on other Desktops do.
 - After a restart on a display of another size, a window moved clear of the strip still goes
   back to where you had it when Stage Manager quits.
+- A config file with a mistake in it no longer brings back the defaults when Stage Manager
+  starts: your last working settings stay, and update checks stay off if they can't be read.
+- Whole-number settings accept a number written like `50.0`.
+- A hotkey of Shift and a key alone is refused (it would take that key from your typing);
+  hotkeys need Control, Option or Command, or a function key.
+- If Stage Manager is moved while an update waits to install, it opens again afterwards
+  instead of staying closed.
+- An update you install by hand no longer leaves its disk image in the temporary folder.
 
 ## 1.4.0 — 2026-10-23
 

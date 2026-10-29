@@ -16,8 +16,9 @@
 //!
 //! Fields added after version 2 first shipped (`saved_at`, `display`, a Space's
 //! `last_seen`, a stage's `last_active`, a window's `fp`, `pending` and `quit_at`) are
-//! optional both ways: older files load without them, and older builds read newer files,
-//! ignoring them.
+//! optional both ways: older files load without them, and older builds of version 2 read
+//! newer version-2 files, ignoring them. A file of a later version is not read
+//! ([`StateFile::from_json`]): the build starts without saved stages, as from no file.
 //!
 //! **Windows of apps that quit** (round 8H) stay in the file a while: an app's quit takes its
 //! windows out of the model (Apple's behaviour, no card), but their saved entries are written

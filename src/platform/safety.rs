@@ -349,6 +349,12 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
 /// What the parked file holds now (only rewritten when it changes).
 static PARKED_WRITTEN: Mutex<Option<ParkedFile>> = Mutex::new(None);
 
+/// [`PARKED_WRITTEN`], taken back from a panic as the other locks are: a poisoned lock must
+/// not stop every later write of the parked file (review S10).
+fn lock_written() -> MutexGuard<'static, Option<ParkedFile>> {
+    PARKED_WRITTEN.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
 /// main display's visible frame, written atomically and flushed to disk before the rename
 /// ([`super::durable`]); removed when the registry is empty.
@@ -356,7 +362,7 @@ fn write_parked_file(listed: &[Registered]) {
     let hidden = hidden_now();
     let empty = listed.is_empty() && hidden.is_empty();
     let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), hidden };
-    let Ok(mut written) = PARKED_WRITTEN.lock() else { return };
+    let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
     }
@@ -1211,6 +1217,22 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review S10: a panic while the parked file's lock is held does not stop later writes.
+    #[test]
+    fn the_parked_files_lock_survives_a_panic() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(|| {
+            let _held = lock_written();
+            panic!("boom");
+        })
+        .join();
+        std::panic::set_hook(prev);
+        assert!(PARKED_WRITTEN.is_poisoned());
+        let written = lock_written();
+        drop(written);
+    }
 
     #[test]
     fn guarded_catches_and_returns_none() {
