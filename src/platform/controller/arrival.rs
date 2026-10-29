@@ -982,7 +982,7 @@ impl Controller {
 
     /// True while the WM thread's fast tick has work: an arrangement's moves to check.
     pub fn wants_fast_tick(&self) -> bool {
-        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held()
+        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(Instant::now())
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -992,6 +992,8 @@ impl Controller {
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
+        // The corner patch after a focus or an activation (round park-reconcile, L2).
+        self.patch_fast_step(now);
         if self.model.is_none() {
             self.verify = None;
         } else if let Some(v) = self.verify.as_ref().filter(|v| v.polling && now >= v.next) {

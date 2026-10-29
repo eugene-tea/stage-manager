@@ -17,6 +17,7 @@
 - While a window that did not come back from the corner is tried again, its edge stays
   covered and ignores clicks.
 - A hung app no longer freezes Stage Manager while its windows are brought back.
+- When you switch apps with ⌘-Tab or the Dock, the corner is covered again at once.
 
 ## 1.4.0 — 2026-10-23
 

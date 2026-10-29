@@ -1624,7 +1624,10 @@ impl Controller {
                     self.patch_honoured = true;
                     tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
                 } else if self.patch_order.refused.is_some() && self.patch_order.refused != was.refused {
-                    tracing::info!("corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches");
+                    tracing::info!(
+                        refused_against = self.patch_order.refused,
+                        "corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches (the fallback mode; `ctl state` names it)"
+                    );
                 } else if check.is_some() && check != was.last {
                     tracing::debug!(?check, "corner patch: order checked");
                 }
@@ -2916,6 +2919,11 @@ impl Controller {
         let now = Instant::now();
         // Something changed since a card was pressed: the click reads the windows afresh.
         self.pressed_obs = None;
+        // macOS raises an activated app's windows, parked ones too, above the corner patch:
+        // the patch is ordered again now, not at the next 250 ms tick (L2).
+        if matches!(event, WinEvent::Focused(_) | WinEvent::AppActivated(_)) {
+            self.replan_patch(now);
+        }
         // Any other event brings windows held behind a transition's snapshots in at once;
         // moves, retitles and the echoes of our own focus (sent before the windows arrive,
         // so the keyboard goes to the new stage at once) leave the animation alone.
