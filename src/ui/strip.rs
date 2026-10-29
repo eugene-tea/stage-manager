@@ -89,6 +89,7 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Picture, Target};
 use crate::platform::capture_frame::Extent;
+use crate::platform::capture_pixels;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
@@ -1724,16 +1725,16 @@ impl Strip {
             .iter()
             .map(|(id, p)| {
                 let e = p.extent;
+                let boxes = capture_pixels::corner_boxes(CGImage::width(Some(&p.image)), CGImage::height(Some(&p.image)));
+                let corner_boxes: Vec<Option<[u8; 3]>> =
+                    capture_pixels::box_stats(&p.image, &boxes).into_iter().map(|s| s.map(|s| [s.alpha, s.mean, s.spread])).collect();
                 (id.to_string(), serde_json::json!({
                     "w": CGImage::width(Some(&p.image)),
                     "h": CGImage::height(Some(&p.image)),
                     "extent": { "left": e.left, "top": e.top, "right": e.right, "bottom": e.bottom },
                     "corners": crate::platform::self_capture::corners(&p.image),
                     // Each corner box's [alpha, mean, spread] (8M: a fill around the window).
-                    "corner_boxes": crate::platform::capture_pixels::read(&p.image).map(|px| {
-                        use crate::platform::capture_pixels::{corner_boxes, stats};
-                        corner_boxes(px.w, px.h).map(|r| stats(&px, r).map(|s| [s.alpha, s.mean, s.spread]))
-                    }),
+                    "corner_boxes": corner_boxes,
                 }))
             })
             .collect();

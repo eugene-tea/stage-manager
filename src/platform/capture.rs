@@ -711,24 +711,25 @@ static LAST_FILL: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(|| Mutex
 /// brightness and spread (numbers only), logged at debug when they change. True when the
 /// picture holds a fill ([`capture_pixels::holds_fill`]): it is not used.
 fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_pt: (f64, f64), left_out: bool) -> bool {
-    let Some(px) = capture_pixels::read(image) else { return false };
-    let corners = capture_pixels::corner_boxes(px.w, px.h).map(|r| capture_pixels::stats(&px, r).unwrap_or_default());
+    let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    if w == 0 || h == 0 {
+        return false;
+    }
     // The window's part of the picture, then each overlap within it, in pixels.
-    let whole = Rect::new(0.0, 0.0, px.w as f64, px.h as f64);
+    let whole = Rect::new(0.0, 0.0, w as f64, h as f64);
     let win = extent.window_in(whole);
     let (kx, ky) = (win.w / size_pt.0.max(1.0), win.h / size_pt.1.max(1.0));
-    let over: Vec<Stats> = overlaps
-        .iter()
-        .filter_map(|o| {
-            let r = PixelRect {
-                x: (win.x + o.x * kx).max(0.0) as usize,
-                y: (win.y + o.y * ky).max(0.0) as usize,
-                w: (o.w * kx).round().max(1.0) as usize,
-                h: (o.h * ky).round().max(1.0) as usize,
-            };
-            capture_pixels::stats(&px, r)
-        })
-        .collect();
+    let mut boxes = capture_pixels::corner_boxes(w, h).to_vec();
+    boxes.extend(overlaps.iter().map(|o| PixelRect {
+        x: (win.x + o.x * kx).max(0.0) as usize,
+        y: (win.y + o.y * ky).max(0.0) as usize,
+        w: (o.w * kx).round().max(1.0) as usize,
+        h: (o.h * ky).round().max(1.0) as usize,
+    }));
+    // Only these boxes' pixels are read, never the whole picture (the review's U2).
+    let read = capture_pixels::box_stats(image, &boxes);
+    let corners: [Stats; 4] = std::array::from_fn(|i| read.get(i).copied().flatten().unwrap_or_default());
+    let over: Vec<Stats> = read.iter().skip(4).filter_map(|s| *s).collect();
     let flat = capture_pixels::holds_fill(&corners, extent.is_none());
     let line = format!(
         "corners=[{}] overlaps=[{}] fill={flat}",
@@ -740,7 +741,7 @@ fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_
             last.clear();
         }
         if last.get(&id) != Some(&line) {
-            tracing::debug!(window = id, w = px.w, h = px.h, children_left_out = left_out, "capture: a window of its app over it: {line}");
+            tracing::debug!(window = id, w, h, children_left_out = left_out, "capture: a window of its app over it: {line}");
             last.insert(id, line);
         }
     }
