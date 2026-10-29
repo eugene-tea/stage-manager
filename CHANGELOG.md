@@ -34,6 +34,16 @@
   already back in place on another Desktop.
 - On a main screen of another size than before, a window brought back from the corner opens
   centered instead of at a place from the other screen.
+- A hidden window that its app moves back onto the screen by itself goes back into the corner
+  within a second; if you are working in it, it stays and joins the stage you are in. Before,
+  it sat mid-screen with no card until you changed Desktop.
+- A hidden window that could not be moved into the corner (its app busy) is tried again, with
+  pauses, rather than counted hidden while it stays on screen.
+- A window dragged out of the corner right after you log in stays where you dropped it.
+- While a window that did not come back from the corner is tried again, its edge stays
+  covered and ignores clicks.
+- A hung app no longer freezes Stage Manager while its windows are brought back.
+- When you switch apps with ⌘-Tab or the Dock, the corner is covered again at once.
 
 ## 1.4.0 — 2026-10-23
 

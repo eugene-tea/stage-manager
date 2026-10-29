@@ -39,7 +39,9 @@ window dropped above the first card takes that slot; a card dragged to another s
 across a relaunch; a card dropped in a gap reorders and one dropped on another card's middle
 merges the two stages (`[strip] merge_on_drop`, on by default); a card click animates and every frame is exact afterwards; an activation of the fixture from
 another app's stage grows from its card (round 8L: see `activation_grows_check`);
-`level = "above_windows"` keeps the strip on top), slots (a dozen card clicks in a mixed order,
+`level = "above_windows"` keeps the strip on top), park (round park-reconcile: a parked window
+the fixture moves to the middle of the screen by itself, SIGALRM, is parked again within about a
+second, its restore frame untouched, and a switch brings it back exactly), slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
 in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
@@ -4660,8 +4662,75 @@ def phase_raise():
     consistent("raise order")
 
 
+# ----- park reconcile: a parked window its app moved out of the corner --------------------
+
+
+def phase_park():
+    """Round park-reconcile (the Fable review's L1/K2/S5: a parked window the window server
+    listed out of the park zone was only logged until the next Desktop change): the fixture
+    moves its own parked window to the middle of the screen (SIGALRM, an app re-centring its
+    window while parked); within about a second the app parks it again, its restore frame
+    untouched, and a switch brings it back exactly where it was. The model and the screen
+    agree throughout (`consistent`)."""
+    say("\n== park reconcile: a parked window its app moved out of the corner is parked again ==")
+    stop_app()
+    stop_fixture()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(2)
+    s = start_app(2)
+    if not check(s is not None, "app manages the 2 fixture windows"):
+        return
+    t = by_title(s)
+    w1, w2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    do("new", w2)
+    s = state()
+    parked = [w for w in s["windows"] if w["parked"]]
+    if not check([w["id"] for w in parked] == [w1], "Fixture 1 is parked (stage 1), Fixture 2's new stage active"):
+        return
+    restore = parked[0]["restore"]
+    fixture = pids_of(FIX_EXE)
+    if not check(bool(fixture), "the fixture runs"):
+        return
+    time.sleep(1.2)  # past the park's echo window
+
+    def listed():
+        wins, d = fixture_windows([FIX_ID])
+        return next((w for w in wins if w["id"] == w1), None), d
+
+    before = log_text().count("parked again")
+    os.kill(fixture[0], signal.SIGALRM)
+    moved = wait_until(lambda: (lambda w, d: w is not None and not is_parked(w["bounds"], d))(*listed()), 3, "the fixture to move its parked window out")
+    if not check(moved, "the fixture moved its parked window to the middle of the screen (the app's own move)"):
+        return
+    t0 = time.time()
+    back = wait_until(lambda: (lambda w, d: w is not None and is_parked(w["bounds"], d))(*listed()), 3, "the window parked again")
+    took = time.time() - t0
+    check(back is not None and took <= 1.5, f"the app parked it again within a second or so ({took:.2f} s after the move showed)")
+    lines = [ln for ln in log_text().splitlines() if "parked again" in ln][before:]
+    check(any("listed out of the park zone: parked again" in ln for ln in lines), "the log says why (a parked window listed out of the park zone)")
+    for ln in lines:
+        say(f"    {ln[ln.find('a parked window'):]}")
+    s = state()
+    t = by_title(s)
+    check(t["Fixture 1"]["parked"] and close(t["Fixture 1"]["restore"], restore), "the model still has it parked, its restore frame untouched by the app's move")
+    consistent("after the re-park")
+    time.sleep(1.0)
+    check(not any("given up on" in ln for ln in log_text().splitlines()[-40:]), "no give-up: one re-park held")
+    do("switch", 1)
+    s = wait_state(lambda x: x["active"] == 1, "stage 1 back")
+    check(s is not None, "a switch brings stage 1")
+    frames = frames_of(["Fixture 1"])
+    check(close(frames["Fixture 1"], restore), f"Fixture 1 is back exactly where it was ({fmt(frames['Fixture 1'])}, wanted {fmt(restore)})")
+    consistent("after the switch back")
+    stop_app()
+    all_onscreen("park reconcile quit")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -4678,7 +4747,8 @@ def main():
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
-             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise}[p]()
+             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
+             "park": phase_park}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

@@ -1226,6 +1226,13 @@ impl Model {
     /// this window as the stage's key window and, when it was dropped outside the park zone,
     /// at the frame it was dropped at (its new restore frame), so it does not jump back.
     pub fn parked_window_dropped(&mut self, id: WindowId, frame: Rect, obs: &Observation) -> Vec<Action> {
+        if self.settling() {
+            // No stage switch while the login settles (as for any focus), but the window the
+            // user dragged out of the corner must not sit shown while counted parked until
+            // `match_screen` parks it again (the Fable review's E7): it joins the active
+            // stage where it was dropped.
+            return self.adopt_shown(id, frame, obs);
+        }
         if let Some(standard) = self.resolve_standard(id)
             && self.windows.get(&standard).is_some_and(|w| w.parked)
         {
@@ -1237,6 +1244,62 @@ impl Model {
             }
         }
         self.window_focused(id, obs)
+    }
+
+    /// A parked window the screen shows out of the park zone where the user wants it (the
+    /// focused window, one they moved; a drop while the login settles) joins the active stage
+    /// of its Space as shown, at `frame` (its restore frame from now on), with no move and no
+    /// raise: it is there already, in front of the user (the Fable review's L1: the model's
+    /// parked flag and the screen agree). Its children come back beside it. Its stage, left
+    /// empty, goes unless declared. The key window when it is the focused one. Nothing for a
+    /// window not parked, pinned, or on a Space not shown.
+    pub fn adopt_shown(&mut self, id: WindowId, frame: Rect, obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let Some(id) = self.resolve_standard(id) else { return actions };
+        let Some(w) = self.windows.get(&id) else { return actions };
+        if !w.parked || w.home == Home::Pinned {
+            return actions;
+        }
+        let (src, space) = (w.home, w.space);
+        if !self.is_shown_space(space) {
+            return actions;
+        }
+        let active = self.ensure_active(space);
+        self.record_frame(id, frame);
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.parked = false;
+        }
+        if src != Home::Stage(active) {
+            if let Home::Stage(s) = src
+                && let Some(stage) = self.stage_mut(s)
+            {
+                stage.windows.retain(|&x| x != id);
+                if stage.key == Some(id) {
+                    stage.key = stage.windows.first().copied();
+                }
+            }
+            let display = self.stage(active).map_or(self.space_display(space), |s| s.display);
+            if let Some(stage) = self.stage_mut(active) {
+                stage.windows.insert(0, id);
+            }
+            self.set_home(id, Home::Stage(active), display);
+        }
+        if obs.focused.and_then(|f| self.resolve_standard(f)) == Some(id) {
+            self.make_key(active, id);
+        }
+        for c in self.children_of(id) {
+            if self.windows.get(&c).is_some_and(|w| w.parked) {
+                self.restore_window(c, &mut actions);
+            }
+        }
+        if let Home::Stage(s) = src
+            && s != active
+        {
+            self.drop_if_dead(s, &mut actions);
+        }
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
     }
 
     /// Click on the wallpaper. Parks the active stage (it enters the strip) and makes a fresh

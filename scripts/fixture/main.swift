@@ -79,6 +79,10 @@
 // SIGURG closes the last standard window opened and lets it go (its window-server window is
 // destroyed), then blocks the main thread for --hang-ms: the app answers no Accessibility
 // message meanwhile (Home on 10-21, round 8M).
+// SIGALRM moves every visible standard window parked in the screen's bottom-right corner to
+// the middle of the screen by itself, without activating (an app that re-centres its own
+// window, or restores its saved bounds, while parked: round park-reconcile, the Fable
+// review's L1).
 import AppKit
 
 struct Options {
@@ -497,6 +501,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         away += parked.map { ($0, $0.frame) }
     }
 
+    /// SIGALRM: every parked window moves itself to the middle of the screen (an app's own
+    /// move while parked), without activating.
+    func moveParkedOut() {
+        guard let screen = NSScreen.main?.frame, let area = NSScreen.main?.visibleFrame else { return }
+        let parked = NSApp.windows.filter { w in
+            w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
+        }
+        for w in parked {
+            let size = w.frame.size
+            w.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2))
+        }
+    }
+
     /// SIGINFO: the windows sent away show again ("their Desktop shows").
     func bringAwayBack() {
         // Ordering in constrains a window onto the screen; a Desktop switch never moves it.
@@ -545,6 +562,10 @@ signal(SIGINFO, SIG_IGN)
 let comeBack = DispatchSource.makeSignalSource(signal: SIGINFO, queue: .main)
 comeBack.setEventHandler { delegate.bringAwayBack() }
 comeBack.resume()
+signal(SIGALRM, SIG_IGN)
+let moveOut = DispatchSource.makeSignalSource(signal: SIGALRM, queue: .main)
+moveOut.setEventHandler { delegate.moveParkedOut() }
+moveOut.resume()
 signal(SIGURG, SIG_IGN)
 let closeHung = DispatchSource.makeSignalSource(signal: SIGURG, queue: .main)
 closeHung.setEventHandler { delegate.closeWhileHung() }
