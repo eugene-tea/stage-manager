@@ -1037,6 +1037,14 @@ pub fn fit_options(visible: Rect, strip_visible: bool, settings: &NativeSettings
     }
 }
 
+/// The windows the strip keeps full-size snapshots of for the next switch (`windows`): none
+/// while the user has hidden the strip, when no switch animates ([`Controller`]'s animated
+/// batch runs at once then) and a snapshot could never be used (the review's U1: a capture of
+/// every active window every two seconds, for nothing).
+fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> {
+    if strip_visible { windows } else { Vec::new() }
+}
+
 /// The strip's card count on a display with `visible` frame.
 pub fn strip_capacity(visible: Rect, config: &Config) -> usize {
     capacity_for(visible.size(), &config.strip.capacity, &config.style)
@@ -2520,8 +2528,8 @@ impl Controller {
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
             window_drag_grab: dragged.map(|d| d.grab),
             announce: std::mem::take(&mut self.announce),
-            active_windows,
-            pinned_windows,
+            active_windows: kept_ready(self.strip_visible, active_windows),
+            pinned_windows: kept_ready(self.strip_visible, pinned_windows),
             transition,
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
@@ -5290,6 +5298,15 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The review's U1: with the strip hidden no switch animates, so the strip is asked to
+    /// keep no full-size snapshot (nothing is captured); shown, every window is kept ready.
+    #[test]
+    fn a_hidden_strip_keeps_no_snapshots_ready() {
+        let w = |id| CardWindow { id, pid: 7, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
+        assert!(kept_ready(false, vec![w(1), w(2)]).is_empty());
+        assert_eq!(kept_ready(true, vec![w(1), w(2)]).iter().map(|w| w.id).collect::<Vec<_>>(), [1, 2]);
+    }
 
     #[test]
     fn a_finder_that_keeps_failing_is_read_less_and_less_often() {

@@ -57,11 +57,12 @@ pub struct StripSnapshot {
     /// The shown Space is a full-screen app's: no strip there.
     pub fullscreen: bool,
     /// The active stage's standard windows, front to back, at their live frames: the strip
-    /// keeps full-size snapshots of them ready for the next switch (`[animation]`).
+    /// keeps full-size snapshots of them ready for the next switch (`[animation]`). Empty
+    /// while the user has hidden the strip: no switch animates then, nothing is captured.
     pub active_windows: Vec<CardWindow>,
     /// The pinned windows shown on this Space, at their live frames: they stay shown through
     /// a switch, and a snapshot of each kept ready lets the switch's cover of the park corner
-    /// draw one that reaches it (round 8L5).
+    /// draw one that reaches it (round 8L5). Empty while the user has hidden the strip.
     pub pinned_windows: Vec<CardWindow>,
     /// Windows are about to leave or arrive: animate them (this snapshot is the strip after
     /// the change).
