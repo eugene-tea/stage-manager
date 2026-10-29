@@ -1,7 +1,8 @@
 #!/bin/bash
 # Launches the dev copy of the app (scripts/dev-app.sh) through LaunchServices (so TCC checks the bundle, not
 # the terminal) and streams today's log from its end (the day's file holds the whole day). Ctrl-C quits the
-# app: `ctl quit` first, SIGTERM as a fallback.
+# app: `ctl quit` first, SIGTERM as a fallback, only ever to the dev copy's own process: an installed
+# copy (~/Applications) is never signalled (review C5).
 #
 # Passed through to the app when set: RUST_LOG (overrides [log] level), STAGE_MANAGER_NO_PROMPT,
 # STAGE_MANAGER_ONLY, STAGE_MANAGER_HOME (config, state, socket and log in that directory),
@@ -42,7 +43,13 @@ done
 START_LINES="$(wc -l < "$LOG" | tr -d ' ')"
 open -n "$APP" ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} || exit 1
 
-# The app's pid: from `ctl ping`, else from the process table.
+# Whether process $1 runs the dev copy's executable itself (its command line is exactly $BIN; never its
+# guardian, a CLI, or a copy elsewhere such as the installed one).
+is_dev_copy() {
+  ps -axo pid=,command= | awk -v pid="$1" -v p="$BIN" '$1 == pid { sub(/^ *[0-9]+ /, ""); if ($0 == p) found = 1 } END { exit !found }'
+}
+
+# The app's pid: from `ctl ping`, else from the process table; either way the dev copy's.
 PID=""
 for _ in $(seq 1 50); do
   if REPLY="$("$BIN" ctl ping 2>/dev/null)"; then
@@ -51,7 +58,11 @@ for _ in $(seq 1 50); do
   fi
   sleep 0.1
 done
-[ -n "$PID" ] || PID="$(pgrep -n -f "Stage Manager.app/Contents/MacOS/stage-manager$")"
+[ -n "$PID" ] || PID="$(ps -axo pid=,command= | awk -v p="$BIN" '{ pid = $1; sub(/^ *[0-9]+ /, ""); if ($0 == p) print pid }' | tail -n 1)"
+if [ -n "$PID" ] && ! is_dev_copy "$PID"; then
+  echo "The process answering (pid $PID) is not the dev copy at $APP; it is left alone." >&2
+  PID=""
+fi
 if [ -z "$PID" ]; then
   echo "Stage Manager did not start; the end of today's log ($LOG) follows." >&2
   tail -n 40 "$LOG" >&2
@@ -68,8 +79,10 @@ quit_app() {
     kill -0 "$PID" 2>/dev/null || return 0
     sleep 0.1
   done
-  echo "Stage Manager did not quit over ctl; sending SIGTERM" >&2
-  kill -TERM "$PID" 2>/dev/null
+  if is_dev_copy "$PID"; then
+    echo "Stage Manager did not quit over ctl; sending SIGTERM" >&2
+    kill -TERM "$PID" 2>/dev/null
+  fi
 }
 
 trap 'quit_app; kill "$TAIL" 2>/dev/null; exit 0' INT TERM
