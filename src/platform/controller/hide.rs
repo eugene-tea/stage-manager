@@ -174,7 +174,7 @@ impl Controller {
         let now = Instant::now();
         self.hides.unhiding.retain(|_, t| now.duration_since(*t) < UNHIDE_ECHO);
         self.hides.refused.retain(|_, t| now.duration_since(*t) < REFUSED_FOR);
-        if self.model.is_none() || self.frozen() || self.space_pending {
+        if self.model.is_none() || self.frozen() {
             return;
         }
         self.reconcile(ob, now);

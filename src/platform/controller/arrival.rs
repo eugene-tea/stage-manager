@@ -836,7 +836,7 @@ impl Controller {
         };
         let overview = self.overview.showing().is_some() || self.overview.holds_arrival(now);
         let (undo, arrange) =
-            hold_step(self.ahead_contradicted(now), self.ahead.is_some(), held.is_some(), self.space_pending, overview);
+            hold_step(self.ahead_contradicted(now), self.ahead.is_some(), held.is_some(), self.phase.changing(), overview);
         if undo {
             self.undo_ahead(ob, "another focus or activation came");
         }
@@ -1080,7 +1080,7 @@ impl Controller {
             self.finish_verify("the arrangement is settled");
             return;
         }
-        if self.space_pending {
+        if self.phase.changing() {
             self.stop_polling("its Desktop is arriving; the arrival checks the moves", &[], now);
             return;
         }
@@ -1588,7 +1588,7 @@ impl Controller {
     /// Forgets a held focus (the user acted on the Desktop shown) and undoes what was
     /// arranged ahead for it ([`forget_undoes`]).
     pub(super) fn forget_held(&mut self, ob: &Observer) {
-        if !forget_undoes(self.space_pending) {
+        if !forget_undoes(self.phase.changing()) {
             return;
         }
         self.focus_replay.clear();
@@ -1602,7 +1602,7 @@ impl Controller {
         let Some(sent) = &self.ahead else { return };
         let changed = self.space_changes != sent.changes_at;
         let waited = now.saturating_duration_since(sent.sent_at);
-        if let Some(why) = expire_step(sent.trigger, self.space_pending, changed, waited, self.ahead_contradicted(now)) {
+        if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, self.ahead_contradicted(now)) {
             self.undo_ahead(ob, why);
         }
     }

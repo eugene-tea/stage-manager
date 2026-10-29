@@ -124,6 +124,9 @@ pub enum Event {
     FullScreenCame,
     /// The Space change settled on a Desktop, recognized now.
     Arrived,
+    /// The screen unlocked: the list is looked at afresh after a settle (a Space change
+    /// waiting counts from now).
+    Unlocked,
     /// A switch was sent to the strip; its incoming windows wait behind their snapshots.
     SwitchSent { id: u64, max: Duration },
     /// The switch's windows are in place (unveiled, or brought in by other input).
@@ -183,6 +186,11 @@ impl Tracker {
                 tracing::warn!(phase = %p, "phase: a Desktop arrived without a Space change");
                 self.changed_at = Some(now);
                 Phase::Steady
+            }
+            (Event::Unlocked, Phase::Changing { from_fullscreen, hold, .. }) => Phase::Changing { since: now, from_fullscreen, hold },
+            (Event::Unlocked, p) => {
+                self.changed_at = Some(now);
+                p
             }
             (Event::SwitchSent { id, max }, p) => {
                 match p {
@@ -328,6 +336,20 @@ mod tests {
         t.feed(Event::Arrived, ms(t0, 5600));
         assert!(!t.fullscreen());
         assert_eq!(t.phase(), Phase::Steady);
+    }
+
+    #[test]
+    fn an_unlock_restarts_the_settle_and_a_waiting_change_counts_from_it() {
+        let t0 = Instant::now();
+        let mut t = Tracker::default();
+        t.feed(Event::Unlocked, t0);
+        assert_eq!(t.phase(), Phase::Steady);
+        assert_eq!(t.changed_at(), Some(t0));
+        assert!(t.space_settling(ms(t0, 500)));
+        t.feed(Event::SpaceChanged, ms(t0, 2000));
+        t.feed(Event::Held(Hold::Overview), ms(t0, 2100));
+        t.feed(Event::Unlocked, ms(t0, 3000));
+        assert_eq!(t.phase(), Phase::Changing { since: ms(t0, 3000), from_fullscreen: false, hold: Some(Hold::Overview) });
     }
 
     #[test]

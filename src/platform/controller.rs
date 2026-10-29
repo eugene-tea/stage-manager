@@ -207,9 +207,6 @@ const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 /// How often the window server's list is checked for windows changing Spaces.
 const SPACE_POLL: Duration = Duration::from_secs(1);
 
-/// No such check this soon after a Space change (the list may still be the old Space's).
-const SPACE_SETTLE: Duration = Duration::from_secs(1);
-
 /// A window counts as moved to or gone from the shown Space after this many checks in a row.
 const SPACE_CHECKS: u32 = 2;
 
@@ -1333,7 +1330,7 @@ impl Controller {
         }
         let listed: HashMap<u32, Rect> =
             list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
-        let settling = self.space_pending || self.space_changed_at.is_some_and(|t| t.elapsed() < SPACE_SETTLE);
+        let settling = self.phase.space_settling(Instant::now());
         let frames = observed_frames(&reads, &listed, settling);
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
     }
@@ -1365,7 +1362,7 @@ impl Controller {
         // slides: the list then shows its windows shifted sideways by up to the display's
         // width. Settling after a change, or off the display, or slid on a display where no
         // window is listed at its tracked frame, the tracked frame stays.
-        let settling = self.space_pending || self.space_changed_at.is_some_and(|t| t.elapsed() < SPACE_SETTLE);
+        let settling = self.phase.space_settling(Instant::now());
         let shown: Vec<(&WindowState, Rect, Option<Rect>)> = m
             .windows()
             .filter(|w| !w.parked && (w.space == space || w.sticky))
@@ -1600,14 +1597,14 @@ impl Controller {
         // Only Mission Control and App Exposé: Show Desktop pushes every window to the screen's
         // edges, the patch then over a pushed window's edge (10-13: a lighter block in the
         // corner each time), so it hides by the plan.
-        if on && !self.space_pending && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
+        if on && !self.phase.changing() && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
             return None;
         }
         // A Space change being recognized: no plan. Each Desktop has its own panel, which
         // slides in with its Desktop as it was left; the main thread leaves it so until the
         // first plan for that Desktop (its Space-change count is newer), so nothing meant
         // for the Desktop left reaches it.
-        if on && self.space_pending && self.model.is_some() {
+        if on && self.phase.changing() && self.model.is_some() {
             return None;
         }
         let mut read = None;
@@ -1708,7 +1705,7 @@ impl Controller {
                     // Not the settle after an overview (that is for Space inference): the patch
                     // comes back with the windows.
                     overview: self.overview.showing().is_some()
-                        || self.space_pending
+                        || self.phase.changing()
                         || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
                     ordered,
                     can_order: possible,
@@ -1995,7 +1992,7 @@ impl Controller {
         if model_parked.is_empty()
             || self.frozen()
             || self.overview.freezes(now)
-            || self.space_changed_at.is_some_and(|t| now.duration_since(t) < SPACE_SETTLE)
+            || self.phase.space_settling(now)
             || self.macos_reveal_at.is_some()
             || self.pending.is_some()
             || self.ahead.is_some()
@@ -2563,7 +2560,7 @@ impl Controller {
         let facts = CoverFacts {
             on: config.windows.corner_patch,
             overview: self.overview.showing().is_some()
-                || self.space_pending
+                || self.phase.changing()
                 || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
             fullscreen: self.phase.fullscreen(),
             slivers,
@@ -2770,7 +2767,7 @@ impl Controller {
     /// Desktop arranged ahead for it (its strip slides in arranged, [`arrival`]).
     fn strip_space(&self) -> Option<SpaceId> {
         let m = self.model.as_ref()?;
-        let ahead = self.space_pending.then(|| self.ahead_space()).flatten();
+        let ahead = self.phase.changing().then(|| self.ahead_space()).flatten();
         Some(ahead.unwrap_or_else(|| m.current_space(m.main_display().id)))
     }
 
@@ -3078,7 +3075,7 @@ impl Controller {
                     // another Desktop, often before the Space change notice): replayed once
                     // it is, never dropped.
                     let predicted = self.predicted_space(id);
-                    tracing::debug!(id, pid, settling = self.space_pending, elsewhere, unknown, predicted, "focus held until its Desktop is recognized");
+                    tracing::debug!(id, pid, settling = self.phase.changing(), elsewhere, unknown, predicted, "focus held until its Desktop is recognized");
                     self.focus_replay.hold(Wanted::Window { id: WindowId(id), pid }, now);
                     self.after_hold(ob, now);
                     return;
@@ -3505,7 +3502,7 @@ impl Controller {
         let Some(id) = self.focus_after_press.take() else { return };
         // The user holds it: no check of a move made ahead parks it again (R11 3).
         self.user_took(id, "grabbed by its sliver");
-        if self.space_pending {
+        if self.phase.changing() {
             // A Space change is settling: the grab waits for it (the tick tries again), or the
             // window would sit on screen counted as parked until the next arrival parks it
             // again (review R2 L1).
@@ -3654,14 +3651,14 @@ impl Controller {
     /// No stage changes now: a full-screen app's Space shows, or a Space change waits for a
     /// full-screen animation to settle.
     fn frozen(&self) -> bool {
-        self.phase.fullscreen() || self.space_pending || self.locked
+        self.phase.fullscreen() || self.phase.changing() || self.locked
     }
 
     /// Why stage commands are refused now, if they are ([`Self::frozen`]).
     fn frozen_reason(&self) -> Option<&'static str> {
         if self.locked {
             Some("the screen is locked")
-        } else if self.space_pending {
+        } else if self.phase.changing() {
             Some("a Space change is settling")
         } else if self.phase.fullscreen() {
             Some("a full-screen app's Space shows")
@@ -4078,7 +4075,7 @@ impl Controller {
         }
         self.ax_silent_since = None;
         self.ax_silent_rescan = None;
-        let since_notice = self.space_changed_at.map_or(MIXED_WAIT, |t| now.duration_since(t));
+        let since_notice = self.phase.since_change(now).unwrap_or(MIXED_WAIT);
         if since_notice < MIXED_WAIT {
             let (live, absent) = self.screen_view(ob, list, main);
             let two = self.model.as_ref().is_some_and(|m| m.shows_two_desktops(main.id, &live, &absent));
@@ -4110,6 +4107,7 @@ impl Controller {
             } else {
                 tracing::info!("the screen is unlocked: the Desktop is looked at again after a settle");
                 self.space_changed_at = Some(now);
+                self.phase.feed(phase::Event::Unlocked, now);
                 self.space_checked = now;
             }
         }
@@ -4202,7 +4200,7 @@ impl Controller {
     fn check_spaces(&mut self, ob: &mut Observer) {
         let now = Instant::now();
         if now.duration_since(self.space_checked) < SPACE_POLL
-            || self.space_changed_at.is_some_and(|t| now.duration_since(t) < SPACE_SETTLE)
+            || self.phase.space_settling(now)
         {
             return;
         }
@@ -4629,7 +4627,7 @@ impl Controller {
         self.flush_pending(ob);
         if self.frozen() && command != HotkeyCommand::ToggleStrip {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
-            tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
+            tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
             return;
         }
         self.forget_held(ob);
@@ -4741,7 +4739,7 @@ impl Controller {
         let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
         if self.frozen() {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
-            tracing::debug!(settling = self.space_pending, "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
+            tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
             if local_edit {
                 self.present();
             }
@@ -5029,7 +5027,7 @@ impl Controller {
             }
             if self.locked {
                 // Nothing is inferred from what a locked screen lists.
-            } else if self.space_pending {
+            } else if self.phase.changing() {
                 self.settle_space(ob);
             } else {
                 self.check_spaces(ob);
@@ -5198,7 +5196,7 @@ impl Controller {
                     "ok": true,
                     "space": m.current_space(m.main_display().id).0,
                     "fullscreen": self.phase.fullscreen(),
-                    "settling": self.space_pending,
+                    "settling": self.phase.changing(),
                     "locked": self.locked,
                     "changes": self.space_changes,
                     "overview": self.overview.showing().map(Overview::name),
@@ -5463,7 +5461,7 @@ impl Controller {
             .collect();
         json!({
             "fullscreen": self.phase.fullscreen(),
-            "settling": self.space_pending,
+            "settling": self.phase.changing(),
             "locked": self.locked,
             "last_arrival": {
                 "rebuilt": m.last_arrival().rebuilt,
