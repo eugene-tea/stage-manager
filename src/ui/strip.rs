@@ -60,7 +60,7 @@
 //!   for a moment at launch.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -148,15 +148,55 @@ const HELD_FADE: &str = "held";
 
 thread_local! {
     static STRIP: RefCell<Option<Strip>> = const { RefCell::new(None) };
+    /// Snapshots that found the strip busy (a run loop turning inside one of its calls: a
+    /// menu, a drag), waiting to be presented in the order they came (the review's U7: one
+    /// was dropped, and a lost transition left the controller waiting with stale cards).
+    static WAITING: RefCell<VecDeque<StripSnapshot>> = const { RefCell::new(VecDeque::new()) };
 }
 
 fn with_strip<R>(f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
-    STRIP.with(|s| match s.try_borrow_mut() {
+    let result = STRIP.with(|s| match s.try_borrow_mut() {
         Ok(mut guard) => guard.as_mut().map(f),
         Err(_) => {
             tracing::debug!("strip busy; event dropped");
             None
         }
+    });
+    // The strip is free again: snapshots that waited for it go now, after this event.
+    if result.is_some() && WAITING.with(|w| w.try_borrow().is_ok_and(|w| !w.is_empty())) {
+        DispatchQueue::main().exec_async(present_waiting);
+    }
+    result
+}
+
+/// Presents `snapshot` after every one still waiting, now if the strip is free. Main thread.
+fn present_in_order(snapshot: StripSnapshot) {
+    WAITING.with(|w| w.borrow_mut().push_back(snapshot));
+    present_waiting();
+}
+
+/// Presents the snapshots waiting, in order, if the strip is free; else they wait for the
+/// end of the call that holds it ([`with_strip`]). Main thread.
+fn present_waiting() {
+    if !hand_over(&STRIP, &WAITING, Strip::present) {
+        tracing::debug!("strip busy; the snapshot waits");
+    }
+}
+
+/// Hands every item of `queue` to the receiver in `cell`, in order, when it is free; false
+/// (they all wait) when it is borrowed or not there.
+fn hand_over<S, T>(
+    cell: &'static std::thread::LocalKey<RefCell<Option<S>>>,
+    queue: &'static std::thread::LocalKey<RefCell<VecDeque<T>>>,
+    mut take: impl FnMut(&mut S, T),
+) -> bool {
+    cell.with(|c| {
+        let Ok(mut guard) = c.try_borrow_mut() else { return false };
+        let Some(receiver) = guard.as_mut() else { return false };
+        while let Some(item) = queue.with(|q| q.borrow_mut().pop_front()) {
+            take(receiver, item);
+        }
+        true
     })
 }
 
@@ -167,9 +207,7 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)));
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     strip_model::set_presenter(|snapshot| {
-        DispatchQueue::main().exec_async(move || {
-            with_strip(|s| s.present(snapshot));
-        });
+        DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
     tracing::info!(thumbnail_interval_ms, "strip installed");
 }
@@ -2821,6 +2859,30 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static SEEN: RefCell<Option<Vec<u32>>> = const { RefCell::new(Some(Vec::new())) };
+        static QUEUE: RefCell<VecDeque<u32>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// U7: an item that finds the receiver borrowed waits, and goes before the next one once
+    /// it is free; nothing is dropped.
+    #[test]
+    fn a_snapshot_that_finds_the_strip_busy_waits_its_turn() {
+        let offer = |n: u32| {
+            QUEUE.with(|q| q.borrow_mut().push_back(n));
+            hand_over(&SEEN, &QUEUE, |seen: &mut Vec<u32>, n| seen.push(n))
+        };
+        assert!(offer(1));
+        let busy = SEEN.with(|s| {
+            let _held = s.borrow_mut();
+            offer(2)
+        });
+        assert!(!busy, "borrowed: it waits");
+        assert_eq!(QUEUE.with(|q| q.borrow().len()), 1);
+        assert!(offer(3));
+        assert_eq!(SEEN.with(|s| s.borrow().clone()), Some(vec![1, 2, 3]));
+    }
     use crate::config::StripStyle;
     use crate::engine::geometry::Size;
 
