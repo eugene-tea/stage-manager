@@ -340,6 +340,9 @@ pub struct Model {
     /// Saved entries of windows whose app quit, kept for `state.json` a while (round 8H,
     /// [`quit`]).
     pub(crate) quit: Vec<QuitWindow>,
+    /// The frames of windows whose app quit, kept a day for a window it opens again in the
+    /// park zone (W2, [`quit`]).
+    pub(crate) quit_frames: Vec<quit::QuitFrame>,
     /// The restore's session and mode.
     pub(crate) restore: super::restore::Restore,
     /// What the last placement from a pending entry did, for the log.
@@ -392,6 +395,7 @@ impl Model {
             merged: HashMap::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
+            quit_frames: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
             dock: Vec::new(),

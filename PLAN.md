@@ -130,6 +130,9 @@ Known gaps the owner accepted as rare:
   (no sooner than a minute after the login), the waiting entries of apps not running then are
   given up (in stages and on saved Desktops not visited); running apps keep theirs under their
   own quiet minute.
+- **Apps that save their own frames (W2):** a window parked when its app quit may be saved
+  by the app at the park frame and reopened there; within a day of the quit it takes the
+  frame it had (by app and title, else the app's only one), else it is centered.
 - **Logout head start (8F, 8H):** at the first logout signal every window comes back, the
   leftovers check runs and stages are saved; the app idles until macOS's quit. A cancelled
   logout resumes at `logoutCancelled`, else two minutes after the latest signal. An app's quit

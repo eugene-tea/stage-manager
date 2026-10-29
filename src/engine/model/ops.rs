@@ -162,10 +162,17 @@ impl Model {
                     .or(self.windows.get(&f).map(|w| w.restore))
             });
         let visible = self.display(display).visible;
+        // Born in the park zone: an app that saved its own frame while the window was parked
+        // at its quit; the frame it had then, kept a day, else centered below (W2).
+        let born = if self.display(display).parks(meta.frame) {
+            self.take_quit_frame(&meta.bundle_id, &meta.title).unwrap_or(meta.frame)
+        } else {
+            meta.frame
+        };
         let placed = match decision.placement {
-            Placement::AsIs => meta.frame,
-            Placement::Center => center(meta.frame, visible),
-            Placement::Cascade => cascade(meta.frame, front, visible, CASCADE_OFFSET),
+            Placement::AsIs => born,
+            Placement::Center => center(born, visible),
+            Placement::Cascade => cascade(born, front, visible, CASCADE_OFFSET),
         };
         let restore = self.safe_restore(placed, display);
         self.windows.insert(
