@@ -4836,6 +4836,8 @@ def phase_park():
     say("\n== park reconcile: a parked window its app moved out of the corner is parked again ==")
     stop_app()
     stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
     for f in ("state.json", "config.toml"):
         p = os.path.join(HOME, f)
         if os.path.exists(p):
