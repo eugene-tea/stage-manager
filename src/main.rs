@@ -764,6 +764,7 @@ mod app {
         if input_monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
+        strip::set_moves_fed(input_monitor.is_some());
 
         if let Err(e) = ctl::serve(listener, ctl_handler(wm.clone())) {
             tracing::error!("ctl socket unavailable: {e}");

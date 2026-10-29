@@ -1,8 +1,12 @@
 //! When the strip shows, pure: the user's toggle, Apple's "Show recent apps" (`AutoHide`),
 //! auto-hide while an active window overlaps the strip, and the left-edge reveal.
 //!
-//! The strip feeds this with the pointer position (polled every ~60 ms only while
-//! [`Decision::poll`] says so) and the current time; it answers whether the strip shows.
+//! The strip feeds this with the pointer position and the current time; it answers whether the
+//! strip shows. The pointer is polled (every ~60 ms) only while [`Decision::poll`] says so: a
+//! clock runs (the rest at the edge, the delay after leaving) or the strip is revealed (the
+//! pointer is then over the strip's own window, which the global monitor never hears).
+//! Otherwise the global monitor's mouse moves wake it ([`Visibility::wakes`]): a 60 ms timer
+//! ran for as long as any window covered the strip (the review's U6).
 //!
 //! Extensions (Apple has neither): the **edge tab** ([`Visibility::set_tab`]), a slim tab
 //! at the left edge shown while a window hides the strip, reveals it on hover with the same
@@ -131,6 +135,13 @@ impl Visibility {
         self.was_shown = false;
     }
 
+    /// True when the pointer at `p` (global) starts something while hidden at the edge: it is
+    /// at the left edge by the strip's rows, or on the edge tab. Between those, moves need no
+    /// look.
+    pub fn wakes(&self, p: Point, strip: &Rect) -> bool {
+        (p.x <= strip.x + self.timing.edge_zone && p.y >= strip.y && p.y <= strip.max_y()) || self.tab.is_some_and(|t| t.contains(p))
+    }
+
     /// Advances the state with the pointer (global, top-left origin; `None` when unknown)
     /// and the strip area `strip` (global).
     pub fn step(&mut self, mode: Mode, pointer: Option<Point>, strip: &Rect, now: Instant) -> Decision {
@@ -178,7 +189,7 @@ impl Visibility {
                         self.dwell_since = None;
                     }
                 }
-                Decision { shown: self.revealed, poll: true }
+                Decision { shown: self.revealed, poll: self.revealed || self.dwell_since.is_some() }
             }
         }
     }
@@ -239,6 +250,30 @@ mod tests {
         let t = Instant::now();
         assert_eq!(v.step(Mode::Shown, None, &STRIP, t), Decision { shown: true, poll: false });
         assert_eq!(v.step(Mode::Off, None, &STRIP, t), Decision { shown: false, poll: false });
+    }
+
+    /// U6: hidden at the edge with the pointer elsewhere nothing is polled (mouse moves wake
+    /// it); a rest at the edge, a revealed strip and the delay after leaving it poll.
+    #[test]
+    fn hidden_at_the_edge_polls_only_while_a_clock_runs() {
+        let mut v = Visibility::default();
+        let t = Instant::now();
+        let edge = Some(Point::new(1.0, 500.0));
+        let away = Some(Point::new(900.0, 500.0));
+        assert_eq!(v.step(Mode::EdgeOnly, away, &STRIP, t), Decision { shown: false, poll: false });
+        assert!(!v.wakes(Point::new(900.0, 500.0), &STRIP));
+        assert!(v.wakes(Point::new(1.0, 500.0), &STRIP));
+        assert!(!v.wakes(Point::new(1.0, 5.0), &STRIP), "above the strip's rows");
+        assert_eq!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 10)), Decision { shown: false, poll: true });
+        assert_eq!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 400)), Decision { shown: true, poll: true });
+        assert_eq!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 500)), Decision { shown: true, poll: true }, "leaving: the delay runs");
+        assert_eq!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 5000)), Decision { shown: false, poll: false });
+        // A rest begun and broken off: polled once more, then idle.
+        assert!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 6000)).poll);
+        assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 6010)).poll);
+        // The edge tab wakes it too.
+        v.set_tab(Some(Rect::new(0.0, 400.0, 10.0, 72.0)));
+        assert!(v.wakes(Point::new(8.0, 420.0), &STRIP));
     }
 
     #[test]

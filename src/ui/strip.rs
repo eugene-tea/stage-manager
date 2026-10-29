@@ -63,6 +63,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -220,6 +221,15 @@ pub fn drop_slot(p: Point) -> Option<StripDrop> {
 /// desktop (the global monitor). Main thread.
 pub fn pointer_moved(p: Point) {
     with_strip(|s| s.pointer_moved(p));
+}
+
+/// The global monitor feeds [`pointer_moved`]: a strip hidden at the edge waits for its moves
+/// instead of polling the pointer. Without it (no monitor) the edge is polled as before.
+static MOVES_FED: AtomicBool = AtomicBool::new(false);
+
+/// Says whether the global monitor's mouse moves reach [`pointer_moved`]. Main thread.
+pub fn set_moves_fed(fed: bool) {
+    MOVES_FED.store(fed, Ordering::Relaxed);
 }
 
 /// What the strip draws now, for a scripted test (`ctl debug-strip`): the cards in slot
@@ -403,6 +413,13 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, _event: &NSEvent) {}
 
+        // The pointer on the tab: its rest starts (the global monitor never hears moves over
+        // our own windows, and nothing is polled while the strip waits at the edge).
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            with_strip(Strip::update_visibility);
+        }
+
         // The tab acts on release, once the click is over: ordered out while its own click
         // was still being handled, the window server put it back on screen at the release
         // (measured 10-12: gone for 60 ms, then listed again over the revealed strip).
@@ -453,6 +470,13 @@ impl EdgeTab {
         unsafe { panel.setReleasedWhenClosed(false) };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
         let view = EdgeTabView::new(mtm, bounds);
+        let options =
+            NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: the view owns the tracking area and outlives it; no user info.
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), bounds, options, Some(&view), None)
+        };
+        view.addTrackingArea(&area);
         let root = CALayer::new();
         view.setLayer(Some(&root));
         view.setWantsLayer(true);
@@ -1134,6 +1158,9 @@ struct Strip {
     icons: HashMap<i32, Option<CFRetained<CGImage>>>,
     visibility: Visibility,
     poll_timer: Option<Retained<NSTimer>>,
+    /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
+    /// global monitor to the edge or the tab looks again.
+    edge_waits: bool,
     capturer: Capturer,
     card_drag: Option<CardDrag>,
     /// A card lifted above the others (dragged, or gliding into its slot after the release),
@@ -1180,6 +1207,7 @@ impl Strip {
             icons: HashMap::new(),
             visibility: Visibility::default(),
             poll_timer: None,
+            edge_waits: false,
             capturer,
             card_drag: None,
             lifted_card: None,
@@ -2508,6 +2536,10 @@ impl Strip {
     /// the cards hover from here and the pane catches clicks again once it is on one.
     fn pointer_moved(&mut self, p: Point) {
         let g = self.geometry.global;
+        // Hidden at the edge, nothing polled: a move to the edge or the tab starts the rest.
+        if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
+            self.update_visibility();
+        }
         if g.contains(p) {
             self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
         } else if self.hovered.is_some() || self.pane.catches == Some(true) {
@@ -2694,7 +2726,12 @@ impl Strip {
             || (self.pane.shown && mode == Mode::EdgeOnly);
         self.set_lifted(lift);
         self.window_drag_card(over);
-        self.set_polling(decision.poll || window_drag || card_dragging);
+        // Hidden at the edge with no clock running, mouse moves wake it (U6); without the
+        // global monitor's moves the pointer is polled as before.
+        let idle_edge = mode == Mode::EdgeOnly && !decision.poll;
+        self.edge_waits = idle_edge;
+        let unfed = idle_edge && !MOVES_FED.load(Ordering::Relaxed);
+        self.set_polling(decision.poll || unfed || window_drag || card_dragging);
         let tab = self.style.reveal.edge_tab
             && !self.snapshot.fullscreen
             && self.covered()
