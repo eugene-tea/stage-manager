@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With Screen Recording allowed, the corner stays clean on any wallpaper, also with desktop
+  icons or widgets there, which still open and drag.
 - The corner stays clean at dawn and dusk on wallpapers that follow the sun.
 - Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
   front with the keyboard, also when it shares its stage with other apps.

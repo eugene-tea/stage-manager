@@ -1,6 +1,15 @@
-//! The desktop in the park corner, as a still (round 8L3): a switch's cover where a Finder
-//! desktop icon lies under the corner (or the icons are not known), so an activation (⌘Tab, a
-//! Dock click) grows from its card on a desktop with icons there too.
+//! The desktop in the park corner, as a still: the corner patch's picture whenever one can be
+//! taken (round desktop-still-patch, [`crate::engine::patch_still`]: exact by construction,
+//! icons, widgets and any wallpaper included), and a switch's cover where a Finder desktop icon
+//! lies under the corner (round 8L3), so an activation (⌘Tab, a Dock click) grows from its card
+//! on a desktop with icons there too.
+//!
+//! For the patch ([`for_patch`]) a still is kept fresh while slivers show, even with no input
+//! (only a locked screen or a sleeping display rests it), and taken again on a Desktop's
+//! arrival once its slide settled, when the icons in the corner change, [`AGAIN_AFTER_TOUCH`]
+//! after a press on the desktop or a release in the corner ([`touched`]), [`FADE`] after the
+//! wallpaper changed ([`wallpaper_changed`]) or the frame the clock predicts is due
+//! ([`set_frame_due`]), else every [`REFRESH_EVERY`].
 //!
 //! The corner patch draws the desktop picture from its file, so it cannot stand for a corner
 //! with icons on it ([`crate::engine::corner_patch`]), and 8L2 gave such a desktop the instant
@@ -27,6 +36,7 @@ use objc2_core_graphics::CGImage;
 use super::capture::{self, DesktopStill};
 use super::{pixels, wallpaper};
 use crate::engine::geometry::Rect;
+use crate::engine::patch_still::{self as ps, AGAIN_AFTER_TOUCH, Block, FADE, Still};
 use crate::engine::wallpaper as wp;
 
 /// The side (points) of the square at the display's bottom-right corner always captured: the
@@ -48,6 +58,10 @@ pub const MAX_AGE: Duration = Duration::from_secs(45);
 
 /// After a capture that could not be taken or failed, the next try waits this long.
 pub const RETRY: Duration = Duration::from_secs(3);
+
+/// After a still was taken, the next one waits at least this long (a burst of reasons, an
+/// icon dragged about the corner, takes one still a moment, not one each).
+pub const MIN_GAP: Duration = Duration::from_millis(500);
 
 /// A capture not answered after this long is given up (the next one may start).
 const STALL: Duration = Duration::from_secs(5);
@@ -87,6 +101,8 @@ pub struct Meta {
     /// No see-through part: the desktop picture's own window is in it. Otherwise it holds
     /// the icons only and is laid over the patch's picture of the wallpaper ([`Layers`]).
     pub opaque: bool,
+    /// Counts the stills kept in this run: the patch redraws when it changes.
+    pub serial: u64,
 }
 
 /// How a still stands for the corner ([`usable`]).
@@ -124,10 +140,22 @@ pub fn block(display: Rect, rect: Option<Rect>) -> Rect {
 }
 
 /// Whether a new still is due for `key` and `region`: none yet, another Desktop, display or
-/// icons, a smaller block, or [`REFRESH_EVERY`] old.
-pub fn due(meta: Option<&Meta>, key: &Key, region: Rect, now: Instant) -> bool {
+/// icons, a smaller block, [`REFRESH_EVERY`] old, or taken before one of the moments `again`
+/// that has come (a press on the desktop, a wallpaper change or a predicted frame change and
+/// its fade).
+pub fn due(meta: Option<&Meta>, key: &Key, region: Rect, again: &[Instant], now: Instant) -> bool {
     let Some(m) = meta else { return true };
-    m.key != *key || !m.region.contains_rect(&region) || now.saturating_duration_since(m.taken) >= REFRESH_EVERY
+    m.key != *key
+        || !m.region.contains_rect(&region)
+        || now.saturating_duration_since(m.taken) >= REFRESH_EVERY
+        || again.iter().any(|a| now >= *a && m.taken < *a)
+}
+
+/// Whether a capture may start now after the last try (`tried`, and whether it `failed`):
+/// [`RETRY`] after one that failed or could not be taken, [`MIN_GAP`] after one taken.
+pub fn may_try(tried: Option<Instant>, failed: bool, now: Instant) -> bool {
+    let gap = if failed { RETRY } else { MIN_GAP };
+    tried.is_none_or(|t| now.saturating_duration_since(t) >= gap)
 }
 
 /// Whether the still `meta` stands for the desktop at `rect` (global, top-left) now, for `key`
@@ -171,19 +199,40 @@ pub struct Moment {
     pub since_switch: Option<Duration>,
 }
 
-/// Why no still is taken now (round 8L4): the screen locked, the display asleep, or no
-/// input and no switch for [`IDLE`]. `None`: one may be taken.
-pub fn rest(m: Moment) -> Option<&'static str> {
+/// Why no still is taken now (round 8L4): the screen locked, the display asleep, or, for a
+/// switch's cover alone (`patch` false: the patch does not stand on one), no input and no
+/// switch for [`IDLE`]. `None`: one may be taken.
+pub fn rest(m: Moment, patch: bool) -> Option<&'static str> {
     if m.locked {
         return Some("the screen is locked");
     }
     if m.asleep {
         return Some("the display sleeps");
     }
-    if m.since_input >= IDLE && m.since_switch.is_none_or(|s| s >= IDLE) {
+    if !patch && m.since_input >= IDLE && m.since_switch.is_none_or(|s| s >= IDLE) {
         return Some("no input and no switch for 2 min");
     }
     None
+}
+
+/// Who wants the still kept fresh ([`keep_fresh`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Wants {
+    /// A switch's cover may need it (8L3).
+    pub cover: bool,
+    /// The corner patch draws it (slivers show).
+    pub patch: bool,
+}
+
+/// Whether a still may be taken now: the capture gate first (captures on, Screen Recording,
+/// window captures working: [`capture::desktop_may_capture`]), the Mac not at [`rest`], then
+/// what the WM thread knows (`safety`, [`ps::may_take`]).
+fn take_now(moment: Moment, patch: bool, safety: Result<(), Block>) -> Result<(), Block> {
+    capture::desktop_may_capture().map_err(Block::No)?;
+    if let Some(why) = rest(moment, patch) {
+        return Err(Block::No(why));
+    }
+    safety
 }
 
 /// Whether an answer to a capture started at `started` is kept over the still `kept`: only
@@ -217,6 +266,21 @@ struct State {
     had: bool,
     /// When a take was last logged ([`TAKE_LOG_EVERY`]).
     take_logged: Option<Instant>,
+    /// The last try failed or could not be taken ([`may_try`]).
+    failed: bool,
+    /// The stills kept in this run ([`Meta::serial`]).
+    serial: u64,
+    /// When the still was last dropped ([`forget`], [`wallpaper_changed`]).
+    dropped_at: Option<Instant>,
+    /// Moments a still taken before is taken again once they come ([`due`]): a press on the
+    /// desktop ([`touched`]), a wallpaper change's fade.
+    again: Vec<Instant>,
+    /// The predicted frame change's moment, its fade included ([`set_frame_due`]).
+    frame_at: Option<Instant>,
+    /// Since when no still has stood for the patch's corner ([`ps::state`]).
+    missing_since: Option<Instant>,
+    /// What the patch found at the last plan, for `ctl state`.
+    patch: Option<Still>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -228,6 +292,13 @@ static STATE: Mutex<State> = Mutex::new(State {
     why_none: None,
     had: false,
     take_logged: None,
+    failed: false,
+    serial: 0,
+    dropped_at: None,
+    again: Vec::new(),
+    frame_at: None,
+    missing_since: None,
+    patch: None,
 });
 
 fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> Option<T> {
@@ -237,36 +308,43 @@ fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> Option<T> {
 /// Logs why no still could be taken, once per reason (until one is taken).
 fn say(s: &mut State, why: &str) {
     if s.said.as_deref() != Some(why) {
-        tracing::debug!(why, "the desktop's still for a switch's cover is not taken now");
+        tracing::debug!(why, "the desktop's still (the corner patch's picture, a switch's cover) is not taken now");
         s.said = Some(why.to_string());
     }
 }
 
+/// The moments a still taken before is due again ([`due`]): [`State::again`] and the
+/// predicted frame change.
+fn marks(s: &State) -> Vec<Instant> {
+    s.again.iter().copied().chain(s.frame_at).collect()
+}
+
 /// Keeps a still of `region` (global, top-left; [`block`]) fresh for `key` (WM thread, at every
-/// corner patch plan while a switch's cover would need it): starts a capture when one is
-/// [`due`], none is in flight, the last try is [`RETRY`] old, and the Mac is not at
-/// [`rest`] (`moment`).
-pub fn keep_fresh(key: Key, region: Rect, moment: Moment, now: Instant) {
+/// corner patch plan while the patch or a switch's cover would need it, `wants`): starts a
+/// capture when one is [`due`], none is in flight, the last try allows it ([`may_try`]), and
+/// it may be taken now (the capture gate, the Mac not at [`rest`], `safety` from the WM
+/// thread: [`ps::may_take`]).
+pub fn keep_fresh(key: Key, region: Rect, moment: Moment, wants: Wants, safety: Result<(), Block>, now: Instant) {
+    if !(wants.cover || wants.patch) {
+        return;
+    }
     let start = with_state(|s| {
         // The capture gate first (pure and cheap): with captures off that is the reason the
         // switch logs, whatever else holds (the scripts expect exactly it).
-        if let Err(why) = capture::desktop_may_capture() {
-            s.why_none = Some(why);
-            say(s, why);
-            return None;
-        }
-        if let Some(why) = rest(moment) {
-            s.why_none = Some(why);
-            say(s, why);
+        if let Err(block) = take_now(moment, wants.patch, safety) {
+            if let Block::No(why) = block {
+                s.why_none = Some(why);
+            }
+            say(s, block.why());
             return None;
         }
         if s.taking.is_some_and(|t| now.saturating_duration_since(t) < STALL) {
             return None;
         }
-        if !due(s.shot.as_ref().map(|x| &x.meta), &key, region, now) {
+        if !due(s.shot.as_ref().map(|x| &x.meta), &key, region, &marks(s), now) {
             return None;
         }
-        if s.tried.is_some_and(|t| now.saturating_duration_since(t) < RETRY) {
+        if !may_try(s.tried, s.failed, now) {
             return None;
         }
         s.tried = Some(now);
@@ -280,10 +358,115 @@ pub fn keep_fresh(key: Key, region: Rect, moment: Moment, now: Instant) {
     if let Err(why) = capture::capture_desktop(region, done) {
         with_state(|s| {
             s.taking = None;
+            s.failed = true;
             s.why_none = Some(why);
             say(s, why);
         });
     }
+}
+
+/// The still for the corner patch at `rect` (WM thread, at every plan while slivers show):
+/// one that stands for it now ([`usable`], whole: the desktop picture's window in it), else
+/// whether one is coming ([`ps::state`]: it may be taken now or shortly, for at most
+/// [`ps::HOLD_MAX`]). Call after [`keep_fresh`] with the same `key`.
+pub fn for_patch(rect: Rect, key: &Key, moment: Moment, safety: Result<(), Block>, now: Instant) -> Still {
+    let take = take_now(moment, true, safety);
+    with_state(|s| {
+        let meta = s.shot.as_ref().map(|x| &x.meta);
+        let ready = match usable(meta, rect, key, now) {
+            Ok(Layers::Alone) => meta.map(|m| m.serial),
+            // A still of the icons only is laid over the file's picture by a switch's cover;
+            // the patch draws the file's picture then, as without one.
+            Ok(Layers::OverWallpaper) => None,
+            Err(_) => None,
+        };
+        let still = match ready {
+            Some(serial) => {
+                s.missing_since = None;
+                Still::Ready(serial)
+            }
+            None => {
+                let since = *s.missing_since.get_or_insert(now);
+                let opaque_known = meta.is_none_or(|m| m.opaque);
+                if opaque_known { ps::state(None, take, now.saturating_duration_since(since)) } else { Still::Absent }
+            }
+        };
+        if s.patch.as_ref().map(std::mem::discriminant) != Some(std::mem::discriminant(&still)) {
+            tracing::debug!(?still, why = take.err().map(Block::why), "corner patch: the desktop's still for the patch");
+        }
+        s.patch = Some(still);
+        still
+    })
+    .unwrap_or_default()
+}
+
+/// The still kept, its block (global, top-left points) and its pixels a point, for the corner
+/// patch (main thread), when it is the one with `serial` and stands alone; the patch crops it
+/// ([`crop`]) and keeps it to hold while the next one comes.
+pub fn patch_still(serial: u64) -> Option<(CFRetained<CGImage>, Rect, f64)> {
+    with_state(|s| s.shot.as_ref().filter(|x| x.meta.serial == serial && x.meta.opaque).map(|x| (x.image.clone(), x.meta.region, x.meta.scale)))
+        .flatten()
+}
+
+/// The pixels of `rect` (global, top-left, whole points) out of a still of `region` at
+/// `scale`; `None` unless the still holds it.
+pub fn crop(still: &CGImage, region: Rect, scale: f64, rect: Rect) -> Option<CFRetained<CGImage>> {
+    let px = wp::crop_px(region, rect, scale)?;
+    wallpaper::crop(still, px)
+}
+
+/// A press on the desktop, or a release in the corner (WM thread): a still taken before is
+/// taken again [`AGAIN_AFTER_TOUCH`] later (an icon selected, deselected or dropped).
+pub fn touched(now: Instant) {
+    with_state(|s| add_mark(s, now + AGAIN_AFTER_TOUCH));
+}
+
+/// Keeps a moment in [`State::again`] (a few at most: the older ones a still has passed go).
+fn add_mark(s: &mut State, at: Instant) {
+    let taken = s.shot.as_ref().map(|x| x.meta.taken);
+    s.again.retain(|a| taken.is_none_or(|t| *a > t));
+    if !s.again.contains(&at) {
+        s.again.push(at);
+    }
+    if s.again.len() > 8 {
+        s.again.remove(0);
+    }
+}
+
+/// The wallpaper read names another picture, placement or look (main thread): the still is
+/// of the old one; dropped, and taken again once the fade is over ([`FADE`]).
+pub fn wallpaper_changed(now: Instant) {
+    forget();
+    with_state(|s| add_mark(s, now + FADE));
+}
+
+/// When the clock predicts the next frame of a dynamic wallpaper (main thread, at every
+/// wallpaper read; `None`: none): a still taken before is taken again once it and its fade
+/// ([`FADE`]) are past ([`next_frame_mark`]).
+pub fn set_frame_due(due: Option<Instant>) {
+    let now = Instant::now();
+    with_state(|s| {
+        let taken = s.shot.as_ref().map(|x| x.meta.taken);
+        s.frame_at = next_frame_mark(s.frame_at, due.map(|d| d + FADE), now, taken);
+    });
+}
+
+/// The predicted frame change to wait for: one still ahead (`kept`, later than `now`) stays
+/// unless the new prediction (`new`) is sooner, so a read every few seconds of a clock that
+/// says "look again in a minute" (a solar frame) does not push it ahead for ever; one come
+/// but not yet served (no still `taken` after it) stays until a still is.
+pub fn next_frame_mark(kept: Option<Instant>, new: Option<Instant>, now: Instant, taken: Option<Instant>) -> Option<Instant> {
+    match kept {
+        Some(k) if k > now => Some(new.map_or(k, |n| k.min(n))),
+        Some(k) if taken.is_none_or(|t| t < k) => Some(k),
+        _ => new,
+    }
+}
+
+/// Since the still was last dropped (a Space, appearance, display or picture change), for
+/// [`ps::TakeFacts::since_dropped`].
+pub fn since_dropped(now: Instant) -> Option<Duration> {
+    with_state(|s| s.dropped_at.map(|t| now.saturating_duration_since(t))).flatten()
 }
 
 /// A capture started at `started` answered (a ScreenCaptureKit queue): kept unless [`forget`]
@@ -299,6 +482,7 @@ fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started
         if s.taking == Some(started) {
             s.taking = None;
         }
+        s.failed = still.is_err();
         match still {
             Ok(_) if s.generation != generation => tracing::trace!("a desktop still from before a change: dropped"),
             Ok(_) if !newer(s.shot.as_ref().map(|x| &x.meta), started) => {
@@ -307,7 +491,7 @@ fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started
             Ok((image, scale, opaque)) => {
                 if !s.had {
                     s.had = true;
-                    tracing::info!(%region, opaque, "switch cover: a still of the desktop stands for the park corner (a desktop icon lies under it, or the patch's picture cannot)");
+                    tracing::info!(%region, opaque, "a still of the desktop stands for the park corner (the corner patch's picture, a switch's cover)");
                 }
                 let now = Instant::now();
                 if s.take_logged.is_none_or(|t| now.saturating_duration_since(t) >= TAKE_LOG_EVERY) {
@@ -316,7 +500,9 @@ fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started
                 }
                 s.said = None;
                 s.why_none = None;
-                s.shot = Some(Shot { meta: Meta { key, region, scale, taken: started, opaque }, image });
+                s.serial = s.serial.wrapping_add(1);
+                s.again.retain(|a| *a > started);
+                s.shot = Some(Shot { meta: Meta { key, region, scale, taken: started, opaque, serial: s.serial }, image });
             }
             Err(why) => say(s, &why),
         }
@@ -378,12 +564,17 @@ pub fn needs_wallpaper() -> bool {
     with_state(|s| s.shot.as_ref().is_none_or(|x| !x.meta.opaque)).unwrap_or(false)
 }
 
-/// Drops the still (an appearance or display change); a capture in flight is not kept.
+/// Drops the still (a Space, appearance or display change); a capture in flight is not kept.
+/// The patch holds what a still drew for a moment ([`ps::HOLD_MAX`]) while the next one comes
+/// ([`ps::SETTLE`] later).
 pub fn forget() {
     with_state(|s| {
         s.shot = None;
         s.generation = s.generation.wrapping_add(1);
         s.tried = None;
+        s.failed = false;
+        s.dropped_at = Some(Instant::now());
+        s.missing_since = None;
     });
 }
 
@@ -396,6 +587,14 @@ pub fn status() -> serde_json::Value {
             "opaque": s.shot.as_ref().map(|x| x.meta.opaque),
             "taking": s.taking.is_some(),
             "why_none": s.why_none,
+            "serial": s.shot.as_ref().map(|x| x.meta.serial),
+            // What the corner patch found at the last plan: ready (drawn from the still),
+            // coming (held) or absent (the file's picture, as without Screen Recording).
+            "patch": s.patch.map(|p| match p {
+                Still::Ready(_) => "ready",
+                Still::Coming => "coming",
+                Still::Absent => "absent",
+            }),
         })
     })
     .unwrap_or(serde_json::Value::Null)
@@ -408,7 +607,7 @@ mod tests {
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
 
     fn meta(key: Key, taken: Instant) -> Meta {
-        Meta { key, region: block(MAIN, None), scale: 2.0, taken, opaque: true }
+        Meta { key, region: block(MAIN, None), scale: 2.0, taken, opaque: true, serial: 1 }
     }
 
     #[test]
@@ -437,14 +636,14 @@ mod tests {
         let now = Instant::now();
         let key = Key::new(1, MAIN, Some(&[]));
         let region = block(MAIN, None);
-        assert!(due(None, &key, region, now));
+        assert!(due(None, &key, region, &[], now));
         let m = meta(key.clone(), now);
-        assert!(!due(Some(&m), &key, region, now + Duration::from_secs(2)));
-        assert!(due(Some(&m), &key, region, now + REFRESH_EVERY));
-        assert!(due(Some(&m), &Key { space: 2, ..key.clone() }, region, now));
+        assert!(!due(Some(&m), &key, region, &[], now + Duration::from_secs(2)));
+        assert!(due(Some(&m), &key, region, &[], now + REFRESH_EVERY));
+        assert!(due(Some(&m), &Key { space: 2, ..key.clone() }, region, &[], now));
         let moved = Key::new(1, MAIN, Some(&[Rect::new(2400.0, 1300.0, 100.0, 100.0)]));
-        assert!(due(Some(&m), &moved, region, now), "an icon came into the corner");
-        assert!(due(Some(&m), &key, Rect::new(2000.0, 1120.0, 560.0, 320.0), now), "a bigger block");
+        assert!(due(Some(&m), &moved, region, &[], now), "an icon came into the corner");
+        assert!(due(Some(&m), &key, Rect::new(2000.0, 1120.0, 560.0, 320.0), &[], now), "a bigger block");
     }
 
     #[test]
@@ -472,16 +671,68 @@ mod tests {
     #[test]
     fn no_still_while_locked_asleep_or_idle_and_one_at_the_first_input_after() {
         let busy = Moment { locked: false, asleep: false, since_input: Duration::from_secs(1), since_switch: None };
-        assert_eq!(rest(busy), None);
-        assert_eq!(rest(Moment { locked: true, ..busy }), Some("the screen is locked"));
-        assert_eq!(rest(Moment { asleep: true, ..busy }), Some("the display sleeps"));
+        assert_eq!(rest(busy, false), None);
+        assert_eq!(rest(Moment { locked: true, ..busy }, false), Some("the screen is locked"));
+        assert_eq!(rest(Moment { asleep: true, ..busy }, false), Some("the display sleeps"));
         let idle = Moment { since_input: IDLE, ..busy };
-        assert_eq!(rest(idle), Some("no input and no switch for 2 min"), "no switch yet in the run");
-        assert_eq!(rest(Moment { since_switch: Some(IDLE + Duration::from_secs(5)), ..idle }), Some("no input and no switch for 2 min"));
+        assert_eq!(rest(idle, false), Some("no input and no switch for 2 min"), "no switch yet in the run");
+        assert_eq!(rest(Moment { since_switch: Some(IDLE + Duration::from_secs(5)), ..idle }, false), Some("no input and no switch for 2 min"));
         // A switch (a ctl switch, a test's) counts as being in use.
-        assert_eq!(rest(Moment { since_switch: Some(Duration::from_secs(30)), ..idle }), None);
+        assert_eq!(rest(Moment { since_switch: Some(Duration::from_secs(30)), ..idle }, false), None);
         // The first input after: a still again (the old one is past REFRESH_EVERY, so due).
-        assert_eq!(rest(Moment { since_input: Duration::from_millis(200), ..idle }), None);
+        assert_eq!(rest(Moment { since_input: Duration::from_millis(200), ..idle }, false), None);
+        // The patch drawn from a still is kept fresh with no input (a film watched), never
+        // while the screen is locked or the display sleeps.
+        assert_eq!(rest(idle, true), None);
+        assert_eq!(rest(Moment { locked: true, ..idle }, true), Some("the screen is locked"));
+        assert_eq!(rest(Moment { asleep: true, ..idle }, true), Some("the display sleeps"));
+    }
+
+    #[test]
+    fn a_still_is_taken_again_after_a_touch_a_wallpaper_change_or_a_predicted_frame() {
+        let t0 = Instant::now();
+        let key = Key::new(1, MAIN, Some(&[]));
+        let region = block(MAIN, None);
+        let m = meta(key.clone(), t0);
+        let soon = t0 + Duration::from_secs(1);
+        // A press on the desktop at t0 + 1 s: due once its moment came, not before.
+        let touch = soon + crate::engine::patch_still::AGAIN_AFTER_TOUCH;
+        assert!(!due(Some(&m), &key, region, &[touch], soon));
+        assert!(due(Some(&m), &key, region, &[touch], touch));
+        // Taken after the moment: not due again for it.
+        let after = meta(key.clone(), touch + Duration::from_millis(1));
+        assert!(!due(Some(&after), &key, region, &[touch], touch + Duration::from_secs(2)));
+        // A predicted frame change in an hour, its fade after it.
+        let frame = t0 + Duration::from_secs(3600) + crate::engine::patch_still::FADE;
+        assert!(!due(Some(&m), &key, region, &[frame], t0 + Duration::from_secs(5)));
+        assert!(due(Some(&m), &key, region, &[frame], frame));
+    }
+
+    #[test]
+    fn a_predicted_frame_change_is_not_pushed_ahead_by_every_read() {
+        let t0 = Instant::now();
+        let at = |s: u64| Some(t0 + Duration::from_secs(s));
+        let taken = at(0);
+        assert_eq!(next_frame_mark(None, at(60), t0, taken), at(60));
+        // Read again 2 s later: "in a minute" again; the first stands.
+        assert_eq!(next_frame_mark(at(60), at(62), t0 + Duration::from_secs(2), taken), at(60));
+        assert_eq!(next_frame_mark(at(60), at(30), t0 + Duration::from_secs(2), taken), at(30), "a sooner one");
+        assert_eq!(next_frame_mark(at(60), None, t0 + Duration::from_secs(2), taken), at(60));
+        // Come, but no still since (a switch ran): it stays due.
+        assert_eq!(next_frame_mark(at(60), at(121), t0 + Duration::from_secs(61), taken), at(60));
+        // Served by a still: the next prediction.
+        assert_eq!(next_frame_mark(at(60), at(121), t0 + Duration::from_secs(62), at(61)), at(121));
+        assert_eq!(next_frame_mark(at(60), None, t0 + Duration::from_secs(62), at(61)), None);
+    }
+
+    #[test]
+    fn a_capture_waits_long_after_a_failure_and_briefly_after_a_still() {
+        let t0 = Instant::now();
+        assert!(may_try(None, false, t0));
+        assert!(!may_try(Some(t0), false, t0 + Duration::from_millis(100)), "a burst of reasons: one still");
+        assert!(may_try(Some(t0), false, t0 + MIN_GAP), "an icon moved right after a refresh: at once");
+        assert!(!may_try(Some(t0), true, t0 + MIN_GAP), "after a failure");
+        assert!(may_try(Some(t0), true, t0 + RETRY));
     }
 
     #[test]

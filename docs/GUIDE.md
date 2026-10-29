@@ -191,9 +191,12 @@ desktop".
 
 To hide a stage, Stage Manager moves its windows into the bottom-right corner of the
 screen. macOS always keeps a thin edge of each window on screen. Stage Manager makes those
-edges ignore clicks and covers them with a matching piece of your wallpaper, so the corner
-looks empty. If a second screen sits beyond that corner, a free corner is used instead.
-Each Desktop has its own patch, which slides in with it.
+edges ignore clicks and covers them with a matching piece of your desktop, so the corner
+looks empty. With Screen Recording allowed, the patch is a picture of the desktop itself:
+any wallpaper, and the icons and widgets in that corner, which you can still click and drag.
+Without it, the patch is drawn from your wallpaper's file. If a second screen sits beyond
+that corner, a free corner is used instead. Each Desktop has its own patch, which slides in
+with it.
 
 ## Settings
 
@@ -325,13 +328,16 @@ macOS 15, macOS shows this for every app that takes pictures of windows directly
 **Allow**. It comes back about once a month, and once whenever the app is moved to a new
 place.
 
-**Thin window edges show in the corner.** The wallpaper patch steps aside when it cannot
-match your wallpaper exactly: video and aerial wallpapers, shuffled or Photos wallpapers,
-the Center and Tile placements, Fit with no fill color, or a desktop icon in the corner.
-Pictures that change with the time of day or with light and dark, Apple's own included,
-are usually matched. A Desktop you visit for the first time may show the edges for a moment. A desktop widget in that
-corner may be covered by the patch. You can turn the patch off with `[windows] corner_patch
-= false`.
+**Thin window edges show in the corner.** Allow Screen Recording (the menu bar icon's menu
+says when it is off): the patch is then a picture of the desktop itself and matches any
+wallpaper, with the icons and widgets in that corner. It is taken again every few seconds,
+so a wallpaper that changes may differ there for a moment. Without Screen Recording, the
+patch is drawn from your wallpaper's file and steps aside when it cannot match it exactly:
+video and aerial wallpapers, shuffled or Photos wallpapers, the Center and Tile placements,
+Fit with no fill color, or a desktop icon in the corner; a desktop widget there may be
+covered. Pictures that change with the time of day or with light and dark, Apple's own
+included, are usually matched. A Desktop you visit for the first time may show the edges for
+a moment. You can turn the patch off with `[windows] corner_patch = false`.
 
 **A window seems lost.** Quit Stage Manager from its menu: every hidden window comes back.
 If the app crashed, a small helper process brings the windows back by itself, and the next

@@ -486,6 +486,19 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugDesktop { at, double, to } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-desktop needs STAGE_MANAGER_TEST=1");
+                }
+                let posted = match to {
+                    Some(to) => input::desktop_drag(at, to),
+                    None => input::desktop_click(at, double),
+                };
+                match posted {
+                    Ok(()) => json!({ "ok": true }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
             Command::DebugHover { x, y, ms } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-hover needs STAGE_MANAGER_TEST=1");

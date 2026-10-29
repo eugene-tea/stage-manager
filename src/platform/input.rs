@@ -323,9 +323,14 @@ pub fn segment(a: Point, b: Point, step: f64) -> Vec<Point> {
 }
 
 fn post_mouse(kind: CGEventType, p: Point, shift: bool) -> Result<(), String> {
+    post_mouse_clicks(kind, p, shift, 1)
+}
+
+/// A mouse event at `p`, the `clicks`th click of a multiple click.
+fn post_mouse_clicks(kind: CGEventType, p: Point, shift: bool, clicks: i64) -> Result<(), String> {
     let at = CGPoint { x: p.x, y: p.y };
     let event = CGEvent::new_mouse_event(None, kind, at, CGMouseButton::Left).ok_or("cannot create a mouse event")?;
-    CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, 1);
+    CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, clicks);
     if shift {
         CGEvent::set_flags(Some(&event), CGEventFlags::MaskShift);
     }
@@ -444,9 +449,90 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
     Ok(())
 }
 
+/// Whether only the desktop lies at `p` in `list` (front to back): the topmost window there,
+/// our click-through ones (the corner patch, the strip's pane off its cards, the overlay) and
+/// transparent ones seen through, is a desktop-level window of another process (Finder's
+/// icons, the wallpaper). The test's desktop clicks ([`desktop_click`], [`desktop_drag`]) go
+/// only there.
+fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32) -> Result<(), String> {
+    let top = list.iter().find(|w| {
+        let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || w.bounds.w > TAB_MAX_WIDTH);
+        w.onscreen && !click_through && w.alpha > 0.0 && w.bounds.contains(p)
+    });
+    match top {
+        Some(w) if w.layer < 0 && w.pid != own => Ok(()),
+        Some(w) => Err(format!("the topmost window at {:.0},{:.0} is not the desktop (pid {}, layer {})", p.x, p.y, w.pid, w.layer)),
+        None => Err(format!("no desktop window at {:.0},{:.0}", p.x, p.y)),
+    }
+}
+
+/// A synthetic click (or double click) at `p` on the desktop itself (test only: a fixture's
+/// desktop icon under the corner patch), only where nothing but the desktop lies
+/// ([`desktop_at`]). The pointer goes back where it was.
+pub fn desktop_click(p: Point, double: bool) -> Result<(), String> {
+    let own = std::process::id() as i32;
+    desktop_at(&windows::list_windows(), p, own)?;
+    let back = pointer_home();
+    move_first(p, false)?;
+    for clicks in 1..=if double { 2 } else { 1 } {
+        for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
+            post_mouse_clicks(kind, p, false, clicks)?;
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+    if let Some(back) = back {
+        let _ = CGWarpMouseCursorPosition(back);
+    }
+    Ok(())
+}
+
+/// A synthetic drag on the desktop from `from` to `to` (test only: a fixture's desktop icon
+/// dragged out of the corner), only when every point it passes lies on the desktop itself
+/// ([`desktop_at`], checked before anything is posted). The pointer goes back where it was.
+pub fn desktop_drag(from: Point, to: Point) -> Result<(), String> {
+    let own = std::process::id() as i32;
+    let list = windows::list_windows();
+    let path = segment(from, to, 4.0);
+    for p in &path {
+        desktop_at(&list, *p, own)?;
+    }
+    let back = pointer_home();
+    move_first(from, false)?;
+    post_mouse(CGEventType::LeftMouseDown, from, false)?;
+    std::thread::sleep(Duration::from_millis(150));
+    for p in path.iter().skip(1) {
+        post_mouse(CGEventType::LeftMouseDragged, *p, false)?;
+        std::thread::sleep(Duration::from_millis(8));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    post_mouse(CGEventType::LeftMouseUp, to, false)?;
+    std::thread::sleep(Duration::from_millis(80));
+    if let Some(back) = back {
+        let _ = CGWarpMouseCursorPosition(back);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_desktop_click_goes_only_where_nothing_but_the_desktop_lies() {
+        use crate::engine::geometry::Rect;
+        let own = 7;
+        let w = |pid: i32, layer: i64, bounds: Rect| windows::CgWindow { id: 1, pid, owner: String::new(), name: None, layer, bounds, onscreen: true, alpha: 1.0 };
+        let screen = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let icons = w(300, -2_147_483_603, screen);
+        let patch = w(own, 0, Rect::new(2440.0, 1240.0, 120.0, 200.0));
+        let app = w(55, 0, Rect::new(100.0, 100.0, 800.0, 600.0));
+        let tab = w(own, 0, Rect::new(0.0, 600.0, 8.0, 80.0));
+        let list = [app.clone(), tab, patch, icons];
+        assert_eq!(desktop_at(&list, Point::new(2490.0, 1380.0), own), Ok(()), "under the patch: the icon");
+        assert!(desktop_at(&list, Point::new(200.0, 200.0), own).is_err(), "an app's window");
+        assert!(desktop_at(&list, Point::new(4.0, 620.0), own).is_err(), "our edge tab takes clicks");
+        assert!(desktop_at(&[app], Point::new(2490.0, 1380.0), own).is_err(), "nothing listed there");
+    }
 
     const NONE: Modifiers = Modifiers { shift: false, cmd: false };
     const SHIFT: Modifiers = Modifiers { shift: true, cmd: false };

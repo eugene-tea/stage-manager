@@ -74,7 +74,11 @@ start at its first signal, repeats ignored, a cancel resuming at once, the apps 
 it holds with the file kept, and the next session bringing each window back into its stage at
 its saved frame (one reopened clamped against the park corner, one at the park spot); and the
 same with no early signal, from the entries kept with `quit_at`. Hands off the Mac during this
-phase: a click or key press ends the restore window early).
+phase: a click or key press ends the restore window early). Run by name only: still (the
+corner patch drawn from a still of the desktop, with window captures on: a disk image of the
+test's own mounted and its icon placed under the park corner; the patch shows over it, the
+icon opens with a double click through the patch and drags out, a new still follows; the
+volume is ejected after).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -3170,6 +3174,163 @@ def phase_capture():
         popup_over_check(over)
 
 
+# ----- still: the corner patch drawn from a still of the desktop (round desktop-still-patch)
+
+
+def finder_script(script):
+    """Runs AppleScript `script` in Finder's dictionary; its output, or None on an error."""
+    r = subprocess.run(["osascript", "-e", f'tell application "Finder"\n{script}\nend tell'],
+                       capture_output=True, text=True, timeout=15)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def patch_plan(s):
+    return (s.get("desktop_still") or {}).get("patch_plan") or {}
+
+
+def icon_image(grown):
+    """A desktop icon's picture from its rectangle as the app reads it (engine::corner_patch::
+    item_reach: grown 36 pt each side, 6 above, 44 below for its label)."""
+    return {"x": grown["x"] + 36, "y": grown["y"] + 6, "w": grown["w"] - 72, "h": grown["h"] - 50}
+
+
+def mid(r):
+    return r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
+
+
+def phase_still():
+    """Round desktop-still-patch: with window captures on (as the capture phase), the corner
+    patch is a still of the desktop, so a desktop icon under it no longer keeps it off and the
+    icon stays usable. The icon is the test's own: a small disk image made in the test's home
+    and mounted (never a file in the owner's Desktop folder), moved under the park corner with
+    Finder's `desktop position`. With a fixture window parked: the patch shows over the icon,
+    drawn from a still (`desktop_still.patch` ready, its plan naming the still's serial); a
+    double click on the icon through the click-through patch opens the volume's Finder window
+    (closed again); a drag takes the icon out of the corner and a new still follows, the patch
+    still shown. The volume is ejected whatever happens. No picture is saved: the still holds
+    the real desktop. With "Click wallpaper to reveal desktop" at Always (macOS's default) the
+    click and the drag run only with SM_STILL_CLICK=1: macOS's own reveal should leave a click
+    on an icon alone, but would move every window aside if it did not. Skipped when Finder shows no disk image on the desktop (Finder Settings,
+    General, External disks) or will not place it under the corner (Sort By, Snap to Grid)."""
+    say("\n== still: the corner patch drawn from a still of the desktop, a fixture icon under it ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(2)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    if not check(s is not None, "still: app up with captures on"):
+        return
+    check(s.get("capture", {}).get("mode") == "on", f"still: captures are on ({s.get('capture')})")
+    t = by_title(s)
+    do("send", 2, t["Fixture 1"]["id"])
+    ready = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("patch") == "ready"
+                                and patch_plan(x).get("show") and patch_plan(x).get("still") is not None else None)(state()),
+                       20, "the corner patch drawn from a still of the desktop")
+    if not check(ready is not None, f"still: the patch is drawn from a still ({(state().get('desktop_still') or {})})"):
+        return
+    rect = patch_plan(ready)["show"]
+    display = ready["display"]["frame"]
+    say(f"    the patch: {fmt(rect)}")
+    name = f"SM Fixture Icon {os.getpid()}"
+    dmg = os.path.join(HOME, "icon.dmg")
+    mount = None
+    try:
+        r = subprocess.run(["hdiutil", "create", "-ov", "-size", "2m", "-fs", "HFS+", "-volname", name, dmg],
+                           capture_output=True, text=True)
+        if not check(r.returncode == 0, f"still: a disk image made ({r.stderr.strip() or 'ok'})"):
+            return
+        r = subprocess.run(["hdiutil", "attach", dmg], capture_output=True, text=True)
+        mount = next((ln.split("\t")[-1].strip() for ln in r.stdout.splitlines() if "/Volumes/" in ln), None)
+        if not check(mount is not None, f"still: the disk image mounted ({r.stderr.strip() or mount})"):
+            return
+        before = [tuple(i.values()) for i in (ready.get("desktop_still") or {}).get("icons") or []]
+
+        def new_icon():
+            x = state()
+            icons = (x.get("desktop_still") or {}).get("icons") or []
+            fresh = [i for i in icons if tuple(i.values()) not in before]
+            return fresh[0] if len(fresh) == 1 else None
+
+        # Its picture's centre 40 pt in from the right edge, at the patch's middle: under the
+        # patch, clear of the sliver's 12 pt resize border.
+        want = (display["x"] + display["w"] - 40, rect["y"] + rect["h"] / 2)
+        icon = None
+        for _ in range(3):
+            if finder_script(f'set desktop position of disk "{name}" to {{{want[0]:.0f}, {want[1]:.0f}}}') is None:
+                break
+            time.sleep(6)  # Finder's icons are read every 5 s
+            icon = new_icon()
+            if icon is None:
+                break
+            got = mid(icon_image(icon))
+            if abs(got[0] - want[0]) <= 4 and abs(got[1] - want[1]) <= 4:
+                break
+            want = (2 * want[0] - got[0], 2 * want[1] - got[1])  # Finder's position is not the centre
+        if icon is None:
+            skip("still: a fixture icon under the corner", "Finder shows no disk image on the desktop, or did not move it")
+            return
+        at = mid(icon_image(icon))
+        s1 = state()
+        rect = patch_plan(s1).get("show") or rect
+        under = intersect(icon_image(icon), rect) and display["x"] + display["w"] - at[0] > 14
+        if not under:
+            skip("still: a fixture icon under the corner",
+                 f"Finder placed it at {at[0]:.0f},{at[1]:.0f}, not under the patch {fmt(rect)} (Sort By or Snap to Grid?)")
+            return
+        say(f"    the fixture icon under the patch at {at[0]:.0f},{at[1]:.0f}")
+        shown = wait_until(lambda: (lambda x: x if patch_plan(x).get("show") and patch_plan(x).get("still") is not None
+                                    and (x.get("desktop_still") or {}).get("patch") == "ready" else None)(state()),
+                           5, "the patch over the icon")
+        check(shown is not None, f"still: the patch shows over a desktop icon, from a still ({patch_plan(state())})")
+        ours = [w for w in our_windows() if w["layer"] == 0 and w.get("alpha", 1.0) > 0 and intersect(w["bounds"], icon_image(icon))]
+        check(bool(ours), f"still: our patch panel is on screen over the icon ({[fmt(w['bounds']) for w in ours]})")
+        serial = (state().get("desktop_still") or {}).get("serial")
+        if wm_default("GloballyEnabled") == "1":
+            skip("still: the icon's double click and drag", "Apple's Stage Manager is on")
+            return
+        if wm_default("EnableStandardClickToShowDesktop") != "0" and os.environ.get("SM_STILL_CLICK") != "1":
+            # macOS's own reveal acts on the bare wallpaper; on an icon it should not, but a
+            # reveal would move every window aside: only on the main thread's word.
+            skip("still: the icon's double click and drag",
+                 "\"Click wallpaper to reveal desktop\" is Always; SM_STILL_CLICK=1 clicks the icon anyway")
+            return
+        fixed = live_frame("Fixture 2")
+
+        say("-- a double click on the icon, through the patch, opens it")
+        r = ctl("debug-desktop", f"{at[0]:.0f}", f"{at[1]:.0f}", "double")
+        if check(r.get("ok"), f"still: double-clicked the icon ({r.get('error', 'ok')})"):
+            opened = wait_until(lambda: name in (finder_script("get name of every Finder window") or ""), 5,
+                                "the volume's Finder window")
+            check(opened is not None, "still: the icon under the patch opened (its Finder window)")
+        finder_script(f'close (every Finder window whose name is "{name}")')
+        time.sleep(0.5)
+        check(close(live_frame("Fixture 2"), fixed), "still: the click on the icon revealed nothing (the shown window stayed)")
+
+        say("-- a drag takes the icon out of the corner; a new still follows")
+        to = (at[0] - 220, at[1])
+        r = ctl("debug-desktop", f"{at[0]:.0f}", f"{at[1]:.0f}", "drag", f"{to[0]:.0f}", f"{to[1]:.0f}")
+        if r.get("ok"):
+            moved = wait_until(lambda: (lambda i: i if i and not intersect(icon_image(i), rect) else None)(new_icon()), 8,
+                               "the icon out of the corner")
+            check(moved is not None, "still: the icon dragged from under the patch moved")
+            fresh = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("serial") not in (None, serial)
+                                        and (x.get("desktop_still") or {}).get("patch") == "ready"
+                                        and patch_plan(x).get("show") else None)(state()), 5, "a new still")
+            check(fresh is not None, f"still: a new still after the icon moved, the patch still shown ({patch_plan(state())})")
+        else:
+            skip("still: the icon dragged", f"the drag's path is not all desktop ({r.get('error')})")
+    finally:
+        if mount:
+            finder_script(f'close (every Finder window whose name is "{name}")')
+            subprocess.run(["hdiutil", "detach", mount, "-force"], capture_output=True)
+        if os.path.exists(dmg):
+            os.remove(dmg)
+        stop_app()
+    all_onscreen("still quit")
+
+
 def holds_fill(boxes, window_alone):
     """capture_pixels::holds_fill over `ctl debug-strip`'s corner boxes ([alpha, mean, spread])."""
     flat = all(a >= 240 and sp <= 6 for a, _, sp in boxes) and max(m for _, m, _ in boxes) - min(m for _, m, _ in boxes) <= 12
@@ -4678,7 +4839,8 @@ def main():
                 break
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
-             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise}[p]()
+             "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
+             "still": phase_still}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
