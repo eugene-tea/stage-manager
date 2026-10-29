@@ -1164,8 +1164,14 @@ impl Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        self.tab.panel.orderOut(None);
-        self.tab.panel.close();
+        // Its tab closes with it (`EdgeTab`'s drop).
+        self.panel.orderOut(None);
+        self.panel.close();
+    }
+}
+
+impl Drop for EdgeTab {
+    fn drop(&mut self) {
         self.panel.orderOut(None);
         self.panel.close();
     }
@@ -2694,6 +2700,13 @@ impl Strip {
             self.update_targets();
             tracing::info!(on_active_space = self.pane.panel.isOnActiveSpace(), "strip: the pane of the Space shown");
         }
+        // The edge tab shown while the Space still slid can have landed on the Desktop being
+        // left (the review's U9): a new one takes over (the stray one closes) and shows here.
+        if self.pane.tab.shown && !self.pane.tab.panel.isOnActiveSpace() {
+            tracing::info!("strip: the edge tab is not on the Space shown; a new one takes over");
+            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()));
+            self.update_visibility();
+        }
         self.publish_panel();
     }
 
@@ -2772,12 +2785,15 @@ impl Strip {
         self.edge_waits = idle_edge;
         let unfed = idle_edge && !MOVES_FED.load(Ordering::Relaxed);
         self.set_polling(decision.poll || unfed || window_drag || card_dragging);
+        // Only beside a pane on the Desktop shown: a tab's first order-in decides the Desktop
+        // it lives on (the review's U9; a stray one is replaced, `ensure_on_active_space`).
         let tab = self.style.reveal.edge_tab
             && !self.snapshot.fullscreen
             && self.covered()
             && !self.pane.shown
             && !window_drag
-            && !card_dragging;
+            && !card_dragging
+            && self.pane.on_space_shown();
         self.pane.tab.show(tab, self.mtm);
     }
 
