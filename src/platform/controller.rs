@@ -2015,7 +2015,8 @@ impl Controller {
     }
 
     /// Notes which windows are parked, where every window lives and the strip's slots, for
-    /// the next transition.
+    /// the next transition: after every batch, and after a change of the strip alone (a Dock
+    /// re-sort, a config reload), never between a model change and its batch.
     fn remember(&mut self) {
         let Some(m) = &self.model else { return };
         self.before = transition_plan::Before::of(m);
@@ -4552,6 +4553,9 @@ impl Controller {
                     let actions = m.set_named_stages(config.stages.names.clone());
                     self.execute(ob, actions);
                 }
+                // The strip's slots may have changed with nothing to execute: the next switch
+                // grows from the cards as they are now (the review's K3).
+                self.remember();
                 self.present();
             }
             Err(e) => {
