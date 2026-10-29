@@ -13,6 +13,9 @@
 - Whole-number settings accept a number written like `50.0`.
 - A hotkey of Shift and a key alone is refused (it would take that key from your typing);
   hotkeys need Control, Option or Command, or a function key.
+- If Stage Manager is moved while an update waits to install, it opens again afterwards
+  instead of staying closed.
+- An update you install by hand no longer leaves its disk image in the temporary folder.
 
 ## 1.4.0 — 2026-10-23
 

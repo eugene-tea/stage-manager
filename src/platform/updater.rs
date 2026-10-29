@@ -22,7 +22,10 @@
 //!    app. Any failure puts the old app back and opens it ([`self_update::run_swap`]), and
 //!    leaves a note the app shows at its next launch ([`take_note`]). When the old app cannot
 //!    be put back, the working folder is kept (marked, so a launch does not clean it) and the
-//!    log and the note say where each copy is (review R1).
+//!    log and the note say where each copy is (review R1). The old process is told by its pid
+//!    and its start time, never a pid reused since (review C3); when nothing could be opened at
+//!    the installed path (the app was moved since), the app is opened by its bundle ID (C12).
+//!    A disk image kept for a manual install goes an hour later (C11).
 //!
 //! Test builds only (the `update-test` feature): `STAGE_MANAGER_UPDATE_DMG=<file>` takes a
 //! local disk image instead of downloading one, and a running app with a local (not
@@ -423,9 +426,16 @@ pub enum PrepareError {
     Failed(String),
 }
 
+/// The prefix of an update's private temporary folder ([`private_dir`]).
+const DOWNLOAD_DIR_PREFIX: &str = "stage-manager-update.";
+
+/// How long a disk image kept for a manual install stays: it is opened in the Finder at
+/// once, and a mounted image needs no file.
+const MANUAL_KEEP: Duration = Duration::from_secs(60 * 60);
+
 /// A private temporary folder (mode 0700).
 fn private_dir() -> Result<PathBuf, String> {
-    let template = paths::user_temp_dir().join("stage-manager-update.XXXXXX");
+    let template = paths::user_temp_dir().join(format!("{DOWNLOAD_DIR_PREFIX}XXXXXX"));
     let mut bytes = template.as_os_str().as_bytes().to_vec();
     bytes.push(0);
     // SAFETY: a writable NUL-terminated template ending in XXXXXX.
@@ -503,8 +513,29 @@ fn fetch(release: &Release, dir: &Path) -> Result<PathBuf, String> {
     Ok(dmg)
 }
 
+/// Removes the update folders in `parent` older than `keep` (by their last change): the disk
+/// images kept for manual installs, which nothing else removes (review C11). A younger one
+/// may be another copy's download in progress, and stays.
+fn clean_old_downloads(parent: &Path, keep: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(parent) else { return 0 };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let ours = e.file_name().to_str().is_some_and(|n| n.starts_with(DOWNLOAD_DIR_PREFIX));
+        let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
+        let old = meta.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= keep);
+        if ours && meta.is_dir() && old && remove_any(&e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Downloads and verifies `release` (blocking; a background thread). See the module docs.
 fn prepare_blocking(release: &Release) -> Result<Prepared, PrepareError> {
+    let old = clean_old_downloads(&paths::user_temp_dir(), MANUAL_KEEP);
+    if old > 0 {
+        tracing::info!(folders = old, "update: removed the disk images kept for earlier manual installs");
+    }
     let trust = own_trust().map_err(|r| PrepareError::Failed(format!("{r:?}")))?;
     let target = can_install();
     let dir = private_dir().map_err(PrepareError::Failed)?;
@@ -602,9 +633,14 @@ pub fn discard(p: &Prepared) {
 
 /// At launch, off the main thread: removes a working folder an earlier update left beside
 /// this app (the app quit while an update waited, or a helper was killed), unless an update
-/// helper runs now (the folder is its own until it ends).
+/// helper runs now (the folder is its own until it ends); and the disk images kept for
+/// manual installs more than an hour ago.
 pub fn clean_stale_work() {
     let _ = std::thread::Builder::new().name("update-clean".into()).spawn(|| {
+        let old = clean_old_downloads(&paths::user_temp_dir(), MANUAL_KEEP);
+        if old > 0 {
+            tracing::info!(folders = old, "update: removed the disk images kept for earlier manual installs");
+        }
         let Ok(target) = self_update::install_target(&own_bundle(), true) else { return };
         let Some((work, _)) = self_update::staging_paths(&target) else { return };
         if std::fs::symlink_metadata(&work).is_err() {
@@ -693,6 +729,19 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
 }
 
+/// Whether the app `pid`, which started at `born` (when the helper could read it), still
+/// runs: the pid alive and its start time unchanged, so a pid the system gave to another
+/// process after the app exited does not hold the update back (review C3).
+fn app_still_runs(pid: u32, born: Option<(u64, u64)>) -> bool {
+    alive(pid) && same_start(born, start_time(pid as i32))
+}
+
+/// A process seen now (`now`, its start time when readable) is the one that started at
+/// `born`; with no start time read at first, any process at the pid is.
+fn same_start(born: Option<(u64, u64)>, now: Option<(u64, u64)>) -> bool {
+    born.is_none_or(|b| now == Some(b))
+}
+
 /// A process's executable.
 fn exe_of(pid: i32) -> Option<PathBuf> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -720,12 +769,17 @@ fn argv_of(pid: i32) -> Option<Vec<String>> {
 
 /// When a process started (seconds since 1970).
 fn started_at(pid: i32) -> Option<u64> {
+    start_time(pid).map(|(secs, _)| secs)
+}
+
+/// When a process started: seconds since 1970 and microseconds.
+fn start_time(pid: i32) -> Option<(u64, u64)> {
     // SAFETY: a zeroed proc_bsdinfo is valid; proc_pidinfo fills at most its size.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_bsdinfo>() as i32;
     // SAFETY: as above.
     let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-    (n == size).then_some(info.pbi_start_tvsec)
+    (n == size).then_some((info.pbi_start_tvsec, info.pbi_start_tvusec))
 }
 
 /// Other processes running the app's executable (`…/Contents/MacOS/stage-manager`, from any
@@ -901,6 +955,26 @@ impl SwapOps for RealSwap {
     }
 }
 
+/// Whether the swap ended with no app opened: a roll back or a stranded exchange whose
+/// relaunch at the installed path failed.
+fn relaunch_failed(outcome: &SwapOutcome) -> bool {
+    matches!(outcome, SwapOutcome::RolledBack { relaunched: Err(_), .. } | SwapOutcome::Stranded { relaunched: Err(_), .. })
+}
+
+/// Opens the app by its bundle ID (`open -b`), with the variables a relaunch passes on.
+fn reopen_by_bundle_id() -> Result<(), String> {
+    let id = own_bundle_id();
+    if id.is_empty() {
+        return Err("no bundle ID".into());
+    }
+    let mut open = Command::new("/usr/bin/open");
+    for var in self_update::relaunch_env(std::env::vars()) {
+        open.arg("--env").arg(var);
+    }
+    let status = open.arg("-b").arg(&id).status().map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("open exited with {status}")) }
+}
+
 /// `stage-manager --update-helper <pid> <target> <staged> <version> <requirement>`: waits
 /// for the old app to exit, then swaps in the verified copy (module docs).
 pub fn run_helper(args: &[String]) -> ExitCode {
@@ -912,9 +986,10 @@ pub fn run_helper(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let born = start_time(args.pid as i32);
     tracing::info!(pid = args.pid, version = %args.version, target = %args.target.display(), "updater: waiting for the app to quit");
     let start = Instant::now();
-    while alive(args.pid) {
+    while app_still_runs(args.pid, born) {
         if start.elapsed() > EXIT_WAIT {
             tracing::error!("updater: the app did not quit; nothing replaced");
             let _ = remove_any(args.staged.parent().unwrap_or(&args.staged));
@@ -980,6 +1055,14 @@ pub fn run_helper(args: &[String]) -> ExitCode {
             let _ = std::fs::write(note_path(), note);
         }
     }
+    if relaunch_failed(&outcome) {
+        // The installed path held nothing to open (the app was moved since Install and
+        // Relaunch): open the app wherever macOS knows it, never leave none running (review C12).
+        match reopen_by_bundle_id() {
+            Ok(()) => tracing::info!("updater: the app could not be opened at its path; opened it by its bundle ID"),
+            Err(e) => tracing::error!("updater: the app could not be opened at its path nor by its bundle ID: {e}"),
+        }
+    }
     if outcome.keeps_work()
         && let Some(work) = args.staged.parent()
     {
@@ -1005,6 +1088,46 @@ mod tests {
     }
 
     /// Release builds trust only a Developer ID signature and never read the test hooks.
+    /// Review C3: a pid given to another process (another start time) is not the app.
+    #[test]
+    fn a_reused_pid_is_not_the_app() {
+        assert!(same_start(Some((100, 5)), Some((100, 5))));
+        assert!(!same_start(Some((100, 5)), Some((160, 0))), "another process at the pid");
+        assert!(!same_start(Some((100, 5)), None), "unreadable: another user's process");
+        assert!(same_start(None, Some((160, 0))), "nothing read at first: the pid decides");
+        let me = std::process::id();
+        assert!(app_still_runs(me, start_time(me as i32)));
+        assert!(!app_still_runs(me, Some((1, 0))));
+    }
+
+    /// Review C12: a relaunch that failed at the installed path is made up for by bundle ID.
+    #[test]
+    fn a_failed_relaunch_is_seen() {
+        let rolled = |relaunched| SwapOutcome::RolledBack { step: self_update::Step::Exchange, why: String::new(), relaunched };
+        assert!(relaunch_failed(&rolled(Err("no such file".into()))));
+        assert!(!relaunch_failed(&rolled(Ok(()))));
+        assert!(!relaunch_failed(&SwapOutcome::Installed));
+    }
+
+    /// Review C11: kept disk images go after an hour; a young folder and others stay.
+    #[test]
+    fn old_manual_downloads_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join(format!("{DOWNLOAD_DIR_PREFIX}aaaaaa"));
+        let young = dir.path().join(format!("{DOWNLOAD_DIR_PREFIX}bbbbbb"));
+        let other = dir.path().join("something-else");
+        for d in [&old, &young, &other] {
+            std::fs::create_dir(d).expect("mkdir");
+            std::fs::write(d.join(updates::DMG_NAME), "dmg").expect("write");
+        }
+        let hours_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        for d in [&old, &other] {
+            std::fs::File::open(d).and_then(|f| f.set_modified(hours_ago)).expect("mtime");
+        }
+        assert_eq!(clean_old_downloads(dir.path(), MANUAL_KEEP), 1);
+        assert!(!old.exists() && young.exists() && other.exists());
+    }
+
     #[test]
     fn local_trust_is_for_test_builds_only() {
         assert_eq!(ALLOW_LOCAL_TRUST, cfg!(feature = "update-test"));
