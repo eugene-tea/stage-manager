@@ -205,10 +205,25 @@ pub fn set_enabled(on: bool) {
     }
 }
 
-/// True unless captures are off or refused: pictures of windows may still come. When false,
-/// the strip draws plain ghosts instead of waiting for snapshots.
+/// True unless captures are off or refused, or Screen Recording is missing: pictures of
+/// windows may still come. When false, the strip draws plain ghosts instead of waiting for
+/// snapshots.
 pub fn pictures_expected() -> bool {
-    MODE.load(Ordering::SeqCst) != OFF && !gate().refused()
+    expects_pictures(MODE.load(Ordering::SeqCst), gate().refused(), CGPreflightScreenCaptureAccess())
+}
+
+/// [`pictures_expected`] from the mode, a refusal and Screen Recording (`access`). Without
+/// access no round is ever issued, so the gate never hears a refusal: it stays untried, and a
+/// switch would wait for snapshots that never come and draw nothing (the review's U3).
+fn expects_pictures(mode: u8, refused: bool, access: bool) -> bool {
+    mode != OFF && !refused && access
+}
+
+/// The window a probe captures (an index of `want`, not empty): the first not yet probed
+/// without an answer (`tried`), so one window that cannot be captured never keeps the gate
+/// shut (the review's U5); every one tried, the first again.
+fn probe_pick(want: &[Target], tried: &HashSet<u32>) -> usize {
+    want.iter().position(|t| !tried.contains(&t.id)).unwrap_or(0)
 }
 
 /// True while captures rest after macOS refused one.
@@ -426,6 +441,9 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
     let mut asked = false;
     // After a probe that told nothing, the next one waits this long.
     let mut rest_until: Option<Instant> = None;
+    // Windows probed without an answer since captures last worked: the next probe takes
+    // another one.
+    let mut probed: HashSet<u32> = HashSet::new();
     loop {
         let (batch, permit) = {
             let Ok(mut s) = lock.lock() else {
@@ -475,7 +493,13 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                                 break (want, Permit::All);
                             }
                             // Alone: the round after it captures the rest.
-                            Permit::Probe => break (want[..1].to_vec(), Permit::Probe),
+                            Permit::Probe => {
+                                if want.iter().all(|t| probed.contains(&t.id)) {
+                                    probed.clear();
+                                }
+                                let at = probe_pick(&want, &probed);
+                                break (vec![want[at]], Permit::Probe);
+                            }
                             Permit::Wait => {}
                         }
                     }
@@ -507,6 +531,11 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
         }
         let change = gate().finished(result.outcome, Instant::now());
         rest_until = (permit == Permit::Probe && result.outcome == Outcome::Inconclusive).then(|| Instant::now() + IDLE_CHECK);
+        match result.outcome {
+            Outcome::Inconclusive if permit == Permit::Probe => probed.extend(batch.first().map(|t| t.id)),
+            Outcome::Captured => probed.clear(),
+            _ => {}
+        }
         match change {
             Change::Refused(rest) => tracing::warn!(
                 retry_in_s = rest.as_secs(),
@@ -1135,7 +1164,32 @@ fn desktop_declined() {
 
 #[cfg(test)]
 mod tests {
-    use super::desktop_level;
+    use super::*;
+
+    /// U3: without Screen Recording no snapshot is coming: the strip draws plain ghosts.
+    #[test]
+    fn without_screen_recording_no_pictures_are_expected() {
+        assert!(expects_pictures(ON, false, true));
+        assert!(expects_pictures(PENDING, false, true));
+        assert!(!expects_pictures(ON, false, false), "no access: no round is ever issued");
+        assert!(!expects_pictures(ON, true, true));
+        assert!(!expects_pictures(OFF, false, true));
+    }
+
+    /// U5: a probe that told nothing is not repeated on the same window while another waits.
+    #[test]
+    fn a_probe_takes_a_window_not_tried_yet() {
+        let t = |id| Target { id, width: 10, height: 10 };
+        let want = [t(1), t(2), t(3)];
+        let mut tried = HashSet::new();
+        assert_eq!(probe_pick(&want, &tried), 0);
+        tried.insert(1);
+        assert_eq!(probe_pick(&want, &tried), 1);
+        tried.insert(2);
+        assert_eq!(probe_pick(&want, &tried), 2);
+        tried.insert(3);
+        assert_eq!(probe_pick(&want, &tried), 0, "every one tried: the first again");
+    }
 
     #[test]
     fn a_still_of_the_desktop_holds_only_desktop_level_windows_never_ours() {
