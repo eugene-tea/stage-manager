@@ -1638,7 +1638,7 @@ impl Controller {
                 self.patch_slide_since = slides.then(|| self.patch_slide_since.unwrap_or(now));
                 self.phase.slide_seen(slides, now);
                 let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
-                if slide_waits(self.patch_slide_since.map(|t| now.saturating_duration_since(t)), shown_now) {
+                if slide_waits(self.phase.sliding_for(now), shown_now) {
                     if self.patch_why != Some("the Desktop slides") {
                         tracing::debug!("corner patch: the Desktop slides; the plan stays as it was");
                         self.patch_why = Some("the Desktop slides");

@@ -52,7 +52,7 @@ impl Controller {
             switching: self.phase.switching().is_some(),
             overview,
             space_pending: self.phase.changing(),
-            slide: self.patch_slide_since.is_some(),
+            slide: self.phase.sliding(),
             fullscreen: self.phase.fullscreen(),
             since_space_change: self.phase.since_change(now),
             since_dropped: desktop_shot::since_dropped(now),
