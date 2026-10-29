@@ -521,12 +521,12 @@ impl Model {
     /// A standard window a rule placed (not Apple's default) on `space`: the saved window it
     /// matches with confidence is no longer awaited (the rule decided where it goes; the entry
     /// would otherwise wait for, and maybe catch, another window).
-    pub(crate) fn forget_pending_match(&mut self, meta: &WindowMeta, space: SpaceId) {
+    pub(crate) fn forget_pending_match(&mut self, meta: &WindowMeta, space: SpaceId, actions: &mut Vec<Action>) {
         if meta.role != WindowRole::Standard || (!self.space_has_pending(space) && !self.pooling()) {
             return;
         }
         let scope = if self.pooling() { Scope::OwnAndPool } else { Scope::Own };
-        if self.forget_waiting(meta, space, scope) {
+        if self.forget_waiting(meta, space, scope, actions) {
             tracing::debug!(id = meta.id.0, "restore: a rule placed a window that was awaited; its saved entry is dropped");
         }
     }

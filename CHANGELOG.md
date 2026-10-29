@@ -10,6 +10,8 @@
 - A stage's windows land in the order its card shows, also with three apps.
 - With named stages set, stages moved together to another Desktop in Mission Control arrive
   with their windows showing, instead of all hidden behind an empty named stage.
+- A dialog left in a stage still waiting for its windows after a relaunch comes back on
+  screen when a rule places that stage's last awaited window elsewhere.
 
 ## 1.4.0 — 2026-10-23
 

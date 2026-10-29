@@ -630,3 +630,26 @@ fn a_voter_back_in_its_own_desktops_stage_leaves_the_entry_it_voted_with() {
     assert_eq!(kin(&m, 86), Some(Kin::Saved(8, 1)), "its own Desktop's");
     assert!(titles(&m).iter().all(|(_, n)| *n == 1), "{:?}", titles(&m));
 }
+
+#[test]
+fn an_orphan_parked_in_a_stage_a_rule_empties_is_brought_back_on_screen() {
+    // Fable E2 (10-29): a rule places the one window a waiting stage still waits for; the
+    // stage goes, its orphan dialog (parked with it) moves to the active stage and is shown,
+    // but `drop_spot` threw away the frame that shows it: counted shown, left in the corner.
+    let mut m = launched(vec![desktop_2()], Restore::same_session("A"));
+    m.arrive(MAIN, &[win(82, 11, TERM, "server", r(9.0))], &[], &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 8);
+    let mail = m.active_stage_in(m.current_space(MAIN)).expect("active");
+    assert!(m.stage(mail).is_some_and(|s| s.windows.is_empty()) && m.has_pending(mail), "the mail stage waits, in front");
+    let dialog = WindowMeta { role: WindowRole::Child { parent: None }, ..win(90, 30, "com.example.tool", "Progress", r(12.0)) };
+    add(&mut m, dialog);
+    assert_eq!(m.window(w(90)).map(|x| x.home), Some(Home::Stage(mail)), "an orphan in the stage in front");
+    let term = m.stage_of(w(82)).expect("stage");
+    let a = m.switch_to(term, &Observation::default());
+    assert!(parks(&a, 90), "parked with the mail stage");
+    let float = Decision { action: crate::engine::rules::RuleAction::Float, ..Decision::default() };
+    let a = m.add_window(win(83, 12, MAIL, "Archive", r(8.0)), &float, &Observation::default());
+    assert!(m.stage(mail).is_none(), "the mail stage has nothing left to wait for");
+    assert!(m.window(w(90)).is_some_and(|x| x.home == Home::Stage(term) && !x.parked), "the orphan joins the stage shown");
+    assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if id.0 == 90)), "and is put back on screen: {a:?}");
+}

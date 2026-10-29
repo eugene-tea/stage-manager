@@ -112,7 +112,7 @@ impl Model {
                 return actions;
             }
         } else {
-            self.forget_pending_match(&meta, space);
+            self.forget_pending_match(&meta, space, &mut actions);
         }
         if decision.action == RuleAction::Native && self.restore.restoring {
             // Matched no saved window: Apple's rule (counted for the restore's line).
