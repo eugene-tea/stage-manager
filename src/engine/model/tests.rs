@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::geometry::Point;
-use crate::engine::park::clamp_to_visible;
+use crate::engine::park::{GRAB_WIDTH, TITLE_BAR_HEIGHT, clamp_to_visible};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
 use crate::engine::testkit::*;
@@ -299,6 +299,64 @@ fn a_new_window_born_in_the_park_zone_gets_a_safe_restore_frame() {
     assert!(!e.d.parked(w(1)), "it is brought out of the corner");
 }
 
+#[test]
+fn a_switch_brings_a_window_hung_off_an_edge_back_at_exactly_its_frame() {
+    // W1: the restore clamp forced the whole width on screen and shrank what was larger, so
+    // every switch moved such a window.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    let right = Rect::new(1100.0, 120.0, 600.0, 400.0);
+    let tall = Rect::new(200.0, 25.0, 700.0, 1100.0);
+    e.d.frames.insert(w(3), right);
+    e.m.window_frame_changed(w(3), right);
+    e.switch(2);
+    e.d.frames.insert(w(2), tall);
+    e.m.window_frame_changed(w(2), tall);
+    e.switch(3);
+    assert_eq!(e.d.frames[&w(3)], right);
+    e.switch(2);
+    assert_eq!(e.d.frames[&w(2)], tall, "taller than the screen: not shrunk");
+}
+
+#[test]
+fn a_window_hung_off_the_left_edge_in_the_upper_half_is_not_centered() {
+    // S2: the restore tested every corner of the visible frame, and the top-left one's
+    // zone caught a window left with 40 pt showing at the left edge: centered on every
+    // switch. The display parks bottom-right, so it comes back pulled to a grab's width.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    let left = Rect::new(-360.0, 100.0, 400.0, 300.0);
+    e.d.frames.insert(w(2), left);
+    e.m.window_frame_changed(w(2), left);
+    assert_eq!(e.m.window(w(2)).map(|x| x.restore), Some(left), "the user's frame is recorded");
+    e.switch(1);
+    e.switch(2);
+    assert_eq!(e.d.frames[&w(2)], Rect::new(GRAB_WIDTH - 400.0, 100.0, 400.0, 300.0));
+}
+
+#[test]
+fn a_dock_that_grows_keeps_a_window_tucked_by_the_corner_by_it() {
+    // W5: a restore frame the new visible frame puts in the park zone was centered.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    let tucked = Rect::new(1300.0, 760.0, 600.0, 400.0);
+    e.d.frames.insert(w(2), tucked);
+    e.m.window_frame_changed(w(2), tucked);
+    e.switch(1);
+    // The Dock grows from 75 to 140 pt: the window's title bar is below the visible frame.
+    let grown = Display { visible: Rect::new(0.0, 25.0, 1440.0, 735.0), ..display() };
+    assert!(grown.parks(tucked));
+    let a = e.m.set_displays(vec![grown]);
+    e.run(a);
+    let restore = e.m.window(w(2)).map(|x| x.restore).expect("managed");
+    assert_eq!(restore, Rect::new(1300.0, 760.0 - TITLE_BAR_HEIGHT, 600.0, 400.0), "moved only as far as reach needs");
+    assert!(!grown.parks(restore));
+}
+
 // ----- children ---------------------------------------------------------------------------
 
 #[test]
@@ -499,12 +557,34 @@ fn switch_never_records_a_parked_frame_as_restore() {
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     let good = e.d.frames[&w(1)];
     e.add(meta(2, 11, "com.example.b"), RuleAction::New);
-    // A stale observation claims window 2 sits in the park zone while active.
+    let before = e.m.window(w(2)).map(|x| x.restore);
+    // A stale observation claims window 2 sits where a park leaves it (one point inside the
+    // right edge, its title kept above the visible bottom) while active.
     e.d.frames
-        .insert(w(2), Rect::new(1430.0, 890.0, 600.0, 400.0));
+        .insert(w(2), Rect::new(1439.0, 793.0, 600.0, 400.0));
     e.switch(1);
-    assert!(!parked_at(e.m.window(w(2)).map(|x| x.restore).expect("w2")));
+    assert_eq!(e.m.window(w(2)).map(|x| x.restore), before);
     assert_eq!(e.d.frames[&w(1)], good);
+}
+
+#[test]
+fn a_window_the_user_pushed_into_the_corner_comes_back_by_it() {
+    // S3: in the park zone but not where a park lands, the frame is the user's. It was
+    // never recorded, and the next switch brought the window back at its older frame.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    let pushed = Rect::new(1400.0, 790.0, 600.0, 400.0);
+    assert!(parked_at(pushed));
+    e.d.frames.insert(w(2), pushed);
+    e.m.window_frame_changed(w(2), pushed);
+    assert_eq!(e.m.window(w(2)).map(|x| x.restore), Some(pushed));
+    e.switch(1);
+    assert!(e.d.parked(w(2)));
+    e.switch(2);
+    let back = e.d.frames[&w(2)];
+    assert!(!parked_at(back), "{back:?}");
+    assert_eq!(back, Rect::new(1440.0 - GRAB_WIDTH, 790.0, 600.0, 400.0), "pulled just within reach, not centered");
 }
 
 #[test]
@@ -1662,11 +1742,17 @@ fn check_invariants(e: &Env, step: &str) {
             );
         }
     }
-    // Restore frames are never in the park zone.
+    // Restore frames are never where a park lands (a user's frame in the zone may be one,
+    // S3), and a restore never brings a window into the park zone.
     for w in m.windows() {
         assert!(
-            !parked_at(w.restore),
-            "{step}: restore frame of {:?} is parked",
+            !(parked_at(w.restore) && m.lands_parked(w, w.restore)),
+            "{step}: restore frame of {:?} is a park",
+            w.meta.id
+        );
+        assert!(
+            !parked_at(m.display(w.meta.display).reach(w.restore)),
+            "{step}: {:?} would be restored into the park zone",
             w.meta.id
         );
     }
@@ -2536,6 +2622,39 @@ mod fitting {
         e.m.window_frame_settled(w(1), clamped);
         assert_eq!(e.m.window(w(1)).and_then(|x| x.original), Some(wide));
         assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(clamped));
+    }
+
+    #[test]
+    fn a_card_dropped_in_the_main_area_stays_where_it_was_dropped() {
+        // E4: the drop wrote the restore frame alone and left the pre-fit frame; quit then
+        // returned the window to where it was before the drag.
+        let mut e = env(true);
+        let over = Rect::new(10.0, 60.0, 1000.0, 700.0);
+        e.add(at(1, over), RuleAction::Native);
+        e.add(at(2, Rect::new(400.0, 100.0, 600.0, 400.0)), RuleAction::Native);
+        assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(Rect::new(INSET, 60.0, 1000.0, 700.0)));
+        assert_eq!(e.m.window(w(1)).and_then(|x| x.original), Some(over));
+        let stage = e.m.stage_of(w(1)).expect("staged");
+        let obs = e.d.obs();
+        let dropped = Rect::new(INSET + 40.0, 160.0, 1000.0, 700.0);
+        let a = e.m.merge_into_active_at(stage, Point::new(dropped.x, dropped.y), &obs);
+        e.run(a);
+        assert_eq!(live(&e, 1), dropped);
+        // Moved, at its own size: as a user's move, the pre-fit frame is done with.
+        assert_eq!(e.m.window(w(1)).and_then(|x| x.original), None);
+        let a = e.m.unpark_all();
+        e.run(a);
+        assert_eq!(live(&e, 1), dropped, "quit leaves it where it was dropped");
+        // Narrowed by the fit: the pre-fit frame moves with the drop.
+        let wide = Rect::new(10.0, 60.0, 1400.0, 700.0);
+        e.add(at(3, wide), RuleAction::Native);
+        e.add(at(4, Rect::new(400.0, 100.0, 600.0, 400.0)), RuleAction::Native);
+        let fitted = e.m.window(w(3)).map(|x| x.restore).expect("managed");
+        let stage = e.m.stage_of(w(3)).expect("staged");
+        let obs = e.d.obs();
+        let a = e.m.merge_into_active_at(stage, Point::new(INSET, 200.0), &obs);
+        e.run(a);
+        assert_eq!(e.m.window(w(3)).and_then(|x| x.original), Some(wide.translate(0.0, 200.0 - fitted.y)));
     }
 
     #[test]

@@ -8,6 +8,12 @@
 - A card shows its front window on top, also when its stage holds two apps, and the windows
   keep that order as they grow from the card.
 - A stage's windows land in the order its card shows, also with three apps.
+- A window left partly off the screen, or taller than it, comes back exactly where you left
+  it, not pulled onto the screen and shrunk.
+- A window pushed into the bottom-right corner comes back by the corner, not where it was
+  before.
+- A bigger Dock no longer sends a window kept by the corner to the middle of the screen.
+- A card dropped in the main area stays where you dropped it when Stage Manager quits.
 
 ## 1.4.0 — 2026-10-23
 

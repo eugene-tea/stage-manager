@@ -4,7 +4,11 @@
 //! display. macOS refuses to move a window entirely offscreen and clamps it so a sliver stays
 //! visible; that sliver is expected. A window that never comes back from the park zone is the
 //! worst bug this app can have, so [`is_parked`] is deliberately inclusive and
-//! [`clamp_to_visible`] never returns a frame inside the park zone.
+//! [`clamp_to_visible`] and [`reach_in`] never return a frame inside the park zone.
+//!
+//! **Where a window comes back** ([`reach_in`]): at its own frame, moved only as far as
+//! reachability needs (its title bar below the menu bar and above a bottom Dock, a grab's
+//! width of it on screen), never resized; the body may hang off any side.
 //!
 //! **Where macOS leaves a parked window.** Measured (every parked window the test runs logged
 //! on a 2560x1440 display whose visible frame reaches its bottom edge): the window keeps its
@@ -46,8 +50,8 @@ use super::geometry::{Rect, Size};
 /// count as parked.
 pub const PARK_MARGIN: f64 = 64.0;
 
-/// Height of a standard title bar; [`clamp_to_visible`] keeps this strip inside the visible
-/// frame so the window can always be grabbed.
+/// Height of a standard title bar; [`reach_in`] keeps this strip between the visible frame's
+/// top and bottom so the window can always be grabbed.
 pub const TITLE_BAR_HEIGHT: f64 = 28.0;
 
 /// Points of title bar macOS keeps above the bottom of the visible frame when a window is
@@ -372,38 +376,78 @@ pub fn is_parked_anywhere(frame: Rect, display: Rect) -> bool {
     Corner::ALL.iter().any(|c| is_parked_at(frame, display, *c))
 }
 
-/// A restore frame that is fully reachable inside `visible` (the display minus menu bar and
-/// Dock).
+/// Points of a window's title bar row that must show inside the visible frame, side to side,
+/// for the window to be within reach ([`reach_in`]): more than [`PARK_MARGIN`], so a frame
+/// within reach is never taken for a parked one (the park tests count at most
+/// `PARK_MARGIN` showing as parked).
+pub const GRAB_WIDTH: f64 = PARK_MARGIN + 16.0;
+
+/// A restore frame within reach on `visible` (the display minus menu bar and Dock), for a
+/// frame with no better source: a frame in the park zone of any corner of `visible` is
+/// centered, everything else goes by [`reach_in`] with that same all-corners test.
 ///
 /// - A degenerate frame (non-finite or non-positive size) becomes [`FALLBACK_SIZE`] (shrunk
 ///   to fit) centered in `visible`.
-/// - A frame larger than `visible` is shrunk to fit.
-/// - A frame in the park zone of any corner of `visible` is centered.
-/// - Otherwise the frame moves only as far as needed to keep its title bar (full width, top
-///   [`TITLE_BAR_HEIGHT`] points) inside `visible`; its body may extend below the bottom.
+/// - A frame in the park zone of any corner of `visible` is centered at its own size.
+/// - Otherwise as [`reach_in`]: the size is kept, and the frame moves only as far as its
+///   title bar needs to be grabbed.
+///
+/// The model's own restores use the display's own corner instead
+/// ([`crate::engine::model::Display::reach`]): a frame there is the user's.
 pub fn clamp_to_visible(frame: Rect, visible: Rect) -> Rect {
     if frame.is_degenerate() {
-        let size = Size::new(
-            FALLBACK_SIZE.w.min(visible.w),
-            FALLBACK_SIZE.h.min(visible.h),
-        );
-        return center_size(size, visible);
+        return fallback(visible);
     }
-    let size = Size::new(frame.w.min(visible.w), frame.h.min(visible.h));
     if is_parked_anywhere(frame, visible) {
-        return center_size(size, visible);
+        return center_size(frame.size(), visible);
     }
-    let title = TITLE_BAR_HEIGHT.min(size.h);
-    let x = frame.x.clamp(visible.x, visible.max_x() - size.w);
-    let y = frame.y.clamp(visible.y, visible.max_y() - title);
-    let out = Rect::new(x, y, size.w, size.h);
-    // A small window slid against a side could still sit in a corner's zone.
-    if is_parked_anywhere(out, visible) { center_size(size, visible) } else { out }
+    reach_in(frame, visible, visible, |f| is_parked_anywhere(f, visible))
 }
 
+/// `frame` moved only as far as reachability needs on `visible`, never resized (W1: a
+/// window the user hung off an edge, or one taller than the screen, comes back as it was):
+///
+/// - its title bar's row (the top [`TITLE_BAR_HEIGHT`] points) lies between the visible
+///   frame's top and bottom, so it is below the menu bar and above a bottom Dock;
+/// - that row shows at least [`GRAB_WIDTH`] points inside `visible` side to side (the whole
+///   width of a narrower window);
+/// - the body may hang off any side.
+///
+/// A frame wholly off `display` (the display's full frame; it shrank or went away under
+/// the window) has no place of the user's on this screen, and is centered at its own size;
+/// so is one that is still in a park zone once moved (`parks`: only a very narrow or short
+/// window can be). A degenerate frame becomes [`FALLBACK_SIZE`] centered.
+pub fn reach_in(frame: Rect, visible: Rect, display: Rect, parks: impl Fn(Rect) -> bool) -> Rect {
+    if frame.is_degenerate() {
+        return fallback(visible);
+    }
+    if frame.intersect(&display).is_none_or(|r| r.w <= 0.0 || r.h <= 0.0) {
+        return center_size(frame.size(), visible);
+    }
+    let title = TITLE_BAR_HEIGHT.min(frame.h);
+    let grab = GRAB_WIDTH.min(frame.w);
+    let x = between(frame.x, visible.x - frame.w + grab, visible.max_x() - grab);
+    let y = between(frame.y, visible.y, visible.max_y() - title);
+    let out = Rect::new(x, y, frame.w, frame.h);
+    if parks(out) { center_size(frame.size(), visible) } else { out }
+}
+
+/// `v` brought between `lo` and `hi` (`lo` wins when they cross: a display smaller than the
+/// grab).
+fn between(v: f64, lo: f64, hi: f64) -> f64 {
+    v.min(hi).max(lo)
+}
+
+/// [`FALLBACK_SIZE`], shrunk to fit, centered in `visible`.
+fn fallback(visible: Rect) -> Rect {
+    center_size(Size::new(FALLBACK_SIZE.w.min(visible.w), FALLBACK_SIZE.h.min(visible.h)), visible)
+}
+
+/// A window of `size` centered in `visible`, its title bar kept below the visible top (a
+/// window taller than the screen hangs below it).
 fn center_size(size: Size, visible: Rect) -> Rect {
     let x = (visible.x + (visible.w - size.w) / 2.0).round();
-    let y = (visible.y + (visible.h - size.h) / 2.0).round();
+    let y = (visible.y + (visible.h - size.h) / 2.0).round().max(visible.y);
     Rect::new(x, y, size.w, size.h)
 }
 
@@ -801,18 +845,58 @@ mod tests {
     fn clamp_pulls_the_title_bar_inside() {
         let above = Rect::new(100.0, -50.0, 400.0, 300.0);
         assert_eq!(clamp_to_visible(above, VISIBLE).y, 25.0);
-        let right = Rect::new(1300.0, 100.0, 400.0, 300.0);
-        assert_eq!(clamp_to_visible(right, VISIBLE).x, 1040.0);
-        let left = Rect::new(-300.0, 100.0, 400.0, 300.0);
-        assert_eq!(clamp_to_visible(left, VISIBLE).x, 0.0);
         let below = Rect::new(100.0, 820.0, 400.0, 300.0);
         assert_eq!(clamp_to_visible(below, VISIBLE).y, 825.0 - TITLE_BAR_HEIGHT);
+        // Less than a grab's width showing: pulled in until a grab's width shows.
+        let right = Rect::new(1370.0, 100.0, 400.0, 300.0);
+        assert_eq!(clamp_to_visible(right, VISIBLE).x, 1440.0 - GRAB_WIDTH);
+        let left = Rect::new(-330.0, 100.0, 400.0, 300.0);
+        assert_eq!(clamp_to_visible(left, VISIBLE).x, GRAB_WIDTH - 400.0);
+        // Wholly off the screen (its display shrank or went away): centered.
+        let gone = Rect::new(1600.0, 100.0, 400.0, 300.0);
+        assert_eq!(clamp_to_visible(gone, VISIBLE), Rect::new(520.0, 275.0, 400.0, 300.0));
     }
 
     #[test]
-    fn clamp_shrinks_oversized_frames() {
+    fn a_window_hung_off_an_edge_comes_back_as_it_was() {
+        // W1: the old clamp forced the whole width inside and shrank what was larger.
+        for f in [
+            Rect::new(1300.0, 100.0, 400.0, 300.0),
+            Rect::new(-300.0, 100.0, 400.0, 300.0),
+            Rect::new(900.0, 300.0, 800.0, 700.0),
+            Rect::new(100.0, 25.0, 600.0, 1200.0),
+            Rect::new(-10.0, 25.0, 3000.0, 2000.0),
+        ] {
+            assert_eq!(clamp_to_visible(f, VISIBLE), f, "{f:?}");
+            assert_eq!(reach_in(f, VISIBLE, DISPLAY, |r| is_parked_in(r, DISPLAY, VISIBLE)), f, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn clamp_never_shrinks() {
         let big = Rect::new(-10.0, 0.0, 3000.0, 2000.0);
-        assert_eq!(clamp_to_visible(big, VISIBLE), VISIBLE);
+        assert_eq!(clamp_to_visible(big, VISIBLE), Rect::new(-10.0, 25.0, 3000.0, 2000.0));
+        // Centered from the park zone, a window taller than the screen keeps its title bar
+        // below the menu bar.
+        let tall = park_frame(Size::new(400.0, 1200.0), DISPLAY);
+        assert_eq!(clamp_to_visible(tall, VISIBLE), Rect::new(520.0, 25.0, 400.0, 1200.0));
+    }
+
+    #[test]
+    fn only_the_displays_own_corner_moves_a_frame_on_a_restore() {
+        // S2: a frame with 40 pt showing at the left edge in the upper half is in the
+        // top-left corner's zone. The display parks bottom-right: it is the user's frame,
+        // pulled in until a grab's width shows, not centered.
+        let left = Rect::new(-360.0, 100.0, 400.0, 300.0);
+        assert!(is_parked_anywhere(left, VISIBLE));
+        let out = reach_in(left, VISIBLE, DISPLAY, |r| is_parked_in(r, DISPLAY, VISIBLE));
+        assert_eq!(out, Rect::new(GRAB_WIDTH - 400.0, 100.0, 400.0, 300.0));
+        // The bottom-right corner's own zone: pulled out of it, not centered.
+        let corner = Rect::new(1400.0, 800.0, 400.0, 300.0);
+        assert!(is_parked_in(corner, DISPLAY, VISIBLE));
+        let out = reach_in(corner, VISIBLE, DISPLAY, |r| is_parked_in(r, DISPLAY, VISIBLE));
+        assert_eq!(out, Rect::new(1440.0 - GRAB_WIDTH, 825.0 - TITLE_BAR_HEIGHT, 400.0, 300.0));
+        assert!(!is_parked_in(out, DISPLAY, VISIBLE));
     }
 
     #[test]
@@ -846,12 +930,10 @@ mod tests {
             for corner in Corner::ALL {
                 assert!(!is_parked_in_at(out, DISPLAY, VISIBLE, corner), "{corner:?}: {out:?}");
             }
-            assert!(VISIBLE.contains_rect(&Rect::new(
-                out.x,
-                out.y,
-                out.w,
-                TITLE_BAR_HEIGHT.min(out.h)
-            )));
+            let title = TITLE_BAR_HEIGHT.min(out.h);
+            assert!(out.y >= VISIBLE.y && out.y + title <= VISIBLE.max_y(), "{out:?}");
+            let shown = out.max_x().min(VISIBLE.max_x()) - out.x.max(VISIBLE.x);
+            assert!(shown >= GRAB_WIDTH.min(out.w) - 1e-9, "{out:?}");
         }
     }
 }

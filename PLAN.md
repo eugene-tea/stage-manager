@@ -81,7 +81,8 @@ A parked window that never returns is the worst bug. Defence in depth:
    slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
    past the right or bottom edge) counts as parked only for windows we manage or registered,
    or apps with a window in `state.json`.
-7. **Restore frames are clamped** onto the visible display.
+7. **Restore frames are kept within reach** (`Display::reach`): never in a park zone, the title
+   bar below the menu bar with 80 pt of it on screen; otherwise exactly the window's own frame.
 
 Windows that are never waited on (logged at debug): **hidden tabs** (8J; layer 0, off
 screen, unlisted by an answering app, vouched for by a same-size sibling; a managed,

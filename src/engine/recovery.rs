@@ -531,7 +531,8 @@ mod tests {
         )]);
         let ws = [live("com.example.a", "Huge", parked(800.0, 600.0))];
         let p = plan(&ws, Some(&st), &displays());
-        assert_eq!(p[0].1, VISIBLE);
+        // Never shrunk: its title bar comes below the menu bar, the body hangs off the sides.
+        assert_eq!(p[0].1, Rect::new(-500.0, VISIBLE.y, 5000.0, 5000.0));
         let bad = state(vec![saved("com.example.a", "X", parked(400.0, 300.0))]);
         let ws = [live("com.example.a", "X", parked(400.0, 300.0))];
         let p = plan(&ws, Some(&bad), &displays());

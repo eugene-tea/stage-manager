@@ -31,7 +31,10 @@ Apple's own Customize sheet does.
 ## Where we match Apple
 
 **Windows keep their frames.** Turning Stage Manager on moves and resizes nothing. A switch
-brings every window back at exactly its own frame, even where it overlaps the strip.
+brings every window back at exactly its own frame, even where it overlaps the strip, hangs
+off an edge or is taller than the screen. Only a window that could not be grabbed moves: its
+title bar comes below the menu bar and above the Dock with at least 80 points of it on
+screen, and one left in the hiding corner comes back just out of it.
 
 **The strip.** It sits below windows: a window moved over it covers it, and the strip slides
 away. Resting the pointer at the left edge brings it back. Each card draws the stage's
