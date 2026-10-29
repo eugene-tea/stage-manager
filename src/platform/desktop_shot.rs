@@ -408,6 +408,13 @@ pub fn patch_still(serial: u64) -> Option<(CFRetained<CGImage>, Rect, f64)> {
         .flatten()
 }
 
+/// The block (global, top-left points) of the still kept, when it stands alone (the patch's
+/// picture can be cropped from it): what the patch may cover while Show Desktop is up, when
+/// no new still is taken.
+pub fn kept_region() -> Option<Rect> {
+    with_state(|s| s.shot.as_ref().filter(|x| x.meta.opaque).map(|x| x.meta.region)).flatten()
+}
+
 /// The pixels of `rect` (global, top-left, whole points) out of a still of `region` at
 /// `scale`; `None` unless the still holds it.
 pub fn crop(still: &CGImage, region: Rect, scale: f64, rect: Rect) -> Option<CFRetained<CGImage>> {

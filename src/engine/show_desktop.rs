@@ -20,18 +20,32 @@
 //!   its alpha, the panel stays ordered in) tells whether macOS leaves it where it was put,
 //!   slides it wholly off the display with the windows (it comes back with them), or pushes
 //!   it aside with a part still on the display, where it would show the wrong part of the
-//!   desktop: then it hides until it is back in place.
+//!   desktop: then it hides until it is back in place. As `Transient` it was pushed aside
+//!   (the owner's log of 10-29: 3 to 10 pt); the panel is `Stationary` since part 2
+//!   ([`crate::ui::panels::corner_patch`]: "unaffected by Exposé", like the desktop
+//!   picture), and this stays as the fallback in case macOS moves it anyway.
+//! - **What it covers** (part 2, [`PushedCover`]): Show Desktop pushes the parked windows
+//!   too, from the corner partly into view (10-29: a window's rounded corner, about 90x130
+//!   pt, with its shadow). While it is up the patch covers what of them is listed on the
+//!   display, grown by the shadow's reach ([`pushed_rect`]), within the still's block (no
+//!   still is taken while an overview shows: the block taken before is what there is), and
+//!   only grows. It shrinks back to the slivers' rectangle at the first look that lists every
+//!   parked window back at its park frame, never before.
 //! - **The close** ([`CloseWatch`]): Show Desktop's own window going, or, sooner, the first
 //!   look at the window list that shows the Desktop's windows moving again once they had come
 //!   to rest (the slide back).
 //! - **Looked at on the fast tick** ([`fast_look`]) while Show Desktop is listed or expected
-//!   from a wallpaper click and the patch is on: the close is seen within 20 ms, not at the
-//!   next once-a-second look.
+//!   from a wallpaper click, or its cover held, and the patch is on: the close is seen within
+//!   20 ms, not at the next once-a-second look, and the cover let go as soon as the windows
+//!   are back.
 //!
-//! Mission Control and App Exposé keep their rule (the panel is `Transient`: macOS hides it
-//! while they show and shows it with the windows, so a patch shown when one opens is left as
-//! it is), and so does a Space change (each Desktop's panel slides with it).
+//! Mission Control and App Exposé keep their rule: a patch shown when one opens is left as it
+//! is (the panel is `Stationary` since part 2, so it stays drawn in place like the desktop
+//! picture under their windows, where `Transient` had macOS hide it; either way it is there
+//! the moment they close), and so does a Space change (each Desktop's panel slides with it:
+//! `Stationary` is the Exposé group's choice, the Spaces group stays empty).
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::geometry::Rect;
@@ -81,11 +95,12 @@ impl PanelPlace {
     }
 }
 
-/// Where the panel is (`listed`: its bounds as listed; `placed`: where the app last put it)
-/// relative to `display`.
-pub fn panel_place(listed: Option<Rect>, placed: Option<Rect>, display: Rect) -> PanelPlace {
+/// Where the panel is (`listed`: its bounds as listed; `placed`: where the app last put it;
+/// `asked`: where the last plan asked for it, which the main thread may have put it at just
+/// before publishing `placed`) relative to `display`.
+pub fn panel_place(listed: Option<Rect>, placed: Option<Rect>, asked: Option<Rect>, display: Rect) -> PanelPlace {
     let (Some(l), Some(p)) = (listed, placed) else { return PanelPlace::Unknown };
-    if !moved(&l, &p) {
+    if !moved(&l, &p) || asked.is_some_and(|a| !moved(&l, &a)) {
         PanelPlace::InPlace
     } else if l.intersect(&display).is_none() {
         PanelPlace::Away
@@ -136,10 +151,156 @@ pub fn gate(f: &RevealFacts) -> Result<(), &'static str> {
 }
 
 /// Whether the WM thread looks at the window list on its fast tick: while Show Desktop is
-/// listed or expected (`show_desktop`) and the patch is on with windows managed
-/// (`patch_on`), so its close is seen within a fast tick.
+/// listed or expected, or the patch's cover is held past it ([`PushedCover::holding`])
+/// (`show_desktop`), and the patch is on with windows managed (`patch_on`), so its close is
+/// seen within a fast tick, and the cover let go at the first look with the windows back.
 pub fn fast_look(show_desktop: bool, patch_on: bool) -> bool {
     show_desktop && patch_on
+}
+
+/// A held cover is let go this long after Show Desktop stopped being listed or expected even
+/// if a parked window is not listed back at its park frame (macOS put it a little elsewhere).
+pub const HOLD_AFTER: Duration = Duration::from_secs(2);
+
+/// The patch's rectangle while Show Desktop is up: what of each parked window (`parts`, its
+/// bounds as listed, wherever Show Desktop put it) shows on `display`, grown by `reach` (its
+/// shadow; [`super::corner_patch::patch_rect`]), each kept within `cap` (the still's block),
+/// together. `None` when nothing of them shows within the cap.
+pub fn pushed_rect(parts: &[Rect], display: Rect, reach: f64, cap: Rect) -> Option<Rect> {
+    let area = cap.intersect(&display)?;
+    parts
+        .iter()
+        .filter_map(|p| super::corner_patch::patch_rect(std::slice::from_ref(p), display, reach))
+        .filter_map(|r| r.intersect(&area))
+        .reduce(|a, b| a.union(&b))
+}
+
+/// What one plan knows for [`PushedCover::see`].
+#[derive(Debug, Clone)]
+pub struct CoverLook<'a> {
+    /// Show Desktop is listed or expected ([`super::overview::OverviewWatch::show_desktop_up`]).
+    pub up: bool,
+    /// This Desktop's parked windows as listed (normal layer), wherever they are.
+    pub parked: &'a [(u32, Rect)],
+    /// Those of them listed in the park zone.
+    pub in_zone: &'a HashSet<u32>,
+    /// The patch's rectangle in use before (this Desktop's).
+    pub in_use: Option<Rect>,
+    /// The main display.
+    pub display: Rect,
+    /// `[windows] corner_patch_reach`.
+    pub reach: f64,
+    /// What the patch may cover: the park corner's square within the still's block.
+    pub cap: Rect,
+    /// This look's time.
+    pub now: Instant,
+}
+
+/// The patch's rectangle as [`PushedCover::see`] decides it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cover {
+    /// The slivers' rectangle, as at any time.
+    Usual,
+    /// The rectangle held through Show Desktop.
+    Held(Rect),
+    /// The slivers' rectangle again, from this look on: taken as it is (not kept at the bigger
+    /// one in use, [`super::corner_patch::steady_rect`]).
+    Released,
+}
+
+/// A cover held through one Show Desktop.
+#[derive(Debug, Clone, Copy)]
+struct Holding {
+    /// The rectangle, grown at every look.
+    rect: Option<Rect>,
+    /// A parked window was seen away from its park frame.
+    left: bool,
+    /// When Show Desktop stopped being up.
+    ended: Option<Instant>,
+}
+
+/// The patch's rectangle through Show Desktop (part 2): the slivers' rectangle grown to what
+/// macOS pushes of the parked windows into view, until they are back.
+#[derive(Debug, Clone, Default)]
+pub struct PushedCover {
+    /// The parked windows' frames as listed at rest in the zone outside Show Desktop: their
+    /// park frames.
+    home: HashMap<u32, Rect>,
+    /// The parked windows as listed at the last look.
+    last: HashMap<u32, Rect>,
+    /// The cover held through this Show Desktop.
+    held: Option<Holding>,
+    /// Let go while Show Desktop is still up (its window lingers): nothing more is held until
+    /// it is over.
+    done: bool,
+}
+
+impl PushedCover {
+    /// Takes a look ([`CoverLook`]) and says which rectangle the patch takes.
+    pub fn see(&mut self, l: &CoverLook) -> Cover {
+        // Back: listed at its park frame; one parked while Show Desktop was up has none known,
+        // and is back once in the zone and still since the last look.
+        let back = |id: &u32, b: &Rect| match self.home.get(id) {
+            Some(h) => !moved(h, b),
+            None => l.in_zone.contains(id) && self.last.get(id).is_some_and(|a| !moved(a, b)),
+        };
+        let all_back = l.parked.iter().all(|(id, b)| back(id, b));
+        self.last = l.parked.iter().copied().collect();
+        if self.done {
+            if !l.up {
+                self.done = false;
+                self.rest(l);
+            }
+            return Cover::Usual;
+        }
+        let h = match self.held.as_mut() {
+            Some(h) => h,
+            None if !l.up => {
+                self.rest(l);
+                return Cover::Usual;
+            }
+            None => self.held.insert(Holding { rect: l.in_use, left: false, ended: None }),
+        };
+        h.left |= !all_back;
+        if l.up {
+            h.ended = None;
+            if h.left && all_back {
+                self.held = None;
+                self.done = true;
+                return Cover::Released;
+            }
+        } else {
+            let ended = *h.ended.get_or_insert(l.now);
+            if !h.left {
+                // Nothing was pushed (macOS showed no Show Desktop): the rectangle never grew.
+                self.held = None;
+                self.rest(l);
+                return Cover::Usual;
+            }
+            if all_back || l.now.saturating_duration_since(ended) >= HOLD_AFTER {
+                self.held = None;
+                self.rest(l);
+                return Cover::Released;
+            }
+        }
+        let parts: Vec<Rect> = l.parked.iter().map(|(_, b)| *b).collect();
+        let pushed = pushed_rect(&parts, l.display, l.reach, l.cap);
+        h.rect = match (h.rect, pushed) {
+            (Some(a), Some(b)) => Some(a.union(&b)),
+            (a, b) => a.or(b),
+        };
+        h.rect.map_or(Cover::Usual, Cover::Held)
+    }
+
+    /// True while a cover is held (the fast tick looks on until it is let go).
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// At rest outside Show Desktop: the parked windows in the zone are at their park frames.
+    fn rest(&mut self, l: &CoverLook) {
+        self.home = l.parked.iter().filter(|(id, _)| l.in_zone.contains(id)).copied().collect();
+    }
 }
 
 /// What a look said about the close ([`CloseWatch::see`]).
@@ -225,16 +386,20 @@ mod tests {
 
     #[test]
     fn the_panel_is_found_in_place_slid_away_or_pushed_aside() {
-        assert_eq!(panel_place(Some(PATCH), Some(PATCH), MAIN), PanelPlace::InPlace);
+        assert_eq!(panel_place(Some(PATCH), Some(PATCH), None, MAIN), PanelPlace::InPlace);
         let nudged = Rect::new(PATCH.x + 0.5, PATCH.y, PATCH.w, PATCH.h);
-        assert_eq!(panel_place(Some(nudged), Some(PATCH), MAIN), PanelPlace::InPlace, "half a point is no move");
+        assert_eq!(panel_place(Some(nudged), Some(PATCH), None, MAIN), PanelPlace::InPlace, "half a point is no move");
         let off = Rect::new(2600.0, 1328.0, 61.0, 112.0);
-        assert_eq!(panel_place(Some(off), Some(PATCH), MAIN), PanelPlace::Away);
+        assert_eq!(panel_place(Some(off), Some(PATCH), None, MAIN), PanelPlace::Away);
         // Show Desktop leaves ~20 pt of a pushed window on the display (his log: x=2538).
         let edge = Rect::new(2540.0, 1328.0, 61.0, 112.0);
-        assert_eq!(panel_place(Some(edge), Some(PATCH), MAIN), PanelPlace::Moved);
-        assert_eq!(panel_place(None, Some(PATCH), MAIN), PanelPlace::Unknown, "not listed");
-        assert_eq!(panel_place(Some(PATCH), None, MAIN), PanelPlace::Unknown, "never put anywhere");
+        assert_eq!(panel_place(Some(edge), Some(PATCH), None, MAIN), PanelPlace::Moved);
+        assert_eq!(panel_place(None, Some(PATCH), None, MAIN), PanelPlace::Unknown, "not listed");
+        assert_eq!(panel_place(Some(PATCH), None, None, MAIN), PanelPlace::Unknown, "never put anywhere");
+        // Put at a new rectangle the plan asked for, before the main thread said so.
+        let grown = Rect::new(2380.0, 1200.0, 180.0, 240.0);
+        assert_eq!(panel_place(Some(grown), Some(PATCH), Some(grown), MAIN), PanelPlace::InPlace);
+        assert_eq!(panel_place(Some(edge), Some(PATCH), Some(grown), MAIN), PanelPlace::Moved);
     }
 
     #[test]
@@ -271,6 +436,129 @@ mod tests {
         assert!(!fast_look(true, false), "the patch off: nothing to bring back");
         assert!(!fast_look(false, true));
         assert!(!fast_look(false, false));
+    }
+
+    /// The still's block at the corner (`desktop_shot::BLOCK`).
+    const CAP: Rect = Rect::new(2240.0, 1120.0, 320.0, 320.0);
+    /// A parked window at its park frame: a one-point sliver 52 pt tall (his 10-29 corner).
+    const PARKED: Rect = Rect::new(2559.0, 1388.0, 1500.0, 1100.0);
+    /// The same window as Show Desktop pushes it partly into view (his 10-29 report: about
+    /// 90x130 pt of its corner).
+    const PUSHED: Rect = Rect::new(2470.0, 1310.0, 1500.0, 1100.0);
+
+    #[test]
+    fn the_pushed_parts_are_covered_with_their_shadow_within_the_still() {
+        let r = pushed_rect(&[PUSHED], MAIN, 60.0, CAP).expect("a part shows");
+        assert_eq!(r, Rect::new(2410.0, 1250.0, 150.0, 190.0), "90x130 grown by 60, kept on the display");
+        // Two windows: one rectangle holding both.
+        let other = Rect::new(2500.0, 1360.0, 900.0, 700.0);
+        let both = pushed_rect(&[PUSHED, other], MAIN, 60.0, CAP).expect("parts");
+        assert!(both.contains_rect(&r) && both.contains_rect(&Rect::new(2440.0, 1300.0, 120.0, 140.0)), "{both:?}");
+        // Pushed further than the still's block holds: only the block is covered.
+        let far = Rect::new(2100.0, 1000.0, 1500.0, 1100.0);
+        assert_eq!(pushed_rect(&[far], MAIN, 60.0, CAP), Some(CAP));
+        // A part wholly outside the block (a window listed mid-screen) adds nothing.
+        let mid = Rect::new(800.0, 400.0, 600.0, 400.0);
+        assert_eq!(pushed_rect(&[mid, PUSHED], MAIN, 60.0, CAP), Some(r));
+        assert_eq!(pushed_rect(&[mid], MAIN, 60.0, CAP), None);
+        // Off the display: nothing.
+        assert_eq!(pushed_rect(&[Rect::new(2600.0, 1300.0, 500.0, 500.0)], MAIN, 60.0, CAP), None);
+    }
+
+    fn look<'a>(up: bool, parked: &'a [(u32, Rect)], in_zone: &'a HashSet<u32>, now: Instant) -> CoverLook<'a> {
+        CoverLook { up, parked, in_zone, in_use: Some(PATCH), display: MAIN, reach: 60.0, cap: CAP, now }
+    }
+
+    #[test]
+    fn the_cover_grows_through_show_desktop_and_shrinks_when_the_windows_are_back() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let zone: HashSet<u32> = [1].into();
+        let none: HashSet<u32> = HashSet::new();
+        let home = [(1, PARKED)];
+        let pushed = [(1, PUSHED)];
+        let halfway = [(1, Rect::new(2515.0, 1350.0, 1500.0, 1100.0))];
+        let mut c = PushedCover::default();
+        assert_eq!(c.see(&look(false, &home, &zone, ms(0))), Cover::Usual, "at rest: the slivers' rectangle");
+        assert!(!c.holding());
+        // The click: expected, nothing moved yet. The rectangle in use is held.
+        assert_eq!(c.see(&look(true, &home, &zone, ms(10))), Cover::Held(PATCH));
+        assert!(c.holding());
+        // Pushed into view: the rectangle grows to cover it.
+        let grown = PATCH.union(&Rect::new(2410.0, 1250.0, 150.0, 190.0));
+        assert_eq!(c.see(&look(true, &pushed, &none, ms(200))), Cover::Held(grown));
+        assert_eq!(c.see(&look(true, &pushed, &none, ms(900))), Cover::Held(grown), "at rest pushed");
+        // The slide back: never smaller before the window is back.
+        assert_eq!(c.see(&look(true, &halfway, &zone, ms(1000))), Cover::Held(grown));
+        assert_eq!(c.see(&look(false, &halfway, &zone, ms(1020))), Cover::Held(grown), "Show Desktop's window gone first");
+        // Back at its park frame: the slivers' rectangle, at once.
+        assert_eq!(c.see(&look(false, &home, &zone, ms(1040))), Cover::Released);
+        assert!(!c.holding());
+        assert_eq!(c.see(&look(false, &home, &zone, ms(1060))), Cover::Usual);
+    }
+
+    #[test]
+    fn a_cover_let_go_while_show_desktop_lingers_is_not_held_again() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let zone: HashSet<u32> = [1].into();
+        let home = [(1, PARKED)];
+        let pushed = [(1, PUSHED)];
+        let mut c = PushedCover::default();
+        c.see(&look(false, &home, &zone, ms(0)));
+        c.see(&look(true, &home, &zone, ms(10)));
+        assert!(matches!(c.see(&look(true, &pushed, &zone, ms(300))), Cover::Held(_)));
+        assert_eq!(c.see(&look(true, &home, &zone, ms(1000))), Cover::Released, "back while its window is still listed");
+        assert_eq!(c.see(&look(true, &home, &zone, ms(1100))), Cover::Usual);
+        assert!(!c.holding());
+        assert_eq!(c.see(&look(false, &home, &zone, ms(1300))), Cover::Usual);
+        // The next Show Desktop holds again.
+        assert_eq!(c.see(&look(true, &home, &zone, ms(2000))), Cover::Held(PATCH));
+    }
+
+    #[test]
+    fn a_window_not_back_is_let_go_a_while_after_show_desktop_ends() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let zone: HashSet<u32> = [1].into();
+        let home = [(1, PARKED)];
+        let pushed = [(1, PUSHED)];
+        // macOS puts it back a point lower, and it stays there.
+        let near = [(1, Rect::new(2559.0, 1390.0, 1500.0, 1100.0))];
+        let mut c = PushedCover::default();
+        c.see(&look(false, &home, &zone, ms(0)));
+        c.see(&look(true, &pushed, &zone, ms(300)));
+        assert!(matches!(c.see(&look(false, &near, &zone, ms(1000))), Cover::Held(_)));
+        assert!(matches!(c.see(&look(false, &near, &zone, ms(2999))), Cover::Held(_)));
+        assert_eq!(c.see(&look(false, &near, &zone, ms(3000))), Cover::Released);
+        // Its new place is its park frame from now on.
+        c.see(&look(true, &near, &zone, ms(4000)));
+        c.see(&look(true, &pushed, &zone, ms(4300)));
+        assert_eq!(c.see(&look(false, &near, &zone, ms(4600))), Cover::Released);
+    }
+
+    #[test]
+    fn nothing_pushed_nothing_held_and_a_window_parked_meanwhile_counts_once_still() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let zone: HashSet<u32> = [1].into();
+        let home = [(1, PARKED)];
+        let mut c = PushedCover::default();
+        c.see(&look(false, &home, &zone, ms(0)));
+        // A click macOS answered with nothing: the expectation runs out, the rectangle in use.
+        assert_eq!(c.see(&look(true, &home, &zone, ms(10))), Cover::Held(PATCH));
+        assert_eq!(c.see(&look(false, &home, &zone, ms(1500))), Cover::Usual);
+        assert!(!c.holding());
+        // A window parked while Show Desktop is up has no park frame known: back once in the
+        // zone and still.
+        let zone2: HashSet<u32> = [1, 2].into();
+        let two = |b: Rect| [(1, PARKED), (2, b)];
+        c.see(&look(true, &home, &zone, ms(2000)));
+        let a = two(PUSHED);
+        assert!(matches!(c.see(&look(true, &a, &zone, ms(2100))), Cover::Held(_)));
+        let b = two(Rect::new(2559.0, 1400.0, 800.0, 600.0));
+        assert!(matches!(c.see(&look(false, &b, &zone2, ms(2200))), Cover::Held(_)), "in the zone, moved since the last look");
+        assert_eq!(c.see(&look(false, &b, &zone2, ms(2220))), Cover::Released, "still: back");
     }
 
     fn at(x: f64) -> Vec<(u32, Rect)> {

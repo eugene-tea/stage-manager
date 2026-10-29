@@ -109,7 +109,7 @@ use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::phase::{self, Hold};
-use crate::engine::show_desktop::{self, CloseWatch, PanelPlace, RevealFacts};
+use crate::engine::show_desktop::{self, CloseWatch, Cover, CoverLook, PanelPlace, PushedCover, RevealFacts};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
@@ -465,6 +465,16 @@ fn note_parked_elsewhere(elsewhere: &[&windows::CgWindow]) {
         tracing::debug!(id = w.id, pid = w.pid, bounds = %format!("{:.0},{:.0} {:.0}x{:.0}", w.bounds.x, w.bounds.y, w.bounds.w, w.bounds.h), onscreen = w.onscreen,
             "a window the model has parked is listed outside the park zone");
     }
+}
+
+/// What the corner patch may cover while Show Desktop pushes the parked windows into view
+/// ([`show_desktop::pushed_rect`]): the park corner's square a switch's cover keeps to
+/// ([`crate::engine::corner_patch::cover_cap`], the still's block at the bottom-right corner),
+/// within the block of the desktop's still kept (`still`, when one is), which the patch's
+/// picture is cropped from: no still is taken while an overview shows.
+fn reveal_cap(display: Rect, corner: Corner, still: Option<Rect>) -> Rect {
+    let cap = crate::engine::corner_patch::cover_cap(display, corner);
+    still.and_then(|s| s.intersect(&cap)).unwrap_or(cap)
 }
 
 /// The windows the sliver tap and the corner patch count parked: the model's parked windows
@@ -979,6 +989,9 @@ pub struct Controller {
     /// Where macOS listed the patch's panel at the last plan during Show Desktop (logged when
     /// it changes; `None` outside Show Desktop).
     reveal_panel: Option<PanelPlace>,
+    /// The patch's rectangle through Show Desktop: grown over the parked windows macOS pushes
+    /// into view, until they are back ([`show_desktop::PushedCover`]).
+    reveal_cover: PushedCover,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
     /// release. Any event, batch, Space change, config reload, retried restore or window
@@ -1193,6 +1206,7 @@ impl Controller {
             overview: OverviewWatch::default(),
             reveal_close: CloseWatch::default(),
             reveal_panel: None,
+            reveal_cover: PushedCover::default(),
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
@@ -1575,11 +1589,13 @@ impl Controller {
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
-        // Mission Control, App Exposé, Show Desktop: the panel is Transient, so macOS hides it
-        // while one shows and shows it again the moment it closes, with the windows. A patch
-        // shown when one opened is left as it is (no plan, no reorder during it); hiding it
-        // from the plan left the slivers bare until the close was seen (up to a second's
-        // poll) and settled (10-13, F3 twice: the corner bare until a window was focused).
+        // Mission Control and App Exposé: the panel is Stationary (round show-desktop-patch;
+        // Transient before, which macOS hid while one showed), so it stays drawn in place like
+        // the desktop picture under their windows, and is there the moment it closes, with the
+        // windows. A patch shown when one opened is left as it is (no plan, no reorder during
+        // it); hiding it from the plan left the slivers bare until the close was seen (up to a
+        // second's poll) and settled (10-13, F3 twice: the corner bare until a window was
+        // focused).
         // A Desktop picked inside Mission Control plans as before (hidden until it is
         // recognized): the old Desktop's patch must not come back on the new one.
         // Only Mission Control and App Exposé: Show Desktop pushes every window to the screen's
@@ -1631,6 +1647,22 @@ impl Controller {
                 );
                 let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
                 let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
+                // Show Desktop pushes the parked windows partly into view (round
+                // show-desktop-patch, part 2): the patch covers what of them shows, until they
+                // are back at their park frames.
+                let show_desktop = self.overview.show_desktop_up(now);
+                let parked_listed: Vec<(u32, Rect)> =
+                    list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| (w.id, w.bounds)).collect();
+                let cover = self.reveal_cover.see(&CoverLook {
+                    up: show_desktop,
+                    parked: &parked_listed,
+                    in_zone: &parked,
+                    in_use: self.patch_rects.get(&here.0).copied(),
+                    display,
+                    reach,
+                    cap: reveal_cap(display, main.corner, desktop_shot::kept_region()),
+                    now,
+                });
                 // This Desktop's windows as listed while Show Desktop is: their slide back is its
                 // close's first sign (round show-desktop-patch).
                 let listed_sd = self.overview.showing() == Some(Overview::ShowDesktop);
@@ -1648,7 +1680,12 @@ impl Controller {
                 // with its Desktop drawn and is there when it slides back.
                 let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
                 let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
-                let slides = (elsewhere || parked.is_empty()) && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
+                // Never while Show Desktop is up or its cover held: it moves the parked windows
+                // out of the zone too.
+                let slides = !show_desktop
+                    && !self.reveal_cover.holding()
+                    && (elsewhere || parked.is_empty())
+                    && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
                 self.phase.slide_seen(slides, now);
                 let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
                 if slide_waits(self.phase.sliding_for(now), shown_now) {
@@ -1658,8 +1695,31 @@ impl Controller {
                     }
                     return Some(list);
                 }
+                // While the cover is held every parked window listed counts as parked, wherever
+                // Show Desktop put it: the patch is ordered just above them and never taken for
+                // over a shown window there.
+                let parked: HashSet<u32> = match cover {
+                    Cover::Held(_) => parked.into_iter().chain(parked_listed.iter().map(|(id, _)| *id)).collect(),
+                    _ => parked,
+                };
                 let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let rect = patch_rect(&slivers, display, reach).map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r));
+                let usual = patch_rect(&slivers, display, reach);
+                let rect = match cover {
+                    Cover::Held(r) => Some(r),
+                    // The windows are back: the slivers' rectangle at once, not kept at the
+                    // bigger one in use.
+                    Cover::Released => usual,
+                    Cover::Usual => usual.map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r)),
+                };
+                match cover {
+                    Cover::Held(r) if self.patch_rect != Some(r) => {
+                        tracing::info!(rect = %r, "Show Desktop: the corner patch covers the parked windows it pushes into view");
+                    }
+                    Cover::Released => {
+                        tracing::info!(rect = %rect.map_or_else(|| "none".to_owned(), |r| r.to_string()), "Show Desktop: the parked windows are back; the corner patch covers their slivers");
+                    }
+                    _ => {}
+                }
                 match rect {
                     Some(r) => self.patch_rects.insert(here.0, r),
                     None => self.patch_rects.remove(&here.0),
@@ -1712,14 +1772,14 @@ impl Controller {
                 let corner = self.corner_still(rect, items.as_deref(), now);
                 // Show Desktop (round show-desktop-patch): where macOS lists the panel, and the
                 // close's first sign, this Desktop's windows sliding back.
-                let show_desktop = self.overview.show_desktop_up(now);
                 let closing = self.reveal_close.see(listed_sd, ours, now);
                 if closing == show_desktop::Closing::Began {
                     tracing::info!("Show Desktop closes: the windows slide back; the corner patch is planned again");
                 }
                 let panel = if show_desktop {
                     let listed = number.and_then(|n| list.iter().find(|w| w.id == n)).map(|w| w.bounds);
-                    let place = show_desktop::panel_place(listed, patch_ui::placed_at(), display);
+                    let asked = self.patch_sent.as_ref().and_then(|p| p.show);
+                    let place = show_desktop::panel_place(listed, patch_ui::placed_at(), asked, display);
                     if self.reveal_panel != Some(place) {
                         tracing::info!(listed = ?listed, placed = ?patch_ui::placed_at(), "Show Desktop: the corner patch's panel is {}", place.name());
                         self.reveal_panel = Some(place);
@@ -1787,6 +1847,7 @@ impl Controller {
             _ => {
                 self.patch_rect = None;
                 self.patch_rects.clear();
+                self.reveal_cover = PushedCover::default();
                 self.phase.forget_slide();
                 self.patch_order = Default::default();
                 self.patch_why = None;
@@ -2154,7 +2215,7 @@ impl Controller {
     /// expected from a wallpaper click, with the patch on ([`show_desktop::fast_look`]).
     pub(super) fn reveal_fast(&self, now: Instant) -> bool {
         let patch_on = self.model.is_some() && self.store.config().windows.corner_patch;
-        show_desktop::fast_look(self.overview.show_desktop_up(now), patch_on)
+        show_desktop::fast_look(self.overview.show_desktop_up(now) || self.reveal_cover.holding(), patch_on)
     }
 
     /// The corner patch as it runs, for `ctl state` (the Fable review's L3): `mode` is
@@ -6190,6 +6251,18 @@ mod tests {
     /// A window of the owner's 2560x1440 Mac (10-16), as the window server lists it.
     fn listed(id: u32, pid: i32, bounds: Rect) -> windows::CgWindow {
         windows::CgWindow { id, pid, owner: String::new(), name: None, layer: 0, bounds, onscreen: true, alpha: 1.0 }
+    }
+
+    #[test]
+    fn show_desktops_cover_keeps_to_the_corner_square_within_the_still() {
+        let display = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let square = Rect::new(2240.0, 1120.0, 320.0, 320.0);
+        assert_eq!(reveal_cap(display, Corner::BottomRight, None), square, "no still: the square a switch's cover keeps to");
+        let bigger = Rect::new(2000.0, 1000.0, 560.0, 440.0);
+        assert_eq!(reveal_cap(display, Corner::BottomRight, Some(bigger)), square, "a bigger still: still the square");
+        let smaller = Rect::new(2300.0, 1200.0, 260.0, 240.0);
+        assert_eq!(reveal_cap(display, Corner::BottomRight, Some(smaller)), smaller, "only what the still holds");
+        assert_eq!(reveal_cap(display, Corner::BottomRight, Some(Rect::new(0.0, 0.0, 100.0, 100.0))), square, "a still elsewhere: the square");
     }
 
     #[test]

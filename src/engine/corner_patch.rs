@@ -54,11 +54,13 @@
 //!   ([`slide_waits`]), so the panel slides away drawn and is there when its Desktop slides
 //!   back in. While the change is recognized no plan is made at all.
 //! - **Overviews** ([`super::show_desktop`]): Mission Control and App Exposé leave a shown
-//!   patch to macOS (its panel is `Transient`), else it stays off. Through Show Desktop a
-//!   patch drawn from a still of the desktop is planned as at any time (round
-//!   show-desktop-patch), unless macOS pushed its panel aside onto the display; one drawn
-//!   from the file hides until the close's first sign, looked for on the fast tick. Never on a
-//!   full-screen app's Space, nor once the app stands down (nothing parked).
+//!   patch as it is (its panel is `Stationary`: drawn in place under their windows), else it
+//!   stays off. Through Show Desktop a patch drawn from a still of the desktop is planned as
+//!   at any time (round show-desktop-patch), its rectangle grown over what macOS pushes of the
+//!   parked windows into view until they are back, unless macOS pushed its panel aside onto
+//!   the display; one drawn from the file hides until the close's first sign, looked for on
+//!   the fast tick. Never on a full-screen app's Space, nor once the app stands down (nothing
+//!   parked).
 
 use std::collections::HashSet;
 use std::time::Duration;

@@ -7,7 +7,7 @@
 - The corner stays clean at dawn and dusk on wallpapers that follow the sun.
 - The corner stays clean when Show Desktop ends: the windows coming back no longer show
   the hidden windows' edges for a moment. With Screen Recording allowed it stays clean
-  through Show Desktop too.
+  through Show Desktop too, where the hidden windows' corners used to show.
 - Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
   front with the keyboard, also when it shares its stage with other apps.
 - A card shows its front window on top, also when its stage holds two apps, and the windows

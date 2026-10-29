@@ -4112,6 +4112,8 @@ SHOW_DESKTOP_LAYER = 18
 # look that sees the windows slide back (the fast tick), drawn on the main thread a frame
 # later: at most this many looks may show a sliver bare from then on.
 CLOSE_LOOKS = 2
+# Show Desktop's push is over this long after the app lists it (part 2's checks start then).
+SETTLED_AFTER = 0.6
 
 
 def desktop_click_point(s, avoid):
@@ -4146,7 +4148,12 @@ def show_desktop_close(label, still):
     patch): with a still of the desktop (`still`), at no look from the opening click on while
     macOS leaves the panel in place or slides it off, else from the close on; with the file's
     picture, at no more than CLOSE_LOOKS looks from the close's start (the first look listing
-    a fixture window moving after the click back). Skipped with Apple's Stage Manager on,
+    a fixture window moving after the click back). Part 2 (the panel `Stationary`; 10-29:
+    a parked window's corner, about 90x130 pt, showed while Show Desktop was up): once Show
+    Desktop has been up for SETTLED_AFTER, at every look the panel is listed where the app
+    put it (its rectangle before, or one the app logged growing it to), never pushed aside,
+    and with a still every parked fixture's part on the display lies under the panel's
+    listed rectangle. Skipped with Apple's Stage Manager on,
     with "Click wallpaper to reveal desktop: Only in Stage Manager", when the patch does not
     show first, or when no point shows only the desktop."""
     what = f"{label}: Show Desktop's close"
@@ -4188,6 +4195,7 @@ def show_desktop_close(label, still):
         sampler.kill()
         skip(what, f"macOS showed no Show Desktop at the click at {pt[0]:.0f},{pt[1]:.0f}")
         return
+    t_up = time.time()
     time.sleep(1.2)
     during = state()
     t_back = time.time()
@@ -4226,15 +4234,27 @@ def show_desktop_close(label, still):
                 found.append((w["id"], vis))
         return found
 
-    # Where macOS lists the panel while Show Desktop shows, against where it was before.
+    # Where macOS lists the panel while Show Desktop shows, against where the app put it: its
+    # rectangle before, those it logged growing it to over the pushed parked windows (part 2),
+    # and the plan's while Show Desktop showed.
     before = [x for x in samples if x["t"] < t_open]
     placed = next((ours(x)[0]["bounds"] for x in reversed(before) if ours(x)), None)
+    lines = log_text()[mark:].splitlines()
+    put = [placed] if placed else []
+    for ln in lines:
+        m = re.search(r"rect=(-?\d+),(-?\d+) (\d+)x(\d+)", ln) if "covers the parked windows it pushes into view" in ln else None
+        if m:
+            put.append(dict(zip(("x", "y", "w", "h"), map(float, m.groups()))))
+    if patch_plan(during).get("show"):
+        put.append(patch_plan(during)["show"])
     sd = [x for x in samples if t_open <= x["t"] < t_back and sd_listed(x)]
     places = []
     for x in sd:
         o = ours(x)
-        p = ("not listed" if not o else "in place" if placed and close(o[0]["bounds"], placed)
-             else ("slid off" if not intersect(o[0]["bounds"], display) else "pushed aside") + f" to {fmt(o[0]['bounds'])}")
+        b = o[0]["bounds"] if o else None
+        p = ("not listed" if not o else "in place" if placed and close(b, placed)
+             else f"in place, grown to {fmt(b)}" if any(close(b, q) for q in put)
+             else ("slid off" if not intersect(b, display) else "pushed aside") + f" to {fmt(b)}")
         if o:
             p += f" alpha {o[0].get('alpha')}"
         if not places or places[-1] != p:
@@ -4245,10 +4265,40 @@ def show_desktop_close(label, still):
         mid_look = sd[len(sd) // 2]
         say("    parked fixtures meanwhile: " + ", ".join(
             f"{w['id']} at {fmt(w['bounds'])}{'' if w['onscreen'] else ' (off screen)'}" for w in mid_look["windows"] if w["id"] in parked))
-    for ln in log_text()[mark:].splitlines():
-        if "Show Desktop" in ln and ("panel is" in ln or "closes" in ln or "closed" in ln):
+    for ln in lines:
+        if "Show Desktop" in ln and ("panel is" in ln or "closes" in ln or "closed" in ln or "corner patch covers" in ln
+                                     or "are back" in ln):
             say("    log: " + ln.split("platform::controller: ", 1)[-1])
     pushed = any(pl.startswith("pushed aside") for pl in places)
+    # Part 2: settled under Show Desktop, the panel stays where it was put (Stationary), and
+    # with a still it lies over every parked fixture's part on the display.
+    settled = [x for x in sd if x["t"] >= t_up + SETTLED_AFTER]
+    moved_looks, uncovered = [], []
+    for x in settled:
+        o = ours(x)
+        if not o:
+            moved_looks.append((x["t"], "not listed"))
+            continue
+        b = o[0]["bounds"]
+        if not any(close(b, q) for q in put):
+            moved_looks.append((x["t"], fmt(b)))
+        if still:
+            for w in x["windows"]:
+                if w["id"] not in parked or w["layer"] != 0 or not w["onscreen"]:
+                    continue
+                vis = intersect(w["bounds"], display)
+                if vis and not contains(b, vis):
+                    uncovered.append((x["t"], w["id"], fmt(vis), fmt(b)))
+    if settled:
+        check(not moved_looks,
+              f"{what}: the patch panel stays where the app put it through Show Desktop (Stationary; {len(settled)} looks; "
+              f"{', '.join(f'{(t - t_back) * 1000:+.0f} ms {b}' for t, b in moved_looks[:4]) or 'never moved'})")
+        if still:
+            check(not uncovered,
+                  f"{what}: every parked fixture's part on the display lies under the patch through Show Desktop "
+                  f"({len(settled)} looks; {', '.join(f'{(t - t_back) * 1000:+.0f} ms {i} {v} outside {b}' for t, i, v, b in uncovered[:4]) or 'all covered'})")
+    else:
+        say(f"    no look sampled {SETTLED_AFTER:.1f} s into Show Desktop: the panel's place and cover not checked")
 
     # The close: the first look after the click back with a fixture window moved.
     after = [x for x in samples if x["t"] >= t_back]

@@ -4,8 +4,9 @@
 //! - **Panels, one per Desktop** ([`Sheet`]): borderless, non-activating, click-through, no
 //!   shadow, opaque, at the normal window level, never key or main; collection behavior
 //!   [`panels::corner_patch`] (no Spaces flag: AppKit keeps it on the Desktop it is first
-//!   ordered in on, as the strip's panes; `Transient`: hidden by Mission Control, App Exposé
-//!   and Show Desktop; `IgnoresCycle`: out of ⌘`). Once ordered in, a Desktop's panel stays
+//!   ordered in on, as the strip's panes; `Stationary`: left drawn and in place by Show
+//!   Desktop, Mission Control and App Exposé, like the desktop picture; `IgnoresCycle`: out
+//!   of ⌘`). Once ordered in, a Desktop's panel stays
 //!   ordered in there, shown or hidden by its alpha (ordered out and in again it would go
 //!   back to its Desktop, wherever the user is), so it slides in and out with its Desktop
 //!   drawn as it was left: nothing moves on a Desktop while the user is away. Which panel
