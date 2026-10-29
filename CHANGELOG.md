@@ -14,6 +14,8 @@
   before.
 - A window of an app busy at a switch comes back where you last moved it.
 - A bigger Dock no longer sends a window kept by the corner to the middle of the screen.
+- After a window is moved here in Mission Control, the stage it puts away comes back where
+  you left its windows.
 - A card dropped in the main area stays where you dropped it when Stage Manager quits.
 
 ## 1.4.0 — 2026-10-23

@@ -419,7 +419,7 @@ impl Model {
         }
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
-        self.move_in(target, &moving, hints, &mut actions);
+        self.move_in(target, &moving, live, hints, &mut actions);
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
@@ -728,8 +728,11 @@ impl Model {
     /// apps never do. The stage holding the frontmost moved window (`hints.z_order`; else
     /// the last one a window went to) is shown, the active stage going to the strip; the
     /// other stages moved windows went to wait in the strip, those windows parked. A pinned
-    /// window stays pinned and shown.
-    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], hints: &LaunchHints, actions: &mut Vec<Action>) {
+    /// window stays pinned and shown. The active stage parked for the front one keeps the
+    /// frames its windows have on screen now (`live`, read fresh at the arrival), as any
+    /// switch keeps them (E3: an app that posts no move notice came back where it was
+    /// before the user last moved it).
+    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], live: &[WindowMeta], hints: &LaunchHints, actions: &mut Vec<Action>) {
         if ids.is_empty() {
             return;
         }
@@ -808,7 +811,17 @@ impl Model {
             // Else the switch below shows the front stage and parks the active one.
         }
         if front != active {
-            // The front stage comes forward; the one shown goes to the strip.
+            // The front stage comes forward; the one shown goes to the strip, with its frames
+            // as they are on screen (the switch has no observation to capture from).
+            let mut shown = self.stage(active).map(|s| s.windows.clone()).unwrap_or_default();
+            shown.extend(self.children_in(Home::Stage(active)));
+            for id in shown {
+                if self.windows.get(&id).is_some_and(|w| !w.parked && w.space == target)
+                    && let Some(m) = live.iter().find(|m| m.id == id)
+                {
+                    self.record_frame(id, m.frame);
+                }
+            }
             let more = self.switch_in(target, active, front, None);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
         }

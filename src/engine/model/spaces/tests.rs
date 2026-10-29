@@ -1779,6 +1779,22 @@ mod identity {
     }
 
     #[test]
+    fn the_stage_a_moved_window_puts_away_keeps_its_frames_from_the_screen() {
+        // E3: the arrival's switch parked the active stage without reading its frames; a
+        // browser that posts no move notice came back where it was before the user moved it.
+        let (mut mac, _, browser) = messages_on_desktop_1();
+        let moved = Rect::new(500.0, 150.0, 600.0, 400.0);
+        mac.wins.get_mut(&2).expect("window").1 = moved;
+        mac.wins.get_mut(&14).expect("window").0 = Some(0);
+        mac.focused = None;
+        mac.go(0);
+        assert!(mac.parked(2), "the browser's stage went to the strip");
+        assert_eq!(mac.m.window(w(2)).map(|x| x.restore), Some(moved));
+        mac.click(browser);
+        assert_eq!(mac.wins[&2].1, moved, "back where the user left it");
+    }
+
+    #[test]
     fn a_window_moved_here_joins_the_active_stage_holding_its_app() {
         let mut mac = Mac::new();
         mac.put(0, 1, 10, "com.example.editor", "Work notes");
