@@ -12,6 +12,7 @@
   it, not pulled onto the screen and shrunk.
 - A window pushed into the bottom-right corner comes back by the corner, not where it was
   before.
+- A window of an app busy at a switch comes back where you last moved it.
 - A bigger Dock no longer sends a window kept by the corner to the middle of the screen.
 - A card dropped in the main area stays where you dropped it when Stage Manager quits.
 

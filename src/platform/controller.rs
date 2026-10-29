@@ -1218,7 +1218,10 @@ impl Controller {
         self.observe_with(ob, &windows::list_windows())
     }
 
-    /// [`Self::observe`] with the window server's list already read (`list`).
+    /// [`Self::observe`] with the window server's list already read (`list`). A frame whose
+    /// Accessibility read fails (a busy app's timeout) is the window server's bounds when
+    /// they can be trusted, as for an activation ([`observed_frames`], W3): the tracked frame
+    /// of an app that posts no move notice is where the window was before the user moved it.
     fn observe_with(&self, ob: &mut Observer, list: &[windows::CgWindow]) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
         let space = m.current_space(m.main_display().id);
@@ -1228,14 +1231,21 @@ impl Controller {
             .map(|w| WindowId(w.id))
             .filter(|id| m.window(*id).is_some())
             .collect();
-        let shown: Vec<u32> =
-            m.windows().filter(|w| !w.parked && (w.space == space || w.sticky)).map(|w| w.meta.id.0).collect();
-        let mut frames = HashMap::new();
-        for id in shown {
-            if let Some(f) = ob.refresh_frame(id) {
-                frames.insert(WindowId(id), f);
+        let shown: Vec<(u32, Display, bool)> = m
+            .windows()
+            .filter(|w| !w.parked && (w.space == space || w.sticky))
+            .map(|w| (w.meta.id.0, *m.display(w.meta.display), w.sticky))
+            .collect();
+        let mut reads = Vec::new();
+        for (id, display, sticky) in shown {
+            if let Some((frame, fresh)) = ob.read_frame(id) {
+                reads.push(FrameRead { id: WindowId(id), display, sticky, frame, fresh });
             }
         }
+        let listed: HashMap<u32, Rect> =
+            list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
+        let settling = self.space_pending || self.space_changed_at.is_some_and(|t| t.elapsed() < SPACE_SETTLE);
+        let frames = observed_frames(&reads, &listed, settling);
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
     }
 
@@ -5265,6 +5275,46 @@ fn app_has_window(m: &Model, waiting: &HashSet<String>, bundle: &str) -> bool {
     waiting.contains(bundle) || m.windows().any(|w| w.meta.bundle_id == bundle)
 }
 
+/// One shown window's frame as [`Controller::observe_with`] read it through Accessibility.
+#[derive(Debug, Clone, Copy)]
+struct FrameRead {
+    id: WindowId,
+    /// The display the model has it on.
+    display: Display,
+    sticky: bool,
+    /// The frame read, or the tracked one when the read failed.
+    frame: Rect,
+    /// The read answered.
+    fresh: bool,
+}
+
+/// The frames of an observation from Accessibility's `reads`: each frame read; for a read
+/// that failed (a busy app's timeout), the window server's bounds (`listed`) when they can
+/// be trusted, by [`activation_frame`]'s rule, else the tracked frame (W3). A display is
+/// steady (no Desktop slide shifts its list) when a window read there is listed at the
+/// frame read.
+fn observed_frames(reads: &[FrameRead], listed: &HashMap<u32, Rect>, settling: bool) -> HashMap<WindowId, Rect> {
+    let steady: HashSet<DisplayId> = reads
+        .iter()
+        .filter(|r| r.fresh && !r.sticky && listed.get(&r.id.0).is_some_and(|cg| !frames_differ(*cg, r.frame)))
+        .map(|r| r.display.id)
+        .collect();
+    reads
+        .iter()
+        .map(|r| {
+            if r.fresh {
+                return (r.id, r.frame);
+            }
+            let cg = listed.get(&r.id.0).copied();
+            let frame = activation_frame(r.frame, cg, r.display.frame, settling, steady.contains(&r.display.id));
+            if frame != r.frame {
+                tracing::debug!(id = r.id.0, tracked = %r.frame, %frame, "frame read failed: the window server's bounds stand in");
+            }
+            (r.id, frame)
+        })
+        .collect()
+}
+
 /// A shown window's frame for an activation's switch: the window server's bounds
 /// (`listed`) when they disagree with the tracked frame by more than a point (an app may
 /// have moved the window without a notice), else the tracked one. The tracked one stays too
@@ -5840,5 +5890,30 @@ mod tests {
         assert_eq!(activation_frame(tracked, Some(slid_right), DISPLAY, false, true), slid_right);
         // A move with a vertical part is never a slide.
         assert_eq!(activation_frame(tracked, Some(moved), DISPLAY, false, false), moved);
+    }
+
+    #[test]
+    fn a_frame_read_that_times_out_takes_the_window_servers_bounds() {
+        // W3: a busy app's timed-out read kept the tracked frame, and for an app that posts no
+        // move notice that is where the window was before the user moved it.
+        let display = Display { id: DisplayId(1), frame: DISPLAY, visible: DISPLAY, corner: Corner::BottomRight };
+        let read = |id: u32, frame: Rect, fresh: bool| FrameRead { id: WindowId(id), display, sticky: false, frame, fresh };
+        let tracked = Rect::new(100.0, 200.0, 800.0, 600.0);
+        let moved = Rect::new(400.0, 260.0, 800.0, 600.0);
+        let other = Rect::new(600.0, 100.0, 500.0, 400.0);
+        let listed: HashMap<u32, Rect> = [(1, moved), (2, other)].into_iter().collect();
+        let frames = observed_frames(&[read(1, tracked, false), read(2, other, true)], &listed, false);
+        assert_eq!(frames[&WindowId(1)], moved);
+        assert_eq!(frames[&WindowId(2)], other, "a frame read stands");
+        // Settling after a Space change: the list may be a slide's, the tracked frame stays.
+        let frames = observed_frames(&[read(1, tracked, false)], &listed, true);
+        assert_eq!(frames[&WindowId(1)], tracked);
+        // Shifted sideways only, no window of the display listed where it was read: a slide.
+        let slid: HashMap<u32, Rect> = [(1, tracked.translate(-700.0, 0.0)), (2, other.translate(-700.0, 0.0))].into_iter().collect();
+        let frames = observed_frames(&[read(1, tracked, false), read(2, other, true)], &slid, false);
+        assert_eq!(frames[&WindowId(1)], tracked);
+        // A read that answered is never replaced.
+        let frames = observed_frames(&[read(1, tracked, true)], &listed, false);
+        assert_eq!(frames[&WindowId(1)], tracked);
     }
 }
