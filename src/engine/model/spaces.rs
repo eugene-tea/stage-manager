@@ -43,7 +43,8 @@
 //!
 //! Empty Spaces are forgotten when left: they hold nothing, and the next visit makes a
 //! fresh one. A Space holding only pending stages (saved windows still to come) goes back to
-//! the saved Spaces waiting for a visit instead.
+//! the saved Spaces waiting for a visit instead. One holding only the entries of apps that
+//! quit a moment ago (kept for the file, `quit.rs`) stays until they are pruned.
 //!
 //! **After a restart** (`state.json` from another window server session): while the restore
 //! window is open ([`crate::engine::restore`]) a Space made from an empty screen is
@@ -211,9 +212,15 @@ impl Model {
     }
 
     /// Forgets a Space that is not shown and has no window: its stages, active stage, strip
-    /// and reveal; pending stages go back to the saved Spaces waiting for a visit.
+    /// and reveal; pending stages go back to the saved Spaces waiting for a visit (the
+    /// entries of its apps that quit with them). One with no pending stage but entries of
+    /// apps that quit is kept until those are pruned, so the file still writes them (Fable
+    /// E5: an app alone on a Desktop the user left lost its quit grace).
     fn prune_space(&mut self, space: SpaceId) {
         if self.is_shown_space(space) || self.windows.values().any(|w| w.space == space) {
+            return;
+        }
+        if self.space_has_quit(space) && !self.space_has_pending(space) {
             return;
         }
         self.pending_to_leftover(space);
@@ -563,6 +570,16 @@ impl Model {
         }
         if prev != target {
             self.prune_space(prev);
+        }
+        // Empty Spaces left behind earlier (kept for their quit entries, since pruned) go too.
+        let stale: Vec<SpaceId> = self
+            .spaces
+            .iter()
+            .map(|s| s.id)
+            .filter(|&s| s != target && s != prev && self.space_is_empty(s) && !self.space_has_quit(s))
+            .collect();
+        for s in stale {
+            self.prune_space(s);
         }
     }
 

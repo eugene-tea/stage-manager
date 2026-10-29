@@ -12,6 +12,8 @@
   with their windows showing, instead of all hidden behind an empty named stage.
 - A dialog left in a stage still waiting for its windows after a relaunch comes back on
   screen when a rule places that stage's last awaited window elsewhere.
+- An app that was alone on a Desktop you left still comes back after a restart when it quit
+  just before it, as apps on other Desktops do.
 
 ## 1.4.0 — 2026-10-23
 

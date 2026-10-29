@@ -178,6 +178,32 @@ fn two_desktops() -> Mac {
 }
 
 #[test]
+fn a_desktop_left_after_its_only_app_quit_keeps_the_quit_window_for_the_file() {
+    // Fable E5 (10-29): chat alone on Desktop 1 quits (the logout's apps quit before its
+    // signal); the user goes to Desktop 0 and the empty Desktop 1 was forgotten with the
+    // entry kept for the file, so the two-minute quit grace restored nothing there.
+    let mut mac = Mac::new();
+    mac.put(0, 1, 10, "com.example.editor", "Work notes");
+    mac.put(1, 4, 30, "com.example.chat", "Family");
+    mac.go(0);
+    mac.go(1);
+    let d1 = mac.space();
+    let closing = mac.m.closing(w(4)).expect("managed");
+    mac.wins.remove(&4);
+    mac.m.remove_window(w(4));
+    mac.m.keep_quit(vec![closing], 1_000);
+    mac.go(0);
+    assert_ne!(mac.space(), d1);
+    let file = mac.m.to_state();
+    let kept = file.spaces.iter().find(|s| s.id == d1.0).expect("Desktop 1 still written");
+    assert!(kept.stages.iter().flat_map(|s| &s.windows).any(|x| x.title == "Family" && x.quit_at == Some(1_000)), "{kept:?}");
+    // Its entries pruned (older than the grace), the empty Desktop goes at the next arrival.
+    mac.m.prune_quit(1_000_000);
+    mac.go(0);
+    assert!(!mac.m.spaces().iter().any(|s| s.id == d1), "forgotten once nothing is kept for it");
+}
+
+#[test]
 fn each_desktop_has_its_own_stages_and_strip() {
     let mut mac = two_desktops();
     mac.focused = Some(w(1));
