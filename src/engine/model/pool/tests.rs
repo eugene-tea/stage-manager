@@ -612,6 +612,31 @@ fn a_card_or_number_of_a_voters_stage_that_goes_follows_its_window() {
 }
 
 #[test]
+fn what_the_restore_remembers_of_a_window_or_stage_goes_with_it() {
+    // Fable E10 (10-29): `followed`, `merged` and the waiting fronts kept stages and windows
+    // gone for the rest of the run.
+    let mut d2 = desktop_2();
+    d2.stages[2].name = Some("Plan".into());
+    let options = ModelOptions { named_stages: vec!["Plan".into()], ..Default::default() };
+    let mut file = StateFile { session: Some("A".into()), ..StateFile::single(SavedSpace::default()) };
+    file.spaces = vec![desktop_1(), d2];
+    file.start_new_session();
+    let (file, _) = file.for_session(Some("B"));
+    let mut m = crate::engine::testkit::model_with(options);
+    m.set_restore(Restore::after_restart("B"));
+    m.restore_spaces(file.spaces);
+    let (_, y) = lone_voter_behind(&mut m, true);
+    m.end_restore().expect("it was open");
+    assert_eq!(m.followed.get(&y), Some(&w(81)), "its stage went; a click on its card follows it");
+    let gone = StageId(9_999);
+    m.merged.insert(Kin::Stage(gone), gone);
+    m.restore.front_waits.push(gone);
+    m.remove_window(w(81));
+    assert!(m.followed.is_empty(), "the window gone, nothing follows it");
+    assert!(m.merged.is_empty() && m.restore.front_waits.is_empty(), "no stage gone is remembered");
+}
+
+#[test]
 fn a_voter_back_in_its_own_desktops_stage_leaves_the_entry_it_voted_with() {
     // Low 3: "zsh" on both Desktops; the one that shows first is nearest Desktop 1's and votes
     // for it; Desktop 2 then takes the Desktop, and the voter's own Desktop's entry takes it.
@@ -652,4 +677,25 @@ fn an_orphan_parked_in_a_stage_a_rule_empties_is_brought_back_on_screen() {
     assert!(m.stage(mail).is_none(), "the mail stage has nothing left to wait for");
     assert!(m.window(w(90)).is_some_and(|x| x.home == Home::Stage(term) && !x.parked), "the orphan joins the stage shown");
     assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if id.0 == 90)), "and is put back on screen: {a:?}");
+}
+
+#[test]
+fn a_voter_placed_at_its_own_frame_keeps_the_frame_it_had_before_fitting() {
+    // Fable E10 (10-29): `lift` dropped `original`, so a fitted voter placed back at its own
+    // frame (the display not the saved size: no saved frames) lost the frame quit and every
+    // safety path put it back at.
+    let restore = Restore::after_restart("B").with_display(Some((1920.0, 1080.0)));
+    let mut m = launched(vec![desktop_1(), desktop_2()], restore);
+    m.set_fit(crate::engine::stage_area::FitOptions { inset: 216.0, shrink: false });
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(99, 30, "com.example.notes", "Notes", r(13.0)));
+    let under_strip = Rect::new(20.0, 100.0, 500.0, 360.0);
+    add(&mut m, win(81, 10, CAL, "Week", under_strip));
+    add(&mut m, win(98, 31, "com.example.draw", "Sketch", r(16.0)));
+    assert_eq!(m.window(w(81)).and_then(|x| x.original), Some(under_strip), "fitted clear of the strip");
+    m.end_restore().expect("it was open");
+    assert!(m.restored_grade(w(81)).is_some_and(Grade::confident), "back in its saved stage");
+    let x = m.window(w(81)).expect("managed");
+    assert_eq!(x.restore.x, 216.0, "at its own (fitted) frame");
+    assert_eq!(x.original, Some(under_strip), "its frame before fitting kept");
 }

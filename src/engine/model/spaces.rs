@@ -581,6 +581,7 @@ impl Model {
         for s in stale {
             self.prune_space(s);
         }
+        self.prune_restore_refs();
     }
 
     /// Known standard windows on screen on `target` whose Space is another one: moved here

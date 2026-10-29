@@ -14,6 +14,8 @@
   screen when a rule places that stage's last awaited window elsewhere.
 - An app that was alone on a Desktop you left still comes back after a restart when it quit
   just before it, as apps on other Desktops do.
+- After a restart on a display of another size, a window moved clear of the strip still goes
+  back to where you had it when Stage Manager quits.
 
 ## 1.4.0 — 2026-10-23
 

@@ -246,6 +246,7 @@ impl Model {
             }
             self.drop_if_dead(s, &mut actions);
         }
+        self.prune_restore_refs();
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
