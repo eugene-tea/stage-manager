@@ -103,6 +103,8 @@ impl Controller {
         if m.set_dock_order(order) {
             tracing::info!(apps, "follow the Dock: the Dock's order changed; the strip follows");
             self.strip_dirty = true;
+            // The next switch grows from the new slots (the review's K3).
+            self.remember();
         }
     }
 

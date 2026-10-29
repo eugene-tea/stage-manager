@@ -174,12 +174,35 @@ mod app {
         _spaces: WorkspaceObservers,
         _appearance: WorkspaceObservers,
         _power_off: apps::LogoutObservers,
-        _input: Option<InputMonitor>,
+        input: Option<InputMonitor>,
         _timer: Retained<NSTimer>,
     }
 
     thread_local! {
         static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    }
+
+    /// The global input monitor: clicks, keys and mouse moves in other apps, to the WM thread
+    /// and the strip. Main thread.
+    fn monitor_input(mtm: MainThreadMarker, wm: &WmHandle) -> Option<InputMonitor> {
+        let wm_input = wm.clone();
+        let on_input = move |event: input::InputEvent| {
+            if event.is_switcher_key() {
+                // ⌘Tab or ⌘` may switch stages: fresh snapshots for the animation (never on
+                // other ⌘ shortcuts, which would capture every shown window on each ⌘C).
+                strip::prefetch();
+            }
+            let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
+            wm_input.send(WmCommand::Input(event, drop));
+        };
+        // Mouse moves go to the strip on this thread: off its cards the strip lets clicks
+        // through, so it learns where the pointer is from the global monitor there.
+        let monitor = input::monitor(mtm, on_input, strip::pointer_moved);
+        if monitor.is_none() {
+            tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
+        }
+        strip::set_moves_fed(monitor.is_some());
+        monitor
     }
 
     fn with_app(f: impl FnOnce(&mut App)) {
@@ -220,6 +243,14 @@ mod app {
                 );
                 if now.accessibility != self.permissions.accessibility {
                     self.wm.send(WmCommand::Accessibility(now.accessibility));
+                }
+                if input::monitor_again(self.permissions.accessibility, now.accessibility)
+                    && let Some(mtm) = MainThreadMarker::new()
+                {
+                    // A monitor made before the grant may never hear a key (the review's K9).
+                    self.input = None;
+                    self.input = monitor_input(mtm, &self.wm);
+                    tracing::info!(on = self.input.is_some(), "input monitor made again after the Accessibility grant");
                 }
                 self.permissions = now;
                 self.refresh_menu();
@@ -702,11 +733,14 @@ mod app {
             wm_keys.send(WmCommand::Hotkey(command));
         });
 
-        wm.send(WmCommand::Apps(apps::running_regular_apps()));
         let wm_events = wm.clone();
         let workspace = apps::observe_workspace(move |event| {
             wm_events.send(WmCommand::App(event));
         });
+        // The running apps once their launches and quits are observed (the review's K10): an
+        // app that finished launching before the observers were in was in neither. One seen
+        // in both is observed once.
+        wm.send(WmCommand::Apps(apps::running_regular_apps()));
         let wm_spaces = wm.clone();
         let spaces = apps::observe_space_changes(move || {
             strip::space_changed();
@@ -748,22 +782,7 @@ mod app {
         warn_if_apple_stage_manager(&settings);
         wm.send(WmCommand::NativeSettings(settings.clone()));
 
-        let wm_input = wm.clone();
-        let on_input = move |event: input::InputEvent| {
-            if event.is_switcher_key() {
-                // ⌘Tab or ⌘` may switch stages: fresh snapshots for the animation (never on
-                // other ⌘ shortcuts, which would capture every shown window on each ⌘C).
-                strip::prefetch();
-            }
-            let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
-            wm_input.send(WmCommand::Input(event, drop));
-        };
-        // Mouse moves go to the strip on this thread: off its cards the strip lets clicks
-        // through, so it learns where the pointer is from the global monitor there.
-        let input_monitor = input::monitor(mtm, on_input, strip::pointer_moved);
-        if input_monitor.is_none() {
-            tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
-        }
+        let input_monitor = monitor_input(mtm, &wm);
 
         if let Err(e) = ctl::serve(listener, ctl_handler(wm.clone())) {
             tracing::error!("ctl socket unavailable: {e}");
@@ -790,7 +809,7 @@ mod app {
             _spaces: spaces,
             _appearance: appearance,
             _power_off: power_off,
-            _input: input_monitor,
+            input: input_monitor,
             _timer: timer,
         };
         state.send_display_if_changed();

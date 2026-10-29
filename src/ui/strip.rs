@@ -60,9 +60,10 @@
 //!   for a moment at launch.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -89,6 +90,7 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Picture, Target};
 use crate::platform::capture_frame::Extent;
+use crate::platform::capture_pixels;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
@@ -146,15 +148,55 @@ const HELD_FADE: &str = "held";
 
 thread_local! {
     static STRIP: RefCell<Option<Strip>> = const { RefCell::new(None) };
+    /// Snapshots that found the strip busy (a run loop turning inside one of its calls: a
+    /// menu, a drag), waiting to be presented in the order they came (the review's U7: one
+    /// was dropped, and a lost transition left the controller waiting with stale cards).
+    static WAITING: RefCell<VecDeque<StripSnapshot>> = const { RefCell::new(VecDeque::new()) };
 }
 
 fn with_strip<R>(f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
-    STRIP.with(|s| match s.try_borrow_mut() {
+    let result = STRIP.with(|s| match s.try_borrow_mut() {
         Ok(mut guard) => guard.as_mut().map(f),
         Err(_) => {
             tracing::debug!("strip busy; event dropped");
             None
         }
+    });
+    // The strip is free again: snapshots that waited for it go now, after this event.
+    if result.is_some() && WAITING.with(|w| w.try_borrow().is_ok_and(|w| !w.is_empty())) {
+        DispatchQueue::main().exec_async(present_waiting);
+    }
+    result
+}
+
+/// Presents `snapshot` after every one still waiting, now if the strip is free. Main thread.
+fn present_in_order(snapshot: StripSnapshot) {
+    WAITING.with(|w| w.borrow_mut().push_back(snapshot));
+    present_waiting();
+}
+
+/// Presents the snapshots waiting, in order, if the strip is free; else they wait for the
+/// end of the call that holds it ([`with_strip`]). Main thread.
+fn present_waiting() {
+    if !hand_over(&STRIP, &WAITING, Strip::present) {
+        tracing::debug!("strip busy; the snapshot waits");
+    }
+}
+
+/// Hands every item of `queue` to the receiver in `cell`, in order, when it is free; false
+/// (they all wait) when it is borrowed or not there.
+fn hand_over<S, T>(
+    cell: &'static std::thread::LocalKey<RefCell<Option<S>>>,
+    queue: &'static std::thread::LocalKey<RefCell<VecDeque<T>>>,
+    mut take: impl FnMut(&mut S, T),
+) -> bool {
+    cell.with(|c| {
+        let Ok(mut guard) = c.try_borrow_mut() else { return false };
+        let Some(receiver) = guard.as_mut() else { return false };
+        while let Some(item) = queue.with(|q| q.borrow_mut().pop_front()) {
+            take(receiver, item);
+        }
+        true
     })
 }
 
@@ -165,9 +207,7 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)));
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     strip_model::set_presenter(|snapshot| {
-        DispatchQueue::main().exec_async(move || {
-            with_strip(|s| s.present(snapshot));
-        });
+        DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
     tracing::info!(thumbnail_interval_ms, "strip installed");
 }
@@ -186,6 +226,8 @@ pub fn stand_down(why: &str) {
         s.card_drag = None;
         s.pressed = None;
         s.squeezed = None;
+        // Snapshots from before the stand-down never bring the strip back after it.
+        WAITING.with(|w| w.borrow_mut().clear());
         let mut snapshot = s.snapshot.clone();
         snapshot.cards.clear();
         snapshot.user_visible = false;
@@ -219,6 +261,15 @@ pub fn drop_slot(p: Point) -> Option<StripDrop> {
 /// desktop (the global monitor). Main thread.
 pub fn pointer_moved(p: Point) {
     with_strip(|s| s.pointer_moved(p));
+}
+
+/// The global monitor feeds [`pointer_moved`]: a strip hidden at the edge waits for its moves
+/// instead of polling the pointer. Without it (no monitor) the edge is polled as before.
+static MOVES_FED: AtomicBool = AtomicBool::new(false);
+
+/// Says whether the global monitor's mouse moves reach [`pointer_moved`]. Main thread.
+pub fn set_moves_fed(fed: bool) {
+    MOVES_FED.store(fed, Ordering::Relaxed);
 }
 
 /// What the strip draws now, for a scripted test (`ctl debug-strip`): the cards in slot
@@ -329,7 +380,10 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.mouse_down(p));
+            // Emit outside the borrow, as on release: the sink may call back into the strip.
+            if let Some(Some(e)) = with_strip(|s| s.mouse_down(p)) {
+                strip_model::emit(e);
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -402,6 +456,13 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, _event: &NSEvent) {}
 
+        // The pointer on the tab: its rest starts (the global monitor never hears moves over
+        // our own windows, and nothing is polled while the strip waits at the edge).
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            with_strip(Strip::update_visibility);
+        }
+
         // The tab acts on release, once the click is over: ordered out while its own click
         // was still being handled, the window server put it back on screen at the release
         // (measured 10-12: gone for 60 ms, then listed again over the revealed strip).
@@ -452,6 +513,13 @@ impl EdgeTab {
         unsafe { panel.setReleasedWhenClosed(false) };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
         let view = EdgeTabView::new(mtm, bounds);
+        let options =
+            NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: the view owns the tracking area and outlives it; no user info.
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), bounds, options, Some(&view), None)
+        };
+        view.addTrackingArea(&area);
         let root = CALayer::new();
         view.setLayer(Some(&root));
         view.setWantsLayer(true);
@@ -1099,8 +1167,14 @@ impl Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        self.tab.panel.orderOut(None);
-        self.tab.panel.close();
+        // Its tab closes with it (`EdgeTab`'s drop).
+        self.panel.orderOut(None);
+        self.panel.close();
+    }
+}
+
+impl Drop for EdgeTab {
+    fn drop(&mut self) {
         self.panel.orderOut(None);
         self.panel.close();
     }
@@ -1133,6 +1207,9 @@ struct Strip {
     icons: HashMap<i32, Option<CFRetained<CGImage>>>,
     visibility: Visibility,
     poll_timer: Option<Retained<NSTimer>>,
+    /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
+    /// global monitor to the edge or the tab looks again.
+    edge_waits: bool,
     capturer: Capturer,
     card_drag: Option<CardDrag>,
     /// A card lifted above the others (dragged, or gliding into its slot after the release),
@@ -1179,6 +1256,7 @@ impl Strip {
             icons: HashMap::new(),
             visibility: Visibility::default(),
             poll_timer: None,
+            edge_waits: false,
             capturer,
             card_drag: None,
             lifted_card: None,
@@ -1336,11 +1414,9 @@ impl Strip {
                 // could land on the Desktop being left: look again once the slide is over.
                 let epoch = self.space_epoch;
                 for seconds in REHOME_CHECKS {
-                    let check = RcBlock::new(move |_t: NonNull<NSTimer>| {
+                    let _once = motion::after(seconds, move || {
                         with_strip(|s| s.ensure_on_active_space(epoch));
                     });
-                    // SAFETY: the block runs once on the main run loop.
-                    let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds, false, &check) };
                 }
             }
         }
@@ -1724,16 +1800,16 @@ impl Strip {
             .iter()
             .map(|(id, p)| {
                 let e = p.extent;
+                let boxes = capture_pixels::corner_boxes(CGImage::width(Some(&p.image)), CGImage::height(Some(&p.image)));
+                let corner_boxes: Vec<Option<[u8; 3]>> =
+                    capture_pixels::box_stats(&p.image, &boxes).into_iter().map(|s| s.map(|s| [s.alpha, s.mean, s.spread])).collect();
                 (id.to_string(), serde_json::json!({
                     "w": CGImage::width(Some(&p.image)),
                     "h": CGImage::height(Some(&p.image)),
                     "extent": { "left": e.left, "top": e.top, "right": e.right, "bottom": e.bottom },
                     "corners": crate::platform::self_capture::corners(&p.image),
                     // Each corner box's [alpha, mean, spread] (8M: a fill around the window).
-                    "corner_boxes": crate::platform::capture_pixels::read(&p.image).map(|px| {
-                        use crate::platform::capture_pixels::{corner_boxes, stats};
-                        corner_boxes(px.w, px.h).map(|r| stats(&px, r).map(|s| [s.alpha, s.mean, s.spread]))
-                    }),
+                    "corner_boxes": corner_boxes,
                 }))
             })
             .collect();
@@ -2136,7 +2212,7 @@ impl Strip {
             t.invalidate();
         }
         let stage = *stage;
-        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        let t = motion::after(settle, move || {
             with_strip(|s| {
                 if s.lifted_card.as_ref().is_some_and(|l| l.0 == stage && l.1.is_some()) {
                     s.lifted_card = None;
@@ -2144,8 +2220,6 @@ impl Strip {
                 }
             });
         });
-        // SAFETY: the block runs once on the main run loop.
-        let t = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(settle, false, &block) };
         if let Some(l) = self.lifted_card.as_mut() {
             l.1 = Some(t);
         }
@@ -2167,7 +2241,8 @@ impl Strip {
         l.icons.iter().find(|(_, r)| r.translate(l.frame.x + d.x, l.frame.y + d.y).contains(p)).map(|(pid, _)| *pid)
     }
 
-    fn mouse_down(&mut self, p: Point) {
+    /// A press at `p` (view coordinates); the event to send once the strip is let go.
+    fn mouse_down(&mut self, p: Point) -> Option<StripEvent> {
         // A card a transition is still landing in is not drawn yet: a press there is nothing
         // (it would switch straight back; review R1-ui 3).
         self.pressed = if self.pane.shown { self.card_at(p).filter(|s| !self.motion.holds(*s)) } else { None };
@@ -2176,12 +2251,12 @@ impl Strip {
             // A click is likely: fresh snapshots of what leaves and what arrives, and the
             // engine's look at the windows taken now rather than at the release.
             self.prefetch(Some(stage));
-            strip_model::emit(StripEvent::CardPressed { stage });
             // Apple's card answers the press at once: it eases back from its hover growth to
             // a little under its resting size.
             self.squeeze(Some(stage));
         }
         tracing::trace!(x = p.x, y = p.y, card = ?self.pressed, "strip mouse down");
+        self.pressed.map(|stage| StripEvent::CardPressed { stage })
     }
 
     /// A possible drag of `stage`'s card from the current pointer.
@@ -2391,7 +2466,7 @@ impl Strip {
     /// holds it (then it is looked at again after as long, so one that a later transition
     /// took never stays pressed: R3 6). A new press of any card ends the watch.
     fn release_squeeze_later(stage: u64) {
-        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        let _once = motion::after(SQUEEZE_MAX, move || {
             with_strip(|s| {
                 if s.squeezed != Some(stage) || s.pressed.is_some() {
                     return;
@@ -2403,8 +2478,6 @@ impl Strip {
                 }
             });
         });
-        // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(SQUEEZE_MAX, false, &block) };
     }
 
     /// Draws `stage`'s card pressed (`None`: no card), easing the card that was and the one
@@ -2491,9 +2564,7 @@ impl Strip {
         }
         CATransaction::commit();
         let card = layers.card.clone();
-        let gone = RcBlock::new(move |_t: NonNull<NSTimer>| card.removeFromSuperlayer());
-        // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, false, &gone) };
+        let _once = motion::after(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, move || card.removeFromSuperlayer());
     }
 
     fn hover_at(&mut self, p: Option<Point>) {
@@ -2507,6 +2578,10 @@ impl Strip {
     /// the cards hover from here and the pane catches clicks again once it is on one.
     fn pointer_moved(&mut self, p: Point) {
         let g = self.geometry.global;
+        // Hidden at the edge, nothing polled: a move to the edge or the tab starts the rest.
+        if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
+            self.update_visibility();
+        }
         if g.contains(p) {
             self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
         } else if self.hovered.is_some() || self.pane.catches == Some(true) {
@@ -2621,6 +2696,13 @@ impl Strip {
             self.update_targets();
             tracing::info!(on_active_space = self.pane.panel.isOnActiveSpace(), "strip: the pane of the Space shown");
         }
+        // The edge tab shown while the Space still slid can have landed on the Desktop being
+        // left (the review's U9): a new one takes over (the stray one closes) and shows here.
+        if self.pane.tab.shown && !self.pane.tab.panel.isOnActiveSpace() {
+            tracing::info!("strip: the edge tab is not on the Space shown; a new one takes over");
+            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()));
+            self.update_visibility();
+        }
         self.publish_panel();
     }
 
@@ -2693,13 +2775,21 @@ impl Strip {
             || (self.pane.shown && mode == Mode::EdgeOnly);
         self.set_lifted(lift);
         self.window_drag_card(over);
-        self.set_polling(decision.poll || window_drag || card_dragging);
+        // Hidden at the edge with no clock running, mouse moves wake it (U6); without the
+        // global monitor's moves the pointer is polled as before.
+        let idle_edge = mode == Mode::EdgeOnly && !decision.poll;
+        self.edge_waits = idle_edge;
+        let unfed = idle_edge && !MOVES_FED.load(Ordering::Relaxed);
+        self.set_polling(decision.poll || unfed || window_drag || card_dragging);
+        // Only beside a pane on the Desktop shown: a tab's first order-in decides the Desktop
+        // it lives on (the review's U9; a stray one is replaced, `ensure_on_active_space`).
         let tab = self.style.reveal.edge_tab
             && !self.snapshot.fullscreen
             && self.covered()
             && !self.pane.shown
             && !window_drag
-            && !card_dragging;
+            && !card_dragging
+            && self.pane.on_space_shown();
         self.pane.tab.show(tab, self.mtm);
     }
 
@@ -2783,6 +2873,30 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static SEEN: RefCell<Option<Vec<u32>>> = const { RefCell::new(Some(Vec::new())) };
+        static QUEUE: RefCell<VecDeque<u32>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// U7: an item that finds the receiver borrowed waits, and goes before the next one once
+    /// it is free; nothing is dropped.
+    #[test]
+    fn a_snapshot_that_finds_the_strip_busy_waits_its_turn() {
+        let offer = |n: u32| {
+            QUEUE.with(|q| q.borrow_mut().push_back(n));
+            hand_over(&SEEN, &QUEUE, |seen: &mut Vec<u32>, n| seen.push(n))
+        };
+        assert!(offer(1));
+        let busy = SEEN.with(|s| {
+            let _held = s.borrow_mut();
+            offer(2)
+        });
+        assert!(!busy, "borrowed: it waits");
+        assert_eq!(QUEUE.with(|q| q.borrow().len()), 1);
+        assert!(offer(3));
+        assert_eq!(SEEN.with(|s| s.borrow().clone()), Some(vec![1, 2, 3]));
+    }
     use crate::config::StripStyle;
     use crate::engine::geometry::Size;
 

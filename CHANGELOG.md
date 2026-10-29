@@ -54,6 +54,10 @@
 - After a window is moved here in Mission Control, the stage it puts away comes back where
   you left its windows.
 - A card dropped in the main area stays where you dropped it when Stage Manager quits.
+- Without Screen Recording, switching stages moves plain window shapes again instead of
+  showing nothing.
+- With the strip hidden, Stage Manager no longer takes pictures of your windows in the
+  background.
 
 ## 1.4.0 — 2026-10-23
 

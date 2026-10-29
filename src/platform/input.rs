@@ -134,6 +134,13 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
     Some(InputMonitor { token })
 }
 
+/// True when the monitor is to be made again: Accessibility was just granted (`trusted`, not
+/// `was_trusted`). A global monitor hears key-downs only from a trusted process, and one made
+/// before the grant may stay deaf to them until a relaunch (the review's K9).
+pub fn monitor_again(was_trusted: bool, trusted: bool) -> bool {
+    trusted && !was_trusted
+}
+
 /// What an event the monitor sees is to us (`None`: not reported).
 fn kind_of(t: NSEventType) -> Option<InputKind> {
     match t {
@@ -452,6 +459,15 @@ mod tests {
     const SHIFT: Modifiers = Modifiers { shift: true, cmd: false };
     const CMD: Modifiers = Modifiers { shift: false, cmd: true };
     const CMD_SHIFT: Modifiers = Modifiers { shift: true, cmd: true };
+
+    /// K9: the monitor is made again only when Accessibility is granted.
+    #[test]
+    fn the_monitor_is_made_again_at_the_grant() {
+        assert!(monitor_again(false, true));
+        assert!(!monitor_again(true, true));
+        assert!(!monitor_again(true, false), "revoked: nothing to gain");
+        assert!(!monitor_again(false, false));
+    }
 
     #[test]
     fn the_release_of_a_used_shift_click_does_not_re_arm_it() {

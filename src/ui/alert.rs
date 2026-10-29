@@ -25,6 +25,10 @@ struct Shown {
 thread_local! {
     static SHOWN: RefCell<Vec<Shown>> = const { RefCell::new(Vec::new()) };
     static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// Alerts closed, kept until the main queue's next turn: one closed from its own button
+    /// (an alert that shows the next under the same key) is still running that button's
+    /// action, whose target must outlive it (the review's U11).
+    static CLOSED: RefCell<Vec<Shown>> = const { RefCell::new(Vec::new()) };
 }
 
 /// What an alert says and offers.
@@ -102,7 +106,15 @@ fn drop_where(pred: impl Fn(&Shown) -> bool) {
         *list = kept;
         gone
     });
-    for a in gone {
+    if gone.is_empty() {
+        return;
+    }
+    for a in &gone {
         a.alert.window().orderOut(None);
     }
+    // Released on the next turn, never inside a button's own action.
+    CLOSED.with(|c| c.borrow_mut().extend(gone));
+    dispatch2::DispatchQueue::main().exec_async(|| {
+        let _released = CLOSED.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    });
 }

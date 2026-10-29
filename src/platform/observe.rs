@@ -315,7 +315,10 @@ impl Observer {
         self.apps.values().filter(|a| a.bundle_id.as_deref() == Some(bundle)).map(|a| a.pid).collect()
     }
 
-    /// Re-reads a tracked window's frame through AX, keeping the result.
+    /// Re-reads a tracked window's frame through AX, keeping the result; the tracked frame
+    /// when the window gives none. One message (`AXPosition` and `AXSize` together,
+    /// [`AxElement::role_and_frame`]), not a round trip for each: the review's K4, every
+    /// shown window read twice on each focus event, card press, new window and hotkey.
     pub fn refresh_frame(&mut self, id: u32) -> Option<Rect> {
         self.read_frame(id).map(|(f, _)| f)
     }
@@ -324,12 +327,12 @@ impl Observer {
     /// tracked one because the read failed (a busy app's timeout).
     pub fn read_frame(&mut self, id: u32) -> Option<(Rect, bool)> {
         let w = self.windows.get_mut(&id)?;
-        let fresh = match w.element.frame() {
-            Ok(f) => {
+        let fresh = match w.element.role_and_frame() {
+            Ok((_, Some(f))) => {
                 w.frame = f;
                 true
             }
-            Err(_) => false,
+            _ => false,
         };
         Some((w.frame, fresh))
     }
