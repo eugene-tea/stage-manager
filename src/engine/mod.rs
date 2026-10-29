@@ -23,6 +23,7 @@ pub mod park;
 pub mod park_reconcile;
 pub mod patch_still;
 pub mod persist;
+pub mod phase;
 pub mod placement;
 pub mod raise_order;
 pub mod recovery;

@@ -104,6 +104,7 @@ use crate::engine::recovery::{self, Known};
 use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
+use crate::engine::phase::{self, Hold};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
@@ -966,6 +967,9 @@ pub struct Controller {
     space_pending: bool,
     /// Waits out full-screen animations.
     settle: Settle,
+    /// The Desktop and transition axis as one state ([`phase::Tracker`]), mirrored beside the
+    /// fields it replaces while the consumers move over ([`Self::phase_agrees`]).
+    phase: phase::Tracker,
     /// When the last Space change was handled.
     space_changed_at: Option<Instant>,
     /// Space changes handled since launch (`ctl space`: a test's switch shows as a step).
@@ -1195,6 +1199,7 @@ impl Controller {
             fullscreen: false,
             space_pending: false,
             settle: Settle::default(),
+            phase: phase::Tracker::default(),
             space_changed_at: None,
             space_changes: 0,
             last_switch: None,
@@ -1636,6 +1641,7 @@ impl Controller {
                 let now = Instant::now();
                 let slides = (elsewhere || parked.is_empty()) && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
                 self.patch_slide_since = slides.then(|| self.patch_slide_since.unwrap_or(now));
+                self.phase.slide_seen(slides, now);
                 let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
                 if slide_waits(self.patch_slide_since.map(|t| now.saturating_duration_since(t)), shown_now) {
                     if self.patch_why != Some("the Desktop slides") {
@@ -1750,6 +1756,7 @@ impl Controller {
                 self.patch_rect = None;
                 self.patch_rects.clear();
                 self.patch_slide_since = None;
+                self.phase.forget_slide();
                 self.patch_order = Default::default();
                 self.patch_why = None;
                 // The icons known stay (they do not depend on the patch); a read is due when
@@ -2667,6 +2674,7 @@ impl Controller {
             .collect();
         let max = motion_math::unveil_backstop(&self.store.config().style);
         self.pending = Some(Pending { id, actions: later, since: Instant::now(), max, entries, frames });
+        self.phase.feed(phase::Event::SwitchSent { id, max }, Instant::now());
         let failed = self.execute(ob, now);
         self.note_parked();
         failed
@@ -2683,6 +2691,7 @@ impl Controller {
     /// input arrived). Never interrupted: these windows are not parked in the model's eyes.
     fn flush_pending(&mut self, ob: &Observer) {
         if let Some(p) = self.pending.take() {
+            self.phase.feed(phase::Event::SwitchDone, Instant::now());
             tracing::trace!(id = p.id, held_ms = p.since.elapsed().as_millis() as u64, "incoming windows unveiled");
             let asked: Vec<(u32, Rect)> = p
                 .actions
@@ -3540,6 +3549,8 @@ impl Controller {
                 if self.locked {
                     // Recognized once the screen unlocks ([`Self::settle_space`]).
                     self.space_pending = true;
+                    self.space_changed_at = Some(Instant::now());
+                    self.phase.feed(phase::Event::SpaceChanged, Instant::now());
                 }
                 return;
             }
@@ -3597,6 +3608,7 @@ impl Controller {
         }
         if main.frame.w > 0.0 && self.screen_seen(ob, &list, main.frame) == Seen::FullScreen {
             self.fullscreen = true;
+            self.phase.feed(phase::Event::LaunchedFullScreen, Instant::now());
             tracing::info!("launched on a full-screen app's Space: no strip until a Desktop shows");
         }
         let hints = launch_hints(&list);
@@ -3655,6 +3667,32 @@ impl Controller {
             Some("a full-screen app's Space shows")
         } else {
             None
+        }
+    }
+
+    /// The mirrored state agrees with the fields it replaces (checked at every tick and
+    /// Space change; a disagreement is a bug of this round, said at warn and, in a debug
+    /// build, a panic).
+    fn phase_agrees(&self, at: &'static str) {
+        let p = &self.phase;
+        let agree = p.fullscreen() == self.fullscreen
+            && p.changing() == self.space_pending
+            && p.switching().map(|s| s.id) == self.pending.as_ref().map(|p| p.id)
+            && p.changed_at() == self.space_changed_at
+            && (p.hold() == Some(Hold::Overview)) == self.arrival_held
+            && p.sliding() == self.patch_slide_since.is_some();
+        if !agree {
+            tracing::warn!(
+                at,
+                phase = %p.phase(),
+                fullscreen = self.fullscreen,
+                settling = self.space_pending,
+                switching = self.pending.as_ref().map(|p| p.id),
+                arrival_held = self.arrival_held,
+                slide = self.patch_slide_since.is_some(),
+                "the phase and the fields disagree"
+            );
+            debug_assert!(agree, "the phase and the fields disagree at {at}");
         }
     }
 
@@ -3821,6 +3859,7 @@ impl Controller {
         // window list is read again (~60 ms) and the Desktop recognized.
         self.arrange_at_notice(ob, now);
         self.space_pending = true;
+        self.phase.feed(phase::Event::SpaceChanged, now);
         if self.ahead.is_some() {
             // Its strip too, in its final order, while the Desktop slides in.
             self.present();
@@ -3847,6 +3886,7 @@ impl Controller {
         // waits for a list that shows the Desktop.
         self.look_for_overview(&list, main.frame, now);
         if self.overview.holds_arrival(now) {
+            self.phase.feed(phase::Event::Held(Hold::Overview), now);
             if !self.arrival_held {
                 self.arrival_held = true;
                 tracing::info!(
@@ -3860,12 +3900,14 @@ impl Controller {
         let was_waiting = self.settle.waiting(now);
         match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
             Verdict::Wait => {
+                self.phase.feed(phase::Event::Held(Hold::Animation), now);
                 if !was_waiting {
                     tracing::info!("Space changed during a full-screen animation; waiting for it to settle");
                 }
             }
             Verdict::FullScreen => {
                 self.space_pending = false;
+                self.phase.feed(phase::Event::FullScreenCame, now);
                 self.undo_ahead(ob, "a full-screen app's Space came");
                 if !self.fullscreen {
                     counters::bump(Count::FullScreen);
@@ -3882,6 +3924,7 @@ impl Controller {
                 self.space_pending = false;
                 self.fullscreen = false;
                 self.space_changed_at = Some(now);
+                self.phase.feed(phase::Event::Arrived, now);
                 // A sliver grab let go while the change settled runs first, so the arrival
                 // finds the window where the user dropped it, already unparked (R2 L1).
                 if self.focus_after_press.is_some() && !input::left_button_down() {
@@ -3890,6 +3933,7 @@ impl Controller {
                 self.arrive_here(ob, &list, main, view);
             }
         }
+        self.phase_agrees("settle_space");
     }
 
     /// A Desktop shows: the engine recognizes it by the windows on screen ([`Model::arrive`]),
@@ -4015,6 +4059,7 @@ impl Controller {
         if session::arrival_silent(known, listed) {
             let since = *self.ax_silent_since.get_or_insert(now);
             if now.duration_since(since) < AX_SILENT_MAX {
+                self.phase.feed(phase::Event::Held(Hold::Silence), now);
                 if since == now {
                     tracing::info!(known_on_screen = known, "Accessibility lists none of the known windows on screen; the Desktop is recognized once it does");
                 }
@@ -4038,6 +4083,7 @@ impl Controller {
             let (live, absent) = self.screen_view(ob, list, main);
             let two = self.model.as_ref().is_some_and(|m| m.shows_two_desktops(main.id, &live, &absent));
             if two {
+                self.phase.feed(phase::Event::Held(Hold::TwoDesktops), now);
                 tracing::debug!(on_screen = live.len(), since_notice_ms = since_notice.as_millis() as u64, "the window list shows two Desktops at once (one still sliding); read again");
                 return true;
             }
@@ -4996,6 +5042,7 @@ impl Controller {
             super::sliver_tap::refresh(list.as_deref());
             self.reconcile_parked(ob, list.as_deref());
         }
+        self.phase_agrees("tick");
         if self.strip_dirty {
             self.present();
         }
