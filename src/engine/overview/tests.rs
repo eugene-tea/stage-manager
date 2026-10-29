@@ -434,3 +434,49 @@ fn the_dock_brought_up_during_an_overview_exit_ends_with_it() {
     w.see(seen(&[WM18]), t0);
     assert_eq!(w.see(seen(&[DOCK]), ms(t0, 500)), Change::Ended(Overview::ShowDesktop));
 }
+
+#[test]
+fn a_wallpaper_click_expects_show_desktop_until_it_is_listed_or_its_time_is_up() {
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    assert!(!w.showing_or_expected(t0));
+    assert!(w.expect_show_desktop(t0));
+    assert!(w.showing_or_expected(ms(t0, 100)), "hidden at the click, before the overview is listed");
+    assert!(!w.expectation_over(ms(t0, 100)));
+    w.see(seen(&[WM18]), ms(t0, 700));
+    assert!(w.showing_or_expected(ms(t0, 700)));
+    assert!(!w.expectation_over(ms(t0, 1500)), "met once listed: no timer to run out");
+    assert!(w.showing_or_expected(ms(t0, 1600)), "the overview listed holds on its own");
+    // Clicking the wallpaper while Show Desktop shows closes it: nothing is expected.
+    assert!(!w.expect_show_desktop(ms(t0, 2000)));
+    w.see(seen(&[MENU]), ms(t0, 2500));
+    assert!(!w.showing_or_expected(ms(t0, 2500)));
+    // Expected, and macOS showed none: over after its time, nothing listed.
+    assert!(w.expect_show_desktop(ms(t0, 3000)));
+    assert!(w.showing_or_expected(ms(t0, 4499)));
+    assert!(!w.showing_or_expected(ms(t0, 4500)));
+    assert!(w.expectation_over(ms(t0, 4500)));
+}
+
+#[test]
+fn show_desktop_is_up_while_listed_or_expected_never_for_mission_control() {
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    assert!(!w.show_desktop_up(t0));
+    assert!(w.expect_show_desktop(t0));
+    assert!(w.show_desktop_up(ms(t0, 100)), "expected from the click");
+    w.see(seen(&[WM18]), ms(t0, 700));
+    assert!(w.show_desktop_up(ms(t0, 700)), "listed");
+    // Closed quickly after the click: up no longer, whatever the click's timer said.
+    w.see(seen(&[MENU]), ms(t0, 1000));
+    assert!(!w.show_desktop_up(ms(t0, 1000)), "the expectation was met when listed");
+    assert!(!w.showing_or_expected(ms(t0, 1000)));
+    // Expected, and macOS showed none: up only for the expectation's time.
+    assert!(w.expect_show_desktop(ms(t0, 2000)));
+    assert!(w.show_desktop_up(ms(t0, 3499)));
+    assert!(!w.show_desktop_up(ms(t0, 3500)));
+    // Mission Control is not Show Desktop.
+    let mut m = OverviewWatch::default();
+    m.see(seen(&[WM19]), t0);
+    assert!(m.showing().is_some() && !m.show_desktop_up(t0));
+}

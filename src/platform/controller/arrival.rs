@@ -836,7 +836,7 @@ impl Controller {
         };
         let overview = self.overview.showing().is_some() || self.overview.holds_arrival(now);
         let (undo, arrange) =
-            hold_step(self.ahead_contradicted(now), self.ahead.is_some(), held.is_some(), self.space_pending, overview);
+            hold_step(self.ahead_contradicted(now), self.ahead.is_some(), held.is_some(), self.phase.changing(), overview);
         if undo {
             self.undo_ahead(ob, "another focus or activation came");
         }
@@ -980,20 +980,26 @@ impl Controller {
         true
     }
 
-    /// True while the WM thread's fast tick has work: an arrangement's moves to check.
+    /// True while the WM thread's fast tick has work: an arrangement's moves to check, a held
+    /// activation, the corner patch after a focus or through Show Desktop.
     pub fn wants_fast_tick(&self) -> bool {
-        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(Instant::now())
+        let now = Instant::now();
+        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(now) || self.reveal_fast(now)
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
     /// when due ([`Self::check_arrangement`]; after its Desktop's arrival,
-    /// [`Self::arrival_round`]), and an activation held for a Desktop slide looked at
-    /// ([`Self::slide_hold_step`]).
+    /// [`Self::arrival_round`]), an activation held for a Desktop slide looked at
+    /// ([`Self::slide_hold_step`]), and the corner patch planned while Show Desktop is up
+    /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
-        // The corner patch after a focus or an activation (round park-reconcile, L2).
-        self.patch_fast_step(now);
+        // The corner patch after a focus or an activation (round park-reconcile, L2), else
+        // through Show Desktop (round show-desktop-patch): one plan a fast tick at most.
+        if !self.patch_fast_step(now) && self.reveal_fast(now) {
+            self.update_patch();
+        }
         if self.model.is_none() {
             self.verify = None;
         } else if let Some(v) = self.verify.as_ref().filter(|v| v.polling && now >= v.next) {
@@ -1080,7 +1086,7 @@ impl Controller {
             self.finish_verify("the arrangement is settled");
             return;
         }
-        if self.space_pending {
+        if self.phase.changing() {
             self.stop_polling("its Desktop is arriving; the arrival checks the moves", &[], now);
             return;
         }
@@ -1588,7 +1594,7 @@ impl Controller {
     /// Forgets a held focus (the user acted on the Desktop shown) and undoes what was
     /// arranged ahead for it ([`forget_undoes`]).
     pub(super) fn forget_held(&mut self, ob: &Observer) {
-        if !forget_undoes(self.space_pending) {
+        if !forget_undoes(self.phase.changing()) {
             return;
         }
         self.focus_replay.clear();
@@ -1602,7 +1608,7 @@ impl Controller {
         let Some(sent) = &self.ahead else { return };
         let changed = self.space_changes != sent.changes_at;
         let waited = now.saturating_duration_since(sent.sent_at);
-        if let Some(why) = expire_step(sent.trigger, self.space_pending, changed, waited, self.ahead_contradicted(now)) {
+        if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, self.ahead_contradicted(now)) {
             self.undo_ahead(ob, why);
         }
     }

@@ -20,6 +20,12 @@
 //! Control. Every panel of ours is now `Transient`: hidden by Exposé, and back when it ends.
 //! The Spaces group is left as it was, so a Desktop's strip pane still belongs to that
 //! Desktop alone (round 6E) and never shows on a full-screen app's Space.
+//!
+//! The one exception is the wallpaper corner patch ([`corner_patch`], round
+//! show-desktop-patch): it is a piece of the desktop, so it is `Stationary` like the desktop
+//! picture. As `Transient` it was moved aside by macOS's Show Desktop like any window (the
+//! owner's log of 10-29: listed 3 to 10 pt off where it was put), and the parked windows it
+//! hides showed in the corner.
 
 use objc2_app_kit::NSWindowCollectionBehavior as B;
 
@@ -44,12 +50,15 @@ pub fn motion_overlay() -> B {
 /// A Desktop's wallpaper corner patch (`[windows] corner_patch`): as a Desktop's strip pane,
 /// on the one Desktop it is first ordered in on (no Spaces flag), so it slides with that
 /// Desktop and is there, drawn, when the Desktop slides back in (it moved to the Space shown
-/// before, and was ordered out at every Space change); hidden by Mission Control, App Exposé
-/// and Show Desktop, out of ⌘` and the Window menu's cycle; never on a full-screen Space.
-/// Its panel is non-activating and click-through, never key or main, so ⌘Tab and switchers
-/// that list apps never see it (an accessory app with no window that can be key).
+/// before, and was ordered out at every Space change); out of ⌘` and the Window menu's cycle;
+/// never on a full-screen Space. `Stationary` (round show-desktop-patch): unaffected by
+/// Exposé, it stays drawn and in place like the desktop picture it shows, through Show
+/// Desktop (which pushed it aside as `Transient`), Mission Control and App Exposé (whose
+/// windows are drawn above it), and is there when they close. Its panel is non-activating
+/// and click-through, never key or main, so ⌘Tab and switchers that list apps never see it
+/// (an accessory app with no window that can be key).
 pub fn corner_patch() -> B {
-    desktop_panel()
+    B::Stationary | B::IgnoresCycle
 }
 
 /// Our own windows (Settings, Welcome, alerts): shown on the Desktop the user is on. Without
@@ -88,7 +97,7 @@ mod tests {
 
     #[test]
     fn every_panel_is_hidden_by_expose_and_out_of_the_cycle() {
-        for b in [desktop_panel(), drag_ghost(), motion_overlay(), corner_patch()] {
+        for b in [desktop_panel(), drag_ghost(), motion_overlay()] {
             assert!(b.contains(B::Transient), "{:?}", names(b.0));
             assert_eq!(count(b, &EXPOSE), 1, "one Exposé choice: {:?}", names(b.0));
             assert!(count(b, &SPACES) <= 1, "one Spaces choice: {:?}", names(b.0));
@@ -112,11 +121,14 @@ mod tests {
     }
 
     #[test]
-    fn the_corner_patch_never_shows_in_switchers_or_overviews() {
+    fn the_corner_patch_stays_put_like_the_desktop_on_its_own_desktop() {
         let b = corner_patch();
-        assert_eq!(names(b.0), ["transient", "ignores_cycle"], "one Desktop's, as a strip pane");
-        assert!(!b.contains(B::Managed) && !b.contains(B::Stationary), "never laid out or kept by Exposé");
-        assert!(!b.contains(B::FullScreenAuxiliary) && !b.contains(B::CanJoinAllSpaces));
+        assert_eq!(names(b.0), ["stationary", "ignores_cycle"]);
+        assert_eq!(count(b, &EXPOSE), 1, "one Exposé choice");
+        assert!(!b.contains(B::Managed) && !b.contains(B::Transient), "never laid out, hidden or moved by Exposé");
+        assert_eq!(count(b, &SPACES), 0, "no Spaces flag: one Desktop, the one it is first ordered in on");
+        assert!(!b.contains(B::FullScreenAuxiliary) && !b.contains(B::FullScreenPrimary), "never on a full-screen Space");
+        assert!(!b.contains(B::ParticipatesInCycle));
     }
 
     #[test]

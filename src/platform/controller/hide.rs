@@ -174,7 +174,7 @@ impl Controller {
         let now = Instant::now();
         self.hides.unhiding.retain(|_, t| now.duration_since(*t) < UNHIDE_ECHO);
         self.hides.refused.retain(|_, t| now.duration_since(*t) < REFUSED_FOR);
-        if self.model.is_none() || self.frozen() || self.space_pending {
+        if self.model.is_none() || self.frozen() {
             return;
         }
         self.reconcile(ob, now);
@@ -402,7 +402,7 @@ impl Controller {
             return;
         }
         let held = self.focus_replay.peek(now).map(Wanted::pid);
-        let transition = self.pending.is_some();
+        let transition = self.phase.switching().is_some();
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.hides.reconcile)
             .into_iter()
             .partition(|(pid, _, t)| reconcile_due(now.duration_since(*t), held == Some(*pid), transition));

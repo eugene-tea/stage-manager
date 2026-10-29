@@ -12,7 +12,7 @@
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2]` clicks, double-clicks or drags on the
 //! desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
-//! patch), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
+//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and

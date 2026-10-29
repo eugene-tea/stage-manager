@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use super::{Controller, PATCH_REVEAL_HOLD, cover_desktop_forced, input};
+use super::{Controller, cover_desktop_forced, input};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::patch_still::{self as ps, Still, TakeFacts};
 use crate::platform::{desktop, desktop_shot, windows};
@@ -47,14 +47,14 @@ impl Controller {
         let grows = anim.activation_grows && anim.animates() && self.strip_visible;
         let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
         let cover = grows && (icons || cover_desktop_forced() || crate::ui::corner_patch::cover_ready(rect).is_err());
-        let overview = self.overview.showing().is_some() || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD);
+        let overview = self.overview.showing_or_expected(now);
         let safety = ps::may_take(&TakeFacts {
-            switching: self.pending.is_some(),
+            switching: self.phase.switching().is_some(),
             overview,
-            space_pending: self.space_pending,
-            slide: self.patch_slide_since.is_some(),
-            fullscreen: self.fullscreen,
-            since_space_change: self.space_changed_at.map(|t| now.saturating_duration_since(t)),
+            space_pending: self.phase.changing(),
+            slide: self.phase.sliding(),
+            fullscreen: self.phase.fullscreen(),
+            since_space_change: self.phase.since_change(now),
             since_dropped: desktop_shot::since_dropped(now),
         });
         let moment = desktop_shot::Moment {
@@ -68,7 +68,7 @@ impl Controller {
         // As before this round: the file's picture is kept rendered for a cover's still of the
         // icons only, never during an overview, a Space change, a full-screen Space or a
         // switch, nor at rest.
-        let busy = overview || self.space_pending || self.fullscreen || self.pending.is_some();
+        let busy = overview || self.phase.changing() || self.phase.fullscreen() || self.phase.switching().is_some();
         let picture = cover && !busy && desktop_shot::rest(moment, false).is_none();
         CornerStill { still, picture }
     }
