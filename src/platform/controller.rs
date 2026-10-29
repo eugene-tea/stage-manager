@@ -670,16 +670,14 @@ struct WindowDrag {
     grab: Point,
 }
 
-/// Incoming windows of a transition, held parked until their snapshots cover their frames.
+/// Incoming windows of a transition, held parked until their snapshots cover their frames:
+/// the batch [`Phase::Switching`](phase::Phase::Switching) holds (the phase keeps its clocks).
 #[derive(Debug)]
 struct Pending {
     /// The transition.
     id: u64,
     /// Their `SetFrame`s, then the batch's raises and focus, in order.
     actions: Vec<Action>,
-    since: Instant,
-    /// They come back this long after `since` even when the strip never unveils them.
-    max: Duration,
     /// Registry entries bringing them to their arrival frames if anything goes wrong.
     entries: BTreeMap<u32, ParkedEntry>,
     /// Their arrival frames: a click there during the wait was meant for them.
@@ -1714,7 +1712,7 @@ impl Controller {
                     // tested by `visibility`).
                     shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
                     dragging,
-                    transition: self.pending.is_some(),
+                    transition: self.phase.switching().is_some(),
                     items,
                     still: corner.still,
                 };
@@ -1994,7 +1992,7 @@ impl Controller {
             || self.overview.freezes(now)
             || self.phase.space_settling(now)
             || self.macos_reveal_at.is_some()
-            || self.pending.is_some()
+            || self.phase.switching().is_some()
             || self.ahead.is_some()
             || self.verify.is_some()
             || self.slide_held()
@@ -2670,7 +2668,7 @@ impl Controller {
             })
             .collect();
         let max = motion_math::unveil_backstop(&self.store.config().style);
-        self.pending = Some(Pending { id, actions: later, since: Instant::now(), max, entries, frames });
+        self.pending = Some(Pending { id, actions: later, entries, frames });
         self.phase.feed(phase::Event::SwitchSent { id, max }, Instant::now());
         let failed = self.execute(ob, now);
         self.note_parked();
@@ -2688,8 +2686,10 @@ impl Controller {
     /// input arrived). Never interrupted: these windows are not parked in the model's eyes.
     fn flush_pending(&mut self, ob: &Observer) {
         if let Some(p) = self.pending.take() {
-            self.phase.feed(phase::Event::SwitchDone, Instant::now());
-            tracing::trace!(id = p.id, held_ms = p.since.elapsed().as_millis() as u64, "incoming windows unveiled");
+            let now = Instant::now();
+            let since = self.phase.switching().map_or(now, |s| s.since);
+            self.phase.feed(phase::Event::SwitchDone, now);
+            tracing::trace!(id = p.id, held_ms = now.duration_since(since).as_millis() as u64, "incoming windows unveiled");
             let asked: Vec<(u32, Rect)> = p
                 .actions
                 .iter()
@@ -2714,7 +2714,7 @@ impl Controller {
             }
             // The strip has its note: now the order its card shows (`raise_order`), unless the
             // user clicked since the switch began (this flush may be his next click's).
-            self.settle_raise_order(ob, &raises, focus, p.since);
+            self.settle_raise_order(ob, &raises, focus, since);
         }
     }
 
@@ -4720,12 +4720,12 @@ impl Controller {
             // Read the windows now, while the button is down (~100 ms before the release),
             // so the click's motion starts without waiting on AX. Not while a transition's
             // windows are still on their way (their frames are not the ones to save).
-            self.pressed_obs = (self.pending.is_none() && !self.frozen() && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
+            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen() && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
             tracing::trace!(stage, read = self.pressed_obs.is_some(), "card pressed");
             return;
         }
         if let StripEvent::Unveil { id } = event {
-            if self.pending.as_ref().is_some_and(|p| p.id == id) {
+            if self.phase.switching().is_some_and(|s| s.id == id) {
                 self.flush_pending(ob);
             }
             return;
@@ -4922,8 +4922,8 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
-        if let Some((id, max)) = self.pending.as_ref().filter(|p| now.duration_since(p.since) >= p.max).map(|p| (p.id, p.max)) {
-            tracing::warn!(id, max_ms = max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
+        if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
+            tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
             self.flush_pending(ob);
         }
         self.echoes.prune(now);
@@ -5006,7 +5006,7 @@ impl Controller {
                 }
             } else if (self.front_after_restore || self.focus_after_restore)
                 && !self.frozen()
-                && self.pending.is_none()
+                && self.phase.switching().is_none()
                 && self.drag.is_none()
                 && !input::left_button_down()
             {
@@ -5392,7 +5392,7 @@ impl Controller {
             "animation_speed": self.store.config().style.animation.speed(),
             // A switch whose incoming windows still wait behind their snapshots (its id): a
             // question asked now leaves them there (8L3), so the checks wait for it to land.
-            "switching": self.pending.as_ref().map(|p| p.id),
+            "switching": self.phase.switching().map(|s| s.id),
             "capture": super::capture::status(),
             "desktop_still": desktop_still,
             "strip_cards": strip_model::published_cards()

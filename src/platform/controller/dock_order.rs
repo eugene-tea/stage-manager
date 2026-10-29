@@ -112,7 +112,7 @@ impl Controller {
     /// snapshots, a window is dragged, a batch holds the strip's snapshot, or a Space change
     /// settles (or the screen is locked, or a full-screen Space shows).
     fn strip_in_motion(&self) -> bool {
-        self.pending.is_some() || self.drag.is_some() || self.defer_present || self.frozen()
+        self.phase.switching().is_some() || self.drag.is_some() || self.defer_present || self.frozen()
     }
 }
 

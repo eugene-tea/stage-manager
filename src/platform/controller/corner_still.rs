@@ -49,7 +49,7 @@ impl Controller {
         let cover = grows && (icons || cover_desktop_forced() || crate::ui::corner_patch::cover_ready(rect).is_err());
         let overview = self.overview.showing().is_some() || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD);
         let safety = ps::may_take(&TakeFacts {
-            switching: self.pending.is_some(),
+            switching: self.phase.switching().is_some(),
             overview,
             space_pending: self.phase.changing(),
             slide: self.patch_slide_since.is_some(),
@@ -68,7 +68,7 @@ impl Controller {
         // As before this round: the file's picture is kept rendered for a cover's still of the
         // icons only, never during an overview, a Space change, a full-screen Space or a
         // switch, nor at rest.
-        let busy = overview || self.phase.changing() || self.phase.fullscreen() || self.pending.is_some();
+        let busy = overview || self.phase.changing() || self.phase.fullscreen() || self.phase.switching().is_some();
         let picture = cover && !busy && desktop_shot::rest(moment, false).is_none();
         CornerStill { still, picture }
     }
