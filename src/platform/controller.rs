@@ -3883,9 +3883,9 @@ impl Controller {
         // waits for a list that shows the Desktop.
         self.look_for_overview(&list, main.frame, now);
         if self.overview.holds_arrival(now) {
-            self.phase.feed(phase::Event::Held(Hold::Overview), now);
-            if !self.arrival_held {
+            if self.phase.hold() != Some(Hold::Overview) {
                 self.arrival_held = true;
+                self.phase.feed(phase::Event::Held(Hold::Overview), now);
                 tracing::info!(
                     "Space changed while {} shows; the Desktop is recognized once it has closed",
                     self.overview.showing().map_or("an overview", Overview::name)
