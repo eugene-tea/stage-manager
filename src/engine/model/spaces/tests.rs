@@ -1733,6 +1733,38 @@ mod identity {
         assert_eq!(mac.m.space_of(w(4)), Some(d0), "the others stay with their Desktop");
     }
 
+    #[test]
+    fn carried_stages_keep_their_active_stage_beside_an_empty_declared_one() {
+        // Fable E1 (10-29): with `[stages] names` set, the new id's declared stage (named,
+        // empty, made active by the arrival) is no placeholder for the unnamed carried
+        // stages; it stayed active and every carried window was parked.
+        let mut mac = Mac::new();
+        mac.m = model_with(crate::engine::model::ModelOptions { named_stages: vec!["Music".into()], ..Default::default() });
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 4, 40, "com.example.mail", "Inbox");
+        mac.put(0, 5, 50, "com.example.terminal", "Shell");
+        mac.put(0, 6, 60, "com.example.calendar", "Week");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        mac.click(editor);
+        assert!(!mac.parked(1), "the editor shown");
+        for id in [4, 5, 6] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(2);
+        }
+        mac.arrive();
+        let new = mac.space();
+        assert_ne!(new, d0, "a new id");
+        assert_eq!(mac.m.last_arrival().carried, 2);
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "the carried active stage stays active");
+        assert!(!mac.parked(1), "its window shown, not parked");
+        assert!(mac.parked(2), "the other carried stage waits in the strip");
+        let music = mac.m.stages_in(new).find(|s| s.name.as_deref() == Some("Music")).map(|s| s.id);
+        assert!(music.is_some_and(|m| mac.m.strip_slots(MAIN).contains(&m)), "the declared stage stays, in the strip");
+    }
+
     /// Desktop 1 (his app's Space 3): Messages alone in a stage, parked; Desktop 0: the
     /// browser active, an editor in the strip.
     fn messages_on_desktop_1() -> (Mac, SpaceId, StageId) {

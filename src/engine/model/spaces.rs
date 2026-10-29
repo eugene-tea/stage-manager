@@ -657,8 +657,11 @@ impl Model {
         let pick = was_active
             .or_else(|| carried.iter().copied().max_by_key(|s| self.stage(*s).map_or(0, |st| st.last_active)))
             .unwrap_or(carried[0]);
+        // The target is bare, so its active stage is empty; a declared one whose name no
+        // carried stage has stays (in the strip) but gives way too (Fable E1: it held the
+        // Desktop and every carried window was parked).
         let current = self.active.get(&target).copied();
-        if current.is_none_or(|c| placeholders.contains(&c)) {
+        if current.is_none_or(|c| placeholders.contains(&c) || self.stage_is_empty(c)) {
             self.active.insert(target, pick);
         }
         for p in placeholders {
