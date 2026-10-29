@@ -639,10 +639,13 @@ impl Model {
         let display: DisplayId = self.known_display(meta.display);
         let live_parked = self.display(display).parks(meta.frame);
         let sure = grade.confident();
-        // Saved frames only on a main display of the saved size; a live frame in a park zone
-        // takes the saved one anyway (made safe for this display).
-        let frames = sure && self.saved_frames_fit();
-        let base = if frames || live_parked || meta.frame.is_degenerate() { entry.frame } else { meta.frame };
+        // Saved frames only on a main display of the saved size; there a live frame in a park
+        // zone takes the saved one even from a doubtful match. On another size it is centered
+        // at its own size, as the recovery scan does (S6 of the Fable review of 10-29): a
+        // frame from another display, clamped onto this one, is no frame the user gave it.
+        let fit = self.saved_frames_fit();
+        let frames = sure && fit;
+        let base = if frames || (live_parked && fit) || meta.frame.is_degenerate() { entry.frame } else { meta.frame };
         let restore = self.safe_restore(base, display);
         let original = entry.original.filter(|_| frames && same_frame(base, entry.frame));
         let home = if sure && entry.pinned { Home::Pinned } else { Home::Stage(stage) };

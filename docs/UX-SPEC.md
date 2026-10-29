@@ -66,6 +66,8 @@ a waiting stage brings that stage forward. A newly opened app gets a stage of it
 extra, off by default, puts it in the current stage instead: see Extras).
 Sheets and dialogs follow their window. An app that quits takes its windows out of their
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
+An app that saved a hidden window's corner place when it quit, and reopens the window there
+within a day, has the window put back where it was before the quit (else centered).
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.

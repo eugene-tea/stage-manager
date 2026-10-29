@@ -362,6 +362,15 @@ impl StateFile {
         (self, dropped)
     }
 
+    /// True when the frames saved here apply on a main display of frame `main`: the file's
+    /// display had that size (points, rounded), or the file does not say (as
+    /// [`crate::engine::restore::Restore::frames_fit`] decides for a restore; S6).
+    pub fn frames_fit(&self, main: Rect) -> bool {
+        self.display.as_ref().is_none_or(|d| {
+            !d.w.is_finite() || !d.h.is_finite() || (d.w.round() as i64, d.h.round() as i64) == (main.w.round() as i64, main.h.round() as i64)
+        })
+    }
+
     /// Every saved stage of every Space.
     pub fn all_stages(&self) -> impl Iterator<Item = &SavedStage> {
         self.spaces.iter().flat_map(|s| s.stages.iter())

@@ -334,8 +334,8 @@ corner may be covered by the patch. You can turn the patch off with `[windows] c
 = false`.
 
 **A window seems lost.** Quit Stage Manager from its menu: every hidden window comes back.
-If the app crashed, a small helper process brings the windows back by itself, and the next
-launch checks the corner again.
+If the app crashed, a small helper process brings the windows back by itself, each where it
+was, and the next launch checks the corner again.
 
 Some limits to know about:
 

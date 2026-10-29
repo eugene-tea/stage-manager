@@ -813,6 +813,29 @@ fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>, hid
     }
 }
 
+/// The frames an unpark's batch restores windows to, by window id (S1).
+fn unparked_frames(actions: &[Action]) -> BTreeMap<u32, Rect> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SetFrame { id, frame } => Some((id.0, *frame)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`unrestored_step`], or with `force` (quit) a retry at once for every window still listed
+/// in the park zone, on any Desktop, whatever its app said before. Never for one listed out of
+/// the zone (S8 of the Fable review of 10-29: the forced retry set the failed restore's old
+/// frame on a window shown at a frame of its own on another Desktop).
+fn unrestored_step_at(force: bool, model_parked: Option<bool>, listed: Option<(bool, bool)>, hidden_tab: bool) -> UnrestoredStep {
+    if force && !hidden_tab && model_parked != Some(true) && listed.is_some_and(|(_, zone)| zone) {
+        UnrestoredStep::Retry
+    } else {
+        unrestored_step(model_parked, listed, hidden_tab)
+    }
+}
+
 /// Whether an [`Unrestored`] window is let go as a hidden tab (8J): only one the model no
 /// longer has (`model_parked` `None`), let go as reported destroyed (`why`: the tab's own
 /// signature; the review of 8J), listed off screen in the park zone (`listed`), and judged
@@ -988,6 +1011,9 @@ pub struct Controller {
     focus_after_press: Option<u32>,
     /// Windows whose restore failed, kept registered until seen back ([`Unrestored`]).
     unrestored: BTreeMap<u32, Unrestored>,
+    /// The frames the latest [`Self::unpark_all`] restored windows to: the leftovers check
+    /// after it brings a window its app moved late back there ([`safety::Ours::unparked`], S1).
+    unparked: BTreeMap<u32, Rect>,
     /// When the unrestored windows were last checked.
     unrestored_checked: Instant,
     /// When a wallpaper click was left to macOS's own reveal (Show Desktop: every window slides
@@ -1143,6 +1169,7 @@ impl Controller {
             strip_hidden_for_desktop: false,
             focus_after_press: None,
             unrestored: BTreeMap::new(),
+            unparked: BTreeMap::new(),
             unrestored_checked: Instant::now(),
             active_off_screen: BTreeSet::new(),
             macos_reveal_at: None,
@@ -1313,7 +1340,7 @@ impl Controller {
             .safety_targets()
             .into_iter()
             .filter_map(|(id, restore)| {
-                let fitted = m.window(id).is_some_and(|w| !w.parked && w.original.is_some());
+                let fitted = m.window(id).filter(|w| !w.parked && w.original.is_some()).map(|w| w.restore);
                 match ob.window(id.0) {
                     Some(w) => {
                         let child = w.kind == WindowKind::Child;
@@ -1721,7 +1748,7 @@ impl Controller {
                         failed += 1;
                         tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
                         if let (Action::SetFrame { frame, .. }, Some(kept)) = (action, kept) {
-                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: false, ..kept });
+                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: None, ..kept });
                         }
                     }
                     None if matches!(action, Action::SetFrame { .. }) => {
@@ -1752,7 +1779,7 @@ impl Controller {
                 ob.suspect(w.pid);
                 if let Action::SetFrame { frame, .. } = action {
                     let child = w.kind == WindowKind::Child;
-                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false });
+                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: None });
                 }
             } else {
                 tracing::trace!(id, ?action, "done");
@@ -1841,7 +1868,6 @@ impl Controller {
                 };
                 (w.onscreen, zone)
             });
-            let forgotten_parked = model_parked.is_none() && listed.is_some_and(|(_, zone)| zone);
             // A hidden tab (8J)? Only by its own signature: one that left its Space stays real.
             let why = self.unrestored.get(&id).map_or(LetGo::Kept, |u| u.why);
             let hidden_tab = let_go_as_tab(model_parked, listed, why, |candidate| {
@@ -1850,11 +1876,7 @@ impl Controller {
                     tabs.get_or_insert_with(|| hidden_tabs::Tabs::new(&list)).is_hidden_tab(w, candidate, |i| shown.contains(&i))
                 })
             });
-            let step = if force && !hidden_tab && (model_parked == Some(false) || forgotten_parked) && listed.is_some() {
-                UnrestoredStep::Retry
-            } else {
-                unrestored_step(model_parked, listed, hidden_tab)
-            };
+            let step = unrestored_step_at(force, model_parked, listed, hidden_tab);
             let Some(u) = self.unrestored.get_mut(&id) else { continue };
             // A forgotten window is quiet until it is seen in the zone a second time (L6).
             let quiet = u.forgotten == Forgotten::Once;
@@ -1994,7 +2016,9 @@ impl Controller {
     /// registry, the model's windows, `state.json`, the registered windows the model let go
     /// as reported destroyed, and the model's windows not parked.
     pub fn safety_ours(&self) -> safety::Ours {
-        safety::Ours::now(self.model_window_ids()).with_tab_signs(self.destroyed_ids(), self.model_shown_ids())
+        safety::Ours::now(self.model_window_ids())
+            .with_tab_signs(self.destroyed_ids(), self.model_shown_ids())
+            .with_unparked(self.unparked.clone())
     }
 
     /// Quit, after its leftovers check: windows whose restore failed are checked against the
@@ -2365,7 +2389,7 @@ impl Controller {
                 Action::SetFrame { id, frame } => {
                     let w = ob.window(id.0)?;
                     let child = w.kind == WindowKind::Child;
-                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false }))
+                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: None }))
                 }
                 _ => None,
             })
@@ -4500,7 +4524,9 @@ impl Controller {
     }
 
     /// Brings every parked window back onscreen (quit, safety). Returns how many AX calls
-    /// failed; the registry is empty afterwards when none did.
+    /// failed; the registry is empty afterwards when none did. The frames it restored stay
+    /// known to the leftovers check that follows ([`Self::safety_ours`]), and the stages are
+    /// saved before that check reads `state.json` (the Fable review of 10-29, S1).
     pub fn unpark_all(&mut self, ob: &Observer) -> usize {
         self.flush_pending(ob);
         // Windows whose restore failed earlier: the model counts them shown, so its unpark
@@ -4508,9 +4534,11 @@ impl Controller {
         self.retry_unrestored(ob, true);
         let Some(m) = self.model.as_mut() else { return self.unrestored.len() };
         let actions = m.unpark_all();
+        self.unparked = unparked_frames(&actions);
         let n = actions.len();
         let failed = self.execute_batch(ob, actions, Batch::Unpark);
         safety::registry_replace(self.parked_entries(ob));
+        self.save_now();
         // Any app of ours the batch did not bring back (none should be left).
         let unhidden = safety::unhide_ours("unpark-all");
         tracing::info!(windows = n, failed, unrestored = self.unrestored.len(), unhidden, "unparked every window");
@@ -5325,6 +5353,21 @@ mod tests {
         assert_eq!(unrestored_step(Some(false), Some((true, false)), false), Done);
         assert_eq!(unrestored_step(Some(false), None, false), Done);
         assert_eq!(unrestored_step(Some(true), Some((true, true)), false), Done);
+    }
+
+    /// S8 (the Fable review of 10-29): quit's forced retry tries every window still listed in
+    /// the park zone at once, on screen or not; one listed out of the zone (shown at a frame
+    /// of its own on another Desktop, or back on this one) is never set to its old frame.
+    #[test]
+    fn quits_forced_retry_reaches_only_windows_in_the_park_zone() {
+        use UnrestoredStep::*;
+        assert_eq!(unrestored_step_at(true, Some(false), Some((false, true)), false), Retry, "another Desktop's corner");
+        assert_eq!(unrestored_step_at(true, None, Some((false, true)), false), Retry, "forgotten, in a corner");
+        assert_eq!(unrestored_step_at(true, Some(false), Some((false, false)), false), Wait, "another Desktop, its own frame");
+        assert_eq!(unrestored_step_at(true, Some(false), Some((true, false)), false), Done, "back on this one");
+        assert_eq!(unrestored_step_at(true, Some(true), Some((true, true)), false), Done, "parked again by the model");
+        assert_eq!(unrestored_step_at(true, None, Some((false, true)), true), Done, "a hidden tab");
+        assert_eq!(unrestored_step_at(false, Some(false), Some((false, true)), false), Wait, "not forced: waits");
     }
 
     /// 6X: a parked window the model forgot (it left its Space, its element was reported

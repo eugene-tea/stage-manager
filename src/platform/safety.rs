@@ -15,8 +15,9 @@
 //!    shows. It learns which windows to wait for from the parked file this module keeps
 //!    beside the registry ([`paths::parked_file`]).
 //! 6. **Recovery scan** (launch, guardian, panic fallback): every window of every allowed app
-//!    whose frame is stranded in the park zone goes back to its `state.json` frame or is
-//!    centered ([`crate::engine::recovery`]).
+//!    whose frame is stranded in the park zone goes back to the frame a crashed copy
+//!    registered for it (its parked file), else its `state.json` frame, else is centered
+//!    ([`crate::engine::recovery`]).
 //! 7. **Clamping**: every restore frame is clamped onto the visible display first.
 //!
 //! Quit counts as clean only when, after unparking, the window server lists no window of an
@@ -24,7 +25,9 @@
 //! quit (the WM thread's, the registry's fallback, the signal watcher's) and a stand-down
 //! ends with [`leftovers_back`]: each window still listed there is brought back, known to
 //! this run or not (its registry frame, its `state.json` frame, else centered); one that
-//! cannot be reached leaves the exit unclean, so the guardian waits for it (6X). A move the
+//! cannot be reached leaves the exit unclean, so the guardian waits for it (6X). The unpark
+//! saves the stages and hands the check the frames it restored, so a window its app moved
+//! late goes back to that frame, not an older one (S1). A move the
 //! registry reports done is never taken for proof. An unpark's restores retry a busy app
 //! quickly ([`set_frame_retrying`]), always within a deadline: the leftovers check never
 //! takes more than [`leftovers::LEFTOVERS_MAX`], the registry's retries share
@@ -59,7 +62,7 @@ use super::ax::{AxElement, AxError, AxResult, names};
 use super::{desktop, hidden_tabs, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::hidden_tab::Candidate;
-use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, UNPARK_POLL, UNPARK_SETTLE};
+use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
 use crate::engine::recovery::{self, HiddenApp, Known, LiveWindow, ParkedFile, Registered, ScanDisplays};
@@ -80,9 +83,9 @@ pub struct ParkedEntry {
     /// A child window (dialog, sheet, panel): some refuse a resize or a move; the recovery
     /// scan covers them.
     pub child: bool,
-    /// A shown window we fitted clear of the strip (not parked): `restore` is its exact
-    /// pre-fit frame.
-    pub fitted: bool,
+    /// A shown window we fitted clear of the strip (not parked): its fitted frame (where we
+    /// put it); `restore` is its exact pre-fit frame.
+    pub fitted: Option<Rect>,
 }
 
 /// Set once Quit is requested: the WM thread stops long batches and answers Quit first.
@@ -338,7 +341,8 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
             pid: e.element.pid().unwrap_or(-1),
             restore: e.restore,
             child: e.child,
-            fitted: e.fitted,
+            fitted: e.fitted.is_some(),
+            fitted_at: e.fitted,
             unvouched: false,
         })
         .collect();
@@ -572,8 +576,10 @@ fn stranded_ids(registered: &BTreeSet<u32>) -> Vec<u32> {
 }
 
 /// Whose windows the safety paths know as ours (the review of 6X, L3): the registry's, the
-/// windows the model manages, and the apps with a window in `state.json`. The park test
-/// counts a sliver only for these ([`Known`]). A leftovers check that could not bring every
+/// windows the model manages, and the windows `state.json` names (this session's ids). The
+/// park test counts a sliver only for these ([`Known`]); an app's other windows are any
+/// app's, so a user's window of that app pushed off the corner is left where it is at a quit,
+/// a stand-down or a logout (S9 of the Fable review of 10-29). A leftovers check that could not bring every
 /// window back hands what it knew to the next try ([`Self::kept_for_retry`]): a stand-down
 /// drops `state.json` and the model before it looks again (the review of 6X2, 2).
 #[derive(Debug, Clone, Default)]
@@ -583,8 +589,6 @@ pub struct Ours {
     pub registered: BTreeSet<u32>,
     /// Windows the model manages.
     pub managed: BTreeSet<u32>,
-    /// Bundle ids with a window in `state.json`.
-    pub bundles: BTreeSet<String>,
     /// `state.json` as it was read: the frames a leftover goes back to.
     pub state: Option<StateFile>,
     /// Registered windows the model let go because Accessibility reported them destroyed
@@ -596,12 +600,16 @@ pub struct Ours {
     /// Windows the model manages and has not parked: they vouch for a
     /// [`Candidate::Destroyed`] window's same size, on any Desktop.
     pub shown_managed: BTreeSet<u32>,
+    /// The frames the controller's latest unpark restored windows to (S1): a window still
+    /// in the park zone at the check goes back there before any `state.json` frame (its
+    /// registry entry left as done with the batch).
+    pub unparked: BTreeMap<u32, Rect>,
 }
 
 impl Ours {
     /// The registry now (the windows taken from an old guardian too, but for unvouched ones:
     /// any app's to the park test, R4), `managed` (the model's windows, when the caller has
-    /// them) and `state.json` (its bundles and frames).
+    /// them) and `state.json` (its window ids and frames).
     pub fn now(managed: BTreeSet<u32>) -> Self {
         let mut registered = registry_ids();
         registered.extend(lock_taken().values().filter(|r| !r.unvouched).map(|r| r.id));
@@ -610,11 +618,14 @@ impl Ours {
 
     /// What is known from the registry's ids, the model's windows and `state.json`.
     pub fn from_parts(registered: BTreeSet<u32>, managed: BTreeSet<u32>, state: Option<StateFile>) -> Self {
-        let bundles = state
-            .as_ref()
-            .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).map(|w| w.bundle_id.clone()).collect())
-            .unwrap_or_default();
-        Self { registered, managed, bundles, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new() }
+        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new() }
+    }
+
+    /// `self`, with the frames the controller's latest unpark restored windows to
+    /// ([`Self::unparked`]).
+    pub fn with_unparked(mut self, unparked: BTreeMap<u32, Rect>) -> Self {
+        self.unparked = unparked;
+        self
     }
 
     /// `self`, with what the hidden-tab test needs from the model (8J): the registered
@@ -654,11 +665,12 @@ impl Ours {
     pub fn merged(mut self, now: Ours) -> Self {
         self.registered.extend(now.registered);
         self.managed.extend(now.managed);
-        self.bundles.extend(now.bundles);
         // Reported destroyed stays true; what the model shows is `now`'s alone (an earlier
         // check's model may have parked those windows since, or be gone).
         self.destroyed.extend(now.destroyed);
         self.shown_managed = now.shown_managed;
+        // A later unpark's frame is the fresher one.
+        self.unparked.extend(now.unparked);
         if self.state.is_none() {
             self.state = now.state;
         }
@@ -671,11 +683,12 @@ impl Ours {
         self.state.as_ref().is_some_and(|s| s.all_stages().flat_map(|st| st.windows.iter()).any(|w| w.window == Some(id)))
     }
 
-    /// What is known of window `id` of an app with `bundle`.
-    pub fn known(&self, id: u32, bundle: Option<&str>) -> Known {
+    /// What is known of window `id`: registered; managed (the model's, or named by
+    /// `state.json`); else any app's, whatever its app (S9).
+    pub fn known(&self, id: u32) -> Known {
         if self.registered.contains(&id) {
             Known::Registered
-        } else if self.managed.contains(&id) || bundle.is_some_and(|b| self.bundles.contains(b)) {
+        } else if self.managed.contains(&id) || self.saved(id) {
             Known::Managed
         } else {
             Known::Unknown
@@ -714,7 +727,7 @@ pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
         .filter(|w| {
             let bundle = bundles.entry(w.pid).or_insert_with(|| bundle_id_of(w.pid));
             observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
-                && recovery::is_stranded(w.bounds, &displays, ours.known(w.id, bundle.as_deref()))
+                && recovery::is_stranded(w.bounds, &displays, ours.known(w.id))
         })
         .filter(|w| {
             let tab = tabs.is_hidden_tab(w, ours.candidate(w.id), |id| ours.shown_managed.contains(&id));
@@ -948,11 +961,17 @@ pub struct ScanScope {
     /// at debug unless a window was brought back or could not be (the caller logs each app's
     /// episode of not answering once).
     pub quiet: bool,
+    /// The windows a crashed copy registered (its parked file, [`crashed_registered`]), by
+    /// window id: one still in the park zone goes back to its registered frame, the freshest
+    /// and exact one, before any `state.json` frame (S4). Used only for a window of the very
+    /// process that registered it.
+    pub registered: BTreeMap<u32, Registered>,
 }
 
 /// The recovery scan: every window of every allowed app (`STAGE_MANAGER_ONLY` honored, our
 /// own process and the system's excluded apps skipped) that is stranded in the park zone
-/// goes back to its `state.json` frame, or is centered.
+/// goes back to its registered frame ([`ScanScope::registered`]), else its `state.json`
+/// frame, else is centered.
 pub fn recovery_scan(reason: &str) -> Report {
     recovery_scan_with(reason, &ScanScope::default()).0
 }
@@ -974,6 +993,7 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
     let mut live = Vec::new();
     let mut elements = Vec::new();
     let mut unanswered = Vec::new();
+    let mut registered = BTreeMap::new();
     for pid in pids {
         let bundle = bundle_id_of(pid);
         if !observe::app_allowed(only.as_ref(), own, pid, bundle.as_deref()) {
@@ -998,16 +1018,20 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
                 continue;
             }
             let Ok(frame) = w.frame() else { continue };
+            // A window id names one window in this session; its process makes sure.
+            if let Some(r) = id.and_then(|id| scope.registered.get(&id)).filter(|r| r.pid == pid) {
+                registered.insert(r.id, r.restore);
+            }
             live.push(LiveWindow { id, bundle_id: bundle.clone().unwrap_or_default(), title: w.title().unwrap_or_default(), frame });
             elements.push(w);
         }
     }
     let mut report = Report { checked: live.len(), ..Report::default() };
-    for (i, frame) in recovery::plan(&live, state.as_ref(), &displays) {
+    for (i, frame, source) in recovery::plan_with(&live, &registered, state.as_ref(), &displays) {
         match elements[i].set_frame(frame) {
             Ok(()) => {
                 report.restored += 1;
-                tracing::warn!(reason, bundle = live[i].bundle_id, from = %live[i].frame, to = %frame, "recovery: window brought back");
+                tracing::warn!(reason, id = live[i].id, bundle = live[i].bundle_id, from = %live[i].frame, to = %frame, source = source.name(), "recovery: window brought back");
             }
             Err(e) => {
                 report.failed += 1;
@@ -1026,6 +1050,29 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
         tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, unanswered = ?unanswered, "recovery scan (some apps did not answer)");
     }
     (report, unanswered)
+}
+
+/// The windows earlier copies of the app registered and left behind (their parked files, an
+/// exit that was not clean: a crash, a kill), this process's own file aside: what the launch
+/// scan brings a window still parked back to (S4). The window ids are checked against the
+/// process that registered them by the scan ([`ScanScope::registered`]).
+pub fn crashed_registered() -> BTreeMap<u32, Registered> {
+    let own = std::process::id();
+    let mut found = BTreeMap::new();
+    let Ok(dir) = std::fs::read_dir(paths::config_dir()) else { return found };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(parked_file_pid).filter(|&p| p != own) else { continue };
+        for r in read_parked_file(pid).windows {
+            found.insert(r.id, r);
+        }
+    }
+    found
+}
+
+/// The process id a parked file's name ([`paths::parked_file`]) stands for.
+fn parked_file_pid(name: &str) -> Option<u32> {
+    name.strip_prefix(".parked-")?.strip_suffix(".json")?.parse().ok()
 }
 
 /// The window ids this window server session's `state.json` names (none when it cannot be
@@ -1143,9 +1190,10 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
 }
 
 /// Brings back every window in `left` (listed in the park zone after an unpark) before
-/// `deadline`: to its registry frame (or the frame it was taken with from an old guardian),
-/// else its `state.json` frame, else centered
-/// ([`leftovers::leftover_frame`]), through the registry's element or the app's own list.
+/// `deadline`: to its registry frame, else the frame the unpark restored it to
+/// ([`Ours::unparked`]), else the frame it was taken with from an old guardian, else its
+/// `state.json` frame, else centered ([`leftovers::leftover_frame`]), through the
+/// registry's element or the app's own list.
 /// A window is tried only when its try fits in the time left ([`leftovers::leftover_fits`]),
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
 /// Desktop's, an app that does not answer, no time left).
@@ -1174,12 +1222,16 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
                 continue;
             }
         };
-        // The title only matters for a state.json match (no registry frame).
-        let title = if entry.is_none() { element.title().unwrap_or_default() } else { String::new() };
+        let remembered = Remembered {
+            registry: entry.as_ref().map(|e| e.restore),
+            unparked: ours.unparked.get(&w.id).copied(),
+            taken: taken_entry(w.id).map(|r| r.restore),
+        };
+        // The title only matters for a state.json match (no frame remembered).
+        let title = if remembered.first().is_none() { element.title().unwrap_or_default() } else { String::new() };
         let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
-        let registered = entry.as_ref().map(|e| e.restore).or_else(|| taken_entry(w.id).map(|r| r.restore));
-        let (frame, source) = leftovers::leftover_frame(registered, &live, state, &displays);
-        let known = ours.known(w.id, bundle.as_deref());
+        let (frame, source) = leftovers::leftover_frame(remembered, &live, state, &displays);
+        let known = ours.known(w.id);
         let mut result = set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now()));
         // The registry's element went stale (the window was reported destroyed while ordered
         // out, its app relaunched it): the app's own list may have it, when that and a try
@@ -1313,6 +1365,47 @@ mod tests {
     fn a_parked_window_that_left_its_space_stays_real_at_the_quit() {
         let ours = Ours::from_parts([1].into(), [2].into(), None).with_tab_signs(BTreeSet::new(), [2].into());
         assert_eq!(ours.candidate(1), Candidate::Real);
+    }
+
+    /// S1 (the Fable review of 10-29): the frames an unpark restored reach the leftovers
+    /// check, and a stand-down's reach the quit's retry after it; a later unpark's frame wins.
+    #[test]
+    fn the_unparks_frames_reach_the_leftovers_check() {
+        let (a, b) = (Rect::new(10.0, 40.0, 300.0, 200.0), Rect::new(50.0, 60.0, 300.0, 200.0));
+        let stand_down = Ours::default().with_unparked(BTreeMap::from([(1, a), (2, a)]));
+        let quit = Ours::default().with_unparked(BTreeMap::from([(2, b)]));
+        let kept = stand_down.kept_for_retry(&[1]).merged(quit);
+        assert_eq!(kept.unparked, BTreeMap::from([(1, a), (2, b)]));
+    }
+
+    /// S9 (the Fable review of 10-29): at a quit, a stand-down or a logout a sliver counts as
+    /// parked only for a window known by its id (registered, the model's, named by this
+    /// session's `state.json`), no longer for any window of an app with one saved: the
+    /// user's other window of that app, pushed off the corner, stays where they put it.
+    #[test]
+    fn a_sliver_is_ours_only_by_its_window_id() {
+        use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
+        let saved = SavedWindow { bundle_id: "com.example.mail".into(), title: "Inbox".into(), window: Some(41), ..Default::default() };
+        let state = StateFile::single(SavedSpace { stages: vec![SavedStage { windows: vec![saved], ..Default::default() }], ..Default::default() });
+        let ours = Ours::from_parts([1].into(), [2].into(), Some(state));
+        assert_eq!(ours.known(1), Known::Registered);
+        assert_eq!(ours.known(2), Known::Managed);
+        assert_eq!(ours.known(41), Known::Managed, "named by state.json");
+        assert_eq!(ours.known(42), Known::Unknown, "another window of the same app");
+        let d = ScanDisplays::new(Rect::new(0.0, 0.0, 1440.0, 900.0), Rect::new(0.0, 25.0, 1440.0, 875.0), vec![], [Corner::BottomRight]);
+        let sliver = Rect::new(1439.0, 820.0, 600.0, 392.0);
+        assert!(recovery::is_stranded(sliver, &d, ours.known(41)));
+        assert!(!recovery::is_stranded(sliver, &d, ours.known(42)));
+    }
+
+    /// S4: a crashed copy's parked file is found by its name, this process's own aside.
+    #[test]
+    fn a_parked_files_name_says_whose_it_is() {
+        let name = paths::parked_file(4242).file_name().and_then(|n| n.to_str().map(str::to_string)).unwrap_or_default();
+        assert_eq!(parked_file_pid(&name), Some(4242));
+        assert_eq!(parked_file_pid(".clean-exit-4242"), None);
+        assert_eq!(parked_file_pid(".parked-x.json"), None);
+        assert_eq!(parked_file_pid("state.json"), None);
     }
 
     #[test]
