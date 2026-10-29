@@ -12,7 +12,13 @@
 //!   a batch that brings back a window of an app we hid first sends that app's other
 //!   in-place windows the stage leaves parked to the corner (still unseen), runs, then
 //!   unhides the app: its windows show at their frames. In an animated switch those windows
-//!   come first, outside the transition (`execute_animated`'s early batch).
+//!   come first, outside the transition (`execute_animated`'s early batch). The batch's
+//!   focus ran while the app was still hidden and left it inactive (live 10-29: the app
+//!   switched away from stayed the active app, so it was never hidden until the user
+//!   activated something else); once the unhide has taken, the key window of such an app is
+//!   focused again ([`Hides::refocus`]), and the hide pass runs again at every activation
+//!   ([`Controller::hide_pass`] from `AppActivated`), so the app left behind is hidden the
+//!   moment the new stage's app is active.
 //! - **macOS's unhide** (⌘Tab, a Dock click, Show All; [`Controller::app_visibility`]): the
 //!   app is ours no more; the activation's switch follows as for any app (its windows already
 //!   in place count as arriving at once). An in-place window the switch did not bring (the
@@ -20,8 +26,10 @@
 //!   later ([`RECONCILE_AFTER`]), once no activation of the app is held and no switch is
 //!   running ([`reconcile_due`]).
 //! - **The user's hides** are never adopted (an app hidden already is never "ours") and
-//!   never undone. Finder is never hidden, nor an app without a bundle id (our unhides
-//!   match the pid against it).
+//!   never undone by an unhide of ours. A switch back to its stage raises its window, and
+//!   macOS unhides the app for that, as Apple's Stage Manager does when the stage of a
+//!   hidden app is clicked (live 10-29). Finder is never hidden, nor an app without a
+//!   bundle id (our unhides match the pid against it).
 //! - **Safety**: every app we hid is recorded ([`safety::set_hidden`]) in the parked file
 //!   before it is asked to hide, and stays recorded until our unhide returns (a crash in
 //!   between leaves it listed); every unpark path unhides it (quit through the batch above,
@@ -34,7 +42,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use super::Controller;
+use super::{Controller, ax_focus};
 use crate::engine::geometry::Point;
 use crate::engine::hide::{HideFacts, may_hide};
 use crate::engine::focus_replay::Wanted;
@@ -82,6 +90,9 @@ pub(super) struct Hides {
     refused: HashMap<i32, Instant>,
     unhiding: HashMap<i32, Instant>,
     reconcile: Vec<(i32, BTreeSet<u32>, Instant)>,
+    /// The key window a batch focused of each app it unhid, focused again once the unhide
+    /// takes (a focus sent to a hidden app leaves it inactive).
+    refocus: HashMap<i32, u32>,
 }
 
 impl Hides {
@@ -110,8 +121,17 @@ impl Hides {
         let listed = self.ours.remove(&pid).is_some() | self.taking.remove(&pid).is_some();
         self.refused.remove(&pid);
         self.unhiding.remove(&pid);
+        self.refocus.remove(&pid);
         self.reconcile.retain(|(p, _, _)| *p != pid);
         listed
+    }
+
+    /// A batch unhid app `pid` and focused `focus` (its key window, when `of_pid` says the
+    /// window is the app's): remembered to be focused again once the unhide has taken.
+    fn remember_refocus(&mut self, pid: i32, focus: Option<u32>, of_pid: impl Fn(u32) -> Option<i32>) {
+        if let Some(key) = focus.filter(|&k| of_pid(k) == Some(pid)) {
+            self.refocus.insert(pid, key);
+        }
     }
 }
 
@@ -255,13 +275,12 @@ impl Controller {
                     // finds it in the parked file.
                     self.hides.ours.insert(pid, Ours { bundle: bundle.clone(), asked: now, confirmed: false, in_place: BTreeSet::new() });
                     self.record_hides();
+                    // Its answer is not the outcome: on macOS 27 `hide` answers NO for another
+                    // app and hides it a moment later (live 10-29: `ok=false`, then the hidden
+                    // notice 20 ms on). The app stays ours, pending, until `confirm_hides`
+                    // reads it hidden or `HIDE_TIMEOUT` passes.
                     let ok = apps::hide(pid);
                     tracing::info!(pid, bundle, ok, "hide: every window of the app is parked; hiding it");
-                    if !ok {
-                        self.hides.ours.remove(&pid);
-                        self.hides.refused.insert(pid, now);
-                        self.record_hides();
-                    }
                 }
                 Err(why) => tracing::trace!(pid, bundle, why, "hide: the app stays parked"),
             }
@@ -293,8 +312,11 @@ impl Controller {
     }
 
     /// After a batch: unhides the apps [`Self::before_batch_hides`] took back (each only while
-    /// its pid still runs the bundle we hid), then records them as ours no more.
-    pub(super) fn after_batch_hides(&mut self, pids: Vec<i32>) {
+    /// its pid still runs the bundle we hid), then records them as ours no more. The batch's
+    /// focus (`focus`) of a window of such an app ran while the app was hidden, which leaves
+    /// the app inactive: it is sent again once the unhide has taken, at its notice
+    /// ([`Self::app_visibility`]).
+    pub(super) fn after_batch_hides(&mut self, ob: &Observer, pids: Vec<i32>, focus: Option<u32>) {
         if pids.is_empty() {
             return;
         }
@@ -305,12 +327,30 @@ impl Controller {
                 let ok = apps::unhide(pid);
                 self.hides.unhiding.insert(pid, now);
                 tracing::info!(pid, ok, "hide: a window of an app we hid comes back; unhiding it");
+                // Sent again at the unhide's notice only: `isHidden` reads NO right after the
+                // ask, before macOS has unhidden the app, and a focus then leaves it inactive
+                // (live 10-29: refocused 1 ms after the ask, the unhide took 73 ms later).
+                self.hides.remember_refocus(pid, focus, |id| ob.window(id).map(|w| w.pid));
             } else {
                 tracing::info!(pid, bundle, "hide: an app we hid is gone (or its pid is another app's); not unhidden");
             }
             self.hides.taking.remove(&pid);
         }
         self.record_hides();
+    }
+
+    /// Focuses again the key window a batch focused of app `pid` while the app was hidden
+    /// (the unhide has taken now): the app becomes active, as the batch meant.
+    fn refocus(&mut self, ob: &Observer, pid: i32) {
+        let Some(key) = self.hides.refocus.remove(&pid) else { return };
+        let Some(w) = ob.window(key) else { return };
+        let now = Instant::now();
+        self.echoes.touch_window(key, now);
+        self.echoes.touch_app(pid, now);
+        match ax_focus(&w.element, pid) {
+            Ok(()) => tracing::debug!(pid, key, "hide: the key window focused again now that its app is unhidden"),
+            Err(e) => tracing::debug!(pid, key, "hide: the key window cannot be focused again: {e}"),
+        }
     }
 
     /// Sends app `pid`'s in-place windows the model counts parked to the corner.
@@ -331,10 +371,11 @@ impl Controller {
         }
     }
 
-    /// An app was hidden or unhidden (NSWorkspace). Our own notices confirm or echo; macOS
-    /// unhiding an app of ours (⌘Tab, the Dock, Show All) makes it no longer ours, and its
-    /// in-place windows no switch brings go to the corner shortly after.
-    pub(super) fn app_visibility(&mut self, pid: i32, hidden: bool) {
+    /// An app was hidden or unhidden (NSWorkspace). Our own notices confirm or echo (an
+    /// unhide of ours that took: the batch's key window is focused again); macOS unhiding
+    /// an app of ours (⌘Tab, the Dock, Show All) makes it no longer ours, and its in-place
+    /// windows no switch brings go to the corner shortly after.
+    pub(super) fn app_visibility(&mut self, ob: &Observer, pid: i32, hidden: bool) {
         if hidden {
             if let Some(o) = self.hides.ours.get(&pid) {
                 tracing::debug!(pid, after_ms = o.asked.elapsed().as_millis() as u64, "hide: our hide took");
@@ -345,6 +386,7 @@ impl Controller {
         }
         if self.hides.unhiding.contains_key(&pid) {
             tracing::debug!(pid, "hide: our unhide took");
+            self.refocus(ob, pid);
             return;
         }
         if let Some(o) = self.hides.ours.remove(&pid) {
@@ -441,6 +483,30 @@ mod tests {
         assert!(h.forget(12), "one a batch was unhiding");
         assert!(!h.forget(13), "never ours: nothing listed changes");
         assert!(h.recorded().is_empty());
+    }
+
+    /// Live 10-29: the batch's focus of a hidden app's window left the app inactive. The key
+    /// window of the app the batch focused is remembered, for the app unhidden only, and
+    /// forgotten with the app.
+    #[test]
+    fn the_batch_s_key_window_of_an_unhidden_app_is_focused_again() {
+        let mut h = Hides::default();
+        let of_pid = |id: u32| match id {
+            7 | 8 => Some(10),
+            9 => Some(11),
+            _ => None,
+        };
+        h.remember_refocus(10, Some(7), of_pid);
+        assert_eq!(h.refocus.get(&10), Some(&7));
+        h.remember_refocus(11, Some(7), of_pid);
+        assert!(!h.refocus.contains_key(&11), "another app's key is not this app's");
+        h.remember_refocus(11, None, of_pid);
+        assert!(!h.refocus.contains_key(&11), "a batch with no focus");
+        h.remember_refocus(11, Some(4), of_pid);
+        assert!(!h.refocus.contains_key(&11), "a window not observed");
+        h.ours.insert(10, ours("com.example.alpha"));
+        h.forget(10);
+        assert!(h.refocus.is_empty(), "gone with the app");
     }
 
     #[test]

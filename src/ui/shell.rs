@@ -212,7 +212,8 @@ fn app_effects(before: &config::AppConfig, after: &config::AppConfig) -> AppEffe
 
 /// Starts the shell. Call once the status menu exists.
 pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: PermissionState, raw: RawSettings) {
-    let config = read_config().unwrap_or_default();
+    // A file that does not load: its last good copy, as the WM thread uses (review C1).
+    let config = config::last_good::read_in_force(&paths::config_file());
     let state = AppState::load(&paths::app_state_file());
     app_menu::install(mtm, |event| match event {
         AppEvent::Reopen => show_settings(),

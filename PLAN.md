@@ -57,8 +57,10 @@ widgets. `config.toml` holds only what macOS lacks and never duplicates a macOS 
 A parked window that never returns is the worst bug. Defence in depth:
 
 1. **Registry** of every parked window's AX element and restore frame, across Spaces.
-2. **Quit** unparks everything, then reads the window server: any allowed app's window still
-   in a park zone comes back to its registry frame, its `state.json` frame, or centered. A
+2. **Quit** unparks everything, saves the stages, then reads the window server: any allowed
+   app's window still in a park zone comes back to its registry frame, the frame the unpark
+   gave it, its `state.json` frame (a dialog only by its own id), or centered. A sliver counts
+   there only for a window known by its id (registered, managed, in `state.json`). A
    busy app's `CannotComplete` is retried (three tries 75 ms apart) on unparks only, never in
    a switch. Bounds: the leftovers check ≤ 4 s, the registry's retries ≤ 2 s. Quit is clean
    only when no managed window is in the park zone on any Space; otherwise the guardian
@@ -77,11 +79,13 @@ A parked window that never returns is the worst bug. Defence in depth:
    (never fitted, its corners ignored, reached only while listed in the park zone). A pass
    that lists nothing on screen is blind: nothing is reached until one sees again.
 6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
-   a park zone goes back to its saved frame or centered; silent apps are retried for 30 s, in
+   a park zone goes back to the frame a crashed copy registered (its parked file, by id),
+   else its saved frame (only on a main display of the saved size), else centered; silent apps are retried for 30 s, in
    slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
    past the right or bottom edge) counts as parked only for windows we manage or registered,
    or apps with a window in `state.json`.
-7. **Restore frames are clamped** onto the visible display.
+7. **Restore frames are kept within reach** (`Display::reach`): never in a park zone, the title
+   bar below the menu bar with 80 pt of it on screen; otherwise exactly the window's own frame.
 
 Windows that are never waited on (logged at debug): **hidden tabs** (8J; layer 0, off
 screen, unlisted by an answering app, vouched for by a same-size sibling; a managed,
@@ -127,6 +131,9 @@ Known gaps the owner accepted as rare:
   (no sooner than a minute after the login), the waiting entries of apps not running then are
   given up (in stages and on saved Desktops not visited); running apps keep theirs under their
   own quiet minute.
+- **Apps that save their own frames (W2):** a window parked when its app quit may be saved
+  by the app at the park frame and reopened there; within a day of the quit it takes the
+  frame it had (by app and title, else the app's only one), else it is centered.
 - **Logout head start (8F, 8H):** at the first logout signal every window comes back, the
   leftovers check runs and stages are saved; the app idles until macOS's quit. A cancelled
   logout resumes at `logoutCancelled`, else two minutes after the latest signal. An app's quit

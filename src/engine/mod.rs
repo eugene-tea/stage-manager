@@ -20,6 +20,8 @@ pub mod model;
 pub mod not_ours;
 pub mod overview;
 pub mod park;
+pub mod park_reconcile;
+pub mod patch_still;
 pub mod persist;
 pub mod placement;
 pub mod raise_order;

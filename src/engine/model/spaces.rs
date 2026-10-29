@@ -43,7 +43,8 @@
 //!
 //! Empty Spaces are forgotten when left: they hold nothing, and the next visit makes a
 //! fresh one. A Space holding only pending stages (saved windows still to come) goes back to
-//! the saved Spaces waiting for a visit instead.
+//! the saved Spaces waiting for a visit instead. One holding only the entries of apps that
+//! quit a moment ago (kept for the file, `quit.rs`) stays until they are pruned.
 //!
 //! **After a restart** (`state.json` from another window server session): while the restore
 //! window is open ([`crate::engine::restore`]) a Space made from an empty screen is
@@ -211,9 +212,15 @@ impl Model {
     }
 
     /// Forgets a Space that is not shown and has no window: its stages, active stage, strip
-    /// and reveal; pending stages go back to the saved Spaces waiting for a visit.
+    /// and reveal; pending stages go back to the saved Spaces waiting for a visit (the
+    /// entries of its apps that quit with them). One with no pending stage but entries of
+    /// apps that quit is kept until those are pruned, so the file still writes them (Fable
+    /// E5: an app alone on a Desktop the user left lost its quit grace).
     fn prune_space(&mut self, space: SpaceId) {
         if self.is_shown_space(space) || self.windows.values().any(|w| w.space == space) {
+            return;
+        }
+        if self.space_has_quit(space) && !self.space_has_pending(space) {
             return;
         }
         self.pending_to_leftover(space);
@@ -419,7 +426,7 @@ impl Model {
         }
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
-        self.move_in(target, &moving, hints, &mut actions);
+        self.move_in(target, &moving, live, hints, &mut actions);
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
@@ -564,6 +571,17 @@ impl Model {
         if prev != target {
             self.prune_space(prev);
         }
+        // Empty Spaces left behind earlier (kept for their quit entries, since pruned) go too.
+        let stale: Vec<SpaceId> = self
+            .spaces
+            .iter()
+            .map(|s| s.id)
+            .filter(|&s| s != target && s != prev && self.space_is_empty(s) && !self.space_has_quit(s))
+            .collect();
+        for s in stale {
+            self.prune_space(s);
+        }
+        self.prune_restore_refs();
     }
 
     /// Known standard windows on screen on `target` whose Space is another one: moved here
@@ -657,8 +675,11 @@ impl Model {
         let pick = was_active
             .or_else(|| carried.iter().copied().max_by_key(|s| self.stage(*s).map_or(0, |st| st.last_active)))
             .unwrap_or(carried[0]);
+        // The target is bare, so its active stage is empty; a declared one whose name no
+        // carried stage has stays (in the strip) but gives way too (Fable E1: it held the
+        // Desktop and every carried window was parked).
         let current = self.active.get(&target).copied();
-        if current.is_none_or(|c| placeholders.contains(&c)) {
+        if current.is_none_or(|c| placeholders.contains(&c) || self.stage_is_empty(c)) {
             self.active.insert(target, pick);
         }
         for p in placeholders {
@@ -728,8 +749,11 @@ impl Model {
     /// apps never do. The stage holding the frontmost moved window (`hints.z_order`; else
     /// the last one a window went to) is shown, the active stage going to the strip; the
     /// other stages moved windows went to wait in the strip, those windows parked. A pinned
-    /// window stays pinned and shown.
-    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], hints: &LaunchHints, actions: &mut Vec<Action>) {
+    /// window stays pinned and shown. The active stage parked for the front one keeps the
+    /// frames its windows have on screen now (`live`, read fresh at the arrival), as any
+    /// switch keeps them (E3: an app that posts no move notice came back where it was
+    /// before the user last moved it).
+    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], live: &[WindowMeta], hints: &LaunchHints, actions: &mut Vec<Action>) {
         if ids.is_empty() {
             return;
         }
@@ -808,7 +832,17 @@ impl Model {
             // Else the switch below shows the front stage and parks the active one.
         }
         if front != active {
-            // The front stage comes forward; the one shown goes to the strip.
+            // The front stage comes forward; the one shown goes to the strip, with its frames
+            // as they are on screen (the switch has no observation to capture from).
+            let mut shown = self.stage(active).map(|s| s.windows.clone()).unwrap_or_default();
+            shown.extend(self.children_in(Home::Stage(active)));
+            for id in shown {
+                if self.windows.get(&id).is_some_and(|w| !w.parked && w.space == target)
+                    && let Some(m) = live.iter().find(|m| m.id == id)
+                {
+                    self.record_frame(id, m.frame);
+                }
+            }
             let more = self.switch_in(target, active, front, None);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
         }

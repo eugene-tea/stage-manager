@@ -9,10 +9,12 @@
 //! repeated here.
 //!
 //! Unknown keys and out-of-range numbers produce warnings (numbers are clamped); a value of
-//! the wrong type is an error, and a bad file keeps the previous config.
+//! the wrong type is an error, and a bad file keeps the previous config: at a reload the one
+//! in force, at launch the last good copy ([`last_good`]).
 
 pub mod edit;
 pub mod hotkey;
+pub mod last_good;
 pub mod schema;
 
 use std::collections::BTreeMap;
@@ -565,7 +567,9 @@ fn validate(d: &schema::KeyDef, v: &toml::Value, warnings: &mut Vec<String>) -> 
         Kind::Bool => toml::Value::Boolean(v.as_bool().ok_or_else(ty)?),
         Kind::Float { min, max } => toml::Value::Float(clamp_f(number(v).ok_or_else(ty)?, min, max, warnings)),
         Kind::Int { min, max } => {
-            let x = v.as_integer().ok_or_else(ty)?;
+            // A whole float (`50.0`) is the whole number it says (review C1).
+            let whole = || v.as_float().filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15).map(|f| f as i64);
+            let x = v.as_integer().or_else(whole).ok_or_else(ty)?;
             if x < min || x > max {
                 let c = x.clamp(min, max);
                 warnings.push(format!("{path} = {x} is outside {min}..{max}; using {c}"));
@@ -999,6 +1003,13 @@ pub fn is_legacy_default(text: &str) -> bool {
 /// a file byte-identical to an earlier version's default is replaced with it. Any other
 /// file is left alone.
 pub fn load_or_create(path: &Path) -> Result<Loaded, ConfigError> {
+    let (text, action) = read_or_create(path)?;
+    let Parsed { config, warnings } = Config::parse(&text)?;
+    Ok(Loaded { config, warnings, action })
+}
+
+/// [`load_or_create`]'s file handling: the text to parse and what was done to the file.
+fn read_or_create(path: &Path) -> Result<(String, FileAction), ConfigError> {
     let mut action = FileAction::Read;
     let write = |path: &Path| {
         std::fs::write(path, default_file()).map_err(|e| ConfigError(format!("cannot write {}: {e}", path.display())))
@@ -1015,25 +1026,34 @@ pub fn load_or_create(path: &Path) -> Result<Loaded, ConfigError> {
         action = FileAction::Upgraded;
     }
     let text = std::fs::read_to_string(path).map_err(|e| ConfigError(format!("cannot read {}: {e}", path.display())))?;
-    let Parsed { config, warnings } = Config::parse(&text)?;
-    Ok(Loaded { config, warnings, action })
+    Ok((text, action))
 }
 
-/// The config in force plus where it came from. A failed reload keeps the previous config.
+/// The config in force plus where it came from. A failed reload keeps the previous config;
+/// a file that fails at launch, the last good copy ([`last_good`]), kept after every load.
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
     config: Config,
+    fallback: Option<last_good::Source>,
 }
 
 impl ConfigStore {
-    /// Opens `path`, creating (or upgrading an unedited) default file. A bad file yields the
-    /// built-in defaults plus the error. Warnings and what happened to the file come back
-    /// for logging.
+    /// Opens `path`, creating (or upgrading an unedited) default file. A bad file yields its
+    /// last good copy, else the built-in defaults with update checks off
+    /// ([`last_good::fallback`], [`Self::fallback`]), plus the error. Warnings and what
+    /// happened to the file come back for logging.
     pub fn open(path: PathBuf) -> (Self, Result<(Vec<String>, FileAction), ConfigError>) {
-        match load_or_create(&path) {
-            Ok(l) => (Self { path, config: l.config }, Ok((l.warnings, l.action))),
-            Err(e) => (Self { path, config: Config::default() }, Err(e)),
+        let loaded = read_or_create(&path).and_then(|(text, action)| Ok((Config::parse(&text)?, text, action)));
+        match loaded {
+            Ok((Parsed { config, warnings }, text, action)) => {
+                last_good::keep(&path, &text);
+                (Self { path, config, fallback: None }, Ok((warnings, action)))
+            }
+            Err(e) => {
+                let (config, source) = last_good::fallback(&path);
+                (Self { path, config, fallback: Some(source) }, Err(e))
+            }
         }
     }
 
@@ -1042,8 +1062,15 @@ impl ConfigStore {
         let text = std::fs::read_to_string(&self.path)
             .map_err(|e| ConfigError(format!("cannot read {}: {e}", self.path.display())))?;
         let Parsed { config, warnings } = Config::parse(&text)?;
+        last_good::keep(&self.path, &text);
         self.config = config;
+        self.fallback = None;
         Ok(warnings)
+    }
+
+    /// What runs in place of a file that failed at launch, until a load succeeds.
+    pub fn fallback(&self) -> Option<last_good::Source> {
+        self.fallback
     }
 
     /// The config in force.
@@ -1541,14 +1568,44 @@ swipe = true
         assert_eq!(store.path(), path.as_path());
     }
 
+    /// Review C1: a file that fails at launch keeps the settings it last loaded with (update
+    /// checks and the menu bar icon off stay off), as a failed reload does.
     #[test]
-    fn a_bad_file_at_launch_falls_back_to_defaults() {
+    fn a_bad_file_at_launch_keeps_the_last_good_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[app]\ncheck_for_updates = false\nshow_menu_bar_icon = false\n").expect("write");
+        let (store, result) = ConfigStore::open(path.clone());
+        assert!(result.is_ok());
+        let good = store.config().clone();
+        assert!(!good.app.check_for_updates && !good.app.show_menu_bar_icon);
         std::fs::write(&path, "[[rule]]\napp = 3").expect("write");
+        let (store, result) = ConfigStore::open(path.clone());
+        assert!(result.is_err());
+        assert_eq!(store.config(), &good, "the last good config, not the defaults");
+        assert_eq!(store.fallback(), Some(last_good::Source::LastGood));
+        assert_eq!(last_good::read_in_force(&path), good, "the shell and the log read the same");
+        // A reload keeps the copy fresh; a later bad launch gets the newer settings.
+        let (mut store, _) = ConfigStore::open(path.clone());
+        std::fs::write(&path, "[app]\ncheck_for_updates = false\n").expect("write");
+        store.reload().expect("good");
+        assert_eq!(store.fallback(), None);
+        std::fs::write(&path, "[app\nbroken").expect("write");
+        let (store, _) = ConfigStore::open(path.clone());
+        assert!(!store.config().app.check_for_updates && store.config().app.show_menu_bar_icon);
+        // With no copy that parses, the defaults with update checks off.
+        std::fs::remove_file(last_good::path_for(&path)).expect("remove");
         let (store, result) = ConfigStore::open(path);
         assert!(result.is_err());
-        assert_eq!(store.config(), &Config::default());
+        assert_eq!(store.fallback(), Some(last_good::Source::SafeDefaults));
+        assert!(!store.config().app.check_for_updates && !store.config().app.install_updates);
+    }
+
+    /// Review C1: `50.0` for a whole-number key is 50; `50.5` is still an error.
+    #[test]
+    fn whole_floats_are_accepted_for_whole_number_keys() {
+        assert_eq!(parse("[log]\nmax_mb_per_day = 50.0").config.log.max_mb_per_day, 50);
+        assert!(Config::parse("[log]\nmax_mb_per_day = 50.5").is_err());
     }
 
     #[test]

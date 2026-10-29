@@ -10,7 +10,9 @@
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
-//! topmost), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
+//! topmost), `debug-desktop X Y [double | drag X2 Y2]` clicks, double-clicks or drags on the
+//! desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
+//! patch), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
@@ -36,8 +38,10 @@
 //! copy's guardian `adopted` and `take-watch` (its binary may no longer be signed like this
 //! one: an update replaced it). That keeps a
 //! script or app without Accessibility from borrowing the app's; it is no wall against a
-//! process of the same user, which can run this binary as a client itself. Lines longer than
-//! [`MAX_LINE`] end the connection.
+//! process of the same user, which can run this binary as a client itself (so `adopted`'s
+//! window ids and `settings` stay open to such a process: review S11 found nothing they give
+//! that the binary would not). Lines longer than [`MAX_LINE`] end the connection; at most
+//! [`MAX_CONNECTIONS`] are served at once.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -47,6 +51,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -197,6 +202,18 @@ pub enum Command {
         /// Hold shift.
         shift: bool,
     },
+    /// A synthetic click, double click (`double`) or drag (to `to`) on the desktop itself, posted
+    /// only where nothing but the desktop lies along its path (Finder's icons, the wallpaper; our
+    /// click-through corner patch seen through; needs `STAGE_MANAGER_TEST=1`): the live check
+    /// that a desktop icon under the corner patch still opens and drags.
+    DebugDesktop {
+        /// Where it is pressed (global, top-left origin).
+        at: Point,
+        /// A double click.
+        double: bool,
+        /// Dragged to here instead of clicked.
+        to: Option<Point>,
+    },
 }
 
 fn number(word: &str) -> Result<usize, String> {
@@ -265,6 +282,16 @@ impl Command {
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
+            }
+            ["debug-desktop", x, y, rest @ ..] => {
+                let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
+                let at = Point::new(coord(x)?, coord(y)?);
+                match rest {
+                    [] => Ok(Self::DebugDesktop { at, double: false, to: None }),
+                    ["double"] => Ok(Self::DebugDesktop { at, double: true, to: None }),
+                    ["drag", x2, y2] => Ok(Self::DebugDesktop { at, double: false, to: Some(Point::new(coord(x2)?, coord(y2)?)) }),
+                    _ => Err("debug-desktop needs X Y [double | drag X2 Y2]".into()),
+                }
             }
             ["debug-space", dir, rest @ ..] if rest.is_empty() || rest == ["numpad"] => {
                 let direction = Direction::parse(dir).ok_or_else(|| format!("expected left or right, got {dir:?}"))?;
@@ -456,6 +483,44 @@ pub fn bind() -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// How many connections are served at once; more are answered with an error and closed, so
+/// a process that opens connections in a loop cannot spawn threads without bound (review
+/// S11). The app's own clients hold one each, briefly.
+const MAX_CONNECTIONS: usize = 16;
+
+/// Connections being served now, up to a limit.
+struct Slots {
+    used: AtomicUsize,
+    max: usize,
+}
+
+/// One connection's place in [`Slots`], given back when dropped.
+struct Slot(&'static Slots);
+
+impl Slots {
+    const fn new(max: usize) -> Self {
+        Self { used: AtomicUsize::new(0), max }
+    }
+
+    /// A place, or `None` when every one is taken.
+    fn take(&'static self) -> Option<Slot> {
+        if self.used.fetch_add(1, Ordering::AcqRel) < self.max {
+            Some(Slot(self))
+        } else {
+            self.used.fetch_sub(1, Ordering::AcqRel);
+            None
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+static CONNECTIONS: Slots = Slots::new(MAX_CONNECTIONS);
+
 /// Serves the bound socket ([`bind`]) on a background thread.
 pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
     std::thread::Builder::new().name("ctl".into()).spawn(move || {
@@ -464,9 +529,16 @@ pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
         let accept = || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
+                        let Some(slot) = CONNECTIONS.take() else {
+                            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                            let _ = writeln!(stream, "{}", error_reply("too many connections at once; try again"));
+                            tracing::warn!(max = MAX_CONNECTIONS, "ctl: a connection refused: too many at once");
+                            continue;
+                        };
                         let handler = handler.clone();
                         let spawned = std::thread::Builder::new().name("ctl-conn".into()).spawn(move || {
+                            let _slot = slot;
                             let _ = super::safety::guarded("a ctl connection", || serve_connection(stream, &handler));
                         });
                         if let Err(e) = spawned {
@@ -679,6 +751,19 @@ mod tests {
             Command::parse("debug-click 60 700.5 shift"),
             Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })
         );
+        assert_eq!(
+            Command::parse("debug-desktop 2490 1380 double"),
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: true, to: None })
+        );
+        assert_eq!(
+            Command::parse("debug-desktop 2490 1380 drag 2200 1380"),
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: false, to: Some(Point::new(2200.0, 1380.0)) })
+        );
+        assert!(Command::parse("debug-desktop 2490 1380 triple").is_err());
+        assert_eq!(
+            Command::parse("debug-desktop 1 2"),
+            Ok(Command::DebugDesktop { at: Point::new(1.0, 2.0), double: false, to: None })
+        );
         assert!(Command::parse("debug-click 60").is_err());
         assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));
         assert!(Command::parse("debug-hover 1 720").is_err());
@@ -833,6 +918,19 @@ mod tests {
         let _listener = bind_private(&path).expect("binds");
         assert_eq!(crate::private_files::mode(&path).expect("mode"), 0o600);
         assert_eq!(crate::private_files::mode(&home).expect("mode"), 0o700);
+    }
+
+    /// Review S11: connections past the limit get no thread; a closed one gives its place back.
+    #[test]
+    fn connections_are_served_up_to_a_limit() {
+        static SLOTS: Slots = Slots::new(2);
+        let a = SLOTS.take().expect("first");
+        let b = SLOTS.take().expect("second");
+        assert!(SLOTS.take().is_none(), "the third waits");
+        drop(a);
+        let c = SLOTS.take().expect("a place came back");
+        drop((b, c));
+        assert_eq!(SLOTS.used.load(Ordering::Acquire), 0);
     }
 
     #[test]

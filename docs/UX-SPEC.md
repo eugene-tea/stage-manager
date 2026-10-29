@@ -31,7 +31,10 @@ Apple's own Customize sheet does.
 ## Where we match Apple
 
 **Windows keep their frames.** Turning Stage Manager on moves and resizes nothing. A switch
-brings every window back at exactly its own frame, even where it overlaps the strip.
+brings every window back at exactly its own frame, even where it overlaps the strip, hangs
+off an edge or is taller than the screen. Only a window that could not be grabbed moves: its
+title bar comes below the menu bar and above the Dock with at least 80 points of it on
+screen, and one left in the hiding corner comes back just out of it.
 
 **The strip.** It sits below windows: a window moved over it covers it, and the strip slides
 away. Resting the pointer at the left edge brings it back. Each card draws the stage's
@@ -66,6 +69,8 @@ a waiting stage brings that stage forward. A newly opened app gets a stage of it
 extra, off by default, puts it in the current stage instead: see Extras).
 Sheets and dialogs follow their window. An app that quits takes its windows out of their
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
+An app that saved a hidden window's corner place when it quit, and reopens the window there
+within a day, has the window put back where it was before the quit (else centered).
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.
@@ -149,8 +154,19 @@ windows come to their places at once instead of growing.
 **Hidden stages wait in a corner.** Without private APIs, the only way to hide a window but
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
 visible in the bottom-right corner (another corner if a second screen sits beyond it). To
-keep the corner as clean as Apple's, those edges ignore clicks and a patch drawn from the
-wallpaper's own file covers them, without screen recording. Dynamic pictures (by time of
+keep the corner as clean as Apple's, those edges ignore clicks and a patch covers them.
+Where window thumbnails are captured (Screen Recording), the patch is a still of the corner
+showing only the desktop's own layers (the picture, Finder's icons, widgets; never a window,
+ours included), exact by construction, so nothing on the desktop keeps it off and icons
+under it take clicks and drags as usual; it is taken again on arriving at a Desktop once the
+slide settles, when an icon there changes, after a click on the desktop, a moment after the
+picture or its predicted frame changes, and every 10 seconds otherwise (never during a
+switch's motion, a slide, Mission Control or Show Desktop; none while the screen is locked
+or asleep). A moving wallpaper may differ there until the next still. Without Screen
+Recording, the patch is drawn from the wallpaper's own file instead. A hidden window that
+its app moves back onto the screen by itself goes back into the corner within about a
+second; the one you are working in (focused, or dragged out) stays and joins the stage you
+are in. Dynamic pictures (by time of
 day, by the sun, light and dark, Apple's own downloaded ones included) are drawn at the
 frame macOS shows. For a picture that follows the sun, neither the place (the time zone
 covers hundreds of miles) nor Apple's rule is known, so the clock is a model that starts
@@ -160,7 +176,7 @@ differ: the patch draws when they look alike in the corner, or when one still of
 (taken only where window thumbnails already are) matches one of them; each clear still
 narrows the clock, and arriving on a Desktop one still checks even a frame the clock is sure
 of. When nothing the clock allows fits the screen, only stills decide. The patch's pixels
-are still the file's. The patch steps aside where it cannot match exactly (see the GUIDE's
+are still the file's. The file's patch steps aside where it cannot match exactly (see the GUIDE's
 troubleshooting). Each Desktop has its own patch, which stays on it and slides with it when
 you go to another Desktop and back, drawn as it was (nothing moves on a Desktop while you
 are away); it is checked again once the Desktop has arrived, and hidden while away if the
@@ -173,7 +189,10 @@ card-sized picture of it, where Apple shrinks the window itself. A card dragged 
 by a growing picture of its front window.
 
 **⌘M** parks the window and then un-minimizes it there, so macOS may show its restore
-animation toward the corner. Apple's window shrinks straight into the strip.
+animation toward the corner. Apple's window shrinks straight into the strip. macOS's
+un-minimize focuses the window and may set it down short of the corner: it is parked again
+where it rests, never taken for a window you brought out (only a focus or a drag of yours
+after the park counts as that).
 
 **Desktop items are left alone.** Hiding Finder's desktop icons is outside a window
 manager's reach through public API.

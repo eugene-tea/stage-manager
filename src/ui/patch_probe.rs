@@ -10,7 +10,8 @@
 //! model (`hypotheses`: how many stand; the probe takes no still, so it never narrows): the
 //! running app's model, narrowed by its stills, may name fewer candidates. For the live
 //! check: compare the PNG pixel by pixel with a screen capture of the same rectangle taken by
-//! hand.
+//! hand. `app` is the patch as the running app runs it (`ctl state`'s `corner_patch`: `mode`
+//! `ordered`, `fallback` or `unknown`), or why not known.
 //!
 //! The rectangle is `--rect` (global points, top-left), else the parked windows' slivers
 //! on screen now grown by the reach ([`crate::engine::corner_patch::patch_rect`]), else a
@@ -35,6 +36,20 @@ use crate::engine::park::is_parked_in_at;
 use crate::engine::wallpaper::Placement;
 use crate::platform::wallpaper::{self, Job, Reader};
 use crate::platform::{desktop, desktop_items, windows};
+
+/// The corner patch as the running app runs it (`ctl state`'s `corner_patch`: its `mode`,
+/// `ordered` or `fallback`, the Fable review's L3), or why not known: no app runs at this
+/// home, or it does not answer.
+fn running_app_patch() -> serde_json::Value {
+    match crate::platform::ctl::request("state", std::time::Duration::from_secs(2)) {
+        Ok(reply) => match serde_json::from_str::<serde_json::Value>(&reply) {
+            Ok(v) if v.get("ok") == Some(&json!(true)) => v.get("corner_patch").cloned().unwrap_or(json!({ "mode": "unknown" })),
+            Ok(v) => json!({ "mode": "unknown", "why": v.get("error").cloned().unwrap_or(json!("no state")) }),
+            Err(e) => json!({ "mode": "unknown", "why": e.to_string() }),
+        },
+        Err(e) => json!({ "mode": "unknown", "why": format!("no running app answers: {e}") }),
+    }
+}
 
 /// Where the PNG goes by default.
 pub const DEFAULT_OUT: &str = "/tmp/stage-manager-patch.png";
@@ -118,6 +133,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let base = json!({
         "rect": rect,
         "rect_from": source,
+        "app": running_app_patch(),
         "slivers": slivers.len(),
         "picture": wall.path.as_deref().map(wallpaper::file_name),
         "dark": wall.dark,

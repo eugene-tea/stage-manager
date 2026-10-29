@@ -6,7 +6,7 @@ use super::{
     StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::park::clamp_to_visible;
+use crate::engine::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
@@ -80,7 +80,7 @@ impl Model {
                 },
                 None => (Home::Stage(self.ensure_active(space)), space),
             };
-            let restore = self.safe_restore(meta.frame, meta.display);
+            let restore = self.child_restore(&meta, parent);
             let born_parked = restore != meta.frame;
             self.windows.insert(
                 id,
@@ -112,7 +112,7 @@ impl Model {
                 return actions;
             }
         } else {
-            self.forget_pending_match(&meta, space);
+            self.forget_pending_match(&meta, space, &mut actions);
         }
         if decision.action == RuleAction::Native && self.restore.restoring {
             // Matched no saved window: Apple's rule (counted for the restore's line).
@@ -162,10 +162,17 @@ impl Model {
                     .or(self.windows.get(&f).map(|w| w.restore))
             });
         let visible = self.display(display).visible;
+        // Born in the park zone: an app that saved its own frame while the window was parked
+        // at its quit; the frame it had then, kept a day, else centered below (W2).
+        let born = if self.display(display).parks(meta.frame) {
+            self.take_quit_frame(&meta.bundle_id, &meta.title).unwrap_or(meta.frame)
+        } else {
+            meta.frame
+        };
         let placed = match decision.placement {
-            Placement::AsIs => meta.frame,
-            Placement::Center => center(meta.frame, visible),
-            Placement::Cascade => cascade(meta.frame, front, visible, CASCADE_OFFSET),
+            Placement::AsIs => born,
+            Placement::Center => center(born, visible),
+            Placement::Cascade => cascade(born, front, visible, CASCADE_OFFSET),
         };
         let restore = self.safe_restore(placed, display);
         self.windows.insert(
@@ -214,9 +221,14 @@ impl Model {
         actions
     }
 
-    /// A window is gone. It leaves its stage; its children are forgotten too (any that were
-    /// parked are first restored, in case they outlive it). An inactive stage left with no
-    /// standard window disappears; the active stage may become empty.
+    /// A window is gone (destroyed). It leaves its stage; its children are forgotten too (any
+    /// that were parked are first restored, in case they outlive it). An inactive stage left
+    /// with no standard window disappears; the active stage may become empty.
+    ///
+    /// The window itself is not restored even when parked: it no longer exists, and a frame
+    /// sent to it would only fail and be retried as a window left in the corner. A window that
+    /// still exists and leaves the model goes through [`Model::window_left_space`], which
+    /// brings it back first (the module's invariant; Fable E9).
     pub fn remove_window(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(w) = self.windows.get(&id) else {
@@ -246,9 +258,28 @@ impl Model {
             }
             self.drop_if_dead(s, &mut actions);
         }
+        self.prune_restore_refs();
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// A new child window's restore frame: its own frame when usable; born in the park zone
+    /// (or degenerate) beside a known parent, where such a window opens on its parent: centered
+    /// across it, just under its title bar, within reach (E8: a dialog an app opens on a parked
+    /// window lands beside it in the corner, and came back centered on the screen, away from
+    /// its window); with no parent known, centered ([`Model::safe_restore`]).
+    fn child_restore(&self, meta: &WindowMeta, parent: Option<WindowId>) -> Rect {
+        let d = *self.display(meta.display);
+        let f = meta.frame;
+        let usable = !f.is_degenerate() && !d.parks(f);
+        match parent.and_then(|p| self.windows.get(&p)) {
+            Some(p) if !usable && !f.is_degenerate() => {
+                let r = p.restore;
+                d.reach(Rect::new((r.x + (r.w - f.w) / 2.0).round(), r.y + TITLE_BAR_HEIGHT.min(r.h), f.w, f.h))
+            }
+            _ => self.safe_restore(f, meta.display),
+        }
     }
 
     /// Switches the target's Space to `target`: saves the active stage's live frames, z-order
@@ -730,8 +761,11 @@ impl Model {
 
     /// A card dragged out of the strip and dropped in the main area: like
     /// [`Model::merge_into_active`], but the stage's front window lands with its top-left
-    /// corner at `top_left` (its size kept, clamped onto the visible frame) and its children
-    /// move with it. The other windows keep their saved frames.
+    /// corner at `top_left` (its size kept, moved left onto the visible frame when it fits,
+    /// within reach: [`Display::reach`]) and its children move with it. The other windows keep
+    /// their saved frames. The new place counts as the user's move ([`Model::move_restore`]):
+    /// a pre-fit frame moves along, so no safety path returns the window to where it was
+    /// before the drag (E4).
     pub fn merge_into_active_at(
         &mut self,
         stage: StageId,
@@ -747,23 +781,19 @@ impl Model {
         if let Some(front) = s.windows.first().copied()
             && let Some(w) = self.windows.get(&front)
         {
-            let visible = self.display(w.meta.display).visible;
+            let d = *self.display(w.meta.display);
             let old = w.restore;
-            let placed = clamp_to_visible(
-                Rect::new(top_left.x, top_left.y, old.w, old.h),
-                visible,
-            );
+            let v = d.visible;
+            // A fresh placement, not a frame the user left: the whole width on screen when
+            // it fits, as before.
+            let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
+            let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
             let (dx, dy) = (placed.x - old.x, placed.y - old.y);
-            if let Some(w) = self.windows.get_mut(&front) {
-                w.restore = placed;
-            }
+            self.move_restore(front, placed);
             for c in self.children_of(front) {
                 let Some(cw) = self.windows.get(&c) else { continue };
-                let display = self.display(cw.meta.display).visible;
-                let moved = clamp_to_visible(cw.restore.translate(dx, dy), display);
-                if let Some(cw) = self.windows.get_mut(&c) {
-                    cw.restore = moved;
-                }
+                let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
+                self.move_restore(c, moved);
             }
         }
         self.merge_into_active(stage, obs)
@@ -1211,12 +1241,21 @@ impl Model {
     /// at `frame`. Apple's parked windows cannot be grabbed, so nothing switched while the
     /// drag went on; now its stage comes as for any focus ([`Model::window_focused`]), with
     /// this window as the stage's key window and, when it was dropped outside the park zone,
-    /// at the frame it was dropped at (its new restore frame), so it does not jump back.
+    /// at the frame it was dropped at (its new restore frame), so it does not jump back. Let
+    /// go still in the park zone, it comes at its old frame: a sliver grabbed and barely
+    /// moved is a press on a hidden window, not a place the user chose.
     pub fn parked_window_dropped(&mut self, id: WindowId, frame: Rect, obs: &Observation) -> Vec<Action> {
+        if self.settling() {
+            // No stage switch while the login settles (as for any focus), but the window the
+            // user dragged out of the corner must not sit shown while counted parked until
+            // `match_screen` parks it again (the Fable review's E7): it joins the active
+            // stage where it was dropped.
+            return self.adopt_shown(id, frame, obs);
+        }
         if let Some(standard) = self.resolve_standard(id)
             && self.windows.get(&standard).is_some_and(|w| w.parked)
         {
-            if standard == id {
+            if standard == id && !self.display(self.windows[&id].meta.display).parks(frame) {
                 self.record_frame(id, frame);
             }
             if let Some(stage) = self.stage_of(standard) {
@@ -1224,6 +1263,62 @@ impl Model {
             }
         }
         self.window_focused(id, obs)
+    }
+
+    /// A parked window the screen shows out of the park zone where the user wants it (the
+    /// focused window, one they moved; a drop while the login settles) joins the active stage
+    /// of its Space as shown, at `frame` (its restore frame from now on), with no move and no
+    /// raise: it is there already, in front of the user (the Fable review's L1: the model's
+    /// parked flag and the screen agree). Its children come back beside it. Its stage, left
+    /// empty, goes unless declared. The key window when it is the focused one. Nothing for a
+    /// window not parked, pinned, or on a Space not shown.
+    pub fn adopt_shown(&mut self, id: WindowId, frame: Rect, obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let Some(id) = self.resolve_standard(id) else { return actions };
+        let Some(w) = self.windows.get(&id) else { return actions };
+        if !w.parked || w.home == Home::Pinned {
+            return actions;
+        }
+        let (src, space) = (w.home, w.space);
+        if !self.is_shown_space(space) {
+            return actions;
+        }
+        let active = self.ensure_active(space);
+        self.record_frame(id, frame);
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.parked = false;
+        }
+        if src != Home::Stage(active) {
+            if let Home::Stage(s) = src
+                && let Some(stage) = self.stage_mut(s)
+            {
+                stage.windows.retain(|&x| x != id);
+                if stage.key == Some(id) {
+                    stage.key = stage.windows.first().copied();
+                }
+            }
+            let display = self.stage(active).map_or(self.space_display(space), |s| s.display);
+            if let Some(stage) = self.stage_mut(active) {
+                stage.windows.insert(0, id);
+            }
+            self.set_home(id, Home::Stage(active), display);
+        }
+        if obs.focused.and_then(|f| self.resolve_standard(f)) == Some(id) {
+            self.make_key(active, id);
+        }
+        for c in self.children_of(id) {
+            if self.windows.get(&c).is_some_and(|w| w.parked) {
+                self.restore_window(c, &mut actions);
+            }
+        }
+        if let Home::Stage(s) = src
+            && s != active
+        {
+            self.drop_if_dead(s, &mut actions);
+        }
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
     }
 
     /// Click on the wallpaper. Parks the active stage (it enters the strip) and makes a fresh
@@ -1432,13 +1527,16 @@ impl Model {
                 _ => None,
             })
             .collect();
-        // A restore frame that falls in a changed display's park zone now (the display shrank)
-        // is replaced by a safe one, so no window is ever brought back into hiding.
+        // A restore frame that falls in a changed display's park zone now (the display shrank,
+        // the Dock grew) is replaced, so no window is ever brought back into hiding: still on
+        // the visible frame, it moves only as far as reach needs ([`Display::reach`]: a window
+        // tucked by the corner stays by it, W5, where it used to be centered); wholly off it
+        // (the display shrank under it), it is centered at its own size.
         let stale: Vec<(WindowId, Rect)> = self
             .windows
             .values()
             .filter(|w| moved_frames.contains(&w.meta.display) && self.display(w.meta.display).parks(w.restore))
-            .map(|w| (w.meta.id, self.safe_restore(w.restore, w.meta.display)))
+            .map(|w| (w.meta.id, self.display(w.meta.display).reach(w.restore)))
             .collect();
         for (id, restore) in stale {
             if let Some(w) = self.windows.get_mut(&id) {

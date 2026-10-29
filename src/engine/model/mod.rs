@@ -4,7 +4,8 @@
 //! ([`WindowMeta`], [`Observation`]) and executes the [`Action`]s each operation returns, in
 //! order. One invariant rules everything: **every window the model parks stays recorded with a
 //! safe restore frame until it is shown again**, and whenever the model forgets a parked window
-//! it first emits a [`Action::SetFrame`] that brings it back. [`Model::unpark_all`] therefore
+//! that still exists it first emits a [`Action::SetFrame`] that brings it back (a destroyed
+//! one, [`Model::remove_window`], has nothing to bring back). [`Model::unpark_all`] therefore
 //! always covers every parked window.
 //!
 //! **Spaces.** Every Space (Desktop) has its own Stage Manager, as Apple's does: its own
@@ -36,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked};
+use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked, reach_in};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -117,6 +118,15 @@ impl Display {
     /// ([`is_parked_in_at`]).
     pub fn parks(&self, frame: Rect) -> bool {
         is_parked_in_at(frame, self.frame, self.visible, self.corner)
+    }
+
+    /// `frame` brought within reach on this display ([`reach_in`]): moved only as far as its
+    /// title bar needs to be grabbed, never resized, and out of this display's own park zone
+    /// (its corner, [`Display::parks`]). Where every restore of the model lands: a frame on
+    /// the user's screen that another corner's zone test would catch (a window hung off the
+    /// left edge in the upper half) is the user's, and stays (S2).
+    pub fn reach(&self, frame: Rect) -> Rect {
+        reach_in(frame, self.visible, self.frame, |f| self.parks(f))
     }
 }
 
@@ -257,6 +267,10 @@ pub(crate) struct Reveal {
     pub(crate) desktop: StageId,
 }
 
+/// How far (points) a frame's side at the park corner may be from where a park asks it and
+/// still be that park's landing ([`Model::lands_parked`]): AX and the window server round.
+const PARK_LANDED_SLACK: f64 = 2.0;
+
 /// Nominal display used only when the platform reports none, so the model never panics.
 const FALLBACK_DISPLAY: Display = Display {
     id: DisplayId(0),
@@ -340,6 +354,9 @@ pub struct Model {
     /// Saved entries of windows whose app quit, kept for `state.json` a while (round 8H,
     /// [`quit`]).
     pub(crate) quit: Vec<QuitWindow>,
+    /// The frames of windows whose app quit, kept a day for a window it opens again in the
+    /// park zone (W2, [`quit`]).
+    pub(crate) quit_frames: Vec<quit::QuitFrame>,
     /// The restore's session and mode.
     pub(crate) restore: super::restore::Restore,
     /// What the last placement from a pending entry did, for the log.
@@ -392,6 +409,7 @@ impl Model {
             merged: HashMap::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
+            quit_frames: Vec::new(),
             restore: super::restore::Restore::default(),
             last_pending: None,
             dock: Vec::new(),
@@ -497,8 +515,8 @@ impl Model {
 
     /// Every window a safety path must move back, with where to: parked windows and windows
     /// we fitted into the stage area. The target is the window's pre-fit frame when it has one
-    /// (exactly, so its size comes back), else its restore frame clamped onto the visible
-    /// frame.
+    /// (exactly, so its size comes back), else its restore frame brought within reach
+    /// ([`Display::reach`]).
     pub fn safety_targets(&self) -> Vec<(WindowId, Rect)> {
         self.windows
             .values()
@@ -511,8 +529,8 @@ impl Model {
         let d = self.display(w.meta.display);
         match w.original {
             Some(o) if !o.is_degenerate() && !d.parks(o) => o,
-            Some(o) => clamp_to_visible(o, d.visible),
-            None => clamp_to_visible(w.restore, d.visible),
+            Some(o) => d.reach(o),
+            None => d.reach(w.restore),
         }
     }
 
@@ -706,17 +724,21 @@ impl Model {
         }
     }
 
-    /// Records `frame` as a window's restore frame unless it is unusable (in a park zone or
-    /// degenerate). Returns whether it was taken.
+    /// Records `frame` as a window's restore frame unless it is unusable (degenerate, or one
+    /// of our parks: [`Model::lands_parked`]). Returns whether it was taken.
     ///
     /// A frame that differs from the restore frame is the user's: resizing forgets the
-    /// window's pre-fit frame, moving carries it along by the same offset.
+    /// window's pre-fit frame, moving carries it along by the same offset. A frame in the park
+    /// zone that is not where a park of the window lands is the user's too (S3: a window
+    /// pushed into the corner by hand is recorded there, and comes back pulled just within
+    /// reach, [`Display::reach`], not at an older frame).
     pub(crate) fn record_frame(&mut self, id: WindowId, frame: Rect) -> bool {
         self.record(id, frame, true)
     }
 
     /// Like [`Model::record_frame`] for a frame that results from our own action (macOS may
-    /// have clamped what we asked for): the pre-fit frame is kept as it is.
+    /// have clamped what we asked for): the pre-fit frame is kept as it is, and no frame in
+    /// the park zone is taken (our own parks report back here).
     pub(crate) fn record_own_frame(&mut self, id: WindowId, frame: Rect) -> bool {
         self.record(id, frame, false)
     }
@@ -731,24 +753,36 @@ impl Model {
             return false;
         };
         let display = *self.display(w.meta.display);
-        let usable = !frame.is_degenerate() && !display.parks(frame);
+        let ours = display.parks(frame) && (!by_user || self.lands_parked(w, frame));
+        let usable = !frame.is_degenerate() && !ours;
         if let Some(w) = self.windows.get_mut(&id) {
             w.meta.frame = frame;
-            if usable {
-                if by_user
-                    && let Some(o) = w.original
-                    && !same_frame(frame, w.restore)
-                {
-                    w.original = if !same_size(frame, w.restore) || same_size(frame, o) {
-                        None
-                    } else {
-                        Some(o.translate(frame.x - w.restore.x, frame.y - w.restore.y))
-                    };
-                }
+        }
+        if usable {
+            if by_user {
+                self.move_restore(id, frame);
+            } else if let Some(w) = self.windows.get_mut(&id) {
                 w.restore = frame;
             }
         }
         usable
+    }
+
+    /// Makes `frame` window `id`'s restore frame as the user's move or resize: a resize
+    /// forgets its pre-fit frame (`original`), a move carries it along by the same offset, so
+    /// a safety path never returns the window to where it was before (E4).
+    pub(crate) fn move_restore(&mut self, id: WindowId, frame: Rect) {
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        if let Some(o) = w.original
+            && !same_frame(frame, w.restore)
+        {
+            w.original = if !same_size(frame, w.restore) || same_size(frame, o) {
+                None
+            } else {
+                Some(o.translate(frame.x - w.restore.x, frame.y - w.restore.y))
+            };
+        }
+        w.restore = frame;
     }
 
     /// Fits a standard, non-pinned window's restore frame into the stage area
@@ -765,8 +799,8 @@ impl Model {
         if w.meta.role != WindowRole::Standard || w.home == Home::Pinned {
             return false;
         }
-        let visible = self.display(w.meta.display).visible;
-        let from = clamp_to_visible(w.restore, visible);
+        let d = self.display(w.meta.display);
+        let (visible, from) = (d.visible, d.reach(w.restore));
         let to = fit_frame(from, stage_area(visible, fit.inset), fit.shrink);
         if same_frame(to, from) {
             return false;
@@ -810,6 +844,29 @@ impl Model {
         park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park)
     }
 
+    /// True when `frame` (in the park zone) is where a park of window `w` lands: its side at
+    /// the corner as far out as a park asks it ([`Model::park_frame_for`]), or as one point
+    /// inside the display's or the visible frame's side (where macOS may clamp a request
+    /// asked further out), within [`PARK_LANDED_SLACK`]. macOS keeps the asked `x` (measured)
+    /// but moves `y` (a title strip kept above the visible bottom or below the menu bar, by
+    /// the app's title height), and an app may resize a parked window, so only that side is
+    /// compared. A user's drag stops short of it: the pointer stops at the screen's edge, and
+    /// the window the grab's offset inside it. When unsure the frame counts as a park: not
+    /// recording a user's frame keeps the older one, recording a park would bring the window
+    /// back at the corner.
+    fn lands_parked(&self, w: &WindowState, frame: Rect) -> bool {
+        let d = self.display(w.meta.display);
+        let park = self.park_frame_for(w);
+        let visible = if d.visible.is_degenerate() { d.frame } else { d.visible };
+        if d.corner.right() {
+            let edge = park.x.min(d.frame.max_x() - 1.0).min(visible.max_x() - 1.0);
+            frame.x >= edge - PARK_LANDED_SLACK
+        } else {
+            let edge = park.max_x().max(d.frame.x + 1.0).max(visible.x + 1.0);
+            frame.max_x() <= edge + PARK_LANDED_SLACK
+        }
+    }
+
     /// Where the model left window `id`: its park frame while parked (where bringing it back
     /// starts from), else its last frame. `meta.frame` alone does not say it for a parked
     /// window: its frames are ignored while parked ([`Model::window_frame_changed`]), so it
@@ -819,13 +876,14 @@ impl Model {
         Some(if w.parked { self.park_frame_for(w) } else { w.meta.frame })
     }
 
-    /// Brings one window to its clamped restore frame, fitted into the stage area first.
+    /// Brings one window to its restore frame, fitted into the stage area first, within reach
+    /// ([`Display::reach`]: exactly its own frame unless its title bar could not be grabbed).
     pub(crate) fn restore_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
         self.fit_window(id);
         let Some(w) = self.windows.get(&id) else {
             return;
         };
-        let frame = clamp_to_visible(w.restore, self.display(w.meta.display).visible);
+        let frame = self.display(w.meta.display).reach(w.restore);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = false;
         }

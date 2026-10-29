@@ -38,7 +38,7 @@ terminal has its approvals checked against the terminal, not the app.
 | `make sign` | signs the bundle with the local identity (hardened runtime) |
 | `make dev` | signs, then copies the app to `~/Library/Application Support/Stage Manager Dev/` |
 | `make run` | `dev`, then launches that copy and tails today's log |
-| `make install` | copies the signed app to `~/Applications` |
+| `make install` | copies the signed app to `~/Applications` (refused while that copy runs: quit it first) |
 | `make fixture` | builds `target/SM Fixture.app`, the test window app |
 | `make check` | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
 | `make icon` | regenerates the app icon (needs Xcode 26; outputs are committed) |
@@ -51,7 +51,9 @@ Dev runs and tests always launch from the fixed dev copy. macOS approves screen 
 app location, so one location means one approval for every worktree. A copy running from
 there (any home) is never replaced, and `make run` refuses before copying when a copy answers
 in its home; the new copy is made beside the old one and swapped in, so a failed copy keeps
-the old one (`python3 scripts/test_dev_app_unit.py` checks this offline).
+the old one (`python3 scripts/test_dev_app_unit.py` checks this offline). `make install` puts
+its copy in `~/Applications` the same way. Neither script ever signals or removes a copy
+running from anywhere else: `make run` stops only the dev copy's own process.
 
 `make run` passes `RUST_LOG`, `STAGE_MANAGER_NO_PROMPT`, `STAGE_MANAGER_ONLY`,
 `STAGE_MANAGER_HOME`, `STAGE_MANAGER_LOG_DIR` and `STAGE_MANAGER_TEST` through to the app.
@@ -67,7 +69,8 @@ its ctl socket and reading the window server's view of the windows:
 ```sh
 scripts/test-stages.sh                    # every phase
 scripts/test-stages.sh m3 safety          # some phases: m3 safety m4 m6 restore strip native
-                                          # visible parity motion slots expose capture raise
+                                          # visible parity motion slots expose capture raise park
+scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh

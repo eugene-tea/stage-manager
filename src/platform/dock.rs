@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_foundation::{NSBundle, NSString};
 
-use super::ax::{AxElement, AxError, names};
+use super::ax::{AxElement, AxError, AxResult, names};
 use super::windows::CgWindow;
 use crate::engine::DockApp;
 use crate::engine::geometry::{Point, Rect};
@@ -116,23 +116,60 @@ fn dock_item_role(role: &str) -> bool {
 }
 
 /// The application item of the Dock (`dock`: its pid) at `p`, with its element; else what
-/// the hit-test found there. Every call runs at the Dock's bounded timeout.
+/// the hit-test found there. Every call runs at the Dock's bounded timeout, and a Dock that
+/// leaves one unanswered is asked nothing more (the review's K6: up to seven calls at the
+/// timeout, on the WM thread, at every mouse-down on the Dock).
 pub fn item_at(dock: i32, p: Point) -> Result<(AxElement, DockItem), Miss> {
     let t = DOCK_AX_TIMEOUT_SECONDS;
     let element = AxElement::application(dock)
         .bounded(t, |app| app.element_at(p))
         .map_err(|e| Miss { found: format!("nothing ({e})"), notable: true })?;
     // The hit-test may answer a part of the item: its parents are looked at too.
-    let mut at = element.clone();
-    for _ in 0..3 {
-        if let Some(item) = at.bounded(t, application_item) {
-            return Ok((at, item));
+    match walk_up(element.clone(), ITEM_STEPS, |e| e.bounded(t, application_item), |e| e.bounded(t, AxElement::parent)) {
+        Walk::Found(at, item) => Ok((at, item)),
+        Walk::Unanswered => Err(Miss { found: "no answer (the Dock is busy)".into(), notable: true }),
+        Walk::Missed => {
+            let (role, subrole) = element.bounded(t, |e| (e.role().unwrap_or_else(|_| "?".into()), e.subrole().unwrap_or_else(|_| "?".into())));
+            Err(Miss { notable: dock_item_role(&role), found: format!("{role} / {subrole}") })
         }
-        let Ok(parent) = at.bounded(t, AxElement::parent) else { break };
-        at = parent;
     }
-    let (role, subrole) = element.bounded(t, |e| (e.role().unwrap_or_else(|_| "?".into()), e.subrole().unwrap_or_else(|_| "?".into())));
-    Err(Miss { notable: dock_item_role(&role), found: format!("{role} / {subrole}") })
+}
+
+/// How many elements a hit-test's walk looks at: the one hit and up to two parents.
+const ITEM_STEPS: usize = 3;
+
+/// What a walk up from a hit element found.
+#[derive(Debug, PartialEq, Eq)]
+enum Walk<E, I> {
+    /// An item, at this element.
+    Found(E, I),
+    /// No item within the steps.
+    Missed,
+    /// A call went unanswered (`CannotComplete` at the timeout): the walk stopped there.
+    Unanswered,
+}
+
+/// Looks for an item (`item`) at `start` and up to `steps - 1` of its parents (`parent`),
+/// stopping at the first unanswered call. An error of any other kind is no item here (an
+/// attribute an element lacks); a parent that cannot be read ends the walk.
+fn walk_up<E, I>(start: E, steps: usize, item: impl Fn(&E) -> AxResult<Option<I>>, parent: impl Fn(&E) -> AxResult<E>) -> Walk<E, I> {
+    let mut at = start;
+    for step in 0..steps {
+        match item(&at) {
+            Ok(Some(found)) => return Walk::Found(at, found),
+            Err(AxError::CANNOT_COMPLETE) => return Walk::Unanswered,
+            Ok(None) | Err(_) => {}
+        }
+        if step + 1 == steps {
+            break;
+        }
+        match parent(&at) {
+            Ok(p) => at = p,
+            Err(AxError::CANNOT_COMPLETE) => return Walk::Unanswered,
+            Err(_) => break,
+        }
+    }
+    Walk::Missed
 }
 
 /// Where the Dock's bar is (`dock`: its pid): the frame around its lists (the Dock app's
@@ -153,17 +190,18 @@ pub fn item_for_bundle(dock: i32, bundle: &str) -> Option<(AxElement, DockItem)>
         let lists = app.children().ok()?;
         let t = DOCK_AX_TIMEOUT_SECONDS;
         lists.iter().flat_map(|list| list.bounded(t, AxElement::children).unwrap_or_default()).find_map(|e| {
-            e.bounded(t, application_item).filter(|i| bundle_id_at(&i.path).as_deref() == Some(bundle)).map(|i| (e, i))
+            e.bounded(t, application_item).ok().flatten().filter(|i| bundle_id_at(&i.path).as_deref() == Some(bundle)).map(|i| (e, i))
         })
     })
 }
 
-/// `element` as an application item of the Dock.
-fn application_item(element: &AxElement) -> Option<DockItem> {
-    if element.role().ok()? != names::ROLE_DOCK_ITEM || element.subrole().ok()? != names::SUBROLE_APPLICATION_DOCK_ITEM {
-        return None;
+/// `element` as an application item of the Dock: `None` for another element; an error as
+/// the Dock gave it (so an unanswered call stops a walk).
+fn application_item(element: &AxElement) -> AxResult<Option<DockItem>> {
+    if element.role()? != names::ROLE_DOCK_ITEM || element.subrole()? != names::SUBROLE_APPLICATION_DOCK_ITEM {
+        return Ok(None);
     }
-    Some(DockItem { path: element.url_path().ok()?, frame: element.frame().ok()? })
+    Ok(Some(DockItem { path: element.url_path()?, frame: element.frame()? }))
 }
 
 /// The Dock's application items in its order (`dock`: its pid), left to right (top to bottom
@@ -253,6 +291,42 @@ mod tests {
         assert!(!visible_window_of(&[clear], 9, parks), "a fully transparent window");
         let panel = CgWindow { layer: 3, ..shown };
         assert!(!visible_window_of(&[panel], 9, parks), "not a window's layer");
+    }
+
+    /// K6: a walk up from the hit element stops at the first unanswered call; another error
+    /// is no item there, and the walk goes on to the parent.
+    #[test]
+    fn a_dock_that_does_not_answer_is_asked_nothing_more() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let busy = || AxError::CANNOT_COMPLETE;
+        let walk = walk_up(
+            0u32,
+            ITEM_STEPS,
+            |_| {
+                calls.set(calls.get() + 1);
+                Err::<Option<&str>, _>(busy())
+            },
+            |e| Ok(e + 1),
+        );
+        assert_eq!(walk, Walk::Unanswered);
+        assert_eq!(calls.get(), 1, "one call, not seven");
+        // A part of the item hit: no item there (an attribute it lacks), its parent is one.
+        let found = walk_up(0u32, ITEM_STEPS, |e| if *e == 1 { Ok(Some("item")) } else { Err(AxError::NO_VALUE) }, |e| Ok(e + 1));
+        assert_eq!(found, Walk::Found(1, "item"));
+        // A parent unanswered stops it too; nothing within the steps is a miss.
+        assert_eq!(walk_up(0u32, ITEM_STEPS, |_| Ok(None::<&str>), |_| Err(busy())), Walk::Unanswered);
+        let parents = Cell::new(0);
+        let missed = walk_up(
+            0u32,
+            ITEM_STEPS,
+            |_| Ok(None::<&str>),
+            |e| {
+                parents.set(parents.get() + 1);
+                Ok(e + 1)
+            },
+        );
+        assert_eq!((missed, parents.get()), (Walk::Missed, 2), "no parent read past the last step");
     }
 
     #[test]

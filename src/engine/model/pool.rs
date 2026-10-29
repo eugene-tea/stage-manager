@@ -41,8 +41,10 @@ use std::collections::HashSet;
 
 use super::pending::Placed;
 use super::{Action, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::geometry::Rect;
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
+use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
 
 /// The saved stage a model stage stands for: built from it (an adoption, an arrival on a
@@ -346,8 +348,10 @@ impl Model {
 
     /// Drops the waiting entry at `spot` (a rule placed its window, or the window stays where
     /// Apple's rule put it): a stage of the model left with nothing goes, a saved Desktop
-    /// left with nothing too.
-    fn drop_spot(&mut self, spot: Spot) {
+    /// left with nothing too. A stage that goes hands its orphans to the active stage, shown:
+    /// their frames go into `actions` (Fable E2: discarded, a parked orphan counted shown
+    /// stayed in the corner).
+    fn drop_spot(&mut self, spot: Spot, actions: &mut Vec<Action>) {
         match spot {
             Spot::Stage(stage, k) => {
                 if let Some(list) = self.pending.get_mut(&stage)
@@ -356,8 +360,7 @@ impl Model {
                     list.remove(k);
                 }
                 self.pending.retain(|_, l| !l.is_empty());
-                let mut ignored = Vec::new();
-                self.drop_if_dead(stage, &mut ignored);
+                self.drop_if_dead(stage, actions);
             }
             Spot::Saved(l, j, k) => {
                 self.take_saved_entry(l, j, k);
@@ -450,10 +453,10 @@ impl Model {
 
     /// Takes window `meta`'s confident match out of the waiting entries `scope` looks at
     /// from `space` (a rule placed the window). True when one was taken.
-    pub(crate) fn forget_waiting(&mut self, meta: &WindowMeta, space: SpaceId, scope: Scope) -> bool {
+    pub(crate) fn forget_waiting(&mut self, meta: &WindowMeta, space: SpaceId, scope: Scope, actions: &mut Vec<Action>) -> bool {
         let pick = self.picks(space, std::slice::from_ref(meta), LowRule::default(), scope).into_iter().find(|c| c.2.confident());
         let Some((_, spot, _, _)) = pick else { return false };
-        self.drop_spot(spot);
+        self.drop_spot(spot, actions);
         true
     }
 
@@ -489,7 +492,7 @@ impl Model {
                 None
             };
             let (Some((_, spot, _, _)), Home::Stage(from)) = (pick, home) else {
-                if self.forget_voted(&meta, desktop) {
+                if self.forget_voted(&meta, desktop, actions) {
                     tracing::debug!(id = v.0, desktop, "restore: a voter stays where Apple's rule put it; its saved entry is forgotten");
                 }
                 continue;
@@ -498,7 +501,7 @@ impl Model {
             let in_place = !own && self.become_part(from, v, space, spot);
             let mark = actions.len();
             let was_parked = self.windows.get(&v).is_some_and(|w| w.parked);
-            let Some(meta) = self.lift(v) else { continue };
+            let Some((meta, original)) = self.lift(v) else { continue };
             let placed = self.match_waiting(space, std::slice::from_ref(&meta), LowRule::default(), None, Scope::OwnAndPool, actions);
             if placed.is_empty() {
                 // Never left unmanaged: it comes back as any new window.
@@ -508,7 +511,15 @@ impl Model {
             } else {
                 tracing::debug!(id = v.0, desktop, in_place, own, "restore: a voter that can adopt nothing goes back to its saved stage here");
             }
-            if own && space.0 != desktop && self.forget_voted(&meta, desktop) {
+            // Back at its own frame (no saved frame taken), it keeps the frame it had before
+            // fitting (Fable E10: `lift` dropped it).
+            if let Some(w) = self.windows.get_mut(&v)
+                && w.original.is_none()
+                && same_frame(w.restore, meta.frame)
+            {
+                w.original = original;
+            }
+            if own && space.0 != desktop && self.forget_voted(&meta, desktop, actions) {
                 tracing::debug!(id = v.0, desktop, "restore: a voter back in its own Desktop's stage; the entry it voted with is forgotten");
             }
             // Parked, it was taken out at its real frame: shown now, it is brought back.
@@ -571,8 +582,10 @@ impl Model {
 
     /// Takes managed window `id` out of its stage (to be placed again at once; the stage
     /// stays, dropped by the caller if left dead). Its meta, when it was managed, at its real
-    /// frame when it was parked (where it goes back to; as [`Model::adopt`] does).
-    fn lift(&mut self, id: WindowId) -> Option<WindowMeta> {
+    /// frame when it was parked (where it goes back to; as [`Model::adopt`] does), and its
+    /// frame before fitting ([`super::WindowState::original`]) for the caller to keep. Only a
+    /// window in a stage is lifted, so never a sticky one (pinned).
+    fn lift(&mut self, id: WindowId) -> Option<(WindowMeta, Option<Rect>)> {
         let w = self.windows.remove(&id)?;
         let mut meta = w.meta;
         if w.parked {
@@ -586,7 +599,19 @@ impl Model {
                 st.key = st.windows.first().copied();
             }
         }
-        Some(meta)
+        Some((meta, w.original))
+    }
+
+    /// Forgets what the restore remembers of windows and stages that are gone: a stage whose
+    /// voter left ([`Model::follow_stage`]) once that window is gone, a merge or a waiting
+    /// front naming a stage gone (Fable E10: kept for the whole run). Each is read only for a
+    /// window or stage that exists, so nothing changes but the memory.
+    pub(crate) fn prune_restore_refs(&mut self) {
+        let windows = &self.windows;
+        self.followed.retain(|_, v| windows.contains_key(v));
+        let stages: HashSet<StageId> = self.stages.iter().map(|s| s.id).collect();
+        self.merged.retain(|_, s| stages.contains(s));
+        self.restore.front_waits.retain(|s| stages.contains(s));
     }
 
     /// The stage `stage` stands for now: itself while it exists, else, when the restore
@@ -629,12 +654,12 @@ impl Model {
     /// Forgets the entry of saved Desktop `desktop` (waiting unvisited, or in the stages of
     /// the Desktop that took its id) that window `meta` matches with confidence. True when
     /// one was.
-    fn forget_voted(&mut self, meta: &WindowMeta, desktop: u64) -> bool {
+    fn forget_voted(&mut self, meta: &WindowMeta, desktop: u64, actions: &mut Vec<Action>) -> bool {
         let (spots, keys) = self.waiting_where(|s| s.space.0 == desktop, |l| l.id == desktop);
         let parked = self.display(meta.display).parks(meta.frame);
         let pick = assign(&keys, &[live_key(meta, parked)], LowRule::default()).into_iter().next().flatten();
         let Some(spot) = pick.filter(|p| p.grade.confident()).map(|p| spots[p.saved]) else { return false };
-        self.drop_spot(spot);
+        self.drop_spot(spot, actions);
         true
     }
 

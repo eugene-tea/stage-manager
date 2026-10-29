@@ -266,7 +266,12 @@ fn log_note(n: Note) {
     match n {
         Note::Swallowed { id, at } => tracing::info!(id, x = at.x, y = at.y, "inert slivers: a press on a parked window's sliver swallowed"),
         Note::Passed { at } => tracing::debug!(x = at.x, y = at.y, "inert slivers: a press in the corner, not on a sliver: passed"),
-        Note::Unjudged { at, age_ms } => tracing::debug!(x = at.x, y = at.y, ?age_ms, "inert slivers: a press in the corner passed: no fresh window list"),
+        Note::Unjudged { at, age_ms } => tracing::info!(
+            x = at.x,
+            y = at.y,
+            ?age_ms,
+            "inert slivers: a press in the corner reached what is under it, a parked window's edge maybe: no fresh window list to judge it by (the WM thread was busy)"
+        ),
         Note::ZoneOwner { owner, zone } => tracing::info!(
             id = owner.id,
             pid = owner.pid,
