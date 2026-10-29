@@ -1788,9 +1788,16 @@ def wallpaper_click(pt, what):
 
 
 def click_card(s, title, what):
-    """Clicks the card of the stage holding `title` (its drawn frame); True when posted."""
+    """Clicks the card of the stage holding `title` (its drawn frame); True when posted. A
+    strip hidden under a window over its column (the fixtures' default frames reach it)
+    publishes no cards: it is revealed at the left edge first, as a person would."""
     home = by_title(s)[title]["home"]
-    b = next((c["frame"] for c in s.get("strip_cards", []) if c["number"] == home), None)
+    frame_of = lambda st: next((c["frame"] for c in st.get("strip_cards", []) if c["number"] == home), None)
+    b = frame_of(s)
+    if b is None and not s.get("strip_cards"):
+        if reveal_strip(f"{what}: the strip, covered") is None:
+            return False
+        b = frame_of(state())
     r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2) if b else {"ok": False, "error": "no card drawn"}
     return check(r.get("ok"), f"clicked {what} ({r.get('error', 'ok')}{whose(r.get('error'))})")
 
