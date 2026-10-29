@@ -12,9 +12,21 @@
 //!   is the shown Desktop's is read from the panels (`isOnActiveSpace`), never from the
 //!   engine's Space ids. Its sharing type is left at the default, so screenshots show it as
 //!   the wallpaper it shows.
-//! - **Picture**: the desktop picture drawn from its file, never captured
+//! - **Picture from a still** (round desktop-still-patch, [`crate::engine::patch_still`]):
+//!   where Screen Recording is granted and window captures work, the WM thread's plan names a
+//!   still of the desktop ([`PatchPlan::still`], [`crate::platform::desktop_shot`]): the
+//!   desktop-level windows only, so icons, widgets and any wallpaper are exact. While the
+//!   next one is on its way ([`PatchPlan::hold`]: a Desktop arrived, an icon moved, the
+//!   picture changed) a panel a still drew keeps its picture, cropped anew for the plan's
+//!   rectangle; a panel left drawn from a still on another Desktop stays while its icons, the
+//!   appearance and the predicted frame are unchanged
+//!   ([`crate::engine::patch_still::away_still_holds`]). Every wallpaper read tells the still
+//!   when the picture changed and when the next frame is due.
+//! - **Picture from the file** (no still: no Screen Recording, captures not working yet):
+//!   the desktop picture drawn from its file, never captured
 //!   ([`crate::platform::wallpaper`], decided by [`crate::engine::wallpaper`]): no Screen
-//!   Recording, no menu bar recording indicator. Near a solar frame change the frame is one
+//!   Recording, no menu bar recording indicator, only where no desktop icon lies under the
+//!   corner ([`PatchPlan::file`]). Near a solar frame change the frame is one
 //!   of a few candidates, settled by [`super::corner_settle`]: they render alike in the
 //!   corner, or (only where window captures already work) one still of the desktop's own
 //!   windows, never a stream, matches one of them; otherwise the patch stays off. On each
@@ -76,8 +88,8 @@ use super::corner_settle::{Check, News, Outcome, Settler};
 use super::panels;
 use crate::engine::geometry::{Rect, Size};
 use crate::engine::wallpaper as wp;
-use crate::platform::desktop;
 use crate::platform::wallpaper::{self, Job, Reader, Wall};
+use crate::platform::{desktop, desktop_shot};
 
 /// What the WM thread asks of the patch.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -100,6 +112,13 @@ pub struct PatchPlan {
     /// Finder's desktop icons as last read well (`None`: not known): they show on every
     /// Desktop, so a panel left drawn on another one over an icon is hidden.
     pub items: Option<Vec<Rect>>,
+    /// The still of the desktop to draw ([`crate::platform::desktop_shot::patch_still`]'s
+    /// serial), first.
+    pub still: Option<u64>,
+    /// A still is on its way: a panel a still drew keeps its picture meanwhile.
+    pub hold: bool,
+    /// The file's picture may stand for the corner (no desktop icon under it): the fallback.
+    pub file: bool,
 }
 
 /// How often the wallpaper is read again while the patch is wanted.
@@ -187,6 +206,38 @@ struct Drawn {
     path: String,
 }
 
+/// What a Desktop's panel drawn from a still of the desktop shows: the still (kept to hold
+/// while the next one comes), and what it was taken under, to tell while away whether it is
+/// still right ([`crate::engine::patch_still::away_still_holds`]).
+struct StillDrawn {
+    serial: u64,
+    /// The whole still, its block (global, top-left points) and scale.
+    block: CFRetained<CGImage>,
+    region: Rect,
+    scale: f64,
+    /// Finder's icons meeting the rectangle drawn, as known then.
+    icons: Option<Vec<Rect>>,
+    /// The appearance then.
+    dark: bool,
+    /// When the clock predicted the next frame then.
+    frame_due: Option<Instant>,
+}
+
+/// The icons of `items` meeting `rect`.
+fn icons_at(items: Option<&[Rect]>, rect: Rect) -> Option<Vec<Rect>> {
+    items.map(|i| i.iter().copied().filter(|r| r.intersect(&rect).is_some()).collect())
+}
+
+/// What tells that the wallpaper read changed for a still of the desktop: the picture, how it
+/// lands and its frame (or why it cannot be drawn), and the appearance.
+fn wall_identity(w: &Wall) -> String {
+    let what = match &w.outcome {
+        Ok((_, job)) => job.key(),
+        Err(why) => why.clone(),
+    };
+    format!("{:?}|{what}|{}", w.path, w.dark)
+}
+
 /// One Desktop's patch panel (main thread): ordered in once on its Desktop, then shown or
 /// hidden there by its alpha.
 struct Sheet {
@@ -204,8 +255,10 @@ struct Sheet {
     ordered: u64,
     /// When it was shown at its rectangle ([`shown_for`]).
     shown_at: Option<Instant>,
-    /// What it draws, while drawn.
+    /// What it draws, while drawn from the file.
     drawn: Option<Drawn>,
+    /// What it draws, while drawn from a still of the desktop.
+    still: Option<StillDrawn>,
 }
 
 impl Sheet {
@@ -234,7 +287,7 @@ impl Sheet {
             view.setWantsLayer(true);
             view.setLayer(Some(&layer));
         }
-        Self { panel, layer, placed: false, shown: None, showing: None, picture: None, ordered: NOT_ORDERED, shown_at: None, drawn: None }
+        Self { panel, layer, placed: false, shown: None, showing: None, picture: None, ordered: NOT_ORDERED, shown_at: None, drawn: None, still: None }
     }
 
     /// Ordered in and on the Desktop shown now.
@@ -248,6 +301,7 @@ impl Sheet {
         self.ordered = NOT_ORDERED;
         self.shown_at = None;
         self.drawn = None;
+        self.still = None;
         if self.shown.take().is_some() {
             self.panel.setAlphaValue(0.0);
             return true;
@@ -322,6 +376,8 @@ struct Patch {
     /// A Desktop arrived (or the patch is new): one still checks a solar frame the clock
     /// names exactly ([`Settler::check`]).
     check_arrival: bool,
+    /// The last wallpaper read's identity ([`wall_identity`]): a change takes a new still.
+    identity: Option<String>,
 }
 /// The render in flight, and the picture key whose render failed (not tried again until
 /// the key changes: a new file version, frame, scale or screen).
@@ -640,6 +696,7 @@ impl Patch {
             settler: Settler::default(),
             settled: None,
             check_arrival: true,
+            identity: None,
         }
     }
 
@@ -692,6 +749,8 @@ impl Patch {
         }
         self.renders.drop_in_flight();
         self.check_arrival = true;
+        // The first read names this Desktop's picture: no change to tell the still.
+        self.identity = None;
         self.arrival = Some((self.plan.space, now));
         self.settle_until = Some(now + SETTLE);
         self.wall = None;
@@ -714,8 +773,19 @@ impl Patch {
         // Panels drawing the same picture, frame and block share one verdict (a solar one
         // weighs every hypothesis of the clock).
         let mut verdicts: Vec<(String, usize, Rect, bool)> = Vec::new();
+        let now = Instant::now();
         for s in self.others.iter_mut() {
             let Some(rect) = s.shown else { continue };
+            if let Some(d) = &s.still {
+                // Drawn from a still: its Desktop as it was then, icons and all.
+                let icons_now = icons_at(items.as_deref(), rect);
+                let frame_due = d.frame_due.is_some_and(|t| now >= t);
+                if !crate::engine::patch_still::away_still_holds(d.icons.as_deref(), icons_now.as_deref(), d.dark != dark, frame_due) {
+                    s.hide();
+                    tracing::debug!(frame_due, "corner patch: another Desktop's panel (a still) hidden while away");
+                }
+                continue;
+            }
             let frame_right = s.drawn.as_ref().is_some_and(|d| {
                 if let Some((.., v)) = verdicts.iter().find(|(b, i, r, _)| *b == d.base && *i == d.index && *r == d.region) {
                     return *v;
@@ -795,8 +865,21 @@ impl Patch {
             return;
         }
         if self.wall.is_none() {
-            let wall = self.reader.read(mtm);
+            let wall = self.read_wall(mtm);
             self.wall = Some((Instant::now(), wall));
+        }
+        // A still of the desktop first; while one comes, what a still drew stays.
+        if self.plan.still.is_some_and(|serial| self.draw_still(mtm, rect, serial)) {
+            return;
+        }
+        if (self.plan.hold || self.plan.still.is_some()) && self.hold_still(mtm, rect) {
+            return;
+        }
+        if !self.plan.file {
+            // A desktop icon under the corner (or the icons not known): only a still may
+            // stand for it.
+            self.hide();
+            return;
         }
         let Some((_, wall)) = self.wall.clone() else { return };
         let (decision, job) = match &wall.outcome {
@@ -862,9 +945,14 @@ impl Patch {
         let base = job.base_key();
         let path = job.path.clone();
         self.active.drawn = wall.image.clone().map(|facts| Drawn { facts, style: decision.style, index: job.index, base, region, path });
+        self.active.still = None;
+        self.went_elsewhere(mtm, was_placed);
+    }
+
+    /// A panel ordered in for the first time while a Desktop still slid went to another
+    /// Desktop: hidden there, it waits as that Desktop's; a new one for this Desktop.
+    fn went_elsewhere(&mut self, mtm: MainThreadMarker, was_placed: bool) {
         if !was_placed && !self.active.panel.isOnActiveSpace() {
-            // Ordered in for the first time while a Desktop still slid: it went to another
-            // Desktop. Hidden there, it waits as that Desktop's; a new one for this Desktop.
             tracing::debug!("corner patch: a new panel went to another Desktop; hidden there, a new one for this one");
             self.active.hide();
             let away = std::mem::replace(&mut self.active, Sheet::new(mtm));
@@ -872,12 +960,67 @@ impl Patch {
         }
     }
 
+    /// Draws the still of the desktop `serial` at `rect`; false when it is not the one kept
+    /// (a newer one came, or it was dropped) or does not hold the rectangle.
+    fn draw_still(&mut self, mtm: MainThreadMarker, rect: Rect, serial: u64) -> bool {
+        let key = format!("still:{serial}");
+        if self.active.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
+            return true;
+        }
+        let Some((block, region, scale)) = desktop_shot::patch_still(serial) else { return false };
+        let Some(image) = desktop_shot::crop(&block, region, scale, rect) else { return false };
+        self.say("drawing a still of the desktop (Screen Recording: the wallpaper, icons and widgets as shown)".into(), false);
+        let (dark, frame_due) = self.wall.as_ref().map_or((false, None), |(_, w)| (w.dark, w.frame_due));
+        let icons = icons_at(self.plan.items.as_deref(), rect);
+        let was_placed = self.active.placed;
+        self.active.show(mtm, rect, &image, scale, self.plan.above, self.plan.reorder);
+        self.active.showing = Some((key, self.plan.clone()));
+        self.active.drawn = None;
+        self.active.still = Some(StillDrawn { serial, block, region, scale, icons, dark, frame_due });
+        self.went_elsewhere(mtm, was_placed);
+        true
+    }
+
+    /// While a new still comes, a panel a still drew stays drawn (at the plan's rectangle and
+    /// order, cropped anew from the still it holds); false when it shows none or the still
+    /// does not hold the rectangle.
+    fn hold_still(&mut self, mtm: MainThreadMarker, rect: Rect) -> bool {
+        if self.active.shown.is_none() {
+            return false;
+        }
+        let Some(d) = &self.active.still else { return false };
+        let key = format!("hold:{}", d.serial);
+        if self.active.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
+            return true;
+        }
+        let Some(image) = desktop_shot::crop(&d.block, d.region, d.scale, rect) else { return false };
+        let scale = d.scale;
+        self.active.show(mtm, rect, &image, scale, self.plan.above, self.plan.reorder);
+        self.active.showing = Some((key, self.plan.clone()));
+        true
+    }
+
+    /// Reads the wallpaper (main thread) and tells the desktop's still what changed: another
+    /// picture, frame or look since the last read takes a new one once the fade is over, and
+    /// the next frame the clock predicts takes one then.
+    fn read_wall(&mut self, mtm: MainThreadMarker) -> Wall {
+        let wall = self.reader.read(mtm);
+        let identity = wall_identity(&wall);
+        if self.identity.as_ref().is_some_and(|was| *was != identity) {
+            tracing::debug!("corner patch: the wallpaper read changed; the desktop's still is taken again");
+            desktop_shot::wallpaper_changed(Instant::now());
+        }
+        self.identity = Some(identity);
+        desktop_shot::set_frame_due(wall.frame_due);
+        wall
+    }
+
     /// Hidden, keeps the picture rendered for the plan's `picture` rectangle (round 8L4: a
     /// switch's cover lays the desktop's still of the icons over it); nothing is shown.
     fn prepare(&mut self, mtm: MainThreadMarker) {
         let Some(rect) = self.plan.picture else { return };
         if self.wall.is_none() {
-            let wall = self.reader.read(mtm);
+            let wall = self.read_wall(mtm);
             self.wall = Some((Instant::now(), wall));
         }
         let Some((_, wall)) = self.wall.clone() else { return };

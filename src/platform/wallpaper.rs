@@ -70,6 +70,10 @@ pub struct Wall {
     pub outcome: Result<(Decision, Job), String>,
     /// When the frame may change by the clock.
     pub recheck_at: Option<Instant>,
+    /// When the frame macOS shows may change by the clock, whatever the placement and whether
+    /// the picture can be drawn ([`wp::frame_due`]): a still of the desktop standing for the
+    /// corner is taken again then.
+    pub frame_due: Option<Instant>,
     /// The appearance read was dark.
     pub dark: bool,
     /// The picture's facts, when drawn: a Desktop's patch left drawn there tells by them
@@ -158,7 +162,7 @@ impl Reader {
     pub fn read(&mut self, mtm: MainThreadMarker) -> Wall {
         let dark = dark_appearance(mtm);
         let Some(screen) = NSScreen::screens(mtm).firstObject() else {
-            return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, dark, image: None };
+            return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, frame_due: None, dark, image: None };
         };
         let f = screen.frame();
         let frame = Rect::new(0.0, 0.0, f.size.width, f.size.height);
@@ -207,6 +211,7 @@ impl Reader {
             solar,
         };
         let decided = wp::decide(&inputs);
+        let frame_due = wp::frame_due(&inputs).map(|s| Instant::now() + Duration::from_secs_f64(s.clamp(1.0, 86_400.0)));
         let recheck_at = decided
             .as_ref()
             .ok()
@@ -233,7 +238,7 @@ impl Reader {
             (Ok(_), _, _) => Err("the picture cannot be read".into()),
             (Err(why), _, _) => Err(why.into()),
         };
-        Wall { screen: frame, path, outcome, recheck_at, dark, image: facts }
+        Wall { screen: frame, path, outcome, recheck_at, frame_due, dark, image: facts }
     }
 
     /// The settings file's choices, parsed again only when its modification time changed;

@@ -10,7 +10,9 @@
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
-//! topmost), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
+//! topmost), `debug-desktop X Y [double | drag X2 Y2]` clicks, double-clicks or drags on the
+//! desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
+//! patch), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
@@ -200,6 +202,18 @@ pub enum Command {
         /// Hold shift.
         shift: bool,
     },
+    /// A synthetic click, double click (`double`) or drag (to `to`) on the desktop itself, posted
+    /// only where nothing but the desktop lies along its path (Finder's icons, the wallpaper; our
+    /// click-through corner patch seen through; needs `STAGE_MANAGER_TEST=1`): the live check
+    /// that a desktop icon under the corner patch still opens and drags.
+    DebugDesktop {
+        /// Where it is pressed (global, top-left origin).
+        at: Point,
+        /// A double click.
+        double: bool,
+        /// Dragged to here instead of clicked.
+        to: Option<Point>,
+    },
 }
 
 fn number(word: &str) -> Result<usize, String> {
@@ -268,6 +282,16 @@ impl Command {
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
+            }
+            ["debug-desktop", x, y, rest @ ..] => {
+                let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
+                let at = Point::new(coord(x)?, coord(y)?);
+                match rest {
+                    [] => Ok(Self::DebugDesktop { at, double: false, to: None }),
+                    ["double"] => Ok(Self::DebugDesktop { at, double: true, to: None }),
+                    ["drag", x2, y2] => Ok(Self::DebugDesktop { at, double: false, to: Some(Point::new(coord(x2)?, coord(y2)?)) }),
+                    _ => Err("debug-desktop needs X Y [double | drag X2 Y2]".into()),
+                }
             }
             ["debug-space", dir, rest @ ..] if rest.is_empty() || rest == ["numpad"] => {
                 let direction = Direction::parse(dir).ok_or_else(|| format!("expected left or right, got {dir:?}"))?;
@@ -726,6 +750,19 @@ mod tests {
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),
             Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })
+        );
+        assert_eq!(
+            Command::parse("debug-desktop 2490 1380 double"),
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: true, to: None })
+        );
+        assert_eq!(
+            Command::parse("debug-desktop 2490 1380 drag 2200 1380"),
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: false, to: Some(Point::new(2200.0, 1380.0)) })
+        );
+        assert!(Command::parse("debug-desktop 2490 1380 triple").is_err());
+        assert_eq!(
+            Command::parse("debug-desktop 1 2"),
+            Ok(Command::DebugDesktop { at: Point::new(1.0, 2.0), double: false, to: None })
         );
         assert!(Command::parse("debug-click 60").is_err());
         assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));

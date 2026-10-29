@@ -118,6 +118,7 @@ use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEve
 use crate::ui::{motion_math, transition_plan};
 
 mod arrival;
+mod corner_still;
 mod dock_order;
 mod hide;
 mod raise_order;
@@ -1510,7 +1511,7 @@ impl Controller {
                         let under = items.iter().filter(|i| i.intersect(&r).is_some()).count();
                         let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(&r).is_some()));
                         if under > 0 && !was {
-                            tracing::info!(under, "corner patch: a desktop icon lies under the corner; the patch stays off while it does");
+                            tracing::info!(under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
                         }
                     }
                     p.known = Some(items);
@@ -1559,7 +1560,7 @@ impl Controller {
         if !self.settings.hide_widgets_standard && !self.patch_widgets_logged {
             self.patch_widgets_logged = true;
             tracing::info!(
-                "corner patch: widgets may show on the desktop (StandardHideWidgets off); their places are not public, so one in the corner would be covered"
+                "corner patch: widgets may show on the desktop (StandardHideWidgets off); their places are not public, so the file's picture would cover one in the corner (a still of the desktop shows it)"
             );
         }
         self.patch_items.known.clone()
@@ -1686,6 +1687,9 @@ impl Controller {
                 let ordered = step.ordered;
                 let dragging = input::left_button_down() || self.drag.is_some();
                 let items = self.patch_items(rect, now, dragging || self.wants_fast_tick());
+                // The desktop's still: the patch's picture wherever one can be taken (round
+                // desktop-still-patch), and a switch's cover where a desktop icon lies (8L3).
+                let corner = self.corner_still(rect, items.as_deref(), now);
                 let facts = PatchFacts {
                     on,
                     rect,
@@ -1703,11 +1707,9 @@ impl Controller {
                     dragging,
                     transition: self.pending.is_some(),
                     items,
+                    still: corner.still,
                 };
                 let visible = visibility(&facts);
-                // A switch's cover where a desktop icon lies: a still of the desktop (8L3), laid
-                // over the patch's picture when it holds the icons only (8L4).
-                let still = self.keep_desktop_shot(rect, facts.items.as_deref(), now);
                 let why = visible.err();
                 if why != self.patch_why {
                     if let Some(why) = why {
@@ -1719,11 +1721,24 @@ impl Controller {
                 read = Some(list);
                 // The test's forced still is compared with the patch's picture (`debug-overlay`).
                 let wanted = desktop_shot::needs_wallpaper() || cover_desktop_forced();
-                let picture = if show.is_none() && still && wanted { rect } else { None };
+                let picture = if show.is_none() && corner.picture && wanted { rect } else { None };
+                let clear = rect.is_some_and(|r| crate::engine::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
+                let source = crate::engine::patch_still::source(facts.still, clear);
                 // The icons as last read well, whatever this plan's rectangle (none read for a
                 // plan with no sliver): they are the same on every Desktop, and other Desktops'
                 // panels are checked against them (10-23: `None` here hid them all).
-                PatchPlan { show, above: show.and(above), reorder, space, picture, on: true, items: self.patch_items.known.clone() }
+                PatchPlan {
+                    show,
+                    above: show.and(above),
+                    reorder,
+                    space,
+                    picture,
+                    on: true,
+                    items: self.patch_items.known.clone(),
+                    still: show.and(source.still),
+                    hold: show.is_some() && source.hold,
+                    file: source.file,
+                }
             }
             _ => {
                 self.patch_rect = None;
@@ -1734,7 +1749,7 @@ impl Controller {
                 // The icons known stay (they do not depend on the patch); a read is due when
                 // the patch is wanted again.
                 self.patch_items.read_for = None;
-                PatchPlan { show: None, above: None, reorder, space, picture: None, on: false, items: None }
+                PatchPlan { show: None, above: None, reorder, space, picture: None, on: false, items: None, still: None, hold: false, file: false }
             }
         };
         if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {
@@ -2482,48 +2497,6 @@ impl Controller {
     fn shot_key(&self) -> Option<desktop_shot::Key> {
         let m = self.model.as_ref()?;
         Some(desktop_shot::Key::new(self.space_changes, m.main_display().frame, self.patch_items.known.as_deref()))
-    }
-
-    /// Keeps the still of the desktop in the park corner fresh while a switch's cover would
-    /// need it (round 8L3): an activation may grow (`[animation] activation_grows`, motion on,
-    /// the strip shown, `[windows] corner_patch` on), something is parked there (`rect`, the
-    /// patch's rectangle), and the patch's picture may not stand for the corner a switch
-    /// covers: a desktop icon (`items`, Finder's as last read) in the still's block around the
-    /// corner, not just under the patch (a switch's corner is the patch's grown by the
-    /// incoming windows: 10-16, the patch clear and the switch's corner on an icon), the
-    /// icons not known, or no picture of it now. Never during an overview, a Space change,
-    /// on a full-screen Space or while a switch runs, and none at rest ([`desktop_shot::rest`]:
-    /// the screen locked, the display asleep, no input and no switch for 2 min; the first
-    /// input after brings a fresh one, 8L4). Whether a still is wanted for the corner now
-    /// (the patch then keeps its picture rendered while hidden, for a still that holds the
-    /// icons only, 8L4).
-    fn keep_desktop_shot(&self, rect: Option<Rect>, items: Option<&[Rect]>, now: Instant) -> bool {
-        let config = self.store.config();
-        let anim = &config.style.animation;
-        if !(anim.activation_grows && anim.animates() && self.strip_visible && config.windows.corner_patch) {
-            return false;
-        }
-        let Some(rect) = rect else { return false };
-        if self.overview.showing().is_some() || self.space_pending || self.fullscreen || self.pending.is_some() {
-            return false;
-        }
-        let (Some(key), Some(m)) = (self.shot_key(), self.model.as_ref()) else { return false };
-        let block = desktop_shot::block(m.main_display().frame, Some(rect));
-        let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
-        if !icons && !cover_desktop_forced() && crate::ui::corner_patch::cover_ready(rect).is_ok() {
-            return false;
-        }
-        // No still while the screen is locked, the display sleeps or nobody has touched the
-        // Mac or switched for a while (8L4): the cover is only needed at a switch.
-        let moment = desktop_shot::Moment {
-            locked: self.locked,
-            asleep: objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()),
-            since_input: input::since_last_input(),
-            since_switch: self.last_switch.map(|t| now.saturating_duration_since(t)),
-        };
-        desktop_shot::keep_fresh(key, block, moment, now);
-        // At rest the patch's picture is not kept rendered either.
-        desktop_shot::rest(moment).is_none()
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
@@ -3411,6 +3384,7 @@ impl Controller {
         if event.kind == InputKind::MouseUp {
             // A desktop icon may have been dropped: Finder's icons are read again shortly.
             self.patch_items.due = Some(now + PATCH_ITEMS_RETRY);
+            self.corner_touched(event.at, now);
         }
         if matches!(event.kind, InputKind::MouseDown | InputKind::MouseUp) {
             // A press may start a window drag: the corner patch's fallback hides at once.
@@ -5254,6 +5228,7 @@ impl Controller {
             Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugDrag { .. }
+            | Command::DebugDesktop { .. }
             | Command::DebugStrip
             | Command::DebugOverlay { .. }
             | Command::DebugSpace { .. }
@@ -5325,6 +5300,9 @@ impl Controller {
         let strays: Vec<Value> =
             self.strays.iter().map(|(id, s)| json!({ "id": id, "tries": s.tries, "gave_up": s.gave_up, "user_moved": s.user_moved })).collect();
         let corner_patch = self.patch_status();
+        // The corner patch's last plan: where it shows, and from which picture (round
+        // desktop-still-patch: the still's serial, held while one comes, the file's).
+        desktop_still["patch_plan"] = json!(self.patch_sent.as_ref().map(|p| json!({ "show": p.show, "still": p.still, "hold": p.hold, "file": p.file })));
         let mut state = json!({
             "ok": true,
             "space": m.current_space(m.main_display().id).0,

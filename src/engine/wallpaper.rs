@@ -1255,6 +1255,24 @@ pub fn decide(i: &Inputs) -> Result<Decision, &'static str> {
     Ok(Decision { placement, frame, candidates, style, kind: schedule.kind(), sun })
 }
 
+/// When the frame macOS shows may next change by the clock (seconds from `i.clock`), whatever
+/// the placement and whether [`decide`] would draw it: a still of the desktop standing for the
+/// corner ([`super::patch_still`]) is taken again then. `None` for a picture with one frame,
+/// one whose schedule or style is not known, or anything that is not a picture file.
+pub fn frame_due(i: &Inputs) -> Option<f64> {
+    let path = i.path?;
+    if i.is_dir {
+        return None;
+    }
+    let view = consult(i.store, path).ok().flatten();
+    let image = i.image?;
+    let schedule = image.schedule.as_ref().ok()?;
+    let style = view.and_then(|v| v.style);
+    let model = i.solar.filter(|m| i.clock.place == Some(m.place()));
+    let (frame, _) = frame_candidates(schedule, style, i.dark, &i.clock, image.primary, image.count, model).ok()?;
+    frame.recheck_in
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1801,6 +1819,25 @@ mod tests {
         assert!(decide(&with(Some(Placement::Fit), false)).is_err());
         assert!(decide(&with(Some(Placement::Fill), false)).is_ok());
         assert!(decide(&with(Some(Placement::Stretch), false)).is_ok());
+    }
+
+    #[test]
+    fn the_next_frame_is_predicted_whatever_the_placement() {
+        // A still of the desktop stands for the corner where the file's picture cannot (Center):
+        // it is taken again when the clock says the frame changes.
+        let store = store_choices(&store_with(&[(HEIC, IMAGE, Some("dynamic"), Some("Center"), false)]));
+        let solar = facts(schedule(None, None, Some(&ventura_solar())), 5);
+        let i = inputs(HEIC_PATH, Some(&store), Some(&solar));
+        assert!(decide(&i).is_err(), "Center: the file's picture is off");
+        assert_eq!(frame_due(&i), Some(SOLAR_RECHECK));
+        let times = Schedule::TimeOfDay { light: None, dark: None, times: vec![(0.25, 0), (0.75, 1)] };
+        let h24 = facts(Ok(times), 2);
+        let due = frame_due(&Inputs { clock: clock(0.0, 0.5), ..inputs(HEIC_PATH, Some(&store), Some(&h24)) }).expect("a boundary ahead");
+        assert!((due - (0.25 * 86_400.0 + 1.0)).abs() < 1e-6, "{due}");
+        let still = facts(Ok(Schedule::Still), 1);
+        assert_eq!(frame_due(&inputs("/Pictures/beach.jpg", None, Some(&still))), None, "one frame");
+        assert_eq!(frame_due(&Inputs { is_dir: true, ..inputs("/Pictures/Holiday", None, Some(&still)) }), None, "a shuffle");
+        assert_eq!(frame_due(&inputs(HEIC_PATH, None, Some(&solar))), None, "the style unknown");
     }
 
     #[test]
