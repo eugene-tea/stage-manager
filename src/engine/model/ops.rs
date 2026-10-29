@@ -6,6 +6,7 @@ use super::{
     StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
@@ -79,7 +80,7 @@ impl Model {
                 },
                 None => (Home::Stage(self.ensure_active(space)), space),
             };
-            let restore = self.safe_restore(meta.frame, meta.display);
+            let restore = self.child_restore(&meta, parent);
             let born_parked = restore != meta.frame;
             self.windows.insert(
                 id,
@@ -248,6 +249,24 @@ impl Model {
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// A new child window's restore frame: its own frame when usable; born in the park zone
+    /// (or degenerate) beside a known parent, where such a window opens on its parent: centered
+    /// across it, just under its title bar, within reach (E8: a dialog an app opens on a parked
+    /// window lands beside it in the corner, and came back centered on the screen, away from
+    /// its window); with no parent known, centered ([`Model::safe_restore`]).
+    fn child_restore(&self, meta: &WindowMeta, parent: Option<WindowId>) -> Rect {
+        let d = *self.display(meta.display);
+        let f = meta.frame;
+        let usable = !f.is_degenerate() && !d.parks(f);
+        match parent.and_then(|p| self.windows.get(&p)) {
+            Some(p) if !usable && !f.is_degenerate() => {
+                let r = p.restore;
+                d.reach(Rect::new((r.x + (r.w - f.w) / 2.0).round(), r.y + TITLE_BAR_HEIGHT.min(r.h), f.w, f.h))
+            }
+            _ => self.safe_restore(f, meta.display),
+        }
     }
 
     /// Switches the target's Space to `target`: saves the active stage's live frames, z-order

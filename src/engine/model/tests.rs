@@ -360,6 +360,23 @@ fn a_dock_that_grows_keeps_a_window_tucked_by_the_corner_by_it() {
 // ----- children ---------------------------------------------------------------------------
 
 #[test]
+fn a_dialog_born_beside_a_parked_window_comes_back_on_it() {
+    // E8: a dialog an app opens on a parked window lands in the corner beside it; its
+    // restore frame was centered on the screen, away from its window.
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.app"), RuleAction::Current);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::New);
+    assert!(e.d.parked(w(1)));
+    let parent = e.m.window(w(1)).map(|x| x.restore).expect("managed");
+    let c = WindowMeta { frame: Rect::new(1439.0, 793.0, 300.0, 150.0), ..child(2, 10, Some(1)) };
+    e.add(c, RuleAction::Current);
+    assert!(e.d.parked(w(2)), "parked with its window");
+    e.switch(1);
+    let back = e.d.frames[&w(2)];
+    assert_eq!(back, Rect::new(parent.x + 150.0, parent.y + TITLE_BAR_HEIGHT, 300.0, 150.0), "across its window, under its title bar");
+}
+
+#[test]
 fn children_follow_their_parent_and_are_not_members() {
     let mut e = Env::new();
     e.add(meta(1, 10, "com.example.app"), RuleAction::Current);
