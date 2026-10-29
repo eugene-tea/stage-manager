@@ -254,6 +254,11 @@ pub struct Registered {
     /// it is back only once there (or once the guardian has moved it there).
     #[serde(default)]
     pub fitted: bool,
+    /// A fitted window's fitted frame, where we put it (S7): one read at neither this frame
+    /// nor its pre-fit one was moved by the user since, and is let go. `None` in files of
+    /// earlier versions (then any frame but the pre-fit one counts as still fitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fitted_at: Option<Rect>,
     /// Taken from a guardian not signed like this app (the Codex review of 10-21, R4;
     /// [`super::handoff::vet`]): nothing vouches that we parked it, so it is any app's window
     /// to the park test (no sliver, no tiny size), never fitted, and reached only while the
@@ -618,7 +623,7 @@ mod tests {
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
-            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, unvouched: false }],
+            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
             corners: vec![Corner::BottomLeft],
             hidden: vec![HiddenApp { pid: 12, bundle: "com.example.a".into() }],
         };

@@ -83,9 +83,9 @@ pub struct ParkedEntry {
     /// A child window (dialog, sheet, panel): some refuse a resize or a move; the recovery
     /// scan covers them.
     pub child: bool,
-    /// A shown window we fitted clear of the strip (not parked): `restore` is its exact
-    /// pre-fit frame.
-    pub fitted: bool,
+    /// A shown window we fitted clear of the strip (not parked): its fitted frame (where we
+    /// put it); `restore` is its exact pre-fit frame.
+    pub fitted: Option<Rect>,
 }
 
 /// Set once Quit is requested: the WM thread stops long batches and answers Quit first.
@@ -341,7 +341,8 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
             pid: e.element.pid().unwrap_or(-1),
             restore: e.restore,
             child: e.child,
-            fitted: e.fitted,
+            fitted: e.fitted.is_some(),
+            fitted_at: e.fitted,
             unvouched: false,
         })
         .collect();

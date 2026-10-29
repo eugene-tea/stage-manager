@@ -1339,7 +1339,7 @@ impl Controller {
             .safety_targets()
             .into_iter()
             .filter_map(|(id, restore)| {
-                let fitted = m.window(id).is_some_and(|w| !w.parked && w.original.is_some());
+                let fitted = m.window(id).filter(|w| !w.parked && w.original.is_some()).map(|w| w.restore);
                 match ob.window(id.0) {
                     Some(w) => {
                         let child = w.kind == WindowKind::Child;
@@ -1747,7 +1747,7 @@ impl Controller {
                         failed += 1;
                         tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
                         if let (Action::SetFrame { frame, .. }, Some(kept)) = (action, kept) {
-                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: false, ..kept });
+                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: None, ..kept });
                         }
                     }
                     None if matches!(action, Action::SetFrame { .. }) => {
@@ -1778,7 +1778,7 @@ impl Controller {
                 ob.suspect(w.pid);
                 if let Action::SetFrame { frame, .. } = action {
                     let child = w.kind == WindowKind::Child;
-                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false });
+                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: None });
                 }
             } else {
                 tracing::trace!(id, ?action, "done");
@@ -2388,7 +2388,7 @@ impl Controller {
                 Action::SetFrame { id, frame } => {
                     let w = ob.window(id.0)?;
                     let child = w.kind == WindowKind::Child;
-                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: false }))
+                    Some((id.0, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: None }))
                 }
                 _ => None,
             })

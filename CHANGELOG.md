@@ -10,7 +10,8 @@
 - A stage's windows land in the order its card shows, also with three apps.
 - Quitting Stage Manager brings every hidden window back where you left it, also a window
   whose app was slow to move it, or a dialog.
-- After a crash, hidden windows come back exactly where they were.
+- After a crash, hidden windows come back exactly where they were, and a window you moved
+  meanwhile stays where you put it.
 - Quitting Stage Manager no longer moves a window you pushed almost off the corner, nor one
   already back in place on another Desktop.
 - On a main screen of another size than before, a window brought back from the corner opens
