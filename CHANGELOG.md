@@ -11,6 +11,8 @@
 - A config file with a mistake in it no longer brings back the defaults when Stage Manager
   starts: your last working settings stay, and update checks stay off if they can't be read.
 - Whole-number settings accept a number written like `50.0`.
+- A hotkey of Shift and a key alone is refused (it would take that key from your typing);
+  hotkeys need Control, Option or Command, or a function key.
 
 ## 1.4.0 — 2026-10-23
 
