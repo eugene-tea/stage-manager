@@ -246,6 +246,14 @@ fn poll_hold() {
 
 /// Runs `f` once on the main run loop after `seconds`, in every mode (also while a menu
 /// tracks the pointer).
+/// True when a transition is drawn: animation on, and not on a full-screen Space, where the
+/// overlay cannot show (it is no full-screen auxiliary window), so it would cover nothing
+/// while the controller waited behind it (the review's U8). Not drawn, nothing is covered
+/// and the switch runs at once.
+fn draws_motion(animates: bool, fullscreen: bool) -> bool {
+    animates && !fullscreen
+}
+
 fn after(seconds: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| f());
     // SAFETY: the block runs on the main run loop only.
@@ -405,7 +413,7 @@ impl Strip {
 
     fn start_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
         self.finish_transition(false);
-        if !self.style.animation.animates() {
+        if !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
             strip_model::cover(t.id, Cover::default());
             return;
         }
@@ -887,4 +895,17 @@ impl Strip {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// U8: no transition is drawn on a full-screen Space (the overlay cannot show there).
+    #[test]
+    fn no_transition_is_drawn_on_a_full_screen_space() {
+        assert!(draws_motion(true, false));
+        assert!(!draws_motion(true, true));
+        assert!(!draws_motion(false, false));
+    }
 }
