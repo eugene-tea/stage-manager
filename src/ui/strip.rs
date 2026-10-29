@@ -1411,11 +1411,9 @@ impl Strip {
                 // could land on the Desktop being left: look again once the slide is over.
                 let epoch = self.space_epoch;
                 for seconds in REHOME_CHECKS {
-                    let check = RcBlock::new(move |_t: NonNull<NSTimer>| {
+                    let _once = motion::after(seconds, move || {
                         with_strip(|s| s.ensure_on_active_space(epoch));
                     });
-                    // SAFETY: the block runs once on the main run loop.
-                    let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds, false, &check) };
                 }
             }
         }
@@ -2211,7 +2209,7 @@ impl Strip {
             t.invalidate();
         }
         let stage = *stage;
-        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        let t = motion::after(settle, move || {
             with_strip(|s| {
                 if s.lifted_card.as_ref().is_some_and(|l| l.0 == stage && l.1.is_some()) {
                     s.lifted_card = None;
@@ -2219,8 +2217,6 @@ impl Strip {
                 }
             });
         });
-        // SAFETY: the block runs once on the main run loop.
-        let t = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(settle, false, &block) };
         if let Some(l) = self.lifted_card.as_mut() {
             l.1 = Some(t);
         }
@@ -2466,7 +2462,7 @@ impl Strip {
     /// holds it (then it is looked at again after as long, so one that a later transition
     /// took never stays pressed: R3 6). A new press of any card ends the watch.
     fn release_squeeze_later(stage: u64) {
-        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        let _once = motion::after(SQUEEZE_MAX, move || {
             with_strip(|s| {
                 if s.squeezed != Some(stage) || s.pressed.is_some() {
                     return;
@@ -2478,8 +2474,6 @@ impl Strip {
                 }
             });
         });
-        // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(SQUEEZE_MAX, false, &block) };
     }
 
     /// Draws `stage`'s card pressed (`None`: no card), easing the card that was and the one
@@ -2566,9 +2560,7 @@ impl Strip {
         }
         CATransaction::commit();
         let card = layers.card.clone();
-        let gone = RcBlock::new(move |_t: NonNull<NSTimer>| card.removeFromSuperlayer());
-        // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, false, &gone) };
+        let _once = motion::after(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, move || card.removeFromSuperlayer());
     }
 
     fn hover_at(&mut self, p: Option<Point>) {

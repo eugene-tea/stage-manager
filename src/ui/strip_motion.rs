@@ -244,8 +244,6 @@ fn poll_hold() {
     with_strip(|s| s.motion.check_hold());
 }
 
-/// Runs `f` once on the main run loop after `seconds`, in every mode (also while a menu
-/// tracks the pointer).
 /// True when a transition is drawn: animation on, and not on a full-screen Space, where the
 /// overlay cannot show (it is no full-screen auxiliary window), so it would cover nothing
 /// while the controller waited behind it (the review's U8). Not drawn, nothing is covered
@@ -254,7 +252,10 @@ fn draws_motion(animates: bool, fullscreen: bool) -> bool {
     animates && !fullscreen
 }
 
-fn after(seconds: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
+/// Runs `f` once on the main run loop after `seconds`, in every mode (also while a menu
+/// tracks the pointer or a card is dragged: the review's U10, one-shots in the default mode
+/// left a lifted card lifted and a merged card's layer behind).
+pub(super) fn after(seconds: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| f());
     // SAFETY: the block runs on the main run loop only.
     let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(seconds.max(0.0), false, &block) };
