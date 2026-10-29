@@ -226,6 +226,8 @@ pub fn stand_down(why: &str) {
         s.card_drag = None;
         s.pressed = None;
         s.squeezed = None;
+        // Snapshots from before the stand-down never bring the strip back after it.
+        WAITING.with(|w| w.borrow_mut().clear());
         let mut snapshot = s.snapshot.clone();
         snapshot.cards.clear();
         snapshot.user_visible = false;
