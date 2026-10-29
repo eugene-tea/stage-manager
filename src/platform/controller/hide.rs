@@ -314,8 +314,8 @@ impl Controller {
     /// After a batch: unhides the apps [`Self::before_batch_hides`] took back (each only while
     /// its pid still runs the bundle we hid), then records them as ours no more. The batch's
     /// focus (`focus`) of a window of such an app ran while the app was hidden, which leaves
-    /// the app inactive: it is sent again once the unhide has taken (now, when macOS was
-    /// quick; else at its notice, [`Self::app_visibility`]).
+    /// the app inactive: it is sent again once the unhide has taken, at its notice
+    /// ([`Self::app_visibility`]).
     pub(super) fn after_batch_hides(&mut self, ob: &Observer, pids: Vec<i32>, focus: Option<u32>) {
         if pids.is_empty() {
             return;
@@ -327,10 +327,10 @@ impl Controller {
                 let ok = apps::unhide(pid);
                 self.hides.unhiding.insert(pid, now);
                 tracing::info!(pid, ok, "hide: a window of an app we hid comes back; unhiding it");
+                // Sent again at the unhide's notice only: `isHidden` reads NO right after the
+                // ask, before macOS has unhidden the app, and a focus then leaves it inactive
+                // (live 10-29: refocused 1 ms after the ask, the unhide took 73 ms later).
                 self.hides.remember_refocus(pid, focus, |id| ob.window(id).map(|w| w.pid));
-                if apps::is_hidden(pid) == Some(false) {
-                    self.refocus(ob, pid);
-                }
             } else {
                 tracing::info!(pid, bundle, "hide: an app we hid is gone (or its pid is another app's); not unhidden");
             }
