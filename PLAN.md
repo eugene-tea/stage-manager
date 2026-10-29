@@ -57,8 +57,10 @@ widgets. `config.toml` holds only what macOS lacks and never duplicates a macOS 
 A parked window that never returns is the worst bug. Defence in depth:
 
 1. **Registry** of every parked window's AX element and restore frame, across Spaces.
-2. **Quit** unparks everything, then reads the window server: any allowed app's window still
-   in a park zone comes back to its registry frame, its `state.json` frame, or centered. A
+2. **Quit** unparks everything, saves the stages, then reads the window server: any allowed
+   app's window still in a park zone comes back to its registry frame, the frame the unpark
+   gave it, its `state.json` frame (a dialog only by its own id), or centered. A sliver counts
+   there only for a window known by its id (registered, managed, in `state.json`). A
    busy app's `CannotComplete` is retried (three tries 75 ms apart) on unparks only, never in
    a switch. Bounds: the leftovers check ≤ 4 s, the registry's retries ≤ 2 s. Quit is clean
    only when no managed window is in the park zone on any Space; otherwise the guardian
@@ -77,7 +79,8 @@ A parked window that never returns is the worst bug. Defence in depth:
    (never fitted, its corners ignored, reached only while listed in the park zone). A pass
    that lists nothing on screen is blind: nothing is reached until one sees again.
 6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
-   a park zone goes back to its saved frame or centered; silent apps are retried for 30 s, in
+   a park zone goes back to the frame a crashed copy registered (its parked file, by id),
+   else its saved frame (only on a main display of the saved size), else centered; silent apps are retried for 30 s, in
    slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
    past the right or bottom edge) counts as parked only for windows we manage or registered,
    or apps with a window in `state.json`.

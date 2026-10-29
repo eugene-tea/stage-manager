@@ -384,7 +384,10 @@ impl WmState {
             WmCommand::Accessibility(trusted) => {
                 if trusted && !self.scanned {
                     self.scanned = true;
-                    let (r, unanswered) = safety::recovery_scan_with("launch", &safety::ScanScope::default());
+                    // A crashed copy's parked file has the exact frames of the windows it parked
+                    // (S4): the scan uses them first, as its guardian does.
+                    let scope = safety::ScanScope { registered: safety::crashed_registered(), ..safety::ScanScope::default() };
+                    let (r, unanswered) = safety::recovery_scan_with("launch", &scope);
                     if r.restored > 0 {
                         tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
                     }
@@ -459,6 +462,7 @@ impl WmState {
                 let _ = reply.send(value);
             }
             WmCommand::Shutdown(reply) => {
+                // The unpark saves the stages before the leftovers check reads them (S1).
                 let failed = self.controller.unpark_all(&self.observer);
                 // Every window of an allowed app still in a park zone on any Space comes back
                 // now, known to this run or not (6X); one that cannot (another Space's, an app
@@ -482,7 +486,6 @@ impl WmState {
                 let ok = rest_back && taken_left == 0;
                 // Handed-over windows still away and nothing else: passed on, a warning.
                 safety::set_passed_on(rest_back && taken_left > 0);
-                self.controller.save_now();
                 self.observer.stop();
                 let _ = self.observer.take_events();
                 if let Some(rl) = CFRunLoop::current() {
@@ -728,7 +731,12 @@ impl WmState {
         }
         let pids: Vec<i32> = pass.iter().map(|q| q.pid).collect();
         let reason = if pass.iter().all(|q| q.why == Why::Launch) { "launch, apps that did not answer" } else { "display change" };
-        let scope = safety::ScanScope { pids: Some(pids.clone()), skip: safety::registry_ids(), quiet: true };
+        let scope = safety::ScanScope {
+            pids: Some(pids.clone()),
+            skip: safety::registry_ids(),
+            quiet: true,
+            registered: safety::crashed_registered(),
+        };
         let (r, unanswered) = safety::recovery_scan_with(reason, &scope);
         if r.restored > 0 {
             tracing::warn!(reason, restored = r.restored, "windows left in the park zone were brought back");
@@ -887,13 +895,13 @@ mod tests {
         // At the quit the controller is a fresh one (no model); the registry holds the held one.
         let now = safety::Ours::from_parts([held].into(), BTreeSet::new(), None);
         let ours = with_kept(Some(kept), now.clone());
-        assert_eq!(ours.known(left, None), Known::Registered, "the window the head start could not move");
-        assert_eq!(ours.known(held, None), Known::Registered, "the registry's held window");
-        assert_eq!(ours.known(managed_then, None), Known::Managed, "the old controller's window");
+        assert_eq!(ours.known(left), Known::Registered, "the window the head start could not move");
+        assert_eq!(ours.known(held), Known::Registered, "the registry's held window");
+        assert_eq!(ours.known(managed_then), Known::Managed, "the old controller's window");
 
         let fresh = with_kept(None, now);
-        assert_eq!(fresh.known(left, None), Known::Unknown, "nothing kept: only what is known then");
-        assert_eq!(fresh.known(held, None), Known::Registered);
+        assert_eq!(fresh.known(left), Known::Unknown, "nothing kept: only what is known then");
+        assert_eq!(fresh.known(held), Known::Registered);
     }
 
     /// The review of 6X2, 2: a managed window a busy app left as a sliver at the stand-down
@@ -909,7 +917,7 @@ mod tests {
 
         let displays = ScanDisplays::new(Rect::new(0.0, 0.0, 1440.0, 900.0), Rect::new(0.0, 25.0, 1440.0, 875.0), vec![], [Corner::BottomRight]);
         let sliver = Rect::new(1439.0, 820.0, 600.0, 392.0);
-        let (id, bundle) = (4242, Some("com.example.mail"));
+        let id = 4242;
         let saved = SavedWindow {
             bundle_id: "com.example.mail".into(),
             title: "Inbox".into(),
@@ -927,12 +935,12 @@ mod tests {
         // After the stand-down (state.json dropped, a fresh controller) nothing knows it: a
         // sliver of an unknown window is never brought back.
         let after = safety::Ours::default();
-        assert_eq!(after.known(id, bundle), Known::Unknown);
-        assert!(!is_stranded(sliver, &displays, after.known(id, bundle)));
+        assert_eq!(after.known(id), Known::Unknown);
+        assert!(!is_stranded(sliver, &displays, after.known(id)));
 
         // The first check knew it (the model's window, its app in state.json) and left it.
         let first = safety::Ours::from_parts(BTreeSet::new(), [id].into(), Some(state.clone()));
-        assert_eq!(first.known(id, bundle), Known::Managed);
+        assert_eq!(first.known(id), Known::Managed);
         let mut kept = Some(first.kept_for_retry(&[id]));
 
         // Two retries while the app is busy, then it answers.
@@ -940,7 +948,7 @@ mod tests {
         for round in 0..3 {
             let k = kept.take().expect("the windows left are kept until each is back");
             kept = retry_leftovers(k, safety::Ours::default, |ours| {
-                seen.push((ours.known(id, bundle), is_stranded(sliver, &displays, ours.known(id, bundle)), ours.state.clone()));
+                seen.push((ours.known(id), is_stranded(sliver, &displays, ours.known(id)), ours.state.clone()));
                 (round < 2).then(|| ours.kept_for_retry(&[id]))
             });
         }
