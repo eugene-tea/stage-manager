@@ -2852,8 +2852,20 @@ def merge_hold_check():
     start, over = center(a), center(b)
     words = [str(round(v, 1)) for p in (start, (start[0], start[1] + 12), over) for v in p] + ["hold=1200"]
     proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
-    held = [p for p in sample_strip_during(proc, after=0.0) if p.get("merge_onto") == target]
+    seen = sample_strip_during(proc, after=0.0)
+    out, _ = proc.communicate(timeout=20)
+    # 10-29, both runs: no sample held, and the drag's reply was never read. The first run's
+    # drag was refused outright (the app answered within 45 ms, nothing posted); the rerun's
+    # press landed in another app (the global monitor saw it at the pointer, 4 pt off the
+    # posted point: a hand on the mouse). The reply and the first sample say which.
+    if blocked(out, "the merge hold (the drag and what it shows)"):
+        return
+    check('"ok": true' in out or '"ok":true' in out, f"the hold drag ran ({out.strip()[:120]}{whose(out)})")
+    held = [p for p in seen if p.get("merge_onto") == target]
     if not check(len(held) >= 3, f"the card was held over the other ({len(held)} samples while held)"):
+        first = seen[0] if seen else {}
+        say(f"  (samples: {len(seen)}; the first: shown {first.get('shown')}, dragging {first.get('dragging')}, "
+            f"cards {[c.get('stage') for c in first.get('cards', [])]}, merge_onto {first.get('merge_onto')})")
         return
     last = held[-1]
     # A window's home is its stage's number.
