@@ -679,8 +679,10 @@ def drill_closed_unanswered():
     message; no destroyed notification came and the model kept it (a gray card). The fixture's
     SIGURG closes its last window and blocks its main thread; the app runs with
     STAGE_MANAGER_DROP_AX_DESTROYED (test only: destroyed notifications ignored, as a hung app
-    sends none). The window leaves the model through the window server's list alone, within
-    about two seconds, its stage and card with it, and the log says so once."""
+    sends none). The window leaves the model through the window server's list alone, its stage
+    and card with it, and the log says so once. The window server lists the window until the
+    fixture's 3 s hang ends; the sweep then needs two looks apart, about a second each (4.9 and
+    5.1 s live)."""
     say("-- drill: a window closed while its app answers nothing leaves the model and its card (8M)")
     stop_app()
     start_fixture(3, "--hang-ms", "3000")
@@ -704,7 +706,7 @@ def drill_closed_unanswered():
         x = ctl("state")
         return x if x.get("ok") and not any(w["id"] == last["id"] for w in x["windows"]) else None
 
-    after = wait_until(gone, 5, "Fixture 3 to leave the model")
+    after = wait_until(gone, 6.5, "Fixture 3 to leave the model")
     took = time.time() - t0
     listed = [w for w in fixture_windows([FIX_ID])[0] if w["id"] == last["id"]]
     if after is None and listed:
