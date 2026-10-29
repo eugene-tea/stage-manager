@@ -150,7 +150,9 @@ windows come to their places at once instead of growing.
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
 visible in the bottom-right corner (another corner if a second screen sits beyond it). To
 keep the corner as clean as Apple's, those edges ignore clicks and a patch drawn from the
-wallpaper's own file covers them, without screen recording. Dynamic pictures (by time of
+wallpaper's own file covers them, without screen recording. A hidden window that its app
+moves back onto the screen by itself goes back into the corner within about a second; the
+one you are working in (focused, or dragged out) stays and joins the stage you are in. Dynamic pictures (by time of
 day, by the sun, light and dark, Apple's own downloaded ones included) are drawn at the
 frame macOS shows. For a picture that follows the sun, neither the place (the time zone
 covers hundreds of miles) nor Apple's rule is known, so the clock is a model that starts

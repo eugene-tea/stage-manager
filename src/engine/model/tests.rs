@@ -1016,6 +1016,63 @@ fn a_parked_window_dragged_out_by_its_sliver_stays_where_it_was_dropped() {
     assert!(!e.d.parked(w(1)));
 }
 
+/// The Fable review's E7: while the login settles (no stage switch for a focus), a parked
+/// window dragged out of the corner joined nothing and stayed counted parked, so the next
+/// `match_screen` parked it again. Now it joins the active stage where it was dropped.
+#[test]
+fn a_parked_window_dropped_while_the_login_settles_joins_the_active_stage() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(3, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert!(e.d.parked(w(1)) && e.d.parked(w(3)));
+    e.m.set_restore(crate::engine::restore::Restore::after_restart("B"));
+    assert!(e.m.settling());
+    let dropped = Rect::new(400.0, 300.0, 600.0, 400.0);
+    e.d.frames.insert(w(1), dropped);
+    e.d.focused = Some(w(1));
+    let obs = e.d.obs();
+    let a = e.m.parked_window_dropped(w(1), dropped, &obs);
+    e.run(a);
+    assert_eq!(e.active_number(), 2, "no switch while the login settles");
+    assert_eq!(e.m.window(w(1)).map(|x| (x.parked, x.restore, x.home)), Some((false, dropped, Home::Stage(e.m.main_active_stage().unwrap()))), "shown in the active stage where it was dropped");
+    assert_eq!(e.members(2), vec![1, 2], "in front of the active stage, as its key");
+    assert_eq!(e.m.stage(e.m.main_active_stage().unwrap()).and_then(|s| s.key), Some(w(1)));
+    assert_eq!(e.d.frames[&w(1)], dropped, "no move: it is there already");
+    assert!(e.d.parked(w(3)), "its old stage keeps its other window parked");
+    assert_eq!(e.m.strip().len(), 1, "the old stage keeps its card");
+}
+
+/// The Fable review's L1: a parked window the window server lists mid-screen that the user
+/// focused or moved is adopted as shown in the active stage, where it is; its children come
+/// back beside it, and its stage, emptied, goes.
+#[test]
+fn a_parked_window_the_user_has_out_of_the_corner_is_adopted_into_the_active_stage() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(child(5, 10, Some(1)), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert!(e.d.parked(w(1)) && e.d.parked(w(5)));
+    let at = Rect::new(300.0, 200.0, 700.0, 500.0);
+    e.d.frames.insert(w(1), at);
+    let obs = e.d.obs();
+    let a = e.m.adopt_shown(w(1), at, &obs);
+    assert!(a.iter().all(|x| !matches!(x, Action::SetFrame { id, .. } | Action::Raise { id } if *id == w(1))), "no move, no raise of the window itself: {a:?}");
+    let active = e.m.main_active_stage();
+    e.run(a);
+    assert_eq!(e.m.main_active_stage(), active, "no switch");
+    assert_eq!(e.m.window(w(1)).map(|x| (x.parked, x.restore)), Some((false, at)));
+    assert_eq!(e.m.stages().len(), 1, "the emptied stage went");
+    assert_eq!(e.members(1), vec![1, 2]);
+    assert!(!e.d.parked(w(5)), "its child came back");
+    assert_eq!(e.m.window(w(5)).map(|x| x.home), e.m.window(w(1)).map(|x| x.home), "the child follows");
+    assert!(e.m.strip().iter().all(|c| c.gap), "no card is left");
+    // Not parked: nothing. Pinned: nothing.
+    assert!(e.m.adopt_shown(w(1), at, &obs).is_empty());
+    e.add(meta(4, 12, "com.example.c"), RuleAction::Float);
+    assert!(e.m.adopt_shown(w(4), at, &obs).is_empty());
+}
+
 // ----- reveal desktop ---------------------------------------------------------------------
 
 #[test]

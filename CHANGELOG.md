@@ -8,6 +8,12 @@
 - A card shows its front window on top, also when its stage holds two apps, and the windows
   keep that order as they grow from the card.
 - A stage's windows land in the order its card shows, also with three apps.
+- A hidden window that its app moves back onto the screen by itself goes back into the corner
+  within a second; if you are working in it, it stays and joins the stage you are in. Before,
+  it sat mid-screen with no card until you changed Desktop.
+- A hidden window that could not be moved into the corner (its app busy) is tried again, with
+  pauses, rather than counted hidden while it stays on screen.
+- A window dragged out of the corner right after you log in stays where you dropped it.
 
 ## 1.4.0 — 2026-10-23
 

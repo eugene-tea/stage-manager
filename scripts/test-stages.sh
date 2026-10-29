@@ -5,7 +5,7 @@
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 restore strip native visible
-#                                          # parity motion slots expose capture raise
+#                                          # parity motion slots expose capture raise park
 #   scripts/test-stages.sh restore m6      # restore after a restart (simulated new sessions), and
 #                                          # the same-session relaunch
 #   scripts/test-stages.sh m3 safety       # some phases
