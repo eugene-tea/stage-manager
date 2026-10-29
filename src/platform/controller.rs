@@ -5718,7 +5718,7 @@ mod tests {
         assert!(parked.contains(&3), "in the zone: its sliver is there");
         assert!(!parked.contains(&4), "seen out of the zone: shown");
         assert_eq!(parked.len(), 3);
-        let u = Unrestored::failed(ParkedEntry { element: AxElement::system_wide(), restore: Rect::new(0.0, 0.0, 10.0, 10.0), child: false, fitted: false });
+        let u = Unrestored::failed(ParkedEntry { element: AxElement::system_wide(), restore: Rect::new(0.0, 0.0, 10.0, 10.0), child: false, fitted: None });
         assert!(u.in_zone, "a restore that just failed left the window where it was");
     }
 
