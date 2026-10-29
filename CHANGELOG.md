@@ -43,6 +43,8 @@
   pauses, rather than counted hidden while it stays on screen.
 - A window you minimize with ⌘M keeps its card in the strip: it no longer rejoins the stage
   by itself a moment later.
+- With `hide_parked_apps` on, the app you switch away from is hidden as soon as the new
+  stage's app is in front, not minutes later; the stage you switch to takes the keyboard.
 - A window dragged out of the corner right after you log in stays where you dropped it.
 - While a window that did not come back from the corner is tried again, its edge stays
   covered and ignores clicks.

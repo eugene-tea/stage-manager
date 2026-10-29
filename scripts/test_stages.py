@@ -5097,7 +5097,9 @@ def phase_hide():
     5. No hide: Alpha 1 shown (with Bravo and Charlie, Bravo the active app), Alpha 2 alone in
        another stage: Alpha is never hidden, and Alpha 2 parks in the corner.
     6. The user's ⌘H: Bravo hidden by the test while its stage is active, then a switch away
-       and back: Bravo stays hidden (hide.rs: the user's hides are never adopted, never undone).
+       and back: never ours (hide.rs: the user's hides are never adopted, never unhidden by
+       us); the switch back raises Bravo's window and macOS unhides it for that, as Apple's
+       Stage Manager does when you click the stage of an app you hid.
     7. A quit with Alpha hidden: Alpha unhidden or its windows back at their frames, and the
        quit's leftovers check quiet.
     Throughout, `consistent` (a hidden app's parked window may wait at its own frame); at the
@@ -5180,6 +5182,10 @@ def hide_body():
     say("-- 5. no hide: an app with a window shown is never hidden; its window elsewhere parks")
     time.sleep(0.8)
     s = state()
+    if number_of(s, "Alpha 1") != s["active"]:
+        # Step 4 should have left Alpha's stage active; the merge below needs it so.
+        do("switch", number_of(s, "Alpha 1"))
+        s = wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage for the merge") or state()
     do("merge", number_of(s, "Bravo 1"))
     s = state()
     t = by_title(s)
@@ -5202,11 +5208,11 @@ def hide_body():
                    and "Bravo 1" in active_titles(x), "Alpha's stage parked again")
     check(s is not None, f"no hide: Alpha's two windows parked together again ({stage_titles(state())})")
 
-    say("-- 6. the user's ⌘H: never undone by a switch away and back")
+    say("-- 6. the user's ⌘H: never ours to undo; a switch back brings it, as Apple's does")
     activate("b")  # Bravo the active app, its window the stage's key
     time.sleep(1.0)
     r = running_apps([extra_pid("b")], "hide")
-    check(any(r.values()), f"⌘H: macOS took the test's hide of Bravo ({r})")
+    say(f"  the test's hide of Bravo, as macOS answered it: {r} (macOS 27 answers NO and hides anyway)")
     check(wait_hidden("b", True), "⌘H: Bravo is hidden, its stage active")
     time.sleep(1.0)
     s = state()
@@ -5217,17 +5223,22 @@ def hide_body():
     check(wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage") is not None, "⌘H: switched away to Alpha's stage")
     time.sleep(1.5)
     check(app_hidden("b") is True, "⌘H: switched away, Bravo stays hidden")
+    before_back = len(log_text())
     do("switch", number_of(state(), "Bravo 1"))
     check(wait_state(lambda x: "Bravo 1" in active_titles(x), "Bravo's stage") is not None, "⌘H: switched back to Bravo's stage")
     time.sleep(1.5)
+    # The switch back raises Bravo's window, and macOS unhides the app for that, as Apple's
+    # Stage Manager does when the stage of an app you hid is clicked (the owner, 10-29). Ours
+    # never unhides it: the log of the switch back has no unhide of Bravo.
     reads = never_hidden("b", 1.0)
-    check(bool(reads) and all(h is True for h in reads),
-          f"⌘H: switched back, our unhide never undoes the user's hide: Bravo stays hidden "
+    check(bool(reads) and all(h is False for h in reads),
+          f"⌘H: switched back, Bravo comes back with its stage, as Apple's does "
           f"({sorted(set(map(str, reads)))}; the stage's key window {key})")
+    check(f"unhiding it pid={extra_pid('b')}" not in log_text()[before_back:], "⌘H: brought back by macOS's raise, never by an unhide of ours")
     check("hidden by the user (never ours)" in log_text(), "⌘H: the app logs the hide as the user's, never ours")
     consistent("⌘H", hidden_ok=True)
     running_apps([extra_pid("b")], "unhide")
-    check(wait_hidden("b", False), "⌘H: the test's own unhide brings Bravo back")
+    check(wait_hidden("b", False), "⌘H: Bravo is not hidden at the end")
     time.sleep(1.0)
     consistent("⌘H undone", hidden_ok=True)
 

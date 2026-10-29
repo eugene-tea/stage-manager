@@ -1890,7 +1890,7 @@ impl Controller {
         } else {
             safety::registry_replace(self.parked_entries(ob));
         }
-        self.after_batch_hides(unhide);
+        self.after_batch_hides(ob, unhide, focus);
         // Two apps' raises can land in either order: the stage's windows end as asked.
         if !interrupted && batch == Batch::User {
             self.settle_raise_order(ob, &raises, focus, now);
@@ -3137,6 +3137,9 @@ impl Controller {
                 for id in waiting {
                     self.on_found(ob, id);
                 }
+                // The active app changed: an app whose every window is parked may be hidden
+                // now (`hide_parked_apps`: the app a switch left stayed active until then).
+                self.hide_pass(ob);
                 if self.echoes.is_app_echo(pid, now) {
                     tracing::debug!(pid, "activation echo of our own action ignored");
                     return;
@@ -3285,8 +3288,8 @@ impl Controller {
 
     /// An app was hidden or unhidden (NSWorkspace): `[windows] hide_parked_apps` follows
     /// its own hides and unhides.
-    fn on_app_hidden(&mut self, _ob: &mut Observer, pid: i32, hidden: bool) {
-        self.app_visibility(pid, hidden);
+    fn on_app_hidden(&mut self, ob: &mut Observer, pid: i32, hidden: bool) {
+        self.app_visibility(ob, pid, hidden);
     }
 
     /// How long before an activation a Shift press still counts (`[sugar]`).
