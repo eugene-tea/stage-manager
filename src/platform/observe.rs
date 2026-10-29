@@ -317,11 +317,21 @@ impl Observer {
 
     /// Re-reads a tracked window's frame through AX, keeping the result.
     pub fn refresh_frame(&mut self, id: u32) -> Option<Rect> {
+        self.read_frame(id).map(|(f, _)| f)
+    }
+
+    /// [`Self::refresh_frame`], saying whether the frame was read now (`true`) or is the
+    /// tracked one because the read failed (a busy app's timeout).
+    pub fn read_frame(&mut self, id: u32) -> Option<(Rect, bool)> {
         let w = self.windows.get_mut(&id)?;
-        if let Ok(f) = w.element.frame() {
-            w.frame = f;
-        }
-        Some(w.frame)
+        let fresh = match w.element.frame() {
+            Ok(f) => {
+                w.frame = f;
+                true
+            }
+            Err(_) => false,
+        };
+        Some((w.frame, fresh))
     }
 
     /// Reads the kind of a tracked window taken for a child again, keeping the answer: a

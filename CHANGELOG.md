@@ -44,6 +44,16 @@
   covered and ignores clicks.
 - A hung app no longer freezes Stage Manager while its windows are brought back.
 - When you switch apps with ⌘-Tab or the Dock, the corner is covered again at once.
+- A window left partly off the screen, or taller than it, comes back exactly where you left
+  it, not pulled onto the screen and shrunk.
+- A window pushed into the bottom-right corner comes back by the corner, not where it was
+  before.
+- A window of an app busy at a switch comes back where you last moved it.
+- A bigger Dock no longer sends a window kept by the corner to the middle of the screen.
+- A dialog opened on a window in another stage comes back on that window.
+- After a window is moved here in Mission Control, the stage it puts away comes back where
+  you left its windows.
+- A card dropped in the main area stays where you dropped it when Stage Manager quits.
 
 ## 1.4.0 — 2026-10-23
 
