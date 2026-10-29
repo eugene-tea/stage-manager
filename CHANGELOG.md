@@ -8,6 +8,10 @@
 - A card shows its front window on top, also when its stage holds two apps, and the windows
   keep that order as they grow from the card.
 - A stage's windows land in the order its card shows, also with three apps.
+- Without Screen Recording, switching stages moves plain window shapes again instead of
+  showing nothing.
+- With the strip hidden, Stage Manager no longer takes pictures of your windows in the
+  background.
 
 ## 1.4.0 — 2026-10-23
 
