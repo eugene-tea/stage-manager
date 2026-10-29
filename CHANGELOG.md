@@ -14,6 +14,9 @@
 - A hidden window that could not be moved into the corner (its app busy) is tried again, with
   pauses, rather than counted hidden while it stays on screen.
 - A window dragged out of the corner right after you log in stays where you dropped it.
+- While a window that did not come back from the corner is tried again, its edge stays
+  covered and ignores clicks.
+- A hung app no longer freezes Stage Manager while its windows are brought back.
 
 ## 1.4.0 — 2026-10-23
 

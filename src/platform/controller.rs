@@ -468,6 +468,17 @@ fn note_parked_elsewhere(elsewhere: &[&windows::CgWindow]) {
     }
 }
 
+/// The windows the sliver tap and the corner patch count parked: the model's parked windows
+/// (`model`), and the windows whose restore failed while they are still listed in the park
+/// zone (`unrestored`: id, in the zone at the last check). The model says shown the moment a
+/// restore is asked; until the retry lands the sliver is there, and a press on it reached
+/// the window at the park frame (the Fable review's W4).
+fn shield_parked(model: impl IntoIterator<Item = u32>, unrestored: impl IntoIterator<Item = (u32, bool)>) -> HashSet<u32> {
+    let mut parked: HashSet<u32> = model.into_iter().collect();
+    parked.extend(unrestored.into_iter().filter(|(_, in_zone)| *in_zone).map(|(id, _)| id));
+    parked
+}
+
 /// The bounds, as listed in `list`, of a switch's `arriving` windows macOS has raised above the
 /// corner patch, which its cover must hide ([`crate::engine::corner_patch::CoverFacts::raised`]):
 /// those waiting in the park zone (`in_zone`), and the `activated` app's wherever macOS put
@@ -694,6 +705,11 @@ struct Unrestored {
     /// Why the model let it go (the review of 8J): only a window reported destroyed while
     /// the window server still listed it may be judged a hidden tab.
     why: LetGo,
+    /// Listed in the park zone at its last check (true until checked: its restore failed,
+    /// so it is where it was): the sliver tap and the corner patch still count it parked
+    /// while so (the Fable review's W4: the model says shown the moment the restore is
+    /// asked, and a press on its sliver reached the window for the retry second).
+    in_zone: bool,
 }
 
 /// Why the model let a parked window go ([`Unrestored::why`]).
@@ -732,7 +748,7 @@ enum Forgotten {
 
 impl Unrestored {
     fn failed(entry: ParkedEntry) -> Self {
-        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false, why: LetGo::Kept }
+        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false, why: LetGo::Kept, in_zone: true }
     }
 }
 
@@ -803,11 +819,16 @@ enum UnrestoredStep {
 /// Unless it is a hidden tab (`hidden_tab`, 8J: [`crate::engine::hidden_tab`]): off screen,
 /// out of Accessibility's reach beside its group's selected tab, nothing can move it and it
 /// takes its group's frame once selected.
-fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>, hidden_tab: bool) -> UnrestoredStep {
+///
+/// A window of a `busy` app (one that did not answer lately, [`BusyApps`]) that would be
+/// moved again waits instead: a hung app's windows cost the WM thread one timeout per
+/// [`BUSY_BACKOFF`], not half a second per window every second (the Fable review's K1).
+fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>, hidden_tab: bool, busy: bool) -> UnrestoredStep {
     match (model_parked, listed) {
         (Some(true), _) | (_, None) => UnrestoredStep::Done,
         (None, Some((false, true))) if hidden_tab => UnrestoredStep::Done,
         (_, Some((true, false))) => UnrestoredStep::Done,
+        (_, Some((true, true))) if busy => UnrestoredStep::Wait,
         (_, Some((true, true))) => UnrestoredStep::Retry,
         (Some(false), Some((false, _))) | (None, Some((false, true))) => UnrestoredStep::Wait,
         (None, Some((false, false))) => UnrestoredStep::Done,
@@ -1364,8 +1385,11 @@ impl Controller {
         let Some(m) = &self.model else { return };
         let on = self.store.config().windows.inert_slivers && self.overview.showing().is_none();
         let dock = if on { self.dock_bar.as_ref().map(|(_, b)| b.clone()).unwrap_or_default() } else { sliver::DockBar::default() };
-        let mut parked: HashSet<u32> =
-            if on { m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect() } else { HashSet::new() };
+        let mut parked: HashSet<u32> = if on {
+            shield_parked(m.windows().filter(|w| w.parked).map(|w| w.meta.id.0), self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)))
+        } else {
+            HashSet::new()
+        };
         if on && let Some(p) = &self.pending {
             parked.extend(p.entries.keys().copied());
         }
@@ -1536,7 +1560,12 @@ impl Controller {
                 // This Desktop's parked windows only: another Desktop's listed on screen means
                 // it slides in (or out) before the Space change's notice.
                 let here = m.current_space(main.id);
-                let model_parked: HashSet<u32> = m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0).collect();
+                // With the windows whose restore failed while they are still listed in the
+                // zone (W4): their slivers are there, whatever the model says.
+                let model_parked: HashSet<u32> = shield_parked(
+                    m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0),
+                    self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
+                );
                 let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
                 let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
                 // A Desktop slides before the Space change's notice (10-23: the parked windows
@@ -2061,12 +2090,16 @@ impl Controller {
                     tabs.get_or_insert_with(|| hidden_tabs::Tabs::new(&list)).is_hidden_tab(w, candidate, |i| shown.contains(&i))
                 })
             });
+            let pid = ob.window(id).map(|w| w.pid).or_else(|| self.unrestored.get(&id).and_then(|u| u.entry.element.pid().ok()));
+            // A busy app is left alone between checks, never at quit (its own budget, K1).
+            let busy = !force && pid.is_some_and(|p| self.busy_apps.borrow().busy(p, now));
             let step = if force && !hidden_tab && (model_parked == Some(false) || forgotten_parked) && listed.is_some() {
                 UnrestoredStep::Retry
             } else {
-                unrestored_step(model_parked, listed, hidden_tab)
+                unrestored_step(model_parked, listed, hidden_tab, busy)
             };
             let Some(u) = self.unrestored.get_mut(&id) else { continue };
+            u.in_zone = listed.is_some_and(|(_, zone)| zone);
             // A forgotten window is quiet until it is seen in the zone a second time (L6).
             let quiet = u.forgotten == Forgotten::Once;
             let (forgotten, warn) = u.forgotten.after(step);
@@ -2118,6 +2151,14 @@ impl Controller {
                             }
                             Err(why) => tracing::debug!(id, "a stale element's lookup: {why}"),
                         }
+                    }
+                    if let Some(pid) = pid {
+                        let reply = match &result {
+                            Ok(()) => Reply::No,
+                            Err(e) if *e == AxError::CANNOT_COMPLETE => Reply::TimedOut,
+                            Err(_) => Reply::CannotTell,
+                        };
+                        self.busy_apps.borrow_mut().note(pid, reply, now);
                     }
                     match result {
                         Ok(()) => {
@@ -5538,18 +5579,39 @@ mod tests {
         assert!(!runs_after_quit(&Action::StateChanged));
     }
 
+    /// W4: a window whose restore failed is counted parked by the sliver tap and the patch
+    /// while it is still listed in the park zone, though the model says shown.
+    #[test]
+    fn an_unrestored_window_still_in_the_zone_counts_as_parked_for_the_shield() {
+        let parked = shield_parked([1, 2], [(3, true), (4, false)]);
+        assert!(parked.contains(&3), "in the zone: its sliver is there");
+        assert!(!parked.contains(&4), "seen out of the zone: shown");
+        assert_eq!(parked.len(), 3);
+        let u = Unrestored::failed(ParkedEntry { element: AxElement::system_wide(), restore: Rect::new(0.0, 0.0, 10.0, 10.0), child: false, fitted: false });
+        assert!(u.in_zone, "a restore that just failed left the window where it was");
+    }
+
+    /// K1: a busy app's unrestored window is not moved again while the app is left alone.
+    #[test]
+    fn a_busy_app_s_unrestored_window_waits_for_the_backoff() {
+        use UnrestoredStep::*;
+        assert_eq!(unrestored_step(Some(false), Some((true, true)), false, true), Wait, "busy: not asked");
+        assert_eq!(unrestored_step(None, Some((true, true)), false, true), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((true, false)), false, true), Done, "seen back: done, busy or not");
+    }
+
     #[test]
     fn a_failed_restore_stays_registered_until_the_window_is_seen_back() {
         use UnrestoredStep::*;
         // Still in the park zone on screen: moved again, never dropped.
-        assert_eq!(unrestored_step(Some(false), Some((true, true)), false), Retry);
+        assert_eq!(unrestored_step(Some(false), Some((true, true)), false, false), Retry);
         // Off screen (another Space, app hidden): kept, waiting.
-        assert_eq!(unrestored_step(Some(false), Some((false, true)), false), Wait);
-        assert_eq!(unrestored_step(Some(false), Some((false, false)), false), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((false, true)), false, false), Wait);
+        assert_eq!(unrestored_step(Some(false), Some((false, false)), false, false), Wait);
         // Seen back out of the zone, closed, or parked again by the model: done.
-        assert_eq!(unrestored_step(Some(false), Some((true, false)), false), Done);
-        assert_eq!(unrestored_step(Some(false), None, false), Done);
-        assert_eq!(unrestored_step(Some(true), Some((true, true)), false), Done);
+        assert_eq!(unrestored_step(Some(false), Some((true, false)), false, false), Done);
+        assert_eq!(unrestored_step(Some(false), None, false, false), Done);
+        assert_eq!(unrestored_step(Some(true), Some((true, true)), false, false), Done);
     }
 
     /// 6X: a parked window the model forgot (it left its Space, its element was reported
@@ -5557,11 +5619,11 @@ mod tests {
     #[test]
     fn a_parked_window_the_model_forgot_stays_registered_until_it_is_back() {
         use UnrestoredStep::*;
-        assert_eq!(unrestored_step(None, Some((true, true)), false), Retry, "on screen in the corner: moved back");
-        assert_eq!(unrestored_step(None, Some((false, true)), false), Wait, "another Space's corner: waits for it");
-        assert_eq!(unrestored_step(None, Some((true, false)), false), Done, "seen back");
-        assert_eq!(unrestored_step(None, Some((false, false)), false), Done, "out of the zone elsewhere");
-        assert_eq!(unrestored_step(None, None, false), Done, "closed");
+        assert_eq!(unrestored_step(None, Some((true, true)), false, false), Retry, "on screen in the corner: moved back");
+        assert_eq!(unrestored_step(None, Some((false, true)), false, false), Wait, "another Space's corner: waits for it");
+        assert_eq!(unrestored_step(None, Some((true, false)), false, false), Done, "seen back");
+        assert_eq!(unrestored_step(None, Some((false, false)), false, false), Done, "out of the zone elsewhere");
+        assert_eq!(unrestored_step(None, None, false, false), Done, "closed");
     }
 
     /// 8J: a parked window the model let go that is a hidden tab (off screen in the park
@@ -5570,9 +5632,9 @@ mod tests {
     #[test]
     fn a_forgotten_hidden_tab_is_let_go() {
         use UnrestoredStep::*;
-        assert_eq!(unrestored_step(None, Some((false, true)), true), Done, "a hidden tab at the park spot");
-        assert_eq!(unrestored_step(None, Some((true, true)), true), Retry, "on screen: no hidden tab");
-        assert_eq!(unrestored_step(Some(false), Some((false, true)), true), Wait, "the model has it: a real window");
+        assert_eq!(unrestored_step(None, Some((false, true)), true, false), Done, "a hidden tab at the park spot");
+        assert_eq!(unrestored_step(None, Some((true, true)), true, false), Retry, "on screen: no hidden tab");
+        assert_eq!(unrestored_step(Some(false), Some((false, true)), true, false), Wait, "the model has it: a real window");
     }
 
     /// The review of 8J, High: only a window the model let go as reported destroyed is ever
@@ -5593,7 +5655,7 @@ mod tests {
         assert!(!let_go_as_tab(None, Some((false, false)), LetGo::Destroyed, |_| true), "out of the zone");
         // The left-Space window: no hidden tab, so it waits off screen, as before.
         let tab = let_go_as_tab(None, zone_off, LetGo::Other, |_| true);
-        assert_eq!(unrestored_step(None, zone_off, tab), Wait);
+        assert_eq!(unrestored_step(None, zone_off, tab, false), Wait);
         assert_eq!(LetGo::Other.candidate(), Candidate::Real);
         assert_eq!(LetGo::Destroyed.candidate(), Candidate::Destroyed);
     }
