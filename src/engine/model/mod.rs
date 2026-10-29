@@ -4,7 +4,8 @@
 //! ([`WindowMeta`], [`Observation`]) and executes the [`Action`]s each operation returns, in
 //! order. One invariant rules everything: **every window the model parks stays recorded with a
 //! safe restore frame until it is shown again**, and whenever the model forgets a parked window
-//! it first emits a [`Action::SetFrame`] that brings it back. [`Model::unpark_all`] therefore
+//! that still exists it first emits a [`Action::SetFrame`] that brings it back (a destroyed
+//! one, [`Model::remove_window`], has nothing to bring back). [`Model::unpark_all`] therefore
 //! always covers every parked window.
 //!
 //! **Spaces.** Every Space (Desktop) has its own Stage Manager, as Apple's does: its own

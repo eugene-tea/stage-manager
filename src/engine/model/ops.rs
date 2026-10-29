@@ -214,9 +214,14 @@ impl Model {
         actions
     }
 
-    /// A window is gone. It leaves its stage; its children are forgotten too (any that were
-    /// parked are first restored, in case they outlive it). An inactive stage left with no
-    /// standard window disappears; the active stage may become empty.
+    /// A window is gone (destroyed). It leaves its stage; its children are forgotten too (any
+    /// that were parked are first restored, in case they outlive it). An inactive stage left
+    /// with no standard window disappears; the active stage may become empty.
+    ///
+    /// The window itself is not restored even when parked: it no longer exists, and a frame
+    /// sent to it would only fail and be retried as a window left in the corner. A window that
+    /// still exists and leaves the model goes through [`Model::window_left_space`], which
+    /// brings it back first (the module's invariant; Fable E9).
     pub fn remove_window(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(w) = self.windows.get(&id) else {
