@@ -4885,9 +4885,9 @@ def phase_park():
     t = by_title(s)
     w1, w2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
     do("new", w2)
-    s = state()
+    s = wait_state(lambda x: [w["id"] for w in x["windows"] if w["parked"]] == [w1], "Fixture 1 parked") or state()
     parked = [w for w in s["windows"] if w["parked"]]
-    if not check([w["id"] for w in parked] == [w1], "Fixture 1 is parked (stage 1), Fixture 2's new stage active"):
+    if not check([w["id"] for w in parked] == [w1], f"Fixture 1 is parked (stage 1), Fixture 2's new stage active (parked: {[w['id'] for w in parked]}, w1 {w1})"):
         return
     restore = parked[0]["restore"]
     fixture = pids_of(FIX_EXE)
