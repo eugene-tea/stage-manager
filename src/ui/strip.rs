@@ -380,7 +380,10 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.mouse_down(p));
+            // Emit outside the borrow, as on release: the sink may call back into the strip.
+            if let Some(Some(e)) = with_strip(|s| s.mouse_down(p)) {
+                strip_model::emit(e);
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -2238,7 +2241,8 @@ impl Strip {
         l.icons.iter().find(|(_, r)| r.translate(l.frame.x + d.x, l.frame.y + d.y).contains(p)).map(|(pid, _)| *pid)
     }
 
-    fn mouse_down(&mut self, p: Point) {
+    /// A press at `p` (view coordinates); the event to send once the strip is let go.
+    fn mouse_down(&mut self, p: Point) -> Option<StripEvent> {
         // A card a transition is still landing in is not drawn yet: a press there is nothing
         // (it would switch straight back; review R1-ui 3).
         self.pressed = if self.pane.shown { self.card_at(p).filter(|s| !self.motion.holds(*s)) } else { None };
@@ -2247,12 +2251,12 @@ impl Strip {
             // A click is likely: fresh snapshots of what leaves and what arrives, and the
             // engine's look at the windows taken now rather than at the release.
             self.prefetch(Some(stage));
-            strip_model::emit(StripEvent::CardPressed { stage });
             // Apple's card answers the press at once: it eases back from its hover growth to
             // a little under its resting size.
             self.squeeze(Some(stage));
         }
         tracing::trace!(x = p.x, y = p.y, card = ?self.pressed, "strip mouse down");
+        self.pressed.map(|stage| StripEvent::CardPressed { stage })
     }
 
     /// A possible drag of `stage`'s card from the current pointer.
