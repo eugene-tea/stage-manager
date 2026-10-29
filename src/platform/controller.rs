@@ -1037,6 +1037,12 @@ pub fn fit_options(visible: Rect, strip_visible: bool, settings: &NativeSettings
     }
 }
 
+/// The windows of `list` by id, at their bounds (top-left global points, as AX frames are),
+/// on screen or not: `ctl state`'s live frames.
+fn described_bounds(list: &[windows::CgWindow]) -> HashMap<u32, Rect> {
+    list.iter().map(|w| (w.id, w.bounds)).collect()
+}
+
 /// The windows the strip keeps full-size snapshots of for the next switch (`windows`): none
 /// while the user has hidden the strip, when no switch animates ([`Controller`]'s animated
 /// batch runs at once then) and a snapshot could never be used (the review's U1: a capture of
@@ -4829,7 +4835,7 @@ impl Controller {
             return json!({ "ok": false, "error": "Accessibility is off" });
         }
         match cmd {
-            Command::State => self.state_json(ob),
+            Command::State => self.state_json(),
             // The guardian of a crashed copy: which of its waiting windows are ours now.
             Command::Adopted(ids) => {
                 let adopted: Vec<u32> =
@@ -4951,7 +4957,7 @@ impl Controller {
     }
 
     /// Stages, windows, frames and parked flags as JSON (`ctl state`).
-    pub fn state_json(&self, ob: &Observer) -> Value {
+    pub fn state_json(&self) -> Value {
         let Some(m) = &self.model else {
             return json!({ "ok": false, "error": not_managing() });
         };
@@ -4976,10 +4982,15 @@ impl Controller {
                 })
             })
             .collect();
+        // Each window's frame as the window server describes it now, in one query: never an
+        // Accessibility round trip per window on the WM thread, which scripts polling this
+        // during a switch held up behind a busy app (the review's K8).
+        let ids: Vec<u32> = m.windows().map(|w| w.meta.id.0).collect();
+        let listed = described_bounds(&windows::describe(&ids));
         let windows: Vec<Value> = m
             .windows()
             .map(|w| {
-                let live = ob.window(w.meta.id.0).and_then(|t| t.element.frame().ok());
+                let live = listed.get(&w.meta.id.0);
                 json!({
                     "id": w.meta.id.0,
                     "pid": w.meta.pid,
@@ -5305,6 +5316,18 @@ mod tests {
 
     /// The review's U1: with the strip hidden no switch animates, so the strip is asked to
     /// keep no full-size snapshot (nothing is captured); shown, every window is kept ready.
+    /// K8: `ctl state`'s live frames are the window server's, for every window it describes,
+    /// on screen (a shown window) or not (one on another Desktop).
+    #[test]
+    fn ctl_state_reads_live_frames_from_the_window_server() {
+        let on = listed(3, 7, Rect::new(10.0, 40.0, 800.0, 600.0));
+        let off = windows::CgWindow { onscreen: false, ..listed(4, 7, Rect::new(1500.0, 900.0, 640.0, 480.0)) };
+        let live = described_bounds(&[on, off]);
+        assert_eq!(live.get(&3), Some(&Rect::new(10.0, 40.0, 800.0, 600.0)));
+        assert_eq!(live.get(&4), Some(&Rect::new(1500.0, 900.0, 640.0, 480.0)));
+        assert_eq!(live.get(&5), None);
+    }
+
     #[test]
     fn a_hidden_strip_keeps_no_snapshots_ready() {
         let w = |id| CardWindow { id, pid: 7, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
