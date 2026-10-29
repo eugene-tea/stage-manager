@@ -53,7 +53,7 @@ impl Controller {
             overview,
             space_pending: self.space_pending,
             slide: self.patch_slide_since.is_some(),
-            fullscreen: self.fullscreen,
+            fullscreen: self.phase.fullscreen(),
             since_space_change: self.space_changed_at.map(|t| now.saturating_duration_since(t)),
             since_dropped: desktop_shot::since_dropped(now),
         });
@@ -68,7 +68,7 @@ impl Controller {
         // As before this round: the file's picture is kept rendered for a cover's still of the
         // icons only, never during an overview, a Space change, a full-screen Space or a
         // switch, nor at rest.
-        let busy = overview || self.space_pending || self.fullscreen || self.pending.is_some();
+        let busy = overview || self.space_pending || self.phase.fullscreen() || self.pending.is_some();
         let picture = cover && !busy && desktop_shot::rest(moment, false).is_none();
         CornerStill { still, picture }
     }

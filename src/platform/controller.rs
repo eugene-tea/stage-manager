@@ -1712,7 +1712,7 @@ impl Controller {
                         || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
                     ordered,
                     can_order: possible,
-                    fullscreen: self.fullscreen,
+                    fullscreen: self.phase.fullscreen(),
                     // The same filter as the order's check (`Listed::counts`, the rectangle
                     // tested by `visibility`).
                     shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
@@ -2565,7 +2565,7 @@ impl Controller {
             overview: self.overview.showing().is_some()
                 || self.space_pending
                 || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
-            fullscreen: self.fullscreen,
+            fullscreen: self.phase.fullscreen(),
             slivers,
             raised,
             display: display.frame,
@@ -2831,7 +2831,7 @@ impl Controller {
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
             space: space.0,
-            fullscreen: current && self.fullscreen,
+            fullscreen: current && self.phase.fullscreen(),
             away: false,
             quiet: m.settling(),
         });
@@ -3612,11 +3612,11 @@ impl Controller {
             tracing::info!("launched on a full-screen app's Space: no strip until a Desktop shows");
         }
         let hints = launch_hints(&list);
-        let actions = if self.fullscreen { Vec::new() } else { model.arrive(main.id, &live, &[], &hints) };
+        let actions = if self.phase.fullscreen() { Vec::new() } else { model.arrive(main.id, &live, &[], &hints) };
         if first_start {
             tracing::info!(stages = model.stages().len(), "first start: one stage per app, as Apple's Stage Manager does");
         }
-        if self.fullscreen {
+        if self.phase.fullscreen() {
             self.unplaced.extend(live.iter().map(|m| m.id.0));
         }
         self.model = Some(model);
@@ -3624,7 +3624,7 @@ impl Controller {
         self.refresh_dock_order(Instant::now(), ob.last_launch());
         self.announce = config.style.reveal.launch_reveal;
         self.execute(ob, actions);
-        if !self.fullscreen {
+        if !self.phase.fullscreen() {
             self.pin_floats(ob, &live);
         }
         self.present();
@@ -3654,7 +3654,7 @@ impl Controller {
     /// No stage changes now: a full-screen app's Space shows, or a Space change waits for a
     /// full-screen animation to settle.
     fn frozen(&self) -> bool {
-        self.fullscreen || self.space_pending || self.locked
+        self.phase.fullscreen() || self.space_pending || self.locked
     }
 
     /// Why stage commands are refused now, if they are ([`Self::frozen`]).
@@ -3663,7 +3663,7 @@ impl Controller {
             Some("the screen is locked")
         } else if self.space_pending {
             Some("a Space change is settling")
-        } else if self.fullscreen {
+        } else if self.phase.fullscreen() {
             Some("a full-screen app's Space shows")
         } else {
             None
@@ -3907,13 +3907,13 @@ impl Controller {
             }
             Verdict::FullScreen => {
                 self.space_pending = false;
-                self.phase.feed(phase::Event::FullScreenCame, now);
                 self.undo_ahead(ob, "a full-screen app's Space came");
-                if !self.fullscreen {
+                if !self.phase.fullscreen() {
                     counters::bump(Count::FullScreen);
                     tracing::info!("Space changed: a full-screen app's Space (no strip)");
                 }
                 self.fullscreen = true;
+                self.phase.feed(phase::Event::FullScreenCame, now);
                 self.present();
             }
             Verdict::Desktop => {
@@ -4217,7 +4217,7 @@ impl Controller {
         if self.look_for_overview(&list, main.frame, now) {
             return;
         }
-        if !self.fullscreen
+        if !self.phase.fullscreen()
             && self.model.as_ref().is_some_and(|m| m.held_focus_acts_now(self.focus_replay.peek(now)))
         {
             if input::left_button_down() {
@@ -4236,17 +4236,17 @@ impl Controller {
         // handled as a Space change; during a full-screen animation nothing is counted.
         match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
             Verdict::Wait => return,
-            Verdict::FullScreen if !self.fullscreen => {
+            Verdict::FullScreen if !self.phase.fullscreen() => {
                 self.on_space_changed(ob);
                 return;
             }
-            Verdict::Desktop if self.fullscreen => {
+            Verdict::Desktop if self.phase.fullscreen() => {
                 self.on_space_changed(ob);
                 return;
             }
             _ => {}
         }
-        if self.fullscreen {
+        if self.phase.fullscreen() {
             return;
         }
         let shown = on_screen(&list);
@@ -5197,7 +5197,7 @@ impl Controller {
                 Some(m) => json!({
                     "ok": true,
                     "space": m.current_space(m.main_display().id).0,
-                    "fullscreen": self.fullscreen,
+                    "fullscreen": self.phase.fullscreen(),
                     "settling": self.space_pending,
                     "locked": self.locked,
                     "changes": self.space_changes,
@@ -5376,7 +5376,7 @@ impl Controller {
         let mut state = json!({
             "ok": true,
             "space": m.current_space(m.main_display().id).0,
-            "fullscreen": self.fullscreen,
+            "fullscreen": self.phase.fullscreen(),
             "unplaced": self.unplaced.iter().collect::<Vec<_>>(),
             "active": active.and_then(number),
             // The cards drawn (the active stage's empty slot left out: `strip_gap` is its slot).
@@ -5462,7 +5462,7 @@ impl Controller {
             })
             .collect();
         json!({
-            "fullscreen": self.fullscreen,
+            "fullscreen": self.phase.fullscreen(),
             "settling": self.space_pending,
             "locked": self.locked,
             "last_arrival": {
