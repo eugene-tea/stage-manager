@@ -980,20 +980,26 @@ impl Controller {
         true
     }
 
-    /// True while the WM thread's fast tick has work: an arrangement's moves to check.
+    /// True while the WM thread's fast tick has work: an arrangement's moves to check, a held
+    /// activation, the corner patch after a focus or through Show Desktop.
     pub fn wants_fast_tick(&self) -> bool {
-        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(Instant::now())
+        let now = Instant::now();
+        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(now) || self.reveal_fast(now)
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
     /// when due ([`Self::check_arrangement`]; after its Desktop's arrival,
-    /// [`Self::arrival_round`]), and an activation held for a Desktop slide looked at
-    /// ([`Self::slide_hold_step`]).
+    /// [`Self::arrival_round`]), an activation held for a Desktop slide looked at
+    /// ([`Self::slide_hold_step`]), and the corner patch planned while Show Desktop is up
+    /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
-        // The corner patch after a focus or an activation (round park-reconcile, L2).
-        self.patch_fast_step(now);
+        // The corner patch after a focus or an activation (round park-reconcile, L2), else
+        // through Show Desktop (round show-desktop-patch): one plan a fast tick at most.
+        if !self.patch_fast_step(now) && self.reveal_fast(now) {
+            self.update_patch();
+        }
         if self.model.is_none() {
             self.verify = None;
         } else if let Some(v) = self.verify.as_ref().filter(|v| v.polling && now >= v.next) {

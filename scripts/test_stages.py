@@ -3265,7 +3265,8 @@ def phase_still():
     double click on the icon through the click-through patch opens the volume's Finder window
     (closed again); a drag takes the icon out of the corner and a new still follows, the patch
     still shown. The volume is ejected whatever happens. No picture is saved: the still holds
-    the real desktop. With "Click wallpaper to reveal desktop" at Always (macOS's default) the
+    the real desktop. First, Show Desktop by a wallpaper click and a click back, the patch
+    drawn from the still through it and its close (`show_desktop_close`). With "Click wallpaper to reveal desktop" at Always (macOS's default) the
     click and the drag run only with SM_STILL_CLICK=1: macOS's own reveal should leave a click
     on an icon alone, but would move every window aside if it did not. Skipped when Finder shows no disk image on the desktop (Finder Settings,
     General, External disks) or will not place it under the corner (Sort By, Snap to Grid)."""
@@ -3286,6 +3287,12 @@ def phase_still():
                                 and patch_plan(x).get("show") and patch_plan(x).get("still") is not None else None)(state()),
                        20, "the corner patch drawn from a still of the desktop")
     if not check(ready is not None, f"still: the patch is drawn from a still ({(state().get('desktop_still') or {})})"):
+        return
+    show_desktop_close("still", still=True)
+    ready = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("patch") == "ready"
+                                and patch_plan(x).get("show") and patch_plan(x).get("still") is not None else None)(state()),
+                       20, "the corner patch drawn from a still of the desktop, after Show Desktop")
+    if not check(ready is not None, f"still: the patch is drawn from a still again ({(state().get('desktop_still') or {})})"):
         return
     rect = patch_plan(ready)["show"]
     display = ready["display"]["frame"]
@@ -4098,7 +4105,182 @@ def show_desktop_round():
     consistent(f"after {label}")
 
 
+# Round show-desktop-patch: looks at the close of Show Desktop (one look every 20 ms).
+WINDOW_MANAGER_ID = "com.apple.WindowManager"
+SHOW_DESKTOP_LAYER = 18
+# With the file's picture the patch hides through Show Desktop and comes back at the first
+# look that sees the windows slide back (the fast tick), drawn on the main thread a frame
+# later: at most this many looks may show a sliver bare from then on.
+CLOSE_LOOKS = 2
+
+
+def desktop_click_point(s, avoid):
+    """Clicks a point of the main display where only the desktop lies (`ctl debug-desktop`
+    refuses anywhere else, posting nothing): right of the strip column, clear of every managed
+    window's frame, the rectangles in `avoid` and the park corner, by 20 pt. Returns the point
+    clicked, or None."""
+    vis = s["display"]["visible"]
+    frames = avoid + [w["restore"] for w in s["windows"]]
+
+    def clear(x, y):
+        return not any(f["x"] - 20 <= x <= f["x"] + f["w"] + 20 and f["y"] - 20 <= y <= f["y"] + f["h"] + 20
+                       for f in frames)
+
+    x0 = vis["x"] + s["strip_width"] + 80
+    for y in range(int(vis["y"] + 120), int(vis["y"] + vis["h"] - 360), 140):
+        for x in range(int(vis["x"] + vis["w"] - 400), int(x0), -160):
+            if clear(x, y) and ctl("debug-desktop", x, y).get("ok"):
+                return x, y
+    return None
+
+
+def show_desktop_close(label, still):
+    """Round show-desktop-patch (the owner's report of 10-29: with "Click wallpaper to reveal
+    desktop: Always", the click that brings the windows back showed the parked windows'
+    slivers for a moment). macOS's Show Desktop by a wallpaper click (`ctl debug-desktop`),
+    then a click back, the window server sampled every 20 ms throughout (the fixtures, our
+    windows, WindowManager's). Reports where macOS lists our patch panel while Show Desktop
+    shows (left in place, slid off the display, pushed aside, not listed; the app's own log
+    says it too) and where the parked fixtures are then, and the close's timing. Checks that
+    no parked fixture window shows on the display without a window in front covering it (our
+    patch): with a still of the desktop (`still`), at no look from the opening click on while
+    macOS leaves the panel in place or slides it off, else from the close on; with the file's
+    picture, at no more than CLOSE_LOOKS looks from the close's start (the first look listing
+    a fixture window moving after the click back). Skipped with Apple's Stage Manager on,
+    with "Click wallpaper to reveal desktop: Only in Stage Manager", when the patch does not
+    show first, or when no point shows only the desktop."""
+    what = f"{label}: Show Desktop's close"
+    say(f"\n  -- {what} (a wallpaper click and a click back; looks every 20 ms) --")
+    if wm_default("GloballyEnabled") == "1":
+        skip(what, "Apple's Stage Manager is on")
+        return
+    if wm_default("EnableStandardClickToShowDesktop") == "0":
+        skip(what, "\"Click wallpaper to reveal desktop\" is Only in Stage Manager: our own reveal, no Show Desktop")
+        return
+
+    def patch_shown(x):
+        plan = patch_plan(x)
+        return x if plan.get("show") and (plan.get("still") is not None or not still) else None
+
+    s = wait_until(lambda: patch_shown(state()), 10, "the corner patch shown")
+    if s is None:
+        skip(what, f"the corner patch does not show ({patch_plan(state())}, {state().get('corner_patch')})")
+        return
+    rect = patch_plan(s)["show"]
+    display = s["display"]["frame"]
+    parked = {w["id"] for w in s["windows"] if w["parked"]}
+    if not parked:
+        skip(what, "no fixture window parked")
+        return
+    pid = app_pid()
+    icons = (s.get("desktop_still") or {}).get("icons") or []
+    mark = len(log_text())
+    sampler = start_sampler([FIX_ID, OUR_ID, WINDOW_MANAGER_ID], 9000)
+    time.sleep(0.4)
+    t_open = time.time()
+    pt = desktop_click_point(s, icons + [rect])
+    if pt is None:
+        sampler.kill()
+        skip(what, "no point shows only the desktop")
+        return
+    up = wait_until(lambda: ctl("space").get("overview") == "Show Desktop", 3, "Show Desktop")
+    if up is None:
+        sampler.kill()
+        skip(what, f"macOS showed no Show Desktop at the click at {pt[0]:.0f},{pt[1]:.0f}")
+        return
+    time.sleep(1.2)
+    during = state()
+    t_back = time.time()
+    r = ctl("debug-desktop", *pt)
+    how = "a click back"
+    if not r.get("ok"):
+        how = f"the Show Desktop shortcut (the click back was refused: {r.get('error')})"
+        ctl("debug-expose", "show-desktop")
+    out = sampler_out(sampler, what)
+    back = wait_until(lambda: ctl("space").get("overview") is None, 4, "Show Desktop to close")
+    check(back is not None, f"{what}: {how} closes it")
+    if out is None:
+        return
+    samples = out.get("samples") or []
+
+    def ours(x):
+        """Our patch panel in look `x`: our layer-0 window in the park corner's quarter."""
+        return [w for w in x["windows"] if w["pid"] == pid and w["layer"] == 0 and w["onscreen"]
+                and w["bounds"]["x"] >= display["x"] + display["w"] / 2 and w["bounds"]["y"] >= display["y"] + display["h"] / 2
+                and w["bounds"]["w"] <= 400 and w["bounds"]["h"] <= 400]
+
+    def sd_listed(x):
+        return any(w["layer"] == SHOW_DESKTOP_LAYER and w["onscreen"] and w["pid"] != pid
+                   and contains(w["bounds"], display) for w in x["windows"])
+
+    def bare(x):
+        """The parked fixture windows showing on the display with nothing in front covering
+        them in look `x`: (id, the part shown)."""
+        layer0 = [w for w in x["windows"] if w["layer"] == 0 and w["onscreen"] and w.get("alpha", 1) > 0 and w["z"] is not None]
+        found = []
+        for w in layer0:
+            if w["id"] not in parked:
+                continue
+            vis = intersect(w["bounds"], display)
+            if vis and not any(c["z"] < w["z"] and contains(c["bounds"], vis) for c in layer0 if c is not w):
+                found.append((w["id"], vis))
+        return found
+
+    # Where macOS lists the panel while Show Desktop shows, against where it was before.
+    before = [x for x in samples if x["t"] < t_open]
+    placed = next((ours(x)[0]["bounds"] for x in reversed(before) if ours(x)), None)
+    sd = [x for x in samples if t_open <= x["t"] < t_back and sd_listed(x)]
+    places = []
+    for x in sd:
+        o = ours(x)
+        p = ("not listed" if not o else "in place" if placed and close(o[0]["bounds"], placed)
+             else ("slid off" if not intersect(o[0]["bounds"], display) else "pushed aside") + f" to {fmt(o[0]['bounds'])}")
+        if o:
+            p += f" alpha {o[0].get('alpha')}"
+        if not places or places[-1] != p:
+            places.append(p)
+    say(f"    the patch at {fmt(placed) if placed else '?'} before; while Show Desktop is listed ({len(sd)} looks): "
+        + (" then ".join(places) if places else "Show Desktop's window not sampled"))
+    if sd:
+        mid_look = sd[len(sd) // 2]
+        say("    parked fixtures meanwhile: " + ", ".join(
+            f"{w['id']} at {fmt(w['bounds'])}{'' if w['onscreen'] else ' (off screen)'}" for w in mid_look["windows"] if w["id"] in parked))
+    for ln in log_text()[mark:].splitlines():
+        if "Show Desktop" in ln and ("panel is" in ln or "closes" in ln or "closed" in ln):
+            say("    log: " + ln.split("platform::controller: ", 1)[-1])
+    pushed = any(pl.startswith("pushed aside") for pl in places)
+
+    # The close: the first look after the click back with a fixture window moved.
+    after = [x for x in samples if x["t"] >= t_back]
+    last = {w["id"]: w["bounds"] for w in (sd[-1]["windows"] if sd else [])}
+    t_move = next((x["t"] for x in after
+                   if any(w["id"] in last and not close(w["bounds"], last[w["id"]]) for w in x["windows"])), None)
+    t_gone = next((x["t"] for x in after if not sd_listed(x)), None)
+    t_patch = next((x["t"] for x in after if any(o.get("alpha", 1) > 0 for o in ours(x))), None)
+    ms = lambda t: f"{(t - t_back) * 1000:.0f} ms" if t else "not seen"
+    say(f"    after the click back: windows move at {ms(t_move)}, Show Desktop's window gone at {ms(t_gone)}, "
+        f"the patch listed drawn at {ms(t_patch)}")
+    strict = still and not pushed
+    start = t_open if strict else (t_move or t_back)
+    looks = [(x["t"], b) for x in samples if x["t"] >= start for b in [bare(x)] if b]
+    told = ", ".join(f"{(t - t_back) * 1000:+.0f} ms {[(i, fmt(v)) for i, v in b]}" for t, b in looks[:6])
+    limit = 0 if strict else CLOSE_LOOKS
+    check(len(looks) <= limit,
+          f"{what}: no parked fixture's sliver bare {'through Show Desktop and its close' if strict else 'from the close on'} "
+          f"({len(looks)} looks bare, at most {limit}; {'a still' if still else 'the file'}; {told or 'none'})")
+    if still:
+        plan = patch_plan(during)
+        check(pushed or plan.get("show") is not None,
+              f"{what}: with a still the patch is planned shown through Show Desktop ({plan}, {(during.get('corner_patch') or {}).get('hidden_why')})")
+    s2 = wait_until(lambda: patch_shown(state()), 3, "the patch shown after")
+    check(s2 is not None, f"{what}: the patch shows afterwards ({patch_plan(state())})")
+    consistent(f"after {what}")
+
+
 def phase_expose():
+    """The strip through Mission Control, App Exposé and Show Desktop; then Show Desktop by a
+    wallpaper click and a click back, the corner patch drawn from the file through its close
+    (`show_desktop_close`)."""
     say("\n== expose: the strip hides in Mission Control and App Exposé, and comes back ==")
     stop_app()
     stop_fixture()
@@ -4124,6 +4306,7 @@ def phase_expose():
             break
     consistent("after Mission Control and App Exposé")
     show_desktop_round()
+    show_desktop_close("expose", still=False)
     stop_app()
     all_onscreen("expose quit")
 

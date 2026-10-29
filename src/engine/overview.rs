@@ -32,8 +32,9 @@
 //!
 //! **Expecting** ([`OverviewWatch::expect_show_desktop`]): a wallpaper click macOS answers
 //! with Show Desktop is known before the overview is listed (~0.7 s after the click): the
-//! corner patch hides at the click. The expectation lasts [`REVEAL_EXPECTED`], a timer, since
-//! no event says macOS showed nothing.
+//! corner patch drawn from the file's picture hides at the click (one drawn from a still of the
+//! desktop stays: [`super::show_desktop`]). The expectation lasts [`REVEAL_EXPECTED`], a
+//! timer, since no event says macOS showed nothing, and ends when Show Desktop is listed.
 //!
 //! **Confirming** ([`Persisting`]): evidence from the window list (windows of another Space
 //! on screen) counts only when the same evidence holds at two checks at least a settle apart,
@@ -73,7 +74,7 @@ pub const DOCK_LAYER: i64 = 20;
 /// WindowManager's layer while Mission Control or App Exposé shows.
 const EXPOSE_LAYER: i64 = 19;
 /// WindowManager's layer while Show Desktop reveals the desktop.
-const SHOW_DESKTOP_LAYER: i64 = 18;
+pub const SHOW_DESKTOP_LAYER: i64 = 18;
 
 /// What macOS shows over the Desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +195,11 @@ impl OverviewWatch {
                 self.showing = Some((kind, now));
                 self.stuck = false;
                 self.ended = None;
+                if kind == Overview::ShowDesktop {
+                    // The expectation is met: the overview holds on its own from here, and its
+                    // close is not held back by a click's timer.
+                    self.expected = None;
+                }
                 Change::Began(kind)
             }
             (None, Some((was, _))) => {
@@ -240,8 +246,19 @@ impl OverviewWatch {
         self.showing().is_some() || self.expected.is_some_and(|t| now.duration_since(t) < REVEAL_EXPECTED)
     }
 
-    /// True once, when an expectation's time is up at `now` (the patch is planned again: it
-    /// stays hidden while Show Desktop is listed, comes back if macOS showed none).
+    /// True while Show Desktop is listed, or expected from a wallpaper click with no overview
+    /// listed yet (round show-desktop-patch: the corner patch's plan and the fast tick,
+    /// [`super::show_desktop`]). Not during Mission Control or App Exposé.
+    pub fn show_desktop_up(&self, now: Instant) -> bool {
+        match self.showing() {
+            Some(Overview::ShowDesktop) => true,
+            Some(Overview::MissionControl) => false,
+            None => self.expected.is_some_and(|t| now.duration_since(t) < REVEAL_EXPECTED),
+        }
+    }
+
+    /// True once, when an expectation's time is up at `now` with no Show Desktop listed since
+    /// the click (the patch is planned again: it comes back if macOS showed none).
     pub fn expectation_over(&mut self, now: Instant) -> bool {
         if self.expected.is_some_and(|t| now.duration_since(t) >= REVEAL_EXPECTED) {
             self.expected = None;

@@ -109,6 +109,7 @@ use crate::engine::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::phase::{self, Hold};
+use crate::engine::show_desktop::{self, CloseWatch, PanelPlace, RevealFacts};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
     Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
@@ -972,6 +973,12 @@ pub struct Controller {
     /// Mission Control, App Exposé and Show Desktop: no Space is inferred from the window
     /// list while one shows and for a settle after ([`OverviewWatch`]).
     overview: OverviewWatch,
+    /// The Desktop's windows while Show Desktop is listed: their slide back is its close's
+    /// first sign, for the corner patch ([`show_desktop::CloseWatch`]).
+    reveal_close: CloseWatch,
+    /// Where macOS listed the patch's panel at the last plan during Show Desktop (logged when
+    /// it changes; `None` outside Show Desktop).
+    reveal_panel: Option<PanelPlace>,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
     /// release. Any event, batch, Space change, config reload, retried restore or window
@@ -1184,6 +1191,8 @@ impl Controller {
             space_checked: Instant::now(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
+            reveal_close: CloseWatch::default(),
+            reveal_panel: None,
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
@@ -1575,9 +1584,23 @@ impl Controller {
         // recognized): the old Desktop's patch must not come back on the new one.
         // Only Mission Control and App Exposé: Show Desktop pushes every window to the screen's
         // edges, the patch then over a pushed window's edge (10-13: a lighter block in the
-        // corner each time), so it hides by the plan.
+        // corner each time), so it is planned through it ([`show_desktop::gate`]).
+        let now = Instant::now();
+        // While Show Desktop is up the window list read for the plan is looked at for it too:
+        // its close is seen at this plan (on the fast tick, within 20 ms; round
+        // show-desktop-patch), not at the next once-a-second check.
+        let mut early = None;
+        if on
+            && !self.phase.changing()
+            && self.overview.show_desktop_up(now)
+            && let Some(display) = self.model.as_ref().map(|m| m.main_display().frame)
+        {
+            let list = windows::on_screen();
+            self.look_for_overview(&list, display, now);
+            early = Some(list);
+        }
         if on && !self.phase.changing() && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
-            return None;
+            return early;
         }
         // A Space change being recognized: no plan. Each Desktop has its own panel, which
         // slides in with its Desktop as it was left; the main thread leaves it so until the
@@ -1590,7 +1613,7 @@ impl Controller {
         let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
         let plan = match &self.model {
             Some(m) if on => {
-                let list = windows::on_screen();
+                let list = early.take().unwrap_or_else(windows::on_screen);
                 let own = std::process::id() as i32;
                 let main = m.main_display();
                 let display = main.frame;
@@ -1608,13 +1631,23 @@ impl Controller {
                 );
                 let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
                 let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
+                // This Desktop's windows as listed while Show Desktop is: their slide back is its
+                // close's first sign (round show-desktop-patch).
+                let listed_sd = self.overview.showing() == Some(Overview::ShowDesktop);
+                let ours: Vec<(u32, Rect)> = if listed_sd {
+                    list.iter()
+                        .filter(|w| w.layer == 0 && m.window(WindowId(w.id)).is_some_and(|x| x.space == here))
+                        .map(|w| (w.id, w.bounds))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 // A Desktop slides before the Space change's notice (10-23: the parked windows
                 // listed at x=110, all together; at 11:51 the next Desktop's listed in the zone
                 // and planned as this one's): the plan stays as it was, so the panel slides away
                 // with its Desktop drawn and is there when it slides back.
                 let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
                 let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
-                let now = Instant::now();
                 let slides = (elsewhere || parked.is_empty()) && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
                 self.phase.slide_seen(slides, now);
                 let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
@@ -1677,12 +1710,38 @@ impl Controller {
                 // The desktop's still: the patch's picture wherever one can be taken (round
                 // desktop-still-patch), and a switch's cover where a desktop icon lies (8L3).
                 let corner = self.corner_still(rect, items.as_deref(), now);
+                // Show Desktop (round show-desktop-patch): where macOS lists the panel, and the
+                // close's first sign, this Desktop's windows sliding back.
+                let show_desktop = self.overview.show_desktop_up(now);
+                let closing = self.reveal_close.see(listed_sd, ours, now);
+                if closing == show_desktop::Closing::Began {
+                    tracing::info!("Show Desktop closes: the windows slide back; the corner patch is planned again");
+                }
+                let panel = if show_desktop {
+                    let listed = number.and_then(|n| list.iter().find(|w| w.id == n)).map(|w| w.bounds);
+                    let place = show_desktop::panel_place(listed, patch_ui::placed_at(), display);
+                    if self.reveal_panel != Some(place) {
+                        tracing::info!(listed = ?listed, placed = ?patch_ui::placed_at(), "Show Desktop: the corner patch's panel is {}", place.name());
+                        self.reveal_panel = Some(place);
+                    }
+                    place
+                } else {
+                    self.reveal_panel = None;
+                    PanelPlace::Unknown
+                };
+                let gate = show_desktop::gate(&RevealFacts {
+                    mission_control: self.overview.showing() == Some(Overview::MissionControl),
+                    show_desktop,
+                    closing: closing.is(),
+                    still: matches!(corner.still, crate::engine::patch_still::Still::Ready(_)),
+                    panel,
+                });
                 let facts = PatchFacts {
                     on,
                     rect,
                     // Not the settle after an overview (that is for Space inference): the patch
                     // comes back with the windows.
-                    overview: self.overview.showing_or_expected(now) || self.phase.changing(),
+                    overview: gate.err().or(self.phase.changing().then_some(show_desktop::OVERVIEW_UP)),
                     ordered,
                     can_order: possible,
                     fullscreen: self.phase.fullscreen(),
@@ -2081,13 +2140,21 @@ impl Controller {
     }
 
     /// The fast tick's share of the patch: a plan while [`Self::patch_replans`], and one
-    /// last plan when the window is over.
-    pub(super) fn patch_fast_step(&mut self, now: Instant) {
-        let Some(until) = self.patch_fast_until else { return };
+    /// last plan when the window is over. True when it planned.
+    pub(super) fn patch_fast_step(&mut self, now: Instant) -> bool {
+        let Some(until) = self.patch_fast_until else { return false };
         if now >= until {
             self.patch_fast_until = None;
         }
         self.update_patch();
+        true
+    }
+
+    /// True while the corner patch is planned on the fast tick for Show Desktop: listed, or
+    /// expected from a wallpaper click, with the patch on ([`show_desktop::fast_look`]).
+    pub(super) fn reveal_fast(&self, now: Instant) -> bool {
+        let patch_on = self.model.is_some() && self.store.config().windows.corner_patch;
+        show_desktop::fast_look(self.overview.show_desktop_up(now), patch_on)
     }
 
     /// The corner patch as it runs, for `ctl state` (the Fable review's L3): `mode` is

@@ -160,6 +160,16 @@ pub fn ordered_against() -> Option<(u32, u32)> {
     }
 }
 
+/// Where the shown Desktop's panel was last put (global, top-left; its alpha hides it there),
+/// for the WM thread's look at where macOS lists it during Show Desktop
+/// ([`crate::engine::show_desktop::panel_place`]); `None` before it is ordered in.
+pub fn placed_at() -> Option<Rect> {
+    PLACED.lock().ok().and_then(|p| *p)
+}
+
+/// [`placed_at`]'s value, published with the panel's number.
+static PLACED: Mutex<Option<Rect>> = Mutex::new(None);
+
 /// The patch panel's window number, for the WM thread's ordering check; `None` before the
 /// panel exists.
 pub fn window_number() -> Option<u32> {
@@ -247,6 +257,8 @@ struct Sheet {
     placed: bool,
     /// Drawn (alpha 1) at this rectangle.
     shown: Option<Rect>,
+    /// Where it was last put (global, top-left): hidden by its alpha, it stays there.
+    frame: Option<Rect>,
     /// What it shows (picture key and the plan), to skip a redundant show.
     showing: Option<(String, PatchPlan)>,
     /// The rendered block its crops come from (its Desktop's picture).
@@ -287,7 +299,7 @@ impl Sheet {
             view.setWantsLayer(true);
             view.setLayer(Some(&layer));
         }
-        Self { panel, layer, placed: false, shown: None, showing: None, picture: None, ordered: NOT_ORDERED, shown_at: None, drawn: None, still: None }
+        Self { panel, layer, placed: false, shown: None, frame: None, showing: None, picture: None, ordered: NOT_ORDERED, shown_at: None, drawn: None, still: None }
     }
 
     /// Ordered in and on the Desktop shown now.
@@ -323,6 +335,7 @@ impl Sheet {
         self.layer.setContentsScale(scale);
         CATransaction::commit();
         self.panel.setFrame_display(frame, false);
+        self.frame = Some(rect);
         match above {
             Some(id) => {
                 self.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, id as isize);
@@ -706,6 +719,9 @@ impl Patch {
         let number = if self.active.placed { self.active.panel.windowNumber() as u32 } else { 0 };
         NUMBER.store(number, Ordering::SeqCst);
         ORDERED_AGAINST.store(self.active.ordered, Ordering::SeqCst);
+        if let Ok(mut p) = PLACED.lock() {
+            *p = if self.active.placed { self.active.frame } else { None };
+        }
         SHOWN_AT.with(|s| s.set(self.active.shown_at));
     }
 

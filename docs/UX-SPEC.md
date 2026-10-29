@@ -162,8 +162,10 @@ under it take clicks and drags as usual; it is taken again on arriving at a Desk
 slide settles, when an icon there changes, after a click on the desktop, a moment after the
 picture or its predicted frame changes, and every 10 seconds otherwise (never during a
 switch's motion, a slide, Mission Control or Show Desktop; none while the screen is locked
-or asleep). A moving wallpaper may differ there until the next still. Without Screen
-Recording, the patch is drawn from the wallpaper's own file instead. A hidden window that
+or asleep). The patch stays through Show Desktop when drawn from a still (it shows what the
+desktop shows there, and never over a window pushed aside into the corner); drawn from the
+file, it hides then and comes back the moment the windows start sliding back. A moving
+wallpaper may differ there until the next still. Without Screen Recording, the patch is drawn from the wallpaper's own file instead. A hidden window that
 its app moves back onto the screen by itself goes back into the corner within about a
 second; the one you are working in (focused, or dragged out) stays and joins the stage you
 are in. Dynamic pictures (by time of

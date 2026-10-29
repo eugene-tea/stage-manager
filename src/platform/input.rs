@@ -459,8 +459,10 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
 /// Whether only the desktop lies at `p` in `list` (front to back): the topmost window there,
 /// our click-through ones (the corner patch, the strip's pane off its cards, the overlay) and
 /// transparent ones seen through, is a desktop-level window of another process (Finder's
-/// icons, the wallpaper). The test's desktop clicks ([`desktop_click`], [`desktop_drag`]) go
-/// only there.
+/// icons, the wallpaper), or the window macOS's Show Desktop puts over the revealed desktop
+/// (WindowManager's, [`crate::engine::overview::SHOW_DESKTOP_LAYER`]: a click there brings
+/// the windows back). The test's desktop clicks ([`desktop_click`], [`desktop_drag`]) go only
+/// there.
 fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32) -> Result<(), String> {
     let top = list.iter().find(|w| {
         let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || w.bounds.w > TAB_MAX_WIDTH);
@@ -468,6 +470,7 @@ fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32) -> Result<(), Stri
     });
     match top {
         Some(w) if w.layer < 0 && w.pid != own => Ok(()),
+        Some(w) if w.owner == "WindowManager" && w.layer == crate::engine::overview::SHOW_DESKTOP_LAYER => Ok(()),
         Some(w) => Err(format!("the topmost window at {:.0},{:.0} is not the desktop (pid {}, layer {})", p.x, p.y, w.pid, w.layer)),
         None => Err(format!("no desktop window at {:.0},{:.0}", p.x, p.y)),
     }
@@ -534,11 +537,19 @@ mod tests {
         let patch = w(own, 0, Rect::new(2440.0, 1240.0, 120.0, 200.0));
         let app = w(55, 0, Rect::new(100.0, 100.0, 800.0, 600.0));
         let tab = w(own, 0, Rect::new(0.0, 600.0, 8.0, 80.0));
-        let list = [app.clone(), tab, patch, icons];
+        let list = [app.clone(), tab, patch, icons.clone()];
         assert_eq!(desktop_at(&list, Point::new(2490.0, 1380.0), own), Ok(()), "under the patch: the icon");
         assert!(desktop_at(&list, Point::new(200.0, 200.0), own).is_err(), "an app's window");
         assert!(desktop_at(&list, Point::new(4.0, 620.0), own).is_err(), "our edge tab takes clicks");
-        assert!(desktop_at(&[app], Point::new(2490.0, 1380.0), own).is_err(), "nothing listed there");
+        assert!(desktop_at(std::slice::from_ref(&app), Point::new(2490.0, 1380.0), own).is_err(), "nothing listed there");
+        // Show Desktop's own window over the revealed desktop: a click there brings the
+        // windows back.
+        let mut reveal = w(400, crate::engine::overview::SHOW_DESKTOP_LAYER, screen);
+        reveal.owner = "WindowManager".into();
+        assert_eq!(desktop_at(&[reveal.clone(), icons.clone()], Point::new(1200.0, 700.0), own), Ok(()));
+        let mut other = reveal;
+        other.owner = "Dock".into();
+        assert!(desktop_at(&[other, icons], Point::new(1200.0, 700.0), own).is_err(), "only WindowManager's");
     }
 
     const NONE: Modifiers = Modifiers { shift: false, cmd: false };

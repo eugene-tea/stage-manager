@@ -53,9 +53,12 @@
 //!   lists the parked windows slid aside ([`desktop_slides`]); the plan then stays as it was
 //!   ([`slide_waits`]), so the panel slides away drawn and is there when its Desktop slides
 //!   back in. While the change is recognized no plan is made at all.
-//! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
-//!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
-//!   down (nothing parked).
+//! - **Overviews** ([`super::show_desktop`]): Mission Control and App Exposé leave a shown
+//!   patch to macOS (its panel is `Transient`), else it stays off. Through Show Desktop a
+//!   patch drawn from a still of the desktop is planned as at any time (round
+//!   show-desktop-patch), unless macOS pushed its panel aside onto the display; one drawn
+//!   from the file hides until the close's first sign, looked for on the fast tick. Never on a
+//!   full-screen app's Space, nor once the app stands down (nothing parked).
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -220,8 +223,10 @@ pub struct PatchFacts {
     pub on: bool,
     /// The patch's rectangle ([`patch_rect`]).
     pub rect: Option<Rect>,
-    /// Mission Control, App Exposé or Show Desktop is up (or settling).
-    pub overview: bool,
+    /// Why Mission Control, App Exposé or Show Desktop keeps the patch off now
+    /// ([`super::show_desktop::gate`]), or a Space change being recognized; `None` while
+    /// nothing does (with a still of the desktop the patch is planned through Show Desktop).
+    pub overview: Option<&'static str>,
     /// The patch's order ([`order_step`]): right, found wrong, or `None` while not known
     /// (never shown, hidden, ordered against another window, ordered anew).
     pub ordered: Option<bool>,
@@ -368,8 +373,8 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
         return Err("off");
     }
     let Some(rect) = f.rect else { return Err("no sliver shows") };
-    if f.overview {
-        return Err("an overview is up");
+    if let Some(why) = f.overview {
+        return Err(why);
     }
     if f.fullscreen {
         return Err("a full-screen Space shows");
@@ -1140,7 +1145,7 @@ mod tests {
             ..facts()
         };
         assert!(visibility(&f).is_ok());
-        assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err(), "never over Mission Control");
+        assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err(), "never over Mission Control");
         assert!(visibility(&PatchFacts { on: false, ..f.clone() }).is_err());
         assert!(visibility(&PatchFacts { rect: None, ..f }).is_err());
     }
@@ -1166,7 +1171,7 @@ mod tests {
         assert!(visibility(&PatchFacts { still: Still::Coming, ..f.clone() }).is_ok(), "one on its way: held");
         assert_eq!(visibility(&PatchFacts { still: Still::Absent, ..f.clone() }), Err("a desktop icon lies under the corner"), "none: as before");
         // The rest of the gate stands: never over an overview, nor on a full-screen Space.
-        assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err());
+        assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err());
         assert!(visibility(&PatchFacts { fullscreen: true, ..f.clone() }).is_err());
         assert_eq!(icons_clear(Some(&[]), facts().rect.expect("rect")), Ok(()));
     }
@@ -1286,7 +1291,7 @@ mod tests {
         // Nothing to order against: the fallback.
         assert!(visibility(&PatchFacts { can_order: false, ..f.clone() }).is_err());
         // Overviews, full screen and icons still win.
-        assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err());
+        assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err());
         assert!(visibility(&PatchFacts { items: None, ..f }).is_err());
     }
 
