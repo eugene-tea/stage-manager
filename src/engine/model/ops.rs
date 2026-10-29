@@ -1071,9 +1071,30 @@ impl Model {
             }
         };
         match target {
-            Some(s) => self.switch_to(s, obs),
+            Some(s) => {
+                // The user asked for this app: its window comes in front with the keyboard,
+                // whatever window of another app the stage had last (Apple's does so).
+                if let Some(k) = self.activated_key(s, pid, obs.focused) {
+                    self.make_key(s, k);
+                }
+                self.switch_to(s, obs)
+            }
             None => Vec::new(),
         }
+    }
+
+    /// The window of app `pid` an activation that shows `stage` makes its key: its focused
+    /// window (`focused`, a child standing for its parent) when that is a member of the stage,
+    /// else the stage's key when it is the app's, else the app's front member. None when the
+    /// stage holds no standard window of the app.
+    fn activated_key(&self, stage: StageId, pid: Pid, focused: Option<WindowId>) -> Option<WindowId> {
+        let s = self.stage(stage)?;
+        let mine = |id: &WindowId| self.windows.get(id).is_some_and(|w| w.meta.pid == pid);
+        focused
+            .and_then(|f| self.resolve_standard(f))
+            .filter(|f| s.windows.contains(f) && mine(f))
+            .or(s.key.filter(|k| s.windows.contains(k) && mine(k)))
+            .or_else(|| s.windows.iter().copied().find(|id| mine(id)))
     }
 
     /// Whether [`Self::app_activated`]'s answer for app `pid` depends on the focused window
@@ -1119,8 +1140,14 @@ impl Model {
             // As for an activation: at login a focus is the app's, not the user's.
             return Vec::new();
         }
-        match self.resolve_standard(id).and_then(|w| self.stage_of(w)) {
-            Some(s) if !self.is_active(s) => self.switch_to(s, obs),
+        let Some(standard) = self.resolve_standard(id) else { return Vec::new() };
+        match self.stage_of(standard) {
+            Some(s) if !self.is_active(s) => {
+                // The focused window is the one the user went for: it comes in front with
+                // the keyboard, not the stage's last key.
+                self.make_key(s, standard);
+                self.switch_to(s, obs)
+            }
             _ => Vec::new(),
         }
     }
@@ -1192,10 +1219,8 @@ impl Model {
             if standard == id {
                 self.record_frame(id, frame);
             }
-            if let Some(stage) = self.stage_of(standard).and_then(|s| self.stage_mut(s))
-                && stage.windows.contains(&standard)
-            {
-                stage.key = Some(standard);
+            if let Some(stage) = self.stage_of(standard) {
+                self.make_key(stage, standard);
             }
         }
         self.window_focused(id, obs)

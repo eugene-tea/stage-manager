@@ -14,8 +14,16 @@
 //!   the wallpaper it shows.
 //! - **Picture**: the desktop picture drawn from its file, never captured
 //!   ([`crate::platform::wallpaper`], decided by [`crate::engine::wallpaper`]): no Screen
-//!   Recording, no menu bar recording indicator. A block of the corner is rendered once on
-//!   a render thread ([`picture_for`]); the patch shows a whole-pixel crop of it
+//!   Recording, no menu bar recording indicator. Near a solar frame change the frame is one
+//!   of a few candidates, settled by [`super::corner_settle`]: they render alike in the
+//!   corner, or (only where window captures already work) one still of the desktop's own
+//!   windows, never a stream, matches one of them; otherwise the patch stays off. On each
+//!   arrival at a Desktop (and at the patch's first draw) one still checks even a solar
+//!   frame the clock names exactly, when one may be taken, at most one a picture per
+//!   [`wp::SOLAR_RECHECK`]; every still that saw clearly narrows the clock's model
+//!   ([`Reader::observe`]) and the frame is decided again. The still picks the frame; the
+//!   pixels drawn are still the file's. A block of the corner is rendered once on a render
+//!   thread ([`picture_for`]); the patch shows a whole-pixel crop of it
 //!   ([`crop_for`]), so a new rectangle inside the block needs no new render. Until the
 //!   picture for the current wallpaper is ready, and whenever it cannot be drawn exactly,
 //!   the patch stays hidden: the sliver is better than a wrong picture. A picture that
@@ -32,8 +40,9 @@
 //!   (NSWorkspace may still name the old Desktop's picture at the first); then it is drawn
 //!   anew or hidden only if the picture, its frame, the rectangle or the order changed.
 //!   A Desktop's panel left drawn is hidden while away once its frame is no longer the one
-//!   macOS shows (the sun, the appearance: [`wp::still_drawn`]) or a desktop icon lies under
-//!   it, so it never slides back in wrong. Panels on other Desktops close on a display
+//!   macOS shows (the sun, the appearance: [`wp::still_drawn`]; near a solar frame change,
+//!   unless the candidates look alike there) or a desktop icon lies under it, so it never
+//!   slides back in wrong; arrived, its frame is settled again. Panels on other Desktops close on a display
 //!   change, when the patch is turned off, and past [`MAX_SHEETS`]; two on the Desktop shown
 //!   (a Desktop removed in Mission Control) leave one.
 //! - **Appearance changes** ([`appearance_changed`]): the patch is hidden at once (the frame
@@ -63,6 +72,7 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CALayer, CATransaction};
 
+use super::corner_settle::{Check, News, Outcome, Settler};
 use super::panels;
 use crate::engine::geometry::{Rect, Size};
 use crate::engine::wallpaper as wp;
@@ -169,6 +179,12 @@ struct Drawn {
     facts: wp::ImageFacts,
     style: Option<wp::Style>,
     index: usize,
+    /// The picture but for its frame ([`Job::base_key`]) and the block rendered: near a solar
+    /// frame change, whether its candidates look alike there ([`Settler::alike_for`]).
+    base: String,
+    region: Rect,
+    /// The picture's file: its clock's model ([`Reader::solar_model`]).
+    path: String,
 }
 
 /// One Desktop's patch panel (main thread): ordered in once on its Desktop, then shown or
@@ -299,6 +315,13 @@ struct Patch {
     arrival: Option<(u64, Instant)>,
     /// What the log last said (a reason it is off, or what it draws).
     said: Option<String>,
+    /// Near a solar frame change: the candidates' renders, verdicts and still.
+    settler: Settler,
+    /// The key of the job at the frame settled near a solar frame change (`None` while not).
+    settled: Option<String>,
+    /// A Desktop arrived (or the patch is new): one still checks a solar frame the clock
+    /// names exactly ([`Settler::check`]).
+    check_arrival: bool,
 }
 /// The render in flight, and the picture key whose render failed (not tried again until
 /// the key changes: a new file version, frame, scale or screen).
@@ -589,6 +612,7 @@ pub fn display_changed(mtm: MainThreadMarker) {
             if let Some(patch) = p.as_mut() {
                 // Drawn for the old arrangement: other Desktops' panels go.
                 patch.others.clear();
+                patch.settler.clear();
                 patch.wall = None;
                 patch.reconcile(mtm);
             }
@@ -613,6 +637,9 @@ impl Patch {
             settle_until: None,
             arrival: None,
             said: None,
+            settler: Settler::default(),
+            settled: None,
+            check_arrival: true,
         }
     }
 
@@ -664,6 +691,7 @@ impl Patch {
             self.others.remove(0);
         }
         self.renders.drop_in_flight();
+        self.check_arrival = true;
         self.arrival = Some((self.plan.space, now));
         self.settle_until = Some(now + SETTLE);
         self.wall = None;
@@ -682,9 +710,25 @@ impl Patch {
         let dark = wallpaper::dark_appearance(mtm);
         let clock = self.reader.clock();
         let items = self.plan.items.clone();
+        let (settler, reader) = (&self.settler, &self.reader);
+        // Panels drawing the same picture, frame and block share one verdict (a solar one
+        // weighs every hypothesis of the clock).
+        let mut verdicts: Vec<(String, usize, Rect, bool)> = Vec::new();
         for s in self.others.iter_mut() {
             let Some(rect) = s.shown else { continue };
-            let frame_right = s.drawn.as_ref().is_some_and(|d| wp::still_drawn(&d.facts, d.style, dark, &clock, d.index));
+            let frame_right = s.drawn.as_ref().is_some_and(|d| {
+                if let Some((.., v)) = verdicts.iter().find(|(b, i, r, _)| *b == d.base && *i == d.index && *r == d.region) {
+                    return *v;
+                }
+                let v = match wp::still_drawn(&d.facts, d.style, dark, &clock, d.index, reader.solar_model(&d.path)) {
+                    wp::StillShown::Yes => true,
+                    wp::StillShown::No => false,
+                    // Near a solar frame change: only while its candidates look alike there.
+                    wp::StillShown::IfAlike(c) => settler.alike_for(&d.base, d.region, &c) == Some(true),
+                };
+                verdicts.push((d.base.clone(), d.index, d.region, v));
+                v
+            });
             let icons_clear = items.as_ref().is_some_and(|i| !i.iter().any(|r| r.intersect(&rect).is_some()));
             if !(frame_right && icons_clear) {
                 s.hide();
@@ -713,9 +757,14 @@ impl Patch {
         self.publish_cover();
     }
 
-    /// The picture the patch would show now, for a switch's cover ([`CoverSource`]).
+    /// The picture the patch would show now, for a switch's cover ([`CoverSource`]): near a
+    /// solar frame change, only the frame settled.
     fn publish_cover(&self) {
-        let wall = self.wall.as_ref().and_then(|(_, w)| w.outcome.as_ref().ok().map(|(_, job)| (w.screen, job.key())));
+        let wall = self.wall.as_ref().and_then(|(_, w)| {
+            let (d, job) = w.outcome.as_ref().ok()?;
+            let key = if d.candidates.is_empty() { Some(job.key()) } else { self.settled.clone() };
+            key.map(|k| (w.screen, k))
+        });
         let picture = wall.and_then(|(screen, key)| self.active.picture.as_ref().filter(|p| p.key == key).map(|p| (screen, p)));
         let source = picture.map(|(screen, p)| CoverSource { region: p.region, scale: p.scale, screen });
         COVER_PICTURE.with(|c| {
@@ -759,6 +808,17 @@ impl Patch {
                 return;
             }
         };
+        let job = match self.settle_frame(&decision, job, wall.screen, rect, settling) {
+            Ok(job) => job,
+            Err(why) => {
+                self.hide();
+                if let Some(why) = why {
+                    let name = wall.path.as_deref().map(wallpaper::file_name).unwrap_or_default();
+                    self.say(format!("{why} ({name})"), true);
+                }
+                return;
+            }
+        };
         let key = job.key();
         if self.active.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
             return;
@@ -788,7 +848,7 @@ impl Patch {
                 "drawing {} ({}, frame {}, style {style}, {}, {}x scale, {})",
                 job.file_name(),
                 decision.kind,
-                decision.frame.index,
+                job.index,
                 decision.placement.name(),
                 job.scale,
                 job.space_key
@@ -798,7 +858,10 @@ impl Patch {
         let was_placed = self.active.placed;
         self.active.show(mtm, rect, &image, job.scale, self.plan.above, self.plan.reorder);
         self.active.showing = Some((key, self.plan.clone()));
-        self.active.drawn = wall.image.clone().map(|facts| Drawn { facts, style: decision.style, index: decision.frame.index });
+        let region = self.active.picture.as_ref().map_or_else(Rect::default, |p| p.region);
+        let base = job.base_key();
+        let path = job.path.clone();
+        self.active.drawn = wall.image.clone().map(|facts| Drawn { facts, style: decision.style, index: job.index, base, region, path });
         if !was_placed && !self.active.panel.isOnActiveSpace() {
             // Ordered in for the first time while a Desktop still slid: it went to another
             // Desktop. Hidden there, it waits as that Desktop's; a new one for this Desktop.
@@ -818,7 +881,9 @@ impl Patch {
             self.wall = Some((Instant::now(), wall));
         }
         let Some((_, wall)) = self.wall.clone() else { return };
-        let Ok((_, job)) = &wall.outcome else { return };
+        let Ok((decision, job)) = &wall.outcome else { return };
+        let settling = self.settle_until.is_some_and(|t| Instant::now() < t);
+        let Ok(job) = self.settle_frame(decision, job.clone(), wall.screen, rect, settling) else { return };
         let key = job.key();
         if self.active.picture.as_ref().is_some_and(|p| p.key != key) {
             self.active.picture = None;
@@ -829,8 +894,74 @@ impl Patch {
         }
         let region = wp::region(Size::new(wall.screen.w, wall.screen.h), local);
         if self.renders.want(&key, region) == Want::Start {
-            start_render(job.clone(), wall.screen, rect, region);
+            start_render(job, wall.screen, rect, region);
         }
+    }
+
+    /// The job to draw for `decision`: `job` itself when its frame is known (a solar one
+    /// checked by one still on arrival, [`Settler::check`]); near a solar frame change
+    /// ([`wp::Decision::candidates`]) the job at the frame settled ([`Settler::settle`]).
+    /// `Err(Some(why))` when off, `Err(None)` while the frames render.
+    fn settle_frame(&mut self, decision: &wp::Decision, job: Job, screen: Rect, rect: Rect, settling: bool) -> Result<Job, Option<String>> {
+        self.settled = None;
+        let Some(sun) = &decision.sun else { return Ok(job) };
+        let region = wp::region(Size::new(screen.w, screen.h), wp::local(rect, screen));
+        let now = Instant::now();
+        if decision.candidates.is_empty() {
+            if self.check_arrival && self.settler.check(&job, &sun.frames, screen, region, self.may_take_still(settling), now) == Check::Done {
+                self.check_arrival = false;
+            }
+            return Ok(job);
+        }
+        let may_take = self.may_take_still(settling);
+        match self.settler.settle(&job, &decision.candidates, &sun.frames, sun.surviving > 0, screen, region, may_take, now) {
+            Outcome::Draw(job) => {
+                self.settled = Some(job.key());
+                Ok(*job)
+            }
+            Outcome::Wait => Err(None),
+            Outcome::Off(why) => Err(Some(why)),
+        }
+    }
+
+    /// A still that saw clearly ([`Settler::news`]): the clock's model for its picture
+    /// narrowed, logged by the count of hypotheses standing (never a place), and the frame
+    /// decided again.
+    fn narrow(&mut self, seen: super::corner_settle::Observation) {
+        let Some(n) = self.reader.observe(&seen.path, seen.unix, &seen.seen) else { return };
+        let all = wp::SolarModel::all();
+        let name = wallpaper::file_name(&seen.path);
+        if n.after == 0 {
+            if n.before > 0 {
+                tracing::info!("corner patch: {} ({name}; the still saw frame {})", wp::CLOCK_MISFIT, super::corner_settle::frames(&seen.seen));
+            }
+        } else if n.after < n.before {
+            tracing::info!("corner patch: a still of the desktop narrowed the clock ({name}): {} of {all} hypotheses stand", n.after);
+        } else {
+            tracing::debug!("corner patch: a still of the desktop fits the clock ({name}): {} of {all} hypotheses stand", n.after);
+        }
+        self.wall = None;
+    }
+
+    /// Whether a still of the desktop may settle a solar frame now: no Space or appearance
+    /// change settling, the capture gate open ([`crate::platform::capture::desktop_may_capture`],
+    /// the rules of every desktop still), the screen unlocked and awake, Finder's icons known
+    /// (they are masked out of the comparison).
+    fn may_take_still(&self, settling: bool) -> Result<(), &'static str> {
+        if settling {
+            return Err("a Space or appearance change settles");
+        }
+        crate::platform::capture::desktop_may_capture()?;
+        if crate::platform::session::screen_locked() {
+            return Err("the screen is locked");
+        }
+        if objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()) {
+            return Err("the display sleeps");
+        }
+        if self.plan.items.is_none() {
+            return Err("Finder's desktop icons are not known");
+        }
+        Ok(())
     }
 
     /// A render of `region` finished (main thread): keep it when it is still the one wanted.
@@ -862,6 +993,24 @@ fn deliver(key: String, region: Rect, scale: f64, result: Result<(Rect, CFRetain
             }
         }
         Err(_) => again_shortly(move || deliver(key, region, scale, result)),
+    });
+}
+
+/// Hands what came back for settling a solar frame ([`News`]) to the patch (main thread);
+/// while the patch is busy, once more [`BUSY_RETRY`] later.
+pub(super) fn settle_news(news: News) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    PATCH.with(|p| match p.try_borrow_mut() {
+        Ok(mut p) => {
+            if let Some(patch) = p.as_mut() {
+                let items = patch.plan.items.clone();
+                if let Some(seen) = patch.settler.news(news, items.as_deref()) {
+                    patch.narrow(seen);
+                }
+                patch.reconcile(mtm);
+            }
+        }
+        Err(_) => again_shortly(move || settle_news(news)),
     });
 }
 

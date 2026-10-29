@@ -1,6 +1,7 @@
 //! Small CoreGraphics pixel helpers for the desktop's still (round 8L4,
-//! [`super::desktop_shot`]) and the overlay's read-back ([`super::self_capture`]): whether a
-//! picture is opaque, one picture laid over another, and a picture's mean colour. Every one
+//! [`super::desktop_shot`]), the overlay's read-back ([`super::self_capture`]) and settling a
+//! solar frame ([`crate::engine::solar_settle`]): whether a picture is opaque, one picture
+//! laid over another, a picture's mean colour, and its pixels in a given colour space. Every one
 //! draws into a bitmap of its own (8-bit BGRA, premultiplied), so the source's pixel format
 //! does not matter.
 
@@ -73,6 +74,17 @@ pub fn min_alpha(image: &CGImage) -> Option<u8> {
 pub fn mean_rgba(image: &CGImage) -> Option<[f64; 4]> {
     let (w, h) = sample_size(image);
     draw_into(&[image], w, h, None).map(|b| mean_of(&b))
+}
+
+/// The pixels of `image` at its own size, drawn in `space` (or device RGB; Core Graphics
+/// converts from the image's own colour space): B, G, R, A per pixel, premultiplied, rows of
+/// `w * 4` bytes, with its width and height. `None` for an empty or oversized image.
+pub fn bgra(image: &CGImage, space: Option<&CGColorSpace>) -> Option<(Vec<u8>, usize, usize)> {
+    let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    if w > 16_384 || h > 16_384 {
+        return None;
+    }
+    draw_into(&[image], w, h, space).map(|b| (b, w, h))
 }
 
 /// `top` laid over `base`, both stretched to `base`'s pixel size, in `base`'s colour space.

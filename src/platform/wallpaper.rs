@@ -1,6 +1,9 @@
 //! The desktop picture, read and drawn from its file: the platform half of
 //! [`crate::engine::wallpaper`], for the corner patch ([`crate::ui::corner_patch`]) and
-//! `stage-manager probe-patch`. No screen capture: nothing here needs Screen Recording.
+//! `stage-manager probe-patch`. No screen capture here: nothing here needs Screen Recording.
+//! (Near a solar frame change, [`crate::ui::corner_settle`] may compare one still of the
+//! desktop with the candidate frames' renders to pick the frame; what is drawn is still the
+//! file's.)
 //!
 //! - **Read** ([`Reader::read`], main thread): the main screen (size, backing scale, color
 //!   space), NSWorkspace's picture URL and options for it, macOS's wallpaper settings file
@@ -17,6 +20,9 @@
 //!   where it lands on the screen, clipped to the region, with high-quality interpolation,
 //!   which gives exactly the pixels of a draw over the whole screen.
 //! - **Crop** ([`crop`]): the patch's whole pixels of a render, shared, not copied.
+//! - **Thumb** ([`thumb`]): a render or a still as mean colours on a grid of points
+//!   ([`crate::engine::solar_settle::Thumb`]), drawn in the display's colour space first, so
+//!   a still in another colour space compares with the render.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -101,11 +107,16 @@ pub struct Job {
 impl Job {
     /// What makes two renders the same picture.
     pub fn key(&self) -> String {
+        format!("{}|frame {}", self.base_key(), self.index)
+    }
+
+    /// What makes two renders the same picture but for the frame: the candidate frames of
+    /// one picture share it.
+    pub fn base_key(&self) -> String {
         format!(
-            "{}|{:?}|{}|{}|{:?}|{}x{}@{}|{}|{}",
+            "{}|{:?}|{}|{:?}|{}x{}@{}|{}|{}",
             self.path,
             self.stamp,
-            self.index,
             self.placement.name(),
             (self.image.px_w, self.image.px_h, self.image.pt_w, self.image.pt_h),
             self.screen.w,
@@ -129,7 +140,9 @@ pub fn file_name(path: &str) -> String {
     crate::logbook::titles::picture_name(path, super::logging::titles_shown())
 }
 
-/// Reads [`Wall`]s, keeping what only changes with a file (settings, picture facts, zone).
+/// Reads [`Wall`]s, keeping what only changes with a file (settings, picture facts, zone),
+/// and the clock's solar models as stills narrowed them ([`wp::SolarMemory`]: in memory
+/// only, forgotten when the time zone changes).
 #[derive(Default)]
 pub struct Reader {
     store: Option<(Option<SystemTime>, Option<Vec<StoreChoice>>)>,
@@ -137,6 +150,7 @@ pub struct Reader {
     descriptions: HashMap<String, Option<Plist>>,
     image: Option<(String, (u128, u64), Option<ImageFacts>)>,
     zone: Option<(String, Option<(f64, f64)>)>,
+    solar: wp::SolarMemory,
 }
 
 impl Reader {
@@ -180,6 +194,7 @@ impl Reader {
             _ => None,
         };
         let clock = self.clock();
+        let solar = path.as_deref().zip(clock.place).and_then(|(p, place)| self.solar.get(p, place));
         let inputs = Inputs {
             path: path.as_deref(),
             is_dir,
@@ -189,6 +204,7 @@ impl Reader {
             fill: fill.is_some(),
             dark,
             clock,
+            solar,
         };
         let decided = wp::decide(&inputs);
         let recheck_at = decided
@@ -199,7 +215,7 @@ impl Reader {
         let facts = image.clone().filter(|_| decided.is_ok());
         let outcome = match (decided, path.clone(), image) {
             (Ok(d), Some(path), Some(image)) => Ok((
-                d,
+                d.clone(),
                 Job {
                     path,
                     stamp,
@@ -262,9 +278,30 @@ impl Reader {
         let zone = NSTimeZone::localTimeZone().name().to_string();
         if self.zone.as_ref().is_none_or(|(z, _)| *z != zone) {
             let place = std::fs::read_to_string(ZONE_TAB).ok().and_then(|tab| wp::zone_place(&tab, &zone));
+            if self.zone.take().is_some() {
+                tracing::debug!("corner patch: the time zone changed; the clock's solar models start over");
+                self.solar.clear();
+            }
             self.zone = Some((zone, place));
         }
         Clock { unix, day_fraction: local_day_fraction(unix), place: self.zone.as_ref().and_then(|(_, p)| *p) }
+    }
+
+    /// The clock's model for the picture at `path`, as stills narrowed it (`None`:
+    /// unnarrowed), for the time zone read last.
+    pub fn solar_model(&self, path: &str) -> Option<&wp::SolarModel> {
+        let place = self.zone.as_ref().and_then(|(_, p)| *p)?;
+        self.solar.get(path, place)
+    }
+
+    /// A still of the desktop at `unix` showed the picture at `path` at one of the frames
+    /// `seen`: its solar model narrowed. `None` when the picture read last is another one or
+    /// not picked by the sun, or the time zone has no place.
+    pub fn observe(&mut self, path: &str, unix: f64, seen: &[usize]) -> Option<wp::Narrowed> {
+        let place = self.zone.as_ref().and_then(|(_, p)| *p)?;
+        let (p, _, facts) = self.image.as_ref()?;
+        let Some(ImageFacts { schedule: Ok(wp::Schedule::Solar { suns, .. }), .. }) = facts.as_ref().filter(|_| p == path) else { return None };
+        Some(self.solar.observe(path, place, suns, unix, seen))
     }
 }
 
@@ -457,6 +494,20 @@ pub fn crop(picture: &CGImage, px: Rect) -> Option<CFRetained<CGImage>> {
     CGImage::with_image_in_rect(Some(picture), cg_rect(px))
 }
 
+/// `image`, a picture of a block of `size` points, as mean colours on the comparison grid,
+/// drawn in `space` (the display's) first; `None` when it cannot be read.
+pub fn thumb(image: &CGImage, space: Option<&CGColorSpace>, size: Size) -> Option<crate::engine::solar_settle::Thumb> {
+    let (bytes, w, h) = super::pixels::bgra(image, space)?;
+    crate::engine::solar_settle::Thumb::from_bgra(&bytes, w, h, w * 4, size)
+}
+
+/// The name of `image`'s colour space, for the log.
+pub fn space_name(image: &CGImage) -> String {
+    CGImage::color_space(Some(image))
+        .and_then(|s| CGColorSpace::name(Some(&s)))
+        .map_or_else(|| "unnamed".into(), |n| n.to_string())
+}
+
 /// Writes `image` to a PNG at `path` (its color space embedded).
 pub fn write_png(image: &CGImage, path: &Path) -> Result<(), String> {
     let url = CFURL::from_file_path(path).ok_or("a bad path")?;
@@ -469,4 +520,29 @@ pub fn write_png(image: &CGImage, path: &Path) -> Result<(), String> {
         dest.finalize()
     };
     if done { Ok(()) } else { Err("the PNG was not written".into()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::pixels::tests::picture;
+
+    #[test]
+    fn a_thumb_reads_a_picture_on_the_grid_in_the_space_asked() {
+        // 40 px for 20 points (2x): a 5 x 5 grid of 4-point cells.
+        let red = picture(40, 40, [1.0, 0.0, 0.0, 1.0], false);
+        let t = thumb(&red, None, Size::new(20.0, 20.0)).expect("a thumb");
+        assert_eq!((t.cols, t.rows), (5, 5));
+        assert!(t.rgb.iter().all(|c| c[0] > 250.0 && c[1] < 5.0 && c[2] < 5.0), "{:?}", t.rgb[0]);
+        assert!(t.alpha.iter().all(|a| *a == 255));
+        // Clear in its left half: those cells see-through.
+        let half = thumb(&picture(40, 40, [1.0, 0.0, 0.0, 1.0], true), None, Size::new(20.0, 20.0)).expect("a thumb");
+        assert_eq!((half.alpha[0], half.alpha[4]), (0, 255));
+        // Drawn in another colour space, the same red reads differently: both sides of a
+        // comparison are drawn in the display's.
+        // SAFETY: a constant name CoreGraphics defines.
+        let p3 = CGColorSpace::with_name(Some(unsafe { objc2_core_graphics::kCGColorSpaceDisplayP3 })).expect("P3");
+        let in_p3 = thumb(&red, Some(&p3), Size::new(20.0, 20.0)).expect("a thumb");
+        assert!(in_p3.rgb[0][0] < t.rgb[0][0] - 5.0, "{:?} vs {:?}", in_p3.rgb[0], t.rgb[0]);
+    }
 }

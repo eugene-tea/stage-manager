@@ -56,7 +56,10 @@ Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
 stage, animated as a card click: the stage you leave shrinks into the strip and the app's
-windows grow from their card. The keyboard goes to the app's window at once.
+windows grow from their card. The keyboard goes to the app's window at once. In a stage
+shared with other apps, the activated app's window comes in front with the keyboard,
+whichever window was focused when the stage was left; a click on a waiting window's edge
+does the same for that window.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
@@ -145,17 +148,25 @@ windows come to their places at once instead of growing.
 
 **Hidden stages wait in a corner.** Without private APIs, the only way to hide a window but
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
-visible in the bottom-right corner (another corner if a second screen sits beyond it). To keep
-the corner as clean as Apple's, those edges ignore clicks and a patch drawn from the
+visible in the bottom-right corner (another corner if a second screen sits beyond it). To
+keep the corner as clean as Apple's, those edges ignore clicks and a patch drawn from the
 wallpaper's own file covers them, without screen recording. Dynamic pictures (by time of
-day, by the sun, light and dark, Apple's own downloaded ones included) are drawn at the frame
-macOS shows. The patch steps aside where it cannot match exactly (see the GUIDE's
-troubleshooting). Each Desktop has its own patch, which stays on it and slides with it
-when you go to another Desktop and back, drawn as it was (nothing moves on a Desktop while
-you are away); it is checked again once the Desktop has arrived, and hidden while away if
-the picture's frame changed meanwhile (the sun, the appearance) or a desktop icon came
-under it. A Desktop's first visit still shows its edges for a moment, until its patch is
-drawn.
+day, by the sun, light and dark, Apple's own downloaded ones included) are drawn at the
+frame macOS shows. For a picture that follows the sun, neither the place (the time zone
+covers hundreds of miles) nor Apple's rule is known, so the clock is a model that starts
+wide (any place in the zone, either of two ways of reading the sun, macOS a few minutes
+late) and narrows with what the screen shows. Near a frame change the frames it allows
+differ: the patch draws when they look alike in the corner, or when one still of the desktop
+(taken only where window thumbnails already are) matches one of them; each clear still
+narrows the clock, and arriving on a Desktop one still checks even a frame the clock is sure
+of. When nothing the clock allows fits the screen, only stills decide. The patch's pixels
+are still the file's. The patch steps aside where it cannot match exactly (see the GUIDE's
+troubleshooting). Each Desktop has its own patch, which stays on it and slides with it when
+you go to another Desktop and back, drawn as it was (nothing moves on a Desktop while you
+are away); it is checked again once the Desktop has arrived, and hidden while away if the
+picture's frame changed meanwhile (the sun, the appearance; near a change of the sun's
+frame, unless the frames look alike there) or a desktop icon came under it. A Desktop's
+first visit still shows its edges for a moment, until its patch is drawn.
 
 **Dragging uses stand-ins.** A window dragged over the strip keeps its size under a
 card-sized picture of it, where Apple shrinks the window itself. A card dragged out is shown

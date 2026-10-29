@@ -68,6 +68,9 @@
 //!   their backstop passes (the expected unveil at the configured speed plus a margin,
 //!   1.5 to 3 s: `motion_math::unveil_backstop`). The batch's focus does not wait: the keyboard goes to the new
 //!   stage at once, as Apple's does (`split_covered`).
+//! - **Raise order** (`raise_order`): after a batch that raised windows of two or more apps,
+//!   the window server's order of them is read for a moment; windows that landed out of the
+//!   order asked (an app's late reorder) are raised again, back to front, the key last.
 //! - **Space settle gate**: while a Space change waits out a full-screen animation, nothing
 //!   changes stages: window events, strip input, hotkeys, wallpaper clicks and ctl stage
 //!   commands are held off (`Controller::frozen`).
@@ -116,6 +119,7 @@ use crate::ui::{motion_math, transition_plan};
 mod arrival;
 mod dock_order;
 mod hide;
+mod raise_order;
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
@@ -386,6 +390,14 @@ pub fn wallpaper_click(s: &NativeSettings, clicks: i64) -> WallpaperClick {
 /// as after a Dock click). The arriving frames, the raises and the focus again (after the
 /// raises, so the key window ends in front) wait. An activation's early focus
 /// ([`Controller::focus_now`]) comes before all this and changes none of it.
+///
+/// The raises all wait, another app's windows' too, even after the early focus gave the
+/// activated app the keyboard: raised now they would rise in the park corner, over the corner
+/// patch, beside the cover drawn for the activated app's. An `AXRaise` of another app's window
+/// reorders it without activating that app (10-27: Mail's window raised after Calendar's early
+/// focus noted a focused-window change in Mail, no activation), and the batch raises the key
+/// window and its children last ([`crate::engine::model::Model::show_stage`]), right before
+/// the focus, which raises the key again: the activated window ends in front.
 fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>, Vec<Action>) {
     let focus: Vec<Action> = actions.iter().copied().filter(|a| matches!(a, Action::Focus { .. })).collect();
     let (later, mut now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
@@ -1669,6 +1681,9 @@ impl Controller {
         let mut changed = false;
         let mut interrupted = false;
         let total = actions.len();
+        // What the batch raises and focuses, for the order check after it (`raise_order`; an
+        // unveil's runs once the strip has its note, [`Self::flush_pending`]).
+        let (raises, focus) = raise_order::raises_and_focus(&actions);
         for (done, action) in actions.into_iter().enumerate() {
             if interruptible && !interrupted && action != Action::StateChanged && safety::quit_requested() {
                 tracing::info!(done, total, "quit requested: the rest of this batch runs only its window restores");
@@ -1749,6 +1764,10 @@ impl Controller {
             safety::registry_replace(self.parked_entries(ob));
         }
         self.after_batch_hides(unhide);
+        // Two apps' raises can land in either order: the stage's windows end as asked.
+        if !interrupted && batch == Batch::User {
+            self.settle_raise_order(ob, &raises, focus, now);
+        }
         self.publish_shield();
         self.update_patch();
         self.remember();
@@ -2377,6 +2396,7 @@ impl Controller {
                     _ => None,
                 })
                 .collect();
+            let (raises, focus) = raise_order::raises_and_focus(&p.actions);
             self.execute_batch(ob, p.actions, Batch::Unveil);
             // Where the windows really are now: their snapshots land exactly there.
             let mut arrived = Vec::new();
@@ -2390,6 +2410,9 @@ impl Controller {
                 self.arrived_note = Some((p.id, arrived));
                 self.present();
             }
+            // The strip has its note: now the order its card shows (`raise_order`), unless the
+            // user clicked since the switch began (this flush may be his next click's).
+            self.settle_raise_order(ob, &raises, focus, p.since);
         }
     }
 
@@ -5555,12 +5578,43 @@ mod tests {
         assert!(run.now.is_empty(), "no window taken out of the transition: every incoming one grows from its card");
         assert_eq!(run.focus, Some(WindowId(3)), "the keyboard goes to the activated window as the transition is sent");
         assert_eq!(run.fallback, [3, 4].into(), "brought at once should the corner not be coverable");
-        // The switch's focus on another app's window (a stage of two apps): not hurried, so
-        // that app is not raised in the corner before the overlay covers it.
+        // The switch's focus on another app's window: not hurried, so that app is not raised
+        // in the corner before the overlay covers it. (An activation's own switch keys the
+        // activated app's window, so this is only a batch the activation did not choose.)
         let other = |id: u32| Some(if id == 3 { 10 } else { 30 });
         assert_eq!(activation_run(true, 30, &activation_batch(), other).focus, None);
         // Nothing to switch: nothing to do.
         assert_eq!(activation_run(true, 30, &[], pid_of), ActivationRun::default());
+    }
+
+    #[test]
+    fn a_dock_click_on_the_other_app_of_a_shared_stage_gives_it_the_keyboard_and_the_front() {
+        // His 10-27 log: one stage holds Mail (B, the key) and Calendar (A); a Dock click on
+        // Calendar switched with Mail's key, no early focus, and our focus activated Mail.
+        use crate::engine::model::ModelOptions;
+        use crate::engine::rules::{Decision, Placement, RuleAction};
+        use crate::engine::testkit::{Desk, child, meta, model_with};
+        let mut m = model_with(ModelOptions::default());
+        let mut d = Desk::default();
+        let a = meta(1, 10, "com.example.a");
+        let sheet = child(4, 10, Some(1));
+        let b = meta(2, 11, "com.example.b");
+        let c = meta(3, 12, "com.example.c");
+        for (w, action) in [(a, RuleAction::Current), (sheet, RuleAction::Current), (b, RuleAction::Current), (c, RuleAction::New)] {
+            d.open(&w);
+            let batch = m.add_window(w, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &d.obs());
+            d.apply(&batch);
+        }
+        let pid_of = |id: u32| m.window(WindowId(id)).map(|w| w.meta.pid);
+        let mut m2 = m.clone();
+        let batch = m2.app_activated(10, &Observation { focused: None, ..d.obs() });
+        let run = activation_run(true, 10, &batch, pid_of);
+        assert_eq!(run.focus, Some(WindowId(1)), "the keyboard goes to the clicked app's window before the motion");
+        let arriving: HashSet<u32> = [1, 2, 4].into();
+        let (now, later) = split_covered(batch, &arriving);
+        assert_eq!(ids(&now).last().map(String::as_str), Some("focus 1"));
+        let tail: Vec<String> = ids(&later).into_iter().filter(|a| a.starts_with("raise") || a.starts_with("focus")).collect();
+        assert_eq!(tail, ["raise 2", "raise 1", "raise 4", "focus 1"], "the other app's window raised first, the key and its sheet last");
     }
 
     #[test]

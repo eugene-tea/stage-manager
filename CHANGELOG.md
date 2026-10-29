@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The corner stays clean at dawn and dusk on wallpapers that follow the sun.
+- Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
+  front with the keyboard, also when it shares its stage with other apps.
+- A card shows its front window on top, also when its stage holds two apps, and the windows
+  keep that order as they grow from the card.
+- A stage's windows land in the order its card shows, also with three apps.
+
 ## 1.4.0 — 2026-10-23
 
 - New apps can open in the current stage: turn on **Open new apps in the current stage**
