@@ -153,11 +153,6 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 /// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 
-/// How long a wallpaper click that macOS answers with Show Desktop hides the corner patch
-/// before the overview is listed (seen ~0.7 s after the click); once listed, the overview
-/// keeps it hidden ([`Controller::update_patch`]).
-const PATCH_REVEAL_HOLD: Duration = Duration::from_millis(1500);
-
 /// How long Finder's desktop icons as read for the corner patch are trusted (a new
 /// rectangle reads them at once).
 const PATCH_ITEMS_FRESH: Duration = Duration::from_secs(5);
@@ -1059,9 +1054,6 @@ pub struct Controller {
     /// never read as a Space change (review R2 V8). Ends with a click off the wallpaper or a
     /// Space change.
     macos_reveal_at: Option<Instant>,
-    /// A wallpaper click macOS answers with Show Desktop, seen before its window is: the
-    /// corner patch hides at the click, not ~0.7 s later when the overview is listed.
-    patch_reveal_hold: Option<Instant>,
     /// Shown windows (the active stage's, pinned ones) the window server did not show at the
     /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
     /// a change seen by the once-a-second check sends a new snapshot.
@@ -1229,7 +1221,6 @@ impl Controller {
             patch_fast_until: None,
             active_off_screen: BTreeSet::new(),
             macos_reveal_at: None,
-            patch_reveal_hold: None,
             quiet: AppQuiet::default(),
             quiet_checked: Instant::now(),
             seen_times: HashMap::new(),
@@ -1702,9 +1693,7 @@ impl Controller {
                     rect,
                     // Not the settle after an overview (that is for Space inference): the patch
                     // comes back with the windows.
-                    overview: self.overview.showing().is_some()
-                        || self.phase.changing()
-                        || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
+                    overview: self.overview.showing_or_expected(now) || self.phase.changing(),
                     ordered,
                     can_order: possible,
                     fullscreen: self.phase.fullscreen(),
@@ -2557,9 +2546,7 @@ impl Controller {
         let now = Instant::now();
         let facts = CoverFacts {
             on: config.windows.corner_patch,
-            overview: self.overview.showing().is_some()
-                || self.phase.changing()
-                || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD),
+            overview: self.overview.showing_or_expected(now) || self.phase.changing(),
             fullscreen: self.phase.fullscreen(),
             slivers,
             raised,
@@ -4567,8 +4554,7 @@ impl Controller {
             WallpaperClick::LeftToMacOs => {
                 self.macos_reveal_at = Some(Instant::now());
                 // Opening Show Desktop (not closing it): the patch goes at once.
-                if self.overview.showing() != Some(Overview::ShowDesktop) {
-                    self.patch_reveal_hold = Some(Instant::now());
+                if self.overview.expect_show_desktop(Instant::now()) {
                     self.update_patch();
                 }
                 tracing::info!(
@@ -4975,8 +4961,7 @@ impl Controller {
             self.refresh_dock_order(now, ob.last_launch());
             // A wallpaper click's hold over: the patch is planned again (it stays hidden while
             // Show Desktop is listed; back if macOS showed none).
-            if self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) >= PATCH_REVEAL_HOLD) {
-                self.patch_reveal_hold = None;
+            if self.overview.expectation_over(now) {
                 self.update_patch();
             }
             self.expire_ahead(ob, now);

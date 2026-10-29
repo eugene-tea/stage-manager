@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use super::{Controller, PATCH_REVEAL_HOLD, cover_desktop_forced, input};
+use super::{Controller, cover_desktop_forced, input};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::patch_still::{self as ps, Still, TakeFacts};
 use crate::platform::{desktop, desktop_shot, windows};
@@ -47,7 +47,7 @@ impl Controller {
         let grows = anim.activation_grows && anim.animates() && self.strip_visible;
         let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
         let cover = grows && (icons || cover_desktop_forced() || crate::ui::corner_patch::cover_ready(rect).is_err());
-        let overview = self.overview.showing().is_some() || self.patch_reveal_hold.is_some_and(|t| now.duration_since(t) < PATCH_REVEAL_HOLD);
+        let overview = self.overview.showing_or_expected(now);
         let safety = ps::may_take(&TakeFacts {
             switching: self.phase.switching().is_some(),
             overview,
