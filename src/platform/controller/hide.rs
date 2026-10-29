@@ -255,13 +255,12 @@ impl Controller {
                     // finds it in the parked file.
                     self.hides.ours.insert(pid, Ours { bundle: bundle.clone(), asked: now, confirmed: false, in_place: BTreeSet::new() });
                     self.record_hides();
+                    // Its answer is not the outcome: on macOS 27 `hide` answers NO for another
+                    // app and hides it a moment later (live 10-29: `ok=false`, then the hidden
+                    // notice 20 ms on). The app stays ours, pending, until `confirm_hides`
+                    // reads it hidden or `HIDE_TIMEOUT` passes.
                     let ok = apps::hide(pid);
                     tracing::info!(pid, bundle, ok, "hide: every window of the app is parked; hiding it");
-                    if !ok {
-                        self.hides.ours.remove(&pid);
-                        self.hides.refused.insert(pid, now);
-                        self.record_hides();
-                    }
                 }
                 Err(why) => tracing::trace!(pid, bundle, why, "hide: the app stays parked"),
             }
