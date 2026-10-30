@@ -169,10 +169,8 @@ Known gaps the owner accepted as rare:
   strip, the floating level, so an always-on-top window may still be covered then.
 - **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
   - **`hide_parked_apps` trial on the owner's Mac** (on in his config since 10-29; the live
-    `hide` phase 65/0). Decide the default after a few days, from how ⌘Tab and the Dock feel.
-  - **The controller's state as one enum** (ARCHITECTURE §3): `Steady`, `SpaceChanging`,
-    `Overview`, `FullScreen` and `Switching`, with the holds derived from it. A Fable round,
-    the live suite before and after.
+    `hide` phase 65/0). 1.5.0 shipped it off, as before; decide the default after a few
+    days, from how ⌘Tab and the Dock feel.
   - **Deferred findings:**
     - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
     - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
@@ -190,9 +188,8 @@ Known gaps the owner accepted as rare:
   - **The suite and macOS's notification layer:** a banner (iCloud, 10-29) puts
     NotificationCenter's full-screen layer-21 window over the strip for minutes, and every
     click check then refuses. Have the suite wait for it to go, and name it when it
-    doesn't.
-  - **The CHANGELOG's Unreleased list** (about 35 lines) to be trimmed to a short user
-    list before 1.5.0.
+    doesn't. The owner's own unmanaged windows do the same while his app is quit (Messages
+    at the left edge, 1.5.0's run: 849/13, 12 of them refused clicks).
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.

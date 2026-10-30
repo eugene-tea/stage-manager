@@ -1,6 +1,6 @@
 [package]
 name = "stage-manager"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 # The oldest Rust that builds it (let chains); rust-toolchain.toml pins the one used.
 rust-version = "1.88"

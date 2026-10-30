@@ -1,72 +1,28 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — 2026-10-29
 
-- With Screen Recording allowed, the corner stays clean on any wallpaper, also with desktop
-  icons or widgets there, which still open and drag.
-- The corner stays clean at dawn and dusk on wallpapers that follow the sun.
-- The corner stays clean when Show Desktop ends: the windows coming back no longer show
-  the hidden windows' edges for a moment. With Screen Recording allowed it stays clean
-  through Show Desktop too, where the hidden windows' corners used to show.
-- Clicking an app in the Dock, or switching to it with ⌘-Tab, brings that app's window to the
-  front with the keyboard, also when it shares its stage with other apps.
-- A card shows its front window on top, also when its stage holds two apps, and the windows
-  keep that order as they grow from the card.
-- A stage's windows land in the order its card shows, also with three apps.
-- With named stages set, stages moved together to another Desktop in Mission Control arrive
-  with their windows showing, instead of all hidden behind an empty named stage.
-- A dialog left in a stage still waiting for its windows after a relaunch comes back on
-  screen when a rule places that stage's last awaited window elsewhere.
-- An app that was alone on a Desktop you left still comes back after a restart when it quit
-  just before it, as apps on other Desktops do.
-- After a restart on a display of another size, a window moved clear of the strip still goes
-  back to where you had it when Stage Manager quits.
-- A config file with a mistake in it no longer brings back the defaults when Stage Manager
-  starts: your last working settings stay, and update checks stay off if they can't be read.
-- Whole-number settings accept a number written like `50.0`.
-- A hotkey of Shift and a key alone is refused (it would take that key from your typing);
-  hotkeys need Control, Option or Command, or a function key.
-- If Stage Manager is moved while an update waits to install, it opens again afterwards
-  instead of staying closed.
-- An update you install by hand no longer leaves its disk image in the temporary folder.
-- Quitting Stage Manager brings every hidden window back where you left it, also a window
-  whose app was slow to move it, or a dialog.
-- After a crash, hidden windows come back exactly where they were, and a window you moved
-  meanwhile stays where you put it.
-- An app that reopens a window in the corner (it saved the hidden window's place when it
-  quit) has it put back where the window was, for a day after the app quit.
-- Quitting Stage Manager no longer moves a window you pushed almost off the corner, nor one
-  already back in place on another Desktop.
-- On a main screen of another size than before, a window brought back from the corner opens
-  centered instead of at a place from the other screen.
-- A hidden window that its app moves back onto the screen by itself goes back into the corner
-  within a second; if you are working in it, it stays and joins the stage you are in. Before,
-  it sat mid-screen with no card until you changed Desktop.
-- A hidden window that could not be moved into the corner (its app busy) is tried again, with
-  pauses, rather than counted hidden while it stays on screen.
-- A window you minimize with ⌘M keeps its card in the strip: it no longer rejoins the stage
-  by itself a moment later.
-- With `hide_parked_apps` on, the app you switch away from is hidden as soon as the new
-  stage's app is in front, not minutes later; the stage you switch to takes the keyboard.
-- A window dragged out of the corner right after you log in stays where you dropped it.
-- While a window that did not come back from the corner is tried again, its edge stays
-  covered and ignores clicks.
+- The corner stays clean on any wallpaper when Screen Recording is allowed, also with desktop
+  icons or widgets there (they still open and drag), at dawn and dusk on wallpapers that
+  follow the sun, and through Show Desktop and back.
+- Clicking an app in the Dock, or ⌘-Tab, brings its window to the front with the keyboard,
+  also when it shares its stage with other apps. Cards show their front window on top, and a
+  stage's windows land in the order its card shows.
+- Hidden windows come back exactly where you left them: when Stage Manager quits or crashes,
+  after a restart on a display of another size, and for a window partly off the screen, one
+  pushed into the corner, a dialog, or one whose app was busy.
+- A hidden window that its app moves back onto the screen goes back into the corner within a
+  second; if you are working in it, it joins your stage.
+- A window you minimize with ⌘M keeps its card in the strip.
+- With named stages, stages moved together to another Desktop in Mission Control arrive with
+  their windows showing.
 - A hung app no longer freezes Stage Manager while its windows are brought back.
-- When you switch apps with ⌘-Tab or the Dock, the corner is covered again at once.
-- A window left partly off the screen, or taller than it, comes back exactly where you left
-  it, not pulled onto the screen and shrunk.
-- A window pushed into the bottom-right corner comes back by the corner, not where it was
-  before.
-- A window of an app busy at a switch comes back where you last moved it.
-- A bigger Dock no longer sends a window kept by the corner to the middle of the screen.
-- A dialog opened on a window in another stage comes back on that window.
-- After a window is moved here in Mission Control, the stage it puts away comes back where
-  you left its windows.
-- A card dropped in the main area stays where you dropped it when Stage Manager quits.
-- Without Screen Recording, switching stages moves plain window shapes again instead of
-  showing nothing.
-- With the strip hidden, Stage Manager no longer takes pictures of your windows in the
-  background.
+- A config file with a mistake in it keeps your last working settings instead of the defaults.
+  Whole-number settings accept `50.0`, and a hotkey of Shift and a key alone is refused.
+- Updates: Stage Manager opens again after an update even if it was moved meanwhile, and an
+  update installed by hand no longer leaves its disk image behind.
+- Without Screen Recording, switching stages shows plain window shapes again. With the strip
+  hidden, no pictures of your windows are taken in the background.
 
 ## 1.4.0 — 2026-10-23
 
