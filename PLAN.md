@@ -175,8 +175,6 @@ Known gaps the owner accepted as rare:
     - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
     - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
       needs a look at the screen.
-    - L6: measure the shadow's reach: `stage-manager probe-shadow` (fixes-151) measures it;
-      `engine::corner_patch::DEFAULT_REACH` is provisional until its numbers are set.
     - C4: a step journal for non-APFS swaps.
   - **Skipped, with reasons in the rounds' reports:** E6, W6, the S11 peer rule.
   - **Live checks the rounds named but never wrote:**

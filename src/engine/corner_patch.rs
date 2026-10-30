@@ -117,13 +117,12 @@ impl Default for Reach {
 }
 
 /// The shadow's reach of a parked window, which is inactive (its app not frontmost, never
-/// key): `[windows] corner_patch_reach = "auto"`, the default. **Provisional** until
-/// measured on the owner's Mac (`stage-manager probe-shadow`): an inactive window's shadow is
-/// smaller and lighter than an active one's and falls downward, so it reaches least above
-/// the window and most below it; the corner that shows of a window parked bottom-right is
-/// its top-left. These are an estimate of an inactive shadow (about 30 pt of blur, 10 pt
-/// down, faded under 2/255 by some 30 pt past its edge) with a margin.
-pub const DEFAULT_REACH: Reach = Reach { left: 40.0, top: 32.0, right: 40.0, bottom: 56.0 };
+/// key): `[windows] corner_patch_reach = "auto"`, the default. Measured on the owner's Mac
+/// (10-30, `stage-manager probe-shadow`, Studio Display at 2x, a titled and a toolbar window
+/// alike): an inactive window's shadow falls downward, so it reaches least above the window
+/// and most below it; past these it is under 2/255 (1/255 reaches 4 to 5 pt further). The
+/// corner that shows of a window parked bottom-right is its top-left.
+pub const DEFAULT_REACH: Reach = Reach { left: 18.0, top: 11.0, right: 18.0, bottom: 25.0 };
 
 /// An active window's shadow, the largest (the reach used everywhere before the per-side
 /// one, unmeasured): a window macOS raised and activated in the corner during a switch
@@ -1163,9 +1162,9 @@ mod tests {
         assert_eq!(one.y - both.y, 48.0);
         assert_eq!(steady_rect(Some(both), one, DEFAULT_REACH), one, "more than the top's reach: the small one");
         assert_eq!(steady_rect(Some(both), one, Reach::even(60.0)), both, "a 60 pt reach keeps it");
-        let a_little = Rect::new(2559.0, 1370.0, 1200.0, 900.0);
+        let a_little = Rect::new(2559.0, 1380.0, 1200.0, 900.0);
         let two = patch_rect(&[near, a_little], MAIN, DEFAULT_REACH).expect("slivers");
-        assert_eq!(steady_rect(Some(two), one, DEFAULT_REACH), two, "a sliver 18 pt taller came and went: kept");
+        assert_eq!(steady_rect(Some(two), one, DEFAULT_REACH), two, "a sliver 8 pt taller came and went: kept");
         assert_eq!(steady_rect(Some(two), one, Reach::even(0.0)), one, "no reach, no slack");
     }
 
