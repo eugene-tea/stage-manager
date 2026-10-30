@@ -4161,6 +4161,9 @@ impl Controller {
         }
         self.lock_checked = Some(now);
         let locked = session::screen_locked();
+        if locked {
+            session::saw_rest(now);
+        }
         if locked != self.locked {
             self.locked = locked;
             // What was counted towards windows gone or moved is looked at afresh.

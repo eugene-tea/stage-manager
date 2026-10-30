@@ -283,7 +283,8 @@ approvals stay. If any step fails, the old version stays (or is put back) and sa
 even putting it back fails, both copies are kept and the note at the next launch says where.
 
 Turn on **Install updates automatically** in Settings to skip the question: an update then
-installs while you are away from the Mac, never in the middle of a drag or a switch. You
+installs while you are away from the Mac, never in the middle of a drag or a switch, and
+never while the screen is locked (it waits until you unlock and step away again). You
 can turn the daily check off, and **Check for Updates…** in the menu works either way. If
 Stage Manager can't replace itself where it is (it runs from the disk image, or from a
 folder you can't write to), it offers the download instead.

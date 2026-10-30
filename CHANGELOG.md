@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- An automatic update no longer installs while the screen is locked, when hidden windows
+  could not come back until you unlocked; it waits until you are back and step away again.
+
 ## 1.5.0 — 2026-10-29
 
 - The corner stays clean on any wallpaper when Screen Recording is allowed, also with desktop
