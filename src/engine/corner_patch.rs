@@ -438,6 +438,10 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
     if f.fullscreen {
         return Err("a full-screen Space shows");
     }
+    // An icon changed under it: the picture held would cut it; hidden until the new still.
+    if f.still == super::patch_still::Still::Redrawing {
+        return Err(super::patch_still::REDRAWING);
+    }
     // The file's picture would hide an icon; a still of the desktop shows it.
     if !super::patch_still::stands(f.still) {
         icons_clear(f.items.as_deref(), rect)?;
@@ -1274,6 +1278,7 @@ mod tests {
         assert!(visibility(&f).is_ok(), "the still shows the icon");
         assert!(visibility(&PatchFacts { items: None, ..f.clone() }).is_ok(), "the icons not known: the still is exact anyway");
         assert!(visibility(&PatchFacts { still: Still::Coming, ..f.clone() }).is_ok(), "one on its way: held");
+        assert_eq!(visibility(&PatchFacts { still: Still::Redrawing, ..f.clone() }), Err(super::super::patch_still::REDRAWING), "an icon changed under it: hidden");
         assert_eq!(visibility(&PatchFacts { still: Still::Absent, ..f.clone() }), Err("a desktop icon lies under the corner"), "none: as before");
         // The rest of the gate stands: never over an overview, nor on a full-screen Space.
         assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err());

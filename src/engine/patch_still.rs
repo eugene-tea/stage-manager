@@ -9,9 +9,14 @@
 //!
 //! - **Which picture** ([`source`]): a still that stands for the corner now
 //!   ([`Still::Ready`]) first; while none does but one is on its way ([`Still::Coming`]: a
-//!   Desktop arrived, an icon moved under the corner, the picture changed) the panel keeps
+//!   Desktop arrived, an icon moved in the corner block, the picture changed) the panel keeps
 //!   what it shows, if a still drew it there, for at most [`HOLD_MAX`]; otherwise the file's
 //!   picture, only where no desktop icon lies under the corner, as before.
+//! - **An icon changed under the patch** ([`Still::Redrawing`], round fixes-151): one added,
+//!   moved or removed under the patch's own rectangle ([`icons_changed_under`]) would be cut
+//!   by the picture held (10-30: an icon dropped into the corner, its label cut in half for
+//!   about a second). The patch hides at once instead, and shows again with the new still: a
+//!   bare sliver for that moment is far less visible than a cut icon.
 //! - **When a still may be taken** ([`may_take`]): never while a switch runs, an overview is
 //!   up (Mission Control, App Exposé, Show Desktop), a Space change is being recognized or a
 //!   Desktop slides, nor within [`SETTLE`] of a Space change or of the still being dropped
@@ -27,6 +32,8 @@
 //! Pure: the WM thread and the patch's panel ask it with what they know.
 
 use std::time::Duration;
+
+use super::geometry::Rect;
 
 /// The longest a shown patch keeps its picture while a new still is on its way: past it, the
 /// file's picture where it may stand, else the slivers (a still that does not come).
@@ -53,6 +60,10 @@ pub enum Still {
     Ready(u64),
     /// None stands now, and one may be taken shortly: the patch holds what a still drew.
     Coming,
+    /// As [`Still::Coming`], but the desktop's icons changed under the patch's rectangle
+    /// since the still: the picture held would cut an icon, so the patch hides until the new
+    /// still is drawn ([`redraw`]).
+    Redrawing,
     /// None stands and none is coming: the file's picture, as without Screen Recording.
     #[default]
     Absent,
@@ -137,6 +148,28 @@ pub fn state(ready: Option<u64>, take: Result<(), Block>, missing_for: Duration)
     }
 }
 
+/// Whether Finder's icons changed under the patch at `rect` between the still kept (`kept`:
+/// the icons it was taken with) and now (`now`): an icon (grown by its reach) in one and not
+/// the other meets the rectangle. False when either is not known: an icon change elsewhere in
+/// the corner, or none known, holds the picture as before.
+pub fn icons_changed_under(kept: Option<&[Rect]>, now: Option<&[Rect]>, rect: Rect) -> bool {
+    let (Some(kept), Some(now)) = (kept, now) else { return false };
+    let gone = kept.iter().filter(|i| !now.contains(i));
+    let came = now.iter().filter(|i| !kept.contains(i));
+    gone.chain(came).any(|i| i.intersect(&rect).is_some())
+}
+
+/// The still for the patch once the icons are looked at: one on its way ([`Still::Coming`])
+/// while the icons changed under the patch (`changed_under`, [`icons_changed_under`]) is
+/// [`Still::Redrawing`]; anything else is as it is.
+pub fn redraw(still: Still, changed_under: bool) -> Still {
+    if changed_under && still == Still::Coming { Still::Redrawing } else { still }
+}
+
+/// [`super::corner_patch::visibility`]'s reason while the patch waits for a still redrawn
+/// for an icon change under it.
+pub const REDRAWING: &str = "a desktop icon changed under the corner; the patch waits for its new still";
+
 /// What the patch's panel draws ([`source`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Source {
@@ -156,7 +189,8 @@ pub fn source(still: Still, icons_clear: bool) -> Source {
     match still {
         Still::Ready(serial) => Source { still: Some(serial), hold: false, file: icons_clear },
         Still::Coming => Source { still: None, hold: true, file: icons_clear },
-        Still::Absent => Source { still: None, hold: false, file: icons_clear },
+        // Hidden by the plan meanwhile; nothing held.
+        Still::Redrawing | Still::Absent => Source { still: None, hold: false, file: icons_clear },
     }
 }
 
@@ -171,7 +205,7 @@ pub fn stands(still: Still) -> bool {
 /// slides back in as it was left): the icons under it unchanged (`drawn`, `now`: those
 /// meeting its rectangle; unknown now counts as unchanged, the arrival takes a new still at
 /// once), the appearance unchanged, and the frame the clock predicted not yet due.
-pub fn away_still_holds(drawn: Option<&[super::geometry::Rect]>, now: Option<&[super::geometry::Rect]>, dark_changed: bool, frame_due: bool) -> bool {
+pub fn away_still_holds(drawn: Option<&[Rect]>, now: Option<&[Rect]>, dark_changed: bool, frame_due: bool) -> bool {
     if dark_changed || frame_due {
         return false;
     }
@@ -184,7 +218,6 @@ pub fn away_still_holds(drawn: Option<&[super::geometry::Rect]>, now: Option<&[s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::geometry::Rect;
 
     #[test]
     fn a_still_is_taken_only_when_nothing_moves_on_the_desktop() {
@@ -221,6 +254,28 @@ mod tests {
         assert_eq!(source(Still::Coming, false), Source { still: None, hold: true, file: false });
         assert_eq!(source(Still::Absent, true), Source { still: None, hold: false, file: true }, "without Screen Recording: as before");
         assert!(stands(Still::Ready(1)) && stands(Still::Coming) && !stands(Still::Absent));
+    }
+
+    #[test]
+    fn an_icon_changed_under_the_patch_hides_it_until_the_new_still() {
+        // His 10-30 screenshot: an icon dropped into the corner, its label cut by the old
+        // still for about a second.
+        let patch = Rect::new(2519.0, 1356.0, 41.0, 84.0);
+        let dropped = Rect::new(2440.0, 1300.0, 136.0, 114.0);
+        let far = Rect::new(2100.0, 1000.0, 136.0, 114.0);
+        assert!(icons_changed_under(Some(&[]), Some(&[dropped]), patch), "one dropped under it");
+        assert!(icons_changed_under(Some(&[dropped]), Some(&[]), patch), "one taken out");
+        let moved = Rect::new(2450.0, 1300.0, 136.0, 114.0);
+        assert!(icons_changed_under(Some(&[dropped]), Some(&[moved]), patch), "one moved under it");
+        assert!(!icons_changed_under(Some(&[dropped]), Some(&[dropped]), patch), "unchanged");
+        assert!(!icons_changed_under(Some(&[dropped]), Some(&[dropped, far]), patch), "one elsewhere in the corner block");
+        assert!(!icons_changed_under(None, Some(&[dropped]), patch), "not known: as before");
+        assert!(!icons_changed_under(Some(&[]), None, patch));
+        assert_eq!(redraw(Still::Coming, true), Still::Redrawing);
+        assert_eq!(redraw(Still::Coming, false), Still::Coming, "elsewhere: held as before");
+        assert_eq!(redraw(Still::Ready(4), true), Still::Ready(4), "the new still: shown");
+        assert_eq!(redraw(Still::Absent, true), Still::Absent, "none coming: the file's picture rules");
+        assert_eq!(source(Still::Redrawing, false), Source { still: None, hold: false, file: false }, "nothing held");
     }
 
     #[test]

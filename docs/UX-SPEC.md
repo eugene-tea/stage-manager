@@ -160,8 +160,9 @@ most below (`[windows] corner_patch_reach` sets one number for every side).
 Where window thumbnails are captured (Screen Recording), the patch is a still of the corner
 showing only the desktop's own layers (the picture, Finder's icons, widgets; never a window,
 ours included), exact by construction, so nothing on the desktop keeps it off and icons
-under it take clicks and drags as usual; it is taken again on arriving at a Desktop once the
-slide settles, when an icon there changes, after a click on the desktop, a moment after the
+under it take clicks and drags as usual (an icon dropped, moved or taken away under the patch
+hides it until the new still is drawn, so a stale picture never cuts the icon); it is taken
+again on arriving at a Desktop once the slide settles, when an icon there changes, after a click on the desktop, a moment after the
 picture or its predicted frame changes, and every 10 seconds otherwise (never during a
 switch's motion, a slide, Mission Control or Show Desktop; none while the screen is locked
 or asleep). The patch stays where it is through Show Desktop, Mission Control and App

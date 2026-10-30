@@ -3267,7 +3267,8 @@ def phase_still():
     drawn from a still (`desktop_still.patch` ready, its plan naming the still's serial); a
     double click on the icon through the click-through patch opens the volume's Finder window
     (closed again); a drag takes the icon out of the corner and a new still follows, the patch
-    still shown. The volume is ejected whatever happens. No picture is saved: the still holds
+    still shown, and hidden, never holding the old picture, while that still is redrawn for the
+    icon (round fixes-151: `desktop_still.patch` "redrawing"). The volume is ejected whatever happens. No picture is saved: the still holds
     the real desktop. First, Show Desktop by a wallpaper click and a click back, the patch
     drawn from the still through it and its close (`show_desktop_close`). With "Click wallpaper to reveal desktop" at Always (macOS's default) the
     click and the drag run only with SM_STILL_CLICK=1: macOS's own reveal should leave a click
@@ -3379,13 +3380,31 @@ def phase_still():
         to = (at[0] - 220, at[1])
         r = ctl("debug-desktop", f"{at[0]:.0f}", f"{at[1]:.0f}", "drag", f"{to[0]:.0f}", f"{to[1]:.0f}")
         if r.get("ok"):
-            moved = wait_until(lambda: (lambda i: i if i and not intersect(icon_image(i), rect) else None)(new_icon()), 8,
-                               "the icon out of the corner")
+            # Round fixes-151: from the drag on, the patch never shows a held picture while the
+            # icons changed under it (the old still would show the icon where it no longer is).
+            looks = []
+
+            def look_moved():
+                x = state()
+                ds = x.get("desktop_still") or {}
+                looks.append((ds.get("patch"), bool(patch_plan(x).get("show")), patch_plan(x).get("hold")))
+                i = new_icon()
+                return i if i and not intersect(icon_image(i), rect) else None
+
+            moved = wait_until(look_moved, 8, "the icon out of the corner")
             check(moved is not None, "still: the icon dragged from under the patch moved")
-            fresh = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("serial") not in (None, serial)
-                                        and (x.get("desktop_still") or {}).get("patch") == "ready"
-                                        and patch_plan(x).get("show") else None)(state()), 5, "a new still")
+
+            def look_fresh():
+                x = state()
+                ds = x.get("desktop_still") or {}
+                looks.append((ds.get("patch"), bool(patch_plan(x).get("show")), patch_plan(x).get("hold")))
+                return x if ds.get("serial") not in (None, serial) and ds.get("patch") == "ready" and patch_plan(x).get("show") else None
+
+            fresh = wait_until(look_fresh, 5, "a new still")
             check(fresh is not None, f"still: a new still after the icon moved, the patch still shown ({patch_plan(state())})")
+            redrawn = [lk for lk in looks if lk[0] == "redrawing"]
+            check(not any(lk[1] for lk in redrawn), f"still: the patch is hidden while its still is redrawn for the icon ({len(redrawn)} looks redrawing)")
+            say(f"    looks while the icon moved: {len(looks)}, redrawing {len(redrawn)}, shown holding {sum(1 for lk in looks if lk[1] and lk[2])}")
         else:
             skip("still: the icon dragged", f"the drag's path is not all desktop ({r.get('error')})")
     finally:
