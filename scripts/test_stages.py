@@ -41,7 +41,8 @@ merges the two stages (`[strip] merge_on_drop`, on by default); a card click ani
 another app's stage grows from its card (round 8L: see `activation_grows_check`);
 `level = "above_windows"` keeps the strip on top), park (round park-reconcile: a parked window
 the fixture moves to the middle of the screen by itself, SIGALRM, is parked again within about a
-second, its restore frame untouched, and a switch brings it back exactly), slots (a dozen card clicks in a mixed order,
+second, its restore frame untouched, and a switch brings it back exactly; round fixes-151:
+the corner patch is its sliver grown by a parked window's shadow reach per side), slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
 in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
@@ -5131,13 +5132,58 @@ def phase_raise():
 # ----- park reconcile: a parked window its app moved out of the corner --------------------
 
 
+def patch_reach_rect(slivers, display, reach):
+    """engine::corner_patch::patch_rect: every sliver on the display grown by the reach per
+    side, together, rounded out to whole points, kept on the display. None when none shows."""
+    dx, dy, dr, db = display["x"], display["y"], display["x"] + display["w"], display["y"] + display["h"]
+    box = None
+    for b in slivers:
+        x0, y0 = max(b["x"], dx), max(b["y"], dy)
+        x1, y1 = min(b["x"] + b["w"], dr), min(b["y"] + b["h"], db)
+        if x0 >= x1 or y0 >= y1:
+            continue
+        g = (x0 - reach["left"], y0 - reach["top"], x1 + reach["right"], y1 + reach["bottom"])
+        box = g if box is None else (min(box[0], g[0]), min(box[1], g[1]), max(box[2], g[2]), max(box[3], g[3]))
+    if box is None:
+        return None
+    x0, y0 = math.floor(max(box[0], dx)), math.floor(max(box[1], dy))
+    x1, y1 = min(math.ceil(min(box[2], dr)), dr), min(math.ceil(min(box[3], db)), db)
+    return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
+def check_patch_rect(parked_ids, what):
+    """Round fixes-151: the corner patch covers the parked fixture windows' slivers grown by a
+    parked (inactive) window's shadow reach, per side (`desktop_still.patch_reach`), not the
+    60 pt on every side of before: exactly that rectangle, or one kept a little bigger (at
+    most the reach on each side, engine::corner_patch::steady_rect)."""
+    s = wait_until(lambda: (lambda x: x if patch_plan(x).get("show") else None)(state()), 5, "the corner patch shown")
+    if s is None:
+        skip(f"{what}: the corner patch's rectangle", f"the patch is not shown ({(state().get('desktop_still') or {}).get('patch_plan')})")
+        return
+    reach = (s.get("desktop_still") or {}).get("patch_reach")
+    if not check(bool(reach), f"{what}: the state names the patch's reach per side ({reach})"):
+        return
+    wins, d = fixture_windows([FIX_ID])
+    slivers = [w["bounds"] for w in wins if w["id"] in parked_ids]
+    want = patch_reach_rect(slivers, d, reach)
+    got = patch_plan(s)["show"]
+    say(f"    slivers {[fmt(b) for b in slivers]}, reach {reach}: the patch {fmt(got)}, wanted {fmt(want) if want else '-'}")
+    if not check(want is not None, f"{what}: a parked fixture window shows a sliver on the display"):
+        return
+    exact = close(got, want, 0.01)
+    extra = (want["x"] - got["x"], want["y"] - got["y"], got["x"] + got["w"] - want["x"] - want["w"], got["y"] + got["h"] - want["y"] - want["h"])
+    kept = all(e >= -0.01 for e in extra) and all(e <= r + 0.01 for e, r in zip(extra, (reach["left"], reach["top"], reach["right"], reach["bottom"])))
+    check(exact or kept, f"{what}: the patch is the slivers grown by the reach per side ({fmt(got)}; wanted {fmt(want)}, or at most the reach bigger: {extra})")
+
+
 def phase_park():
     """Round park-reconcile (the Fable review's L1/K2/S5: a parked window the window server
     listed out of the park zone was only logged until the next Desktop change): the fixture
     moves its own parked window to the middle of the screen (SIGALRM, an app re-centring its
     window while parked); within about a second the app parks it again, its restore frame
     untouched, and a switch brings it back exactly where it was. The model and the screen
-    agree throughout (`consistent`)."""
+    agree throughout (`consistent`). Round fixes-151: once parked, the corner patch is its
+    sliver grown by the reach per side ([`check_patch_rect`])."""
     say("\n== park reconcile: a parked window its app moved out of the corner is parked again ==")
     stop_app()
     stop_fixture()
@@ -5160,6 +5206,7 @@ def phase_park():
     if not check([w["id"] for w in parked] == [w1], f"Fixture 1 is parked (stage 1), Fixture 2's new stage active (parked: {[w['id'] for w in parked]}, w1 {w1})"):
         return
     restore = parked[0]["restore"]
+    check_patch_rect({w1}, "park")
     fixture = pids_of(FIX_EXE)
     if not check(bool(fixture), "the fixture runs"):
         return

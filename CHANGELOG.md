@@ -4,6 +4,8 @@
 
 - An automatic update no longer installs while the screen is locked, when hidden windows
   could not come back until you unlocked; it waits until you are back and step away again.
+- The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges
+  only as far as their shadow does.
 
 ## 1.5.0 — 2026-10-29
 

@@ -326,8 +326,22 @@ pub struct WindowsConfig {
     /// The desktop picture, drawn from its file, over the parked windows' slivers (a
     /// prototype).
     pub corner_patch: bool,
-    /// How far past a sliver the patch reaches (its shadow).
-    pub corner_patch_reach: f64,
+    /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
+    /// shadow side by side ([`crate::engine::corner_patch::DEFAULT_REACH`]), or one number for
+    /// every side ([`WindowsConfig::patch_reach`]).
+    pub corner_patch_reach: Auto,
+}
+
+impl WindowsConfig {
+    /// The corner patch's reach past each side of a sliver: the user's number on every side
+    /// when `[windows] corner_patch_reach` is set, else an inactive window's shadow.
+    pub fn patch_reach(&self) -> crate::engine::corner_patch::Reach {
+        use crate::engine::corner_patch::{DEFAULT_REACH, Reach};
+        match self.corner_patch_reach {
+            Auto::Auto => DEFAULT_REACH,
+            Auto::Value(v) => Reach::even(v).clean(),
+        }
+    }
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -906,7 +920,7 @@ impl Config {
                 park_drop: v.num("windows.park_drop"),
                 hide_parked_apps: v.flag("windows.hide_parked_apps"),
                 corner_patch: v.flag("windows.corner_patch"),
-                corner_patch_reach: v.num("windows.corner_patch_reach"),
+                corner_patch_reach: v.auto("windows.corner_patch_reach"),
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
@@ -1156,6 +1170,21 @@ mod tests {
         let p = parse(&uncommented);
         assert_eq!(p.config, Config::default());
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn the_corner_patch_reach_is_an_inactive_shadow_unless_set() {
+        use crate::engine::corner_patch::{DEFAULT_REACH, Reach};
+        assert_eq!(Config::default().windows.corner_patch_reach, Auto::Auto);
+        assert_eq!(Config::default().windows.patch_reach(), DEFAULT_REACH, "not set: per side");
+        assert_eq!(parse("[windows]\ncorner_patch_reach = \"auto\"\n").config.windows.patch_reach(), DEFAULT_REACH);
+        let set = parse("[windows]\ncorner_patch_reach = 60\n");
+        assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+        assert_eq!(set.config.windows.patch_reach(), Reach::even(60.0), "set: one number, every side");
+        assert_eq!(parse("[windows]\ncorner_patch_reach = 0.0\n").config.windows.patch_reach(), Reach::even(0.0));
+        let far = parse("[windows]\ncorner_patch_reach = 900\n");
+        assert_eq!(far.config.windows.patch_reach(), Reach::even(400.0));
+        assert!(!far.warnings.is_empty());
     }
 
     #[test]

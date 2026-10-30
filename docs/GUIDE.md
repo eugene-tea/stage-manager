@@ -338,7 +338,9 @@ video and aerial wallpapers, shuffled or Photos wallpapers, the Center and Tile 
 Fit with no fill color, or a desktop icon in the corner; a desktop widget there may be
 covered. Pictures that change with the time of day or with light and dark, Apple's own
 included, are usually matched. A Desktop you visit for the first time may show the edges for
-a moment. You can turn the patch off with `[windows] corner_patch = false`.
+a moment. You can turn the patch off with `[windows] corner_patch = false`. If a faint
+shadow shows beside it, `[windows] corner_patch_reach = 60` makes it reach that many points
+past every edge.
 
 **A window seems lost.** Quit Stage Manager from its menu: every hidden window comes back.
 If the app crashed, a small helper process brings the windows back by itself, each where it

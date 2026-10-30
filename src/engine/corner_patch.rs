@@ -5,8 +5,9 @@
 //! when it may show.
 //!
 //! - **Where** ([`patch_rect`]): the parked windows' slivers as the window server lists them,
-//!   each grown by the shadow's reach ([`DEFAULT_REACH`], `[windows] corner_patch_reach`),
-//!   on the display. A park or unpark that shrinks it a little keeps the rectangle in use
+//!   each grown by the shadow's reach per side ([`DEFAULT_REACH`], an inactive window's;
+//!   `[windows] corner_patch_reach` sets one number for every side), on the display. A park
+//!   or unpark that shrinks it by no more than the reach keeps the rectangle in use
 //!   ([`steady_rect`]), so the panel does not move for every sliver that comes and goes.
 //! - **Ordering.** The patch is a normal-level window ordered just above the topmost parked
 //!   window under it (`orderWindow:relativeTo:` with another app's window number). Whether
@@ -68,19 +69,76 @@ use std::time::Duration;
 use super::geometry::Rect;
 use super::park::Corner;
 
-/// How far (points) a window's shadow reaches past its frame: an active window's shadow is
-/// the largest (unmeasured on the owner's displays; to be confirmed by the live check).
-pub const DEFAULT_REACH: f64 = 60.0;
+/// How far (points) a window's shadow reaches past each side of its frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reach {
+    /// Past its left edge.
+    pub left: f64,
+    /// Above its top edge.
+    pub top: f64,
+    /// Past its right edge.
+    pub right: f64,
+    /// Below its bottom edge.
+    pub bottom: f64,
+}
+
+impl Reach {
+    /// The same reach on every side (`[windows] corner_patch_reach` set to a number).
+    pub const fn even(r: f64) -> Self {
+        Self { left: r, top: r, right: r, bottom: r }
+    }
+
+    /// Each side kept within 0..=400 pt; a side that is no number takes [`DEFAULT_REACH`]'s.
+    pub fn clean(self) -> Self {
+        let side = |v: f64, d: f64| if v.is_finite() { v.clamp(0.0, 400.0) } else { d };
+        let d = DEFAULT_REACH;
+        Self { left: side(self.left, d.left), top: side(self.top, d.top), right: side(self.right, d.right), bottom: side(self.bottom, d.bottom) }
+    }
+
+    /// Each side the larger of the two.
+    pub fn max(self, o: Self) -> Self {
+        Self { left: self.left.max(o.left), top: self.top.max(o.top), right: self.right.max(o.right), bottom: self.bottom.max(o.bottom) }
+    }
+
+    /// `r` grown by the reach on each side.
+    pub fn grow(self, r: Rect) -> Rect {
+        Rect::new(r.x - self.left, r.y - self.top, r.w + self.left + self.right, r.h + self.top + self.bottom)
+    }
+}
+
+// An inactive shadow falls downward: least above, most below, the same left and right.
+const _: () = assert!(DEFAULT_REACH.top < DEFAULT_REACH.left && DEFAULT_REACH.left < DEFAULT_REACH.bottom);
+const _: () = assert!(DEFAULT_REACH.left == DEFAULT_REACH.right);
+
+impl Default for Reach {
+    fn default() -> Self {
+        DEFAULT_REACH
+    }
+}
+
+/// The shadow's reach of a parked window, which is inactive (its app not frontmost, never
+/// key): `[windows] corner_patch_reach = "auto"`, the default. **Provisional** until
+/// measured on the owner's Mac (`stage-manager probe-shadow`): an inactive window's shadow is
+/// smaller and lighter than an active one's and falls downward, so it reaches least above
+/// the window and most below it; the corner that shows of a window parked bottom-right is
+/// its top-left. These are an estimate of an inactive shadow (about 30 pt of blur, 10 pt
+/// down, faded under 2/255 by some 30 pt past its edge) with a margin.
+pub const DEFAULT_REACH: Reach = Reach { left: 40.0, top: 32.0, right: 40.0, bottom: 56.0 };
+
+/// An active window's shadow, the largest (the reach used everywhere before the per-side
+/// one, unmeasured): a window macOS raised and activated in the corner during a switch
+/// ([`switch_cover`]) may wear it.
+pub const ACTIVE_REACH: Reach = Reach::even(60.0);
 
 /// The patch's rectangle: every sliver (`slivers`: parked windows' bounds as listed) that
-/// shows on `display`, grown by `reach` on every side, rounded out to whole points (so the
-/// picture's crop, whole pixels, is exactly the panel's size), kept on the display. `None`
-/// when no sliver shows.
-pub fn patch_rect(slivers: &[Rect], display: Rect, reach: f64) -> Option<Rect> {
-    let reach = if reach.is_finite() { reach.clamp(0.0, 400.0) } else { DEFAULT_REACH };
+/// shows on `display`, grown by `reach` on each side (the window's shadow, [`Reach::grow`]),
+/// rounded out to whole points (so the picture's crop, whole pixels, is exactly the panel's
+/// size), kept on the display. `None` when no sliver shows.
+pub fn patch_rect(slivers: &[Rect], display: Rect, reach: Reach) -> Option<Rect> {
+    let reach = reach.clean();
     let mut out: Option<Rect> = None;
     for s in slivers.iter().filter_map(|s| s.intersect(&display)) {
-        let grown = Rect::new(s.x - reach, s.y - reach, s.w + 2.0 * reach, s.h + 2.0 * reach);
+        let grown = reach.grow(s);
         out = Some(match out {
             None => grown,
             Some(u) => union(u, grown),
@@ -95,19 +153,18 @@ fn whole_points(r: Rect) -> Rect {
     Rect::new(x, y, r.max_x().ceil() - x, r.max_y().ceil() - y)
 }
 
-/// How much bigger (points, on any side) than needed the rectangle in use may stay.
-pub const STEADY_SLACK: f64 = 48.0;
-
 /// The rectangle to use: the one in use (`prev`) while it still covers `next` and is at most
-/// [`STEADY_SLACK`] bigger on every side (a sliver that came and went), else `next`.
-pub fn steady_rect(prev: Option<Rect>, next: Rect) -> Rect {
+/// `slack` bigger on each side (a sliver that came and went), else `next`. The slack is the
+/// shadow's reach on that side, so a small patch stays small.
+pub fn steady_rect(prev: Option<Rect>, next: Rect, slack: Reach) -> Rect {
+    let slack = slack.clean();
     match prev {
         Some(p)
             if p.contains_rect(&next)
-                && next.x - p.x <= STEADY_SLACK
-                && next.y - p.y <= STEADY_SLACK
-                && p.max_x() - next.max_x() <= STEADY_SLACK
-                && p.max_y() - next.max_y() <= STEADY_SLACK =>
+                && next.x - p.x <= slack.left
+                && next.y - p.y <= slack.top
+                && p.max_x() - next.max_x() <= slack.right
+                && p.max_y() - next.max_y() <= slack.bottom =>
         {
             p
         }
@@ -433,8 +490,8 @@ pub struct CoverFacts {
     /// The Dock's bar (its frames, top-left), as the inert-slivers code last read it; `None`
     /// when not known (the cover keeps to the visible frame then).
     pub dock_bars: Option<Vec<Rect>>,
-    /// `[windows] corner_patch_reach`.
-    pub reach: f64,
+    /// The parked windows' shadow reach ([`DEFAULT_REACH`], or `[windows] corner_patch_reach`).
+    pub reach: Reach,
     /// The patch's rectangle in use, if any ([`steady_rect`]).
     pub in_use: Option<Rect>,
     /// Finder's desktop icons as last read well ([`PatchFacts::items`]).
@@ -506,7 +563,7 @@ pub const NOTHING_IN_CORNER: &str = "nothing waits in the park corner";
 /// The side (points) of the square at the display's park corner that a switch's cover never
 /// leaves (round 8L6): a parked window shows at most a [`super::park::PARK_SLIVER_LENGTH`]
 /// (256 pt) sliver there, or a [`super::park::PARK_MARGIN`] square, with its shadow's reach
-/// ([`DEFAULT_REACH`]) beside it. The owner's covers of up to 2087x1316 pt (10-16, the patch's
+/// ([`DEFAULT_REACH`], [`ACTIVE_REACH`]) beside it. The owner's covers of up to 2087x1316 pt (10-16, the patch's
 /// rectangle grown by a window the model had parked listed mid-screen) painted his desktop
 /// over his windows for 400 ms at every switch: never again, whatever the rectangles say.
 pub const COVER_CAP: f64 = 320.0;
@@ -569,13 +626,12 @@ pub fn switch_cover(f: &CoverFacts) -> Result<SwitchCover, Refused> {
     if f.fullscreen {
         return Err("a full-screen Space shows".into());
     }
-    // The raised windows count as slivers wherever they are: what the cover must hide.
-    let waiting: Vec<Rect> = f.slivers.iter().chain(&f.raised).copied().collect();
-    let grown = patch_rect(&waiting, f.display, f.reach);
-    let rect = match (grown, f.in_use.and_then(|r| r.intersect(&f.display))) {
-        (Some(a), Some(b)) => union(a, b),
-        (Some(r), None) | (None, Some(r)) => r,
-        (None, None) => return Err("no sliver shows".into()),
+    // The raised windows count as slivers wherever they are: what the cover must hide. macOS
+    // activated them, so their shadow may be an active window's: at least [`ACTIVE_REACH`].
+    let grown = [patch_rect(&f.slivers, f.display, f.reach), patch_rect(&f.raised, f.display, f.reach.clean().max(ACTIVE_REACH))];
+    let rect = match grown.into_iter().chain([f.in_use.and_then(|r| r.intersect(&f.display))]).flatten().reduce(union) {
+        Some(r) => r,
+        None => return Err("no sliver shows".into()),
     };
     let cap = cover_cap(f.display, f.corner);
     let rect = rect.intersect(&cap).ok_or(NOTHING_IN_CORNER)?;
@@ -783,7 +839,7 @@ mod tests {
             on: true,
             slivers: vec![sliver(32.0)],
             display: MAIN,
-            reach: 60.0,
+            reach: Reach::even(60.0),
             items: Some(vec![Rect::new(2400.0, 40.0, 100.0, 100.0)]),
             ..CoverFacts::default()
         }
@@ -843,7 +899,7 @@ mod tests {
     fn a_switch_covers_every_sliver_the_incoming_ones_included_with_the_patch_in_use() {
         let f = cover_facts();
         let alone = cover(&f).expect("covered");
-        assert_eq!(Some(alone), patch_rect(&f.slivers, MAIN, 60.0), "what the patch would cover");
+        assert_eq!(Some(alone), patch_rect(&f.slivers, MAIN, Reach::even(60.0)), "what the patch would cover");
         assert_eq!(alone.max_x(), MAIN.max_x());
         // An incoming window raised in the corner, a taller sliver: covered with its shadow.
         let raised = CoverFacts { slivers: vec![sliver(32.0), sliver(80.0)], ..f.clone() };
@@ -1062,7 +1118,7 @@ mod tests {
 
     #[test]
     fn the_patch_covers_every_sliver_and_its_shadow_on_the_display() {
-        let r = patch_rect(&[sliver(32.0), sliver(66.0)], MAIN, 60.0).expect("slivers show");
+        let r = patch_rect(&[sliver(32.0), sliver(66.0)], MAIN, Reach::even(60.0)).expect("slivers show");
         for kept in [32.0, 66.0] {
             let seen = sliver(kept).intersect(&MAIN).expect("on screen");
             let shadow = Rect::new(seen.x - 60.0, seen.y - 60.0, seen.w + 60.0, seen.h + 60.0);
@@ -1071,8 +1127,55 @@ mod tests {
         assert!(MAIN.contains_rect(&r));
         assert_eq!(r.max_x(), MAIN.max_x());
         assert!(r.w <= 61.0 + 1.0, "only as wide as the shadow: {r:?}");
-        assert_eq!(patch_rect(&[], MAIN, 60.0), None);
-        assert_eq!(patch_rect(&[Rect::new(3000.0, 100.0, 50.0, 50.0)], MAIN, 60.0), None, "off the display");
+        assert_eq!(patch_rect(&[], MAIN, Reach::even(60.0)), None);
+        assert_eq!(patch_rect(&[Rect::new(3000.0, 100.0, 50.0, 50.0)], MAIN, Reach::even(60.0)), None, "off the display");
+    }
+
+    #[test]
+    fn the_patch_grows_by_each_sides_reach_an_inactive_shadow_by_default() {
+        // His slivers (10-30): 1x52 pt at the bottom-right corner, a patch of 61x112 at 60 pt
+        // on every side. Parked windows are inactive: the default reach is per side.
+        let his = Rect::new(2559.0, 1388.0, 1200.0, 900.0);
+        let r = patch_rect(&[his], MAIN, DEFAULT_REACH).expect("a sliver");
+        assert_eq!(r, Rect::new(2559.0 - DEFAULT_REACH.left, 1388.0 - DEFAULT_REACH.top, 1.0 + DEFAULT_REACH.left, 52.0 + DEFAULT_REACH.top));
+        assert_eq!(patch_rect(&[his], MAIN, Reach::even(60.0)), Some(Rect::new(2499.0, 1328.0, 61.0, 112.0)), "the old reach");
+        assert!(r.w < 61.0 && r.h < 112.0, "smaller than before: {r:?}");
+        // Each side its own: a window of the display's middle grows by each side's reach.
+        let mid = Rect::new(1000.0, 500.0, 200.0, 100.0);
+        let odd = Reach { left: 1.0, top: 2.0, right: 3.0, bottom: 4.0 };
+        assert_eq!(patch_rect(&[mid], MAIN, odd), Some(Rect::new(999.0, 498.0, 204.0, 106.0)));
+        // A side that is no number takes the default's; every side kept within 0..=400.
+        let bad = Reach { left: f64::NAN, top: -5.0, right: 1000.0, bottom: f64::INFINITY }.clean();
+        assert_eq!(bad, Reach { left: DEFAULT_REACH.left, top: 0.0, right: 400.0, bottom: DEFAULT_REACH.bottom });
+    }
+
+    #[test]
+    fn the_steady_slack_is_the_reach_so_a_small_patch_stays_small() {
+        let near = Rect::new(2559.0, 1388.0, 1200.0, 900.0);
+        let higher = Rect::new(2559.0, 1340.0, 1200.0, 900.0);
+        let both = patch_rect(&[near, higher], MAIN, DEFAULT_REACH).expect("slivers");
+        let one = patch_rect(&[near], MAIN, DEFAULT_REACH).expect("a sliver");
+        // 48 pt taller than needed: within the old 48 pt slack, past the top reach.
+        assert_eq!(one.y - both.y, 48.0);
+        assert_eq!(steady_rect(Some(both), one, DEFAULT_REACH), one, "more than the top's reach: the small one");
+        assert_eq!(steady_rect(Some(both), one, Reach::even(60.0)), both, "a 60 pt reach keeps it");
+        let a_little = Rect::new(2559.0, 1370.0, 1200.0, 900.0);
+        let two = patch_rect(&[near, a_little], MAIN, DEFAULT_REACH).expect("slivers");
+        assert_eq!(steady_rect(Some(two), one, DEFAULT_REACH), two, "a sliver 18 pt taller came and went: kept");
+        assert_eq!(steady_rect(Some(two), one, Reach::even(0.0)), one, "no reach, no slack");
+    }
+
+    #[test]
+    fn a_switch_covers_a_raised_window_with_an_active_shadow() {
+        // An incoming window macOS raised and activated in the corner wears an active
+        // window's shadow: covered by at least the old 60 pt, the parked slivers by theirs.
+        let raised = sliver(80.0);
+        let f = CoverFacts { reach: DEFAULT_REACH, slivers: vec![sliver(32.0)], raised: vec![raised], items: None, ..cover_facts() };
+        let r = cover(&f).expect("covered");
+        let seen = raised.intersect(&MAIN).expect("on screen");
+        assert!(r.contains_rect(&ACTIVE_REACH.grow(seen).intersect(&MAIN).expect("on")), "{r:?}");
+        let quiet = CoverFacts { raised: vec![], ..f.clone() };
+        assert_eq!(cover(&quiet).ok(), patch_rect(&quiet.slivers, MAIN, DEFAULT_REACH), "parked slivers alone: their own reach");
     }
 
     #[test]
@@ -1241,7 +1344,7 @@ mod tests {
 
     #[test]
     fn the_patch_rectangle_is_whole_points() {
-        let r = patch_rect(&[Rect::new(2559.4, 1331.25, 1200.0, 900.0)], MAIN, 60.5).expect("a sliver");
+        let r = patch_rect(&[Rect::new(2559.4, 1331.25, 1200.0, 900.0)], MAIN, Reach::even(60.5)).expect("a sliver");
         assert_eq!(r, Rect::new(2498.0, 1270.0, 62.0, 170.0));
         for v in [r.x, r.y, r.w, r.h] {
             assert_eq!(v.fract(), 0.0, "{r:?}");
@@ -1259,20 +1362,20 @@ mod tests {
 
     #[test]
     fn a_rect_that_barely_shrinks_stays_and_one_that_grows_moves() {
-        let wide = patch_rect(&[sliver(32.0), sliver(52.0)], MAIN, 60.0).expect("slivers");
-        let narrow = patch_rect(&[sliver(32.0)], MAIN, 60.0).expect("a sliver");
+        let wide = patch_rect(&[sliver(32.0), sliver(52.0)], MAIN, Reach::even(60.0)).expect("slivers");
+        let narrow = patch_rect(&[sliver(32.0)], MAIN, Reach::even(60.0)).expect("a sliver");
         assert_ne!(wide, narrow);
         // Safari's sliver goes (an unpark): the patch keeps its rectangle.
-        assert_eq!(steady_rect(Some(wide), narrow), wide);
+        assert_eq!(steady_rect(Some(wide), narrow, Reach::even(60.0)), wide);
         // It comes back: the same rectangle again, the panel stays put.
-        assert_eq!(steady_rect(Some(wide), wide), wide);
+        assert_eq!(steady_rect(Some(wide), wide, Reach::even(60.0)), wide);
         // Fresh, or growing past the one in use: the new one.
-        assert_eq!(steady_rect(None, narrow), narrow);
-        assert_eq!(steady_rect(Some(narrow), wide), wide);
+        assert_eq!(steady_rect(None, narrow, Reach::even(60.0)), narrow);
+        assert_eq!(steady_rect(Some(narrow), wide, Reach::even(60.0)), wide);
         // Shrinking a lot (most slivers gone): the new one.
         let small = Rect::new(2500.0, 1300.0, 60.0, 140.0);
         let big = Rect::new(2300.0, 1000.0, 260.0, 440.0);
-        assert_eq!(steady_rect(Some(big), small), small);
+        assert_eq!(steady_rect(Some(big), small, Reach::even(60.0)), small);
     }
 
     #[test]

@@ -28,6 +28,9 @@
 //!   `/tmp/stage-manager-patch.png`) and prints what it drew, one JSON line, with which way
 //!   its frame settled (`exact`; near a solar frame change `alike`, or `off`: the running
 //!   app settles that with one still of the desktop).
+//! - `stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle]` opens
+//!   windows of its own, inactive, one at a time, and prints how far each one's shadow
+//!   reaches past its frame per side, one JSON object (`platform::shadow_probe`).
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
 //!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
 //!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.
@@ -65,6 +68,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
             println!("stage-manager {}", env!("CARGO_PKG_VERSION"));
@@ -74,7 +79,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] | --version]"
             );
             ExitCode::from(2)
         }

@@ -1588,7 +1588,7 @@ impl Controller {
         };
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
         let config = self.store.config();
-        let (on, reach, space) = (config.windows.corner_patch, config.windows.corner_patch_reach, self.space_changes);
+        let (on, reach, space) = (config.windows.corner_patch, config.windows.patch_reach(), self.space_changes);
         // Mission Control and App Exposé: the panel is Stationary (round show-desktop-patch;
         // Transient before, which macOS hid while one showed), so it stays drawn in place like
         // the desktop picture under their windows, and is there the moment it closes, with the
@@ -1709,7 +1709,7 @@ impl Controller {
                     // The windows are back: the slivers' rectangle at once, not kept at the
                     // bigger one in use.
                     Cover::Released => usual,
-                    Cover::Usual => usual.map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r)),
+                    Cover::Usual => usual.map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r, reach)),
                 };
                 match cover {
                     Cover::Held(r) if self.patch_rect != Some(r) => {
@@ -2670,7 +2670,7 @@ impl Controller {
             corner: display.corner,
             visible: display.visible,
             dock_bars: self.dock_bar.as_ref().map(|(_, b)| b.bars.clone()).filter(|b| !b.is_empty()),
-            reach: config.windows.corner_patch_reach,
+            reach: config.windows.patch_reach(),
             in_use: self.patch_rect,
             items: self.patch_items.known.clone(),
             staying,
@@ -5435,6 +5435,9 @@ impl Controller {
         // The corner patch's last plan: where it shows, and from which picture (round
         // desktop-still-patch: the still's serial, held while one comes, the file's).
         desktop_still["patch_plan"] = json!(self.patch_sent.as_ref().map(|p| json!({ "show": p.show, "still": p.still, "hold": p.hold, "file": p.file })));
+        // The reach its rectangle grows each sliver by (round fixes-151: per side).
+        let reach = self.store.config().windows.patch_reach();
+        desktop_still["patch_reach"] = json!({ "left": reach.left, "top": reach.top, "right": reach.right, "bottom": reach.bottom });
         let mut state = json!({
             "ok": true,
             "space": m.current_space(m.main_display().id).0,
@@ -6283,7 +6286,7 @@ mod tests {
         assert_eq!(parked, [96, 115].into());
         // The patch's rectangle from those: the corner's, never the screen's.
         let slivers: Vec<Rect> = list.iter().filter(|w| parked.contains(&w.id)).map(|w| w.bounds).collect();
-        let rect = crate::engine::corner_patch::patch_rect(&slivers, display, 60.0).expect("slivers");
+        let rect = crate::engine::corner_patch::patch_rect(&slivers, display, crate::engine::corner_patch::DEFAULT_REACH).expect("slivers");
         assert!(crate::engine::corner_patch::cover_cap(display, Corner::BottomRight).contains_rect(&rect), "{rect:?}");
         // And 101 stays shown through a switch: the cover draws it or is not drawn.
         let staying = staying_windows(&list, 500, &[109].into(), &[96].into(), &parked, |_| false);

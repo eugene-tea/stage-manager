@@ -171,6 +171,8 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
 - `stage-manager probe-windows <bundle-id>…`, `probe-screen` and `probe-patch` print the
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
+- `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
+  each side of its frame, from windows of its own (the corner patch's reach).
 
 ## Logs
 

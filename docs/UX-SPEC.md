@@ -154,7 +154,9 @@ windows come to their places at once instead of growing.
 **Hidden stages wait in a corner.** Without private APIs, the only way to hide a window but
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
 visible in the bottom-right corner (another corner if a second screen sits beyond it). To
-keep the corner as clean as Apple's, those edges ignore clicks and a patch covers them.
+keep the corner as clean as Apple's, those edges ignore clicks and a patch covers them,
+reaching past each edge only as far as a hidden (inactive) window's shadow does: least above,
+most below (`[windows] corner_patch_reach` sets one number for every side).
 Where window thumbnails are captured (Screen Recording), the patch is a still of the corner
 showing only the desktop's own layers (the picture, Finder's icons, widgets; never a window,
 ours included), exact by construction, so nothing on the desktop keeps it off and icons
