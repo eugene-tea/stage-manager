@@ -120,9 +120,12 @@ impl Default for Reach {
 /// key): `[windows] corner_patch_reach = "auto"`, the default. Measured on the owner's Mac
 /// (10-30, `stage-manager probe-shadow`, Studio Display at 2x, a titled and a toolbar window
 /// alike): an inactive window's shadow falls downward, so it reaches least above the window
-/// and most below it; past these it is under 2/255 (1/255 reaches 4 to 5 pt further). The
-/// corner that shows of a window parked bottom-right is its top-left.
-pub const DEFAULT_REACH: Reach = Reach { left: 18.0, top: 11.0, right: 18.0, bottom: 25.0 };
+/// and most below it, and it ends there, whatever its alpha. Its whole extent, not where one
+/// window's shadow fades under 2/255 (18, 11, 18, 25): parked windows share the corner and
+/// their faint tails add up (his 14 showed a darker edge outside an 18 pt patch; 16 stacked
+/// probe windows reach 16/255 at the extent, `probe-shadow --stack 16`). The corner that shows
+/// of a window parked bottom-right is its top-left.
+pub const DEFAULT_REACH: Reach = Reach { left: 22.0, top: 16.0, right: 22.0, bottom: 30.0 };
 
 /// An active window's shadow, the largest (the reach used everywhere before the per-side
 /// one, unmeasured): a window macOS raised and activated in the corner during a switch

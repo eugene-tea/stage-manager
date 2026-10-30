@@ -23,8 +23,10 @@
 //! The probe's app is an accessory: no copy of Stage Manager manages its windows (they
 //! observe regular apps only), and nothing of the user's is moved or captured.
 //!
-//! Prints one JSON object: every variant, and `suggested`, the reach per side at 2/255 over
-//! the variants that were drawn, rounded up to whole points.
+//! Prints one JSON object: every variant, and `suggested`, the reach per side at 1/255 (the
+//! shadow's whole extent, [`SUGGESTED_AT`]) over the variants that were drawn, rounded up to
+//! whole points. `--stack N` takes 1, 2, 4 … N windows at one frame together instead, as
+//! parked windows share the corner ([`run_stack`]).
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -46,12 +48,12 @@ use crate::engine::geometry::Rect;
 /// How far past the frame (points, every side) the image is taken: more than any shadow.
 pub const MARGIN: f64 = 160.0;
 
-/// The alpha levels (out of 255) whose reach is reported; 2 is the one the patch uses (a
-/// shadow fainter than 2/255 is invisible on any wallpaper).
+/// The alpha levels (out of 255) whose reach is reported.
 pub const THRESHOLDS: [u8; 5] = [1, 2, 4, 8, 16];
 
-/// The threshold `suggested` is read at.
-pub const SUGGESTED_AT: u8 = 2;
+/// The threshold `suggested` is read at: the shadow's whole extent. One window's tail under
+/// 2/255 is invisible, but parked windows share the corner and their tails add up (`--stack`).
+pub const SUGGESTED_AT: u8 = 1;
 
 /// How much of the parked window shows in the corner (points down from its top), as on the
 /// owner's Mac (Safari keeps 52).
@@ -122,13 +124,13 @@ impl Variant {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle]");
+    eprintln!("usage: stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--stack N]");
     ExitCode::from(2)
 }
 
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
-    let (mut settle, mut size, mut only) = (Duration::from_millis(600), NSSize::new(800.0, 500.0), None::<bool>);
+    let (mut settle, mut size, mut only, mut stack) = (Duration::from_millis(600), NSSize::new(800.0, 500.0), None::<bool>, None::<usize>);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match (a.as_str(), it.next().map(String::as_str)) {
@@ -146,6 +148,10 @@ pub fn run(args: &[String]) -> ExitCode {
             }
             ("--only", Some("corner")) => only = Some(true),
             ("--only", Some("middle")) => only = Some(false),
+            ("--stack", Some(n)) => match n.parse::<usize>() {
+                Ok(n) if (1..=32).contains(&n) => stack = Some(n),
+                _ => return usage(),
+            },
             _ => return usage(),
         }
     }
@@ -157,6 +163,9 @@ pub fn run(args: &[String]) -> ExitCode {
         println!("{}", json!({ "ok": false, "why": "no main display" }));
         return ExitCode::FAILURE;
     };
+    if let Some(n) = stack {
+        return run_stack(mtm, &main, n, size, settle);
+    }
     let mut variants = Vec::new();
     for toolbar in [false, true] {
         for corner in [true, false] {
@@ -295,6 +304,91 @@ fn measure(mtm: MainThreadMarker, main: &crate::engine::model::Display, v: Varia
     window.close();
     spin(Duration::from_millis(100));
     result
+}
+
+/// `--stack N`: the shadows of 1, 2, 4 … `n` titled windows at one frame in the middle, low
+/// level (parked windows share the corner, and their faint shadow tails add up: his 14 parked
+/// windows showed a shadow edge past the one-window reach, 10-30), taken together as one
+/// image of the probe's own windows (`CGWindowListCreateImageFromArray`). Prints one JSON
+/// object: per count, the reach per side at each threshold.
+fn run_stack(mtm: MainThreadMarker, main: &crate::engine::model::Display, n: usize, size: NSSize, settle: Duration) -> ExitCode {
+    let v = Variant { toolbar: false, corner: false, normal_level: false };
+    let (x, y) = (main.visible.x + (main.visible.w - size.width) / 2.0, main.visible.y + (main.visible.h - size.height) / 2.0);
+    let primary = desktop::primary_height(mtm);
+    let mut windows: Vec<Retained<NSWindow>> = Vec::new();
+    let mut rows = Vec::new();
+    let mut counts: Vec<usize> = std::iter::successors(Some(1usize), |c| Some(c * 2)).take_while(|c| *c < n).collect();
+    counts.push(n);
+    for count in counts {
+        while windows.len() < count {
+            let w = make_window(mtm, v, size);
+            let frame = w.frame();
+            w.setFrame_display(NSRect::new(NSPoint::new(x, primary - y - frame.size.height), frame.size), false);
+            w.orderFrontRegardless();
+            w.setFrame_display(NSRect::new(NSPoint::new(x, primary - y - frame.size.height), frame.size), false);
+            windows.push(w);
+        }
+        spin(settle);
+        let row = (|| {
+            if NSApplication::sharedApplication(mtm).isActive() || windows.iter().any(|w| w.isKeyWindow()) {
+                return Err("a probe window became active; not measured".to_string());
+            }
+            let ids: Vec<u32> = windows.iter().filter_map(|w| u32::try_from(w.windowNumber()).ok()).collect();
+            let listed = windows::describe(&ids[..1]).into_iter().next().map(|w| w.bounds).ok_or("the window server does not list the window")?;
+            let grown = Rect::new(listed.x - MARGIN, listed.y - MARGIN, listed.w + 2.0 * MARGIN, listed.h + 2.0 * MARGIN);
+            let image = stack_image(&ids, grown).ok_or("no image of the windows")?;
+            let (bytes, w, h) = pixels::bgra(&image, None).ok_or("the image could not be read")?;
+            let scale = w as f64 / grown.w;
+            let frame = PixelRect {
+                x: (MARGIN * scale).round() as usize,
+                y: (MARGIN * scale).round() as usize,
+                w: (listed.w * scale).round() as usize,
+                h: (listed.h * scale).round() as usize,
+            };
+            let reach: serde_json::Map<String, Value> = THRESHOLDS
+                .iter()
+                .map(|t| {
+                    let value = match reach_px(&bytes, w * 4, w, h, 3, frame, *t) {
+                        Some((px, clipped)) => {
+                            let pt = px.map(|p| p as f64 / scale);
+                            json!({ "left": pt[0], "top": pt[1], "right": pt[2], "bottom": pt[3], "clipped": clipped })
+                        }
+                        None => Value::Null,
+                    };
+                    (t.to_string(), value)
+                })
+                .collect();
+            Ok(json!({ "windows": count, "ok": true, "reach": reach }))
+        })();
+        rows.push(row.unwrap_or_else(|why| json!({ "windows": count, "ok": false, "why": why })));
+    }
+    for w in &windows {
+        w.orderOut(None);
+        w.close();
+    }
+    spin(Duration::from_millis(100));
+    let ok = rows.iter().all(|r| r["ok"] == true);
+    println!("{}", json!({ "ok": ok, "display": main.frame, "stack": rows }));
+    if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// The image of the probe's own windows `ids` together, with their framing, over `bounds`
+/// (global, top-left), at the display's resolution.
+fn stack_image(ids: &[u32], bounds: Rect) -> Option<objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>> {
+    // The array holds the CGWindowIDs themselves as its values (no callbacks), as the call
+    // expects ([`windows::describe`]).
+    let mut values: Vec<*const std::ffi::c_void> = ids.iter().map(|&id| id as usize as *const std::ffi::c_void).collect();
+    let count = objc2_core_foundation::CFIndex::try_from(values.len()).ok()?;
+    // SAFETY: `values` holds `count` pointer-sized values and outlives the call; null
+    // callbacks make CF store them as they are, never retained or released.
+    let array = unsafe { objc2_core_foundation::CFArray::new(None, values.as_mut_ptr(), count, std::ptr::null()) }?;
+    let rect = CGRect::new(CGPoint::new(bounds.x, bounds.y), CGSize::new(bounds.w, bounds.h));
+    // SAFETY: an array of CGWindowIDs, as the call is documented to take; only the probe's
+    // own windows are named, so nothing else is captured.
+    #[allow(deprecated)]
+    unsafe {
+        objc2_core_graphics::CGWindowListCreateImageFromArray(rect, &array, CGWindowImageOption::BestResolution)
+    }
 }
 
 /// A titled window (with a unified toolbar for `v.toolbar`), at a level just above the
