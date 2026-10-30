@@ -356,6 +356,22 @@ mod tests {
     }
 
     #[test]
+    fn a_press_on_a_desktop_icon_under_the_corner_patch_reaches_finder() {
+        // Round desktop-still-patch: the patch (ours, click-through) shows a still with an
+        // icon in it; the icon's press, and so its double click and its drag, pass to Finder.
+        // Only the sliver and its resize border are swallowed.
+        let s = sliver(7, 52.0);
+        let patch = Listed { id: 90, pid: OWN, bounds: Rect::new(2440.0, VISIBLE.max_y() - 172.0, 120.0, 232.0), alpha: 1.0, layer: 0 };
+        let icons = Listed { id: 91, pid: 300, bounds: MAIN, alpha: 1.0, layer: -2_147_483_603 };
+        let list = [patch, s, icons];
+        // The icon's picture, 64 pt, in Finder's rightmost column (its centre ~70 pt in).
+        let on_icon = Point::new(MAIN.max_x() - 70.0, VISIBLE.max_y() - 60.0);
+        assert_eq!(shield(&[7]).hits(&list, on_icon, OWN), None);
+        // The label's end beside the sliver, within its resize border: the sliver's.
+        assert_eq!(shield(&[7]).hits(&list, Point::new(s.bounds.x - 3.0, VISIBLE.max_y() - 20.0), OWN), Some(7));
+    }
+
+    #[test]
     fn a_shown_window_over_the_corner_keeps_its_press() {
         let shown = Listed { id: 3, pid: 50, bounds: Rect::new(1800.0, 900.0, 800.0, 600.0), alpha: 1.0, layer: 0 };
         let list = [shown, sliver(7, 52.0)];

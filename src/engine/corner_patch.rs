@@ -24,12 +24,15 @@
 //! - **Found not ordered right** (the fallback; macOS did not honour the order): the patch
 //!   sits above every normal window there, so it shows only while no shown window reaches
 //!   its rectangle, no window is being dragged and no switch is running ([`visibility`]).
-//! - **Desktop items.** The patch draws the picture only: a Finder desktop icon under it
+//! - **Desktop items.** With Screen Recording the patch draws a still of the desktop
+//!   ([`super::patch_still`]): icons and widgets are in it, and nothing below keeps it off.
+//!   Without one, the file's picture shows the picture only: a Finder desktop icon under it
 //!   (read through Accessibility, [`desktop_icons`], [`item_reach`]) keeps it off, and so
 //!   does not knowing: no good read yet, more icons than are read ([`MAX_ICONS`]), or a tree
-//!   that is not the one expected. A read that fails keeps the last good one. Widgets'
-//!   places are not public; with widgets shown on the desktop the patch would cover one in
-//!   the corner (logged).
+//!   that is not the one expected ([`icons_clear`]). A read that fails keeps the last good
+//!   one. Widgets' places are not public; with widgets shown on the desktop the file's
+//!   picture would cover one in the corner (logged). The icons read stay the still's change
+//!   signal: one added, moved or removed in the corner takes a new still.
 //! - **During a switch** ([`switch_cover`], round 8L) the incoming windows wait in the corner
 //!   behind their growing snapshots, and macOS raises an activated app's windows there above
 //!   the patch: the motion overlay, above every window, shows the patch's picture over the
@@ -50,9 +53,14 @@
 //!   lists the parked windows slid aside ([`desktop_slides`]); the plan then stays as it was
 //!   ([`slide_waits`]), so the panel slides away drawn and is there when its Desktop slides
 //!   back in. While the change is recognized no plan is made at all.
-//! - Never during Mission Control, App Exposé or Show Desktop (its panel is `Transient`, and
-//!   the overview watch hides it), on a full-screen app's Space, nor once the app stands
-//!   down (nothing parked).
+//! - **Overviews** ([`super::show_desktop`]): Mission Control and App Exposé leave a shown
+//!   patch as it is (its panel is `Stationary`: drawn in place under their windows), else it
+//!   stays off. Through Show Desktop a patch drawn from a still of the desktop is planned as
+//!   at any time (round show-desktop-patch), its rectangle grown over what macOS pushes of the
+//!   parked windows into view until they are back, unless macOS pushed its panel aside onto
+//!   the display; one drawn from the file hides until the close's first sign, looked for on
+//!   the fast tick. Never on a full-screen app's Space, nor once the app stands down (nothing
+//!   parked).
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -217,8 +225,10 @@ pub struct PatchFacts {
     pub on: bool,
     /// The patch's rectangle ([`patch_rect`]).
     pub rect: Option<Rect>,
-    /// Mission Control, App Exposé or Show Desktop is up (or settling).
-    pub overview: bool,
+    /// Why Mission Control, App Exposé or Show Desktop keeps the patch off now
+    /// ([`super::show_desktop::gate`]), or a Space change being recognized; `None` while
+    /// nothing does (with a still of the desktop the patch is planned through Show Desktop).
+    pub overview: Option<&'static str>,
     /// The patch's order ([`order_step`]): right, found wrong, or `None` while not known
     /// (never shown, hidden, ordered against another window, ordered anew).
     pub ordered: Option<bool>,
@@ -236,6 +246,9 @@ pub struct PatchFacts {
     /// Finder's desktop icons with their labels ([`item_reach`]), as last read well; `None`
     /// while they are not known (no good read yet, too many to read).
     pub items: Option<Vec<Rect>>,
+    /// A still of the desktop for the patch ([`super::patch_still`]): while one stands for
+    /// the corner or is on its way, the icons under it do not keep the patch off.
+    pub still: super::patch_still::Still,
 }
 
 /// How far past a desktop icon's image (Accessibility's `AXImage` frame) its label and
@@ -346,21 +359,31 @@ pub fn finder_desktop_on(raw: Option<&str>) -> bool {
     !raw.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
 }
 
+/// Whether the file's picture may stand for the patch at `rect` with Finder's icons `items`
+/// (`None`: not known): it draws the picture only, so no icon may lie under it.
+pub fn icons_clear(items: Option<&[Rect]>, rect: Rect) -> Result<(), &'static str> {
+    let Some(items) = items else { return Err("Finder's desktop icons are not known") };
+    if items.iter().any(|i| i.intersect(&rect).is_some()) {
+        return Err("a desktop icon lies under the corner");
+    }
+    Ok(())
+}
+
 /// Whether the patch shows, and why not.
 pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
     if !f.on {
         return Err("off");
     }
     let Some(rect) = f.rect else { return Err("no sliver shows") };
-    if f.overview {
-        return Err("an overview is up");
+    if let Some(why) = f.overview {
+        return Err(why);
     }
     if f.fullscreen {
         return Err("a full-screen Space shows");
     }
-    let Some(items) = &f.items else { return Err("Finder's desktop icons are not known") };
-    if items.iter().any(|i| i.intersect(&rect).is_some()) {
-        return Err("a desktop icon lies under the corner");
+    // The file's picture would hide an icon; a still of the desktop shows it.
+    if !super::patch_still::stands(f.still) {
+        icons_clear(f.items.as_deref(), rect)?;
     }
     match f.ordered {
         Some(true) => return Ok(rect),
@@ -1124,7 +1147,7 @@ mod tests {
             ..facts()
         };
         assert!(visibility(&f).is_ok());
-        assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err(), "never over Mission Control");
+        assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err(), "never over Mission Control");
         assert!(visibility(&PatchFacts { on: false, ..f.clone() }).is_err());
         assert!(visibility(&PatchFacts { rect: None, ..f }).is_err());
     }
@@ -1138,6 +1161,21 @@ mod tests {
         let away = Rect::new(2000.0, 100.0, 48.0, 48.0);
         assert!(visibility(&PatchFacts { items: Some(vec![item_reach(away)]), ..f.clone() }).is_ok());
         assert_eq!(visibility(&PatchFacts { items: None, ..f }), Err("Finder's desktop icons are not known"), "not known: off");
+    }
+
+    #[test]
+    fn with_a_still_of_the_desktop_the_icons_under_the_corner_do_not_keep_it_off() {
+        use super::super::patch_still::Still;
+        let icon = Rect::new(2440.0 - 48.0 - 20.0, 1300.0, 48.0, 48.0);
+        let f = PatchFacts { ordered: Some(true), items: Some(vec![item_reach(icon)]), still: Still::Ready(4), ..facts() };
+        assert!(visibility(&f).is_ok(), "the still shows the icon");
+        assert!(visibility(&PatchFacts { items: None, ..f.clone() }).is_ok(), "the icons not known: the still is exact anyway");
+        assert!(visibility(&PatchFacts { still: Still::Coming, ..f.clone() }).is_ok(), "one on its way: held");
+        assert_eq!(visibility(&PatchFacts { still: Still::Absent, ..f.clone() }), Err("a desktop icon lies under the corner"), "none: as before");
+        // The rest of the gate stands: never over an overview, nor on a full-screen Space.
+        assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err());
+        assert!(visibility(&PatchFacts { fullscreen: true, ..f.clone() }).is_err());
+        assert_eq!(icons_clear(Some(&[]), facts().rect.expect("rect")), Ok(()));
     }
 
     fn icon(x: f64, y: f64) -> AxNode {
@@ -1255,7 +1293,7 @@ mod tests {
         // Nothing to order against: the fallback.
         assert!(visibility(&PatchFacts { can_order: false, ..f.clone() }).is_err());
         // Overviews, full screen and icons still win.
-        assert!(visibility(&PatchFacts { overview: true, ..f.clone() }).is_err());
+        assert!(visibility(&PatchFacts { overview: Some("an overview is up"), ..f.clone() }).is_err());
         assert!(visibility(&PatchFacts { items: None, ..f }).is_err());
     }
 

@@ -10,11 +10,15 @@
 //!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
 //!   show on another display either (so a window on a second display to the bottom-right of
 //!   the main one is left alone);
-//! - a stranded window goes back to its frame from `state.json` (any Space; the same window
-//!   id first, then exact bundle ID + title, then bundle ID only when one candidate is left,
-//!   each saved window used once: [`super::window_match`]), else it is centered; the
-//!   result is always clamped onto the visible frame and never in a park zone; a saved
-//!   window we had fitted clear of the strip goes back to its pre-fit frame instead;
+//! - a stranded window goes back to the frame a crashed copy registered for it (its parked
+//!   file, by window id: exact, and fresher than any save; S4 of the Fable review of 10-29),
+//!   else its frame from `state.json` (any Space; the same window id first, then exact
+//!   bundle ID + title, then bundle ID only when one candidate is left, each saved window
+//!   used once: [`super::window_match`]; a child only as the very window, by its id), else
+//!   it is centered; the result is always clamped onto the visible frame and never in a park
+//!   zone; a saved window we had fitted clear of the strip goes back to its pre-fit frame
+//!   instead; `state.json` frames only on a main display of the size they were saved on
+//!   (S6, as a restore uses them);
 //! - a window that is not stranded but still sits exactly where we fitted it (its saved
 //!   window matched, live frame equal to the saved one) goes back to its saved pre-fit frame, so
 //!   a crash never leaves a window narrowed.
@@ -22,6 +26,8 @@
 //! The guardian's watch after its scan ([`super::guard_watch`]) works from the windows the
 //! crashed app had registered (the parked file, [`Registered`]) and the window server's list
 //! on every Space ([`Listed`]).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +133,8 @@ pub fn is_stranded(frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
 /// Where a frame the scan moves a window to comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameSource {
+    /// The frame a crashed copy registered for it (its parked file).
+    Registered,
     /// Its window's frame in `state.json` (or its pre-fit frame there).
     Saved,
     /// No saved window matched: centered on the visible frame.
@@ -137,6 +145,7 @@ impl FrameSource {
     /// A short name for the log.
     pub fn name(self) -> &'static str {
         match self {
+            Self::Registered => "registered",
             Self::Saved => "state.json",
             Self::Centered => "centered",
         }
@@ -152,34 +161,69 @@ pub fn plan(
     plan_sourced(windows, state, displays).into_iter().map(|(i, f, _)| (i, f)).collect()
 }
 
-/// [`plan`], with where each frame comes from. Saved windows are matched by
-/// [`match_windows`]: the same window id first (ids in `state` must be this session's, as
-/// [`StateFile::for_session`] leaves them), then the app and exact title, then the app alone
-/// only when one candidate is left on both sides; every live window takes part, so a window
-/// still on screen keeps its own saved frame.
+/// [`plan_sourced`] with no registered frames.
 pub fn plan_sourced(
     windows: &[LiveWindow],
     state: Option<&StateFile>,
     displays: &ScanDisplays,
 ) -> Vec<(usize, Rect, FrameSource)> {
-    let saved: Vec<&SavedWindow> = state
-        .map(|s| s.all_stages().flat_map(|st| st.windows.iter()).filter(|w| w.role == SavedRole::Standard).collect())
-        .unwrap_or_default();
-    // An app with a window in state.json is one we manage: a sliver of its counts (L3).
+    plan_with(windows, &BTreeMap::new(), state, displays)
+}
+
+/// [`plan`], with where each frame comes from. `registered`: the frames a crashed copy
+/// registered (its parked file), by window id, for windows of the process that registered
+/// them (the caller checks): a stranded window named there goes back to that frame, a
+/// window we parked whatever its size or sliver (S4). Saved windows are matched by
+/// [`match_windows`]: the same window id first (ids in `state` must be this session's, as
+/// [`StateFile::for_session`] leaves them), then the app and exact title, then the app alone
+/// only when one candidate is left on both sides; every live window takes part, so a window
+/// still on screen keeps its own saved frame. A saved child (a dialog, a sheet) is matched
+/// only as the very window, by its id: its title says little, and it never takes a standard
+/// window's place in the app-alone pass (S1). Saved frames apply only on a main display of
+/// the size they were saved on ([`StateFile::frames_fit`], S6): else a stranded window is
+/// centered at its own size, as a restore leaves windows at the frames their apps give them.
+pub fn plan_with(
+    windows: &[LiveWindow],
+    registered: &BTreeMap<u32, Rect>,
+    state: Option<&StateFile>,
+    displays: &ScanDisplays,
+) -> Vec<(usize, Rect, FrameSource)> {
+    let all: Vec<&SavedWindow> = state.map(|s| s.all_stages().flat_map(|st| st.windows.iter()).collect()).unwrap_or_default();
+    let (saved, children): (Vec<&SavedWindow>, Vec<&SavedWindow>) = all.into_iter().partition(|w| w.role == SavedRole::Standard);
+    let frames_fit = state.is_none_or(|s| s.frames_fit(displays.main));
+    // An app with a window in state.json is one we manage: a sliver of its counts (L3); a
+    // window a crashed copy registered is ours (any size, a sliver).
     let known = |w: &LiveWindow| {
-        if !w.bundle_id.is_empty() && saved.iter().any(|s| s.bundle_id == w.bundle_id) { Known::Managed } else { Known::Unknown }
+        if w.id.is_some_and(|id| registered.contains_key(&id)) {
+            Known::Registered
+        } else if !w.bundle_id.is_empty() && saved.iter().any(|s| s.bundle_id == w.bundle_id) {
+            Known::Managed
+        } else {
+            Known::Unknown
+        }
     };
     let stranded: Vec<bool> = windows.iter().map(|w| is_stranded(w.frame, displays, known(w))).collect();
-    let saved_keys: Vec<Key> = saved.iter().map(|s| Key { id: s.window, bundle: &s.bundle_id, title: &s.title }).collect();
     let live_keys: Vec<Key> = windows.iter().map(|w| Key { id: w.id, bundle: &w.bundle_id, title: &w.title }).collect();
-    let matched = match_windows(&saved_keys, &live_keys, |i| stranded[i]);
+    // Children first, by id only: no title pass (no title given), no app-alone pass.
+    let child_keys: Vec<Key> = children.iter().map(|s| Key { id: s.window, bundle: &s.bundle_id, title: "" }).collect();
+    let as_child = match_windows(&child_keys, &live_keys, |_| false);
+    // A live window found as a saved child is that child: it takes part in no other pass.
+    let rest_keys: Vec<Key> = live_keys
+        .iter()
+        .zip(&as_child)
+        .map(|(k, c)| if c.is_some() { Key { id: None, bundle: "", title: "" } } else { *k })
+        .collect();
+    let saved_keys: Vec<Key> = saved.iter().map(|s| Key { id: s.window, bundle: &s.bundle_id, title: &s.title }).collect();
+    let matched = match_windows(&saved_keys, &rest_keys, |i| stranded[i]);
     let mut out = Vec::new();
     for (i, w) in windows.iter().enumerate() {
-        let found = matched[i].map(|(k, _)| saved[k]);
+        let found = matched[i].map(|(k, _)| saved[k]).or_else(|| as_child[i].map(|(k, _)| children[k]));
         if stranded[i] {
-            let (frame, source) = match found {
-                Some(s) => (s.original.unwrap_or(s.frame), FrameSource::Saved),
-                None => (w.frame, FrameSource::Centered),
+            let own = w.id.and_then(|id| registered.get(&id));
+            let (frame, source) = match (own, found) {
+                (Some(r), _) => (*r, FrameSource::Registered),
+                (None, Some(s)) if frames_fit => (s.original.unwrap_or(s.frame), FrameSource::Saved),
+                (None, _) => (w.frame, FrameSource::Centered),
             };
             out.push((i, safe_restore(frame, displays), source));
         } else if let Some(s) = found
@@ -210,6 +254,11 @@ pub struct Registered {
     /// it is back only once there (or once the guardian has moved it there).
     #[serde(default)]
     pub fitted: bool,
+    /// A fitted window's fitted frame, where we put it (S7): one read at neither this frame
+    /// nor its pre-fit one was moved by the user since, and is let go. `None` in files of
+    /// earlier versions (then any frame but the pre-fit one counts as still fitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fitted_at: Option<Rect>,
     /// Taken from a guardian not signed like this app (the Codex review of 10-21, R4;
     /// [`super::handoff::vet`]): nothing vouches that we parked it, so it is any app's window
     /// to the park test (no sliver, no tiny size), never fitted, and reached only while the
@@ -406,6 +455,73 @@ mod tests {
         assert!(!is_parked(p[2].1, MAIN));
     }
 
+    /// S1 (the Fable review of 10-29): a parked dialog never matched (standard windows only)
+    /// and was always centered. Saved as a child with its id (this session's: a quit, a
+    /// crash), it is found as the very window; a child never matches by title, nor takes
+    /// the app-alone pass from a standard window, nor is a standard window taken for one.
+    #[test]
+    fn a_parked_child_is_found_as_the_very_window() {
+        let dialog_at = Rect::new(500.0, 300.0, 420.0, 180.0);
+        let doc_at = Rect::new(200.0, 150.0, 900.0, 600.0);
+        let mut dialog = saved("com.example.a", "Save", dialog_at);
+        dialog.role = SavedRole::Child;
+        dialog.window = Some(77);
+        let mut untitled = saved("com.example.a", "", Rect::new(40.0, 60.0, 300.0, 200.0));
+        untitled.role = SavedRole::Child;
+        let st = state(vec![saved("com.example.a", "Report", doc_at), dialog, untitled]);
+        let mut d = live("com.example.a", "Save", parked(420.0, 180.0));
+        d.id = Some(77);
+        let p = plan_sourced(&[d.clone()], Some(&st), &displays());
+        assert_eq!(p, vec![(0, dialog_at, FrameSource::Saved)], "its own saved frame, not the center");
+        // Another dialog with the same title and no saved id: never the child's frame by
+        // title (and two of the app's windows want the one standard entry: neither takes it).
+        let other = live("com.example.a", "Save", parked(420.0, 180.0));
+        let doc = live("com.example.a", "Renamed", parked(900.0, 600.0));
+        let p = plan_sourced(&[other, doc], Some(&st), &displays());
+        assert_eq!(p.iter().map(|x| x.2).collect::<Vec<_>>(), [FrameSource::Centered, FrameSource::Centered], "{p:?}");
+        // The very dialog beside its document: each its own, the document by app alone (the
+        // dialog found as a child no longer wants the standard entry).
+        let p = plan_sourced(&[d, live("com.example.a", "Renamed", parked(900.0, 600.0))], Some(&st), &displays());
+        assert_eq!(p, vec![(0, dialog_at, FrameSource::Saved), (1, doc_at, FrameSource::Saved)], "each its own");
+    }
+
+    /// S4 (the Fable review of 10-29): after a crash the scan used `state.json` (a save up to
+    /// a debounce old, a retitled window by app alone, a child never) and centered what it
+    /// could not match. A window the crashed copy registered goes back to its registered
+    /// frame first, by id, however small or thin a sliver of it shows.
+    #[test]
+    fn a_registered_window_goes_back_to_its_registered_frame_first() {
+        let reg_at = Rect::new(120.0, 90.0, 800.0, 500.0);
+        let mut saved_w = saved("com.example.a", "Draft", Rect::new(10.0, 40.0, 800.0, 500.0));
+        saved_w.window = Some(5);
+        let st = state(vec![saved_w]);
+        let mut a = live("com.example.a", "Draft", parked(800.0, 500.0));
+        a.id = Some(5);
+        let mut b = live("com.example.b", "", Rect::new(1439.0, 899.0, 30.0, 30.0));
+        b.id = Some(6);
+        let registered = BTreeMap::from([(5, reg_at), (6, Rect::new(300.0, 300.0, 30.0, 30.0))]);
+        let p = plan_with(&[a.clone(), b], &registered, Some(&st), &displays());
+        assert_eq!(p, vec![(0, reg_at, FrameSource::Registered), (1, Rect::new(300.0, 300.0, 30.0, 30.0), FrameSource::Registered)]);
+        assert_eq!(plan_sourced(&[a], Some(&st), &displays())[0].2, FrameSource::Saved, "without it: state.json");
+    }
+
+    /// S6 (the Fable review of 10-29): `state.json` frames saved on a main display of another
+    /// size are not used by the scan (as a restore does not use them); the stranded window is
+    /// centered at its own size. A file that does not say keeps them.
+    #[test]
+    fn saved_frames_of_another_display_size_are_not_used() {
+        let at = Rect::new(1700.0, 900.0, 500.0, 400.0);
+        let mut st = state(vec![saved("com.example.a", "Draft", at)]);
+        st.display = Some(crate::engine::persist::SavedDisplay { w: 2560.0, h: 1440.0, key: None });
+        let ws = [live("com.example.a", "Draft", parked(500.0, 400.0))];
+        let p = plan_sourced(&ws, Some(&st), &displays());
+        assert_eq!(p, vec![(0, Rect::new(470.0, 263.0, 500.0, 400.0), FrameSource::Centered)]);
+        st.display = Some(crate::engine::persist::SavedDisplay { w: 1440.2, h: 899.8, key: None });
+        assert_eq!(plan_sourced(&ws, Some(&st), &displays())[0].2, FrameSource::Saved, "the same size, rounded");
+        st.display = None;
+        assert_eq!(plan_sourced(&ws, Some(&st), &displays())[0].2, FrameSource::Saved, "a file that does not say");
+    }
+
     /// Grok High 2 (1.1.0): two stranded windows of one app whose titles changed keep their
     /// own frames when their ids were saved (this session's), whatever the saved order.
     #[test]
@@ -507,7 +623,7 @@ mod tests {
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
-            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, unvouched: false }],
+            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
             corners: vec![Corner::BottomLeft],
             hidden: vec![HiddenApp { pid: 12, bundle: "com.example.a".into() }],
         };
@@ -531,7 +647,8 @@ mod tests {
         )]);
         let ws = [live("com.example.a", "Huge", parked(800.0, 600.0))];
         let p = plan(&ws, Some(&st), &displays());
-        assert_eq!(p[0].1, VISIBLE);
+        // Never shrunk: its title bar comes below the menu bar, the body hangs off the sides.
+        assert_eq!(p[0].1, Rect::new(-500.0, VISIBLE.y, 5000.0, 5000.0));
         let bad = state(vec![saved("com.example.a", "X", parked(400.0, 300.0))]);
         let ws = [live("com.example.a", "X", parked(400.0, 300.0))];
         let p = plan(&ws, Some(&bad), &displays());

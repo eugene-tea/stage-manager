@@ -33,11 +33,12 @@ dev: sign
 run: sign
 	scripts/run.sh
 
-## install: copy the signed app to ~/Applications
+## install: copy the signed app to ~/Applications (refused while a copy runs from there; the old
+##          copy goes only once the new one is in place, as scripts/dev-app.sh does)
 install: sign
+	@case "$(HOME)" in /?*) [ -d "$(HOME)" ] ;; *) false ;; esac || { echo "error: HOME is not a folder: '$(HOME)'" >&2; exit 1; }
 	mkdir -p "$(HOME)/Applications"
-	rm -rf "$(HOME)/Applications/Stage Manager.app"
-	ditto "$(APP)" "$(HOME)/Applications/Stage Manager.app"
+	@SM_DEV_APP="$(HOME)/Applications/Stage Manager.app" scripts/dev-app.sh >/dev/null
 	@echo "Installed $(HOME)/Applications/Stage Manager.app"
 
 ## fixture: build and sign target/SM Fixture.app (test windows)

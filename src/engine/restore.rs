@@ -90,6 +90,12 @@ pub const QUIET: Duration = Duration::from_secs(60);
 /// save; an app the user quit earlier is not reopened by a login.
 pub const QUIT_KEEP: Duration = Duration::from_secs(120);
 
+/// How long the frames of an app's windows are kept after it quit, for a window it opens
+/// again in the park zone ([`crate::engine::model::Model::add_window`]; W2 of the Fable review
+/// of 10-29): an app that saves its own window frames wrote the park frame for a window
+/// parked at its quit, and reopens it there, a day later as well as a minute later.
+pub const QUIT_FRAMES_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// The restore window's longest life after the launch (the design's cap).
 pub const WINDOW: Duration = Duration::from_secs(5 * 60);
 

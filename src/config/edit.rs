@@ -184,7 +184,15 @@ fn plain_line(text: &str, d: &KeyDef) -> Option<usize> {
     let line = text.lines().nth(i)?;
     let value = line.split_once('=')?.1.trim();
     let single: Option<toml::Value> = literal_value(value);
-    (single.is_some() && !value.contains('#') && !value.starts_with('[') && !value.starts_with('{')).then_some(i)
+    // A `#` inside a string (a colour's "#rrggbb") is no comment (review C2).
+    (single.is_some() && !has_comment(value) && !value.starts_with('[') && !value.starts_with('{')).then_some(i)
+}
+
+/// Whether a one-line TOML value carries a comment after it.
+fn has_comment(value: &str) -> bool {
+    let Ok(doc) = format!("v = {value}\n").parse::<toml_edit::DocumentMut>() else { return true };
+    let suffix = doc.get("v").and_then(|i| i.as_value()).and_then(|v| v.decor().suffix()).and_then(|s| s.as_str());
+    suffix.is_none_or(|s| s.contains('#')) || doc.trailing().as_str().is_none_or(|t| t.contains('#'))
 }
 
 /// Sets the key with `toml_edit`, keeping the old value's decoration (its comments).
@@ -250,6 +258,20 @@ mod tests {
         assert_eq!(out, "# mine\n[animation]\n# faster please\nspeed = 1.5\n\n[strip]\nwidth = 220.0 # wide\n");
         let out = set(text, "strip.width", "240.0").expect("sets");
         assert!(out.contains("width = 240.0 # wide"), "the trailing comment stays: {out}");
+    }
+
+    /// Review C2: a colour back at its default is commented out again, though its value holds
+    /// a `#`; a colour with a comment after it keeps the comment.
+    #[test]
+    fn a_colour_back_at_its_default_is_commented_out_again() {
+        let before = default_file();
+        let red = set(&before, "cards.border_color", "\"#ff0000\"").expect("sets");
+        assert!(red.contains("\nborder_color = \"#ff0000\"\n"), "uncommented in place");
+        let back = set(&red, "cards.border_color", "\"#ffffff2e\"").expect("sets");
+        assert_eq!(back, before, "the default file again, byte for byte");
+        let text = "[cards]\nborder_color = \"#ff0000\" # mine\n";
+        let out = set(text, "cards.border_color", "\"#00ff00\"").expect("sets");
+        assert!(out.contains("border_color = \"#00ff00\" # mine"), "{out}");
     }
 
     #[test]

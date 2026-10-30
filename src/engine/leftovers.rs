@@ -6,8 +6,8 @@
 //! macOS put back in a corner after a display change, one an earlier run left there, one
 //! whose app answered late), and the exit counted as clean, so the guardian did nothing
 //! either. Now every unpark path ends with a look at the list ([`settle`]): each window still
-//! parked is brought back ([`leftover_frame`]: its registered frame, else its `state.json`
-//! frame, else centered); one that cannot be reached (another Desktop's, an app that does
+//! parked is brought back ([`leftover_frame`]: its registered frame, else the frame the unpark
+//! gave it, else its `state.json` frame, else centered); one that cannot be reached (another Desktop's, an app that does
 //! not answer) leaves the exit unclean, so the guardian waits for it.
 //!
 //! A restore an app is too busy to answer (`kAXErrorCannotComplete`, the 0.25 s messaging
@@ -92,11 +92,39 @@ pub fn leftover_fits(left: Duration, registered: bool) -> bool {
     left >= reach + TRY_MAX
 }
 
+/// What this run remembers of a window's frame when the leftovers check finds it still in
+/// the park zone, freshest first (S1: the unpark's own frame used to be dropped with its
+/// registry entry before the check, so a window whose app carried the move out late, or only
+/// its size, went back to an older `state.json` frame or the center).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Remembered {
+    /// The safety registry's frame (a window still parked, or one whose restore failed).
+    pub registry: Option<Rect>,
+    /// The frame the unpark just restored it to (it left the registry as done).
+    pub unparked: Option<Rect>,
+    /// The frame an old guardian handed it over with (round 8N).
+    pub taken: Option<Rect>,
+}
+
+impl Remembered {
+    /// The freshest frame remembered, with where it comes from.
+    pub fn first(&self) -> Option<(Rect, LeftoverSource)> {
+        self.registry
+            .map(|r| (r, LeftoverSource::Registry))
+            .or(self.unparked.map(|r| (r, LeftoverSource::Unparked)))
+            .or(self.taken.map(|r| (r, LeftoverSource::Registry)))
+    }
+}
+
 /// Where a window still parked after the unpark goes back to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeftoverSource {
-    /// The safety registry's frame for it (a window we parked, whose restore failed).
+    /// The safety registry's frame for it (a window we parked, whose restore failed), or the
+    /// frame an old guardian handed it over with.
     Registry,
+    /// The frame the unpark restored it to a moment before (its app carried the move out
+    /// late, or not at all).
+    Unparked,
     /// Its window's frame in `state.json`.
     Saved,
     /// Nothing known: centered on the visible frame.
@@ -108,22 +136,24 @@ impl LeftoverSource {
     pub fn name(self) -> &'static str {
         match self {
             Self::Registry => "registry",
+            Self::Unparked => "unpark",
             Self::Saved => "state.json",
             Self::Centered => "centered",
         }
     }
 }
 
-/// The frame a window still parked goes back to: its `registered` frame (made safe), else
-/// its `state.json` frame (its window id first, then exact bundle id and title, then bundle
-/// id when one candidate is left: [`super::window_match`]), else centered;
-/// always on the visible frame and never in a park zone.
-pub fn leftover_frame(registered: Option<Rect>, live: &LiveWindow, state: Option<&StateFile>, displays: &ScanDisplays) -> (Rect, LeftoverSource) {
-    if let Some(r) = registered {
-        return (safe_restore(r, displays), LeftoverSource::Registry);
+/// The frame a window still parked goes back to: the freshest frame this run `remembered`
+/// (made safe), else its `state.json` frame (its window id first, then exact bundle id and
+/// title, then bundle id when one candidate is left: [`super::window_match`]), else
+/// centered; always on the visible frame and never in a park zone.
+pub fn leftover_frame(remembered: Remembered, live: &LiveWindow, state: Option<&StateFile>, displays: &ScanDisplays) -> (Rect, LeftoverSource) {
+    if let Some((r, source)) = remembered.first() {
+        return (safe_restore(r, displays), source);
     }
     match plan_sourced(std::slice::from_ref(live), state, displays).first() {
-        Some((_, frame, FrameSource::Saved)) => (*frame, LeftoverSource::Saved),
+        // No registered frames are given here: the caller's come first (`remembered`).
+        Some((_, frame, FrameSource::Saved | FrameSource::Registered)) => (*frame, LeftoverSource::Saved),
         Some((_, frame, FrameSource::Centered)) => (*frame, LeftoverSource::Centered),
         // The window server's frame and the scan's park test disagree (it was listed in the
         // zone): centered all the same.
@@ -329,22 +359,49 @@ mod tests {
         let mail = live("com.apple.mail", "Inbox", parked);
 
         let registered = Rect::new(67.0, 39.0, 1621.0, 1130.0);
-        assert_eq!(leftover_frame(Some(registered), &mail, None, &d), (registered, LeftoverSource::Registry));
+        assert_eq!(leftover_frame(reg(registered), &mail, None, &d), (registered, LeftoverSource::Registry));
 
         let st = state(vec![saved("com.apple.mail", "Inbox", Rect::new(299.0, 39.0, 1401.0, 1130.0))]);
-        assert_eq!(leftover_frame(None, &mail, Some(&st), &d), (Rect::new(299.0, 39.0, 1401.0, 1130.0), LeftoverSource::Saved));
+        assert_eq!(leftover_frame(Remembered::default(), &mail, Some(&st), &d), (Rect::new(299.0, 39.0, 1401.0, 1130.0), LeftoverSource::Saved));
 
-        let (f, source) = leftover_frame(None, &live("com.apple.MobileSMS", "Chat", Rect::new(2559.0, 1388.0, 1051.0, 906.0)), Some(&st), &d);
+        let (f, source) = leftover_frame(Remembered::default(), &live("com.apple.MobileSMS", "Chat", Rect::new(2559.0, 1388.0, 1051.0, 906.0)), Some(&st), &d);
         assert_eq!(source, LeftoverSource::Centered);
         assert!(VISIBLE.contains_rect(&f) && !d.parks(f), "{f:?}");
         assert_eq!((f.w, f.h), (1051.0, 906.0), "its size kept");
+    }
+
+    fn reg(r: Rect) -> Remembered {
+        Remembered { registry: Some(r), ..Remembered::default() }
+    }
+
+    /// S1 (the Fable review of 10-29): at quit the unpark restored Mail to its frame and
+    /// dropped its registry entry; Mail carried the move out late, so the check found it in
+    /// the zone. It goes back to the frame the unpark gave it, not to an older `state.json`
+    /// frame (read before the save) nor the center; a failed restore's registry frame and a
+    /// handed-over frame keep their places around it.
+    #[test]
+    fn a_leftover_the_unpark_restored_goes_back_to_the_unparks_frame() {
+        let d = displays();
+        let mail = live("com.apple.mail", "Inbox", Rect::new(2559.0, 1388.0, 1621.0, 1183.0));
+        let fresh = Rect::new(120.0, 60.0, 1500.0, 1100.0);
+        let older = Rect::new(299.0, 39.0, 1401.0, 1130.0);
+        let st = state(vec![saved("com.apple.mail", "Inbox", older)]);
+        let unparked = Remembered { unparked: Some(fresh), ..Remembered::default() };
+        assert_eq!(leftover_frame(unparked, &mail, Some(&st), &d), (fresh, LeftoverSource::Unparked));
+        let renamed = live("com.apple.mail", "Inbox (3)", mail.frame);
+        assert_eq!(leftover_frame(unparked, &renamed, None, &d), (fresh, LeftoverSource::Unparked), "never centered");
+        let failed = Rect::new(80.0, 50.0, 1500.0, 1100.0);
+        let both = Remembered { registry: Some(failed), unparked: Some(fresh), taken: Some(older) };
+        assert_eq!(leftover_frame(both, &mail, Some(&st), &d), (failed, LeftoverSource::Registry), "the registry first");
+        let taken = Remembered { unparked: Some(fresh), taken: Some(older), ..Remembered::default() };
+        assert_eq!(taken.first(), Some((fresh, LeftoverSource::Unparked)), "this run's unpark before an old guardian's frame");
     }
 
     #[test]
     fn a_registered_frame_in_the_park_zone_is_never_used_as_is() {
         let d = displays();
         let w = live("com.example.a", "Draft", Rect::new(2559.0, 1408.0, 800.0, 600.0));
-        let (f, source) = leftover_frame(Some(Rect::new(2559.0, 1408.0, 800.0, 600.0)), &w, None, &d);
+        let (f, source) = leftover_frame(reg(Rect::new(2559.0, 1408.0, 800.0, 600.0)), &w, None, &d);
         assert_eq!(source, LeftoverSource::Registry);
         assert!(!is_parked(f, MAIN) && VISIBLE.contains_rect(&f), "{f:?}");
     }
@@ -353,7 +410,7 @@ mod tests {
     fn a_leftover_the_scan_does_not_count_parked_is_centered_all_the_same() {
         let d = displays();
         let w = live("com.example.a", "Draft", Rect::new(400.0, 300.0, 800.0, 600.0));
-        let (f, source) = leftover_frame(None, &w, None, &d);
+        let (f, source) = leftover_frame(Remembered::default(), &w, None, &d);
         assert_eq!(source, LeftoverSource::Centered);
         assert!(VISIBLE.contains_rect(&f) && !d.parks(f));
     }

@@ -25,6 +25,13 @@ impl Mods {
     pub fn is_empty(&self) -> bool {
         !(self.ctrl || self.alt || self.shift || self.cmd)
     }
+
+    /// True when Control, Option or Command is set: Shift alone only types the shifted
+    /// character, so a hotkey of Shift and a key would take that character from every app
+    /// (review C9).
+    pub fn holds_a_command_modifier(&self) -> bool {
+        self.ctrl || self.alt || self.cmd
+    }
 }
 
 /// A key by name (US layout positions; the platform maps names to virtual key codes).
@@ -360,16 +367,16 @@ fn parse_any(text: &str) -> Result<Parsed, String> {
         *slot = true;
     }
     if *key == "{n}" {
-        if mods.is_empty() {
+        if !mods.holds_a_command_modifier() {
             return Err(format!(
-                "hotkey {text:?}: digits need at least one modifier"
+                "hotkey {text:?}: digits need ctrl, alt or cmd (shift alone types !@#…)"
             ));
         }
         return Ok(Parsed::Numbered(mods));
     }
     let key = Key::parse(key).map_err(|e| format!("hotkey {text:?}: {e}"))?;
-    if mods.is_empty() && !matches!(key, Key::F(_)) {
-        return Err(format!("hotkey {text:?}: needs at least one modifier"));
+    if !mods.holds_a_command_modifier() && !matches!(key, Key::F(_)) {
+        return Err(format!("hotkey {text:?}: needs ctrl, alt or cmd (shift alone would take the key from typing)"));
     }
     Ok(Parsed::Key(Hotkey { key, mods }))
 }
@@ -457,6 +464,16 @@ mod tests {
         );
         assert!(parse_hotkey("ctrl++").is_err());
         assert!(parse_hotkey("f21").is_err());
+    }
+
+    /// Review C9: Shift alone types; it never makes a hotkey of a typing key.
+    #[test]
+    fn shift_alone_is_not_enough() {
+        assert!(parse_hotkey("shift+n").is_err());
+        assert!(parse_hotkey("shift+space").is_err());
+        assert!(parse_numbered("shift+{n}").is_err());
+        assert!(parse_hotkey("shift+f5").expect("ok").is_some(), "a function key may take Shift alone");
+        assert!(parse_hotkey("ctrl+shift+n").expect("ok").is_some());
     }
 
     #[test]

@@ -9,9 +9,12 @@
 //!
 //! The overlay shows only while something moves; it stays on the active Space (it moves
 //! there when shown, it never joins every Space). Its layers repeat the strip's perspective:
-//! one container whose eye is the strip's eye, so a ghost turned like a card and placed on a
-//! card's thumbnail looks exactly like that thumbnail, and a flat ghost at a window's frame
-//! looks exactly like the window.
+//! each ghost has a container of its own whose eye is the strip's eye, so a ghost turned like
+//! a card and placed on a card's thumbnail looks exactly like that thumbnail, and a flat ghost
+//! at a window's frame looks exactly like the window. The ghosts stack in the order they were
+//! added, the last on top: in one shared container Core Animation would sort turned ghosts by
+//! depth, as it did the card's planes (owner, 10-27), and a second app's ghost would start
+//! over the front window's and flip under it as they flatten.
 //!
 //! **Coordinates.** Planes are given top-left (global minus [`Overlay::origin`]); the
 //! overlay's view is flipped ([`OverlayView`]), which is what keeps its root layer top-down.
@@ -114,6 +117,8 @@ impl Look {
 pub struct Ghost {
     /// The window it shows.
     pub window: u32,
+    /// Its perspective container, in the overlay's stack.
+    depth: Retained<CALayer>,
     plane: Retained<CALayer>,
     image: Retained<CALayer>,
     /// Where the window is in the picture.
@@ -243,7 +248,7 @@ impl Ghost {
     pub fn remove(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        self.plane.removeFromSuperlayer();
+        self.depth.removeFromSuperlayer();
         CATransaction::commit();
     }
 }
@@ -298,12 +303,15 @@ fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     panel
 }
 
-/// The overlay panel and its perspective container.
+/// The overlay panel and its stack of ghosts.
 pub struct Overlay {
     panel: Retained<NSPanel>,
     view: Retained<OverlayView>,
     root: Retained<CALayer>,
+    /// The ghosts' perspective containers, flat, bottom to top.
     space: Retained<CALayer>,
+    /// The eye in the overlay's coordinates, and its distance.
+    eye: (Point, f64),
     /// The overlay's top-left corner, global coordinates.
     origin: Point,
     shown: bool,
@@ -329,7 +337,8 @@ impl Overlay {
         let space = CALayer::new();
         root.addSublayer(&space);
         panel.setContentView(Some(&view));
-        Self { panel, view, root, space, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false }
+        let eye = (Point::new(0.0, 0.0), 1.0);
+        Self { panel, view, root, space, eye, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false }
     }
 
     /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them) and sets
@@ -347,16 +356,45 @@ impl Overlay {
         CATransaction::setDisableActions(true);
         let all = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height));
         self.root.setFrame(all);
-        self.space.setBounds(all);
-        self.space.setAnchorPoint(CGPoint::new(
-            local_eye.x / size.width.max(1.0),
-            local_eye.y / size.height.max(1.0),
-        ));
-        self.space.setPosition(CGPoint::new(local_eye.x, local_eye.y));
+        self.space.setFrame(all);
+        self.eye = (local_eye, distance);
+        // SAFETY: reading the sublayers array; every one is a ghost's container.
+        if let Some(depths) = unsafe { self.space.sublayers() } {
+            for depth in depths.iter() {
+                self.fit(&depth);
+            }
+        }
+        CATransaction::commit();
+    }
+
+    /// Makes `depth` a ghost's perspective container: the whole overlay, the eye where
+    /// [`Self::place`] put it.
+    fn fit(&self, depth: &CALayer) {
+        let all = self.space.bounds();
+        let (eye, distance) = self.eye;
+        depth.setBounds(all);
+        depth.setAnchorPoint(CGPoint::new(eye.x / all.size.width.max(1.0), eye.y / all.size.height.max(1.0)));
+        depth.setPosition(CGPoint::new(eye.x, eye.y));
         let mut p = CATransform3D::new_scale(1.0, 1.0, 1.0);
         p.m34 = -1.0 / distance.max(1.0);
-        self.space.setSublayerTransform(p);
+        depth.setSublayerTransform(p);
+    }
+
+    /// A ghost's perspective container holding `plane`, on top of the stack, or at the bottom
+    /// (`bottom`).
+    fn stack(&self, plane: &CALayer, bottom: bool) -> Retained<CALayer> {
+        let depth = CALayer::new();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.fit(&depth);
+        depth.addSublayer(plane);
+        if bottom {
+            self.space.insertSublayer_atIndex(&depth, 0);
+        } else {
+            self.space.addSublayer(&depth);
+        }
         CATransaction::commit();
+        depth
     }
 
     /// The overlay's top-left corner (global): planes are relative to it.
@@ -472,12 +510,9 @@ impl Overlay {
             }
         }
         plane.addSublayer(&img);
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.space.addSublayer(&plane);
-        CATransaction::commit();
+        let depth = self.stack(&plane, false);
         let extent = picture.map_or(Extent::NONE, |p| p.extent);
-        let mut g = Ghost { window, plane, image: img, extent, pending: None, target: at };
+        let mut g = Ghost { window, depth, plane, image: img, extent, pending: None, target: at };
         g.set(at);
         g
     }
@@ -515,11 +550,8 @@ impl Overlay {
             img.addSublayer(&window);
         }
         plane.addSublayer(&img);
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.space.insertSublayer_atIndex(&plane, 0);
-        CATransaction::commit();
-        let mut g = Ghost { window: 0, plane, image: img, extent: Extent::NONE, pending: None, target: at };
+        let depth = self.stack(&plane, true);
+        let mut g = Ghost { window: 0, depth, plane, image: img, extent: Extent::NONE, pending: None, target: at };
         g.set(at);
         g
     }

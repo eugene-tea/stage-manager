@@ -5,12 +5,16 @@
 //!   thread; everything here runs on the main thread. Each snapshot carries the
 //!   [`StripStyle`] (config), so look and motion follow config edits live.
 //! - **Cards** ([`strip_layout`]): each window's thumbnail is its own plane, turned about
-//!   its left edge inside its card's perspective container, whose eye sits at the display's
-//!   vertical middle. A card is **one unit**: its planes, app icons, badge and name sit in
-//!   one 3D group (`CATransformLayer`, so the planes keep their perspective) that moves as a
-//!   whole, so an icon never drifts from its thumbnail (with the icons in a separate flat
-//!   layer they did, by the hover scale times the distance travelled, owner 10-12); the icons
-//!   are flat at depth 0, where the perspective leaves them as they are.
+//!   its left edge in a perspective whose eye sits at the display's vertical middle. A card
+//!   is **one unit**: its planes, app icons, badge and name move as a whole, so an icon never
+//!   drifts from its thumbnail (with the icons in a separate flat layer they did, by the hover
+//!   scale times the distance travelled, owner 10-12); the icons are flat at depth 0, where
+//!   the perspective leaves them as they are. Each plane sits in a **depth** of its own (a
+//!   perspective container holding a 3D group, `Depth`), the icons in a top one, and the card
+//!   draws them back to front, so the front window is on top: in one shared 3D group Core
+//!   Animation stacked the planes by depth, and a second app's window, further right, covered
+//!   the front one (owner, 10-27). Every depth gets the same slide and the same glide in one
+//!   transaction, which keeps the card one unit.
 //! - **Hover** grows the card about its center (eased); a click acts on mouse-up in the same
 //!   card and goes out as [`StripEvent::CardClicked`], or [`StripEvent::IconClicked`] on its
 //!   app icon.
@@ -56,9 +60,10 @@
 //!   for a moment at launch.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -85,6 +90,7 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Picture, Target};
 use crate::platform::capture_frame::Extent;
+use crate::platform::capture_pixels;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
@@ -142,15 +148,55 @@ const HELD_FADE: &str = "held";
 
 thread_local! {
     static STRIP: RefCell<Option<Strip>> = const { RefCell::new(None) };
+    /// Snapshots that found the strip busy (a run loop turning inside one of its calls: a
+    /// menu, a drag), waiting to be presented in the order they came (the review's U7: one
+    /// was dropped, and a lost transition left the controller waiting with stale cards).
+    static WAITING: RefCell<VecDeque<StripSnapshot>> = const { RefCell::new(VecDeque::new()) };
 }
 
 fn with_strip<R>(f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
-    STRIP.with(|s| match s.try_borrow_mut() {
+    let result = STRIP.with(|s| match s.try_borrow_mut() {
         Ok(mut guard) => guard.as_mut().map(f),
         Err(_) => {
             tracing::debug!("strip busy; event dropped");
             None
         }
+    });
+    // The strip is free again: snapshots that waited for it go now, after this event.
+    if result.is_some() && WAITING.with(|w| w.try_borrow().is_ok_and(|w| !w.is_empty())) {
+        DispatchQueue::main().exec_async(present_waiting);
+    }
+    result
+}
+
+/// Presents `snapshot` after every one still waiting, now if the strip is free. Main thread.
+fn present_in_order(snapshot: StripSnapshot) {
+    WAITING.with(|w| w.borrow_mut().push_back(snapshot));
+    present_waiting();
+}
+
+/// Presents the snapshots waiting, in order, if the strip is free; else they wait for the
+/// end of the call that holds it ([`with_strip`]). Main thread.
+fn present_waiting() {
+    if !hand_over(&STRIP, &WAITING, Strip::present) {
+        tracing::debug!("strip busy; the snapshot waits");
+    }
+}
+
+/// Hands every item of `queue` to the receiver in `cell`, in order, when it is free; false
+/// (they all wait) when it is borrowed or not there.
+fn hand_over<S, T>(
+    cell: &'static std::thread::LocalKey<RefCell<Option<S>>>,
+    queue: &'static std::thread::LocalKey<RefCell<VecDeque<T>>>,
+    mut take: impl FnMut(&mut S, T),
+) -> bool {
+    cell.with(|c| {
+        let Ok(mut guard) = c.try_borrow_mut() else { return false };
+        let Some(receiver) = guard.as_mut() else { return false };
+        while let Some(item) = queue.with(|q| q.borrow_mut().pop_front()) {
+            take(receiver, item);
+        }
+        true
     })
 }
 
@@ -161,9 +207,7 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)));
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     strip_model::set_presenter(|snapshot| {
-        DispatchQueue::main().exec_async(move || {
-            with_strip(|s| s.present(snapshot));
-        });
+        DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
     tracing::info!(thumbnail_interval_ms, "strip installed");
 }
@@ -182,6 +226,8 @@ pub fn stand_down(why: &str) {
         s.card_drag = None;
         s.pressed = None;
         s.squeezed = None;
+        // Snapshots from before the stand-down never bring the strip back after it.
+        WAITING.with(|w| w.borrow_mut().clear());
         let mut snapshot = s.snapshot.clone();
         snapshot.cards.clear();
         snapshot.user_visible = false;
@@ -215,6 +261,15 @@ pub fn drop_slot(p: Point) -> Option<StripDrop> {
 /// desktop (the global monitor). Main thread.
 pub fn pointer_moved(p: Point) {
     with_strip(|s| s.pointer_moved(p));
+}
+
+/// The global monitor feeds [`pointer_moved`]: a strip hidden at the edge waits for its moves
+/// instead of polling the pointer. Without it (no monitor) the edge is polled as before.
+static MOVES_FED: AtomicBool = AtomicBool::new(false);
+
+/// Says whether the global monitor's mouse moves reach [`pointer_moved`]. Main thread.
+pub fn set_moves_fed(fed: bool) {
+    MOVES_FED.store(fed, Ordering::Relaxed);
 }
 
 /// What the strip draws now, for a scripted test (`ctl debug-strip`): the cards in slot
@@ -325,7 +380,10 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.mouse_down(p));
+            // Emit outside the borrow, as on release: the sink may call back into the strip.
+            if let Some(Some(e)) = with_strip(|s| s.mouse_down(p)) {
+                strip_model::emit(e);
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -398,6 +456,13 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, _event: &NSEvent) {}
 
+        // The pointer on the tab: its rest starts (the global monitor never hears moves over
+        // our own windows, and nothing is polled while the strip waits at the edge).
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            with_strip(Strip::update_visibility);
+        }
+
         // The tab acts on release, once the click is over: ordered out while its own click
         // was still being handled, the window server put it back on screen at the release
         // (measured 10-12: gone for 60 ms, then listed again over the revealed strip).
@@ -448,6 +513,13 @@ impl EdgeTab {
         unsafe { panel.setReleasedWhenClosed(false) };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
         let view = EdgeTabView::new(mtm, bounds);
+        let options =
+            NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: the view owns the tracking area and outlives it; no user info.
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), bounds, options, Some(&view), None)
+        };
+        view.addTrackingArea(&area);
         let root = CALayer::new();
         view.setLayer(Some(&root));
         view.setWantsLayer(true);
@@ -563,15 +635,59 @@ impl Geometry {
 // ---------------------------------------------------------------------------------------
 // Layers
 
+/// One depth of a card: a perspective container of its own holding a 3D group.
+///
+/// Core Animation sorts turned planes that share one perspective container by depth, not by
+/// their order: a plane whose left edge is further right is nearer the eye, so a second app's
+/// window (`second_app_dx` to the right) was drawn over the front window (owner, 10-27). A
+/// plain layer flattens what it holds, so each window's plane gets a container of its own and
+/// the card draws them in their order, back to front, with the same transforms as before.
+struct Depth {
+    /// Covers the panel, anchored at the eye; its `sublayerTransform` is the strip's slide
+    /// and the perspective ([`perspective`]).
+    space: Retained<CALayer>,
+    /// The 3D group inside it: its `position` is the card's offset from where its content
+    /// was built. Every depth of a card gets the same position and glide in the same
+    /// transaction, so the card moves as one unit.
+    unit: Retained<CATransformLayer>,
+}
+
+impl Depth {
+    /// A new depth on `card`, `index` among its sublayers, its slide at `dx`; a slide under
+    /// way on `like` (another depth's container) carries on in it.
+    fn new(card: &CALayer, index: u32, m: &Metrics, dx: f64, like: Option<&CALayer>) -> Self {
+        let bounds = card.bounds();
+        let anchor = card.anchorPoint();
+        let space = CALayer::new();
+        space.setBounds(bounds);
+        space.setAnchorPoint(anchor);
+        space.setPosition(CGPoint::new(bounds.size.width * anchor.x, bounds.size.height * anchor.y));
+        space.setSublayerTransform(perspective(m, dx));
+        let key = NSString::from_str("sublayerTransform");
+        // SAFETY: reading a layer's animation by key; nil when there is none.
+        if let Some(anim) = like.and_then(|l| unsafe { l.animationForKey(&key) }) {
+            space.addAnimation_forKey(&anim, Some(&key));
+        }
+        let unit = CATransformLayer::new();
+        unit.setBounds(bounds);
+        unit.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        unit.setPosition(CGPoint::new(0.0, 0.0));
+        space.addSublayer(&unit);
+        card.insertSublayer_atIndex(&space, index);
+        Self { space, unit }
+    }
+}
+
 /// One card's layers.
 struct CardLayers {
-    /// The card's perspective container: covers the panel, anchored at the eye; its
-    /// `sublayerTransform` is the slide and the perspective, its `transform` the hover.
+    /// The card: covers the panel, anchored at the eye, flat; its `transform` is the hover.
+    /// It draws its depths in their order.
     card: Retained<CALayer>,
-    /// The card's content as one unit (planes, icons, badge, name), a 3D group inside the
-    /// container: its `position` is the card's offset from where its content was built, so a
-    /// glide moves everything together.
-    unit: Retained<CATransformLayer>,
+    /// The thumbnails' depths, back to front, one per plane.
+    depths: Vec<Depth>,
+    /// The top depth, over the thumbnails: the icons, badge and name. With [`Self::depths`]
+    /// it is the card's content as one unit.
+    top: Depth,
     /// Thumbnail planes per window id (back to front), each turned about its left edge.
     planes: Vec<(u32, Retained<CALayer>)>,
     /// Image layer per window id.
@@ -586,6 +702,34 @@ struct CardLayers {
     /// What the layers were built from.
     snapshot: CardSnapshot,
     layout: CardLayout,
+}
+
+impl CardLayers {
+    /// Every depth, back to front, the top one last.
+    fn all_depths(&self) -> impl Iterator<Item = &Depth> {
+        self.depths.iter().chain(std::iter::once(&self.top))
+    }
+
+    /// Moves the card's content to offset `to` (from `from`, as [`move_to`] does), every
+    /// depth alike.
+    fn move_units(&self, glide: Option<motion_math::Spring>, from: CGPoint, to: CGPoint) {
+        for d in self.all_depths() {
+            move_to(glide, &d.unit, from, to);
+        }
+    }
+
+    /// Slides every depth to `dx`: on the spring `s`, or at once.
+    fn slide_to(&self, s: Option<motion_math::Spring>, m: &Metrics, dx: f64) {
+        for d in self.all_depths() {
+            match s {
+                Some(s) => spring_sublayer_transform(s, &d.space, perspective(m, dx)),
+                None => {
+                    d.space.removeAnimationForKey(&NSString::from_str("sublayerTransform"));
+                    d.space.setSublayerTransform(perspective(m, dx));
+                }
+            }
+        }
+    }
 }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
@@ -1023,8 +1167,14 @@ impl Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        self.tab.panel.orderOut(None);
-        self.tab.panel.close();
+        // Its tab closes with it (`EdgeTab`'s drop).
+        self.panel.orderOut(None);
+        self.panel.close();
+    }
+}
+
+impl Drop for EdgeTab {
+    fn drop(&mut self) {
         self.panel.orderOut(None);
         self.panel.close();
     }
@@ -1057,6 +1207,9 @@ struct Strip {
     icons: HashMap<i32, Option<CFRetained<CGImage>>>,
     visibility: Visibility,
     poll_timer: Option<Retained<NSTimer>>,
+    /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
+    /// global monitor to the edge or the tab looks again.
+    edge_waits: bool,
     capturer: Capturer,
     card_drag: Option<CardDrag>,
     /// A card lifted above the others (dragged, or gliding into its slot after the release),
@@ -1103,6 +1256,7 @@ impl Strip {
             icons: HashMap::new(),
             visibility: Visibility::default(),
             poll_timer: None,
+            edge_waits: false,
             capturer,
             card_drag: None,
             lifted_card: None,
@@ -1260,11 +1414,9 @@ impl Strip {
                 // could land on the Desktop being left: look again once the slide is over.
                 let epoch = self.space_epoch;
                 for seconds in REHOME_CHECKS {
-                    let check = RcBlock::new(move |_t: NonNull<NSTimer>| {
+                    let _once = motion::after(seconds, move || {
                         with_strip(|s| s.ensure_on_active_space(epoch));
                     });
-                    // SAFETY: the block runs once on the main run loop.
-                    let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(seconds, false, &check) };
                 }
             }
         }
@@ -1648,16 +1800,16 @@ impl Strip {
             .iter()
             .map(|(id, p)| {
                 let e = p.extent;
+                let boxes = capture_pixels::corner_boxes(CGImage::width(Some(&p.image)), CGImage::height(Some(&p.image)));
+                let corner_boxes: Vec<Option<[u8; 3]>> =
+                    capture_pixels::box_stats(&p.image, &boxes).into_iter().map(|s| s.map(|s| [s.alpha, s.mean, s.spread])).collect();
                 (id.to_string(), serde_json::json!({
                     "w": CGImage::width(Some(&p.image)),
                     "h": CGImage::height(Some(&p.image)),
                     "extent": { "left": e.left, "top": e.top, "right": e.right, "bottom": e.bottom },
                     "corners": crate::platform::self_capture::corners(&p.image),
                     // Each corner box's [alpha, mean, spread] (8M: a fill around the window).
-                    "corner_boxes": crate::platform::capture_pixels::read(&p.image).map(|px| {
-                        use crate::platform::capture_pixels::{corner_boxes, stats};
-                        corner_boxes(px.w, px.h).map(|r| stats(&px, r).map(|s| [s.alpha, s.mean, s.spread]))
-                    }),
+                    "corner_boxes": corner_boxes,
                 }))
             })
             .collect();
@@ -1734,12 +1886,8 @@ impl Strip {
                 card_layer.setBounds(bounds);
                 card_layer.setAnchorPoint(CGPoint::new(m.eye.x / size.width.max(1.0), m.eye.y / size.height.max(1.0)));
                 card_layer.setPosition(CGPoint::new(m.eye.x, m.eye.y));
-                card_layer.setSublayerTransform(perspective(&m, self.current_dx()));
-                let unit = CATransformLayer::new();
-                unit.setBounds(bounds);
-                unit.setAnchorPoint(CGPoint::new(0.0, 0.0));
-                unit.setPosition(CGPoint::new(0.0, 0.0));
-                card_layer.addSublayer(&unit);
+                // The thumbnails' depths come with its content (`fill_card`), under this one.
+                let top = Depth::new(&card_layer, 0, &m, self.current_dx(), None);
                 self.pane.cards_root.addSublayer(&card_layer);
                 let fade = self.style.animation.seconds(self.style.cards.fade_ms);
                 if self.motion.holds(card.stage) {
@@ -1750,7 +1898,8 @@ impl Strip {
                 }
                 let layers = CardLayers {
                     card: card_layer,
-                    unit,
+                    depths: Vec::new(),
+                    top,
                     planes: Vec::new(),
                     images: Vec::new(),
                     icons: Vec::new(),
@@ -1771,7 +1920,7 @@ impl Strip {
         let (drawn, old_center) = match self.pane.cards.get(&card.stage) {
             Some(l) => {
                 // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-                let at = unsafe { l.unit.presentationLayer() }.map_or_else(|| l.unit.position(), |p| p.position());
+                let at = unsafe { l.top.unit.presentationLayer() }.map_or_else(|| l.top.unit.position(), |p| p.position());
                 (Point::new(l.built.x + at.x, l.built.y + at.y), l.layout.hover_center(&m))
             }
             None => (Point::new(layout.frame.x, layout.frame.y), layout.hover_center(&m)),
@@ -1800,7 +1949,7 @@ impl Strip {
             let to = Self::unit_offset(layout, layers.built);
             let now = Point::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
             let from = motion_math::rescaled_start(now, scale, old_center, layout.hover_center(&m));
-            move_to(glide, &layers.unit, CGPoint::new(from.x, from.y), to);
+            layers.move_units(glide, CGPoint::new(from.x, from.y), to);
             layers.card.setTransform(hover);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
@@ -1809,20 +1958,30 @@ impl Strip {
 
     /// (Re)builds a card's thumbnail planes, icons, badge and name.
     fn fill_card(&mut self, stage: u64, layout: &CardLayout, card: &CardSnapshot) {
-        let Some(layers) = self.pane.cards.get(&stage) else { return };
-        let unit = layers.unit.clone();
         let m = self.m().clone();
-        let style = self.style.clone();
-        let c = &style.cards;
-        let k = m.k;
+        let dx = self.current_dx();
+        let Some(layers) = self.pane.cards.get_mut(&stage) else { return };
+        let unit = layers.top.unit.clone();
         // SAFETY: setting no sublayers removes the old children.
         unsafe { unit.setSublayers(None) };
         unit.removeAnimationForKey(&NSString::from_str("position"));
         unit.setPosition(CGPoint::new(0.0, 0.0));
+        for d in layers.depths.drain(..) {
+            d.space.removeFromSuperlayer();
+        }
+        // Thumbnails back to front, each a plane turned about its left edge in a depth of its
+        // own (see `Depth`), so the front window is drawn on top.
+        let order = layout.draw_order();
+        let depths: Vec<Depth> =
+            (0..order.len()).map(|i| Depth::new(&layers.card, i as u32, &m, dx, Some(&layers.top.space))).collect();
+        layers.depths = depths;
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
+        let style = self.style.clone();
+        let c = &style.cards;
+        let k = m.k;
         let mut planes = Vec::new();
         let mut images = Vec::new();
-        // Thumbnails back to front, each a plane turned about its left edge.
-        for slot in layout.thumbs.iter().rev() {
+        for (slot, depth) in order.into_iter().zip(&layers.depths) {
             let plane = CALayer::new();
             plane.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(slot.rect.w, slot.rect.h)));
             plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
@@ -1830,6 +1989,10 @@ impl Strip {
             plane.setTransform(turn(&m));
             plane.setCornerRadius(c.corner_radius * k);
             plane.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 1.0)));
+            #[cfg(feature = "debug-render")]
+            if let Some((r, g, b)) = crate::ui::strip_demo::fake_color(slot.id) {
+                plane.setBackgroundColor(Some(&color(r, g, b, 1.0)));
+            }
             if card.active {
                 // The active stage's card (`[strip] active = "card"`): a light rim marks it.
                 plane.setBorderWidth(ACTIVE_RIM * k);
@@ -1860,7 +2023,7 @@ impl Strip {
                 tracing::debug!(stage, window = slot.id, "card drawn with a thumbnail that has no picture yet");
             }
             plane.addSublayer(&image);
-            unit.addSublayer(&plane);
+            depth.unit.addSublayer(&plane);
             planes.push((slot.id, plane));
             images.push((slot.id, image));
         }
@@ -2021,9 +2184,9 @@ impl Strip {
     /// How far `stage`'s card is drawn from its slot (on its way there).
     fn drawn_offset(&self, stage: u64) -> Point {
         let Some(l) = self.pane.cards.get(&stage) else { return Point::new(0.0, 0.0) };
-        let model = l.unit.position();
+        let model = l.top.unit.position();
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-        let drawn = unsafe { l.unit.presentationLayer() }.map_or(model, |p| p.position());
+        let drawn = unsafe { l.top.unit.presentationLayer() }.map_or(model, |p| p.position());
         Point::new(drawn.x - model.x, drawn.y - model.y)
     }
 
@@ -2049,7 +2212,7 @@ impl Strip {
             t.invalidate();
         }
         let stage = *stage;
-        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        let t = motion::after(settle, move || {
             with_strip(|s| {
                 if s.lifted_card.as_ref().is_some_and(|l| l.0 == stage && l.1.is_some()) {
                     s.lifted_card = None;
@@ -2057,8 +2220,6 @@ impl Strip {
                 }
             });
         });
-        // SAFETY: the block runs once on the main run loop.
-        let t = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(settle, false, &block) };
         if let Some(l) = self.lifted_card.as_mut() {
             l.1 = Some(t);
         }
@@ -2080,7 +2241,8 @@ impl Strip {
         l.icons.iter().find(|(_, r)| r.translate(l.frame.x + d.x, l.frame.y + d.y).contains(p)).map(|(pid, _)| *pid)
     }
 
-    fn mouse_down(&mut self, p: Point) {
+    /// A press at `p` (view coordinates); the event to send once the strip is let go.
+    fn mouse_down(&mut self, p: Point) -> Option<StripEvent> {
         // A card a transition is still landing in is not drawn yet: a press there is nothing
         // (it would switch straight back; review R1-ui 3).
         self.pressed = if self.pane.shown { self.card_at(p).filter(|s| !self.motion.holds(*s)) } else { None };
@@ -2089,12 +2251,12 @@ impl Strip {
             // A click is likely: fresh snapshots of what leaves and what arrives, and the
             // engine's look at the windows taken now rather than at the release.
             self.prefetch(Some(stage));
-            strip_model::emit(StripEvent::CardPressed { stage });
             // Apple's card answers the press at once: it eases back from its hover growth to
             // a little under its resting size.
             self.squeeze(Some(stage));
         }
         tracing::trace!(x = p.x, y = p.y, card = ?self.pressed, "strip mouse down");
+        self.pressed.map(|stage| StripEvent::CardPressed { stage })
     }
 
     /// A possible drag of `stage`'s card from the current pointer.
@@ -2304,7 +2466,7 @@ impl Strip {
     /// holds it (then it is looked at again after as long, so one that a later transition
     /// took never stays pressed: R3 6). A new press of any card ends the watch.
     fn release_squeeze_later(stage: u64) {
-        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        let _once = motion::after(SQUEEZE_MAX, move || {
             with_strip(|s| {
                 if s.squeezed != Some(stage) || s.pressed.is_some() {
                     return;
@@ -2316,8 +2478,6 @@ impl Strip {
                 }
             });
         });
-        // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(SQUEEZE_MAX, false, &block) };
     }
 
     /// Draws `stage`'s card pressed (`None`: no card), easing the card that was and the one
@@ -2404,9 +2564,7 @@ impl Strip {
         }
         CATransaction::commit();
         let card = layers.card.clone();
-        let gone = RcBlock::new(move |_t: NonNull<NSTimer>| card.removeFromSuperlayer());
-        // SAFETY: the block runs once on the main run loop.
-        let _once = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, false, &gone) };
+        let _once = motion::after(if seconds > 0.0 { seconds + 0.05 } else { 0.0 }, move || card.removeFromSuperlayer());
     }
 
     fn hover_at(&mut self, p: Option<Point>) {
@@ -2420,6 +2578,10 @@ impl Strip {
     /// the cards hover from here and the pane catches clicks again once it is on one.
     fn pointer_moved(&mut self, p: Point) {
         let g = self.geometry.global;
+        // Hidden at the edge, nothing polled: a move to the edge or the tab starts the rest.
+        if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
+            self.update_visibility();
+        }
         if g.contains(p) {
             self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
         } else if self.hovered.is_some() || self.pane.catches == Some(true) {
@@ -2534,6 +2696,13 @@ impl Strip {
             self.update_targets();
             tracing::info!(on_active_space = self.pane.panel.isOnActiveSpace(), "strip: the pane of the Space shown");
         }
+        // The edge tab shown while the Space still slid can have landed on the Desktop being
+        // left (the review's U9): a new one takes over (the stray one closes) and shows here.
+        if self.pane.tab.shown && !self.pane.tab.panel.isOnActiveSpace() {
+            tracing::info!("strip: the edge tab is not on the Space shown; a new one takes over");
+            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()));
+            self.update_visibility();
+        }
         self.publish_panel();
     }
 
@@ -2606,13 +2775,21 @@ impl Strip {
             || (self.pane.shown && mode == Mode::EdgeOnly);
         self.set_lifted(lift);
         self.window_drag_card(over);
-        self.set_polling(decision.poll || window_drag || card_dragging);
+        // Hidden at the edge with no clock running, mouse moves wake it (U6); without the
+        // global monitor's moves the pointer is polled as before.
+        let idle_edge = mode == Mode::EdgeOnly && !decision.poll;
+        self.edge_waits = idle_edge;
+        let unfed = idle_edge && !MOVES_FED.load(Ordering::Relaxed);
+        self.set_polling(decision.poll || unfed || window_drag || card_dragging);
+        // Only beside a pane on the Desktop shown: a tab's first order-in decides the Desktop
+        // it lives on (the review's U9; a stray one is replaced, `ensure_on_active_space`).
         let tab = self.style.reveal.edge_tab
             && !self.snapshot.fullscreen
             && self.covered()
             && !self.pane.shown
             && !window_drag
-            && !card_dragging;
+            && !card_dragging
+            && self.pane.on_space_shown();
         self.pane.tab.show(tab, self.mtm);
     }
 
@@ -2651,13 +2828,7 @@ impl Strip {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
-            match slide {
-                Some(s) => spring_sublayer_transform(s, &layers.card, perspective(&m, dx)),
-                None => {
-                    layers.card.removeAnimationForKey(&NSString::from_str("sublayerTransform"));
-                    layers.card.setSublayerTransform(perspective(&m, dx));
-                }
-            }
+            layers.slide_to(slide, &m, dx);
         }
         CATransaction::commit();
     }
@@ -2697,4 +2868,74 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
         }
     }
     starts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    thread_local! {
+        static SEEN: RefCell<Option<Vec<u32>>> = const { RefCell::new(Some(Vec::new())) };
+        static QUEUE: RefCell<VecDeque<u32>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// U7: an item that finds the receiver borrowed waits, and goes before the next one once
+    /// it is free; nothing is dropped.
+    #[test]
+    fn a_snapshot_that_finds_the_strip_busy_waits_its_turn() {
+        let offer = |n: u32| {
+            QUEUE.with(|q| q.borrow_mut().push_back(n));
+            hand_over(&SEEN, &QUEUE, |seen: &mut Vec<u32>, n| seen.push(n))
+        };
+        assert!(offer(1));
+        let busy = SEEN.with(|s| {
+            let _held = s.borrow_mut();
+            offer(2)
+        });
+        assert!(!busy, "borrowed: it waits");
+        assert_eq!(QUEUE.with(|q| q.borrow().len()), 1);
+        assert!(offer(3));
+        assert_eq!(SEEN.with(|s| s.borrow().clone()), Some(vec![1, 2, 3]));
+    }
+    use crate::config::StripStyle;
+    use crate::engine::geometry::Size;
+
+    /// `v` (a row vector, `w` = 1) times `t`, as Core Animation applies a transform.
+    fn apply(t: &CATransform3D, v: [f64; 3]) -> [f64; 4] {
+        let [x, y, z] = v;
+        [
+            x * t.m11 + y * t.m21 + z * t.m31 + t.m41,
+            x * t.m12 + y * t.m22 + z * t.m32 + t.m42,
+            x * t.m13 + y * t.m23 + z * t.m33 + t.m43,
+            x * t.m14 + y * t.m24 + z * t.m34 + t.m44,
+        ]
+    }
+
+    /// Where the point `p` of a thumbnail plane (its bounds coordinates) is drawn: through
+    /// the transforms `fill_card` and `Depth::new` set (the plane's turn about its left edge's
+    /// middle, its position, then its depth's slide and perspective about the eye).
+    fn drawn(m: &Metrics, x: f64, top: f64, size: Size, p: Point, dx: f64) -> Point {
+        let turned = apply(&turn(m), [p.x, p.y - size.h / 2.0, 0.0]);
+        let at = [x + turned[0] - m.eye.x, top + size.h / 2.0 + turned[1] - m.eye.y, turned[2]];
+        let q = apply(&perspective(m, dx), at);
+        Point::new(m.eye.x + q[0] / q[3], m.eye.y + q[1] / q[3])
+    }
+
+    #[test]
+    fn a_plane_in_its_own_depth_is_drawn_where_the_layout_projects_it() {
+        // His laptop's strip (see strip_layout's tests): planes above, at and below the eye,
+        // at rest and slid partly out.
+        let m = Metrics::new(&StripStyle::default(), Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0);
+        for (x, top, u, v) in [(15.0, 120.0, 140.0, 105.0), (32.0, 480.0, 120.0, 90.0), (83.0, 900.0, 161.0, 120.0)] {
+            for dx in [0.0, -60.0] {
+                let size = Size::new(u, v);
+                let corners = [Point::new(0.0, 0.0), Point::new(u, 0.0), Point::new(u, v), Point::new(0.0, v)];
+                let want = m.project(x + dx, top, u, v);
+                for (c, w) in corners.into_iter().zip(want) {
+                    let got = drawn(&m, x, top, size, c, dx);
+                    assert!((got.x - w.x).abs() < 1e-6 && (got.y - w.y).abs() < 1e-6, "{c:?} of {x},{top}: {got:?} vs {w:?}");
+                }
+            }
+        }
+    }
 }

@@ -977,10 +977,13 @@ fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
     let a = add(&mut m, win(23, 50, EDITOR, "Plan.txt", DEFAULT));
     assert_eq!(set_frame(&a, 23), None, "a shown window is not moved: {a:?}");
     assert_eq!(m.window(w(23)).map(|x| x.restore), Some(DEFAULT));
-    // A window reopened in the park zone still comes out of it.
+    // A window reopened in the park zone still comes out of it, centered at its own size:
+    // its saved frame is another display's (S6).
     let corner = park_frame(Size::new(640.0, 420.0), FRAME);
     add(&mut m, win(24, 50, EDITOR, "Notes.txt", corner));
     assert!(m.window(w(24)).is_some_and(|x| !parked_at(x.restore)));
+    let restore = m.window(w(24)).map(|x| x.restore);
+    assert!(restore.is_some_and(|r| r != F_NOTES && (r.w, r.h) == (640.0, 420.0)), "{restore:?}");
     // The same display size: the saved frames.
     let mut m = restoring_after(vec![desktop_5()], Restore::after_restart("B").with_display(Some((1440.0, 900.0))));
     m.arrive(MAIN, &[], &[], &LaunchHints::default());

@@ -17,10 +17,12 @@
 //!   rounded corner clears only a few pixels of its box, which stays nearly opaque). Such a
 //!   picture is not used; the card keeps its last good picture.
 //!
-//! Pure arithmetic over a byte buffer, unit tested; [`read`] takes the buffer from a CGImage.
+//! Pure arithmetic over a byte buffer, unit tested; [`box_stats`] reads the boxes of a CGImage,
+//! each cropped and drawn on its own, so only their pixels are read (the review's U2: a copy
+//! of the whole buffer, 26-59 MB for a full-size snapshot, every round, to read four boxes).
 
-use objc2_core_foundation::CFRetained;
-use objc2_core_graphics::{CGBitmapInfo, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{CGBitmapInfo, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
 
 /// A box's mean alpha at or above this is opaque.
 pub const OPAQUE: u8 = 240;
@@ -131,18 +133,28 @@ pub fn holds_fill(corners: &[Stats; 4], window_alone: bool) -> bool {
     flat_fill(corners) || (window_alone && corners.iter().any(|s| s.alpha < SEE_THROUGH))
 }
 
-/// The bytes of a 32-bit `image`; `None` for another pixel format or no data.
-pub fn read(image: &CGImage) -> Option<Pixels> {
-    let w = CGImage::width(Some(image));
-    let h = CGImage::height(Some(image));
-    if CGImage::bits_per_pixel(Some(image)) != 32 || w == 0 || h == 0 {
-        return None;
-    }
-    let row = CGImage::bytes_per_row(Some(image));
-    let alpha = alpha_byte(CGImage::alpha_info(Some(image)), CGImage::bitmap_info(Some(image)));
-    let provider: Option<CFRetained<CGDataProvider>> = CGImage::data_provider(Some(image));
-    let bytes = CGDataProvider::data(provider.as_deref())?.to_vec();
-    Some(Pixels { bytes, row, w, h, alpha })
+/// The numbers of each of `boxes` of `image` (pixels, top-left origin, clipped to the image),
+/// in order: each box is cropped out of the image and drawn on its own, in the image's colour
+/// space (so its bytes are the image's own), and only its pixels are read. `None` for a box
+/// with nothing of it in the image, or one that cannot be drawn.
+pub fn box_stats(image: &CGImage, boxes: &[PixelRect]) -> Vec<Option<Stats>> {
+    let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    let space = CGImage::color_space(Some(image));
+    boxes
+        .iter()
+        .map(|r| {
+            let (x1, y1) = ((r.x + r.w).min(w), (r.y + r.h).min(h));
+            if r.x >= x1 || r.y >= y1 {
+                return None;
+            }
+            let crop = CGRect::new(CGPoint::new(r.x as f64, r.y as f64), CGSize::new((x1 - r.x) as f64, (y1 - r.y) as f64));
+            let part = CGImage::with_image_in_rect(Some(image), crop)?;
+            // A colour space a 32-bit bitmap cannot use (not RGB): device RGB, converted.
+            let (bytes, pw, ph) = super::pixels::bgra(&part, space.as_deref()).or_else(|| super::pixels::bgra(&part, None))?;
+            let px = Pixels { bytes, row: pw * 4, w: pw, h: ph, alpha: 3 };
+            stats(&px, PixelRect { x: 0, y: 0, w: pw, h: ph })
+        })
+        .collect()
 }
 
 /// Which byte of a 32-bit pixel holds alpha.
@@ -230,6 +242,45 @@ mod tests {
         assert!(!flat_fill(&corners(&busy)), "not flat");
         let two = image(w, h, |_, y| if y < h / 2 { [30, 30, 30, 255] } else { [200, 200, 200, 255] });
         assert!(!flat_fill(&corners(&two)), "two colours");
+    }
+
+    /// `px` (BGRA, alpha last, premultiplied) as a CGImage in device RGB.
+    fn cg_image(px: &Pixels) -> objc2_core_foundation::CFRetained<CGImage> {
+        use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace};
+        let space = CGColorSpace::new_device_rgb().expect("device RGB");
+        let info = CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0;
+        let mut bytes = px.bytes.clone();
+        // SAFETY: `bytes` holds h rows of `row` bytes and outlives the context; the image
+        // made from it is a copy.
+        let ctx = unsafe { CGBitmapContextCreate(bytes.as_mut_ptr().cast(), px.w, px.h, 8, px.row, Some(&space), info) }.expect("bitmap");
+        CGBitmapContextCreateImage(Some(&ctx)).expect("image")
+    }
+
+    /// U2: the boxes read from the image itself, each cropped and drawn alone, give the same
+    /// numbers as the whole buffer read in memory, top-left origin and all.
+    #[test]
+    fn boxes_read_from_the_image_match_the_whole_buffer() {
+        let (w, h) = (347, 276);
+        let px = image(w, h, |x, y| {
+            let corner = (x < 12 || x >= w - 12) && (y < 12 || y >= h - 12);
+            if corner {
+                [0, 0, 0, 0]
+            } else if y < h / 2 {
+                [40, 40, 40, 255]
+            } else {
+                [((x * 7 + y * 3) % 200) as u8, 90, 160, 255]
+            }
+        });
+        let cg = cg_image(&px);
+        let mut boxes = corner_boxes(w, h).to_vec();
+        boxes.push(PixelRect { x: 100, y: 200, w: 40, h: 30 });
+        boxes.push(PixelRect { x: 340, y: 270, w: 40, h: 30 });
+        boxes.push(PixelRect { x: 400, y: 0, w: 4, h: 4 });
+        let read = box_stats(&cg, &boxes);
+        let want: Vec<Option<Stats>> = boxes.iter().map(|r| stats(&px, *r)).collect();
+        assert_eq!(read, want);
+        assert!(read[0].is_some_and(|s| s.alpha < OPAQUE) && read[6].is_none(), "{read:?}");
+        assert_ne!(read[0].map(|s| s.mean), read[4].map(|s| s.mean), "top and bottom differ");
     }
 
     #[test]

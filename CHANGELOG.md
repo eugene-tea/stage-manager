@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.0 — 2026-10-29
+
+- The corner stays clean on any wallpaper when Screen Recording is allowed, also with desktop
+  icons or widgets there (they still open and drag), at dawn and dusk on wallpapers that
+  follow the sun, and through Show Desktop and back.
+- Clicking an app in the Dock, or ⌘-Tab, brings its window to the front with the keyboard,
+  also when it shares its stage with other apps. Cards show their front window on top, and a
+  stage's windows land in the order its card shows.
+- Hidden windows come back exactly where you left them: when Stage Manager quits or crashes,
+  after a restart on a display of another size, and for a window partly off the screen, one
+  pushed into the corner, a dialog, or one whose app was busy.
+- A hidden window that its app moves back onto the screen goes back into the corner within a
+  second; if you are working in it, it joins your stage.
+- A window you minimize with ⌘M keeps its card in the strip.
+- With named stages, stages moved together to another Desktop in Mission Control arrive with
+  their windows showing.
+- A hung app no longer freezes Stage Manager while its windows are brought back.
+- A config file with a mistake in it keeps your last working settings instead of the defaults.
+  Whole-number settings accept `50.0`, and a hotkey of Shift and a key alone is refused.
+- Updates: Stage Manager opens again after an update even if it was moved meanwhile, and an
+  update installed by hand no longer leaves its disk image behind.
+- Without Screen Recording, switching stages shows plain window shapes again. With the strip
+  hidden, no pictures of your windows are taken in the background.
+
 ## 1.4.0 — 2026-10-23
 
 - New apps can open in the current stage: turn on **Open new apps in the current stage**

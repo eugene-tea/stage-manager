@@ -34,6 +34,9 @@ const MALFORMED_AFTER: Duration = Duration::from_secs(5);
 /// How often a young malformed key file is read again.
 const MALFORMED_POLL: Duration = Duration::from_millis(50);
 
+/// How long a process's log setup waits for a young malformed key file.
+pub const LAUNCH_WAIT: Duration = Duration::from_millis(250);
+
 static KEY: OnceLock<Key> = OnceLock::new();
 
 /// Sets the key titles are hashed with in this process (the first call wins; false when
@@ -63,8 +66,16 @@ fn key() -> &'static Key {
 /// winner's. A malformed file is replaced only once it is [`MALFORMED_AFTER`] old (until
 /// then it is read again), and under a lock, so two repairs never remove each other's key.
 pub fn load_or_create_key(dir: &Path, random: impl Fn() -> Key) -> io::Result<Key> {
+    load_or_create_key_within(dir, random, MALFORMED_AFTER * 2)
+}
+
+/// [`load_or_create_key`], waiting at most `wait` for a young malformed key file to become
+/// whole: past it, an error (the caller hashes with a key of its own this run). The log's
+/// setup on the main thread waits [`LAUNCH_WAIT`], never the ten seconds a repair can take
+/// (review C10).
+pub fn load_or_create_key_within(dir: &Path, random: impl Fn() -> Key, wait: Duration) -> io::Result<Key> {
     let path = dir.join(KEY_FILE);
-    let deadline = Instant::now() + MALFORMED_AFTER * 2;
+    let deadline = Instant::now() + wait;
     for _ in 0..1000 {
         match read_key(&path) {
             Ok(Some(key)) => return Ok(key),
@@ -347,6 +358,20 @@ mod tests {
         let never = || -> Key { panic!("a key being written is never replaced") };
         assert_eq!(load_or_create_key(dir.path(), never).expect("read"), [5; 16]);
         writer.join().expect("joins");
+    }
+
+    /// Review C10: the log's setup never waits out a young malformed key; it gives up quickly
+    /// and leaves the file alone.
+    #[test]
+    fn a_launch_waits_briefly_for_a_young_malformed_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(KEY_FILE);
+        std::fs::write(&path, "cut sh").expect("writes");
+        let start = Instant::now();
+        let never = || -> Key { panic!("a key being written is never replaced") };
+        assert!(load_or_create_key_within(dir.path(), never, LAUNCH_WAIT).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        assert_eq!(std::fs::read_to_string(&path).expect("reads"), "cut sh", "left as it was");
     }
 
     /// Two repairs of one stale malformed key agree on the new one.

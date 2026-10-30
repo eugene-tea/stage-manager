@@ -61,6 +61,11 @@
 //                                      never through Accessibility (round 8M)
 //   --hang-ms N  | FIXTURE_HANG_MS=N   with SIGURG: how long the main thread blocks after the
 //                                      close (default 3000)
+//   --raise-delay-ms N | FIXTURE_RAISE_DELAY_MS=N  the standard windows answer Accessibility's
+//                                      raise (AXRaise) at once and reorder N ms later, as a
+//                                      real app may that orders on a later run-loop pass
+//                                      (Mail and Safari landing swapped on 10-27, round
+//                                      raise-order); 0, the default, raises as AppKit does
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -74,6 +79,10 @@
 // SIGURG closes the last standard window opened and lets it go (its window-server window is
 // destroyed), then blocks the main thread for --hang-ms: the app answers no Accessibility
 // message meanwhile (Home on 10-21, round 8M).
+// SIGALRM moves every visible standard window parked in the screen's bottom-right corner to
+// the middle of the screen by itself, without activating (an app that re-centres its own
+// window, or restores its saved bounds, while parked: round park-reconcile, the Fable
+// review's L1).
 import AppKit
 
 struct Options {
@@ -94,6 +103,7 @@ struct Options {
     var childOver: Double? = nil
     var stray = false
     var hangMs = 3000
+    var raiseDelayMs = 0
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -131,6 +141,7 @@ struct Options {
         if let n = env["FIXTURE_CHILD_OVER"].flatMap(Double.init) { o.childOver = n }
         if env["FIXTURE_STRAY"] == "1" { o.stray = true }
         if let n = env["FIXTURE_HANG_MS"].flatMap(Int.init) { o.hangMs = n }
+        if let n = env["FIXTURE_RAISE_DELAY_MS"].flatMap(Int.init) { o.raiseDelayMs = n }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -151,6 +162,7 @@ struct Options {
             case "--child-over": if let n = args.next().flatMap(Double.init) { o.childOver = n }
             case "--stray": o.stray = true
             case "--hang-ms": if let n = args.next().flatMap(Int.init) { o.hangMs = n }
+            case "--raise-delay-ms": if let n = args.next().flatMap(Int.init) { o.raiseDelayMs = n }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -158,6 +170,7 @@ struct Options {
         o.delayMs = max(0, o.delayMs)
         o.staggerMs = max(0, o.staggerMs)
         o.retitleAfterMs = max(0, o.retitleAfterMs)
+        o.raiseDelayMs = max(0, o.raiseDelayMs)
         o.tabbed = max(0, min(o.tabbed, o.windows - 1))
         return o
     }
@@ -179,6 +192,20 @@ let palette: [NSColor] = [
 ]
 
 /// A flat color with a label drawn large in the middle.
+/// A standard window whose Accessibility raise answers at once and reorders `raiseDelayMs`
+/// later (`--raise-delay-ms`); with 0 it raises as AppKit does.
+final class LateRaiseWindow: NSWindow {
+    var raiseDelayMs = 0
+
+    override func accessibilityPerformRaise() -> Bool {
+        guard raiseDelayMs > 0 else { return super.accessibilityPerformRaise() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(raiseDelayMs)) {
+            _ = super.accessibilityPerformRaise()
+        }
+        return true
+    }
+}
+
 final class LabelView: NSView {
     let color: NSColor
     let label: String
@@ -347,10 +374,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rect = NSRect(x: area.minX + f[0], y: area.maxY - f[1] - f[3], width: fw, height: f[3])
         }
         let name = title(i)
-        let window = NSWindow(
+        let window = LateRaiseWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
+        window.raiseDelayMs = options.raiseDelayMs
         window.title = name
         window.isReleasedWhenClosed = false
         window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: name)
@@ -473,6 +501,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         away += parked.map { ($0, $0.frame) }
     }
 
+    /// SIGALRM: every parked window moves itself to the middle of the screen (an app's own
+    /// move while parked), without activating.
+    func moveParkedOut() {
+        guard let screen = NSScreen.main?.frame, let area = NSScreen.main?.visibleFrame else { return }
+        let parked = NSApp.windows.filter { w in
+            w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
+        }
+        for w in parked {
+            let size = w.frame.size
+            w.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2))
+        }
+    }
+
     /// SIGINFO: the windows sent away show again ("their Desktop shows").
     func bringAwayBack() {
         // Ordering in constrains a window onto the screen; a Desktop switch never moves it.
@@ -521,6 +562,10 @@ signal(SIGINFO, SIG_IGN)
 let comeBack = DispatchSource.makeSignalSource(signal: SIGINFO, queue: .main)
 comeBack.setEventHandler { delegate.bringAwayBack() }
 comeBack.resume()
+signal(SIGALRM, SIG_IGN)
+let moveOut = DispatchSource.makeSignalSource(signal: SIGALRM, queue: .main)
+moveOut.setEventHandler { delegate.moveParkedOut() }
+moveOut.resume()
 signal(SIGURG, SIG_IGN)
 let closeHung = DispatchSource.makeSignalSource(signal: SIGURG, queue: .main)
 closeHung.setEventHandler { delegate.closeWhileHung() }

@@ -33,7 +33,9 @@ B="/Applications/Stage Manager.app/Contents/MacOS/stage-manager"
 - Saved changes apply **within a second** (the app polls the file's modification time).
   Do not restart the app. `"$B" ctl reload` forces a reload.
 - A value of the wrong type, or a file that cannot be read, keeps the **last good config**
-  in force; the error shows in the menu, in Settings and in the log. Unknown keys and out-of-range numbers only warn
+  in force, also when the app starts with the broken file (the app keeps a copy,
+  `.config-last-good.toml` beside it; with no copy, the defaults with update checks off);
+  the error shows in the menu, in Settings and in the log. Unknown keys and out-of-range numbers only warn
   (numbers are clamped).
 - The Settings window writes the same file (it uncomments a changed key in place and
   comments it out again at the default); your edits show there at once.

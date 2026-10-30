@@ -169,12 +169,13 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     let registered = file.windows;
     tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, corners = ?file.corners, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
-    let r = safety::recovery_scan("guardian");
+    let scope = scan_scope(&registered);
+    let (r, _) = safety::recovery_scan_with("guardian", &scope);
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
     install_stop_handlers();
     // The window server lists moved windows at their new frames a moment later.
     std::thread::sleep(SETTLE);
-    watch(parent as u32, &registered);
+    watch(parent as u32, &registered, &scope);
     let _ = std::fs::remove_file(&parked_file);
     ExitCode::SUCCESS
 }
@@ -207,8 +208,19 @@ struct Handoff {
     offering: Offering,
 }
 
+/// The recovery scan's scope after a crash: the windows the app registered bring their
+/// registered frames, the exact ones, before `state.json`'s (S4: the scan used to move a
+/// registered window to its older saved frame, or center it, before the watch could). A
+/// window taken unvouched from an older guardian (R4) brings none.
+fn scan_scope(registered: &[Registered]) -> safety::ScanScope {
+    safety::ScanScope {
+        registered: registered.iter().filter(|r| !r.unvouched).map(|r| (r.id, *r)).collect(),
+        ..safety::ScanScope::default()
+    }
+}
+
 /// The watch after the scan: see the module docs.
-fn watch(parent: u32, registered: &[Registered]) {
+fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope) {
     let mut w = Watch::new(registered);
     let mut reported: Option<Vec<(u32, bool)>> = None;
     let mut attempts: HashMap<u32, Attempts> = HashMap::new();
@@ -219,7 +231,7 @@ fn watch(parent: u32, registered: &[Registered]) {
         let sig = STOP_SIGNAL.load(Ordering::SeqCst);
         if sig != 0 {
             tracing::warn!(signal = sig, "guardian: told to stop; one last scan");
-            let r = safety::recovery_scan("guardian: stopping");
+            let (r, _) = safety::recovery_scan_with("guardian: stopping", scope);
             tracing::warn!(restored = r.restored, failed = r.failed, "guardian: stopped");
             return;
         }

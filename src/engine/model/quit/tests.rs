@@ -434,3 +434,37 @@ fn an_app_launched_in_the_restore_window_keeps_its_minute() {
     assert_eq!(dropped, 1, "its minute up: Notes.txt given up");
     assert_eq!(m.pending_count(), 0);
 }
+
+/// W2 (the Fable review of 10-29): Chat saves its own window frames. Its window was parked
+/// when it quit, so it wrote the park frame, and an hour later it reopens the window in the
+/// corner. The window takes the frame it had at the quit (by app and title, else the app's
+/// only one left), not the center; once, and not past a day.
+#[test]
+fn an_app_reopening_its_window_in_the_corner_gets_its_frame_back_within_a_day() {
+    let corner = park_frame(crate::engine::geometry::Size::new(F_TEAM.w, F_TEAM.h), FRAME);
+    let mut m = desk();
+    assert!(m.window(w(21)).is_some_and(|x| x.parked));
+    quit_app(&mut m, &[21], T);
+    m.prune_quit(T + 3600); // the saves of the hour since
+    add(&mut m, win(51, 22, CHAT, "Team", corner));
+    assert_eq!(m.window(w(51)).map(|x| x.restore), Some(F_TEAM), "its frame at the quit");
+    // Used once: another window born there is centered (its size kept).
+    add(&mut m, win(52, 22, CHAT, "Team", corner));
+    assert!(m.window(w(52)).is_some_and(|x| x.restore != F_TEAM && !parked_at(x.restore)));
+    // Retitled: the app's only frame left still fits it.
+    let mut m = desk();
+    quit_app(&mut m, &[21], T);
+    add(&mut m, win(51, 22, CHAT, "Team — 3 unread", corner));
+    assert_eq!(m.window(w(51)).map(|x| x.restore), Some(F_TEAM));
+    // A day later it is gone; a window born out of the zone never takes it.
+    let mut m = desk();
+    quit_app(&mut m, &[21], T);
+    m.prune_quit(T + 24 * 3600 + 1);
+    add(&mut m, win(51, 22, CHAT, "Team", corner));
+    assert!(m.window(w(51)).is_some_and(|x| x.restore != F_TEAM && !parked_at(x.restore)), "centered");
+    let mut m = desk();
+    quit_app(&mut m, &[21], T);
+    let elsewhere = Rect::new(300.0, 200.0, 700.0, 500.0);
+    add(&mut m, win(51, 22, CHAT, "Team", elsewhere));
+    assert_eq!(m.window(w(51)).map(|x| x.restore), Some(elsewhere), "where its app put it");
+}

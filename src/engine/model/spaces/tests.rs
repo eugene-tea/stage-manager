@@ -178,6 +178,32 @@ fn two_desktops() -> Mac {
 }
 
 #[test]
+fn a_desktop_left_after_its_only_app_quit_keeps_the_quit_window_for_the_file() {
+    // Fable E5 (10-29): chat alone on Desktop 1 quits (the logout's apps quit before its
+    // signal); the user goes to Desktop 0 and the empty Desktop 1 was forgotten with the
+    // entry kept for the file, so the two-minute quit grace restored nothing there.
+    let mut mac = Mac::new();
+    mac.put(0, 1, 10, "com.example.editor", "Work notes");
+    mac.put(1, 4, 30, "com.example.chat", "Family");
+    mac.go(0);
+    mac.go(1);
+    let d1 = mac.space();
+    let closing = mac.m.closing(w(4)).expect("managed");
+    mac.wins.remove(&4);
+    mac.m.remove_window(w(4));
+    mac.m.keep_quit(vec![closing], 1_000);
+    mac.go(0);
+    assert_ne!(mac.space(), d1);
+    let file = mac.m.to_state();
+    let kept = file.spaces.iter().find(|s| s.id == d1.0).expect("Desktop 1 still written");
+    assert!(kept.stages.iter().flat_map(|s| &s.windows).any(|x| x.title == "Family" && x.quit_at == Some(1_000)), "{kept:?}");
+    // Its entries pruned (older than the grace), the empty Desktop goes at the next arrival.
+    mac.m.prune_quit(1_000_000);
+    mac.go(0);
+    assert!(!mac.m.spaces().iter().any(|s| s.id == d1), "forgotten once nothing is kept for it");
+}
+
+#[test]
 fn each_desktop_has_its_own_stages_and_strip() {
     let mut mac = two_desktops();
     mac.focused = Some(w(1));
@@ -1733,6 +1759,38 @@ mod identity {
         assert_eq!(mac.m.space_of(w(4)), Some(d0), "the others stay with their Desktop");
     }
 
+    #[test]
+    fn carried_stages_keep_their_active_stage_beside_an_empty_declared_one() {
+        // Fable E1 (10-29): with `[stages] names` set, the new id's declared stage (named,
+        // empty, made active by the arrival) is no placeholder for the unnamed carried
+        // stages; it stayed active and every carried window was parked.
+        let mut mac = Mac::new();
+        mac.m = model_with(crate::engine::model::ModelOptions { named_stages: vec!["Music".into()], ..Default::default() });
+        mac.put(0, 1, 10, "com.example.editor", "Work notes");
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 4, 40, "com.example.mail", "Inbox");
+        mac.put(0, 5, 50, "com.example.terminal", "Shell");
+        mac.put(0, 6, 60, "com.example.calendar", "Week");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let d0 = mac.space();
+        let editor = mac.m.stage_of(w(1)).expect("stage");
+        mac.click(editor);
+        assert!(!mac.parked(1), "the editor shown");
+        for id in [4, 5, 6] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(2);
+        }
+        mac.arrive();
+        let new = mac.space();
+        assert_ne!(new, d0, "a new id");
+        assert_eq!(mac.m.last_arrival().carried, 2);
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "the carried active stage stays active");
+        assert!(!mac.parked(1), "its window shown, not parked");
+        assert!(mac.parked(2), "the other carried stage waits in the strip");
+        let music = mac.m.stages_in(new).find(|s| s.name.as_deref() == Some("Music")).map(|s| s.id);
+        assert!(music.is_some_and(|m| mac.m.strip_slots(MAIN).contains(&m)), "the declared stage stays, in the strip");
+    }
+
     /// Desktop 1 (his app's Space 3): Messages alone in a stage, parked; Desktop 0: the
     /// browser active, an editor in the strip.
     fn messages_on_desktop_1() -> (Mac, SpaceId, StageId) {
@@ -1776,6 +1834,22 @@ mod identity {
         assert!(mac.strip().contains(&vec![14]), "its own card: {:?}", mac.strip());
         assert_eq!(mac.m.stage_of(w(2)), Some(browser));
         assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+    }
+
+    #[test]
+    fn the_stage_a_moved_window_puts_away_keeps_its_frames_from_the_screen() {
+        // E3: the arrival's switch parked the active stage without reading its frames; a
+        // browser that posts no move notice came back where it was before the user moved it.
+        let (mut mac, _, browser) = messages_on_desktop_1();
+        let moved = Rect::new(500.0, 150.0, 600.0, 400.0);
+        mac.wins.get_mut(&2).expect("window").1 = moved;
+        mac.wins.get_mut(&14).expect("window").0 = Some(0);
+        mac.focused = None;
+        mac.go(0);
+        assert!(mac.parked(2), "the browser's stage went to the strip");
+        assert_eq!(mac.m.window(w(2)).map(|x| x.restore), Some(moved));
+        mac.click(browser);
+        assert_eq!(mac.wins[&2].1, moved, "back where the user left it");
     }
 
     #[test]

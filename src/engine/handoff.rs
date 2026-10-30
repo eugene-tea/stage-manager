@@ -183,7 +183,7 @@ pub fn vet(offer: &Offer, trust: Trust, listed: &[Listed], displays: &ScanDispla
         };
         match why {
             Some(why) => refused.push((r.id, why)),
-            None => windows.push(Registered { fitted: false, unvouched: true, ..*r }),
+            None => windows.push(Registered { fitted: false, fitted_at: None, unvouched: true, ..*r }),
         }
     }
     Vetted { windows, corners: Vec::new(), refused }
@@ -305,7 +305,7 @@ mod tests {
     use crate::engine::geometry::Rect;
 
     fn reg(id: u32, x: f64) -> Registered {
-        Registered { id, pid: 7, restore: Rect::new(x, 200.0, 600.0, 400.0), child: false, fitted: false, unvouched: false }
+        Registered { id, pid: 7, restore: Rect::new(x, 200.0, 600.0, 400.0), child: false, fitted: false, fitted_at: None, unvouched: false }
     }
 
     fn offer(windows: Vec<Registered>) -> Offer {
@@ -424,7 +424,7 @@ mod tests {
     /// update), unvouched and never fitted.
     #[test]
     fn an_unsigned_offer_takes_only_parked_windows() {
-        let forged = Registered { id: 71, pid: 12345, restore: RESTORE, child: false, fitted: true, unvouched: false };
+        let forged = Registered { id: 71, pid: 12345, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: false };
         let o = Offer { app: 99, guardian: 98, corners: vec![Corner::TopLeft], windows: vec![forged] };
         let words: Vec<String> = o.line().expect("line").split_whitespace().skip(1).map(str::to_string).collect();
         let o = Offer::parse(&words.iter().map(String::as_str).collect::<Vec<_>>()).expect("parses");

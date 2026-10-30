@@ -57,8 +57,10 @@ widgets. `config.toml` holds only what macOS lacks and never duplicates a macOS 
 A parked window that never returns is the worst bug. Defence in depth:
 
 1. **Registry** of every parked window's AX element and restore frame, across Spaces.
-2. **Quit** unparks everything, then reads the window server: any allowed app's window still
-   in a park zone comes back to its registry frame, its `state.json` frame, or centered. A
+2. **Quit** unparks everything, saves the stages, then reads the window server: any allowed
+   app's window still in a park zone comes back to its registry frame, the frame the unpark
+   gave it, its `state.json` frame (a dialog only by its own id), or centered. A sliver counts
+   there only for a window known by its id (registered, managed, in `state.json`). A
    busy app's `CannotComplete` is retried (three tries 75 ms apart) on unparks only, never in
    a switch. Bounds: the leftovers check ≤ 4 s, the registry's retries ≤ 2 s. Quit is clean
    only when no managed window is in the park zone on any Space; otherwise the guardian
@@ -77,11 +79,13 @@ A parked window that never returns is the worst bug. Defence in depth:
    (never fitted, its corners ignored, reached only while listed in the park zone). A pass
    that lists nothing on screen is blind: nothing is reached until one sees again.
 6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
-   a park zone goes back to its saved frame or centered; silent apps are retried for 30 s, in
+   a park zone goes back to the frame a crashed copy registered (its parked file, by id),
+   else its saved frame (only on a main display of the saved size), else centered; silent apps are retried for 30 s, in
    slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
    past the right or bottom edge) counts as parked only for windows we manage or registered,
    or apps with a window in `state.json`.
-7. **Restore frames are clamped** onto the visible display.
+7. **Restore frames are kept within reach** (`Display::reach`): never in a park zone, the title
+   bar below the menu bar with 80 pt of it on screen; otherwise exactly the window's own frame.
 
 Windows that are never waited on (logged at debug): **hidden tabs** (8J; layer 0, off
 screen, unlisted by an answering app, vouched for by a same-size sibling; a managed,
@@ -127,6 +131,9 @@ Known gaps the owner accepted as rare:
   (no sooner than a minute after the login), the waiting entries of apps not running then are
   given up (in stages and on saved Desktops not visited); running apps keep theirs under their
   own quiet minute.
+- **Apps that save their own frames (W2):** a window parked when its app quit may be saved
+  by the app at the park frame and reopened there; within a day of the quit it takes the
+  frame it had (by app and title, else the app's only one), else it is centered.
 - **Logout head start (8F, 8H):** at the first logout signal every window comes back, the
   leftovers check runs and stages are saved; the app idles until macOS's quit. A cancelled
   logout resumes at `logoutCancelled`, else two minutes after the latest signal. An app's quit
@@ -160,6 +167,29 @@ Known gaps the owner accepted as rare:
   (`stage-manager log summary`); the suite's estimate is ~1 MB a normal day, 2–3 MB heavy.
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the
   strip, the floating level, so an always-on-top window may still be covered then.
+- **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
+  - **`hide_parked_apps` trial on the owner's Mac** (on in his config since 10-29; the live
+    `hide` phase 65/0). 1.5.0 shipped it off, as before; decide the default after a few
+    days, from how ⌘Tab and the Dock feel.
+  - **Deferred findings:**
+    - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
+    - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
+      needs a look at the screen.
+    - L6: measure the shadow's reach.
+    - C4: a step journal for non-APFS swaps.
+  - **Skipped, with reasons in the rounds' reports:** E6, W6, the S11 peer rule.
+  - **Live checks the rounds named but never wrote:**
+    - restore-frames: an off-edge window, a window tucked by the corner, a Dock change,
+      a dialog born parked;
+    - quit-frames: a late answer at quit, `kill -9` with a dialog, a fitted move after a
+      crash, a reopen at the corner frame;
+    - config-tools: a broken config at launch, with and without the last good copy;
+    - ui-perf: the strip hidden stops captures, edge reveal, the tab across Spaces.
+  - **The suite and macOS's notification layer:** a banner (iCloud, 10-29) puts
+    NotificationCenter's full-screen layer-21 window over the strip for minutes, and every
+    click check then refuses. Have the suite wait for it to go, and name it when it
+    doesn't. The owner's own unmanaged windows do the same while his app is quit (Messages
+    at the left edge, 1.5.0's run: 849/13, 12 of them refused clicks).
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.

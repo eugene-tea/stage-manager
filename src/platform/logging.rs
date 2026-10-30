@@ -10,7 +10,8 @@
 //! - **Ring:** the last [`RING_KEEP`] of lines at `trace` stay in memory for a problem mark
 //!   ([`write_mark`]), whatever the file's level.
 //! - **Limits:** a day's file past `[log] max_mb_per_day` takes only warnings, errors, marks
-//!   and counts; files older than `[log] days` and the oldest past `[log] max_mb_total` are
+//!   and counts, and past twice that only marks and counts
+//!   ([`crate::logbook::writer::Weight`]); files older than `[log] days` and the oldest past `[log] max_mb_total` are
 //!   deleted at launch and every hour (the app only).
 //! - **Counts:** the app writes its counters ([`crate::logbook::counters`]) every hour, at
 //!   the day's rollover (into the day that ends) and at quit.
@@ -33,14 +34,14 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
 use super::paths;
-use crate::config::{Config, LogConfig};
+use crate::config::LogConfig;
 use crate::logbook::counters::{self, Count};
 use crate::logbook::retention::{self, LEGACY_NAMES, LogFile};
 use crate::logbook::ring::Ring;
 use crate::logbook::summary;
 use crate::logbook::time::{Date, Stamp};
-use crate::logbook::writer::DayWriter;
-use crate::logbook::{self, CAP_NOTICE, COUNT_MESSAGE};
+use crate::logbook::writer::{DayWriter, Weight};
+use crate::logbook::{self, CAP_NOTICE, COUNT_MESSAGE, WARNING_CAP_NOTICE};
 
 /// How long the ring keeps lines.
 pub const RING_KEEP: Duration = Duration::from_secs(30);
@@ -140,12 +141,9 @@ pub fn day_file(date: Date) -> PathBuf {
     paths::log_dir().join(date.file_name())
 }
 
+/// `[log]` as the file says, else as its last good copy says (review C1).
 fn read_config() -> LogConfig {
-    std::fs::read_to_string(paths::config_file())
-        .ok()
-        .and_then(|t| Config::parse(&t).ok())
-        .map(|p| p.config.log)
-        .unwrap_or_default()
+    crate::config::last_good::read_in_force(&paths::config_file()).log
 }
 
 fn targets(directives: &str) -> Targets {
@@ -203,7 +201,8 @@ fn title_key() {
         unsafe { libc::arc4random_buf(key.as_mut_ptr().cast(), key.len()) };
         key
     };
-    match crate::logbook::titles::load_or_create_key(&paths::config_dir(), random) {
+    let titles = crate::logbook::titles::LAUNCH_WAIT;
+    match crate::logbook::titles::load_or_create_key_within(&paths::config_dir(), random, titles) {
         Ok(key) => {
             crate::logbook::titles::set_key(key);
         }
@@ -315,19 +314,20 @@ impl Book {
             if self.echo {
                 eprint!("{line}");
             }
-            self.write(&stamp, &line, level <= Level::WARN);
+            self.write(&stamp, &line, if level <= Level::WARN { Weight::Warning } else { Weight::Detail });
         }
     }
 
     /// Writes `text` into the day's file (rolling over first when the day changed).
-    fn write(&self, stamp: &Stamp, text: &str, important: bool) -> bool {
+    fn write(&self, stamp: &Stamp, text: &str, weight: Weight) -> bool {
         let mut w = lock(&self.writer);
         self.roll_over(&mut w, stamp);
         let max = self.max_day.load(Ordering::Relaxed);
-        let notice = || {
-            format!("{}logbook: {CAP_NOTICE} ({} MB)\n", logbook::prefix(stamp, self.tag, self.pid, "WARN"), max / MB)
+        let notice = |cut: Weight| {
+            let what = if cut == Weight::Warning { WARNING_CAP_NOTICE } else { CAP_NOTICE };
+            format!("{}logbook: {what} ({} MB)\n", logbook::prefix(stamp, self.tag, self.pid, "WARN"), max / MB)
         };
-        match w.write(stamp.date, text, important, max, notice) {
+        match w.write(stamp.date, text, weight, max, notice) {
             Ok(_) => true,
             Err(e) => {
                 if !self.write_failed.swap(true, Ordering::Relaxed) {
@@ -347,7 +347,7 @@ impl Book {
         }
         let counts = counters::global().take();
         let line = self.counts_line(stamp, "day", &counts.fields());
-        let _ = w.write(old, &line, true, u64::MAX, String::new);
+        let _ = w.write(old, &line, Weight::Always, u64::MAX, |_| String::new());
         *lock(&self.since) = "00:00".into();
     }
 
@@ -415,7 +415,7 @@ pub fn write_counts(kind: &str) {
         b.roll_over(&mut w, &stamp);
     }
     let line = b.counts_line(&stamp, kind, &counters::global().snapshot().fields());
-    b.write(&stamp, &line, true);
+    b.write(&stamp, &line, Weight::Always);
 }
 
 /// Every hour: the counts and a prune; the first line after midnight rolls the day over.
@@ -492,7 +492,7 @@ pub fn write_mark(note: &str, sections: &[(&str, String)]) -> Result<Marked, Str
     let begin = logbook::prefix(&stamp, b.tag, b.pid, "MARK");
     let end = logbook::prefix(&now(), b.tag, b.pid, "MARK");
     let block = logbook::mark_block(&begin, &end, &logbook::clean_note(note), sections, &recent);
-    if !b.write(&stamp, &block, true) {
+    if !b.write(&stamp, &block, Weight::Always) {
         return Err(format!("cannot write the log in {}", paths::log_dir().display()));
     }
     Ok(Marked { file: day_file(stamp.date), at: stamp.clock()[..8].to_string() })
@@ -560,10 +560,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = LogConfig::default();
         let book = Book::new(Process::App, dir.path().to_path_buf(), &config, targets("info"));
-        assert!(book.write(&stamp(12, 23), "before midnight\n", false));
+        assert!(book.write(&stamp(12, 23), "before midnight\n", Weight::Detail));
         counters::bump(Count::Switch);
         counters::bump(Count::Switch);
-        assert!(book.write(&stamp(13, 0), "after midnight\n", false));
+        assert!(book.write(&stamp(13, 0), "after midnight\n", Weight::Detail));
         let read = |d: u32| std::fs::read_to_string(dir.path().join(format!("2026-10-{d}.log"))).unwrap_or_default();
         let old = read(12);
         assert!(old.starts_with("before midnight\n"), "{old}");
@@ -575,8 +575,8 @@ mod tests {
         assert_eq!(*lock(&book.since), "00:00");
         // The guardian never writes counts.
         let guardian = Book::new(Process::Guardian, dir.path().to_path_buf(), &config, targets("info"));
-        guardian.write(&stamp(13, 1), "g\n", false);
-        guardian.write(&stamp(14, 0), "g2\n", false);
+        guardian.write(&stamp(13, 1), "g\n", Weight::Detail);
+        guardian.write(&stamp(14, 0), "g2\n", Weight::Detail);
         assert_eq!(read(13), "after midnight\ng\n");
         assert_eq!(read(14), "g2\n");
     }
@@ -587,10 +587,10 @@ mod tests {
         let config = LogConfig { max_mb_per_day: 1, ..LogConfig::default() };
         let book = Book::new(Process::Guardian, dir.path().to_path_buf(), &config, targets("info"));
         let big = "x".repeat(1 << 20) + "\n";
-        book.write(&stamp(12, 9), &big, false);
-        book.write(&stamp(12, 9), "debug 1\n", false);
-        book.write(&stamp(12, 9), "debug 2\n", false);
-        book.write(&stamp(12, 9), "a warning\n", true);
+        book.write(&stamp(12, 9), &big, Weight::Detail);
+        book.write(&stamp(12, 9), "debug 1\n", Weight::Detail);
+        book.write(&stamp(12, 9), "debug 2\n", Weight::Detail);
+        book.write(&stamp(12, 9), "a warning\n", Weight::Warning);
         let text = std::fs::read_to_string(dir.path().join("2026-10-12.log")).unwrap_or_default();
         let tail: Vec<&str> = text.lines().skip(1).collect();
         assert_eq!(tail.len(), 2, "{tail:?}");

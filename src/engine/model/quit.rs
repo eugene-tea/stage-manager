@@ -18,14 +18,38 @@
 //! - **Kept for a while** ([`Model::prune_quit`]): an entry older than `QUIT_KEEP` at a save is
 //!   dropped, and so are an app's entries when the app shows a window again in this session
 //!   ([`Model::forget_quit_of`]): it is back, its windows go by the usual rules.
+//! - **Frames kept a day** ([`QuitFrame`], W2 of the Fable review of 10-29): an app that saves
+//!   its own window frames (Chrome, Terminal, an Electron app) writes the park frame for a
+//!   window parked at its quit and reopens it in the corner. The window's real frame is kept
+//!   by app and title for [`QUIT_FRAMES_KEEP`], whatever the app does meanwhile, and a window
+//!   the app opens in the park zone takes it ([`Model::take_quit_frame`]: the same title,
+//!   else the app's only one left), once.
 
 use std::collections::BTreeMap;
 
 use super::{Home, Model, Pid, SpaceId, StageId, WindowId, WindowRole};
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{SavedRole, SavedStage, SavedWindow};
-use crate::engine::restore::QUIT_KEEP;
-use crate::engine::window_match::fingerprint;
+use crate::engine::geometry::Rect;
+use crate::engine::restore::{QUIT_FRAMES_KEEP, QUIT_KEEP};
+use crate::engine::window_match::{Key, fingerprint, match_windows};
+
+/// The most quit frames kept (the oldest go first): an app opening and quitting windows all
+/// day keeps no more.
+const QUIT_FRAMES_MAX: usize = 256;
+
+/// A window's real frame when its app quit, kept a day by app and title (W2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuitFrame {
+    /// Its app's bundle id.
+    pub bundle_id: String,
+    /// Its title then.
+    pub title: String,
+    /// Its restore frame then (never a park frame).
+    pub frame: Rect,
+    /// When its app quit (Unix seconds).
+    pub quit_at: u64,
+}
 
 /// A window's saved entry read just before it left the model (its app may be quitting).
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +158,7 @@ impl Model {
             }
             window.key = !window.pinned && *key == Some(c.id);
             window.quit_at = Some(now);
+            self.quit_frames.push(QuitFrame { bundle_id: window.bundle_id.clone(), title: window.title.clone(), frame: window.frame, quit_at: now });
             self.quit.retain(|q| q.window.window != window.window || q.window.bundle_id != window.bundle_id);
             self.quit.push(QuitWindow { space: c.space, stage: c.stage, name: c.name, last_active: c.last_active, slot: c.slot, window });
         }
@@ -145,6 +170,20 @@ impl Model {
     pub fn prune_quit(&mut self, now: u64) {
         let keep = QUIT_KEEP.as_secs();
         self.quit.retain(|q| q.window.quit_at.is_some_and(|t| t.saturating_add(keep) >= now));
+        let day = QUIT_FRAMES_KEEP.as_secs();
+        self.quit_frames.retain(|f| f.quit_at.saturating_add(day) >= now);
+        let over = self.quit_frames.len().saturating_sub(QUIT_FRAMES_MAX);
+        self.quit_frames.drain(..over);
+    }
+
+    /// The frame a window of app `bundle` titled `title` had when its app quit within the
+    /// last day (W2): the same title first, else the app's only frame left
+    /// ([`match_windows`]); used once.
+    pub(crate) fn take_quit_frame(&mut self, bundle: &str, title: &str) -> Option<Rect> {
+        let mine: Vec<usize> = (0..self.quit_frames.len()).rev().filter(|&i| self.quit_frames[i].bundle_id == bundle).collect();
+        let keys: Vec<Key> = mine.iter().map(|&i| Key { id: None, bundle, title: &self.quit_frames[i].title }).collect();
+        let found = match_windows(&keys, &[Key { id: None, bundle, title }], |_| true)[0]?;
+        Some(self.quit_frames.remove(mine[found.0]).frame)
     }
 
     /// App `bundle` shows a window again in this session: its entries from its quit go (its

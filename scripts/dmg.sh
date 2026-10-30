@@ -5,8 +5,10 @@
 # .../releases/latest/download/Stage-Manager.dmg always serves the newest. A versioned copy,
 # Stage-Manager-<version>.dmg, goes alongside. The volume is named "Stage Manager".
 #
-# dmgbuild runs from a private virtualenv under target/ (created on first use); it writes the
-# Finder layout directly, so no AppleScript and no Automation approval. DMG_THEME=dark uses the
+# dmgbuild runs from a private virtualenv under target/ (created on first use, and again whenever
+# packaging/dmgbuild-requirements.txt changes), installed from that lock of exact versions and
+# their hashes only (review C7); it writes the Finder layout directly, so no AppleScript and no
+# Automation approval. DMG_THEME=dark uses the
 # dark background (Finder shows one background in both appearances; light is the default).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -18,10 +20,14 @@ OUT_DIR="target/release"
 DMG="$OUT_DIR/Stage-Manager.dmg"
 
 VENV="target/dmgbuild-venv"
-DMGBUILD_VERSION="1.6.5"
-if [ ! -x "$VENV/bin/dmgbuild" ] || ! "$VENV/bin/pip" show dmgbuild 2>/dev/null | grep -q "^Version: $DMGBUILD_VERSION$"; then
+LOCK="packaging/dmgbuild-requirements.txt"
+STAMP="$VENV/.lock-sha256"
+WANT="$(shasum -a 256 "$LOCK" | cut -d' ' -f1)"
+if [ ! -x "$VENV/bin/dmgbuild" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$WANT" ]; then
+  rm -rf "$VENV"
   python3 -m venv "$VENV"
-  "$VENV/bin/pip" install --quiet --disable-pip-version-check "dmgbuild==$DMGBUILD_VERSION"
+  "$VENV/bin/pip" install --quiet --disable-pip-version-check --require-hashes --only-binary :all: -r "$LOCK"
+  echo "$WANT" > "$STAMP"
 fi
 
 mkdir -p "$OUT_DIR"

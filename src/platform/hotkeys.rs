@@ -155,41 +155,42 @@ thread_local! {
 }
 
 extern "C" fn on_hotkey(_call: EventHandlerCallRef, event: EventRef, _data: *mut c_void) -> OsStatus {
-    let result = std::panic::catch_unwind(|| {
-        let mut id = EventHotKeyId::default();
-        // SAFETY: `id` is a valid buffer of the requested size; the event is live for the
-        // duration of the callback.
-        let status = unsafe {
-            GetEventParameter(
-                event,
-                PARAM_DIRECT_OBJECT,
-                TYPE_HOTKEY_ID,
-                std::ptr::null_mut(),
-                std::mem::size_of::<EventHotKeyId>(),
-                std::ptr::null_mut(),
-                (&mut id as *mut EventHotKeyId).cast(),
-            )
-        };
-        if status != 0 || id.signature != SIGNATURE {
-            return;
-        }
-        let command = STATE.with(|s| s.borrow().commands.get(&id.id).copied());
-        if let Some(command) = command {
-            tracing::debug!(?command, "hotkey");
-            // Take the sink out while it runs, so a re-entrant call cannot double-borrow.
-            let sink = STATE.with(|s| s.borrow_mut().sink.take());
-            if let Some(sink) = sink {
-                sink(command);
-                STATE.with(|s| {
-                    s.borrow_mut().sink.get_or_insert(sink);
-                });
-            }
-        }
-    });
-    if result.is_err() {
-        tracing::error!("panic in the hotkey handler");
+    let mut id = EventHotKeyId::default();
+    // SAFETY: `id` is a valid buffer of the requested size; the event is live for the
+    // duration of the callback.
+    let status = unsafe {
+        GetEventParameter(
+            event,
+            PARAM_DIRECT_OBJECT,
+            TYPE_HOTKEY_ID,
+            std::ptr::null_mut(),
+            std::mem::size_of::<EventHotKeyId>(),
+            std::ptr::null_mut(),
+            (&mut id as *mut EventHotKeyId).cast(),
+        )
+    };
+    if status == 0 && id.signature == SIGNATURE {
+        // Nothing unwinds into Carbon: a panic is caught here and logged.
+        let _ = super::safety::guarded("the hotkey handler", || dispatch(id.id));
     }
     0
+}
+
+/// Sends the command bound to hotkey `id` to the sink. A panic is caught where it happens
+/// ([`super::safety::guarded`]; a bare `catch_unwind` here was dead, the review's K7: the
+/// panic hook unparked everything and quit first) and the sink stays for the next hotkey.
+fn dispatch(id: u32) {
+    let command = STATE.with(|s| s.borrow().commands.get(&id).copied());
+    let Some(command) = command else { return };
+    tracing::debug!(?command, "hotkey");
+    // Take the sink out while it runs, so a re-entrant call cannot double-borrow.
+    let sink = STATE.with(|s| s.borrow_mut().sink.take());
+    if let Some(sink) = sink {
+        let _ = super::safety::guarded("a hotkey's command", || sink(command));
+        STATE.with(|s| {
+            s.borrow_mut().sink.get_or_insert(sink);
+        });
+    }
 }
 
 /// Installs the Carbon event handler and the sink that receives hotkey commands (main
@@ -261,6 +262,27 @@ pub fn register(bindings: &[(Hotkey, HotkeyCommand)]) -> Registered {
 mod tests {
     use super::*;
     use crate::config::HotkeyConfig;
+
+    /// K7: a command that panics is caught where it runs, and the next hotkey still reaches
+    /// the sink.
+    #[test]
+    fn a_panicking_hotkey_command_keeps_the_hotkeys() {
+        use std::rc::Rc;
+        let seen = Rc::new(std::cell::Cell::new(0));
+        let count = seen.clone();
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.commands.insert(1, HotkeyCommand::NewStage);
+            s.sink = Some(Box::new(move |_| {
+                count.set(count.get() + 1);
+                assert!(count.get() != 1, "the first command panics");
+            }));
+        });
+        dispatch(1);
+        dispatch(1);
+        assert_eq!(seen.get(), 2, "the sink stayed after the panic");
+        assert!(STATE.with(|s| s.borrow().sink.is_some()));
+    }
 
     #[test]
     fn modifiers_map_to_carbon_masks() {

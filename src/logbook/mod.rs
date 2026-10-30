@@ -36,6 +36,9 @@ pub const NO_NOTE: &str = "(no note)";
 /// Part of the line written once a day's file reaches its cap.
 pub const CAP_NOTICE: &str = "this day's log reached its cap; from now on only warnings, errors, marks and counts are written";
 
+/// Part of the line written once a day's file reaches twice its cap: warnings stop too.
+pub const WARNING_CAP_NOTICE: &str = "this day's log reached twice its cap; from now on only marks and counts are written";
+
 /// Part of the guardian's line after an app exit without the clean-exit marker.
 pub const UNCLEAN_EXIT: &str = "the app exited without a clean exit";
 

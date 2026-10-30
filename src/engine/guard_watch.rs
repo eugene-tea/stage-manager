@@ -259,6 +259,9 @@ pub struct Waiting {
     /// A window we had fitted clear of the strip ([`Registered::fitted`]): back only at its
     /// registered pre-fit frame, or once the guardian has moved it there (L3).
     pub fitted: bool,
+    /// Where we had fitted it, when the parked file says ([`Registered::fitted_at`]): read
+    /// anywhere else but its pre-fit frame, the user moved it, and it is back (S7).
+    pub fitted_at: Option<Rect>,
     /// Taken from a guardian not signed like this app ([`Registered::unvouched`], R4):
     /// reached only while listed on screen in the park zone, by any app's park test.
     pub unvouched: bool,
@@ -463,7 +466,7 @@ impl Watch {
                     } else if !settled {
                         w.out_since = None;
                         Look::OutUnsettled { frame: l.bounds }
-                    } else if w.fitted && !at_pre_fit(w, l.bounds, displays) {
+                    } else if still_fitted(w, l.bounds, displays) {
                         // Shown, but still at the fitted frame: the guardian moves it back.
                         w.out_since = None;
                         Look::OutShown { frame: l.bounds }
@@ -491,14 +494,15 @@ impl Watch {
 
     /// Window `id`'s frame read through Accessibility (after moving it, when `moved`): let go
     /// when outside the park zone. A frame in the park zone changes nothing.
-    /// A fitted window read away from its pre-fit frame is let go only after the guardian
-    /// moved it (`moved`): never a fight with the user over a frame macOS adjusted.
+    /// A fitted window still at its fitted frame is let go only after the guardian moved it
+    /// (`moved`): never a fight with the user over a frame macOS adjusted. One the user moved
+    /// elsewhere since is back where they put it (S7).
     pub fn read_through_ax(&mut self, id: u32, frame: Rect, moved: bool, displays: &ScanDisplays) -> Option<Event> {
         let known = self.waiting.get(&id).map_or(Known::Unknown, Waiting::known);
         if is_stranded(frame, displays, known) {
             return None;
         }
-        if !moved && self.waiting.get(&id).is_some_and(|w| w.fitted && !at_pre_fit(w, frame, displays)) {
+        if !moved && self.waiting.get(&id).is_some_and(|w| still_fitted(w, frame, displays)) {
             return None;
         }
         let w = self.waiting.remove(&id)?;
@@ -564,12 +568,21 @@ impl Waiting {
 }
 
 fn waiting(id: u32, pid: i32, registered: Option<Rect>) -> Waiting {
-    Waiting { id, pid, registered, fitted: false, unvouched: false, look: None, out_since: None, missing_since: None }
+    Waiting { id, pid, registered, fitted: false, fitted_at: None, unvouched: false, look: None, out_since: None, missing_since: None }
 }
 
 /// A registered window, waiting: fitted only when vouched for (R4).
 fn waiting_for(r: &Registered) -> Waiting {
-    Waiting { fitted: r.fitted && !r.unvouched, unvouched: r.unvouched, ..waiting(r.id, r.pid, Some(r.restore)) }
+    let fitted = r.fitted && !r.unvouched;
+    Waiting { fitted, fitted_at: r.fitted_at.filter(|_| fitted), unvouched: r.unvouched, ..waiting(r.id, r.pid, Some(r.restore)) }
+}
+
+/// True when a fitted window read at `frame` is still where we fitted it, so the guardian
+/// puts back its pre-fit frame: not at its pre-fit frame, and at its fitted frame when that
+/// is known (a frame elsewhere is the user's: S7). A parked file of an earlier version does
+/// not say where: any frame but the pre-fit one counts, as before.
+fn still_fitted(w: &Waiting, frame: Rect, displays: &ScanDisplays) -> bool {
+    w.fitted && !at_pre_fit(w, frame, displays) && w.fitted_at.is_none_or(|f| same_frame(frame, f))
 }
 
 /// True when a waiting window sits at its registered frame (as registered, or as the
@@ -599,7 +612,7 @@ mod tests {
     }
 
     fn reg() -> Vec<Registered> {
-        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false }]
+        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false }]
     }
 
     fn at(id: u32, bounds: Rect, onscreen: bool) -> Listed {
@@ -657,7 +670,7 @@ mod tests {
     fn a_small_registered_window_is_never_lost() {
         let d = displays();
         let small = Rect::new(2559.0, 1408.0, 40.0, 30.0);
-        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false, unvouched: false };
+        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false, fitted_at: None, unvouched: false };
         let mut w = Watch::new(&[reg]);
         let listed = [
             Listed { id: 7, pid: 8, bounds: small, onscreen: false, allowed: true },
@@ -904,7 +917,7 @@ mod tests {
     #[test]
     fn a_fitted_window_waits_for_its_pre_fit_frame() {
         let fitted_at = Rect::new(216.0, 218.0, 600.0, 392.0);
-        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, unvouched: false }];
+        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: false }];
         let t0 = Instant::now();
         let mut w = Watch::new(&r);
         pass(&mut w, t0, 0, &on_desktop_1());
@@ -923,13 +936,42 @@ mod tests {
         assert!(matches!(pass(&mut w, t0, 3500, &on_desktop_2(RESTORE)), Some(Release::SeenBack { .. })));
     }
 
+    /// S7 (the Fable review of 10-29): the parked file says where the window was fitted. At
+    /// that frame the guardian still puts back its pre-fit one; read anywhere else, the user
+    /// moved it after the crash, and it is back where they put it, not moved again.
+    #[test]
+    fn a_fitted_window_the_user_moved_is_left_where_they_put_it() {
+        let fitted_at = Rect::new(216.0, 218.0, 600.0, 392.0);
+        let moved = Rect::new(700.0, 300.0, 600.0, 392.0);
+        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: Some(fitted_at), unvouched: false }];
+        let t0 = Instant::now();
+        let mut w = Watch::new(&r);
+        pass(&mut w, t0, 0, &on_desktop_1());
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_2(fitted_at)), None);
+        assert_eq!(w.read_through_ax(1, fitted_at, false, &displays()), None, "at the fitted frame: the guardian moves it");
+        let e = w.read_through_ax(1, moved, false, &displays());
+        assert!(matches!(e, Some(Event::LetGo { why: Release::ReadBack { .. }, .. })), "moved by the user: let go unmoved, {e:?}");
+        // The window server's list says the same in settled passes.
+        let mut w = Watch::new(&r);
+        pass(&mut w, t0, 0, &on_desktop_1());
+        pass(&mut w, t0, 1500, &on_desktop_2(moved));
+        pass(&mut w, t0, 2500, &on_desktop_2(moved));
+        assert!(matches!(pass(&mut w, t0, 3500, &on_desktop_2(moved)), Some(Release::SeenBack { .. })));
+        // The parked file round-trips it; an earlier version's file reads without it.
+        let json = serde_json::to_string(&r[0]).unwrap_or_default();
+        assert_eq!(serde_json::from_str::<Registered>(&json).ok(), Some(r[0]));
+        let old = serde_json::to_string(&Registered { fitted_at: None, ..r[0] }).unwrap_or_default();
+        assert!(!old.contains("fitted_at"), "{old}");
+        assert_eq!(serde_json::from_str::<Registered>(&old).ok().map(|x| x.fitted_at), Some(None));
+    }
+
     /// The Codex review of 10-21, R4: a window taken unvouched (from a sender not signed like
     /// this app) is reached only while listed on screen in the park zone. On screen anywhere
     /// else it is never reached (seen back there, it is let go unmoved), and even an offer
     /// that said fitted never makes it one.
     #[test]
     fn an_unvouched_window_is_reached_only_in_the_park_zone() {
-        let r = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, unvouched: true };
+        let r = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: true };
         let t0 = Instant::now();
         let mut w = Watch::registered_only(&[r]);
         assert!(!w.waiting().next().is_some_and(|x| x.fitted), "never fitted");
@@ -953,8 +995,8 @@ mod tests {
     fn a_new_app_running_takes_over_only_the_windows_it_adopted() {
         let t0 = Instant::now();
         let mut w = Watch::new(&[
-            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false },
-            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false },
+            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false },
+            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false },
         ]);
         let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
         let mut listed = on_desktop_1();
@@ -987,8 +1029,8 @@ mod tests {
     #[test]
     fn a_watch_hands_over_and_a_taken_watch_holds_only_what_it_took() {
         let t0 = Instant::now();
-        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, unvouched: false };
-        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true, unvouched: false };
+        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false };
+        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true, fitted_at: None, unvouched: false };
         let mut w = Watch::new(&[r1, r2]);
         let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
         let mut listed = on_desktop_1();
@@ -1021,7 +1063,7 @@ mod tests {
 
     #[test]
     fn registered_restore_frames_are_made_safe() {
-        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false, unvouched: false }];
+        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false, fitted_at: None, unvouched: false }];
         let w = Watch::new(&r);
         let f = w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())).unwrap_or_default();
         assert!(!is_stranded(f, &displays(), Known::Registered) && VISIBLE.contains_rect(&f), "{f:?}");
