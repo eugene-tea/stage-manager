@@ -130,7 +130,13 @@ during the motion brings the windows in at once; typing never cuts it short (the
 already the new stage's). An arriving window takes its place under its picture once the
 picture as shown on screen is within a point of it on every edge (about 600 ms after the
 click for a window growing from its card, 450 ms at the least: `[animation] unpark_at` is the
-floor), so the hand-over shows no step; the picture goes a moment later. Each picture
+floor), so the hand-over shows no step. The picture comes to rest on the spring's own curve
+(within a tenth of a point, about 750 ms for a 2000-point travel; Core Animation's settling
+time stopped it 1 pt short and jumped, the owner's recording 11-01), and fades out over its
+window over 200 ms a moment after the unveil, so a look that differs (a picture taken while
+the window was parked and inactive, a window's own late redraw) melts instead of flipping.
+The incoming key window is captured again about 180 ms into the switch, once it is key, and
+that picture cross-fades into its growing snapshot. Each picture
 carries macOS's own window shadow, measured on a Studio Display (`stage-manager probe-shadow
 --profile`: a hairline rim and a soft drop, the key window's 2.5 times as wide as an inactive
 window's): the key window's on the window that is or becomes key, an inactive window's on
@@ -138,6 +144,11 @@ the others, turning into the card's shadow on the spring as it nears its card. A
 shadow appears in one frame at a moment known only within a frame or two, so the picture's
 shadow fades over 100 ms centred on it (the unveil), done before the picture goes; an
 outgoing picture's shadow comes in over twice `[animation] cover_ms` as its window leaves.
+With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
+unhide after the unveil has taken (about 100 ms later): its picture's shadow fades around
+then, and the picture stays until the app has taken the activation of its key window focused
+again, so the window is never seen in its inactive look (11-01: Messages flipped to its key
+look 180 ms after it showed); 400 ms past the unveil at the most.
 Arriving windows
 wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS

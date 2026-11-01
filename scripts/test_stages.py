@@ -5432,6 +5432,12 @@ def hide_arrival(how, k, what):
         unhid = [n for n, ln in enumerate(lines) if "unhiding it pid=" in ln]
         check(bool(unhid) and covered is not None and min(unhid) > covered,
               f"{what}: our unhide comes after the switch's snapshots are up (covered at line {covered}, unhides at {unhid[:3]})")
+        # The hidden app's snapshots hand over and land when its windows show (the unhide's
+        # notice, the app's activation), not at the unveil, and not by the strip's wait.
+        shown = [ln for n, ln in enumerate(lines) if "transition: late windows show" in ln and unhid and n > min(unhid)]
+        told = [ln[ln.find("on_screen="):][:120] for ln in shown[:3]]
+        check(bool(shown) and all("waited_out=false" in ln for ln in shown),
+              f"{what}: the snapshots land once the windows show, told by the app's notices ({told or 'none'})")
         unveil = re.search(r"unveil_ms=(\d+)", lines[covered]) if covered is not None else None
         if p is not None:
             first, away = first_on_screen(p.get("samples", []), frames)

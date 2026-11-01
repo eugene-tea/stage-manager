@@ -122,6 +122,10 @@ pub enum WinEvent {
     /// An observed app became frontmost (NSWorkspace; its notice's instant:
     /// [`Observer::activated_at`]).
     AppActivated(i32),
+    /// An observed app posted its own activation (AXApplicationActivated): unlike the
+    /// NSWorkspace notice ([`WinEvent::AppActivated`]), it comes once the app has taken it,
+    /// about when its windows are redrawn in their active look.
+    AppTookActivation(i32),
     /// An observed app was hidden (NSWorkspace).
     AppHidden(i32),
     /// An observed app was unhidden (NSWorkspace).
@@ -791,6 +795,7 @@ impl Observer {
             n::APPLICATION_ACTIVATED => {
                 tracing::debug!(pid, bundle = self.bundle_of(pid), "AX application activated");
                 self.rescan_app(pid);
+                self.events.push(WinEvent::AppTookActivation(pid));
             }
             n::ELEMENT_DESTROYED => {
                 if drop_destroyed() {

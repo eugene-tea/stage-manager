@@ -19,6 +19,8 @@
 //!   the travel short, and a frame or three before the snapshot showed there: a 25–31 pt jump
 //!   on a window growing from its card (the owner's recording, 11-01). [`unveil_backstop`] is
 //!   how long the controller holds incoming windows for the strip's unveil at that speed.
+//!   A snapshot's spring runs until it rests within [`END_TOLERANCE`] ([`spring_duration`]),
+//!   not Core Animation's settling time, which stopped it a point short and jumped.
 //! - **Planes.** A snapshot is a plane turned about its left edge, like a strip card: at a
 //!   window's frame it is flat and full size; on a card it is the card's thumbnail, turned by
 //!   the strip's tilt and seen from the strip's eye. Moving between the two on one spring
@@ -78,6 +80,22 @@ pub const PRESENTATION_LAG: f64 = 0.05;
 const MAX_TRAVEL: f64 = 5000.0;
 /// The unveil comes at least this long before the backstop (seconds).
 const BACKSTOP_LEAD: f64 = 0.25;
+
+/// How far from its end a snapshot's spring may stop (points): a tenth of a point, a fifth of
+/// a pixel at 2x, so its last step is never seen.
+pub const END_TOLERANCE: f64 = 0.1;
+
+/// How long a spring animation of `travel` points runs (seconds): until the spring stays
+/// within [`END_TOLERANCE`] of its end for good, so it comes to rest on the curve. Core
+/// Animation's own `settlingDuration` (0.6 s for Apple's spring) stops it 0.055 % short and
+/// puts it at its end in one frame: 1.1 pt on a 2000 pt travel, a snap and a halt in the
+/// owner's recording (11-01). Nothing to travel: as short as the search allows.
+pub fn spring_duration(s: Spring, travel: f64) -> f64 {
+    if travel <= END_TOLERANCE {
+        return STEP;
+    }
+    settle_time(s, END_TOLERANCE / travel.min(MAX_TRAVEL))
+}
 
 /// The farthest any edge of `start` is from the same edge of `end` (points).
 pub fn travel(start: Rect, end: Rect) -> f64 {
@@ -478,6 +496,35 @@ mod tests {
         let t = unveil_time(&soft, 1200.0) - PRESENTATION_LAG;
         let s = switch_spring(&soft);
         assert!((0..2000).all(|i| ((1.0 - spring_progress(s, t + i as f64 / 1000.0)) * 1200.0).abs() <= UNVEIL_TOLERANCE + 1e-6));
+    }
+
+    /// 11-01, switch 1: the snapshot moved 0–2 px a frame, then 3 px in one frame, then
+    /// stopped dead. Core Animation's settling duration for Apple's spring is 0.6 s, where
+    /// 0.055 % of the way is left: 1.1 pt of a 1999 pt travel. Ours runs on until a tenth of a
+    /// point is left, its last frame's motion under a frame's motion before it.
+    #[test]
+    fn a_snapshot_s_spring_runs_until_its_last_step_is_unseen() {
+        let s = Spring::APPLE;
+        let ca_settle = 0.6;
+        let left_at_ca = (1.0 - spring_progress(s, ca_settle)) * 1999.0;
+        assert!((1.0..1.2).contains(&left_at_ca), "Core Animation's cut leaves {left_at_ca:.2} pt");
+        let d = spring_duration(s, 1999.0);
+        let left = (1.0 - spring_progress(s, d)) * 1999.0;
+        assert!(left <= END_TOLERANCE + 1e-9, "{left}");
+        assert!((0.7..0.8).contains(&d), "{d}");
+        // Its last frames move a fraction of a pixel at 2x, so the stop is not seen; at Core
+        // Animation's cut the last frame still moved a third of a point, then jumped 1.1.
+        let frame = 1.0 / 60.0;
+        let moved = |t: f64| (spring_progress(s, t) - spring_progress(s, t - frame)) * 1999.0;
+        assert!(moved(d) < 0.05, "the last frame moved {:.3} pt", moved(d));
+        assert!(moved(ca_settle) > 0.2 && left_at_ca > 3.0 * moved(ca_settle), "{}", moved(ca_settle));
+        // Shorter travels stop sooner, never before Core Animation's for a long one.
+        assert!(spring_duration(s, 100.0) < d && spring_duration(s, 100.0) > 0.4);
+        assert_eq!(spring_duration(s, 0.0), STEP);
+        // It ends before the snapshot lands (the unveil plus 120 ms).
+        let style = StripStyle::default();
+        assert!(d <= unveil_time(&style, 1999.0) + 0.12, "{d}");
+        assert!(spring_duration(s, 1e6) < HORIZON);
     }
 
     #[test]

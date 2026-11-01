@@ -1403,6 +1403,9 @@ impl Strip {
         if let Some((id, frames)) = self.snapshot.arrived.clone() {
             self.incoming_arrived(id, &frames);
         }
+        if let Some(note) = self.snapshot.late.clone() {
+            self.late_shown(note.id, Some(&note.shown), Some(&note.active));
+        }
         self.after_snapshot();
         // Cards moved under a resting pointer: the pane catches clicks where they are now.
         self.update_pass_through(None);

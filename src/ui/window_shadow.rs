@@ -259,11 +259,12 @@ impl ShadowLayers {
     }
 
     /// Moves the shadow from around a plane of `from` to around one of `to` on `spring`, as
-    /// the plane's bounds move (in the caller's transaction).
-    pub fn spring_layout(&self, from: CGSize, to: CGSize, spring: Spring) {
+    /// the plane's bounds move, `duration` seconds long as they do (in the caller's
+    /// transaction).
+    pub fn spring_layout(&self, from: CGSize, to: CGSize, spring: Spring, duration: f64) {
         self.image.setPosition(CGPoint::new(-self.extent, -self.extent));
         self.image.setBounds(self.bounds(to));
-        let anim = crate::ui::overlay::spring_anim(spring, "bounds", &NSValue::new(self.bounds(from)), &NSValue::new(self.bounds(to)));
+        let anim = crate::ui::overlay::spring_anim(spring, "bounds", &NSValue::new(self.bounds(from)), &NSValue::new(self.bounds(to)), duration);
         self.image.addAnimation_forKey(&anim, Some(&NSString::from_str("bounds")));
     }
 
@@ -280,9 +281,9 @@ impl ShadowLayers {
         f64::from(shown.map_or(self.image.opacity(), |l| l.opacity()))
     }
 
-    /// Moves the amount from what is shown to `to` on `spring`, with the plane's motion (in
-    /// the caller's transaction).
-    pub fn spring_amount(&self, to: f64, spring: Spring) {
+    /// Moves the amount from what is shown to `to` on `spring`, with the plane's motion
+    /// (`duration` seconds, as long as its flight; in the caller's transaction).
+    pub fn spring_amount(&self, to: f64, spring: Spring, duration: f64) {
         let from = self.amount();
         let to = to.clamp(0.0, 1.0);
         self.image.setOpacity(to as f32);
@@ -290,7 +291,7 @@ impl ShadowLayers {
             self.image.removeAnimationForKey(&NSString::from_str("opacity"));
             return;
         }
-        let anim = crate::ui::overlay::spring_anim(spring, "opacity", &NSNumber::new_f64(from), &NSNumber::new_f64(to));
+        let anim = crate::ui::overlay::spring_anim(spring, "opacity", &NSNumber::new_f64(from), &NSNumber::new_f64(to), duration);
         self.image.addAnimation_forKey(&anim, Some(&NSString::from_str("opacity")));
     }
 

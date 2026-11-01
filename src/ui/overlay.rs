@@ -37,14 +37,14 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
 use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue};
 use objc2_quartz_core::{
-    CALayer, CAMediaTiming, CASpringAnimation, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
+    CABasicAnimation, CALayer, CAMediaTiming, CASpringAnimation, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
     kCAGravityResize,
 };
 
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::Picture;
 use crate::platform::capture_frame::Extent;
-use crate::ui::motion_math::{Plane, Spring};
+use crate::ui::motion_math::{Plane, Spring, spring_duration};
 use crate::ui::panels;
 use crate::ui::window_shadow::{ShadowLayers, WindowShadow};
 
@@ -78,13 +78,15 @@ fn bounds(p: &Plane) -> CGRect {
     CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(p.size.w.max(1.0), p.size.h.max(1.0)))
 }
 
-/// A spring animation of `key` from `from` to `to`.
-pub(crate) fn spring_anim(spring: Spring, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
+/// A spring animation of `key` from `from` to `to`, `duration` seconds long
+/// ([`spring_duration`]: on until it rests on the curve, never Core Animation's
+/// `settlingDuration`, which cut it short by a point on a long travel).
+pub(crate) fn spring_anim(spring: Spring, key: &str, from: &AnyObject, to: &AnyObject, duration: f64) -> Retained<CASpringAnimation> {
     let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
     anim.setMass(spring.mass);
     anim.setStiffness(spring.stiffness);
     anim.setDamping(spring.damping);
-    anim.setDuration(anim.settlingDuration());
+    anim.setDuration(duration.max(1e-3));
     // SAFETY: from/to are values of the animated property's type.
     unsafe {
         anim.setFromValue(Some(from));
@@ -162,6 +164,25 @@ pub struct Ghost {
     pending: Option<Picture>,
     /// Where it is headed (or sits).
     pub target: Plane,
+    /// How long its current flight's spring runs (seconds; [`spring_duration`] of its travel):
+    /// its shadow's springs run as long.
+    flight: f64,
+}
+
+/// How long a newer picture of the window takes to replace the one a flying snapshot shows
+/// (seconds): a cross-fade, so a look that changed (a window made key while parked, captured
+/// again) melts in instead of flipping in one frame.
+pub const PICTURE_FADE: f64 = 0.15;
+
+/// The farthest any edge of a plane of `from_bounds` at `from_position` (its left edge's
+/// middle) is from the same edge of one of `to_bounds` at `to_position` (points, before the
+/// turn).
+fn plane_travel(from_position: CGPoint, from_bounds: CGRect, to_position: CGPoint, to_bounds: CGRect) -> f64 {
+    let edges = |p: CGPoint, b: CGRect| {
+        let (w, h) = (b.size.width, b.size.height);
+        Rect::new(p.x, p.y - h / 2.0, w, h)
+    };
+    crate::ui::motion_math::travel(edges(from_position, from_bounds), edges(to_position, to_bounds))
 }
 
 /// The image layer's position and bounds (anchor at its top-left corner) on a plane of
@@ -177,7 +198,10 @@ impl Ghost {
     /// [`SAME_PT`](crate::platform::capture_frame::SAME_PT) or more as drawn) waits while the
     /// ghost flies, and shows at its next placement ([`Ghost::set`], [`Ghost::spring_to`]), so
     /// a flight is never cut short.
-    pub fn set_image(&mut self, picture: &Picture) {
+    ///
+    /// `fade`: the new picture cross-fades in over [`PICTURE_FADE`] (a switch's snapshot,
+    /// whose window may look different now: made key since it was captured); else at once.
+    pub fn set_image(&mut self, picture: &Picture, fade: bool) {
         let b = self.plane.bounds();
         let same = picture.extent.same_as(&self.extent, b.size.width, b.size.height);
         if !same && self.flying() {
@@ -187,7 +211,22 @@ impl Ghost {
         self.pending = None;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        // What is drawn now, before the new picture replaces it.
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil; its contents are
+        // the CGImage set on the layer, or nil.
+        let before = if fade && same { unsafe { self.image.presentationLayer().and_then(|l| l.contents()) } } else { None };
         self.show(picture, !same);
+        if let Some(before) = before {
+            let key = NSString::from_str("contents");
+            let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
+            // SAFETY: both are the layer's contents (CGImages).
+            unsafe {
+                anim.setFromValue(Some(&before));
+                anim.setToValue(Some(as_object(&*picture.image)));
+            }
+            anim.setDuration(PICTURE_FADE);
+            self.image.addAnimation_forKey(&anim, Some(&key));
+        }
         CATransaction::commit();
     }
 
@@ -270,7 +309,7 @@ impl Ghost {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         if let Some(s) = &self.shadow {
-            s.spring_amount(amount, spring);
+            s.spring_amount(amount, spring, self.flight);
         }
         let key = NSString::from_str("shadowOpacity");
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
@@ -278,7 +317,7 @@ impl Ghost {
         let to = (self.card_opacity * (1.0 - amount.clamp(0.0, 1.0))) as f32;
         self.body.setShadowOpacity(to);
         if (from - to).abs() > 1e-3 {
-            let anim = spring_anim(spring, "shadowOpacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to));
+            let anim = spring_anim(spring, "shadowOpacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to), self.flight);
             self.body.addAnimation_forKey(&anim, Some(&key));
         } else {
             self.body.removeAnimationForKey(&key);
@@ -326,6 +365,9 @@ impl Ghost {
         let from_corner = shown_image.as_ref().map_or(self.image.cornerRadius(), |l| l.cornerRadius());
         let from_image = shown_body.as_ref().map_or((self.body.position(), self.body.bounds()), |l| (l.position(), l.bounds()));
         let to = Look::of(&p);
+        // Every key runs as long as the farthest edge needs to come to rest on the curve.
+        let duration = spring_duration(spring, plane_travel(from_position, from_bounds, to.position, to.bounds));
+        self.flight = duration;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.take_pending();
@@ -336,7 +378,7 @@ impl Ghost {
         self.place_image(to_image.0, to_image.1);
         self.image.setCornerRadius(to.corner);
         let add = |layer: &CALayer, key: &str, from: &AnyObject, to: &AnyObject| {
-            let anim = spring_anim(spring, key, from, to);
+            let anim = spring_anim(spring, key, from, to, duration);
             layer.addAnimation_forKey(&anim, Some(&NSString::from_str(key)));
         };
         add(&self.plane, "position", &NSValue::new(from_position), &NSValue::new(to.position));
@@ -349,10 +391,31 @@ impl Ghost {
         }
         add(&self.image, "cornerRadius", &NSNumber::new_f64(from_corner), &NSNumber::new_f64(to.corner));
         if let Some(s) = &self.shadow {
-            s.spring_layout(from_bounds.size, to.bounds.size, spring);
+            s.spring_layout(from_bounds.size, to.bounds.size, spring, duration);
         }
         CATransaction::commit();
         self.target = p;
+    }
+
+    /// Fades the whole snapshot out over `duration` seconds from now, where it is (the
+    /// landing: whatever differs from the window under it melts instead of flipping). The
+    /// caller removes it after.
+    pub fn fade_out(&self, duration: f64) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        let key = NSString::from_str("opacity");
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let from = unsafe { self.plane.presentationLayer() }.map_or(self.plane.opacity(), |l| l.opacity());
+        self.plane.setOpacity(0.0);
+        let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
+        // SAFETY: from/to are numbers, the property's type.
+        unsafe {
+            anim.setFromValue(Some(&NSNumber::new_f32(from)));
+            anim.setToValue(Some(&NSNumber::new_f32(0.0)));
+        }
+        anim.setDuration(duration.max(1e-3));
+        self.plane.addAnimation_forKey(&anim, Some(&key));
+        CATransaction::commit();
     }
 
     /// Takes the ghost off the screen.
@@ -644,6 +707,7 @@ impl Overlay {
             extent,
             pending: None,
             target: at,
+            flight: 0.0,
         };
         g.set(at);
         g.set_shadow_amount(shadow.amount);
@@ -687,7 +751,7 @@ impl Overlay {
         body.addSublayer(&img);
         plane.addSublayer(&body);
         let depth = self.stack(&plane, true);
-        let mut g = Ghost { window: 0, depth, plane, body, image: img, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at };
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, flight: 0.0 };
         g.set(at);
         g
     }

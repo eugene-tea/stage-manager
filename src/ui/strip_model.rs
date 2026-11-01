@@ -73,6 +73,8 @@ pub struct StripSnapshot {
     /// The incoming windows of this transition are in place, at these frames as read back
     /// from the windows (global, top-left): their snapshots land exactly there.
     pub arrived: Option<(u64, Vec<(u32, Rect)>)>,
+    /// Late incoming windows of a transition ([`Transition::late`]) that show now.
+    pub late: Option<LateNote>,
     /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.
@@ -112,6 +114,41 @@ pub struct Transition {
     /// The incoming window the switch makes key (the batch's focus, else the front one; none
     /// when the focus goes to a window already in place).
     pub key_in: Option<u32>,
+    /// Incoming windows that show only once their app is unhidden and active again after the
+    /// unveil (`[windows] hide_parked_apps`: hidden in place, our unhide at the landing): their
+    /// snapshots hand over and land when [`StripSnapshot::late`] says so, not at the unveil.
+    pub late: Vec<u32>,
+}
+
+/// Late incoming windows of transition `id` ([`Transition::late`]) on their way to the screen.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LateNote {
+    pub id: u64,
+    /// On screen now (their app unhidden), with their window shadow: their snapshots hand the
+    /// shadow over.
+    pub shown: Vec<u32>,
+    /// Drawn in their final look now (their app took the activation of its key window focused
+    /// again, or none follows): their snapshots may land. Each is also shown.
+    pub active: Vec<u32>,
+}
+
+impl LateNote {
+    /// Adds `windows` of transition `id`, `active` or only shown; a note of an older
+    /// transition is replaced.
+    pub fn add(note: &mut Option<LateNote>, id: u64, windows: &[u32], active: bool) {
+        let n = note.get_or_insert_with(|| LateNote { id, ..LateNote::default() });
+        if n.id != id {
+            *n = LateNote { id, ..LateNote::default() };
+        }
+        for &w in windows {
+            if !n.shown.contains(&w) {
+                n.shown.push(w);
+            }
+            if active && !n.active.contains(&w) {
+                n.active.push(w);
+            }
+        }
+    }
 }
 
 /// One window of a [`Transition`].
@@ -548,6 +585,19 @@ pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A late window shown at the unhide, then active at its app's activation, in one note
+    /// or two; a newer transition's note replaces an older one's.
+    #[test]
+    fn a_late_note_gathers_shown_and_active_windows() {
+        let mut n = None;
+        LateNote::add(&mut n, 4, &[7], false);
+        assert_eq!(n, Some(LateNote { id: 4, shown: vec![7], active: vec![] }));
+        LateNote::add(&mut n, 4, &[7, 8], true);
+        assert_eq!(n, Some(LateNote { id: 4, shown: vec![7, 8], active: vec![7, 8] }), "active is shown too, once each");
+        LateNote::add(&mut n, 5, &[9], false);
+        assert_eq!(n, Some(LateNote { id: 5, shown: vec![9], active: vec![] }));
+    }
 
     #[test]
     fn a_number_alone_never_rebuilds_a_card() {

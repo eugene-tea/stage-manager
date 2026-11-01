@@ -396,6 +396,16 @@ impl Capturer {
         }
     }
 
+    /// Captures targets `ids` again as soon as the current round ends, the others on their
+    /// interval (a window whose look changed: made key while parked).
+    pub fn recapture(&self, ids: &[u32]) {
+        let (lock, cv) = &*self.shared;
+        if let Ok(mut s) = lock.lock() {
+            s.captured.retain(|id| !ids.contains(id));
+            cv.notify_all();
+        }
+    }
+
     /// Changes the refresh interval.
     pub fn set_interval(&self, interval: Duration) {
         let (lock, cv) = &*self.shared;

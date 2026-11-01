@@ -21,7 +21,12 @@
 //!   [`StripEvent::Unveil`]: when the growing snapshots as shown are within a point of their
 //!   windows on every edge (`motion_math::unveil_time`, by the farthest edge's travel; not
 //!   before `[animation] unpark_at` of the motion), and the snapshots stay over the windows
-//!   a moment after ([`AFTER_UNVEIL`]) while they show. Meanwhile the park corner, where
+//!   a moment after ([`AFTER_UNVEIL`]) while they show, then fade out over them
+//!   ([`LANDING_FADE`]). The incoming key window is captured again once it is key
+//!   ([`RECAPTURE_AFTER`]), its picture cross-fading in mid-flight. Late windows (an app we
+//!   hid, unhidden after the unveil: [`Transition::late`]) hand their shadow over when they
+//!   are on screen and land once drawn in their key look ([`Strip::late_shown`]). Meanwhile
+//!   the park corner, where
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
 //!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
@@ -76,6 +81,20 @@ const AFTER_UNVEIL: f64 = 0.12;
 /// unveil, when the window's own shadow is expected on screen (seconds): a presentation lag
 /// each way ([`handover`]), over well before the landing ([`AFTER_UNVEIL`]).
 const HANDOVER_SPREAD: f64 = 2.0 * PRESENTATION_LAG;
+/// How long past the unveil the snapshots of late windows ([`Transition::late`]: an app we hid,
+/// unhidden after the unveil) wait for them to show before they hand over and land anyway
+/// (seconds). Messages showed and took its activation ~115 ms after the unveil (11-01).
+const LATE_MAX: f64 = 0.4;
+/// How long after a switch starts the incoming key window is captured again (seconds): its
+/// snapshot was taken while it was parked and not key (the inactive look; 11-01, Mail), and by
+/// now the switch's focus has made it key and its app has redrawn it (Mail took its activation
+/// ~130 ms in). The new picture cross-fades in while the snapshot still grows.
+const RECAPTURE_AFTER: f64 = 0.18;
+/// How long the incoming snapshots take to fade out at the landing (seconds): what still
+/// differs from the window under them (a look captured before, the window's own late redraw)
+/// melts instead of flipping in one frame. They sit within a tenth of a point of their windows
+/// by then, so nothing moves.
+const LANDING_FADE: f64 = 0.2;
 
 /// A running transition.
 struct Running {
@@ -95,8 +114,25 @@ struct Running {
     /// The incoming windows' frames: aimed at, then read back once in place.
     arrived: Vec<(u32, Rect)>,
     /// The transition does not land before this (its incoming windows shown under their
-    /// snapshots: the unveil plus [`AFTER_UNVEIL`]).
+    /// snapshots: the unveil plus [`AFTER_UNVEIL`]; for late windows, when they show plus
+    /// as much).
     lands_after: Option<Instant>,
+    /// When the strip unveils the incoming windows.
+    unveil_at: Option<Instant>,
+    /// Late incoming windows ([`Transition::late`]) not on screen yet: their snapshots keep
+    /// their shadows ([`Strip::late_shown`]).
+    late_hidden: Vec<u32>,
+    /// Late incoming windows not drawn in their final look yet: the landing waits for them.
+    late_inactive: Vec<u32>,
+    /// The landing was due once already (its outgoing snapshots settled): a landing moved
+    /// earlier needs a timer of its own.
+    settled: bool,
+}
+
+/// A landed switch's incoming snapshots fading out over their windows ([`LANDING_FADE`]).
+struct Fading {
+    ghosts: Vec<Ghost>,
+    timer: Retained<NSTimer>,
 }
 
 /// A landed switch's cover of the park corner, kept until the corner patch shows
@@ -141,6 +177,8 @@ pub(super) struct Motion {
     drag_monitor: Option<Retained<AnyObject>>,
     /// A landed switch's cover still over the corner.
     hold: Option<Hold>,
+    /// A landed switch's incoming snapshots, fading out.
+    fading: Option<Fading>,
 }
 
 impl Motion {
@@ -162,12 +200,30 @@ impl Motion {
             drag_seen: None,
             drag_monitor: None,
             hold: None,
+            fading: None,
         }
     }
 
-    /// Nothing draws in the overlay: no transition, no dragged window's card, no held cover.
+    /// Nothing draws in the overlay: no transition, no dragged window's card, no held cover,
+    /// no landed snapshot fading.
     fn overlay_idle(&self) -> bool {
-        self.running.is_none() && self.window_card.is_none() && self.hold.is_none()
+        self.running.is_none() && self.window_card.is_none() && self.hold.is_none() && self.fading.is_none()
+    }
+
+    /// Takes a landed switch's fading snapshots off now (the overlay hidden if nothing else
+    /// is in it).
+    fn drop_fading(&mut self) {
+        let Some(f) = self.fading.take() else { return };
+        f.timer.invalidate();
+        objc2_quartz_core::CATransaction::begin();
+        objc2_quartz_core::CATransaction::setDisableActions(true);
+        for g in &f.ghosts {
+            g.remove();
+        }
+        objc2_quartz_core::CATransaction::commit();
+        if self.overlay_idle() {
+            self.overlay.hide();
+        }
     }
 
     /// Takes a held cover off the corner now (the overlay hidden if nothing else is in it).
@@ -213,6 +269,7 @@ impl Motion {
     pub(super) fn space_changed(&mut self, mtm: MainThreadMarker) {
         // A cover held on the Desktop left goes with it.
         self.drop_hold();
+        self.drop_fading();
         if self.running.is_none() && self.window_card.is_none() {
             self.overlay.renew(mtm);
         }
@@ -221,7 +278,7 @@ impl Motion {
     /// A thumbnail arrived: the dragged window's card uses it while it has no snapshot.
     pub(super) fn thumbnail_arrived(&mut self, id: u32, picture: &Picture) {
         if let Some(c) = self.window_card.as_mut().filter(|c| c.window == id && !c.has_image) {
-            c.ghost.set_image(picture);
+            c.ghost.set_image(picture, false);
             c.has_image = true;
         }
     }
@@ -451,10 +508,15 @@ impl Strip {
     /// one is up: the overlay stays shown between the two (hidden after if nothing is in it).
     pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
         let held = self.motion.hold.take();
+        let fading = self.motion.fading.take();
         self.start_transition(t, starts);
         if let Some(h) = held {
             self.motion.hold = Some(h);
             self.motion.drop_hold();
+        }
+        if let Some(f) = fading {
+            self.motion.fading = Some(f);
+            self.motion.drop_fading();
         }
         if self.motion.overlay_idle() {
             self.motion.overlay.hide();
@@ -583,15 +645,32 @@ impl Strip {
         // point of them: the farthest edge's travel decides when.
         let travel = report.iter().filter(|g| !g.outgoing).fold(0.0, |m: f64, g| m.max(travel(g.start, g.end)));
         let unveil = cover.incoming.then(|| unveil_time(&self.style, travel));
-        let lands_after = unveil.map(|u| Instant::now() + Duration::from_secs_f64(u + AFTER_UNVEIL));
+        let started = Instant::now();
+        let unveil_at = unveil.map(|u| started + Duration::from_secs_f64(u));
+        // Late windows (an app we hid, unhidden after the unveil) show when their app says so,
+        // bounded: their snapshots wait for that ([`Self::late_shown`]).
+        let late: Vec<u32> = t.late.iter().copied().filter(|w| ghosts.iter().any(|g| g.window == *w)).collect();
+        let lands_after = unveil.map(|u| started + Duration::from_secs_f64(u + if late.is_empty() { 0.0 } else { LATE_MAX } + AFTER_UNVEIL));
         // The handover: each incoming snapshot's shadow fades around the unveil, when its
-        // window's own shadow is expected on screen, and is gone before the landing.
+        // window's own shadow is expected on screen, and is gone before the landing; a late
+        // window's around when it shows.
         if let Some(u) = unveil {
             let (begin, duration) = handover(u, HANDOVER_SPREAD);
-            let incoming: Vec<u32> = t.incoming.iter().map(|w| w.window.id).collect();
+            let incoming: Vec<u32> = t.incoming.iter().map(|w| w.window.id).filter(|w| !late.contains(w)).collect();
             for g in ghosts.iter().filter(|g| incoming.contains(&g.window)) {
                 g.fade_shadow(1.0, 0.0, begin, duration);
             }
+            if !late.is_empty() {
+                timers.push(after(u + LATE_MAX, move || {
+                    with_strip(|s| s.late_shown(id, None, None));
+                }));
+            }
+        }
+        // The key window's snapshot, taken parked and inactive, again once it is key.
+        if let Some(key) = t.key_in.filter(|k| !late.contains(k) && ghosts.iter().any(|g| g.window == *k) && !plain) {
+            timers.push(after(RECAPTURE_AFTER, move || {
+                with_strip(|s| s.recapture_key(id, key));
+            }));
         }
         if let Some(unveil) = unveil {
             timers.push(after(unveil, move || {
@@ -611,7 +690,7 @@ impl Strip {
             }));
         }
         let unveil_ms = unveil.map(|u| (u * 1000.0).round() as u64);
-        tracing::debug!(id, ghosts = ghosts.len(), held = ?held, ?cover, travel = travel.round(), unveil_ms, "transition");
+        tracing::debug!(id, ghosts = ghosts.len(), held = ?held, ?cover, travel = travel.round(), unveil_ms, ?late, "transition");
         for g in &report {
             tracing::debug!(
                 id,
@@ -641,7 +720,23 @@ impl Strip {
             travel,
             unveil_ms,
         });
-        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner, corner_at, arrived, lands_after });
+        self.motion.running =
+            Some(Running {
+                id,
+                ghosts,
+                waiting,
+                held,
+                timers,
+                under,
+                corner,
+                corner_at,
+                arrived,
+                lands_after,
+                unveil_at,
+                late_hidden: late.clone(),
+                late_inactive: late,
+                settled: false,
+            });
     }
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
@@ -742,10 +837,64 @@ impl Strip {
         strip_model::emit(StripEvent::Unveil { id });
     }
 
-    /// Transition `id` has landed: the snapshots go and the held cards show, in one frame;
-    /// not before its incoming windows show under their snapshots (else it looks again then).
+    /// Late incoming windows of transition `id` on their way to the screen: `shown` are on
+    /// screen now with their window shadow, `active` drawn in their final look too (each also
+    /// shown); `None` for both: the wait is over ([`LATE_MAX`] past the unveil), every one
+    /// counts as both. A shown window's snapshot hands its shadow over around when the window
+    /// is on screen, a presentation lag from now (never before the unveil); once every late
+    /// window is in its final look the transition lands [`AFTER_UNVEIL`] after that, as after
+    /// an unveil.
+    pub(super) fn late_shown(&mut self, id: u64, shown: Option<&[u32]>, active: Option<&[u32]>) {
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        let now = Instant::now();
+        let all = shown.is_none() && active.is_none();
+        let named = |w: &u32| all || shown.is_some_and(|s| s.contains(w)) || active.is_some_and(|a| a.contains(w));
+        let final_look = |w: &u32| all || active.is_some_and(|a| a.contains(w));
+        let on_screen: Vec<u32> = r.late_hidden.iter().copied().filter(named).collect();
+        let done: Vec<u32> = r.late_inactive.iter().copied().filter(final_look).collect();
+        if on_screen.is_empty() && done.is_empty() {
+            return;
+        }
+        r.late_hidden.retain(|w| !on_screen.contains(w));
+        r.late_inactive.retain(|w| !done.contains(w));
+        // Not before the unveil: a window placed then shows a presentation lag later.
+        let from_now = r.unveil_at.map_or(0.0, |u| u.saturating_duration_since(now).as_secs_f64());
+        let (begin, duration) = handover(from_now + PRESENTATION_LAG, HANDOVER_SPREAD);
+        for g in r.ghosts.iter().filter(|g| on_screen.contains(&g.window)) {
+            g.fade_shadow(1.0, 0.0, begin, duration);
+        }
+        let since_unveil_ms = r.unveil_at.map(|u| now.saturating_duration_since(u).as_millis() as u64);
+        tracing::debug!(id, on_screen = ?on_screen, final_look = ?done, waited_out = all, since_unveil_ms, "transition: late windows show");
+        if done.is_empty() || !r.late_inactive.is_empty() {
+            return;
+        }
+        let lands = from_now + AFTER_UNVEIL;
+        r.lands_after = Some(now + Duration::from_secs_f64(lands));
+        if r.settled {
+            r.timers.push(after(lands, move || {
+                with_strip(|s| s.end_transition(id));
+            }));
+        }
+    }
+
+    /// Captures transition `id`'s incoming key window `key` again (its snapshot was taken
+    /// while it was parked and not key); the picture cross-fades into its growing snapshot
+    /// ([`Self::set_snapshot`]).
+    fn recapture_key(&mut self, id: u64, key: u32) {
+        if self.motion.running.as_ref().is_none_or(|r| r.id != id) {
+            return;
+        }
+        tracing::debug!(id, key, "transition: the incoming key window is captured again in its key look");
+        self.update_snapshot_targets(None, false);
+        self.motion.capturer.recapture(&[key]);
+    }
+
+    /// Transition `id` has landed: the snapshots go and the held cards show, in one frame
+    /// (the incoming snapshots fade out over their windows, [`LANDING_FADE`]); not before its
+    /// incoming windows show under their snapshots (else it looks again then).
     fn end_transition(&mut self, id: u64) {
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        r.settled = true;
         let now = Instant::now();
         if let Some(wait) = r.lands_after.map(|at| at.saturating_duration_since(now)).filter(|w| !w.is_zero()) {
             r.timers.push(after(wait.as_secs_f64(), move || {
@@ -829,10 +978,16 @@ impl Strip {
             _ => None,
         };
         let hold = facts.filter(cover_holds).and_then(|f| r.corner.take().map(|g| (g, f)));
+        // Landed, the incoming snapshots fade out over their windows; the rest go at once.
+        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) =
+            std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && r.arrived.iter().any(|(w, _)| *w == g.window));
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
-        for g in r.ghosts.iter().chain(&r.corner) {
+        for g in gone.iter().chain(&r.corner) {
             g.remove();
+        }
+        for g in &fade {
+            g.fade_out(LANDING_FADE);
         }
         for stage in &r.held {
             if let Some(layers) = self.pane.cards.get(stage) {
@@ -840,6 +995,19 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
+        if !fade.is_empty() {
+            // One landing fades at a time: an older one still fading goes now.
+            if let Some(old) = self.motion.fading.take() {
+                old.timer.invalidate();
+                for g in &old.ghosts {
+                    g.remove();
+                }
+            }
+            let timer = after(LANDING_FADE, || {
+                with_strip(|s| s.motion.drop_fading());
+            });
+            self.motion.fading = Some(Fading { ghosts: fade, timer });
+        }
         if let Some((ghost, facts)) = hold {
             tracing::debug!(id = r.id, cover = %facts.cover, "transition: landed; the corner's cover stays until the corner patch shows");
             let timer = after(HOLD_POLL, poll_hold);
@@ -961,13 +1129,15 @@ impl Strip {
             return;
         }
         let bytes = CGImage::width(Some(&picture.image)) * CGImage::height(Some(&picture.image)) * 4;
+        // A switch's snapshot cross-fades to the newer picture: its window may look different
+        // now (made key since it was captured).
         if let Some(r) = self.motion.running.as_mut() {
             for g in r.ghosts.iter_mut().filter(|g| g.window == id) {
-                g.set_image(&picture);
+                g.set_image(&picture, true);
             }
         }
         if let Some(c) = self.motion.window_card.as_mut().filter(|c| c.window == id) {
-            c.ghost.set_image(&picture);
+            c.ghost.set_image(&picture, false);
             c.has_image = true;
         }
         self.motion.cache.insert(id, picture, bytes);
@@ -995,8 +1165,10 @@ impl Strip {
         let grab = if f.w > 1.0 && f.h > 1.0 { ((seen.x - f.x) / f.w, (seen.y - f.y) / f.h) } else { (0.5, 0.05) };
         let corner = self.style.cards.corner_radius * m.k;
         if self.motion.window_card.as_ref().is_none_or(|c| c.window != w.id) {
-            // The card goes above every window: a cover held over the corner goes first.
+            // The card goes above every window: a cover held over the corner, and landed
+            // snapshots still fading, go first.
             self.motion.drop_hold();
+            self.motion.drop_fading();
             self.place_overlay();
             let image = self.motion.cache.get(w.id).cloned().or_else(|| self.thumbs.get(&w.id).cloned());
             let o = self.motion.overlay.origin();

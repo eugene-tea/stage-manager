@@ -922,6 +922,9 @@ pub struct Controller {
     /// The transition whose incoming windows are in place, with their frames read back, for
     /// the next snapshot.
     arrived_note: Option<(u64, Vec<(u32, Rect)>)>,
+    /// A transition's late incoming windows on screen now (their app unhidden, and active
+    /// again, `hide_parked_apps`), for the next snapshot ([`StripSnapshot::late`]).
+    late_note: Option<strip_model::LateNote>,
     /// How the next animated batch runs when an activation caused it ([`ActivationRun`],
     /// `[animation] activation_grows`).
     activation: ActivationRun,
@@ -1181,6 +1184,7 @@ impl Controller {
             next_transition: 0,
             parked_note: None,
             arrived_note: None,
+            late_note: None,
             activation: ActivationRun::default(),
             fallback_said: HashSet::new(),
             hides: hide::Hides::default(),
@@ -2734,6 +2738,10 @@ impl Controller {
         };
         t.under = self.window_in_place(&arriving, &outgoing, &actions, &list);
         t.corner = corner;
+        // Windows hidden in place show only once our unhide after the unveil has taken: their
+        // snapshots wait for that ([`strip_model::LateNote`]).
+        t.late = t.incoming.iter().map(|w| w.window.id).filter(|w| landing.contains(w)).collect();
+        let late = t.late.clone();
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let started = Instant::now();
         self.present_with(Some(Transition { sent: Some(started), ..t }));
@@ -2792,7 +2800,7 @@ impl Controller {
         let max = motion_math::unveil_backstop(&self.store.config().style);
         self.pending = Some(Pending { id, actions: later, entries, frames });
         self.phase.feed(phase::Event::SwitchSent { id, max }, Instant::now());
-        self.hold_for_landing(held, Instant::now() + max + hide::LANDING_MARGIN);
+        self.hold_for_landing(id, held, &late, ob, Instant::now() + max + hide::LANDING_MARGIN);
         let failed = self.execute(ob, now);
         self.note_parked();
         failed
@@ -2953,6 +2961,7 @@ impl Controller {
             transition,
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
+            late: self.late_note.take(),
             space: space.0,
             fullscreen: current && self.phase.fullscreen(),
             away: false,
@@ -3105,6 +3114,7 @@ impl Controller {
                 | WinEvent::Retitled(_)
                 | WinEvent::Focused(_)
                 | WinEvent::AppActivated(_)
+                | WinEvent::AppTookActivation(_)
                 | WinEvent::AppHidden(_)
                 | WinEvent::AppUnhidden(_)
                 | WinEvent::AppTerminated(_)
@@ -3257,6 +3267,7 @@ impl Controller {
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid, true),
             WinEvent::AppUnhidden(pid) => self.on_app_hidden(ob, pid, false),
+            WinEvent::AppTookActivation(pid) => self.app_took_activation(pid),
             WinEvent::AppTerminated(pid) => {
                 // Its icon leaves the Dock unless pinned: the strip may follow.
                 self.dock_order.soon(now);

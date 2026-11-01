@@ -6,6 +6,9 @@
   place only once its picture is right over it.
 - Moving windows carry the same shadow as the windows themselves, the focused window's
   larger one included, so the shadow no longer wobbles as a switch starts and ends.
+- The end of a switch no longer flickers: the arriving window comes to rest without a last
+  small snap, shows in its focused look as its picture fades away, and a hidden app's window
+  keeps its shadow until it is really on screen.
 - An automatic update no longer installs while the screen is locked, when hidden windows
   could not come back until you unlocked; it waits until you are back and step away again.
 - The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges

@@ -61,6 +61,7 @@ use crate::engine::model::{Action, WindowId};
 use crate::platform::observe::Observer;
 use crate::platform::windows::{self, FINDER_BUNDLE_ID};
 use crate::platform::{apps, safety};
+use crate::ui::strip_model::LateNote;
 
 /// How long a hide may take before macOS counts as refusing it.
 const HIDE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -110,6 +111,14 @@ pub(super) struct Hides {
     /// Apps of ours whose windows a switch's snapshots bring, unhidden at the landing (the
     /// held batch's flush), or at the deadline if none comes.
     landing: BTreeMap<i32, Instant>,
+    /// Of those, the switch and its windows whose snapshots wait for them to show ([`Late`]):
+    /// the strip hears when our unhide has taken (the windows on screen, with their key
+    /// shadow) and when the app has taken the activation of its key window focused again
+    /// (drawn in their key look), so it never hands the shadow over to a window not on screen
+    /// yet, nor lands on one about to flip from inactive to key (11-01: Messages showed ~100
+    /// ms after the unveil, its shadow already the key one, and flipped to its key look
+    /// ~180 ms after that).
+    shown_wait: BTreeMap<i32, (u64, Vec<u32>)>,
 }
 
 impl Hides {
@@ -140,6 +149,7 @@ impl Hides {
         self.unhiding.remove(&pid);
         self.refocus.remove(&pid);
         self.landing.remove(&pid);
+        self.shown_wait.remove(&pid);
         self.reconcile.retain(|(p, _, _)| *p != pid);
         listed
     }
@@ -155,6 +165,21 @@ impl Hides {
         due.into_iter().filter(|p| self.ours(*p)).collect()
     }
 
+    /// What the strip hears of app `pid`'s late windows at `step`: their switch, the windows,
+    /// and whether they are drawn in their final look (else only on screen). Forgotten once
+    /// final. An activation of an app still hidden by us, or still waiting for its landing, is
+    /// not the one.
+    fn late(&mut self, pid: i32, step: Late) -> Option<(u64, Vec<u32>, bool)> {
+        match step {
+            Late::UnhiddenFocusFollows => self.shown_wait.get(&pid).map(|(id, ws)| (*id, ws.clone(), false)),
+            Late::Unhidden => self.shown_wait.remove(&pid).map(|(id, ws)| (id, ws, true)),
+            Late::Activated if !self.ours(pid) && !self.landing.contains_key(&pid) => {
+                self.shown_wait.remove(&pid).map(|(id, ws)| (id, ws, true))
+            }
+            Late::Activated => None,
+        }
+    }
+
     /// A batch unhid app `pid` and focused `focus` (its key window, when `of_pid` says the
     /// window is the app's): remembered to be focused again once the unhide has taken.
     fn remember_refocus(&mut self, pid: i32, focus: Option<u32>, of_pid: impl Fn(u32) -> Option<i32>) {
@@ -162,6 +187,17 @@ impl Hides {
             self.refocus.insert(pid, key);
         }
     }
+}
+
+/// Where a late window ([`Hides::shown_wait`]) is on its way to the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Late {
+    /// Our unhide took and its key window is focused again: on screen, its key look to come.
+    UnhiddenFocusFollows,
+    /// Our unhide took and no focus follows: on screen as it stays.
+    Unhidden,
+    /// The app took its activation (AXApplicationActivated): drawn in its key look.
+    Activated,
 }
 
 /// Whether an app's in-place windows that macOS's unhide left behind go to the corner now:
@@ -395,16 +431,38 @@ impl Controller {
 
     /// Focuses again the key window a batch focused of app `pid` while the app was hidden
     /// (the unhide has taken now): the app becomes active, as the batch meant.
-    fn refocus(&mut self, ob: &Observer, pid: i32) {
-        let Some(key) = self.hides.refocus.remove(&pid) else { return };
-        let Some(w) = ob.window(key) else { return };
+    /// True when the focus was sent.
+    fn refocus(&mut self, ob: &Observer, pid: i32) -> bool {
+        let Some(key) = self.hides.refocus.remove(&pid) else { return false };
+        let Some(w) = ob.window(key) else { return false };
         let now = Instant::now();
         self.echoes.touch_window(key, now);
         self.echoes.touch_app(pid, now);
         match ax_focus(&w.element, pid) {
-            Ok(()) => tracing::debug!(pid, key, "hide: the key window focused again now that its app is unhidden"),
-            Err(e) => tracing::debug!(pid, key, "hide: the key window cannot be focused again: {e}"),
+            Ok(()) => {
+                tracing::debug!(pid, key, "hide: the key window focused again now that its app is unhidden");
+                true
+            }
+            Err(e) => {
+                tracing::debug!(pid, key, "hide: the key window cannot be focused again: {e}");
+                false
+            }
         }
+    }
+
+    /// Tells the strip where app `pid`'s late windows of a switch are at `step`
+    /// ([`Hides::late`]), with the next snapshot.
+    fn note_late(&mut self, pid: i32, step: Late) {
+        let Some((id, windows, active)) = self.hides.late(pid, step) else { return };
+        tracing::debug!(id, pid, ?windows, ?step, "hide: the windows of the app we unhid are on screen; their snapshots follow");
+        LateNote::add(&mut self.late_note, id, &windows, active);
+        self.present();
+    }
+
+    /// App `pid` posted its own activation (AXApplicationActivated): one whose key window we
+    /// focused again after our unhide is drawn as the active app now.
+    pub(super) fn app_took_activation(&mut self, pid: i32) {
+        self.note_late(pid, Late::Activated);
     }
 
     /// Sends app `pid`'s in-place windows the model counts parked to the corner.
@@ -440,7 +498,10 @@ impl Controller {
         }
         if self.hides.unhiding.contains_key(&pid) {
             tracing::debug!(pid, "hide: our unhide took");
-            self.refocus(ob, pid);
+            // On screen now; with its key window focused again, in their key look once the app
+            // has taken that activation ([`Self::app_took_activation`]).
+            let step = if self.refocus(ob, pid) { Late::UnhiddenFocusFollows } else { Late::Unhidden };
+            self.note_late(pid, step);
             return;
         }
         if let Some(o) = self.hides.ours.remove(&pid) {
@@ -501,12 +562,18 @@ impl Controller {
         by_app.into_values().filter(|(lands, _)| *lands).flat_map(|(_, ids)| ids).collect()
     }
 
-    /// Apps `pids` are unhidden at the landing of a switch whose held batch was just set, or
-    /// at `deadline` if it never comes.
-    pub(super) fn hold_for_landing(&mut self, pids: impl IntoIterator<Item = i32>, deadline: Instant) {
+    /// Apps `pids` are unhidden at the landing of switch `id` whose held batch was just set,
+    /// or at `deadline` if it never comes; the snapshots of their windows among `late` wait
+    /// for them to show ([`Hides::shown_wait`]; a new switch forgets the last one's).
+    pub(super) fn hold_for_landing(&mut self, id: u64, pids: impl IntoIterator<Item = i32>, late: &[u32], ob: &Observer, deadline: Instant) {
+        self.hides.shown_wait.clear();
         for pid in pids {
             tracing::info!(pid, "hide: the switch's snapshots bring the windows of an app we hid; it is unhidden when they land");
             self.hides.landing.insert(pid, deadline);
+            let windows: Vec<u32> = late.iter().copied().filter(|w| ob.window(*w).is_some_and(|t| t.pid == pid)).collect();
+            if !windows.is_empty() {
+                self.hides.shown_wait.insert(pid, (id, windows));
+            }
         }
     }
 
@@ -668,6 +735,29 @@ mod tests {
         h.landing.insert(10, t0);
         h.forget(10);
         assert!(h.landing.is_empty(), "a quit app forgotten");
+    }
+
+    /// 11-01: Messages, hidden in place, showed ~100 ms after the unveil and flipped to its
+    /// key look ~180 ms later. Its snapshot waits: for the unhide when no focus follows, else
+    /// for the app's own activation once the unhide took; told once.
+    #[test]
+    fn a_late_window_shows_once_its_app_is_unhidden_and_active() {
+        let mut h = Hides::default();
+        h.ours.insert(10, ours("com.example.alpha"));
+        h.landing.insert(10, Instant::now());
+        h.shown_wait.insert(10, (4, vec![7]));
+        assert_eq!(h.late(10, Late::Activated), None, "an activation while still hidden by us");
+        h.landing.remove(&10);
+        h.take_for_batch(10);
+        assert_eq!(h.late(10, Late::UnhiddenFocusFollows), Some((4, vec![7], false)), "on screen, its key look to come");
+        assert_eq!(h.late(10, Late::Activated), Some((4, vec![7], true)), "the app took the activation");
+        assert_eq!(h.late(10, Late::Activated), None, "told once");
+        h.shown_wait.insert(11, (5, vec![9]));
+        assert_eq!(h.late(11, Late::Unhidden), Some((5, vec![9], true)), "no focus follows: final at the unhide");
+        assert!(!h.shown_wait.contains_key(&11));
+        h.shown_wait.insert(12, (5, vec![8]));
+        h.forget(12);
+        assert!(h.shown_wait.is_empty(), "a quit app forgotten");
     }
 
     #[test]
