@@ -2488,16 +2488,17 @@ impl Controller {
         self.last_switch = Some(Instant::now());
         let mut run = std::mem::take(&mut self.activation);
         let hidden = self.hidden_arrivals(ob, &actions);
-        // A hidden app's windows this switch brings: waiting in place, they go to the corner
-        // first, unseen, and arrive from their card as any parked window (11-01); macOS's own
-        // unhide (the activated app's) and a switch not drawn leave them coming at once.
+        // A hidden app's windows this switch brings: in a switch of ours the strip draws, they
+        // stay in place and hidden while their snapshots grow, the app unhidden at the landing
+        // (11-01); macOS's own unhide (the activated app's) and a switch not drawn bring them
+        // first and at once.
         let animated = {
             let anim = &self.store.config().style.animation;
             anim.animates() && self.strip_visible && !self.phase.fullscreen()
         };
         let activated: HashSet<u32> = run.now.union(&run.fallback).copied().collect();
-        let cornered = self.corner_hidden_arrivals(ob, &hidden, animated, &activated);
-        let hidden: HashSet<u32> = hidden.into_iter().filter(|id| !cornered.iter().any(|c| c.0 == *id)).collect();
+        let landing = self.landing_arrivals(ob, &hidden, animated, &activated);
+        let hidden: HashSet<u32> = hidden.difference(&landing).copied().collect();
         // An activation that grows: can the overlay cover the corner where macOS has raised
         // the activated windows? Decided before the strip is told, from the batch (its
         // arrivals and parks); when not, those windows arrive at once (6V), never shown in
@@ -2505,7 +2506,7 @@ impl Controller {
         let mut early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)> = None;
         let anim = &self.store.config().style.animation;
         if !run.fallback.is_empty() && anim.animates() && self.strip_visible {
-            let list = hide::listed_with_cornered(windows::on_screen(), &cornered);
+            let list = windows::on_screen();
             let arriving: HashSet<u32> = actions
                 .iter()
                 .filter_map(|a| match a {
@@ -2555,7 +2556,7 @@ impl Controller {
             // Windows moved: the list read before is stale.
             early_corner = None;
         }
-        failed + self.execute_animated_rest(ob, actions, &first, run, early_corner, &cornered)
+        failed + self.execute_animated_rest(ob, actions, &first, run, early_corner, &landing)
     }
 
     /// The frontmost window of the main display's active stage already in place (shown, and
@@ -2693,9 +2694,9 @@ impl Controller {
     /// the strip, an activation's focus (`run`, [`ActivationRun::focus`]) routed at once, then
     /// the parks behind the strip's snapshots and the arrivals held until it unveils them.
     /// `early_corner`: the corner's cover as the activation found it, and the window list it
-    /// read (none read, or moved since: both read here). `cornered`: the windows of apps we
-    /// hid that wait in the corner, unseen until the batch's unhide
-    /// ([`Self::corner_hidden_arrivals`]), counted by the cover as listed there.
+    /// read (none read, or moved since: both read here). `landing`: windows of apps we hid,
+    /// in place and hidden, whose apps are unhidden at the landing ([`Self::landing_arrivals`]):
+    /// their raise and focus wait with the held batch.
     fn execute_animated_rest(
         &mut self,
         ob: &Observer,
@@ -2703,7 +2704,7 @@ impl Controller {
         first: &HashSet<u32>,
         run: ActivationRun,
         early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)>,
-        cornered: &[(u32, i32, Rect)],
+        landing: &HashSet<u32>,
     ) -> usize {
         let anim = self.store.config().style.animation.clone();
         if !anim.animates() || !self.strip_visible {
@@ -2718,7 +2719,7 @@ impl Controller {
         let (corner, list) = match early_corner {
             Some((corner, list)) => (corner, list),
             None => {
-                let list = hide::listed_with_cornered(windows::on_screen(), cornered);
+                let list = windows::on_screen();
                 let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
                 let corner =
                     self.switch_corner(&arriving, &outgoing, &activated, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
@@ -2769,6 +2770,10 @@ impl Controller {
             return failed;
         }
         let (now, later) = split_covered(actions, &arriving);
+        // The apps whose windows wait hidden in place for the landing: their raise and focus
+        // run with the held batch, our unhide after it.
+        let held: BTreeSet<i32> = landing.intersection(&arriving).filter_map(|w| ob.window(*w).map(|t| t.pid)).collect();
+        let (now, later) = hide::defer_to_landing(now, later, |w| ob.window(w).is_some_and(|t| held.contains(&t.pid)));
         if let Some(Action::Focus { id: key }) = now.iter().rev().find(|a| matches!(a, Action::Focus { .. })) {
             tracing::debug!(id, key = key.0, "the keyboard goes to the new stage now; its windows arrive behind their snapshots");
         }
@@ -2786,6 +2791,7 @@ impl Controller {
         let max = motion_math::unveil_backstop(&self.store.config().style);
         self.pending = Some(Pending { id, actions: later, entries, frames });
         self.phase.feed(phase::Event::SwitchSent { id, max }, Instant::now());
+        self.hold_for_landing(held, Instant::now() + max + hide::LANDING_MARGIN);
         let failed = self.execute(ob, now);
         self.note_parked();
         failed
@@ -2816,6 +2822,9 @@ impl Controller {
                 .collect();
             let (raises, focus) = raise_order::raises_and_focus(&p.actions);
             self.execute_batch(ob, p.actions, Batch::Unveil);
+            // An app whose unhide waited for this landing and that the batch did not unhide
+            // (its window gone, say): unhidden now.
+            self.land_hides(ob, true);
             // Where the windows really are now: their snapshots land exactly there.
             let mut arrived = Vec::new();
             for (id, frame) in asked {

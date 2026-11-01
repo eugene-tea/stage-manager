@@ -11,14 +11,19 @@
 //! - **Our unhide** ([`Controller::before_batch_hides`], [`Controller::after_batch_hides`]):
 //!   a batch that brings back a window of an app we hid first sends that app's other
 //!   in-place windows the stage leaves parked to the corner (still unseen), runs, then
-//!   unhides the app: its windows show at their frames. In a switch of ours that animates (a
-//!   card click, a ctl switch; [`Controller::corner_hidden_arrivals`]) the in-place windows
-//!   the stage brings go to the corner first, still unseen, and arrive from their card
-//!   behind their snapshots as any parked window does: the batch's unhide shows them in the
-//!   corner, under the switch's cover, until the strip unveils them (11-01: Messages, hidden
-//!   in place, just appeared at its frame while every other stage grew from its card). Not
-//!   animated (or the corner move refused), they come first and at once, outside the
-//!   transition (`execute_animated`'s early batch), as before. The batch's
+//!   unhides the app: its windows show at their frames. In a switch of ours the strip
+//!   animates (a card click, a ctl switch; [`Controller::landing_arrivals`]) those windows
+//!   stay in place and hidden while their snapshots grow from the card, and the unhide waits
+//!   for the landing: their raise and focus join the held batch the strip's unveil runs
+//!   ([`defer_to_landing`]: a raise of a hidden app's window has macOS unhide it at once), so
+//!   the unhide after that batch shows them under their snapshots (11-01: Messages, hidden in
+//!   place, just appeared at its frame while every other stage grew from its card; a window
+//!   sent to the corner while hidden was put wholly on the display by macOS at the unhide).
+//!   A landing that never comes still unhides the app: at any flush of the held batch (the
+//!   unveil, other input, a new switch) and at its backstop plus [`LANDING_MARGIN`]
+//!   ([`Controller::land_hides`]), so an app is never left hidden with its stage active.
+//!   macOS's activation of the app, or a switch not drawn, bring them first and at once,
+//!   outside the transition (`execute_animated`'s early batch), as before. The batch's
 //!   focus ran while the app was still hidden and left it inactive (live 10-29: the app
 //!   switched away from stayed the active app, so it was never hidden until the user
 //!   activated something else); once the unhide has taken, the key window of such an app is
@@ -27,8 +32,7 @@
 //!   moment the new stage's app is active.
 //! - **macOS's unhide** (⌘Tab, a Dock click, Show All; [`Controller::app_visibility`]): the
 //!   app is ours no more; the activation's switch follows as for any app (its windows already
-//!   in place count as arriving at once, shown where they are: never sent to the corner,
-//!   [`hidden_arrival`]). An in-place window the switch did not bring (the
+//!   in place count as arriving at once). An in-place window the switch did not bring (the
 //!   focus picked another stage, or no switch came: Show All) goes to the corner a moment
 //!   later ([`RECONCILE_AFTER`]), once no activation of the app is held and no switch is
 //!   running ([`reconcile_due`]).
@@ -50,7 +54,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::{Controller, ax_focus};
-use crate::engine::geometry::{Point, Rect};
+use crate::engine::geometry::Point;
 use crate::engine::hide::{HideFacts, may_hide};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::model::{Action, WindowId};
@@ -72,6 +76,9 @@ const RECONCILE_AFTER: Duration = Duration::from_millis(150);
 /// `arrival`'s query timeout; the app goes back to the global timeout right after
 /// ([`crate::platform::ax::AxElement::bounded`]).
 const HIDE_AX_TIMEOUT_SECONDS: f32 = 0.05;
+/// How long past a switch's unveil backstop a hidden app whose unhide waits for the landing
+/// ([`Hides::landing`]) is unhidden anyway.
+pub(super) const LANDING_MARGIN: Duration = Duration::from_millis(500);
 /// A window smaller than this (either side) does not count as an unmanaged window of an app
 /// (helper and offscreen utility windows).
 const UNMANAGED_MIN: f64 = 50.0;
@@ -100,6 +107,9 @@ pub(super) struct Hides {
     /// The key window a batch focused of each app it unhid, focused again once the unhide
     /// takes (a focus sent to a hidden app leaves it inactive).
     refocus: HashMap<i32, u32>,
+    /// Apps of ours whose windows a switch's snapshots bring, unhidden at the landing (the
+    /// held batch's flush), or at the deadline if none comes.
+    landing: BTreeMap<i32, Instant>,
 }
 
 impl Hides {
@@ -129,8 +139,20 @@ impl Hides {
         self.refused.remove(&pid);
         self.unhiding.remove(&pid);
         self.refocus.remove(&pid);
+        self.landing.remove(&pid);
         self.reconcile.retain(|(p, _, _)| *p != pid);
         listed
+    }
+
+    /// The apps whose unhide waited for a landing that is due now (`flushed`: the held batch
+    /// ran, so every one; else those past their deadline), forgotten as waiting. Only those
+    /// still ours (the held batch unhid the others already).
+    fn due_landings(&mut self, now: Instant, flushed: bool) -> Vec<i32> {
+        let due: Vec<i32> = self.landing.iter().filter(|(_, at)| flushed || now >= **at).map(|(&p, _)| p).collect();
+        for p in &due {
+            self.landing.remove(p);
+        }
+        due.into_iter().filter(|p| self.ours(*p)).collect()
     }
 
     /// A batch unhid app `pid` and focused `focus` (its key window, when `of_pid` says the
@@ -149,49 +171,28 @@ pub(super) fn reconcile_due(waited: Duration, held: bool, transition: bool) -> b
     waited >= RECONCILE_AFTER && !held && !transition
 }
 
-/// What a switch does with a window it brings of an app we hid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HiddenArrival {
-    /// Waiting in place: sent to the corner first, unseen, and it arrives from its card behind
-    /// its snapshot as any parked window.
-    ToCorner,
-    /// Parked in the corner already, unseen (its move in place was refused): it arrives from
-    /// its card as it is.
-    FromCorner,
-    /// To its frame first and at once, outside the transition, shown there by the unhide.
-    AtOnce,
+/// Whether a window a switch brings of an app we hid lands with its snapshot, the app
+/// unhidden at the landing: `animated` (a switch of ours the strip animates, the strip shown,
+/// no full screen), not `activated` (the app macOS activated: its own unhide, shown in place
+/// at once, as ⌘Tab and a Dock click leave it), `hidden_now` (macOS says the app is hidden,
+/// our hide confirmed). Otherwise it comes first and at once.
+pub(super) fn lands_with_snapshot(animated: bool, activated: bool, hidden_now: bool) -> bool {
+    animated && !activated && hidden_now
 }
 
-/// What a switch does with a window it brings of an app we hid: `animated` (a
-/// switch of ours the strip animates, the strip shown, no full screen), `activated` (the
-/// window's app is the one macOS activated: its own unhide, in place and shown at once, as
-/// ⌘Tab and a Dock click leave it), `hidden_now` (macOS says the app is hidden, our hide
-/// confirmed), `in_place` (the window waits at its own frame).
-pub(super) fn hidden_arrival(animated: bool, activated: bool, hidden_now: bool, in_place: bool) -> HiddenArrival {
-    if !animated || activated || !hidden_now {
-        HiddenArrival::AtOnce
-    } else if in_place {
-        HiddenArrival::ToCorner
-    } else {
-        HiddenArrival::FromCorner
-    }
-}
-
-/// Window server list `list` (front to back) with the windows `cornered` (id, pid, frame) of
-/// apps we hid listed at their frames in the corner, in front: they wait there, unseen while
-/// their app is hidden, but the batch's unhide shows them there (raised by its focus) while
-/// the switch's cover is up, so the cover counts them as it counts any incoming window
-/// waiting in the corner.
-pub(super) fn listed_with_cornered(list: Vec<windows::CgWindow>, cornered: &[(u32, i32, Rect)]) -> Vec<windows::CgWindow> {
-    if cornered.is_empty() {
-        return list;
-    }
-    let mut out: Vec<windows::CgWindow> = cornered
-        .iter()
-        .map(|&(id, pid, bounds)| windows::CgWindow { id, pid, owner: String::new(), name: None, layer: 0, bounds, onscreen: true, alpha: 1.0 })
-        .collect();
-    out.extend(list.into_iter().filter(|w| !cornered.iter().any(|c| c.0 == w.id)));
-    out
+/// A covered switch's batches (`now`, run at once; `later`, held until the strip unveils the
+/// incoming windows) with the raises and focuses of windows whose app's unhide waits for the
+/// landing (`held`) moved from `now` to the end of `later`, in order, a focus once (the
+/// last): a raise of a hidden app's window has macOS unhide the app at once, and the held
+/// batch's focus is the one focused again once our unhide has taken.
+pub(super) fn defer_to_landing(now: Vec<Action>, mut later: Vec<Action>, held: impl Fn(u32) -> bool) -> (Vec<Action>, Vec<Action>) {
+    let (moved, now): (Vec<Action>, Vec<Action>) = now.into_iter().partition(|a| match a {
+        Action::Raise { id } | Action::Focus { id } => held(id.0),
+        _ => false,
+    });
+    let last_focus = moved.iter().rposition(|a| matches!(a, Action::Focus { .. }));
+    later.extend(moved.into_iter().enumerate().filter(|(i, a)| !matches!(a, Action::Focus { .. }) || Some(*i) == last_focus).map(|(_, a)| a));
+    (now, later)
 }
 
 /// Whether pid's running app (`now`: its bundle id) is still the one we hid (`recorded`): a
@@ -226,6 +227,7 @@ impl Controller {
         let now = Instant::now();
         self.hides.unhiding.retain(|_, t| now.duration_since(*t) < UNHIDE_ECHO);
         self.hides.refused.retain(|_, t| now.duration_since(*t) < REFUSED_FOR);
+        self.land_hides(ob, false);
         if self.model.is_none() || self.frozen() {
             return;
         }
@@ -481,69 +483,57 @@ impl Controller {
         self.record_hides();
     }
 
-    /// A switch of ours brings windows `hidden` of apps we hid ([`Self::hidden_arrivals`]):
-    /// when it animates (`animated`), each waiting in place goes to the corner first, unseen
-    /// (the app still hidden; bounded as this module's other moves), and arrives from its card
-    /// behind its snapshot as any parked window; the batch that focuses it unhides the app,
-    /// which shows it in the corner under the switch's cover until the strip unveils it.
-    /// `activated`: windows of the app macOS activated (its own unhide: left in place). Returns
-    /// the windows that wait in the corner (id, pid, frame there) for the cover; the others
-    /// come first and at once, as before.
-    pub(super) fn corner_hidden_arrivals(&mut self, ob: &Observer, hidden: &HashSet<u32>, animated: bool, activated: &HashSet<u32>) -> Vec<(u32, i32, Rect)> {
-        let Some(m) = &self.model else { return Vec::new() };
-        let mut ids: Vec<u32> = hidden.iter().copied().collect();
-        ids.sort_unstable();
-        let mut hidden_now: HashMap<i32, bool> = HashMap::new();
-        let mut plan = Vec::new();
-        for id in ids {
+    /// Of windows `hidden` a switch brings of apps we hid ([`Self::hidden_arrivals`]), those
+    /// that land with their snapshot ([`lands_with_snapshot`]; `animated`, `activated`: the
+    /// windows of the app macOS activated), an app's all or none: they stay in place and
+    /// hidden while their snapshots grow, the app unhidden at the landing.
+    pub(super) fn landing_arrivals(&self, ob: &Observer, hidden: &HashSet<u32>, animated: bool, activated: &HashSet<u32>) -> HashSet<u32> {
+        let mut by_app: BTreeMap<i32, (bool, Vec<u32>)> = BTreeMap::new();
+        for &id in hidden {
             let Some(w) = ob.window(id) else { continue };
-            let Some(o) = self.hides.ours.get(&w.pid) else { continue };
-            let now_hidden = *hidden_now.entry(w.pid).or_insert_with(|| o.confirmed && apps::is_hidden(w.pid) == Some(true));
-            let how = hidden_arrival(animated, activated.contains(&id), now_hidden, o.in_place.contains(&id));
-            let at = match how {
-                HiddenArrival::ToCorner => m.park_frame_of(WindowId(id)),
-                HiddenArrival::FromCorner => Some(w.frame),
-                HiddenArrival::AtOnce => None,
-            };
-            if let Some(at) = at {
-                plan.push((id, w.pid, how, at));
-            }
+            let e = by_app.entry(w.pid).or_insert_with(|| {
+                let hidden_now = self.hides.ours.get(&w.pid).is_some_and(|o| o.confirmed) && apps::is_hidden(w.pid) == Some(true);
+                (hidden_now, Vec::new())
+            });
+            e.0 &= lands_with_snapshot(animated, activated.contains(&id), true);
+            e.1.push(id);
         }
+        by_app.into_values().filter(|(lands, _)| *lands).flat_map(|(_, ids)| ids).collect()
+    }
+
+    /// Apps `pids` are unhidden at the landing of a switch whose held batch was just set, or
+    /// at `deadline` if it never comes.
+    pub(super) fn hold_for_landing(&mut self, pids: impl IntoIterator<Item = i32>, deadline: Instant) {
+        for pid in pids {
+            tracing::info!(pid, "hide: the switch's snapshots bring the windows of an app we hid; it is unhidden when they land");
+            self.hides.landing.insert(pid, deadline);
+        }
+    }
+
+    /// Unhides the apps whose unhide waited for a landing, still ours: every one once the held
+    /// batch ran (`flushed`: its own unhide took the others), those past their deadline
+    /// otherwise. Never left hidden with its stage active.
+    pub(super) fn land_hides(&mut self, ob: &Observer, flushed: bool) {
+        if self.hides.landing.is_empty() {
+            return;
+        }
+        let due = self.hides.due_landings(Instant::now(), flushed);
+        if due.is_empty() {
+            return;
+        }
+        tracing::info!(pids = ?due, flushed, "hide: no landing unhid an app whose stage came; unhiding it now");
         let now = Instant::now();
-        let mut cornered = Vec::new();
-        for (id, pid, how, at) in plan {
-            let Some(w) = ob.window(id) else { continue };
-            if how == HiddenArrival::ToCorner {
-                self.echoes.touch_window(id, now);
-                if let Err(e) = w.element.bounded(HIDE_AX_TIMEOUT_SECONDS, |e| e.set_position(at.origin())) {
-                    tracing::debug!(pid, id, "hide: an in-place window this switch brings cannot go to the corner first; it comes at once: {e}");
-                    continue;
-                }
-                if let Some(o) = self.hides.ours.get_mut(&pid) {
-                    o.in_place.remove(&id);
-                }
+        for &pid in &due {
+            if let Some(in_place) = self.hides.take_for_batch(pid) {
+                self.repark(ob, pid, &in_place, now);
             }
-            cornered.push((id, pid, at));
         }
-        // An app with a window that comes at once is unhidden by the early batch that brings it,
-        // which would show its others in the corner before the cover is up: they come at once
-        // too (that batch moves them back to their frames, still unseen).
-        let at_once: BTreeSet<i32> = hidden
-            .iter()
-            .filter(|id| !cornered.iter().any(|c| c.0 == **id))
-            .filter_map(|id| ob.window(*id).map(|w| w.pid))
-            .collect();
-        cornered.retain(|c| !at_once.contains(&c.1));
-        if !cornered.is_empty() {
-            let ids: Vec<u32> = cornered.iter().map(|c| c.0).collect();
-            tracing::info!(windows = ?ids, "hide: the windows of an app we hid this switch brings wait in the corner, unseen; they arrive from their card");
-        }
-        cornered
+        self.after_batch_hides(ob, due, None);
     }
 
     /// The windows of apps we hid among a batch's `SetFrame`s: they come first and at once
     /// in an animated switch (macOS shows them where they are when the app unhides), unless
-    /// [`Self::corner_hidden_arrivals`] sends them to the corner first.
+    /// they land with their snapshots ([`Self::landing_arrivals`]).
     pub(super) fn hidden_arrivals(&self, ob: &Observer, actions: &[Action]) -> HashSet<u32> {
         actions
             .iter()
@@ -559,6 +549,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::geometry::Rect;
 
     fn ours(bundle: &str) -> Ours {
         Ours { bundle: bundle.into(), asked: Instant::now(), confirmed: true, in_place: [7, 8].into() }
@@ -622,37 +613,61 @@ mod tests {
         assert!(h.refocus.is_empty(), "gone with the app");
     }
 
-    /// 11-01: a card click on the stage of an app hidden in place arrives from the card as any
-    /// parked window; macOS's own unhide (its activation), a switch not animated, or a hide
-    /// not taken yet bring it at once, where it is.
+    /// 11-01: a card click on the stage of an app hidden in place lands it with its snapshot;
+    /// macOS's own unhide (its activation), a switch not drawn, or a hide not taken yet bring
+    /// it at once, where it is.
     #[test]
-    fn a_switch_of_ours_brings_an_in_place_window_from_the_corner() {
-        assert_eq!(hidden_arrival(true, false, true, true), HiddenArrival::ToCorner, "a card click: to the corner first");
-        assert_eq!(hidden_arrival(true, false, true, false), HiddenArrival::FromCorner, "parked already: from the corner as it is");
-        assert_eq!(hidden_arrival(true, true, true, true), HiddenArrival::AtOnce, "the app macOS activated: in place, at once");
-        assert_eq!(hidden_arrival(false, false, true, true), HiddenArrival::AtOnce, "not animated: at once");
-        assert_eq!(hidden_arrival(true, false, false, true), HiddenArrival::AtOnce, "not hidden (yet, or no more): at once");
+    fn a_switch_of_ours_lands_a_hidden_app_s_window_with_its_snapshot() {
+        assert!(lands_with_snapshot(true, false, true), "a card click: the unhide waits for the landing");
+        assert!(!lands_with_snapshot(true, true, true), "the app macOS activated: in place, at once");
+        assert!(!lands_with_snapshot(false, false, true), "not animated: at once");
+        assert!(!lands_with_snapshot(true, false, false), "not hidden (yet, or no more): at once");
     }
 
+    /// The held app's raise and focus wait for the landing (a raise unhides a hidden app at
+    /// once); the parks and the other apps' raises run now; the focus once, last.
     #[test]
-    fn the_cover_counts_the_cornered_windows_in_front() {
-        let w = |id, x| windows::CgWindow {
-            id,
-            pid: 5,
-            owner: String::new(),
-            name: None,
-            layer: 0,
-            bounds: Rect::new(x, 0.0, 10.0, 10.0),
-            onscreen: true,
-            alpha: 1.0,
-        };
-        let list = vec![w(1, 0.0), w(2, 0.0)];
-        assert_eq!(listed_with_cornered(list.clone(), &[]).len(), 2, "nothing cornered: as listed");
-        let at = Rect::new(900.0, 700.0, 400.0, 300.0);
-        let out = listed_with_cornered(list, &[(2, 9, at), (3, 9, at)]);
-        let ids: Vec<u32> = out.iter().map(|w| w.id).collect();
-        assert_eq!(ids, vec![2, 3, 1], "the cornered in front, each once");
-        assert!(out[..2].iter().all(|w| w.bounds == at && w.pid == 9 && w.layer == 0 && w.alpha > 0.0), "listed at the corner, drawn");
+    fn the_held_app_s_raise_and_focus_wait_for_the_landing() {
+        let w = |n| WindowId(n);
+        let frame = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let now = vec![
+            Action::Park { id: w(1), frame },
+            Action::Raise { id: w(5) },
+            Action::Raise { id: w(7) },
+            Action::Focus { id: w(7) },
+            Action::Focus { id: w(7) },
+        ];
+        let later = vec![Action::SetFrame { id: w(7), frame }, Action::SetFrame { id: w(5), frame }];
+        let (n, l) = defer_to_landing(now.clone(), later.clone(), |id| id == 7);
+        assert_eq!(n, vec![Action::Park { id: w(1), frame }, Action::Raise { id: w(5) }]);
+        assert_eq!(
+            l,
+            vec![Action::SetFrame { id: w(7), frame }, Action::SetFrame { id: w(5), frame }, Action::Raise { id: w(7) }, Action::Focus { id: w(7) }]
+        );
+        let (n, l) = defer_to_landing(now.clone(), later.clone(), |_| false);
+        assert_eq!((n, l), (now, later), "nothing held: as split");
+    }
+
+    /// A landing that never comes: past the deadline, or at the held batch's flush, the app is
+    /// unhidden; one the held batch unhid already (ours no more) is just forgotten.
+    #[test]
+    fn a_landing_that_never_comes_still_unhides() {
+        let mut h = Hides::default();
+        let t0 = Instant::now();
+        h.ours.insert(10, ours("com.example.alpha"));
+        h.ours.insert(11, ours("com.example.bravo"));
+        h.landing.insert(10, t0 + Duration::from_secs(2));
+        h.landing.insert(11, t0 + Duration::from_secs(2));
+        assert!(h.due_landings(t0, false).is_empty(), "before the deadline, no flush: it waits");
+        assert_eq!(h.due_landings(t0 + Duration::from_secs(3), false), vec![10, 11], "past the deadline");
+        assert!(h.landing.is_empty());
+        h.landing.insert(10, t0 + Duration::from_secs(2));
+        h.landing.insert(12, t0 + Duration::from_secs(2));
+        assert_eq!(h.due_landings(t0, true), vec![10], "flushed: every one still ours");
+        assert!(h.landing.is_empty(), "the one unhidden by the batch forgotten too");
+        h.landing.insert(10, t0);
+        h.forget(10);
+        assert!(h.landing.is_empty(), "a quit app forgotten");
     }
 
     #[test]
