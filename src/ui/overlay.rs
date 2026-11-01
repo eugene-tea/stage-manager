@@ -41,12 +41,12 @@ use objc2_quartz_core::{
     kCAGravityResize,
 };
 
-use crate::config::AnimationStyle;
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::Picture;
 use crate::platform::capture_frame::Extent;
 use crate::ui::motion_math::{Plane, Spring};
 use crate::ui::panels;
+use crate::ui::window_shadow::{ShadowLayers, WindowShadow};
 
 /// Every key path a ghost animates.
 /// The overlay's level when no window is given to go under: above every normal window (so
@@ -79,7 +79,7 @@ fn bounds(p: &Plane) -> CGRect {
 }
 
 /// A spring animation of `key` from `from` to `to`.
-fn spring_anim(spring: Spring, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
+pub(crate) fn spring_anim(spring: Spring, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
     let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
     anim.setMass(spring.mass);
     anim.setStiffness(spring.stiffness);
@@ -112,15 +112,49 @@ impl Look {
     }
 }
 
-/// One moving snapshot: a shadowed plane (the window's rectangle) holding a masked image
-/// (the window's picture, reaching past the plane where child windows stick out).
+/// The card's shadow on a snapshot (`[cards] shadow_*`, at the strip's scale): a Core
+/// Animation shadow, as the strip draws its thumbnails'.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardShadow {
+    pub color: (f64, f64, f64, f64),
+    pub opacity: f64,
+    pub radius: f64,
+    pub offset: (f64, f64),
+}
+
+impl CardShadow {
+    /// No shadow.
+    pub const NONE: CardShadow = CardShadow { color: (0.0, 0.0, 0.0, 1.0), opacity: 0.0, radius: 0.0, offset: (0.0, 0.0) };
+}
+
+/// How a snapshot's shadow looks: the window's at full size, the card's on a card, and how
+/// far along between the two it starts (0 a card, 1 the window).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GhostShadow {
+    /// The window's shadow (the key window's or an inactive one's).
+    pub window: WindowShadow,
+    /// The window's corner radius (points; the shadow follows it).
+    pub corner: f64,
+    pub card: CardShadow,
+    pub amount: f64,
+}
+
+/// One moving snapshot: a plane (the window's rectangle) holding the window's shadow
+/// ([`ShadowLayers`]) and a body that carries the card's shadow and holds a masked image (the
+/// window's picture, reaching past the plane where child windows stick out).
 pub struct Ghost {
     /// The window it shows.
     pub window: u32,
     /// Its perspective container, in the overlay's stack.
     depth: Retained<CALayer>,
     plane: Retained<CALayer>,
+    /// The image's frame on the plane; its Core Animation shadow is the card's.
+    body: Retained<CALayer>,
     image: Retained<CALayer>,
+    /// The window's shadow under the body (none on the corner's cover).
+    shadow: Option<ShadowLayers>,
+    /// The card shadow's opacity on a card (it fades out toward the window).
+    card_opacity: f64,
     /// Where the window is in the picture.
     extent: Extent,
     /// A picture whose window sits elsewhere in it, arrived mid-flight: shown at the next
@@ -159,7 +193,16 @@ impl Ghost {
 
     /// True while a spring moves the ghost's image.
     fn flying(&self) -> bool {
-        self.image.animationKeys().is_some_and(|keys| keys.count() > 0)
+        self.body.animationKeys().is_some_and(|keys| keys.count() > 0)
+    }
+
+    /// Puts the image at `position` with `bounds` on the plane (the body there, the image
+    /// filling it), at once.
+    fn place_image(&self, position: CGPoint, bounds: CGRect) {
+        self.body.setPosition(position);
+        self.body.setBounds(bounds);
+        self.image.setPosition(CGPoint::new(0.0, 0.0));
+        self.image.setBounds(bounds);
     }
 
     /// Shows `picture`; `place`: at its own extent on the plane (in a transaction).
@@ -169,8 +212,7 @@ impl Ghost {
         if place {
             self.extent = picture.extent;
             let (position, bounds) = image_frame(&self.extent, self.plane.bounds());
-            self.image.setPosition(position);
-            self.image.setBounds(bounds);
+            self.place_image(position, bounds);
         }
     }
 
@@ -188,7 +230,7 @@ impl Ghost {
     pub fn set(&mut self, p: Plane) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        for layer in [&self.plane, &self.image] {
+        for layer in [&self.plane, &self.body, &self.image] {
             for key in KEYS {
                 layer.removeAnimationForKey(&NSString::from_str(key));
             }
@@ -199,11 +241,60 @@ impl Ghost {
         self.plane.setBounds(look.bounds);
         self.plane.setTransform(look.transform);
         let (position, bounds) = image_frame(&self.extent, look.bounds);
-        self.image.setBounds(bounds);
-        self.image.setPosition(position);
+        self.place_image(position, bounds);
         self.image.setCornerRadius(look.corner);
+        if let Some(s) = &self.shadow {
+            s.layout(look.bounds.size);
+        }
         CATransaction::commit();
         self.target = p;
+    }
+
+    /// Shows `amount` of the window's shadow (0: the card's shadow alone, 1: the window's
+    /// alone), at once.
+    pub fn set_shadow_amount(&self, amount: f64) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(s) = &self.shadow {
+            s.set_amount(amount);
+        }
+        let key = NSString::from_str("shadowOpacity");
+        self.body.removeAnimationForKey(&key);
+        self.body.setShadowOpacity((self.card_opacity * (1.0 - amount.clamp(0.0, 1.0))) as f32);
+        CATransaction::commit();
+    }
+
+    /// Moves the shadow toward `amount` of the window's (0 the card's, 1 the window's) on
+    /// `spring`, with the plane's motion when started with it.
+    pub fn spring_shadow(&self, amount: f64, spring: Spring) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(s) = &self.shadow {
+            s.spring_amount(amount, spring);
+        }
+        let key = NSString::from_str("shadowOpacity");
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let from = unsafe { self.body.presentationLayer() }.map_or(self.body.shadowOpacity(), |l| l.shadowOpacity());
+        let to = (self.card_opacity * (1.0 - amount.clamp(0.0, 1.0))) as f32;
+        self.body.setShadowOpacity(to);
+        if (from - to).abs() > 1e-3 {
+            let anim = spring_anim(spring, "shadowOpacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to));
+            self.body.addAnimation_forKey(&anim, Some(&key));
+        } else {
+            self.body.removeAnimationForKey(&key);
+        }
+        CATransaction::commit();
+    }
+
+    /// The handover of the window's shadow: from `from` to `to` (1 shown, 0 gone), linear,
+    /// `begin` seconds from now for `duration` (`shadow_math::handover`).
+    pub fn fade_shadow(&self, from: f64, to: f64, begin: f64, duration: f64) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(s) = &self.shadow {
+            s.fade(from, to, begin, duration);
+        }
+        CATransaction::commit();
     }
 
     /// Where the ghost is drawn now (Core Animation's presentation of it; its target when
@@ -230,8 +321,10 @@ impl Ghost {
         let from_position = shown.as_ref().map_or(self.plane.position(), |l| l.position());
         let from_bounds = shown.as_ref().map_or(self.plane.bounds(), |l| l.bounds());
         let from_transform = shown.as_ref().map_or(self.plane.transform(), |l| l.transform());
+        // SAFETY: as above.
+        let shown_body = unsafe { self.body.presentationLayer() };
         let from_corner = shown_image.as_ref().map_or(self.image.cornerRadius(), |l| l.cornerRadius());
-        let from_image = shown_image.as_ref().map_or((self.image.position(), self.image.bounds()), |l| (l.position(), l.bounds()));
+        let from_image = shown_body.as_ref().map_or((self.body.position(), self.body.bounds()), |l| (l.position(), l.bounds()));
         let to = Look::of(&p);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -240,8 +333,7 @@ impl Ghost {
         self.plane.setPosition(to.position);
         self.plane.setBounds(to.bounds);
         self.plane.setTransform(to.transform);
-        self.image.setPosition(to_image.0);
-        self.image.setBounds(to_image.1);
+        self.place_image(to_image.0, to_image.1);
         self.image.setCornerRadius(to.corner);
         let add = |layer: &CALayer, key: &str, from: &AnyObject, to: &AnyObject| {
             let anim = spring_anim(spring, key, from, to);
@@ -250,11 +342,15 @@ impl Ghost {
         add(&self.plane, "position", &NSValue::new(from_position), &NSValue::new(to.position));
         add(&self.plane, "bounds", &NSValue::new(from_bounds), &NSValue::new(to.bounds));
         add(&self.plane, "transform", &transform_value(from_transform), &transform_value(to.transform));
+        add(&self.body, "bounds", &NSValue::new(from_image.1), &NSValue::new(to_image.1));
         add(&self.image, "bounds", &NSValue::new(from_image.1), &NSValue::new(to_image.1));
         if from_image.0 != to_image.0 {
-            add(&self.image, "position", &NSValue::new(from_image.0), &NSValue::new(to_image.0));
+            add(&self.body, "position", &NSValue::new(from_image.0), &NSValue::new(to_image.0));
         }
         add(&self.image, "cornerRadius", &NSNumber::new_f64(from_corner), &NSNumber::new_f64(to.corner));
+        if let Some(s) = &self.shadow {
+            s.spring_layout(from_bounds.size, to.bounds.size, spring);
+        }
         CATransaction::commit();
         self.target = p;
     }
@@ -498,17 +594,26 @@ impl Overlay {
         }
     }
 
+    /// The overlay's pixels per point.
+    pub fn scale(&self) -> f64 {
+        self.panel.backingScaleFactor()
+    }
+
     /// A new ghost of window `window` showing `image` (or a plain card when there is none),
-    /// placed at `at`, above the ghosts added before it.
-    pub fn ghost(&self, window: u32, picture: Option<&Picture>, at: Plane, style: &AnimationStyle, opacity: f32) -> Ghost {
+    /// placed at `at` with `shadow`, above the ghosts added before it.
+    pub fn ghost(&self, window: u32, picture: Option<&Picture>, at: Plane, shadow: &GhostShadow, opacity: f32) -> Ghost {
         let plane = CALayer::new();
         plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
-        plane.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
-        plane.setShadowOpacity(style.shadow_opacity as f32);
-        plane.setShadowRadius(style.shadow_radius);
-        plane.setShadowOffset(CGSize::new(0.0, style.shadow_offset_y));
         plane.setAllowsEdgeAntialiasing(true);
         plane.setOpacity(opacity);
+        let mut layers = ShadowLayers::new(&plane);
+        layers.set_shadow(&shadow.window, shadow.corner, self.scale(), bounds(&at).size);
+        let body = CALayer::new();
+        body.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        let (r, g, b, a) = shadow.card.color;
+        body.setShadowColor(Some(&color(r, g, b, a)));
+        body.setShadowRadius(shadow.card.radius);
+        body.setShadowOffset(CGSize::new(shadow.card.offset.0, shadow.card.offset.1));
         let img = CALayer::new();
         img.setAnchorPoint(CGPoint::new(0.0, 0.0));
         img.setMasksToBounds(true);
@@ -524,11 +629,24 @@ impl Overlay {
                 img.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
             }
         }
-        plane.addSublayer(&img);
+        body.addSublayer(&img);
+        plane.addSublayer(&body);
         let depth = self.stack(&plane, false);
         let extent = picture.map_or(Extent::NONE, |p| p.extent);
-        let mut g = Ghost { window, depth, plane, image: img, extent, pending: None, target: at };
+        let mut g = Ghost {
+            window,
+            depth,
+            plane,
+            body,
+            image: img,
+            shadow: Some(layers),
+            card_opacity: shadow.card.opacity,
+            extent,
+            pending: None,
+            target: at,
+        };
         g.set(at);
+        g.set_shadow_amount(shadow.amount);
         g
     }
 
@@ -564,9 +682,12 @@ impl Overlay {
             unsafe { window.setContents(Some(as_object(&*snapshot.image))) };
             img.addSublayer(&window);
         }
-        plane.addSublayer(&img);
+        let body = CALayer::new();
+        body.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        body.addSublayer(&img);
+        plane.addSublayer(&body);
         let depth = self.stack(&plane, true);
-        let mut g = Ghost { window: 0, depth, plane, image: img, extent: Extent::NONE, pending: None, target: at };
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at };
         g.set(at);
         g
     }

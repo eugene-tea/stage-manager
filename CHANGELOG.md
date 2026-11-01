@@ -4,6 +4,8 @@
 
 - A window arriving in a switch no longer jumps a little as the motion ends: it takes its
   place only once its picture is right over it.
+- Moving windows carry the same shadow as the windows themselves, the focused window's
+  larger one included, so the shadow no longer wobbles as a switch starts and ends.
 - An automatic update no longer installs while the screen is locked, when hidden windows
   could not come back until you unlocked; it waits until you are back and step away again.
 - The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges

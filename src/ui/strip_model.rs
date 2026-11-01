@@ -106,6 +106,12 @@ pub struct Transition {
     /// controller found ready: macOS raises an activated app's windows above the patch.
     /// `None`: the corner is left as it is.
     pub corner: Option<SwitchCover>,
+    /// The outgoing window that is key now (its stage's key window, else its front one): its
+    /// snapshot has the key window's shadow, the others an inactive window's.
+    pub key_out: Option<u32>,
+    /// The incoming window the switch makes key (the batch's focus, else the front one; none
+    /// when the focus goes to a window already in place).
+    pub key_in: Option<u32>,
 }
 
 /// One window of a [`Transition`].

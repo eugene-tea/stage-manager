@@ -46,13 +46,16 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTimer};
 
 use super::{Ghost as CardGhost, Strip, with_strip};
+use crate::config::SnapshotShadow;
 use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
-use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, travel, unveil_time};
-use crate::ui::overlay::{Ghost, Overlay};
+use crate::ui::motion_math::{PRESENTATION_LAG, Plane, SnapshotCache, Spring, settle_time, switch_spring, travel, unveil_time};
+use crate::ui::overlay::{CardShadow, Ghost, GhostShadow, Overlay};
+use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, StripEvent, Transition, TransitionReport};
+use crate::ui::window_shadow::{self, DEFAULT_CORNER, WindowShadow};
 
 /// The interval used when `snapshot_interval_ms = 0` (captures only on demand).
 const ON_DEMAND: Duration = Duration::from_secs(24 * 3600);
@@ -69,6 +72,10 @@ const HOLD_POLL: f64 = 1.0 / 60.0;
 /// windows are placed through the Accessibility API and reach the screen a presentation lag
 /// or more later; the snapshots, within a point of them by then, go after that.
 const AFTER_UNVEIL: f64 = 0.12;
+/// How long an incoming snapshot's shadow takes to fade at the handover, centred on the
+/// unveil, when the window's own shadow is expected on screen (seconds): a presentation lag
+/// each way ([`handover`]), over well before the landing ([`AFTER_UNVEIL`]).
+const HANDOVER_SPREAD: f64 = 2.0 * PRESENTATION_LAG;
 
 /// A running transition.
 struct Running {
@@ -295,11 +302,43 @@ impl Strip {
         switch_spring(&self.style)
     }
 
-    /// Lays the overlay over the main display with the strip's eye.
+    /// The shadows a snapshot can carry at full size (`[animation] shadow`): the key window's
+    /// and an inactive one's, or the custom one for both.
+    fn window_shadows(&self) -> [WindowShadow; 2] {
+        let a = &self.style.animation;
+        match a.shadow {
+            SnapshotShadow::Window => [WindowShadow::ACTIVE, WindowShadow::INACTIVE],
+            SnapshotShadow::Custom => [WindowShadow::custom(a.shadow_radius, a.shadow_opacity, a.shadow_offset_y); 2],
+        }
+    }
+
+    /// How a window's snapshot (`picture`, the window at `frame`) is shadowed: the key
+    /// window's shadow when `key`, an inactive window's otherwise, around its own corner
+    /// (read from the picture, else a titled window's; `[animation] corner_radius` when set),
+    /// and the card's shadow on a card; starting `amount` of the way to the window's (0 a
+    /// card, 1 the window).
+    fn ghost_shadow(&self, picture: Option<&Picture>, frame: Rect, key: bool, amount: f64) -> GhostShadow {
+        let [active, inactive] = self.window_shadows();
+        let set = self.style.animation.corner_radius;
+        let corner = if set > 0.0 { set } else { picture.and_then(|p| window_shadow::corner_of(p, (frame.w, frame.h))).unwrap_or(DEFAULT_CORNER) };
+        let c = &self.style.cards;
+        let k = self.m().k;
+        let card = CardShadow {
+            color: (c.shadow_color.r, c.shadow_color.g, c.shadow_color.b, c.shadow_color.a),
+            opacity: c.shadow_opacity,
+            radius: c.shadow_radius * k,
+            offset: (c.shadow_offset_x * k, c.shadow_offset_y * k),
+        };
+        GhostShadow { window: if key { active } else { inactive }, corner, card, amount }
+    }
+
+    /// Lays the overlay over the main display with the strip's eye, and has the snapshots'
+    /// shadows drawn for its scale ahead of the first switch.
     fn place_overlay(&mut self) {
         let g = &self.geometry;
         let eye = Point::new(g.global.x + g.m.eye.x, g.global.y + g.m.eye.y);
         self.motion.overlay.place(g.screen, g.primary_height, eye, g.m.perspective);
+        window_shadow::prepare(&self.window_shadows(), self.motion.overlay.scale());
     }
 
     /// A card thumbnail's plane in overlay coordinates (slid out with the strip when hidden).
@@ -441,6 +480,12 @@ impl Strip {
         let mut report = Vec::new();
         // With captures off or refused no snapshot is coming: plain ghosts stand in.
         let plain = !capture::pictures_expected();
+        // The key window's shadow on the window that is key (outgoing) or becomes key
+        // (incoming), an inactive one's on the others.
+        let (key_out, key_in) = (t.key_out, t.key_in);
+        // The outgoing windows leave `cover_ms` after their snapshots are drawn: the
+        // snapshots' shadows come in around then, as the windows' go.
+        let (out_begin, out_duration) = handover(style.cover_ms as f64 / 1000.0, 2.0 * style.cover_ms as f64 / 1000.0);
         for w in &t.outgoing {
             let id = w.window.id;
             let (end, card, aimed) = match self.card_for(&self.layouts, w).and_then(|(slot, l)| self.plane_on(l, id).map(|p| (p, l.stage, slot))) {
@@ -458,7 +503,10 @@ impl Strip {
                         continue;
                     }
                     let at = Plane::window(w.window.frame, o, style.corner_radius);
-                    self.motion.overlay.ghost(id, image.as_ref(), at, &style, 1.0)
+                    let shadow = self.ghost_shadow(image.as_ref(), w.window.frame, key_out == Some(id), 1.0);
+                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0);
+                    ghost.fade_shadow(0.0, 1.0, out_begin, out_duration);
+                    ghost
                 }
             };
             // It holds still over the window until the window has parked behind it.
@@ -488,9 +536,11 @@ impl Strip {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
-            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &style, 1.0);
+            let shadow = self.ghost_shadow(image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
+            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0);
             let end = Plane::window(w.window.frame, o, style.corner_radius);
             ghost.spring_to(end, spring);
+            ghost.spring_shadow(1.0, spring);
             report.push(GhostReport {
                 window: id,
                 outgoing: false,
@@ -534,6 +584,15 @@ impl Strip {
         let travel = report.iter().filter(|g| !g.outgoing).fold(0.0, |m: f64, g| m.max(travel(g.start, g.end)));
         let unveil = cover.incoming.then(|| unveil_time(&self.style, travel));
         let lands_after = unveil.map(|u| Instant::now() + Duration::from_secs_f64(u + AFTER_UNVEIL));
+        // The handover: each incoming snapshot's shadow fades around the unveil, when its
+        // window's own shadow is expected on screen, and is gone before the landing.
+        if let Some(u) = unveil {
+            let (begin, duration) = handover(u, HANDOVER_SPREAD);
+            let incoming: Vec<u32> = t.incoming.iter().map(|w| w.window.id).collect();
+            for g in ghosts.iter().filter(|g| incoming.contains(&g.window)) {
+                g.fade_shadow(1.0, 0.0, begin, duration);
+            }
+        }
         if let Some(unveil) = unveil {
             timers.push(after(unveil, move || {
                 // The strip busy (never expected from a timer): the unveil still goes.
@@ -633,6 +692,7 @@ impl Strip {
                     tracing::debug!(id, window, real = %real, off, "transition: ghost end vs the window's real frame");
                     if off > 0.25 {
                         g.spring_to(to, spring);
+                        g.spring_shadow(1.0, spring);
                     }
                 }
             }
@@ -655,6 +715,7 @@ impl Strip {
         for (i, end) in std::mem::take(&mut r.waiting) {
             if let Some(g) = r.ghosts.get_mut(i) {
                 g.spring_to(end, spring);
+                g.spring_shadow(0.0, spring);
             }
         }
         r.timers.push(after(settle_time(spring, SETTLED), move || {
@@ -940,8 +1001,8 @@ impl Strip {
             let image = self.motion.cache.get(w.id).cloned().or_else(|| self.thumbs.get(&w.id).cloned());
             let o = self.motion.overlay.origin();
             let at = Plane::under_pointer(Point::new(p.x - o.x, p.y - o.y), m.thumb_size(&f), grab, m.tilt, corner);
-            let style = self.style.animation.clone();
-            let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &style, self.style.drag.ghost_opacity as f32);
+            let shadow = self.ghost_shadow(image.as_ref(), f, false, 0.0);
+            let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &shadow, self.style.drag.ghost_opacity as f32);
             self.motion.window_card = Some(WindowCard { window: w.id, ghost, has_image: image.is_some() });
             self.motion.overlay.show_on_top();
         }

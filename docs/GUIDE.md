@@ -351,7 +351,9 @@ Some limits to know about:
 - Only the main screen is managed: windows on a second monitor are left alone. Every
   Desktop on the main screen has its own stages.
 - Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
-  jump when the motion ends. Card pictures refresh every 1.5 seconds rather than live.
+  jump when the motion ends. Their shadow is drawn like macOS's own and hands over to the
+  window's as it takes its place, which can still show as a faint flicker at the shadow's
+  edge. Card pictures refresh every 1.5 seconds rather than live.
 - With ⌘M, macOS may show a short animation toward the corner.
 - After ⌘-Tab to another Desktop, its stage is set up once the Desktop has slid in. (A Dock
   click sets it up before.)

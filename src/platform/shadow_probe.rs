@@ -26,7 +26,9 @@
 //! Prints one JSON object: every variant, and `suggested`, the reach per side at 1/255 (the
 //! shadow's whole extent, [`SUGGESTED_AT`]) over the variants that were drawn, rounded up to
 //! whole points. `--stack N` takes 1, 2, 4 … N windows at one frame together instead, as
-//! parked windows share the corner ([`run_stack`]).
+//! parked windows share the corner ([`run_stack`]). `--profile [--dump DIR]` measures the
+//! shadow's falloff for a key window and an inactive one, and `--compare` also how closely a
+//! snapshot's shadow as the overlay draws it matches each ([`super::shadow_profile`]).
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -106,10 +108,10 @@ pub fn middle_alpha(bytes: &[u8], row: usize, alpha: usize, frame: PixelRect) ->
 
 /// One window to measure.
 #[derive(Debug, Clone, Copy)]
-struct Variant {
-    toolbar: bool,
-    corner: bool,
-    normal_level: bool,
+pub(super) struct Variant {
+    pub(super) toolbar: bool,
+    pub(super) corner: bool,
+    pub(super) normal_level: bool,
 }
 
 impl Variant {
@@ -124,16 +126,29 @@ impl Variant {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--stack N]");
+    eprintln!("usage: stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--stack N] [--profile [--dump DIR]] [--compare]");
     ExitCode::from(2)
 }
 
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let (mut settle, mut size, mut only, mut stack) = (Duration::from_millis(600), NSSize::new(800.0, 500.0), None::<bool>, None::<usize>);
-    let mut it = args.iter();
+    let (mut profile, mut compare, mut dump) = (false, false, None::<std::path::PathBuf>);
+    let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
+        match a.as_str() {
+            "--profile" => {
+                profile = true;
+                continue;
+            }
+            "--compare" => {
+                compare = true;
+                continue;
+            }
+            _ => {}
+        }
         match (a.as_str(), it.next().map(String::as_str)) {
+            ("--dump", Some(dir)) => dump = Some(dir.into()),
             ("--settle", Some(ms)) => match ms.parse::<u64>() {
                 Ok(ms) => settle = Duration::from_millis(ms.clamp(100, 5000)),
                 Err(_) => return usage(),
@@ -165,6 +180,9 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     if let Some(n) = stack {
         return run_stack(mtm, &main, n, size, settle);
+    }
+    if profile || compare {
+        return super::shadow_profile::run(mtm, &main, size, settle, dump.as_deref(), compare);
     }
     let mut variants = Vec::new();
     for toolbar in [false, true] {
@@ -393,7 +411,7 @@ fn stack_image(ids: &[u32], bounds: Rect) -> Option<objc2_core_foundation::CFRet
 
 /// A titled window (with a unified toolbar for `v.toolbar`), at a level just above the
 /// desktop icons (under every normal window) unless `v.normal_level`; never key.
-fn make_window(mtm: MainThreadMarker, v: Variant, size: NSSize) -> Retained<NSWindow> {
+pub(super) fn make_window(mtm: MainThreadMarker, v: Variant, size: NSSize) -> Retained<NSWindow> {
     let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable;
     // SAFETY: a fresh allocation, a valid frame and style; released only by us.
     let window = unsafe {
@@ -415,7 +433,7 @@ fn make_window(mtm: MainThreadMarker, v: Variant, size: NSSize) -> Retained<NSWi
 
 /// The image of window `id` alone with its framing, over `bounds` (global, top-left), or over
 /// the window and its framing when `None`, at the display's resolution.
-fn window_image(id: u32, bounds: Option<Rect>) -> Option<objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>> {
+pub(super) fn window_image(id: u32, bounds: Option<Rect>) -> Option<objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>> {
     // CGRectNull: the window's own bounds, framing included.
     let rect = bounds.map_or(CGRect::new(CGPoint::new(f64::INFINITY, f64::INFINITY), CGSize::new(0.0, 0.0)), |b| {
         CGRect::new(CGPoint::new(b.x, b.y), CGSize::new(b.w, b.h))
@@ -428,7 +446,7 @@ fn window_image(id: u32, bounds: Option<Rect>) -> Option<objc2_core_foundation::
 }
 
 /// Runs the main run loop for `d` (the window server draws the window meanwhile).
-fn spin(d: Duration) {
+pub(super) fn spin(d: Duration) {
     let until = NSDate::dateWithTimeIntervalSinceNow(d.as_secs_f64());
     NSRunLoop::currentRunLoop().runUntilDate(&until);
 }

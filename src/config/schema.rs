@@ -303,7 +303,9 @@ pub const KEYS: &[KeyDef] = &[
         "Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first."),
     k("animation", "corner_radius", f(0.0, 60.0), "0.0",
         "Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius)."),
-    k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow."),
+    k("animation", "shadow", Kind::Choice(&["window", "custom"]), "\"window\"",
+        "A moving snapshot's shadow: \"window\" is macOS's own window shadow (the key window's on the window that is or becomes key, an inactive window's on the others), turning into the card's shadow on a card; \"custom\" is one shadow from shadow_radius, shadow_opacity and shadow_offset_y."),
+    k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow with shadow = \"custom\"."),
     k("animation", "shadow_opacity", f(0.0, 1.0), "0.35", "Opacity of that shadow."),
     k("animation", "shadow_offset_y", f(-100.0, 100.0), "10.0", "Vertical offset of that shadow (down is positive)."),
     k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
@@ -503,6 +505,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-18.toml"),
     include_str!("legacy/default-19.toml"),
     include_str!("legacy/default-20.toml"),
+    include_str!("legacy/default-21.toml"),
 ];
 
 #[cfg(test)]

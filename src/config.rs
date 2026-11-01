@@ -215,6 +215,9 @@ pub struct AnimationStyle {
     pub unpark_at: f64,
     pub cover_ms: u64,
     pub corner_radius: f64,
+    /// A moving snapshot's shadow: macOS's window shadow, or one of its own.
+    pub shadow: SnapshotShadow,
+    /// `shadow = "custom"`: its blur radius, opacity and offset down.
     pub shadow_radius: f64,
     pub shadow_opacity: f64,
     pub shadow_offset_y: f64,
@@ -225,6 +228,17 @@ pub struct AnimationStyle {
     /// corner, where macOS has raised them, is covered meanwhile); off, they come to their
     /// frames at once.
     pub activation_grows: bool,
+}
+
+/// `[animation] shadow`: a moving snapshot's shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapshotShadow {
+    /// macOS's own window shadow: the key window's on the window that is or becomes key, an
+    /// inactive window's on the others (Apple's look).
+    #[default]
+    Window,
+    /// One shadow from `shadow_radius`, `shadow_opacity` and `shadow_offset_y`.
+    Custom,
 }
 
 /// `[strip] level`: where the strip sits among windows.
@@ -898,6 +912,10 @@ impl Config {
                     unpark_at: v.num("animation.unpark_at"),
                     cover_ms: v.uint("animation.cover_ms"),
                     corner_radius: v.num("animation.corner_radius"),
+                    shadow: match v.text("animation.shadow") {
+                        "custom" => SnapshotShadow::Custom,
+                        _ => SnapshotShadow::Window,
+                    },
                     shadow_radius: v.num("animation.shadow_radius"),
                     shadow_opacity: v.num("animation.shadow_opacity"),
                     shadow_offset_y: v.num("animation.shadow_offset_y"),

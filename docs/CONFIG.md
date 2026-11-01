@@ -127,7 +127,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `animation.unpark_at` | `0.99` | number, 0.5 to 1 | The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 600 ms for a window growing from its card). |
 | `animation.cover_ms` | `20` | whole number, 0 to 500 | Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first. |
 | `animation.corner_radius` | `0.0` | number, 0 to 60 | Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius). |
-| `animation.shadow_radius` | `24.0` | number, 0 to 100 | Blur radius of a moving snapshot's shadow. |
+| `animation.shadow` | `"window"` | "window", "custom" | A moving snapshot's shadow: "window" is macOS's own window shadow (the key window's on the window that is or becomes key, an inactive window's on the others), turning into the card's shadow on a card; "custom" is one shadow from shadow_radius, shadow_opacity and shadow_offset_y. |
+| `animation.shadow_radius` | `24.0` | number, 0 to 100 | Blur radius of a moving snapshot's shadow with shadow = "custom". |
 | `animation.shadow_opacity` | `0.35` | number, 0 to 1 | Opacity of that shadow. |
 | `animation.shadow_offset_y` | `10.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
 | `animation.snapshot_interval_ms` | `2000` | whole number, 0 to 60000 | How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip. |

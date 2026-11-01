@@ -130,7 +130,15 @@ during the motion brings the windows in at once; typing never cuts it short (the
 already the new stage's). An arriving window takes its place under its picture once the
 picture as shown on screen is within a point of it on every edge (about 600 ms after the
 click for a window growing from its card, 450 ms at the least: `[animation] unpark_at` is the
-floor), so the hand-over shows no step; the picture goes a moment later. Arriving windows
+floor), so the hand-over shows no step; the picture goes a moment later. Each picture
+carries macOS's own window shadow, measured on a Studio Display (`stage-manager probe-shadow
+--profile`: a hairline rim and a soft drop, the key window's 2.5 times as wide as an inactive
+window's): the key window's on the window that is or becomes key, an inactive window's on
+the others, turning into the card's shadow on the spring as it nears its card. A window's own
+shadow appears in one frame at a moment known only within a frame or two, so the picture's
+shadow fades over 100 ms centred on it (the unveil), done before the picture goes; an
+outgoing picture's shadow comes in over twice `[animation] cover_ms` as its window leaves.
+Arriving windows
 wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
@@ -320,7 +328,7 @@ starts every app in a stage of its own, as Apple's does. One log line sums it up
   window.
 - Not measured yet on Apple's: the edge-reveal and auto-hide delays (ours: 250 ms and
   500 ms), the hover's exact easing, a new card's fade, a Shift-click on a card holding
-  several apps, the cards' shadow and corner radius, and the shadow of moving windows.
+  several apps, and the cards' shadow and corner radius.
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a
   stage of its own, shown in front. Several apps moved at once get a stage each; the front
