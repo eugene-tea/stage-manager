@@ -124,8 +124,8 @@ pub struct Transition {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LateNote {
     pub id: u64,
-    /// On screen now (their app unhidden), with their window shadow: their snapshots hand the
-    /// shadow over.
+    /// On screen now (their app unhidden; the strip hands the shadow over once the window
+    /// server shows them).
     pub shown: Vec<u32>,
     /// Drawn in their final look now (their app took the activation of its key window focused
     /// again, or none follows): their snapshots may land. Each is also shown.
@@ -489,6 +489,12 @@ pub struct GhostReport {
     pub real: Option<Rect>,
     /// For an incoming window: where its snapshot was drawn when the strip unveiled it.
     pub at_unveil: Option<Rect>,
+    /// For an incoming window: when the window server showed it at its frame (ms after the
+    /// unveil; `None`: not seen, the wait ran out).
+    pub shown_ms: Option<u64>,
+    /// For an incoming window: when its snapshot's shadow began to fade (ms after the unveil);
+    /// never before `shown_ms`.
+    pub handover_ms: Option<u64>,
 }
 
 /// The ghosts of the last transition the strip drew.

@@ -141,14 +141,23 @@ carries macOS's own window shadow, measured on a Studio Display (`stage-manager 
 --profile`: a hairline rim and a soft drop, the key window's 2.5 times as wide as an inactive
 window's): the key window's on the window that is or becomes key, an inactive window's on
 the others, turning into the card's shadow on the spring as it nears its card. A window's own
-shadow appears in one frame at a moment known only within a frame or two, so the picture's
-shadow fades over 100 ms centred on it (the unveil), done before the picture goes; an
-outgoing picture's shadow comes in over twice `[animation] cover_ms` as its window leaves.
+shadow appears in one frame, so the picture keeps its shadow until the window server lists
+the window on screen at its frame (asked every half frame from the unveil), then fades it
+over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few
+frames read about 2 levels darker, while a shadow faded before its window showed read 16
+lighter for 80 ms (the owner's third recording, 11-01; the window reached the screen a frame
+after a fade centred on the unveil had ended). The picture goes only after that, 300 ms past
+the unveil at the most; an outgoing picture's shadow comes in over twice
+`[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
+switch's pictures move (a round of captures is the window server's work, and dropped a frame).
 With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
-unhide after the unveil has taken (about 100 ms later): its picture's shadow fades around
-then, and the picture stays until the app has taken the activation of its key window focused
-again, so the window is never seen in its inactive look (11-01: Messages flipped to its key
-look 180 ms after it showed); 400 ms past the unveil at the most.
+unhide after the unveil has taken (about 100 ms later), when the window server lists it on
+screen: its picture's shadow hands over then, and the picture stays until the app has taken
+the activation of its key window focused again, so the window is never seen in its inactive
+look (11-01: Messages flipped to its key look 180 ms after it showed); 400 ms past the unveil
+at the most. An app that has not taken that activation 60 ms after its key window was focused
+again is focused once more, twice at most (11-01: Messages's window took the focus, the app
+never became active, and the keyboard stayed with the app before).
 Arriving windows
 wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS

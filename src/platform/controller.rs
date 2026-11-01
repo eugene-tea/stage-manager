@@ -3275,6 +3275,8 @@ impl Controller {
                 self.app_terminated(pid);
             }
             WinEvent::AppActivated(pid) => {
+                // An app we unhid and focused again took it (or another app did: no retry).
+                self.activation_noticed(pid);
                 let waiting: Vec<u32> =
                     self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
                 for id in waiting {

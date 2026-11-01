@@ -9,6 +9,10 @@
 - The end of a switch no longer flickers: the arriving window comes to rest without a last
   small snap, shows in its focused look as its picture fades away, and a hidden app's window
   keeps its shadow until it is really on screen.
+- The arriving window's picture keeps its shadow until the window itself is on screen, so the
+  shadow no longer lightens for a moment at the end of a switch.
+- With hidden parked apps, a switch to a hidden app's stage now always gives it the keyboard:
+  an app that does not take its activation is asked again.
 - An automatic update no longer installs while the screen is locked, when hidden windows
   could not come back until you unlocked; it waits until you are back and step away again.
 - The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges

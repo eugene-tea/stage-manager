@@ -2428,8 +2428,13 @@ def click_slot(slot, what, settle=1.0):
             # The handover: where its snapshot was drawn when the window took its place.
             if b and (not g.get("at_unveil") or edge_gap(g["at_unveil"], b) > 2.0):
                 hand.append(f"incoming {g['window']} drawn at {g.get('at_unveil') and fmt(g['at_unveil'])}, the window is at {fmt(b)}")
+            # Its shadow hands over once the window server shows the window at its frame,
+            # never before (11-01: faded with nothing under it).
+            shown_ms, handover_ms = g.get("shown_ms"), g.get("handover_ms")
+            if shown_ms is None or handover_ms is None or handover_ms < shown_ms:
+                hand.append(f"incoming {g['window']} shown at {shown_ms} ms, its shadow handed over at {handover_ms} ms after the unveil")
     check(not bad, f"{what}: every snapshot started on its window and landed on its card or window" + (f" ({'; '.join(bad)})" if bad else ""))
-    check(not hand, f"{what}: every incoming window took its place within 2 pt of its snapshot "
+    check(not hand, f"{what}: every incoming window took its place within 2 pt of its snapshot, its shadow handed over once the window server showed it "
                     f"(travel {t.get('travel', 0):.0f} pt, unveiled at {t.get('unveil_ms')} ms)" + (f" ({'; '.join(hand)})" if hand else ""))
     return s
 
@@ -5438,6 +5443,8 @@ def hide_arrival(how, k, what):
         told = [ln[ln.find("on_screen="):][:120] for ln in shown[:3]]
         check(bool(shown) and all("waited_out=false" in ln for ln in shown),
               f"{what}: the snapshots land once the windows show, told by the app's notices ({told or 'none'})")
+        check("never took the activation of its key window" not in log,
+              f"{what}: every app we unhid took the activation of its key window focused again")
         unveil = re.search(r"unveil_ms=(\d+)", lines[covered]) if covered is not None else None
         if p is not None:
             first, away = first_on_screen(p.get("samples", []), frames)

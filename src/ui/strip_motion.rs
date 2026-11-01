@@ -22,11 +22,13 @@
 //!   windows on every edge (`motion_math::unveil_time`, by the farthest edge's travel; not
 //!   before `[animation] unpark_at` of the motion), and the snapshots stay over the windows
 //!   a moment after ([`AFTER_UNVEIL`]) while they show, then fade out over them
-//!   ([`LANDING_FADE`]). The incoming key window is captured again once it is key
+//!   ([`LANDING_FADE`]). Each hands its shadow over to its window's once the window server
+//!   shows the window at its frame, polled from the unveil ([`Strip::poll_shown`]), and the
+//!   landing waits for that too. The incoming key window is captured again once it is key
 //!   ([`RECAPTURE_AFTER`]), its picture cross-fading in mid-flight. Late windows (an app we
-//!   hid, unhidden after the unveil: [`Transition::late`]) hand their shadow over when they
-//!   are on screen and land once drawn in their key look ([`Strip::late_shown`]). Meanwhile
-//!   the park corner, where
+//!   hid, unhidden after the unveil: [`Transition::late`]) show once the app is unhidden and
+//!   land once drawn in their key look ([`Strip::late_shown`]). Meanwhile the park corner,
+//!   where
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
 //!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
@@ -55,7 +57,10 @@ use crate::config::SnapshotShadow;
 use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
-use crate::ui::motion_math::{PRESENTATION_LAG, Plane, SnapshotCache, Spring, settle_time, switch_spring, travel, unveil_time};
+use crate::platform::windows;
+use crate::ui::motion_math::{
+    Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, switch_spring, travel, unveil_time,
+};
 use crate::ui::overlay::{CardShadow, Ghost, GhostShadow, Overlay};
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
@@ -77,10 +82,16 @@ const HOLD_POLL: f64 = 1.0 / 60.0;
 /// windows are placed through the Accessibility API and reach the screen a presentation lag
 /// or more later; the snapshots, within a point of them by then, go after that.
 const AFTER_UNVEIL: f64 = 0.12;
-/// How long an incoming snapshot's shadow takes to fade at the handover, centred on the
-/// unveil, when the window's own shadow is expected on screen (seconds): a presentation lag
-/// each way ([`handover`]), over well before the landing ([`AFTER_UNVEIL`]).
-const HANDOVER_SPREAD: f64 = 2.0 * PRESENTATION_LAG;
+/// How often the window server is asked whether the incoming windows show at their frames,
+/// from the unveil on (seconds: half a 60 Hz frame).
+const SHOWN_POLL: f64 = 1.0 / 120.0;
+/// How long past the unveil an incoming snapshot waits for the window server to show its
+/// window at its frame before it hands its shadow over anyway (seconds; a late window waits
+/// [`LATE_MAX`]). The windows showed 30–70 ms after the unveil (11-01).
+const SHOWN_MAX: f64 = 0.3;
+/// The strip's thumbnail captures wait at most this long for a switch to land (seconds;
+/// [`Capturer::hold_until`]).
+const THUMBS_HOLD_MAX: f64 = 1.5;
 /// How long past the unveil the snapshots of late windows ([`Transition::late`]: an app we hid,
 /// unhidden after the unveil) wait for them to show before they hand over and land anyway
 /// (seconds). Messages showed and took its activation ~115 ms after the unveil (11-01).
@@ -119,11 +130,18 @@ struct Running {
     lands_after: Option<Instant>,
     /// When the strip unveils the incoming windows.
     unveil_at: Option<Instant>,
-    /// Late incoming windows ([`Transition::late`]) not on screen yet: their snapshots keep
-    /// their shadows ([`Strip::late_shown`]).
-    late_hidden: Vec<u32>,
+    /// Incoming windows the window server does not show at their frames yet: their snapshots
+    /// keep their shadows, and the landing waits ([`Strip::poll_shown`]).
+    unshown: Vec<u32>,
+    /// The late incoming windows ([`Transition::late`]): they may take [`LATE_MAX`] to show.
+    late: Vec<u32>,
     /// Late incoming windows not drawn in their final look yet: the landing waits for them.
     late_inactive: Vec<u32>,
+    /// The landing is not before this once every incoming window shows (its shadow handed
+    /// over: [`shown_lands`]).
+    shown_land: Option<Instant>,
+    /// Nor before this once every late window is in its final look.
+    final_land: Option<Instant>,
     /// The landing was due once already (its outgoing snapshots settled): a landing moved
     /// earlier needs a timer of its own.
     settled: bool,
@@ -460,8 +478,10 @@ impl Strip {
         if p.tilt == 0.0 {
             return Rect::new(p.left_mid.x + o.x, top + o.y, p.size.w, p.size.h);
         }
+        // Its own turn: a snapshot a hair from flat (its spring not quite at rest) is about
+        // as wide as its window, never measured as a card (11-01: 1217 pt read as 355).
         let g = self.geometry.global;
-        let b = self.m().projected_bounds(p.left_mid.x + o.x - g.x, top + o.y - g.y, p.size.w, p.size.h);
+        let b = self.m().projected_bounds_turned(p.left_mid.x + o.x - g.x, top + o.y - g.y, p.size.w, p.size.h, p.tilt);
         b.translate(g.x, g.y)
     }
 
@@ -583,6 +603,8 @@ impl Strip {
                 end: self.plane_rect(&end),
                 real: None,
                 at_unveil: None,
+                shown_ms: None,
+                handover_ms: None,
             });
             waiting.push((ghosts.len(), end));
             ghosts.push(ghost);
@@ -613,6 +635,8 @@ impl Strip {
                 end: self.plane_rect(&end),
                 real: None,
                 at_unveil: None,
+                shown_ms: None,
+                handover_ms: None,
             });
             ghosts.push(ghost);
             cover.incoming = true;
@@ -638,6 +662,8 @@ impl Strip {
         self.show_overlay(below);
         self.motion.overlay.flush();
         self.motion.landing = None;
+        // The cards' thumbnails are not captured while the snapshots move.
+        self.capturer.hold_until(Some(Instant::now() + Duration::from_secs_f64(THUMBS_HOLD_MAX)));
         strip_model::cover(t.id, cover);
         let id = t.id;
         let mut timers = Vec::new();
@@ -650,21 +676,17 @@ impl Strip {
         // Late windows (an app we hid, unhidden after the unveil) show when their app says so,
         // bounded: their snapshots wait for that ([`Self::late_shown`]).
         let late: Vec<u32> = t.late.iter().copied().filter(|w| ghosts.iter().any(|g| g.window == *w)).collect();
-        let lands_after = unveil.map(|u| started + Duration::from_secs_f64(u + if late.is_empty() { 0.0 } else { LATE_MAX } + AFTER_UNVEIL));
-        // The handover: each incoming snapshot's shadow fades around the unveil, when its
-        // window's own shadow is expected on screen, and is gone before the landing; a late
-        // window's around when it shows.
-        if let Some(u) = unveil {
-            let (begin, duration) = handover(u, HANDOVER_SPREAD);
-            let incoming: Vec<u32> = t.incoming.iter().map(|w| w.window.id).filter(|w| !late.contains(w)).collect();
-            for g in ghosts.iter().filter(|g| incoming.contains(&g.window)) {
-                g.fade_shadow(1.0, 0.0, begin, duration);
-            }
-            if !late.is_empty() {
-                timers.push(after(u + LATE_MAX, move || {
-                    with_strip(|s| s.late_shown(id, None, None));
-                }));
-            }
+        // The handover: each incoming snapshot keeps its shadow until the window server shows
+        // its window at its frame, polled from the unveil ([`Self::poll_shown`]); the landing
+        // waits for every one (the latest it can be until then).
+        let unshown: Vec<u32> =
+            if unveil.is_some() { ghosts.iter().filter(|g| t.incoming.iter().any(|w| w.window.id == g.window)).map(|g| g.window).collect() } else { Vec::new() };
+        let wait = if late.is_empty() { SHOWN_MAX } else { LATE_MAX.max(SHOWN_MAX) };
+        let lands_after = unveil.map(|u| started + Duration::from_secs_f64(u + wait + SHOWN_FADE + AFTER_UNVEIL));
+        if let Some(u) = unveil.filter(|_| !late.is_empty()) {
+            timers.push(after(u + LATE_MAX, move || {
+                with_strip(|s| s.late_shown(id, None, None));
+            }));
         }
         // The key window's snapshot, taken parked and inactive, again once it is key.
         if let Some(key) = t.key_in.filter(|k| !late.contains(k) && ghosts.iter().any(|g| g.window == *k) && !plain) {
@@ -733,8 +755,11 @@ impl Strip {
                 arrived,
                 lands_after,
                 unveil_at,
-                late_hidden: late.clone(),
+                unshown,
+                late: late.clone(),
                 late_inactive: late,
+                shown_land: None,
+                final_land: None,
                 settled: false,
             });
     }
@@ -835,46 +860,133 @@ impl Strip {
             });
         }
         strip_model::emit(StripEvent::Unveil { id });
+        // The controller places the windows now: from here the window server is asked when
+        // each shows at its frame.
+        self.poll_shown(id);
     }
 
-    /// Late incoming windows of transition `id` on their way to the screen: `shown` are on
-    /// screen now with their window shadow, `active` drawn in their final look too (each also
-    /// shown); `None` for both: the wait is over ([`LATE_MAX`] past the unveil), every one
-    /// counts as both. A shown window's snapshot hands its shadow over around when the window
-    /// is on screen, a presentation lag from now (never before the unveil); once every late
-    /// window is in its final look the transition lands [`AFTER_UNVEIL`] after that, as after
-    /// an unveil.
+    /// Asks the window server whether transition `id`'s incoming windows not shown yet show
+    /// at their frames now (one query for all of them); those that do hand their shadow over
+    /// ([`Self::windows_shown`]). Again each [`SHOWN_POLL`] while any is left; past
+    /// [`SHOWN_MAX`] after the unveil ([`LATE_MAX`] for a late window) one left hands over
+    /// anyway (logged).
+    fn poll_shown(&mut self, id: u64) {
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.unshown.is_empty()) else { return };
+        let now = Instant::now();
+        let since = r.unveil_at.map_or(0.0, |u| now.saturating_duration_since(u).as_secs_f64());
+        let described = windows::describe(&r.unshown);
+        let shown: Vec<u32> = r
+            .unshown
+            .iter()
+            .copied()
+            .filter(|w| {
+                let frame = r.arrived.iter().find(|(a, _)| a == w).map(|(_, f)| *f);
+                let seen = described.iter().find(|d| d.id == *w);
+                frame.zip(seen).is_some_and(|(f, d)| shows_at(d.onscreen, d.bounds, f))
+            })
+            .collect();
+        let waited: Vec<u32> = r
+            .unshown
+            .iter()
+            .copied()
+            .filter(|w| !shown.contains(w) && since >= if r.late.contains(w) { LATE_MAX.max(SHOWN_MAX) } else { SHOWN_MAX })
+            .collect();
+        for w in &waited {
+            let seen = described.iter().find(|d| d.id == *w).map(|d| format!("{} onscreen={}", d.bounds, d.onscreen));
+            tracing::debug!(id, window = w, ?seen, since_unveil_ms = (since * 1000.0).round() as u64, "transition: the window server never showed the incoming window at its frame; its snapshot hands over anyway");
+        }
+        self.windows_shown(id, &shown, true);
+        self.windows_shown(id, &waited, false);
+        if self.motion.running.as_ref().is_some_and(|r| r.id == id && !r.unshown.is_empty()) {
+            let timer = after(SHOWN_POLL, move || {
+                with_strip(|s| s.poll_shown(id));
+            });
+            if let Some(r) = self.motion.running.as_mut() {
+                r.timers.push(timer);
+            }
+        }
+    }
+
+    /// Transition `id`'s incoming windows `windows` show at their frames now (`seen`: the
+    /// window server said so; else the wait ran out): each snapshot's shadow fades from
+    /// [`shown_handover`] on, and once every incoming window shows the landing is planned
+    /// ([`Self::replan_landing`]). Kept for `ctl state` ([`GhostReport::shown_ms`]).
+    fn windows_shown(&mut self, id: u64, windows: &[u32], seen: bool) {
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        let windows: Vec<u32> = windows.iter().copied().filter(|w| r.unshown.contains(w)).collect();
+        if windows.is_empty() {
+            return;
+        }
+        r.unshown.retain(|w| !windows.contains(w));
+        let now = Instant::now();
+        let since = r.unveil_at.map_or(0.0, |u| now.saturating_duration_since(u).as_secs_f64());
+        let begin = shown_handover(since);
+        for g in r.ghosts.iter().filter(|g| windows.contains(&g.window)) {
+            g.fade_shadow(1.0, 0.0, begin, SHOWN_FADE);
+        }
+        let land = now + Duration::from_secs_f64(shown_lands(since));
+        r.shown_land = Some(r.shown_land.map_or(land, |l| l.max(land)));
+        let (shown_ms, handover_ms) = ((since * 1000.0).round() as u64, ((since + begin) * 1000.0).round() as u64);
+        tracing::debug!(id, ?windows, seen, shown_ms, handover_ms, "transition: the incoming windows show at their frames; their snapshots hand the shadow over");
+        strip_model::update_transition(id, |t| {
+            for g in t.ghosts.iter_mut().filter(|g| !g.outgoing && windows.contains(&g.window)) {
+                g.shown_ms = seen.then_some(shown_ms);
+                g.handover_ms = Some(handover_ms);
+            }
+        });
+        Self::replan_landing(r, now);
+    }
+
+    /// Plans transition `r`'s landing once every incoming window shows and every late one is
+    /// in its final look: not before [`AFTER_UNVEIL`] past the unveil, each shadow handed over
+    /// ([`Running::shown_land`]) and each late window [`AFTER_UNVEIL`] past its final look
+    /// ([`Running::final_land`]); a timer of its own when the landing was due already.
+    fn replan_landing(r: &mut Running, now: Instant) {
+        if !r.unshown.is_empty() || !r.late_inactive.is_empty() {
+            return;
+        }
+        let Some(floor) = r.unveil_at.map(|u| u + Duration::from_secs_f64(AFTER_UNVEIL)) else { return };
+        let at = [r.shown_land, r.final_land].into_iter().flatten().fold(floor, Instant::max);
+        if r.lands_after == Some(at) {
+            return;
+        }
+        r.lands_after = Some(at);
+        if r.settled {
+            let id = r.id;
+            r.timers.push(after(at.saturating_duration_since(now).as_secs_f64(), move || {
+                with_strip(|s| s.end_transition(id));
+            }));
+        }
+    }
+
+    /// Late incoming windows of transition `id` on their way to the screen, as their app's
+    /// notices tell: `shown` are unhidden (logged: the window server's word decides when their
+    /// shadow hands over, [`Self::poll_shown`]), `active` drawn in their final look; `None`
+    /// for both: the wait is over ([`LATE_MAX`] past the unveil), every one counts as final.
+    /// Once every late window is in its final look the transition lands [`AFTER_UNVEIL`] after
+    /// that, as after an unveil (and not before every window shows).
     pub(super) fn late_shown(&mut self, id: u64, shown: Option<&[u32]>, active: Option<&[u32]>) {
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
         let now = Instant::now();
         let all = shown.is_none() && active.is_none();
-        let named = |w: &u32| all || shown.is_some_and(|s| s.contains(w)) || active.is_some_and(|a| a.contains(w));
         let final_look = |w: &u32| all || active.is_some_and(|a| a.contains(w));
-        let on_screen: Vec<u32> = r.late_hidden.iter().copied().filter(named).collect();
+        let on_screen: Vec<u32> = shown.unwrap_or_default().iter().copied().filter(|w| r.late.contains(w)).collect();
         let done: Vec<u32> = r.late_inactive.iter().copied().filter(final_look).collect();
-        if on_screen.is_empty() && done.is_empty() {
+        if done.is_empty() && on_screen.iter().all(|w| !r.unshown.contains(w)) {
             return;
         }
-        r.late_hidden.retain(|w| !on_screen.contains(w));
         r.late_inactive.retain(|w| !done.contains(w));
-        // Not before the unveil: a window placed then shows a presentation lag later.
-        let from_now = r.unveil_at.map_or(0.0, |u| u.saturating_duration_since(now).as_secs_f64());
-        let (begin, duration) = handover(from_now + PRESENTATION_LAG, HANDOVER_SPREAD);
-        for g in r.ghosts.iter().filter(|g| on_screen.contains(&g.window)) {
-            g.fade_shadow(1.0, 0.0, begin, duration);
-        }
         let since_unveil_ms = r.unveil_at.map(|u| now.saturating_duration_since(u).as_millis() as u64);
-        tracing::debug!(id, on_screen = ?on_screen, final_look = ?done, waited_out = all, since_unveil_ms, "transition: late windows show");
+        let unshown = r.unshown.clone();
+        tracing::debug!(id, on_screen = ?on_screen, final_look = ?done, waited_out = all, since_unveil_ms, ?unshown, "transition: late windows show");
         if done.is_empty() || !r.late_inactive.is_empty() {
             return;
         }
-        let lands = from_now + AFTER_UNVEIL;
-        r.lands_after = Some(now + Duration::from_secs_f64(lands));
-        if r.settled {
-            r.timers.push(after(lands, move || {
-                with_strip(|s| s.end_transition(id));
-            }));
-        }
+        // Not before the unveil: a window placed then shows a presentation lag later.
+        let from_now = r.unveil_at.map_or(0.0, |u| u.saturating_duration_since(now).as_secs_f64());
+        let land = now + Duration::from_secs_f64(from_now + AFTER_UNVEIL);
+        r.final_land = Some(r.final_land.map_or(land, |l| l.max(land)));
+        Self::replan_landing(r, now);
     }
 
     /// Captures transition `id`'s incoming key window `key` again (its snapshot was taken
@@ -962,6 +1074,7 @@ impl Strip {
     /// [`cover_holds`]), or a new one starts and hides the overlay itself if it draws nothing.
     fn finish_transition(&mut self, landed: bool) {
         let Some(mut r) = self.motion.running.take() else { return };
+        self.capturer.hold_until(None);
         for t in &r.timers {
             t.invalidate();
         }

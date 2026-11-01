@@ -29,7 +29,10 @@
 //!   activated something else); once the unhide has taken, the key window of such an app is
 //!   focused again ([`Hides::refocus`]), and the hide pass runs again at every activation
 //!   ([`Controller::hide_pass`] from `AppActivated`), so the app left behind is hidden the
-//!   moment the new stage's app is active.
+//!   moment the new stage's app is active. An app that does not take that activation within
+//!   [`ACTIVATION_WAIT`] (11-01: Messages, its window focused, never activated; it takes it
+//!   within 10 ms otherwise) is focused again, [`ACTIVATION_TRIES`] times at most
+//!   ([`Controller::activation_step`]), so the keyboard goes where the click meant.
 //! - **macOS's unhide** (⌘Tab, a Dock click, Show All; [`Controller::app_visibility`]): the
 //!   app is ours no more; the activation's switch follows as for any app (its windows already
 //!   in place count as arriving at once). An in-place window the switch did not bring (the
@@ -83,6 +86,12 @@ pub(super) const LANDING_MARGIN: Duration = Duration::from_millis(500);
 /// A window smaller than this (either side) does not count as an unmanaged window of an app
 /// (helper and offscreen utility windows).
 const UNMANAGED_MIN: f64 = 50.0;
+/// How long after its key window is focused again an app we unhid has to take the
+/// activation before it is focused once more (Messages took it within 3–10 ms, 11-01).
+const ACTIVATION_WAIT: Duration = Duration::from_millis(60);
+/// How many times such an app is focused once more (the last also asked through
+/// `NSRunningApplication`).
+const ACTIVATION_TRIES: u8 = 2;
 
 /// An app we hid.
 #[derive(Debug)]
@@ -119,6 +128,20 @@ pub(super) struct Hides {
     /// ms after the unveil, its shadow already the key one, and flipped to its key look
     /// ~180 ms after that).
     shown_wait: BTreeMap<i32, (u64, Vec<u32>)>,
+    /// Apps whose key window was focused again after our unhide, until their activation is
+    /// heard ([`ACTIVATION_WAIT`], [`Controller::activation_step`]).
+    activation_wait: HashMap<i32, ActivationWait>,
+}
+
+/// An app focused again after our unhide whose activation is not heard yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActivationWait {
+    /// Its key window.
+    key: u32,
+    /// When it was last focused.
+    sent: Instant,
+    /// How many times it was focused once more.
+    tries: u8,
 }
 
 impl Hides {
@@ -150,8 +173,36 @@ impl Hides {
         self.refocus.remove(&pid);
         self.landing.remove(&pid);
         self.shown_wait.remove(&pid);
+        self.activation_wait.remove(&pid);
         self.reconcile.retain(|(p, _, _)| *p != pid);
         listed
+    }
+
+    /// An activation of app `pid` was heard (NSWorkspace, or the app's own): its wait is
+    /// over; another app's activation ends every other wait too (the front is someone
+    /// else's now: never fought). Returns the waits it ended for other apps.
+    fn activation_heard(&mut self, pid: i32) -> Vec<i32> {
+        self.activation_wait.remove(&pid);
+        let others: Vec<i32> = self.activation_wait.keys().copied().collect();
+        self.activation_wait.clear();
+        others
+    }
+
+    /// The apps whose activation is overdue at `now`, taken out of the waits (with their
+    /// wait).
+    fn activations_due(&mut self, now: Instant) -> Vec<(i32, ActivationWait)> {
+        let due: Vec<(i32, ActivationWait)> =
+            self.activation_wait.iter().filter(|(_, w)| now.duration_since(w.sent) >= ACTIVATION_WAIT).map(|(&p, &w)| (p, w)).collect();
+        for (p, _) in &due {
+            self.activation_wait.remove(p);
+        }
+        due
+    }
+
+    /// True while an app's activation after our unhide is awaited (the WM thread's fast tick
+    /// looks).
+    pub(super) fn awaits_activation(&self) -> bool {
+        !self.activation_wait.is_empty()
     }
 
     /// The apps whose unhide waited for a landing that is due now (`flushed`: the held batch
@@ -369,8 +420,8 @@ impl Controller {
                     // app and hides it a moment later (live 10-29: `ok=false`, then the hidden
                     // notice 20 ms on). The app stays ours, pending, until `confirm_hides`
                     // reads it hidden or `HIDE_TIMEOUT` passes.
-                    let ok = apps::hide(pid);
-                    tracing::info!(pid, bundle, ok, "hide: every window of the app is parked; hiding it");
+                    let answer = apps::hide(pid);
+                    tracing::info!(pid, bundle, answer, "hide: every window of the app is parked; hiding it");
                 }
                 Err(why) => tracing::trace!(pid, bundle, why, "hide: the app stays parked"),
             }
@@ -414,9 +465,11 @@ impl Controller {
         for pid in pids {
             let Some(bundle) = self.hides.taking.get(&pid).cloned() else { continue };
             if same_app(apps::bundle_of(pid).as_deref(), &bundle) {
-                let ok = apps::unhide(pid);
+                // Its answer is not the outcome (`apps::unhide`: NO, then unhidden 5 ms on);
+                // the unhide's notice is.
+                let answer = apps::unhide(pid);
                 self.hides.unhiding.insert(pid, now);
-                tracing::info!(pid, ok, "hide: a window of an app we hid comes back; unhiding it");
+                tracing::info!(pid, answer, "hide: a window of an app we hid comes back; unhiding it");
                 // Sent again at the unhide's notice only: `isHidden` reads NO right after the
                 // ask, before macOS has unhidden the app, and a focus then leaves it inactive
                 // (live 10-29: refocused 1 ms after the ask, the unhide took 73 ms later).
@@ -441,6 +494,7 @@ impl Controller {
         match ax_focus(&w.element, pid) {
             Ok(()) => {
                 tracing::debug!(pid, key, "hide: the key window focused again now that its app is unhidden");
+                self.hides.activation_wait.insert(pid, ActivationWait { key, sent: now, tries: 0 });
                 true
             }
             Err(e) => {
@@ -462,7 +516,47 @@ impl Controller {
     /// App `pid` posted its own activation (AXApplicationActivated): one whose key window we
     /// focused again after our unhide is drawn as the active app now.
     pub(super) fn app_took_activation(&mut self, pid: i32) {
+        self.activation_noticed(pid);
         self.note_late(pid, Late::Activated);
+    }
+
+    /// An activation of app `pid` was heard: an app we focused again after our unhide took
+    /// it; another app's ends that wait ([`Hides::activation_heard`]).
+    pub(super) fn activation_noticed(&mut self, pid: i32) {
+        for other in self.hides.activation_heard(pid) {
+            tracing::debug!(pid = other, activated = pid, "hide: another app was activated; the app we unhid is not focused again");
+        }
+    }
+
+    /// The WM thread's fast tick: an app we unhid and focused again that has not taken the
+    /// activation within [`ACTIVATION_WAIT`] is focused once more (11-01: Messages's window
+    /// took the focus, the app never became active, the keyboard stayed with the app before),
+    /// [`ACTIVATION_TRIES`] times at most, the last also asked through
+    /// `NSRunningApplication`. Its activation then reaches the late snapshots' wait as usual.
+    pub(super) fn activation_step(&mut self, ob: &Observer) {
+        let now = Instant::now();
+        for (pid, wait) in self.hides.activations_due(now) {
+            let waited_ms = now.duration_since(wait.sent).as_millis() as u64;
+            if self.hides.ours(pid) {
+                continue;
+            }
+            if apps::is_active(pid) == Some(true) {
+                tracing::debug!(pid, waited_ms, "hide: the app we unhid is active (its notice still on its way)");
+                continue;
+            }
+            if wait.tries >= ACTIVATION_TRIES {
+                tracing::warn!(pid, key = wait.key, tries = wait.tries, waited_ms, "hide: the app we unhid never took the activation of its key window; left as it is");
+                continue;
+            }
+            let Some(w) = ob.window(wait.key) else { continue };
+            self.echoes.touch_window(wait.key, now);
+            self.echoes.touch_app(pid, now);
+            let tries = wait.tries + 1;
+            let focused = ax_focus(&w.element, pid);
+            let asked = (tries == ACTIVATION_TRIES).then(|| apps::activate(pid));
+            tracing::info!(pid, key = wait.key, tries, waited_ms, focused = focused.is_ok(), ?asked, "hide: the app we unhid has not taken the activation of its key window; focused once more");
+            self.hides.activation_wait.insert(pid, ActivationWait { key: wait.key, sent: now, tries });
+        }
     }
 
     /// Sends app `pid`'s in-place windows the model counts parked to the corner.
@@ -758,6 +852,30 @@ mod tests {
         h.shown_wait.insert(12, (5, vec![8]));
         h.forget(12);
         assert!(h.shown_wait.is_empty(), "a quit app forgotten");
+    }
+
+    /// 11-01: Messages, unhidden by us and its key window focused again, never took the
+    /// activation. Overdue after the wait, taken once; heard, or another app's activation,
+    /// ends the wait.
+    #[test]
+    fn an_activation_not_heard_is_due_once_after_the_wait() {
+        let mut h = Hides::default();
+        let t0 = Instant::now();
+        h.activation_wait.insert(10, ActivationWait { key: 7, sent: t0, tries: 0 });
+        assert!(h.awaits_activation());
+        assert!(h.activations_due(t0 + ACTIVATION_WAIT / 2).is_empty(), "not yet");
+        let due = h.activations_due(t0 + ACTIVATION_WAIT);
+        assert_eq!(due, vec![(10, ActivationWait { key: 7, sent: t0, tries: 0 })]);
+        assert!(!h.awaits_activation(), "taken out once due");
+        h.activation_wait.insert(10, ActivationWait { key: 7, sent: t0, tries: 1 });
+        assert_eq!(h.activation_heard(10), Vec::<i32>::new(), "its own: heard");
+        assert!(!h.awaits_activation());
+        h.activation_wait.insert(10, ActivationWait { key: 7, sent: t0, tries: 0 });
+        assert_eq!(h.activation_heard(11), vec![10], "another app in front: never fought");
+        assert!(!h.awaits_activation());
+        h.activation_wait.insert(12, ActivationWait { key: 8, sent: t0, tries: 0 });
+        h.forget(12);
+        assert!(!h.awaits_activation(), "a quit app forgotten");
     }
 
     #[test]

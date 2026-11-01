@@ -344,9 +344,18 @@ pub fn hide(pid: i32) -> bool {
 }
 
 /// Asks app `pid` to unhide, without activating it. False when there is no such app or macOS
-/// refused the request.
+/// answered NO, which is not the outcome: on macOS 27 it answers NO for another app and
+/// unhides it a few milliseconds later (11-01: `answer=false` at every unhide, its notice
+/// 5 ms on). The unhide notice tells when it took.
 pub fn unhide(pid: i32) -> bool {
     running(pid).is_some_and(|a| a.unhide())
+}
+
+/// Asks macOS to activate app `pid` (no options: its key window comes forward). macOS may
+/// pass over a request from an app that is not active; false when there is no such app or it
+/// answered NO.
+pub fn activate(pid: i32) -> bool {
+    running(pid).is_some_and(|a| a.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty()))
 }
 
 /// Whether app `pid` is hidden now; `None` when it is not running.

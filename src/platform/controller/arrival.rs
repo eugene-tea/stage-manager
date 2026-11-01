@@ -984,7 +984,11 @@ impl Controller {
     /// activation, the corner patch after a focus or through Show Desktop.
     pub fn wants_fast_tick(&self) -> bool {
         let now = Instant::now();
-        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(now) || self.reveal_fast(now)
+        self.verify.as_ref().is_some_and(|v| v.polling)
+            || self.slide_held()
+            || self.patch_replans(now)
+            || self.reveal_fast(now)
+            || self.hides.awaits_activation()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -994,6 +998,8 @@ impl Controller {
     /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
+        // An app we unhid that has not taken its activation is focused once more.
+        self.activation_step(ob);
         let now = Instant::now();
         // The corner patch after a focus or an activation (round park-reconcile, L2), else
         // through Show Desktop (round show-desktop-patch): one plan a fast tick at most.

@@ -327,6 +327,8 @@ struct Shared {
     interval: Duration,
     /// Capture every target now, whatever the interval says.
     force: bool,
+    /// No round starts before this ([`Capturer::hold_until`]).
+    held_until: Option<Instant>,
     shutdown: bool,
 }
 
@@ -406,6 +408,20 @@ impl Capturer {
         }
     }
 
+    /// Starts no round before `until` (`None`: as usual again); a round due meanwhile runs
+    /// then. The strip's thumbnails wait while a switch's snapshots move: a round of window
+    /// captures is the window server's work, and the frames it drops show in the motion
+    /// (11-01: a dropped frame mid-switch as a round of five thumbnails ran).
+    pub fn hold_until(&self, until: Option<Instant>) {
+        let (lock, cv) = &*self.shared;
+        if let Ok(mut s) = lock.lock()
+            && s.held_until != until
+        {
+            s.held_until = until;
+            cv.notify_all();
+        }
+    }
+
     /// Changes the refresh interval.
     pub fn set_interval(&self, interval: Duration) {
         let (lock, cv) = &*self.shared;
@@ -476,9 +492,10 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                         }
                     }
                 }
-                let ready = on && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
+                let held = s.held_until.map(|t| t.saturating_duration_since(Instant::now())).filter(|d| !d.is_zero());
+                let ready = on && held.is_none() && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
                 let due_in = last_full.map_or(Duration::ZERO, |t| s.interval.saturating_sub(t.elapsed()));
-                let mut wait = IDLE_CHECK;
+                let mut wait = held.map_or(IDLE_CHECK, |h| h.min(IDLE_CHECK));
                 // Paused (nobody sees the screen: woken when that ends) or backing off.
                 let paced = if ready { pace().wait(Instant::now()) } else { Some(Duration::ZERO) };
                 if let Some(left) = paced.filter(|d| !d.is_zero()) {
