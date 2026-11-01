@@ -2488,6 +2488,16 @@ impl Controller {
         self.last_switch = Some(Instant::now());
         let mut run = std::mem::take(&mut self.activation);
         let hidden = self.hidden_arrivals(ob, &actions);
+        // A hidden app's windows this switch brings: waiting in place, they go to the corner
+        // first, unseen, and arrive from their card as any parked window (11-01); macOS's own
+        // unhide (the activated app's) and a switch not drawn leave them coming at once.
+        let animated = {
+            let anim = &self.store.config().style.animation;
+            anim.animates() && self.strip_visible && !self.phase.fullscreen()
+        };
+        let activated: HashSet<u32> = run.now.union(&run.fallback).copied().collect();
+        let cornered = self.corner_hidden_arrivals(ob, &hidden, animated, &activated);
+        let hidden: HashSet<u32> = hidden.into_iter().filter(|id| !cornered.iter().any(|c| c.0 == *id)).collect();
         // An activation that grows: can the overlay cover the corner where macOS has raised
         // the activated windows? Decided before the strip is told, from the batch (its
         // arrivals and parks); when not, those windows arrive at once (6V), never shown in
@@ -2495,7 +2505,7 @@ impl Controller {
         let mut early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)> = None;
         let anim = &self.store.config().style.animation;
         if !run.fallback.is_empty() && anim.animates() && self.strip_visible {
-            let list = windows::on_screen();
+            let list = hide::listed_with_cornered(windows::on_screen(), &cornered);
             let arriving: HashSet<u32> = actions
                 .iter()
                 .filter_map(|a| match a {
@@ -2545,7 +2555,7 @@ impl Controller {
             // Windows moved: the list read before is stale.
             early_corner = None;
         }
-        failed + self.execute_animated_rest(ob, actions, &first, run, early_corner)
+        failed + self.execute_animated_rest(ob, actions, &first, run, early_corner, &cornered)
     }
 
     /// The frontmost window of the main display's active stage already in place (shown, and
@@ -2683,7 +2693,9 @@ impl Controller {
     /// the strip, an activation's focus (`run`, [`ActivationRun::focus`]) routed at once, then
     /// the parks behind the strip's snapshots and the arrivals held until it unveils them.
     /// `early_corner`: the corner's cover as the activation found it, and the window list it
-    /// read (none read, or moved since: both read here).
+    /// read (none read, or moved since: both read here). `cornered`: the windows of apps we
+    /// hid that wait in the corner, unseen until the batch's unhide
+    /// ([`Self::corner_hidden_arrivals`]), counted by the cover as listed there.
     fn execute_animated_rest(
         &mut self,
         ob: &Observer,
@@ -2691,6 +2703,7 @@ impl Controller {
         first: &HashSet<u32>,
         run: ActivationRun,
         early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)>,
+        cornered: &[(u32, i32, Rect)],
     ) -> usize {
         let anim = self.store.config().style.animation.clone();
         if !anim.animates() || !self.strip_visible {
@@ -2705,7 +2718,7 @@ impl Controller {
         let (corner, list) = match early_corner {
             Some((corner, list)) => (corner, list),
             None => {
-                let list = windows::on_screen();
+                let list = hide::listed_with_cornered(windows::on_screen(), cornered);
                 let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
                 let corner =
                     self.switch_corner(&arriving, &outgoing, &activated, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));

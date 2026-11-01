@@ -5350,13 +5350,36 @@ def parked_or_hidden(k, what):
                  f"({[fmt(w['bounds']) for w in listed]})")
 
 
+def corner_then_frame(samples, frames, display):
+    """From looks at windows (`frames`: id -> its restore frame): per window, the first look
+    listing it in the park zone and the first look after that with it at its own frame (±2);
+    None for either not seen."""
+    out = {}
+    for i, f in frames.items():
+        t_corner = t_frame = None
+        for x in samples:
+            w = next((w for w in x["windows"] if w["id"] == i and w["layer"] == 0), None)
+            if w is None:
+                continue
+            if t_corner is None and is_parked(w["bounds"], display):
+                t_corner = x["t"]
+            elif t_corner is not None and close(w["bounds"], f, 2.0):
+                t_frame = x["t"]
+                break
+        out[i] = (t_corner, t_frame)
+    return out
+
+
 def hide_arrival(how, k, what):
     """Steps 2-4: app `k`, hidden by us with its stage parked, comes back by `how`: "open" (an
     activation with no click, as ⌘Tab's: `open` of its path, as the native phase), "dock" (its
     Dock item, `ctl debug-dock-click`) or "card" (a click on its stage's card). The stage's
-    apps unhide, the stage becomes active with every window at its exact frame, no window of
-    it is listed in the park zone at any look (every 20 ms) while it comes, and the stage left
-    behind is parked: its apps not hidden with their windows parked, or hidden."""
+    apps unhide, the stage becomes active with every window at its exact frame, and the stage
+    left behind is parked: its apps not hidden with their windows parked, or hidden. macOS's
+    own unhide ("open", "dock"): no window of the stage is listed in the park zone at any look
+    (every 20 ms) while it comes. Our switch ("card", round hide-arrival): each window arrives
+    as a parked one does, an incoming snapshot growing for it from the card, the window listed
+    in the corner before it lands at its frame."""
     s0 = state()
     name, title = EXTRA[k][3], f"{EXTRA[k][3]} 1"
     home = by_title(s0)[title]["home"]
@@ -5365,6 +5388,7 @@ def hide_arrival(how, k, what):
     coming = [j for j in EXTRA if any(w["bundle_id"] == EXTRA[j][0] for w in s0["windows"] if w["id"] in frames)]
     leaving = [j for j in EXTRA if j not in coming and app_frames(s0, j)]
     check(wait_hidden(k, True), f"{what}: {name} is hidden before (its stage parked; hidden: {app_hidden(k)})")
+    before_log = len(log_text())
     sampler = start_sampler([EXTRA[j][0] for j in coming], 2500)
     time.sleep(0.15)  # the sampler's first looks are before the arrival
     if how == "dock":
@@ -5379,11 +5403,26 @@ def hide_arrival(how, k, what):
     for j in coming:
         check(wait_hidden(j, False), f"{what}: {EXTRA[j][3]} is unhidden")
     p = sampler_out(sampler, what)
-    if p is not None:
+    if p is not None and how != "card":
         flashed = in_zone_looks(p.get("samples", []), set(frames), p["display"])
         check(not flashed, f"{what}: no window of the stage is listed in the park zone at any look "
                            f"({len(p.get('samples', []))} looks; seen there: {flashed[:6]})")
+    elif p is not None:
+        seen = corner_then_frame(p.get("samples", []), frames, p["display"])
+        late = {i: v for i, v in seen.items() if v[0] is None or v[1] is None}
+        check(not late, f"{what}: every window of the stage is listed in the corner before it lands at its frame "
+                        f"({len(p.get('samples', []))} looks; "
+                        f"{ {i: tuple(None if t is None else round(t, 2) for t in v) for i, v in seen.items()} })")
     time.sleep(0.6)  # the motion has landed
+    if how == "card":
+        log = log_text()[before_log:]
+        check("they arrive from their card" in log, f"{what}: the hidden stage's windows wait in the corner for the switch, unseen")
+        t = state().get("last_transition") or {}
+        grows = {g["window"] for g in t.get("ghosts", []) if not g["outgoing"]}
+        check(set(frames) <= grows, f"{what}: an incoming snapshot grows for every window of the stage "
+                                    f"(incoming {sorted(grows)}, the stage's {sorted(frames)})")
+        check(any("transition covered" in ln and "incoming: true" in ln for ln in log.splitlines()),
+              f"{what}: the switch holds the stage's windows behind their snapshots, as a parked stage's")
     wins, _ = fixture_windows([EXTRA[j][0] for j in coming])
     cg = {w["id"]: w for w in wins}
     off = [f"{i} at {fmt(cg[i]['bounds']) if i in cg else 'unlisted'}, wanted {fmt(f)}"
@@ -5404,9 +5443,11 @@ def phase_hide():
        Alpha, no window of it is left in the park zone, and its windows are listed at their
        own frames, off screen, the moment the hide takes (within a tick or two).
     2. ⌘Tab (an activation with no click), 3. a click on Bravo's card, 4. a Dock click on Alpha:
-       the app unhides, its stage comes with every window at its exact frame, nothing of it
-       is listed in the corner at any look (every 20 ms), and the stage left behind is parked
-       (its apps hidden, or not hidden with their windows parked).
+       the app unhides, its stage comes with every window at its exact frame, and the stage
+       left behind is parked (its apps hidden, or not hidden with their windows parked).
+       macOS's own unhide (2, 4): nothing of it is listed in the corner at any look (every
+       20 ms). Our card click (3, round hide-arrival): each window arrives as a parked one, an
+       incoming snapshot growing from the card, listed in the corner before it lands.
     5. No hide: Alpha 1 shown (with Bravo and Charlie, Bravo the active app), Alpha 2 alone in
        another stage: Alpha is never hidden, and Alpha 2 parks in the corner.
     6. The user's ⌘H: Bravo hidden by the test while its stage is active, then a switch away
@@ -5484,7 +5525,7 @@ def hide_body():
     say("-- 2. ⌘Tab, simulated (an activation with no click): Alpha unhides in place")
     hide_arrival("open", "a", "⌘Tab to Alpha")
 
-    say("-- 3. a click on Bravo's card: Bravo and Charlie unhide in place")
+    say("-- 3. a click on Bravo's card: Bravo and Charlie arrive from the card, as a parked stage")
     time.sleep(0.8)  # past the activation's echo window
     hide_arrival("card", "b", "a click on Bravo's card")
 

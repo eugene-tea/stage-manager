@@ -11,8 +11,14 @@
 //! - **Our unhide** ([`Controller::before_batch_hides`], [`Controller::after_batch_hides`]):
 //!   a batch that brings back a window of an app we hid first sends that app's other
 //!   in-place windows the stage leaves parked to the corner (still unseen), runs, then
-//!   unhides the app: its windows show at their frames. In an animated switch those windows
-//!   come first, outside the transition (`execute_animated`'s early batch). The batch's
+//!   unhides the app: its windows show at their frames. In a switch of ours that animates (a
+//!   card click, a ctl switch; [`Controller::corner_hidden_arrivals`]) the in-place windows
+//!   the stage brings go to the corner first, still unseen, and arrive from their card
+//!   behind their snapshots as any parked window does: the batch's unhide shows them in the
+//!   corner, under the switch's cover, until the strip unveils them (11-01: Messages, hidden
+//!   in place, just appeared at its frame while every other stage grew from its card). Not
+//!   animated (or the corner move refused), they come first and at once, outside the
+//!   transition (`execute_animated`'s early batch), as before. The batch's
 //!   focus ran while the app was still hidden and left it inactive (live 10-29: the app
 //!   switched away from stayed the active app, so it was never hidden until the user
 //!   activated something else); once the unhide has taken, the key window of such an app is
@@ -21,7 +27,8 @@
 //!   moment the new stage's app is active.
 //! - **macOS's unhide** (⌘Tab, a Dock click, Show All; [`Controller::app_visibility`]): the
 //!   app is ours no more; the activation's switch follows as for any app (its windows already
-//!   in place count as arriving at once). An in-place window the switch did not bring (the
+//!   in place count as arriving at once, shown where they are: never sent to the corner,
+//!   [`hidden_arrival`]). An in-place window the switch did not bring (the
 //!   focus picked another stage, or no switch came: Show All) goes to the corner a moment
 //!   later ([`RECONCILE_AFTER`]), once no activation of the app is held and no switch is
 //!   running ([`reconcile_due`]).
@@ -43,7 +50,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::{Controller, ax_focus};
-use crate::engine::geometry::Point;
+use crate::engine::geometry::{Point, Rect};
 use crate::engine::hide::{HideFacts, may_hide};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::model::{Action, WindowId};
@@ -140,6 +147,51 @@ impl Hides {
 /// switch may still bring them) and no switch's transition is running.
 pub(super) fn reconcile_due(waited: Duration, held: bool, transition: bool) -> bool {
     waited >= RECONCILE_AFTER && !held && !transition
+}
+
+/// What a switch does with a window it brings of an app we hid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HiddenArrival {
+    /// Waiting in place: sent to the corner first, unseen, and it arrives from its card behind
+    /// its snapshot as any parked window.
+    ToCorner,
+    /// Parked in the corner already, unseen (its move in place was refused): it arrives from
+    /// its card as it is.
+    FromCorner,
+    /// To its frame first and at once, outside the transition, shown there by the unhide.
+    AtOnce,
+}
+
+/// What a switch does with a window it brings of an app we hid: `animated` (a
+/// switch of ours the strip animates, the strip shown, no full screen), `activated` (the
+/// window's app is the one macOS activated: its own unhide, in place and shown at once, as
+/// ⌘Tab and a Dock click leave it), `hidden_now` (macOS says the app is hidden, our hide
+/// confirmed), `in_place` (the window waits at its own frame).
+pub(super) fn hidden_arrival(animated: bool, activated: bool, hidden_now: bool, in_place: bool) -> HiddenArrival {
+    if !animated || activated || !hidden_now {
+        HiddenArrival::AtOnce
+    } else if in_place {
+        HiddenArrival::ToCorner
+    } else {
+        HiddenArrival::FromCorner
+    }
+}
+
+/// Window server list `list` (front to back) with the windows `cornered` (id, pid, frame) of
+/// apps we hid listed at their frames in the corner, in front: they wait there, unseen while
+/// their app is hidden, but the batch's unhide shows them there (raised by its focus) while
+/// the switch's cover is up, so the cover counts them as it counts any incoming window
+/// waiting in the corner.
+pub(super) fn listed_with_cornered(list: Vec<windows::CgWindow>, cornered: &[(u32, i32, Rect)]) -> Vec<windows::CgWindow> {
+    if cornered.is_empty() {
+        return list;
+    }
+    let mut out: Vec<windows::CgWindow> = cornered
+        .iter()
+        .map(|&(id, pid, bounds)| windows::CgWindow { id, pid, owner: String::new(), name: None, layer: 0, bounds, onscreen: true, alpha: 1.0 })
+        .collect();
+    out.extend(list.into_iter().filter(|w| !cornered.iter().any(|c| c.0 == w.id)));
+    out
 }
 
 /// Whether pid's running app (`now`: its bundle id) is still the one we hid (`recorded`): a
@@ -429,8 +481,69 @@ impl Controller {
         self.record_hides();
     }
 
+    /// A switch of ours brings windows `hidden` of apps we hid ([`Self::hidden_arrivals`]):
+    /// when it animates (`animated`), each waiting in place goes to the corner first, unseen
+    /// (the app still hidden; bounded as this module's other moves), and arrives from its card
+    /// behind its snapshot as any parked window; the batch that focuses it unhides the app,
+    /// which shows it in the corner under the switch's cover until the strip unveils it.
+    /// `activated`: windows of the app macOS activated (its own unhide: left in place). Returns
+    /// the windows that wait in the corner (id, pid, frame there) for the cover; the others
+    /// come first and at once, as before.
+    pub(super) fn corner_hidden_arrivals(&mut self, ob: &Observer, hidden: &HashSet<u32>, animated: bool, activated: &HashSet<u32>) -> Vec<(u32, i32, Rect)> {
+        let Some(m) = &self.model else { return Vec::new() };
+        let mut ids: Vec<u32> = hidden.iter().copied().collect();
+        ids.sort_unstable();
+        let mut hidden_now: HashMap<i32, bool> = HashMap::new();
+        let mut plan = Vec::new();
+        for id in ids {
+            let Some(w) = ob.window(id) else { continue };
+            let Some(o) = self.hides.ours.get(&w.pid) else { continue };
+            let now_hidden = *hidden_now.entry(w.pid).or_insert_with(|| o.confirmed && apps::is_hidden(w.pid) == Some(true));
+            let how = hidden_arrival(animated, activated.contains(&id), now_hidden, o.in_place.contains(&id));
+            let at = match how {
+                HiddenArrival::ToCorner => m.park_frame_of(WindowId(id)),
+                HiddenArrival::FromCorner => Some(w.frame),
+                HiddenArrival::AtOnce => None,
+            };
+            if let Some(at) = at {
+                plan.push((id, w.pid, how, at));
+            }
+        }
+        let now = Instant::now();
+        let mut cornered = Vec::new();
+        for (id, pid, how, at) in plan {
+            let Some(w) = ob.window(id) else { continue };
+            if how == HiddenArrival::ToCorner {
+                self.echoes.touch_window(id, now);
+                if let Err(e) = w.element.bounded(HIDE_AX_TIMEOUT_SECONDS, |e| e.set_position(at.origin())) {
+                    tracing::debug!(pid, id, "hide: an in-place window this switch brings cannot go to the corner first; it comes at once: {e}");
+                    continue;
+                }
+                if let Some(o) = self.hides.ours.get_mut(&pid) {
+                    o.in_place.remove(&id);
+                }
+            }
+            cornered.push((id, pid, at));
+        }
+        // An app with a window that comes at once is unhidden by the early batch that brings it,
+        // which would show its others in the corner before the cover is up: they come at once
+        // too (that batch moves them back to their frames, still unseen).
+        let at_once: BTreeSet<i32> = hidden
+            .iter()
+            .filter(|id| !cornered.iter().any(|c| c.0 == **id))
+            .filter_map(|id| ob.window(*id).map(|w| w.pid))
+            .collect();
+        cornered.retain(|c| !at_once.contains(&c.1));
+        if !cornered.is_empty() {
+            let ids: Vec<u32> = cornered.iter().map(|c| c.0).collect();
+            tracing::info!(windows = ?ids, "hide: the windows of an app we hid this switch brings wait in the corner, unseen; they arrive from their card");
+        }
+        cornered
+    }
+
     /// The windows of apps we hid among a batch's `SetFrame`s: they come first and at once
-    /// in an animated switch (macOS shows them where they are when the app unhides).
+    /// in an animated switch (macOS shows them where they are when the app unhides), unless
+    /// [`Self::corner_hidden_arrivals`] sends them to the corner first.
     pub(super) fn hidden_arrivals(&self, ob: &Observer, actions: &[Action]) -> HashSet<u32> {
         actions
             .iter()
@@ -507,6 +620,39 @@ mod tests {
         h.ours.insert(10, ours("com.example.alpha"));
         h.forget(10);
         assert!(h.refocus.is_empty(), "gone with the app");
+    }
+
+    /// 11-01: a card click on the stage of an app hidden in place arrives from the card as any
+    /// parked window; macOS's own unhide (its activation), a switch not animated, or a hide
+    /// not taken yet bring it at once, where it is.
+    #[test]
+    fn a_switch_of_ours_brings_an_in_place_window_from_the_corner() {
+        assert_eq!(hidden_arrival(true, false, true, true), HiddenArrival::ToCorner, "a card click: to the corner first");
+        assert_eq!(hidden_arrival(true, false, true, false), HiddenArrival::FromCorner, "parked already: from the corner as it is");
+        assert_eq!(hidden_arrival(true, true, true, true), HiddenArrival::AtOnce, "the app macOS activated: in place, at once");
+        assert_eq!(hidden_arrival(false, false, true, true), HiddenArrival::AtOnce, "not animated: at once");
+        assert_eq!(hidden_arrival(true, false, false, true), HiddenArrival::AtOnce, "not hidden (yet, or no more): at once");
+    }
+
+    #[test]
+    fn the_cover_counts_the_cornered_windows_in_front() {
+        let w = |id, x| windows::CgWindow {
+            id,
+            pid: 5,
+            owner: String::new(),
+            name: None,
+            layer: 0,
+            bounds: Rect::new(x, 0.0, 10.0, 10.0),
+            onscreen: true,
+            alpha: 1.0,
+        };
+        let list = vec![w(1, 0.0), w(2, 0.0)];
+        assert_eq!(listed_with_cornered(list.clone(), &[]).len(), 2, "nothing cornered: as listed");
+        let at = Rect::new(900.0, 700.0, 400.0, 300.0);
+        let out = listed_with_cornered(list, &[(2, 9, at), (3, 9, at)]);
+        let ids: Vec<u32> = out.iter().map(|w| w.id).collect();
+        assert_eq!(ids, vec![2, 3, 1], "the cornered in front, each once");
+        assert!(out[..2].iter().all(|w| w.bounds == at && w.pid == 9 && w.layer == 0 && w.alpha > 0.0), "listed at the corner, drawn");
     }
 
     #[test]
