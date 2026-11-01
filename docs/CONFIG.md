@@ -124,7 +124,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `animation.spring_stiffness` | `272.0` | number, 1 to 10000 | Spring stiffness of the windows' motion in a switch, the desktop reveal, Cmd-M and drops. Apple's, measured: 272 (99 % by about 400 ms). |
 | `animation.spring_damping` | `33.0` | number, 0 to 1000 | Spring damping of the windows' motion (33 with stiffness 272 and mass 1: critically damped, no overshoot). |
 | `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the windows' motion. |
-| `animation.unpark_at` | `0.99` | number, 0.5 to 1 | An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 400 ms). |
+| `animation.unpark_at` | `0.99` | number, 0.5 to 1 | The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 600 ms for a window growing from its card). |
 | `animation.cover_ms` | `20` | whole number, 0 to 500 | Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first. |
 | `animation.corner_radius` | `0.0` | number, 0 to 60 | Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius). |
 | `animation.shadow_radius` | `24.0` | number, 0 to 100 | Blur radius of a moving snapshot's shadow. |

@@ -127,7 +127,11 @@ so switches are animated with snapshots in a click-through layer above everythin
 the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
 nears a card, so content that changed meanwhile can jump when the motion ends. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
-already the new stage's). Arriving windows wait in the corner behind their pictures, and
+already the new stage's). An arriving window takes its place under its picture once the
+picture as shown on screen is within a point of it on every edge (about 600 ms after the
+click for a window growing from its card, 450 ms at the least: `[animation] unpark_at` is the
+floor), so the hand-over shows no step; the picture goes a moment later. Arriving windows
+wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window

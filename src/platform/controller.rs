@@ -64,9 +64,10 @@
 //!   back is announced to the strip first ([`strip_model::Transition`]); once the strip has
 //!   drawn snapshots over them, outgoing windows park behind theirs, and incoming windows wait
 //!   (in the safety registry at their arrival frames) until the strip's growing snapshots
-//!   cover their frames ([`StripEvent::Unveil`]), or a click or another event arrives, or
-//!   their backstop passes (the expected unveil at the configured speed plus a margin,
-//!   1.5 to 3 s: `motion_math::unveil_backstop`). The batch's focus does not wait: the keyboard goes to the new
+//!   are within a point of their frames as shown ([`StripEvent::Unveil`],
+//!   `motion_math::unveil_time`), or a click or another event arrives, or their backstop
+//!   passes (the latest unveil at the configured speed plus a margin, 1.5 to 3 s:
+//!   `motion_math::unveil_backstop`). The batch's focus does not wait: the keyboard goes to the new
 //!   stage at once, as Apple's does (`split_covered`).
 //! - **Raise order** (`raise_order`): after a batch that raised windows of two or more apps,
 //!   the window server's order of them is read for a moment; windows that landed out of the
@@ -2746,14 +2747,14 @@ impl Controller {
         };
         let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
-        let unveil_ms = (motion_math::unveil_time(&self.store.config().style) * 1000.0).round() as u64;
+        let unveil_latest_ms = (motion_math::unveil_latest(&self.store.config().style) * 1000.0).round() as u64;
         tracing::debug!(
             id,
             ?cover,
             waited_ms = started.elapsed().as_millis() as u64,
             early_focus_ms,
             focus_since_activation_ms,
-            unveil_ms,
+            unveil_latest_ms,
             at_once = run.at_once,
             at_once_windows = ?run.at_once_windows,
             "transition covered"

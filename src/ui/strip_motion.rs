@@ -18,7 +18,10 @@
 //!   for `ctl state` ([`strip_model::last_transition`]). The strip answers
 //!   with what it covered ([`strip_model::cover`]); the controller parks the outgoing
 //!   windows behind their snapshots and holds the incoming ones until
-//!   [`StripEvent::Unveil`] (at `unpark_at` of the motion). Meanwhile the park corner, where
+//!   [`StripEvent::Unveil`]: when the growing snapshots as shown are within a point of their
+//!   windows on every edge (`motion_math::unveil_time`, by the farthest edge's travel; not
+//!   before `[animation] unpark_at` of the motion), and the snapshots stay over the windows
+//!   a moment after ([`AFTER_UNVEIL`]) while they show. Meanwhile the park corner, where
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
 //!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
@@ -46,7 +49,7 @@ use super::{Ghost as CardGhost, Strip, with_strip};
 use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
-use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, time_to_progress};
+use crate::ui::motion_math::{Plane, SnapshotCache, Spring, settle_time, switch_spring, travel, unveil_time};
 use crate::ui::overlay::{Ghost, Overlay};
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, StripEvent, Transition, TransitionReport};
@@ -62,6 +65,10 @@ const LANDING_MAX: f64 = 1.0;
 const PARK_WAIT_MAX: f64 = 0.2;
 /// How often a landed switch's held cover looks whether the patch shows (seconds: a frame).
 const HOLD_POLL: f64 = 1.0 / 60.0;
+/// How long incoming snapshots stay over their windows after the unveil (seconds): the
+/// windows are placed through the Accessibility API and reach the screen a presentation lag
+/// or more later; the snapshots, within a point of them by then, go after that.
+const AFTER_UNVEIL: f64 = 0.12;
 
 /// A running transition.
 struct Running {
@@ -80,6 +87,9 @@ struct Running {
     corner_at: Option<(Rect, CoverPicture)>,
     /// The incoming windows' frames: aimed at, then read back once in place.
     arrived: Vec<(u32, Rect)>,
+    /// The transition does not land before this (its incoming windows shown under their
+    /// snapshots: the unveil plus [`AFTER_UNVEIL`]).
+    lands_after: Option<Instant>,
 }
 
 /// A landed switch's cover of the park corner, kept until the corner patch shows
@@ -462,6 +472,7 @@ impl Strip {
                 start: self.plane_rect(&start),
                 end: self.plane_rect(&end),
                 real: None,
+                at_unveil: None,
             });
             waiting.push((ghosts.len(), end));
             ghosts.push(ghost);
@@ -489,6 +500,7 @@ impl Strip {
                 start: self.plane_rect(&start),
                 end: self.plane_rect(&end),
                 real: None,
+                at_unveil: None,
             });
             ghosts.push(ghost);
             cover.incoming = true;
@@ -517,9 +529,18 @@ impl Strip {
         strip_model::cover(t.id, cover);
         let id = t.id;
         let mut timers = Vec::new();
-        if cover.incoming {
-            let unveil_at = time_to_progress(spring, style.unpark_at);
-            timers.push(after(unveil_at, move || strip_model::emit(StripEvent::Unveil { id })));
+        // The incoming windows take their place once their snapshots as shown are within a
+        // point of them: the farthest edge's travel decides when.
+        let travel = report.iter().filter(|g| !g.outgoing).fold(0.0, |m: f64, g| m.max(travel(g.start, g.end)));
+        let unveil = cover.incoming.then(|| unveil_time(&self.style, travel));
+        let lands_after = unveil.map(|u| Instant::now() + Duration::from_secs_f64(u + AFTER_UNVEIL));
+        if let Some(unveil) = unveil {
+            timers.push(after(unveil, move || {
+                // The strip busy (never expected from a timer): the unveil still goes.
+                if with_strip(|s| s.unveil(id)).is_none() {
+                    strip_model::emit(StripEvent::Unveil { id });
+                }
+            }));
         }
         if waiting.is_empty() {
             timers.push(after(settle_time(spring, SETTLED), move || {
@@ -530,7 +551,8 @@ impl Strip {
                 with_strip(|s| s.outgoing_parked(id));
             }));
         }
-        tracing::debug!(id, ghosts = ghosts.len(), held = ?held, ?cover, "transition");
+        let unveil_ms = unveil.map(|u| (u * 1000.0).round() as u64);
+        tracing::debug!(id, ghosts = ghosts.len(), held = ?held, ?cover, travel = travel.round(), unveil_ms, "transition");
         for g in &report {
             tracing::debug!(
                 id,
@@ -551,8 +573,16 @@ impl Strip {
             CoverPicture::Wallpaper => "wallpaper",
             CoverPicture::Desktop => "desktop",
         });
-        strip_model::publish_transition(TransitionReport { id, ghosts: report, order, corner: covered.map(|c| c.rect), corner_picture });
-        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner, corner_at, arrived });
+        strip_model::publish_transition(TransitionReport {
+            id,
+            ghosts: report,
+            order,
+            corner: covered.map(|c| c.rect),
+            corner_picture,
+            travel,
+            unveil_ms,
+        });
+        self.motion.running = Some(Running { id, ghosts, waiting, held, timers, under, corner, corner_at, arrived, lands_after });
     }
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
@@ -632,11 +662,37 @@ impl Strip {
         }));
     }
 
-    /// Transition `id` has landed: the snapshots go and the held cards show, in one frame.
-    fn end_transition(&mut self, id: u64) {
-        if self.motion.running.as_ref().is_some_and(|r| r.id == id) {
-            self.finish_transition(true);
+    /// Transition `id`'s incoming snapshots are within a point of their windows as shown:
+    /// the controller places the windows now. Where each snapshot is drawn is kept for
+    /// `ctl state` ([`GhostReport::at_unveil`]).
+    fn unveil(&mut self, id: u64) {
+        if let Some(r) = self.motion.running.as_ref().filter(|r| r.id == id) {
+            let drawn: Vec<(u32, Rect)> =
+                r.ghosts.iter().filter(|g| r.arrived.iter().any(|(w, _)| *w == g.window)).map(|g| (g.window, self.plane_rect(&g.drawn()))).collect();
+            for (window, at) in &drawn {
+                tracing::debug!(id, window, at = %at, "transition: unveiled; the snapshot is drawn here");
+            }
+            strip_model::update_transition(id, |t| {
+                for g in t.ghosts.iter_mut().filter(|g| !g.outgoing) {
+                    g.at_unveil = drawn.iter().find(|(w, _)| *w == g.window).map(|(_, at)| *at);
+                }
+            });
         }
+        strip_model::emit(StripEvent::Unveil { id });
+    }
+
+    /// Transition `id` has landed: the snapshots go and the held cards show, in one frame;
+    /// not before its incoming windows show under their snapshots (else it looks again then).
+    fn end_transition(&mut self, id: u64) {
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        let now = Instant::now();
+        if let Some(wait) = r.lands_after.map(|at| at.saturating_duration_since(now)).filter(|w| !w.is_zero()) {
+            r.timers.push(after(wait.as_secs_f64(), move || {
+                with_strip(|s| s.end_transition(id));
+            }));
+            return;
+        }
+        self.finish_transition(true);
     }
 
     /// Ends the running transition now (it `landed`, or a new one starts).

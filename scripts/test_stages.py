@@ -2363,6 +2363,12 @@ def off(a, b):
     return max(abs(a[k] - b[k]) for k in ("x", "y", "w", "h"))
 
 
+def edge_gap(a, b):
+    """The farthest any edge of `a` is from the same edge of `b` (points)."""
+    return max(abs(a["x"] - b["x"]), abs(a["y"] - b["y"]),
+               abs(a["x"] + a["w"] - b["x"] - b["w"]), abs(a["y"] + a["h"] - b["y"] - b["h"]))
+
+
 def cg_bounds(wid):
     wins, _ = fixture_windows([FIX_ID])
     return next((w["bounds"] for w in wins if w["id"] == wid), None)
@@ -2402,7 +2408,7 @@ def click_slot(slot, what, settle=1.0):
     if not check(t.get("id") and t.get("id") != t0.get("id"), f"{what}: a transition was drawn"):
         return s
     num = numbers_by_id(s)
-    bad = []
+    bad, hand = [], []
     drawn = s["strip_cards"][slot]["frame"]
     for g in t["ghosts"]:
         if g["outgoing"]:
@@ -2419,7 +2425,12 @@ def click_slot(slot, what, settle=1.0):
             b = cg_bounds(g["window"])
             if not g.get("real") or not b or off(g["real"], b) > 1.0 or off(g["end"], b) > 1.0:
                 bad.append(f"incoming {g['window']} ends at {fmt(g['end'])}, the window is at {b and fmt(b)}")
+            # The handover: where its snapshot was drawn when the window took its place.
+            if b and (not g.get("at_unveil") or edge_gap(g["at_unveil"], b) > 2.0):
+                hand.append(f"incoming {g['window']} drawn at {g.get('at_unveil') and fmt(g['at_unveil'])}, the window is at {fmt(b)}")
     check(not bad, f"{what}: every snapshot started on its window and landed on its card or window" + (f" ({'; '.join(bad)})" if bad else ""))
+    check(not hand, f"{what}: every incoming window took its place within 2 pt of its snapshot "
+                    f"(travel {t.get('travel', 0):.0f} pt, unveiled at {t.get('unveil_ms')} ms)" + (f" ({'; '.join(hand)})" if hand else ""))
     return s
 
 

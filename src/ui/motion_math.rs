@@ -7,11 +7,18 @@
 //!   laptop session; the record: `docs/UX-SPEC.md` as of commit 20665a3, "Transitions"); cards glide at ω ≈ 17.0 and the strip
 //!   slides at ω ≈ 16.8. [`spring_progress`] gives the fraction of the way covered after `t`
 //!   seconds for any mass, stiffness and damping; [`time_to_progress`] when a fraction is first
-//!   reached (the moment an incoming window may take its place behind its growing snapshot,
-//!   `[animation] unpark_at`). `[animation] speed` scales every spring ([`Spring::at_speed`]:
-//!   the same curve, ω times the speed) and duration; [`switch_spring`], [`glide_spring`] and
-//!   [`slide_spring`] are the style's springs with it applied. [`unveil_backstop`] is how long
-//!   the controller holds incoming windows for the strip's unveil at that speed.
+//!   reached, [`settle_time`] when it stays within a tolerance for good. `[animation] speed`
+//!   scales every spring ([`Spring::at_speed`]: the same curve, ω times the speed) and
+//!   duration; [`switch_spring`], [`glide_spring`] and [`slide_spring`] are the style's springs
+//!   with it applied.
+//! - **Unveil.** An incoming window takes its place behind its growing snapshot when the
+//!   snapshot as shown is within [`UNVEIL_TOLERANCE`] of the window on every edge
+//!   ([`unveil_time`]): by distance, from the transition's own start and end rectangles
+//!   ([`travel`]), plus the [`PRESENTATION_LAG`] by which the snapshot on screen trails the
+//!   clock; `[animation] unpark_at` is the floor. A fixed fraction placed the window 1 % of
+//!   the travel short, and a frame or three before the snapshot showed there: a 25–31 pt jump
+//!   on a window growing from its card (the owner's recording, 11-01). [`unveil_backstop`] is
+//!   how long the controller holds incoming windows for the strip's unveil at that speed.
 //! - **Planes.** A snapshot is a plane turned about its left edge, like a strip card: at a
 //!   window's frame it is flat and full size; on a card it is the card's thumbnail, turned by
 //!   the strip's tilt and seen from the strip's eye. Moving between the two on one spring
@@ -56,24 +63,63 @@ pub fn switch_spring(style: &StripStyle) -> Spring {
     Spring { stiffness: a.spring_stiffness, damping: a.spring_damping, mass: a.spring_mass }.at_speed(a.speed())
 }
 
-/// When the strip unveils a switch's incoming windows: the switch spring's time to
-/// `[animation] unpark_at`, at the style's speed (seconds).
-pub fn unveil_time(style: &StripStyle) -> f64 {
-    time_to_progress(switch_spring(style), style.animation.unpark_at)
+/// How close the snapshot as shown is to its window, on every edge, when the window takes
+/// its place behind it (points).
+pub const UNVEIL_TOLERANCE: f64 = 1.0;
+/// How far what is on screen trails the clock when the window takes its place (seconds): the
+/// snapshot's frames in flight to the display, against the window placed through the
+/// Accessibility API. About three frames at 60 Hz, measured from the owner's recording
+/// (11-01: the window showed where the snapshot had been 50 ms before). Not scaled by the
+/// display's refresh: the window's own path (the app, the window server) is not frame-bound,
+/// and too long a lag only leaves the snapshot over its window a moment longer, still within
+/// the tolerance.
+pub const PRESENTATION_LAG: f64 = 0.05;
+/// The longest travel the unveil waits for (points): more than any display's diagonal.
+const MAX_TRAVEL: f64 = 5000.0;
+/// The unveil comes at least this long before the backstop (seconds).
+const BACKSTOP_LEAD: f64 = 0.25;
+
+/// The farthest any edge of `start` is from the same edge of `end` (points).
+pub fn travel(start: Rect, end: Rect) -> f64 {
+    [start.x - end.x, start.y - end.y, start.max_x() - end.max_x(), start.max_y() - end.max_y()]
+        .into_iter()
+        .fold(0.0, |m, d| m.max(d.abs()))
+}
+
+/// When the strip unveils a switch's incoming windows whose snapshots travel `travel` points
+/// at most (seconds after the motion starts): once the switch spring stays within
+/// [`UNVEIL_TOLERANCE`] of the end for good, and not before `[animation] unpark_at` of the
+/// way, each as shown on screen ([`PRESENTATION_LAG`] later); never past the backstop less a
+/// lead ([`unveil_backstop`]).
+pub fn unveil_time(style: &StripStyle, travel: f64) -> f64 {
+    unveil_at(style, travel).min(unveil_backstop(style).as_secs_f64() - BACKSTOP_LEAD)
+}
+
+/// [`unveil_time`] before the backstop's bound.
+fn unveil_at(style: &StripStyle, travel: f64) -> f64 {
+    let s = switch_spring(style);
+    let floor = time_to_progress(s, style.animation.unpark_at);
+    let near = if travel > UNVEIL_TOLERANCE { settle_time(s, UNVEIL_TOLERANCE / travel.min(MAX_TRAVEL)) } else { 0.0 };
+    floor.max(near) + PRESENTATION_LAG
+}
+
+/// The latest the strip unveils, whatever the travel (seconds).
+pub fn unveil_latest(style: &StripStyle) -> f64 {
+    unveil_time(style, MAX_TRAVEL)
 }
 
 /// The shortest backstop for incoming windows the strip never unveils.
 pub const UNVEIL_BACKSTOP_MIN: std::time::Duration = std::time::Duration::from_millis(1500);
 /// The longest: a slow spring (a low speed, a soft spring) never holds windows longer.
 pub const UNVEIL_BACKSTOP_MAX: std::time::Duration = std::time::Duration::from_millis(3000);
-/// How long after the expected unveil the backstop waits.
+/// How long after the latest unveil the backstop waits.
 const UNVEIL_MARGIN: f64 = 0.5;
 
 /// How long incoming windows may wait for the strip's unveil before they come back anyway:
-/// the expected unveil ([`unveil_time`]) plus a margin, kept within
+/// the latest unveil (the longest travel) plus a margin, kept within
 /// [`UNVEIL_BACKSTOP_MIN`]..[`UNVEIL_BACKSTOP_MAX`].
 pub fn unveil_backstop(style: &StripStyle) -> std::time::Duration {
-    let at = std::time::Duration::from_secs_f64((unveil_time(style) + UNVEIL_MARGIN).clamp(0.0, HORIZON));
+    let at = std::time::Duration::from_secs_f64((unveil_at(style, MAX_TRAVEL) + UNVEIL_MARGIN).clamp(0.0, HORIZON));
     at.clamp(UNVEIL_BACKSTOP_MIN, UNVEIL_BACKSTOP_MAX)
 }
 
@@ -359,20 +405,88 @@ mod tests {
         let mut style = StripStyle::default();
         for speed in [crate::config::MIN_SPEED, 0.26, 0.3, 0.5, 1.0, 2.0, 4.0] {
             style.animation.speed = speed;
-            let unveil = unveil_time(&style);
+            let latest = unveil_latest(&style);
             let backstop = unveil_backstop(&style).as_secs_f64();
-            assert!(backstop >= unveil + 0.3, "speed {speed}: unveil at {unveil:.3} s, backstop at {backstop:.3} s");
+            assert!(backstop >= latest + BACKSTOP_LEAD - 1e-9, "speed {speed}: unveil by {latest:.3} s, backstop at {backstop:.3} s");
             assert!(backstop >= UNVEIL_BACKSTOP_MIN.as_secs_f64() && backstop <= UNVEIL_BACKSTOP_MAX.as_secs_f64());
+            for travel in [0.0, 10.0, 1200.0, 1e6] {
+                assert!(unveil_time(&style, travel) <= latest + 1e-9, "speed {speed}, {travel} pt");
+            }
         }
         // The slowest speed unveils after 1.5 s (the constant cap before R3 fired first).
         style.animation.speed = crate::config::MIN_SPEED;
-        assert!(unveil_time(&style) > 1.5, "{}", unveil_time(&style));
-        // A spring that never gets there is still bounded.
+        assert!(unveil_time(&style, 1200.0) > 1.5, "{}", unveil_time(&style, 1200.0));
+        // A spring that never gets there is still bounded, and unveils before the backstop.
         style.animation.speed = 1.0;
         style.animation.spring_stiffness = 0.5;
         assert_eq!(unveil_backstop(&style), UNVEIL_BACKSTOP_MAX);
+        assert!((unveil_time(&style, 1200.0) - (UNVEIL_BACKSTOP_MAX.as_secs_f64() - BACKSTOP_LEAD)).abs() < 1e-9);
         style.animation.spring_stiffness = 1e6;
         assert_eq!(unveil_backstop(&style), UNVEIL_BACKSTOP_MIN);
+    }
+
+    /// The snapshot on screen at the unveil: where the spring had it a presentation lag before.
+    fn shown_gap(style: &StripStyle, travel: f64) -> f64 {
+        let t = unveil_time(style, travel) - PRESENTATION_LAG;
+        (1.0 - spring_progress(switch_spring(style), t)) * travel
+    }
+
+    #[test]
+    fn the_window_takes_its_place_within_a_point_of_its_snapshot_as_shown() {
+        let style = StripStyle::default();
+        // A window growing from its card across the screen (the owner's 11-01 recording: a
+        // 1200 pt edge travel jumped 25–31 pt at 99 %, the snapshot shown 50 ms late).
+        let long = unveil_time(&style, 1200.0);
+        assert!(shown_gap(&style, 1200.0) <= UNVEIL_TOLERANCE + 1e-6, "{}", shown_gap(&style, 1200.0));
+        assert!((0.60..0.65).contains(&long), "a long travel unveils at {long:.3} s");
+        let old = time_to_progress(Spring::APPLE, 0.99);
+        let old_gap = (1.0 - spring_progress(Spring::APPLE, old - PRESENTATION_LAG)) * 1200.0;
+        assert!(old_gap > 20.0, "the 99 % unveil jumped {old_gap:.1} pt");
+        // A short one waits for the floor (99 % as shown), not for the distance.
+        let short = unveil_time(&style, 40.0);
+        assert!((short - (time_to_progress(Spring::APPLE, 0.99) + PRESENTATION_LAG)).abs() < 1e-9, "{short}");
+        assert!(shown_gap(&style, 40.0) <= UNVEIL_TOLERANCE);
+        assert!(short < long);
+        // Longer travels wait longer, each within the tolerance.
+        let mut last = 0.0;
+        for travel in [100.0, 300.0, 600.0, 1200.0, 2400.0, 4000.0] {
+            let t = unveil_time(&style, travel);
+            assert!(t >= last, "{travel} pt at {t:.3} s");
+            assert!(shown_gap(&style, travel) <= UNVEIL_TOLERANCE + 1e-6, "{travel} pt: {}", shown_gap(&style, travel));
+            last = t;
+        }
+        // Nothing to travel: the floor still holds.
+        assert_eq!(unveil_time(&style, 0.0), short);
+    }
+
+    #[test]
+    fn a_slow_speed_unveils_by_distance_too_and_a_floor_can_wait_longer() {
+        let mut style = StripStyle::default();
+        style.animation.speed = 0.5;
+        let t = unveil_time(&style, 1200.0);
+        // Twice the spring's time, the presentation lag unscaled.
+        let at_one = unveil_time(&StripStyle::default(), 1200.0);
+        assert!((t - (2.0 * (at_one - PRESENTATION_LAG) + PRESENTATION_LAG)).abs() < 0.003, "{t} vs {at_one}");
+        assert!(shown_gap(&style, 1200.0) <= UNVEIL_TOLERANCE + 1e-6);
+        // unpark_at is a floor: set near 1 it waits past the distance's moment.
+        style.animation.speed = 1.0;
+        style.animation.unpark_at = 0.99999;
+        assert!(unveil_time(&style, 300.0) > unveil_time(&StripStyle::default(), 300.0) + 0.1);
+        // An overshooting spring waits until it stays within the tolerance.
+        let mut soft = StripStyle::default();
+        soft.animation.spring_damping = 12.0;
+        let t = unveil_time(&soft, 1200.0) - PRESENTATION_LAG;
+        let s = switch_spring(&soft);
+        assert!((0..2000).all(|i| ((1.0 - spring_progress(s, t + i as f64 / 1000.0)) * 1200.0).abs() <= UNVEIL_TOLERANCE + 1e-6));
+    }
+
+    #[test]
+    fn travel_is_the_farthest_edge() {
+        let end = Rect::new(100.0, 100.0, 800.0, 600.0);
+        assert_eq!(travel(end, end), 0.0);
+        // A card at the left growing to the window: the right edge travels farthest.
+        assert_eq!(travel(Rect::new(20.0, 300.0, 120.0, 90.0), end), 760.0);
+        assert_eq!(travel(Rect::new(100.0, 90.0, 800.0, 600.0), end), 10.0);
     }
 
     #[test]

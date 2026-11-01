@@ -444,6 +444,8 @@ pub struct GhostReport {
     pub end: Rect,
     /// For an incoming window: its frame read back from the window once in place.
     pub real: Option<Rect>,
+    /// For an incoming window: where its snapshot was drawn when the strip unveiled it.
+    pub at_unveil: Option<Rect>,
 }
 
 /// The ghosts of the last transition the strip drew.
@@ -461,6 +463,10 @@ pub struct TransitionReport {
     /// What stood for the corner there: `"wallpaper"` (the patch's picture) or `"desktop"` (a
     /// still of the desktop, icons and all; round 8L3).
     pub corner_picture: Option<&'static str>,
+    /// The farthest an incoming snapshot's edge travels (points; 0 with none).
+    pub travel: f64,
+    /// When the strip unveils the incoming windows, after the motion starts (ms), if any.
+    pub unveil_ms: Option<u64>,
 }
 
 fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {

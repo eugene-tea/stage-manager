@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A window arriving in a switch no longer jumps a little as the motion ends: it takes its
+  place only once its picture is right over it.
 - An automatic update no longer installs while the screen is locked, when hidden windows
   could not come back until you unlocked; it waits until you are back and step away again.
 - The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges

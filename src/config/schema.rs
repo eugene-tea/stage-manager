@@ -298,7 +298,7 @@ pub const KEYS: &[KeyDef] = &[
     k("animation", "spring_damping", f(0.0, 1000.0), "33.0", "Spring damping of the windows' motion (33 with stiffness 272 and mass 1: critically damped, no overshoot)."),
     k("animation", "spring_mass", f(0.01, 100.0), "1.0", "Spring mass of the windows' motion."),
     k("animation", "unpark_at", f(0.5, 1.0), "0.99",
-        "An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 400 ms)."),
+        "The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 600 ms for a window growing from its card)."),
     k("animation", "cover_ms", i(0, 500), "20",
         "Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first."),
     k("animation", "corner_radius", f(0.0, 60.0), "0.0",
@@ -502,6 +502,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-17.toml"),
     include_str!("legacy/default-18.toml"),
     include_str!("legacy/default-19.toml"),
+    include_str!("legacy/default-20.toml"),
 ];
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ use objc2_quartz_core::{
 };
 
 use crate::config::AnimationStyle;
-use crate::engine::geometry::{Point, Rect};
+use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::Picture;
 use crate::platform::capture_frame::Extent;
 use crate::ui::motion_math::{Plane, Spring};
@@ -204,6 +204,21 @@ impl Ghost {
         self.image.setCornerRadius(look.corner);
         CATransaction::commit();
         self.target = p;
+    }
+
+    /// Where the ghost is drawn now (Core Animation's presentation of it; its target when
+    /// nothing is drawn yet).
+    pub fn drawn(&self) -> Plane {
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let Some(shown) = (unsafe { self.plane.presentationLayer() }) else { return self.target };
+        let (position, bounds, t) = (shown.position(), shown.bounds(), shown.transform());
+        Plane {
+            left_mid: Point::new(position.x, position.y),
+            size: Size::new(bounds.size.width, bounds.size.height),
+            // A turn about the vertical axis: m11 = cos, m31 = sin.
+            tilt: t.m31.atan2(t.m11),
+            corner: self.target.corner,
+        }
     }
 
     /// Moves the ghost to `p` on the spring, from wherever it is drawn now.
