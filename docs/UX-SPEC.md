@@ -140,7 +140,15 @@ that picture cross-fades into its growing snapshot. Each picture
 carries macOS's own window shadow, measured on a Studio Display (`stage-manager probe-shadow
 --profile`: a hairline rim and a soft drop, the key window's 2.5 times as wide as an inactive
 window's): the key window's on the window that is or becomes key, an inactive window's on
-the others, turning into the card's shadow on the spring as it nears its card. A window's own
+the others, turning into the card's shadow on the spring as it nears its card. macOS draws a
+window's shadow by the window's appearance: in Dark Mode the drop reaches as far but is
+nearly twice as dark and the hairline nearly opaque, so the picture takes the shadow of the
+appearance the system is in at each switch. macOS also draws a thin white line just inside
+each window's edge, with the shadow (a capture that leaves the shadow out lacks it): a point
+wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
+shows only on dark content. The picture carries it too, over its edge and corner, coming
+and going with the window's shadow; without it every edge stepped lighter at the handover
+(the owner, 11-01, Dark Mode). A window's own
 shadow appears in one frame, so the picture keeps its shadow until the window server lists
 the window on screen at its frame (asked every half frame from the unveil), then fades it
 over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few

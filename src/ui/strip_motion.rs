@@ -378,13 +378,22 @@ impl Strip {
     }
 
     /// The shadows a snapshot can carry at full size (`[animation] shadow`): the key window's
-    /// and an inactive one's, or the custom one for both.
-    fn window_shadows(&self) -> [WindowShadow; 2] {
+    /// and an inactive one's in the appearance windows are drawn in now (`dark`), or the
+    /// custom one for both.
+    fn window_shadows(&self, dark: bool) -> [WindowShadow; 2] {
         let a = &self.style.animation;
         match a.shadow {
-            SnapshotShadow::Window => [WindowShadow::ACTIVE, WindowShadow::INACTIVE],
+            SnapshotShadow::Window => [WindowShadow::of_window(true, dark), WindowShadow::of_window(false, dark)],
             SnapshotShadow::Custom => [WindowShadow::custom(a.shadow_radius, a.shadow_opacity, a.shadow_offset_y); 2],
         }
+    }
+
+    /// True when windows are drawn in the dark appearance now: the system's, read at each
+    /// snapshot so a change of Light, Dark or Auto is followed at the next switch (macOS
+    /// draws a window's shadow by the window's own appearance, which follows the system's
+    /// unless its app sets one).
+    fn dark_now() -> bool {
+        MainThreadMarker::new().is_some_and(crate::platform::wallpaper::dark_appearance)
     }
 
     /// How a window's snapshot (`picture`, the window at `frame`) is shadowed: the key
@@ -393,7 +402,7 @@ impl Strip {
     /// and the card's shadow on a card; starting `amount` of the way to the window's (0 a
     /// card, 1 the window).
     fn ghost_shadow(&self, picture: Option<&Picture>, frame: Rect, key: bool, amount: f64) -> GhostShadow {
-        let [active, inactive] = self.window_shadows();
+        let [active, inactive] = self.window_shadows(Self::dark_now());
         let set = self.style.animation.corner_radius;
         let corner = if set > 0.0 { set } else { picture.and_then(|p| window_shadow::corner_of(p, (frame.w, frame.h))).unwrap_or(DEFAULT_CORNER) };
         let c = &self.style.cards;
@@ -404,7 +413,7 @@ impl Strip {
             radius: c.shadow_radius * k,
             offset: (c.shadow_offset_x * k, c.shadow_offset_y * k),
         };
-        GhostShadow { window: if key { active } else { inactive }, corner, card, amount }
+        GhostShadow { window: if key { active } else { inactive }, corner, window_size: (frame.w, frame.h), card, amount }
     }
 
     /// Lays the overlay over the main display with the strip's eye, and has the snapshots'
@@ -413,7 +422,10 @@ impl Strip {
         let g = &self.geometry;
         let eye = Point::new(g.global.x + g.m.eye.x, g.global.y + g.m.eye.y);
         self.motion.overlay.place(g.screen, g.primary_height, eye, g.m.perspective);
-        window_shadow::prepare(&self.window_shadows(), self.motion.overlay.scale());
+        // Both appearances', so a change of appearance finds them drawn too.
+        let [a, b] = self.window_shadows(false);
+        let [c, d] = self.window_shadows(true);
+        window_shadow::prepare(&[a, b, c, d], self.motion.overlay.scale());
     }
 
     /// A card thumbnail's plane in overlay coordinates (slid out with the strip when hidden).

@@ -14,11 +14,20 @@
 //! and 2/255 reach per side, and the window's corner radius as drawn. `--dump DIR` also writes
 //! each state's alpha plane (`<state>.pgm`, with `<state>.json` saying where the frame is).
 //!
+//! **Colour.** Per state also the colour across the middle of each side's edge, inside out
+//! (`edges`), and the window's own picture without its framing (`bare_edges_outside_in`,
+//! `kCGWindowImageBoundsIgnoreFraming`, as a snapshot leaves the shadow out): macOS's white
+//! inner rim shows in the first and not in the second. `--appearance` draws the probe's
+//! windows dark or light (macOS draws a window's shadow by the window's own appearance, not
+//! the system's), `--background GREY` fills them with a grey so a rim over the content shows.
+//!
 //! **Compare.** For each state, the real window's image as above, and the probe's own
 //! borderless overlay-like window drawing a snapshot plane exactly as the motion overlay does
-//! ([`crate::ui::window_shadow::ShadowLayers`], over an opaque plane of the window's size and
-//! corner radius), taken the same way at the same frame. Printed: the largest alpha difference
-//! outside the frame, along each profile and over the whole margin.
+//! ([`crate::ui::window_shadow::ShadowLayers`]: the window's own picture without its framing,
+//! the shadow under it and the inner rim over it, for the appearance the probe's windows are
+//! drawn in), taken the same way at the same frame. Printed: the largest alpha difference
+//! outside the frame, along each profile and over the whole margin, and the largest colour
+//! difference across each side's edge and near the frame (inside and out).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -28,6 +37,7 @@ use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplication, NSBackingStoreType, NSColor, NSPanel, NSView, NSWindow, NSWindowStyleMask};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGWindowImageOption;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CALayer, CATransaction};
 use serde_json::{Value, json};
@@ -44,6 +54,13 @@ pub struct AlphaPlane {
     pub w: usize,
     pub h: usize,
     pub alpha: Vec<u8>,
+    /// The premultiplied colour, BGRA per pixel as captured (empty for a model's plane).
+    pub bgra: Vec<u8>,
+    /// The window's image without its framing (shadow), as a snapshot is taken, BGRA, the
+    /// frame's size: `None` for a model's plane.
+    pub bare: Option<(Vec<u8>, usize, usize)>,
+    /// The same image, for the comparison's snapshot to show.
+    pub bare_image: Option<objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>>,
     pub frame: PixelRect,
     /// Pixels per point.
     pub scale: f64,
@@ -82,6 +99,24 @@ impl AlphaPlane {
         ]
     }
 
+    /// The colour across the middle of each side's edge (left, top, right, bottom), from `n`
+    /// pixels inside the frame to `n` outside, as `[alpha, red, green, blue]` premultiplied.
+    pub fn edges(&self, n: usize) -> [Vec<[u8; 4]>; 4] {
+        let f = &self.frame;
+        let (cx, cy) = ((f.x + f.w / 2) as isize, (f.y + f.h / 2) as isize);
+        let (x0, y0, x1, y1) = (f.x as isize, f.y as isize, (f.x + f.w) as isize, (f.y + f.h) as isize);
+        let n = n as isize;
+        let px = |x: isize, y: isize| -> [u8; 4] {
+            if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h || self.bgra.is_empty() {
+                return [0; 4];
+            }
+            let i = (y as usize * self.w + x as usize) * 4;
+            [self.bgra[i + 3], self.bgra[i + 2], self.bgra[i + 1], self.bgra[i]]
+        };
+        let take = |step: &dyn Fn(isize) -> (isize, isize)| (-n..n).map(|d| { let (x, y) = step(d); px(x, y) }).collect();
+        [take(&|d| (x0 - 1 - d, cy)), take(&|d| (cx, y0 - 1 - d)), take(&|d| (x1 + d, cy)), take(&|d| (cx, y1 + d))]
+    }
+
     /// The window's corner radius as drawn (points), read as a snapshot's is
     /// ([`crate::ui::window_shadow::corner_of`]): along the diagonal into the top-left corner,
     /// how far in its own pixels turn more than half opaque (the shadow under the corner is
@@ -102,7 +137,21 @@ fn reach_pt(profiles: &[Vec<u8>; 4], threshold: u8, scale: f64) -> [f64; 4] {
 }
 
 /// Runs the profile or the comparison (see the module docs).
-pub fn run(mtm: MainThreadMarker, main: &crate::engine::model::Display, size: NSSize, settle: Duration, dump: Option<&Path>, compare: bool) -> ExitCode {
+pub fn run(
+    mtm: MainThreadMarker,
+    main: &crate::engine::model::Display,
+    size: NSSize,
+    settle: Duration,
+    dump: Option<&Path>,
+    compare: bool,
+    appearance: Option<bool>,
+) -> ExitCode {
+    // The probe's own windows in the appearance asked for (the system's is never changed).
+    crate::ui::form::set_app_appearance(mtm, appearance);
+    let system_dark = objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .stringForKey(&objc2_foundation::NSString::from_str("AppleInterfaceStyle"))
+        .is_some_and(|s| s.to_string() == "Dark");
+    let windows_dark = crate::platform::wallpaper::dark_appearance(mtm);
     let mut out = serde_json::Map::new();
     let mut ok = true;
     for key in [false, true] {
@@ -120,12 +169,19 @@ pub fn run(mtm: MainThreadMarker, main: &crate::engine::model::Display, size: NS
         {
             eprintln!("probe-shadow: {why}");
         }
+        // The window's own pixels as a snapshot has them (its frame alone).
+        if let (Some(dir), Some((bytes, w, h))) = (dump, real.bare.as_ref()) {
+            let alpha = bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+            let bare = AlphaPlane { w: *w, h: *h, alpha, bgra: Vec::new(), bare: None, bare_image: None, frame: PixelRect { x: 0, y: 0, w: *w, h: *h }, scale: real.scale };
+            let _ = write_dump(dir, &format!("{state}-bare"), &bare);
+        }
         let mut row = profile_json(&real);
         if compare {
-            let shadow = if key { WindowShadow::ACTIVE } else { WindowShadow::INACTIVE };
+            let shadow = WindowShadow::of_window(key, windows_dark);
             // The window's whole frame (its title bar included), at the same top-left.
             let frame = NSSize::new(real.frame.w as f64 / real.scale, real.frame.h as f64 / real.scale);
-            match drawn_snapshot(mtm, middle(main, size), frame, settle, &shadow, real.corner_radius()) {
+            let corner = corner_override().unwrap_or_else(|| real.corner_radius());
+            match drawn_snapshot(mtm, middle(main, size), frame, settle, &shadow, corner, real.bare_image.as_deref()) {
                 Ok(ours) => {
                     if let Some(dir) = dump {
                         let _ = write_dump(dir, &format!("{state}-ours"), &ours);
@@ -140,7 +196,7 @@ pub fn run(mtm: MainThreadMarker, main: &crate::engine::model::Display, size: NS
         }
         out.insert(state.into(), row);
     }
-    println!("{}", json!({ "ok": ok, "display": main.frame, "states": out }));
+    println!("{}", json!({ "ok": ok, "display": main.frame, "system_dark": system_dark, "windows_dark": windows_dark, "states": out }));
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
@@ -157,8 +213,21 @@ fn profile_json(p: &AlphaPlane) -> Value {
         "reach_2": side(reach_pt(&sides, 2, p.scale)),
         "sides": { "left": trim(&sides[0]), "top": trim(&sides[1]), "right": trim(&sides[2]), "bottom": trim(&sides[3]) },
         "corners": { "top_left": trim(&corners[0]), "top_right": trim(&corners[1]), "bottom_right": trim(&corners[2]), "bottom_left": trim(&corners[3]) },
+        "edges": edges_json(p),
+        "bare_size": p.bare.as_ref().map(|(_, w, h)| json!([w, h])),
+        "bare_edges_outside_in": p.bare.as_ref().map(|b| { let e = bare_edges(b, EDGE_PX); json!({ "left": e[0], "top": e[1], "right": e[2], "bottom": e[3] }) }),
     })
 }
+
+/// The colour across each side's edge, inside out ([`AlphaPlane::edges`]): the first entry
+/// is [`EDGE_PX`] pixels inside the frame, the one at index [`EDGE_PX`] the first outside.
+fn edges_json(p: &AlphaPlane) -> Value {
+    let e = p.edges(EDGE_PX);
+    json!({ "left": e[0], "top": e[1], "right": e[2], "bottom": e[3] })
+}
+
+/// How far (pixels) the edge readout reaches each way.
+const EDGE_PX: usize = 8;
 
 /// The largest alpha difference between the real window's shadow and ours, outside the frame.
 fn compare_json(real: &AlphaPlane, ours: &AlphaPlane) -> Value {
@@ -187,9 +256,55 @@ fn compare_json(real: &AlphaPlane, ours: &AlphaPlane) -> Value {
             }
         }
     }
+    // The colour (premultiplied, every channel) on screen over the window's edge: outside it
+    // and within EDGE_PX pixels inside it (the inner rim over the content), where both planes
+    // carry colour.
+    let (mut color_out, mut color_edge, mut color_at) = (0i32, 0i32, (0isize, 0isize));
+    if !real.bgra.is_empty() && !ours.bgra.is_empty() {
+        let e = EDGE_PX as isize;
+        let (fx0, fy0, fx1, fy1) = (f.x as isize, f.y as isize, (f.x + f.w) as isize, (f.y + f.h) as isize);
+        let px = |p: &AlphaPlane, x: isize, y: isize| -> [i32; 4] {
+            if x < 0 || y < 0 || x as usize >= p.w || y as usize >= p.h {
+                return [0; 4];
+            }
+            let i = (y as usize * p.w + x as usize) * 4;
+            [p.bgra[i] as i32, p.bgra[i + 1] as i32, p.bgra[i + 2] as i32, p.bgra[i + 3] as i32]
+        };
+        for y in (fy0 - e).max(0)..(fy1 + e).min(real.h as isize) {
+            for x in (fx0 - e).max(0)..(fx1 + e).min(real.w as isize) {
+                let inside = x >= fx0 && x < fx1 && y >= fy0 && y < fy1;
+                let deep = x >= fx0 + e && x < fx1 - e && y >= fy0 + e && y < fy1 - e;
+                if deep {
+                    continue;
+                }
+                let (a, b) = (px(real, x, y), px(ours, x + dx, y + dy));
+                let d = (0..4).map(|k| (a[k] - b[k]).abs()).max().unwrap_or(0);
+                let slot = if inside { &mut color_edge } else { &mut color_out };
+                if d > *slot {
+                    *slot = d;
+                    if inside {
+                        color_at = (x - fx0, y - fy0);
+                    }
+                }
+            }
+        }
+    }
+    // Across the middle of each side, inside out: the inner rim and the hairline where the
+    // edge is straight.
+    let edge_worst: Vec<i32> = real
+        .edges(EDGE_PX)
+        .iter()
+        .zip(ours.edges(EDGE_PX).iter())
+        .map(|(a, b)| a.iter().zip(b).map(|(x, y)| (0..4).map(|k| (x[k] as i32 - y[k] as i32).abs()).max().unwrap_or(0)).max().unwrap_or(0))
+        .collect();
     let pt = |px: isize| px as f64 / real.scale;
     json!({
         "ok": true,
+        "color_across_sides": { "left": edge_worst[0], "top": edge_worst[1], "right": edge_worst[2], "bottom": edge_worst[3] },
+        "edges_ours": edges_json(ours),
+        "largest_color_outside_near": color_out,
+        "largest_color_edge_inside": color_edge,
+        "largest_color_edge_inside_at_pt": [pt(color_at.0), pt(color_at.1)],
         "largest": largest,
         "largest_at_pt_from_frame_top_left": [pt(at.0), pt(at.1)],
         "mean": sum as f64 / count.max(1) as f64,
@@ -237,7 +352,60 @@ fn plane_of(id: u32) -> Result<AlphaPlane, String> {
         h: (listed.h * scale).round() as usize,
     };
     let alpha = bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
-    Ok(AlphaPlane { w, h, alpha, frame, scale })
+    Ok(AlphaPlane { w, h, alpha, bgra: bytes, bare: None, bare_image: None, frame, scale })
+}
+
+/// The probe windows' background grey (0-1, sRGB) when `--background` set one: a rim over a
+/// window's content shows against it.
+static BACKGROUND: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
+/// Sets the probe windows' background grey (`--background`).
+pub fn set_background(grey: Option<f64>) {
+    *BACKGROUND.lock().unwrap_or_else(|e| e.into_inner()) = grey;
+}
+
+/// The corner radius the comparison's shadow is drawn at when `--corner` set one (else the
+/// one read from the window's picture, as a snapshot's is).
+static CORNER: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
+/// Sets the comparison's corner radius (`--corner`).
+pub fn set_corner(r: Option<f64>) {
+    *CORNER.lock().unwrap_or_else(|e| e.into_inner()) = r;
+}
+
+fn corner_override() -> Option<f64> {
+    *CORNER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn background() -> Option<f64> {
+    *BACKGROUND.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Window `id`'s image without its framing (`kCGWindowImageBoundsIgnoreFraming`): its own
+/// pixels, as a snapshot (shadows ignored) has them.
+fn bare_image_of(id: u32) -> Option<objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>> {
+    let opt = CGWindowImageOption::BestResolution | CGWindowImageOption::BoundsIgnoreFraming;
+    let rect = CGRect::new(CGPoint::new(f64::INFINITY, f64::INFINITY), CGSize::new(0.0, 0.0));
+    // Our own window only (kCGWindowListOptionIncludingWindow), as [`window_image`].
+    #[allow(deprecated)]
+    objc2_core_graphics::CGWindowListCreateImage(rect, objc2_core_graphics::CGWindowListOption::OptionIncludingWindow, id, opt)
+}
+
+/// The colour across the middle of each side of a bare image (`w` x `h`, the frame), from
+/// the outermost pixel inward, `n` each, `[alpha, red, green, blue]` premultiplied.
+fn bare_edges((bytes, w, h): &(Vec<u8>, usize, usize), n: usize) -> [Vec<[u8; 4]>; 4] {
+    let px = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * w + x) * 4;
+        bytes.get(i..i + 4).map_or([0; 4], |b| [b[3], b[2], b[1], b[0]])
+    };
+    let (cx, cy) = (w / 2, h / 2);
+    let n = n.min(w / 2).min(h / 2);
+    [
+        (0..n).map(|d| px(d, cy)).collect(),
+        (0..n).map(|d| px(cx, d)).collect(),
+        (0..n).map(|d| px(w - 1 - d, cy)).collect(),
+        (0..n).map(|d| px(cx, h - 1 - d)).collect(),
+    ]
 }
 
 /// A titled window of the probe's own in the middle: inactive under every window, or key
@@ -265,6 +433,9 @@ fn real_window(mtm: MainThreadMarker, main: &crate::engine::model::Display, size
     } else {
         make_window(mtm, Variant { toolbar: false, corner: false, normal_level: false }, size)
     };
+    if let Some(grey) = background() {
+        window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(grey, grey, grey, 1.0)));
+    }
     let at = middle(main, size);
     // The app in front, given its place back after (the panel may activate the probe's app).
     let before = key.then(|| objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication()).flatten();
@@ -286,7 +457,11 @@ fn real_window(mtm: MainThreadMarker, main: &crate::engine::model::Display, size
             ));
         }
         let id = u32::try_from(window.windowNumber()).map_err(|_| "no window number".to_string())?;
-        let plane = plane_of(id)?;
+        let mut plane = plane_of(id)?;
+        if let Some(image) = bare_image_of(id) {
+            plane.bare = pixels::bgra(&image, None);
+            plane.bare_image = Some(image);
+        }
         if plane.at((plane.frame.x + plane.frame.w / 2) as isize, (plane.frame.y + plane.frame.h / 2) as isize) < 200 {
             return Err("the window was not drawn".into());
         }
@@ -313,6 +488,7 @@ fn drawn_snapshot(
     settle: Duration,
     shadow: &WindowShadow,
     corner: f64,
+    picture: Option<&objc2_core_graphics::CGImage>,
 ) -> Result<AlphaPlane, String> {
     // The panel reaches past the frame by the margin, the plane at the frame within it.
     let grown = NSSize::new(size.width + 2.0 * MARGIN, size.height + 2.0 * MARGIN);
@@ -344,18 +520,32 @@ fn drawn_snapshot(
     plane.setPosition(CGPoint::new(MARGIN, MARGIN));
     plane.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height)));
     let mut layers = ShadowLayers::new(&plane);
-    layers.set_shadow(shadow, corner, scale, CGSize::new(size.width, size.height));
+    let window = CGSize::new(size.width, size.height);
+    layers.set_shadow(shadow, corner, scale, window, window);
     layers.set_amount(1.0);
     let img = CALayer::new();
     img.setAnchorPoint(CGPoint::new(0.0, 0.0));
     img.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width, size.height)));
     img.setPosition(CGPoint::new(0.0, 0.0));
-    img.setBackgroundColor(Some(&objc2_core_graphics::CGColor::new_srgb(0.95, 0.95, 0.95, 1.0)));
-    img.setCornerRadius(corner);
-    // SAFETY: framework constant.
-    img.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
-    img.setMasksToBounds(true);
+    match picture {
+        // The real window's own pixels (its corners clear), as a snapshot shows them.
+        Some(picture) => {
+            // SAFETY: framework constant; a CGImage is valid layer contents.
+            unsafe {
+                img.setContentsGravity(objc2_quartz_core::kCAGravityResize);
+                img.setContents(Some(&*(picture as *const objc2_core_graphics::CGImage).cast::<objc2::runtime::AnyObject>()));
+            }
+        }
+        None => {
+            img.setBackgroundColor(Some(&objc2_core_graphics::CGColor::new_srgb(0.95, 0.95, 0.95, 1.0)));
+            img.setCornerRadius(corner);
+            // SAFETY: framework constant.
+            img.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+            img.setMasksToBounds(true);
+        }
+    }
     plane.addSublayer(&img);
+    layers.attach_rim(&plane);
     // Top-down, as the overlay's layers are (a view's own layer cannot keep the flag).
     let flipped = CALayer::new();
     flipped.setGeometryFlipped(true);
@@ -376,7 +566,7 @@ fn drawn_snapshot(
         let (bytes, w, h) = pixels::bgra(&image, None).ok_or("the image could not be read")?;
         let s = w as f64 / shot.w;
         let frame = PixelRect { x: (MARGIN * s).round() as usize, y: (MARGIN * s).round() as usize, w: (size.width * s).round() as usize, h: (size.height * s).round() as usize };
-        Ok(AlphaPlane { w, h, alpha: bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect(), frame, scale: s })
+        Ok(AlphaPlane { w, h, alpha: bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect(), bgra: bytes, bare: None, bare_image: None, frame, scale: s })
     })();
     panel.orderOut(None);
     panel.close();

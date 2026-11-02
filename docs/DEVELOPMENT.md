@@ -172,7 +172,13 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
 - `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
-  each side of its frame, from windows of its own (the corner patch's reach).
+  each side of its frame, from windows of its own (the corner patch's reach). `--profile`
+  prints the falloff of a key and an inactive window's shadow and the colour across each
+  edge (the inner rim), `--compare` how closely a snapshot drawn as the overlay draws it
+  (the window's own picture, its shadow and rim) matches; `--appearance dark|light` draws
+  the probe's windows in that appearance (the system's is never changed), `--background
+  GREY` fills them with a grey (a rim shows on it), `--corner PT` draws the comparison at
+  that corner radius.
 
 ## Logs
 

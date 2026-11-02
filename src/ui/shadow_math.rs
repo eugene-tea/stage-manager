@@ -2,13 +2,21 @@
 //! nine-part image, and the handover's fade. Drawn by [`crate::ui::window_shadow`].
 //!
 //! - **The model.** macOS's window shadow, measured on the owner's Mac (11-01, `stage-manager
-//!   probe-shadow --profile`, Studio Display at 2x, light appearance), is two parts laid over
-//!   one another: a hairline rim just outside the window (a sharp line half a point out,
-//!   about a fifth opaque) and a soft drop moved down. The key window's drop is about 2.5
-//!   times as wide and nearly twice as dark as an inactive window's. Each part is the
-//!   window's shape grown by a spread and moved down by an offset, blurred by a Gaussian
-//!   ([`ShadowPart`]); fitted to the falloff along every side, the model is within an alpha
-//!   level of the measured one (out of 255) there.
+//!   probe-shadow --profile`, Studio Display at 2x), is two parts laid over one another: a
+//!   hairline rim just outside the window (a sharp line half a point out) and a soft drop
+//!   moved down. The key window's drop is about 2.5 times as wide as an inactive window's.
+//!   Each part is the window's shape grown by a spread and moved down by an offset, blurred by
+//!   a Gaussian ([`ShadowPart`]); fitted to the falloff along every side, the model is within
+//!   a few alpha levels (out of 255) of the measured one there.
+//! - **Light and dark.** macOS draws a window's shadow by the window's own appearance (a
+//!   window drawn in the light appearance on a dark system keeps the light shadow, measured
+//!   with the probe's own windows set to each). In the dark one the drop has the same reach
+//!   and offset but is nearly twice as dark, and the rim is nearly opaque (a fifth to a third
+//!   in the light one): [`WindowShadow::ACTIVE_DARK`], [`WindowShadow::INACTIVE_DARK`].
+//! - **The inner rim.** macOS also draws a thin white line just inside the window's edge
+//!   (over its content, following its corner), with the shadow, not with the window's own
+//!   pixels: a capture that ignores the shadow lacks it ([`InnerRim`]). It reads on a dark
+//!   window (a dark-appearance one above all, a point wide there), not on a white one.
 //! - **The shape.** A window's corner is Core Animation's continuous corner (Apple's
 //!   "squircle", reaching 1.53 radii along each edge), 16 pt on a titled window; a circular
 //!   arc of the same radius sits up to half a point off it, which puts the rim a pixel off.
@@ -39,10 +47,31 @@ impl ShadowPart {
     pub const NONE: ShadowPart = ShadowPart { blur: 0.0, opacity: 0.0, offset_y: 0.0, spread: 0.0 };
 }
 
-/// A window shadow: its parts, laid over one another (source over).
+/// The white line macOS draws just inside a window's edge, over its content, with its
+/// shadow: `width` points wide, white at `white` (0-1) over the content, following the
+/// window's corner. Drawn on a snapshot over its picture ([`crate::ui::window_shadow`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InnerRim {
+    pub width: f64,
+    pub white: f64,
+}
+
+impl InnerRim {
+    /// No inner rim.
+    pub const NONE: InnerRim = InnerRim { width: 0.0, white: 0.0 };
+
+    /// True when it draws nothing.
+    pub fn is_none(&self) -> bool {
+        self.width <= 0.0 || self.white <= 0.0
+    }
+}
+
+/// A window shadow: its parts, laid over one another (source over), under the window, and
+/// the inner rim over it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowShadow {
     pub parts: [ShadowPart; 2],
+    pub rim: InnerRim,
 }
 
 /// The corner radius of a titled window on the owner's Mac (points, continuous), measured
@@ -53,30 +82,70 @@ pub const DEFAULT_CORNER: f64 = 16.0;
 pub const CORNER_REACH: f64 = 1.528_665;
 
 impl WindowShadow {
-    /// The key (active) window's shadow, fitted to the owner's Mac (11-01): at 2/255 it
-    /// reaches 45 pt left and right, 24.5 above and 62 below the middle of each side.
+    /// The key (active) window's shadow in the light appearance, fitted to the owner's Mac
+    /// (11-01): at 2/255 it reaches 45 pt left and right, 24.5 above and 62 below the middle
+    /// of each side; the inner rim half a point, white at a tenth.
     pub const ACTIVE: WindowShadow = WindowShadow {
         parts: [
             ShadowPart { blur: 0.25, opacity: 0.315, offset_y: 0.0, spread: 0.35 },
             ShadowPart { blur: 19.25, opacity: 0.395, offset_y: 17.9, spread: 0.65 },
         ],
+        rim: InnerRim { width: 0.5, white: 0.10 },
     };
-    /// An inactive window's shadow, fitted to the owner's Mac (11-01): at 2/255 it reaches
-    /// 15.5 pt left and right, 8.5 above and 23 below the middle of each side.
+    /// An inactive window's shadow in the light appearance, fitted to the owner's Mac
+    /// (11-01): at 2/255 it reaches 15.5 pt left and right, 8.5 above and 23 below the middle
+    /// of each side; the inner rim as the key window's.
     pub const INACTIVE: WindowShadow = WindowShadow {
         parts: [
             ShadowPart { blur: 0.25, opacity: 0.22, offset_y: 0.0, spread: 0.5 },
             ShadowPart { blur: 7.8, opacity: 0.215, offset_y: 7.0, spread: 0.2 },
         ],
+        rim: InnerRim { width: 0.5, white: 0.10 },
+    };
+    /// The key window's shadow in the dark appearance, fitted to the owner's Mac (11-01): at
+    /// 2/255 it reaches 46 pt left and right, 29 above and 63.5 below the middle of each
+    /// side; the hairline 0.95 opaque, the drop 0.35 just past it (light: 0.37, 0.22); the
+    /// inner rim a point wide, white at a tenth.
+    pub const ACTIVE_DARK: WindowShadow = WindowShadow {
+        parts: [
+            ShadowPart { blur: 0.03, opacity: 0.93, offset_y: 0.0, spread: 0.52 },
+            ShadowPart { blur: 19.25, opacity: 0.68, offset_y: 17.85, spread: 0.95 },
+        ],
+        rim: InnerRim { width: 1.0, white: 0.10 },
+    };
+    /// An inactive window's shadow in the dark appearance, fitted to the owner's Mac (11-01):
+    /// at 2/255 it reaches 17.5 pt left and right, 10 above and 25.5 below the middle of each
+    /// side; the hairline 0.87 opaque, the drop 0.23 just past it (light: 0.29, 0.12); the
+    /// inner rim a point wide, white at 0.08.
+    pub const INACTIVE_DARK: WindowShadow = WindowShadow {
+        parts: [
+            ShadowPart { blur: 0.03, opacity: 0.83, offset_y: 0.0, spread: 0.52 },
+            ShadowPart { blur: 7.37, opacity: 0.425, offset_y: 6.8, spread: 0.9 },
+        ],
+        rim: InnerRim { width: 1.0, white: 0.08 },
     };
 
     /// No shadow.
-    pub const NONE: WindowShadow = WindowShadow { parts: [ShadowPart::NONE; 2] };
+    pub const NONE: WindowShadow = WindowShadow { parts: [ShadowPart::NONE; 2], rim: InnerRim::NONE };
+
+    /// macOS's shadow for a window drawn in the dark appearance (`dark`) or the light one,
+    /// key (`key`) or not.
+    pub fn of_window(key: bool, dark: bool) -> WindowShadow {
+        match (key, dark) {
+            (true, false) => Self::ACTIVE,
+            (false, false) => Self::INACTIVE,
+            (true, true) => Self::ACTIVE_DARK,
+            (false, true) => Self::INACTIVE_DARK,
+        }
+    }
 
     /// One Core Animation-like shadow (`[animation] shadow = "custom"`): blur `radius` (a
-    /// sigma of half of it), `opacity`, moved down `offset_y`.
+    /// sigma of half of it), `opacity`, moved down `offset_y`; no rim.
     pub fn custom(radius: f64, opacity: f64, offset_y: f64) -> WindowShadow {
-        WindowShadow { parts: [ShadowPart { blur: radius.max(0.0) / 2.0, opacity: opacity.clamp(0.0, 1.0), offset_y, spread: 0.0 }, ShadowPart::NONE] }
+        WindowShadow {
+            parts: [ShadowPart { blur: radius.max(0.0) / 2.0, opacity: opacity.clamp(0.0, 1.0), offset_y, spread: 0.0 }, ShadowPart::NONE],
+            rim: InnerRim::NONE,
+        }
     }
 
     /// How far past the window (points, every side) the shadow can reach: 3.5 sigmas of the
@@ -91,6 +160,7 @@ impl WindowShadow {
         for p in &mut s.parts {
             p.opacity = (p.opacity * k).clamp(0.0, 1.0);
         }
+        s.rim.white = (s.rim.white * k).clamp(0.0, 1.0);
         s
     }
 }
@@ -339,6 +409,14 @@ pub fn handover_error(a: f64, t: f64, shown: f64, begin: f64, duration: f64) -> 
     if t >= shown { f + a * (1.0 - f) - a } else { f - a }
 }
 
+/// How the inner rim, laid out at the window's `window` size (points) so its corner and width
+/// are the window's, is scaled to a plane of `plane` size: as the snapshot's picture is, so
+/// the rim stays on the picture's edge and corner all the way (`(1, 1)` at the window).
+pub fn rim_scale(plane: (f64, f64), window: (f64, f64)) -> (f64, f64) {
+    let ratio = |p: f64, w: f64| if w > 0.0 { (p / w).max(0.0) } else { 1.0 };
+    (ratio(plane.0, window.0), ratio(plane.1, window.1))
+}
+
 /// The shadow's amount (0 at a card, 1 at the window) for a plane `progress` of the way from
 /// `from` to `to` on the switch's spring: the same curve as the plane's motion.
 pub fn amount_at(from: f64, to: f64, progress: f64) -> f64 {
@@ -384,7 +462,7 @@ mod tests {
     /// opacity 0.5, 7.5 pt past the edge, is 0.5 (1 - Φ(7.5 / 4)).
     #[test]
     fn a_side_falls_off_as_the_gaussian() {
-        let s = WindowShadow { parts: [ShadowPart { blur: 4.0, opacity: 0.5, offset_y: 0.0, spread: 0.0 }, ShadowPart::NONE] };
+        let s = WindowShadow { parts: [ShadowPart { blur: 4.0, opacity: 0.5, offset_y: 0.0, spread: 0.0 }, ShadowPart::NONE], rim: InnerRim::NONE };
         let (w, h) = (200, 200);
         let a = shadow_alpha(&s, (50.0, 50.0, 100.0, 100.0), 8.0, w, h, 1.0);
         let at = |x: usize, y: usize| f64::from(a[y * w + x]);
@@ -399,7 +477,7 @@ mod tests {
     /// The rim: a sharp part half a point out is one pixel wide at 2x.
     #[test]
     fn a_sharp_rim_is_one_pixel_at_2x() {
-        let s = WindowShadow { parts: [ShadowPart { blur: 0.25, opacity: 0.3, offset_y: 0.0, spread: 0.5 }, ShadowPart::NONE] };
+        let s = WindowShadow { parts: [ShadowPart { blur: 0.25, opacity: 0.3, offset_y: 0.0, spread: 0.5 }, ShadowPart::NONE], rim: InnerRim::NONE };
         let (w, h) = (120, 120);
         let a = shadow_alpha(&s, (10.0, 10.0, 40.0, 40.0), 4.0, w, h, 2.0);
         let at = |x: usize, y: usize| f64::from(a[y * w + x]);
@@ -410,7 +488,7 @@ mod tests {
 
     #[test]
     fn an_offset_moves_the_shadow_down() {
-        let s = WindowShadow { parts: [ShadowPart { blur: 3.0, opacity: 0.6, offset_y: 6.0, spread: 0.0 }, ShadowPart::NONE] };
+        let s = WindowShadow { parts: [ShadowPart { blur: 3.0, opacity: 0.6, offset_y: 6.0, spread: 0.0 }, ShadowPart::NONE], rim: InnerRim::NONE };
         let (w, h) = (120, 120);
         let a = shadow_alpha(&s, (30.0, 30.0, 60.0, 60.0), 0.0, w, h, 1.0);
         let (above, below) = (a[25 * w + 60], a[94 * w + 60]);
@@ -441,6 +519,7 @@ mod tests {
     fn the_nine_part_image_stretches_to_any_size() {
         let s = WindowShadow {
             parts: [ShadowPart { blur: 0.5, opacity: 0.3, offset_y: 0.0, spread: 0.5 }, ShadowPart { blur: 3.0, opacity: 0.4, offset_y: 3.0, spread: 0.0 }],
+            rim: InnerRim::NONE,
         };
         let corner = 6.0;
         let img = render(&s, corner, 1.0);
@@ -461,10 +540,62 @@ mod tests {
         assert!(worst <= 1.5 / 255.0, "worst {}", worst * 255.0);
     }
 
+    /// The dark shadows reach where the probe measured them (11-01, the system in the dark
+    /// appearance): inactive 17.5 left, 10 above, 25.5 below; active 46, 29, 63.5; and they
+    /// are darker than the light ones just past the hairline.
+    #[test]
+    fn the_dark_shadows_reach_as_measured() {
+        let reach = |s: &WindowShadow| {
+            let img = render(s, DEFAULT_CORNER, 2.0);
+            let size = (800.0, 532.0);
+            let past = |f: &dyn Fn(f64) -> (f64, f64)| (0..400).map(|i| i as f64 * 0.5 + 0.25).take_while(|d| { let (x, y) = f(*d); nine_part_at(&img, size, x, y) >= 2.0 / 255.0 }).last().unwrap_or(0.0) + 0.25;
+            (past(&|d| (-d, 266.0)), past(&|d| (400.0, -d)), past(&|d| (400.0, 532.0 + d)))
+        };
+        let close = |got: (f64, f64, f64), want: (f64, f64, f64)| (got.0 - want.0).abs() <= 3.0 && (got.1 - want.1).abs() <= 3.0 && (got.2 - want.2).abs() <= 3.0;
+        let inactive = reach(&WindowShadow::INACTIVE_DARK);
+        assert!(close(inactive, (17.5, 10.0, 25.5)), "inactive {inactive:?}");
+        let active = reach(&WindowShadow::ACTIVE_DARK);
+        assert!(close(active, (46.0, 29.0, 63.5)), "active {active:?}");
+        // Measured at 2x: the hairline (the first pixel out) and the drop (the next) left of
+        // the middle of the left side.
+        for (s, hairline, drop) in [(WindowShadow::ACTIVE_DARK, 243.0, 90.0), (WindowShadow::INACTIVE_DARK, 221.0, 58.0)] {
+            let img = render(&s, DEFAULT_CORNER, 2.0);
+            let at = |d: f64| nine_part_at(&img, (800.0, 532.0), -d, 266.0) * 255.0;
+            assert!((at(0.25) - hairline).abs() <= 4.0, "hairline {} vs {hairline}", at(0.25));
+            assert!((at(0.75) - drop).abs() <= 4.0, "drop {} vs {drop}", at(0.75));
+        }
+    }
+
+    /// The shadow is picked by the window's appearance and focus; a custom one has no rim.
+    #[test]
+    fn the_shadow_follows_appearance_and_focus() {
+        assert_eq!(WindowShadow::of_window(true, false), WindowShadow::ACTIVE);
+        assert_eq!(WindowShadow::of_window(false, false), WindowShadow::INACTIVE);
+        assert_eq!(WindowShadow::of_window(true, true), WindowShadow::ACTIVE_DARK);
+        assert_eq!(WindowShadow::of_window(false, true), WindowShadow::INACTIVE_DARK);
+        let (light, dark) = (WindowShadow::ACTIVE.parts[1], WindowShadow::ACTIVE_DARK.parts[1]);
+        assert!(dark.opacity > 1.5 * light.opacity && (dark.blur - light.blur).abs() < 1.0, "the dark drop: as wide, darker");
+        let rim = |key: bool, dark: bool| WindowShadow::of_window(key, dark).rim;
+        assert!(rim(true, true).width > rim(true, false).width, "the dark rim is a point, the light one half");
+        assert!(rim(false, true).white < rim(true, true).white, "an inactive window's dark rim is fainter");
+        assert_eq!(rim(false, false), rim(true, false), "the light rim is the same on both");
+        assert!(WindowShadow::custom(24.0, 0.35, 10.0).rim.is_none() && WindowShadow::NONE.rim.is_none());
+    }
+
+    /// The rim keeps to the picture: scaled with the plane, the window's own size at the
+    /// window, a card's fraction of it on a card, never negative.
+    #[test]
+    fn the_rim_scales_with_the_plane() {
+        assert_eq!(rim_scale((800.0, 500.0), (800.0, 500.0)), (1.0, 1.0));
+        assert_eq!(rim_scale((200.0, 100.0), (800.0, 500.0)), (0.25, 0.2));
+        assert_eq!(rim_scale((200.0, 100.0), (0.0, 500.0)), (1.0, 0.2), "no window size: as laid out");
+        assert_eq!(rim_scale((-5.0, 100.0), (800.0, 500.0)).0, 0.0);
+    }
+
     #[test]
     fn the_extent_covers_the_widest_part() {
         assert_eq!(WindowShadow::NONE.extent(), 1.0);
-        let s = WindowShadow { parts: [ShadowPart { blur: 10.0, opacity: 0.4, offset_y: 6.0, spread: 1.0 }, ShadowPart::NONE] };
+        let s = WindowShadow { parts: [ShadowPart { blur: 10.0, opacity: 0.4, offset_y: 6.0, spread: 1.0 }, ShadowPart::NONE], rim: InnerRim::NONE };
         assert_eq!(s.extent(), 43.0);
         assert_eq!(WindowShadow::custom(24.0, 0.35, 10.0).parts[0], ShadowPart { blur: 12.0, opacity: 0.35, offset_y: 10.0, spread: 0.0 });
         assert_eq!(WindowShadow::INACTIVE.scaled(0.0).parts[1].opacity, 0.0);

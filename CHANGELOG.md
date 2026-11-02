@@ -11,6 +11,8 @@
   keeps its shadow until it is really on screen.
 - The arriving window's picture keeps its shadow until the window itself is on screen, so the
   shadow no longer lightens for a moment at the end of a switch.
+- In Dark Mode, moving windows carry the darker shadow and the thin light edge macOS gives
+  windows there, so the edges no longer flicker as a switch ends.
 - With hidden parked apps, a switch to a hidden app's stage now always gives it the keyboard:
   an app that does not take its activation is asked again.
 - An automatic update no longer installs while the screen is locked, when hidden windows

@@ -28,7 +28,10 @@
 //! whole points. `--stack N` takes 1, 2, 4 … N windows at one frame together instead, as
 //! parked windows share the corner ([`run_stack`]). `--profile [--dump DIR]` measures the
 //! shadow's falloff for a key window and an inactive one, and `--compare` also how closely a
-//! snapshot's shadow as the overlay draws it matches each ([`super::shadow_profile`]).
+//! snapshot's shadow as the overlay draws it matches each ([`super::shadow_profile`]);
+//! `--appearance dark|light|system` draws the probe's windows in that appearance (the
+//! system's is never changed), `--background GREY` fills them with a grey, `--corner PT`
+//! draws the comparison's shadow at that corner radius.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -126,14 +129,14 @@ impl Variant {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--stack N] [--profile [--dump DIR]] [--compare]");
+    eprintln!("usage: stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--stack N] [--profile [--dump DIR]] [--compare] [--appearance dark|light|system] [--background GREY] [--corner PT]");
     ExitCode::from(2)
 }
 
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let (mut settle, mut size, mut only, mut stack) = (Duration::from_millis(600), NSSize::new(800.0, 500.0), None::<bool>, None::<usize>);
-    let (mut profile, mut compare, mut dump) = (false, false, None::<std::path::PathBuf>);
+    let (mut profile, mut compare, mut dump, mut appearance) = (false, false, None::<std::path::PathBuf>, None::<bool>);
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -149,6 +152,17 @@ pub fn run(args: &[String]) -> ExitCode {
         }
         match (a.as_str(), it.next().map(String::as_str)) {
             ("--dump", Some(dir)) => dump = Some(dir.into()),
+            ("--appearance", Some("dark")) => appearance = Some(true),
+            ("--appearance", Some("light")) => appearance = Some(false),
+            ("--appearance", Some("system")) => appearance = None,
+            ("--corner", Some(r)) => match r.parse::<f64>() {
+                Ok(r) if (0.0..=40.0).contains(&r) => super::shadow_profile::set_corner(Some(r)),
+                _ => return usage(),
+            },
+            ("--background", Some(g)) => match g.parse::<f64>() {
+                Ok(g) if (0.0..=1.0).contains(&g) => super::shadow_profile::set_background(Some(g)),
+                _ => return usage(),
+            },
             ("--settle", Some(ms)) => match ms.parse::<u64>() {
                 Ok(ms) => settle = Duration::from_millis(ms.clamp(100, 5000)),
                 Err(_) => return usage(),
@@ -182,7 +196,7 @@ pub fn run(args: &[String]) -> ExitCode {
         return run_stack(mtm, &main, n, size, settle);
     }
     if profile || compare {
-        return super::shadow_profile::run(mtm, &main, size, settle, dump.as_deref(), compare);
+        return super::shadow_profile::run(mtm, &main, size, settle, dump.as_deref(), compare, appearance);
     }
     let mut variants = Vec::new();
     for toolbar in [false, true] {

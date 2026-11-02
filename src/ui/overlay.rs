@@ -65,7 +65,7 @@ fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
     CGColor::new_srgb(r, g, b, a)
 }
 
-fn transform_value(t: CATransform3D) -> Retained<NSValue> {
+pub(crate) fn transform_value(t: CATransform3D) -> Retained<NSValue> {
     // SAFETY: QuartzCore's NSValue category; any transform is valid.
     unsafe { NSValue::valueWithCATransform3D(t) }
 }
@@ -137,6 +137,8 @@ pub struct GhostShadow {
     pub window: WindowShadow,
     /// The window's corner radius (points; the shadow follows it).
     pub corner: f64,
+    /// The window's size (points; the inner rim is laid out at it).
+    pub window_size: (f64, f64),
     pub card: CardShadow,
     pub amount: f64,
 }
@@ -670,7 +672,8 @@ impl Overlay {
         plane.setAllowsEdgeAntialiasing(true);
         plane.setOpacity(opacity);
         let mut layers = ShadowLayers::new(&plane);
-        layers.set_shadow(&shadow.window, shadow.corner, self.scale(), bounds(&at).size);
+        let window_size = CGSize::new(shadow.window_size.0, shadow.window_size.1);
+        layers.set_shadow(&shadow.window, shadow.corner, self.scale(), bounds(&at).size, window_size);
         let body = CALayer::new();
         body.setAnchorPoint(CGPoint::new(0.0, 0.0));
         let (r, g, b, a) = shadow.card.color;
@@ -694,6 +697,7 @@ impl Overlay {
         }
         body.addSublayer(&img);
         plane.addSublayer(&body);
+        layers.attach_rim(&plane);
         let depth = self.stack(&plane, false);
         let extent = picture.map_or(Extent::NONE, |p| p.extent);
         let mut g = Ghost {

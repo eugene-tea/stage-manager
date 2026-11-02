@@ -16,6 +16,11 @@
 //!   handover ([`ShadowLayers::fade`]) holding the image's layer, whose opacity is the amount
 //!   of the window's shadow shown (0 on a card, 1 at the window), moved on the switch's
 //!   spring with the plane ([`ShadowLayers::spring_amount`]).
+//! - **The inner rim** ([`crate::ui::shadow_math::InnerRim`]): over the picture, the same
+//!   pair (a handover layer holding the rim's), so it comes and goes with the shadow. The rim
+//!   is a white border laid out at the window's size with its corner (continuous) and scaled
+//!   to the plane as the picture is ([`crate::ui::shadow_math::rim_scale`]), so it keeps to
+//!   the picture's edge and corner all the way; [`ShadowLayers::attach_rim`] puts it on top.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,14 +28,14 @@ use std::sync::{Arc, Mutex};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
 use objc2_foundation::{NSNumber, NSString, NSValue};
-use objc2_quartz_core::{CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, kCAFillModeBackwards};
+use objc2_quartz_core::{CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, CATransform3D, kCACornerCurveContinuous, kCAFillModeBackwards};
 
 use crate::platform::capture::Picture;
 use crate::ui::motion_math::Spring;
 pub use crate::ui::shadow_math::{DEFAULT_CORNER, NinePart, WindowShadow};
-use crate::ui::shadow_math::{corner_from_inset, render};
+use crate::ui::shadow_math::{corner_from_inset, render, rim_scale};
 
 /// What a rendered image is drawn for: the shadow's numbers, the corner (half points) and
 /// the scale (hundredths), as bits.
@@ -204,8 +209,8 @@ fn as_object<T>(cf: &T) -> &AnyObject {
 }
 
 /// A snapshot's window shadow on screen: the nine-part image in a layer that follows the
-/// plane, inside a layer that fades it at a handover, under everything else on the plane.
-/// Main thread only.
+/// plane, inside a layer that fades it at a handover, under everything else on the plane;
+/// and the inner rim the same way over the picture. Main thread only.
 pub struct ShadowLayers {
     /// Fades the shadow at a handover ([`Self::fade`]).
     handover: Retained<CALayer>,
@@ -213,28 +218,70 @@ pub struct ShadowLayers {
     /// amount of the window's shadow shown.
     image: Retained<CALayer>,
     extent: f64,
+    /// Fades the inner rim at a handover, as `handover` the shadow.
+    rim_handover: Retained<CALayer>,
+    /// The inner rim: a border at the window's size, scaled to the plane; its opacity is the
+    /// amount, as the image's.
+    rim: Retained<CALayer>,
+    /// The window's size (points) the rim is laid out at.
+    window: CGSize,
+}
+
+fn scale_transform((sx, sy): (f64, f64)) -> CATransform3D {
+    CATransform3D { m11: sx, m12: 0.0, m13: 0.0, m14: 0.0, m21: 0.0, m22: sy, m23: 0.0, m24: 0.0, m31: 0.0, m32: 0.0, m33: 1.0, m34: 0.0, m41: 0.0, m42: 0.0, m43: 0.0, m44: 1.0 }
 }
 
 impl ShadowLayers {
-    /// New layers at the bottom of `plane`, showing nothing until [`Self::set_shadow`].
+    /// New layers at the bottom of `plane`, showing nothing until [`Self::set_shadow`]; the
+    /// rim's go on top with [`Self::attach_rim`].
     pub fn new(plane: &CALayer) -> Self {
+        let zero = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
         let handover = CALayer::new();
         handover.setAnchorPoint(CGPoint::new(0.0, 0.0));
         handover.setPosition(CGPoint::new(0.0, 0.0));
-        handover.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0)));
+        handover.setBounds(zero);
         let image = CALayer::new();
         image.setAnchorPoint(CGPoint::new(0.0, 0.0));
         handover.addSublayer(&image);
         plane.insertSublayer_atIndex(&handover, 0);
-        Self { handover, image, extent: 0.0 }
+        let rim_handover = CALayer::new();
+        rim_handover.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        rim_handover.setPosition(CGPoint::new(0.0, 0.0));
+        rim_handover.setBounds(zero);
+        let rim = CALayer::new();
+        rim.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        rim.setPosition(CGPoint::new(0.0, 0.0));
+        rim.setAllowsEdgeAntialiasing(true);
+        // SAFETY: framework constant.
+        rim.setCornerCurve(unsafe { kCACornerCurveContinuous });
+        rim.setHidden(true);
+        rim_handover.addSublayer(&rim);
+        Self { handover, image, extent: 0.0, rim_handover, rim, window: CGSize::new(0.0, 0.0) }
     }
 
-    /// Shows `shadow` for a window with corners of radius `corner` on a display of `scale`
-    /// pixels a point, around a plane of `size` (in the caller's transaction).
-    pub fn set_shadow(&mut self, shadow: &WindowShadow, corner: f64, scale: f64, size: CGSize) {
+    /// Puts the inner rim on top of `plane`'s layers (call once the picture is on it).
+    pub fn attach_rim(&self, plane: &CALayer) {
+        plane.addSublayer(&self.rim_handover);
+    }
+
+    /// Shows `shadow` for a window of `window` size (points) with corners of radius `corner`
+    /// on a display of `scale` pixels a point, around a plane of `size` (in the caller's
+    /// transaction).
+    pub fn set_shadow(&mut self, shadow: &WindowShadow, corner: f64, scale: f64, size: CGSize, window: CGSize) {
+        self.window = window;
+        let rim = &shadow.rim;
+        self.rim.setHidden(rim.is_none());
+        if !rim.is_none() {
+            self.rim.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), window));
+            self.rim.setCornerRadius(corner);
+            self.rim.setBorderWidth(rim.width);
+            self.rim.setBorderColor(Some(&CGColor::new_srgb(1.0, 1.0, 1.0, rim.white)));
+            self.rim.setContentsScale(scale);
+        }
         let img = rendered(shadow, corner, scale);
         let Some(cg) = image_for(&img) else {
             tracing::debug!("snapshot shadow: no image; none shown");
+            self.layout(size);
             return;
         };
         self.extent = img.extent;
@@ -251,11 +298,18 @@ impl ShadowLayers {
         CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.width + 2.0 * self.extent, size.height + 2.0 * self.extent))
     }
 
+    /// The rim's scale on a plane of `size`.
+    fn rim_transform(&self, size: CGSize) -> CATransform3D {
+        scale_transform(rim_scale((size.width, size.height), (self.window.width, self.window.height)))
+    }
+
     /// Lays the shadow around a plane of `size` at once (in the caller's transaction).
     pub fn layout(&self, size: CGSize) {
         self.image.removeAnimationForKey(&NSString::from_str("bounds"));
         self.image.setPosition(CGPoint::new(-self.extent, -self.extent));
         self.image.setBounds(self.bounds(size));
+        self.rim.removeAnimationForKey(&NSString::from_str("transform"));
+        self.rim.setTransform(self.rim_transform(size));
     }
 
     /// Moves the shadow from around a plane of `from` to around one of `to` on `spring`, as
@@ -266,12 +320,23 @@ impl ShadowLayers {
         self.image.setBounds(self.bounds(to));
         let anim = crate::ui::overlay::spring_anim(spring, "bounds", &NSValue::new(self.bounds(from)), &NSValue::new(self.bounds(to)), duration);
         self.image.addAnimation_forKey(&anim, Some(&NSString::from_str("bounds")));
+        self.rim.setTransform(self.rim_transform(to));
+        let (a, b) = (crate::ui::overlay::transform_value(self.rim_transform(from)), crate::ui::overlay::transform_value(self.rim_transform(to)));
+        let anim = crate::ui::overlay::spring_anim(spring, "transform", &a, &b, duration);
+        self.rim.addAnimation_forKey(&anim, Some(&NSString::from_str("transform")));
+    }
+
+    /// The layers whose opacity is the amount shown: the image and the rim.
+    fn amount_layers(&self) -> [&CALayer; 2] {
+        [&self.image, &self.rim]
     }
 
     /// Shows `amount` of the window's shadow (0 on a card, 1 at the window) at once.
     pub fn set_amount(&self, amount: f64) {
-        self.image.removeAnimationForKey(&NSString::from_str("opacity"));
-        self.image.setOpacity(amount.clamp(0.0, 1.0) as f32);
+        for layer in self.amount_layers() {
+            layer.removeAnimationForKey(&NSString::from_str("opacity"));
+            layer.setOpacity(amount.clamp(0.0, 1.0) as f32);
+        }
     }
 
     /// The amount shown now (Core Animation's presentation of it).
@@ -286,35 +351,40 @@ impl ShadowLayers {
     pub fn spring_amount(&self, to: f64, spring: Spring, duration: f64) {
         let from = self.amount();
         let to = to.clamp(0.0, 1.0);
-        self.image.setOpacity(to as f32);
-        if (from - to).abs() < 1e-3 {
-            self.image.removeAnimationForKey(&NSString::from_str("opacity"));
-            return;
+        for layer in self.amount_layers() {
+            layer.setOpacity(to as f32);
+            if (from - to).abs() < 1e-3 {
+                layer.removeAnimationForKey(&NSString::from_str("opacity"));
+                continue;
+            }
+            let anim = crate::ui::overlay::spring_anim(spring, "opacity", &NSNumber::new_f64(from), &NSNumber::new_f64(to), duration);
+            layer.addAnimation_forKey(&anim, Some(&NSString::from_str("opacity")));
         }
-        let anim = crate::ui::overlay::spring_anim(spring, "opacity", &NSNumber::new_f64(from), &NSNumber::new_f64(to), duration);
-        self.image.addAnimation_forKey(&anim, Some(&NSString::from_str("opacity")));
     }
 
-    /// The handover: the shadow goes from `from` to `to` (1 shown, 0 gone), linear, from
-    /// `begin` seconds from now for `duration`, showing `from` until then (in the caller's
-    /// transaction).
+    /// The handover: the shadow and the rim go from `from` to `to` (1 shown, 0 gone),
+    /// linear, from `begin` seconds from now for `duration`, showing `from` until then (in
+    /// the caller's transaction).
     pub fn fade(&self, from: f64, to: f64, begin: f64, duration: f64) {
         let key = NSString::from_str("opacity");
-        self.handover.removeAnimationForKey(&key);
-        self.handover.setOpacity(to as f32);
-        if duration <= 0.0 && begin <= 0.0 {
-            return;
+        let start = CACurrentMediaTime() + begin.max(0.0);
+        for layer in [&self.handover, &self.rim_handover] {
+            layer.removeAnimationForKey(&key);
+            layer.setOpacity(to as f32);
+            if duration <= 0.0 && begin <= 0.0 {
+                continue;
+            }
+            let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
+            // SAFETY: from/to are numbers, the property's type.
+            unsafe {
+                anim.setFromValue(Some(&NSNumber::new_f64(from)));
+                anim.setToValue(Some(&NSNumber::new_f64(to)));
+            }
+            anim.setBeginTime(start);
+            anim.setDuration(duration.max(1e-3));
+            // SAFETY: framework constant.
+            anim.setFillMode(unsafe { kCAFillModeBackwards });
+            layer.addAnimation_forKey(&anim, Some(&key));
         }
-        let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
-        // SAFETY: from/to are numbers, the property's type.
-        unsafe {
-            anim.setFromValue(Some(&NSNumber::new_f64(from)));
-            anim.setToValue(Some(&NSNumber::new_f64(to)));
-        }
-        anim.setBeginTime(CACurrentMediaTime() + begin.max(0.0));
-        anim.setDuration(duration.max(1e-3));
-        // SAFETY: framework constant.
-        anim.setFillMode(unsafe { kCAFillModeBackwards });
-        self.handover.addAnimation_forKey(&anim, Some(&key));
     }
 }
