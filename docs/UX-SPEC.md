@@ -135,6 +135,9 @@ floor), so the hand-over shows no step. The picture comes to rest on the spring'
 time stopped it 1 pt short and jumped, the owner's recording 11-01), and fades out over its
 window over 200 ms a moment after the unveil, so a look that differs (a picture taken while
 the window was parked and inactive, a window's own late redraw) melts instead of flipping.
+The arriving pictures fade as one picture, overlapping as their windows do: a window behind
+never shows through the one in front as both fade (each faded on its own showed the one
+behind at a quarter at mid-fade, 11-02).
 The incoming key window is captured again about 180 ms into the switch, once it is key, and
 that picture cross-fades into its growing snapshot. Each picture
 carries macOS's own window shadow, measured on a Studio Display (`stage-manager probe-shadow

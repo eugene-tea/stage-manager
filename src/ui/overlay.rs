@@ -16,6 +16,13 @@
 //! depth, as it did the card's planes (owner, 10-27), and a second app's ghost would start
 //! over the front window's and flip under it as they flatten.
 //!
+//! **Groups.** A switch's incoming snapshots go into one [`GhostGroup`], a flat layer holding
+//! their containers in the same order, so the landing fades them as one picture: at fade `a`
+//! the stack shows as it was drawn, at `a`, over the real windows. Each snapshot faded on its
+//! own let a lower one show through an upper one as both went translucent: over the front
+//! window, the window behind's picture at `a·(1−a)`, a quarter at mid-fade (11-02, Photos
+//! under VS Code, seen at every switch to VS Code).
+//!
 //! **Coordinates.** Planes are given top-left (global minus [`Overlay::origin`]); the
 //! overlay's view is flipped ([`OverlayView`]), which is what keeps its root layer top-down.
 //! A plain `NSView` hosting a layer marked `geometryFlipped` does not: AppKit resets the flag
@@ -169,6 +176,50 @@ pub struct Ghost {
     /// How long its current flight's spring runs (seconds; [`spring_duration`] of its travel):
     /// its shadow's springs run as long.
     flight: f64,
+    /// It stacks in a [`GhostGroup`] (it goes with the group).
+    grouped: bool,
+}
+
+/// The name marking a [`GhostGroup`]'s layer among the ghosts' containers
+/// ([`Overlay::place`] fits the containers inside it).
+const GROUP: &str = "ghost-group";
+
+/// Snapshots drawn as one picture: a flat layer over the whole overlay holding their
+/// perspective containers, in the order they were added (see the module notes, "Groups").
+/// Its opacity applies to what they draw together (group opacity), never to each.
+pub struct GhostGroup {
+    layer: Retained<CALayer>,
+}
+
+impl GhostGroup {
+    /// Fades the group out over `duration` seconds from now, as one picture (the landing:
+    /// whatever differs from the windows under it melts, and no snapshot shows through
+    /// another). The caller removes it after.
+    pub fn fade_out(&self, duration: f64) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        let key = NSString::from_str("opacity");
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let from = unsafe { self.layer.presentationLayer() }.map_or(self.layer.opacity(), |l| l.opacity());
+        self.layer.setOpacity(0.0);
+        let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
+        // SAFETY: from/to are numbers, the property's type.
+        unsafe {
+            anim.setFromValue(Some(&NSNumber::new_f32(from)));
+            anim.setToValue(Some(&NSNumber::new_f32(0.0)));
+        }
+        anim.setDuration(duration.max(1e-3));
+        self.layer.addAnimation_forKey(&anim, Some(&key));
+        CATransaction::commit();
+    }
+
+    /// Takes the group off the screen, with every snapshot in it.
+    pub fn remove(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.layer.removeFromSuperlayer();
+        CATransaction::commit();
+    }
 }
 
 /// How long a newer picture of the window takes to replace the one a flying snapshot shows
@@ -399,25 +450,9 @@ impl Ghost {
         self.target = p;
     }
 
-    /// Fades the whole snapshot out over `duration` seconds from now, where it is (the
-    /// landing: whatever differs from the window under it melts instead of flipping). The
-    /// caller removes it after.
-    pub fn fade_out(&self, duration: f64) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        let key = NSString::from_str("opacity");
-        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-        let from = unsafe { self.plane.presentationLayer() }.map_or(self.plane.opacity(), |l| l.opacity());
-        self.plane.setOpacity(0.0);
-        let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
-        // SAFETY: from/to are numbers, the property's type.
-        unsafe {
-            anim.setFromValue(Some(&NSNumber::new_f32(from)));
-            anim.setToValue(Some(&NSNumber::new_f32(0.0)));
-        }
-        anim.setDuration(duration.max(1e-3));
-        self.plane.addAnimation_forKey(&anim, Some(&key));
-        CATransaction::commit();
+    /// True when it stacks in a [`GhostGroup`].
+    pub fn grouped(&self) -> bool {
+        self.grouped
     }
 
     /// Takes the ghost off the screen.
@@ -534,17 +569,26 @@ impl Overlay {
         self.root.setFrame(all);
         self.space.setFrame(all);
         self.eye = (local_eye, distance);
-        // SAFETY: reading the sublayers array; every one is a ghost's container.
+        // SAFETY: reading the sublayers array; every one is a ghost's container or a group of them.
         if let Some(depths) = unsafe { self.space.sublayers() } {
             for depth in depths.iter() {
-                self.fit(&depth);
+                if depth.name().is_some_and(|n| n.to_string() == GROUP) {
+                    depth.setFrame(all);
+                    // SAFETY: as above; a group holds ghosts' containers only.
+                    for inner in unsafe { depth.sublayers() }.iter().flat_map(|a| a.iter()) {
+                        self.fit(&inner);
+                    }
+                } else {
+                    self.fit(&depth);
+                }
             }
         }
         CATransaction::commit();
     }
 
     /// Makes `depth` a ghost's perspective container: the whole overlay, the eye where
-    /// [`Self::place`] put it.
+    /// [`Self::place`] put it (a group covers the whole overlay too, so it is the same inside
+    /// one).
     fn fit(&self, depth: &CALayer) {
         let all = self.space.bounds();
         let (eye, distance) = self.eye;
@@ -556,18 +600,18 @@ impl Overlay {
         depth.setSublayerTransform(p);
     }
 
-    /// A ghost's perspective container holding `plane`, on top of the stack, or at the bottom
-    /// (`bottom`).
-    fn stack(&self, plane: &CALayer, bottom: bool) -> Retained<CALayer> {
+    /// A ghost's perspective container holding `plane`, on top of the stack (of `group`'s,
+    /// when given), or at the bottom (`bottom`).
+    fn stack(&self, plane: &CALayer, bottom: bool, group: Option<&GhostGroup>) -> Retained<CALayer> {
         let depth = CALayer::new();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.fit(&depth);
         depth.addSublayer(plane);
-        if bottom {
-            self.space.insertSublayer_atIndex(&depth, 0);
-        } else {
-            self.space.addSublayer(&depth);
+        match group {
+            Some(g) => g.layer.addSublayer(&depth),
+            None if bottom => self.space.insertSublayer_atIndex(&depth, 0),
+            None => self.space.addSublayer(&depth),
         }
         CATransaction::commit();
         depth
@@ -664,9 +708,26 @@ impl Overlay {
         self.panel.backingScaleFactor()
     }
 
+    /// A new group of ghosts on top of the stack ([`GhostGroup`]): the ghosts made in it
+    /// stack inside it, above the ones added before it.
+    pub fn group(&self) -> GhostGroup {
+        let layer = CALayer::new();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        layer.setName(Some(&NSString::from_str(GROUP)));
+        // Its opacity fades what its snapshots draw together (Core Animation's default on
+        // macOS too; stated, since the landing depends on it).
+        layer.setAllowsGroupOpacity(true);
+        layer.setFrame(self.space.bounds());
+        self.space.addSublayer(&layer);
+        CATransaction::commit();
+        GhostGroup { layer }
+    }
+
     /// A new ghost of window `window` showing `image` (or a plain card when there is none),
-    /// placed at `at` with `shadow`, above the ghosts added before it.
-    pub fn ghost(&self, window: u32, picture: Option<&Picture>, at: Plane, shadow: &GhostShadow, opacity: f32) -> Ghost {
+    /// placed at `at` with `shadow`, above the ghosts added before it (in `group` when given:
+    /// above the ones in it).
+    pub fn ghost(&self, window: u32, picture: Option<&Picture>, at: Plane, shadow: &GhostShadow, opacity: f32, group: Option<&GhostGroup>) -> Ghost {
         let plane = CALayer::new();
         plane.setAnchorPoint(CGPoint::new(0.0, 0.5));
         plane.setAllowsEdgeAntialiasing(true);
@@ -698,7 +759,7 @@ impl Overlay {
         body.addSublayer(&img);
         plane.addSublayer(&body);
         layers.attach_rim(&plane);
-        let depth = self.stack(&plane, false);
+        let depth = self.stack(&plane, false, group);
         let extent = picture.map_or(Extent::NONE, |p| p.extent);
         let mut g = Ghost {
             window,
@@ -712,6 +773,7 @@ impl Overlay {
             pending: None,
             target: at,
             flight: 0.0,
+            grouped: group.is_some(),
         };
         g.set(at);
         g.set_shadow_amount(shadow.amount);
@@ -754,8 +816,8 @@ impl Overlay {
         body.setAnchorPoint(CGPoint::new(0.0, 0.0));
         body.addSublayer(&img);
         plane.addSublayer(&body);
-        let depth = self.stack(&plane, true);
-        let mut g = Ghost { window: 0, depth, plane, body, image: img, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, flight: 0.0 };
+        let depth = self.stack(&plane, true, None);
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, flight: 0.0, grouped: false };
         g.set(at);
         g
     }

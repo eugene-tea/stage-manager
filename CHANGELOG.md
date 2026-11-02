@@ -9,6 +9,8 @@
 - The end of a switch no longer flickers: the arriving window comes to rest without a last
   small snap, shows in its focused look as its picture fades away, and a hidden app's window
   keeps its shadow until it is really on screen.
+- When a stage's windows overlap, the window behind no longer shows faintly through the one
+  in front at the end of a switch.
 - The arriving window's picture keeps its shadow until the window itself is on screen, so the
   shadow no longer lightens for a moment at the end of a switch.
 - In Dark Mode, moving windows carry the darker shadow and the thin light edge macOS gives

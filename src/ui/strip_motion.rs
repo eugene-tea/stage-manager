@@ -21,8 +21,9 @@
 //!   [`StripEvent::Unveil`]: when the growing snapshots as shown are within a point of their
 //!   windows on every edge (`motion_math::unveil_time`, by the farthest edge's travel; not
 //!   before `[animation] unpark_at` of the motion), and the snapshots stay over the windows
-//!   a moment after ([`AFTER_UNVEIL`]) while they show, then fade out over them
-//!   ([`LANDING_FADE`]). Each hands its shadow over to its window's once the window server
+//!   a moment after ([`AFTER_UNVEIL`]) while they show, then fade out over them as one
+//!   picture ([`LANDING_FADE`], their [`GhostGroup`]: never a lower one through an upper
+//!   one). Each hands its shadow over to its window's once the window server
 //!   shows the window at its frame, polled from the unveil ([`Strip::poll_shown`]), and the
 //!   landing waits for that too. The incoming key window is captured again once it is key
 //!   ([`RECAPTURE_AFTER`]), its picture cross-fading in mid-flight. Late windows (an app we
@@ -64,7 +65,7 @@ use crate::platform::windows;
 use crate::ui::motion_math::{
     Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, switch_spring, travel, unveil_time,
 };
-use crate::ui::overlay::{CardShadow, Ghost, GhostShadow, Overlay};
+use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, Overlay};
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowReport, StripEvent, Transition, TransitionReport};
@@ -114,6 +115,9 @@ const LANDING_FADE: f64 = 0.2;
 struct Running {
     id: u64,
     ghosts: Vec<Ghost>,
+    /// The incoming snapshots' group, above the outgoing ones: they land as one picture
+    /// ([`GhostGroup`]).
+    incoming: Option<GhostGroup>,
     /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane).
     waiting: Vec<(usize, Plane)>,
     /// Cards hidden until their snapshots land.
@@ -156,9 +160,13 @@ struct Running {
     settled: bool,
 }
 
-/// A landed switch's incoming snapshots fading out over their windows ([`LANDING_FADE`]).
+/// A landed switch's incoming snapshots fading out over their windows as one picture
+/// ([`LANDING_FADE`]).
 struct Fading {
-    ghosts: Vec<Ghost>,
+    /// Their group (removed with them).
+    group: GhostGroup,
+    /// Kept until the group goes.
+    _ghosts: Vec<Ghost>,
     timer: Retained<NSTimer>,
 }
 
@@ -244,9 +252,7 @@ impl Motion {
         f.timer.invalidate();
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
-        for g in &f.ghosts {
-            g.remove();
-        }
+        f.group.remove();
         objc2_quartz_core::CATransaction::commit();
         if self.overlay_idle() {
             self.overlay.hide();
@@ -617,7 +623,7 @@ impl Strip {
                     }
                     let at = Plane::window(w.window.frame, o, style.corner_radius);
                     let (shadow, note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_out == Some(id), 1.0);
-                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0);
+                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, None);
                     ghost.fade_shadow(0.0, 1.0, out_begin, out_duration);
                     (ghost, Some(note))
                 }
@@ -645,6 +651,8 @@ impl Strip {
                 held.push(stage);
             }
         }
+        // The incoming snapshots go into one group, above the outgoing ones (made with the first).
+        let mut incoming: Option<GhostGroup> = None;
         for w in &t.incoming {
             let id = w.window.id;
             let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
@@ -653,7 +661,8 @@ impl Strip {
                 continue;
             };
             let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
-            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0);
+            let group = incoming.get_or_insert_with(|| self.motion.overlay.group());
+            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
             let end = Plane::window(w.window.frame, o, style.corner_radius);
             ghost.spring_to(end, spring);
             ghost.spring_shadow(1.0, spring);
@@ -675,6 +684,9 @@ impl Strip {
             cover.incoming = true;
         }
         if ghosts.is_empty() {
+            if let Some(g) = &incoming {
+                g.remove();
+            }
             strip_model::cover(t.id, cover);
             return;
         }
@@ -780,6 +792,7 @@ impl Strip {
             Some(Running {
                 id,
                 ghosts,
+                incoming,
                 waiting,
                 held,
                 timers,
@@ -1145,35 +1158,42 @@ impl Strip {
             _ => None,
         };
         let hold = facts.filter(cover_holds).and_then(|f| r.corner.take().map(|g| (g, f)));
-        // Landed, the incoming snapshots fade out over their windows; the rest go at once.
-        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) =
-            std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && r.arrived.iter().any(|(w, _)| *w == g.window));
+        // Landed, the incoming snapshots fade out over their windows as one picture (their
+        // group: never one through another, 11-02); the rest go at once.
+        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) = std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped());
+        let group = r.incoming.take();
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
         for g in gone.iter().chain(&r.corner) {
             g.remove();
         }
-        for g in &fade {
-            g.fade_out(LANDING_FADE);
-        }
+        let group = match group {
+            Some(g) if !fade.is_empty() => {
+                g.fade_out(LANDING_FADE);
+                Some(g)
+            }
+            Some(g) => {
+                g.remove();
+                None
+            }
+            None => None,
+        };
         for stage in &r.held {
             if let Some(layers) = self.pane.cards.get(stage) {
                 layers.card.setOpacity(1.0);
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        if !fade.is_empty() {
+        if let Some(group) = group {
             // One landing fades at a time: an older one still fading goes now.
             if let Some(old) = self.motion.fading.take() {
                 old.timer.invalidate();
-                for g in &old.ghosts {
-                    g.remove();
-                }
+                old.group.remove();
             }
             let timer = after(LANDING_FADE, || {
                 with_strip(|s| s.motion.drop_fading());
             });
-            self.motion.fading = Some(Fading { ghosts: fade, timer });
+            self.motion.fading = Some(Fading { group, _ghosts: fade, timer });
         }
         if let Some((ghost, facts)) = hold {
             tracing::debug!(id = r.id, cover = %facts.cover, "transition: landed; the corner's cover stays until the corner patch shows");
@@ -1341,7 +1361,7 @@ impl Strip {
             let o = self.motion.overlay.origin();
             let at = Plane::under_pointer(Point::new(p.x - o.x, p.y - o.y), m.thumb_size(&f), grab, m.tilt, corner);
             let (shadow, _) = self.ghost_shadow(w.id, image.as_ref(), f, false, 0.0);
-            let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &shadow, self.style.drag.ghost_opacity as f32);
+            let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &shadow, self.style.drag.ghost_opacity as f32, None);
             self.motion.window_card = Some(WindowCard { window: w.id, ghost, has_image: image.is_some() });
             self.motion.overlay.show_on_top();
         }

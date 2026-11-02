@@ -57,7 +57,8 @@ them, sit in the Dock's order as the app read it from the Dock (never pinned or 
 keep it, a card dragged down springs back with no switch, and the strip still follows after
 an app quits), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
-its card as Apple's thumbnails show it, and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
+its card as Apple's thumbnails show it, two overlapping windows landing as one picture (the
+one behind never through the one in front), and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
 is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
 Desktop, drawn as before, and a card click switches), restore (a restart simulated with
@@ -3190,13 +3191,102 @@ def popup_picture_check(s):
               f"the popup's part is drawn beside the window, not squeezed in ({grow:.3f} vs {1 + want['right']:.3f})")
 
 
+# How far (0-255, any channel) a fading box's colour, alpha taken out, may be from the same
+# box's colour while the snapshots rest opaque: the window behind showing through the one in
+# front at fade a shifts it by (1-a)/(2-a) of the two colours' difference, a third at mid-fade
+# (blue over green: ~40 levels of blue).
+LANDING_BLEND_TOLERANCE = 12
+
+
+def landing_blend_check():
+    """Round landing-bleed (11-02): a stage's incoming snapshots fade out at the landing as one
+    picture. Fixture 2 (blue) joins Fixture 3's stage (green), the two overlapping, and a box
+    in the front window's frame, over the window behind, is read back from our own overlay
+    (`ctl debug-overlay`, our overlay window only, never the screen) through switches back to
+    that stage. While the snapshots fade, the box's colour with its alpha taken out stays the
+    front snapshot's as drawn at rest (opaque): the window behind never shows through. Each
+    snapshot faded on its own showed it at a(1-a) over the front window (Photos under VS Code,
+    11-02)."""
+    say("-- a stage's overlapping windows land as one picture: the one behind never shows through the one in front")
+    s = state()
+    t = by_title(s)
+    nums = numbers_by_id(s)
+    here = nums.get(t["Fixture 3"]["home"])
+    away = nums.get(t["Fixture 1"]["home"])
+    if not check(here is not None and away is not None and here != away,
+                 f"Fixture 3 and Fixture 1 in stages of their own ({here}, {away})"):
+        return
+    if s["active"] != here:
+        do("switch", here)
+        time.sleep(1.2)
+    do("send", here, t["Fixture 2"]["id"])
+    s = wait_state(lambda x: {"Fixture 2", "Fixture 3"} <= active_titles(x)
+                   and not any(by_title(x)[n]["parked"] for n in ("Fixture 2", "Fixture 3")),
+                   "Fixture 2 shown beside Fixture 3")
+    if not check(s is not None, "Fixture 2 joined Fixture 3's stage, shown"):
+        return
+    here = s["active"]
+    vis = s["display"]["visible"]
+    left = vis["x"] + s["strip_width"] + 60
+    front, back = (z_titles(["Fixture 2", "Fixture 3"]) + ["Fixture 2", "Fixture 3"])[:2]
+    ids = by_title(s)
+    ctl("debug-frame", ids[back]["id"], left, vis["y"] + 60, 640, 420)
+    ctl("debug-frame", ids[front]["id"], left + 200, vis["y"] + 200, 640, 420)
+    time.sleep(0.5)
+    # In the front window, over the one behind, away from both labels and the title bars.
+    box = [left + 216, vis["y"] + 440, 24, 24]
+    say(f"    {front} in front of {back}; the box {box}")
+    fading, refs = [], []
+    for _ in range(8):
+        do("switch", away)
+        time.sleep(1.2)
+        ctl("switch", here)
+        reads, seen, end = [], False, time.time() + 3.0
+        while time.time() < end:
+            g = ctl("debug-overlay", *box)
+            if not g.get("ok"):
+                break
+            mean = g.get("mean")
+            if mean:
+                reads.append(mean)
+                seen = seen or mean[3] > 1
+            if seen and (not mean or mean[3] <= 1):
+                break
+        # The last opaque read before the fade is the front snapshot at rest; each later
+        # read with the overlay part-way faded is judged against it.
+        ref = None
+        for m in reads:
+            if m[3] >= 250:
+                ref = m
+            elif ref and 25 <= m[3] <= 230:
+                rgb = [m[i] * 255.0 / m[3] for i in range(3)]
+                fading.append((round(m[3]), [round(v) for v in rgb], [round(v) for v in ref[:3]],
+                               max(abs(rgb[i] - ref[i]) for i in range(3))))
+        if ref:
+            refs.append([round(v) for v in ref[:3]])
+        if len(fading) >= 4:
+            break
+    say(f"    at rest: {refs[:3]}; fading (alpha, colour, at rest, off): {fading[:8]}")
+    # The fixture's palette (sRGB): Fixture 2 blue, Fixture 3 green; at rest the box shows the front one.
+    palette = {"Fixture 2": (51, 140, 217), "Fixture 3": (64, 179, 89)}
+    near = lambda c, n: max(abs(c[i] - palette[n][i]) for i in range(3))
+    check(bool(refs) and all(near(r, front) < near(r, back) for r in refs),
+          f"at rest the box shows {front}'s snapshot ({refs[:3]})")
+    if check(len(fading) >= 2, f"the landing's fade was read in the box ({len(fading)} reads part-way faded)"):
+        worst = max(f[3] for f in fading)
+        check(worst <= LANDING_BLEND_TOLERANCE,
+              f"while it fades, {back} never shows through {front} (largest shift {worst:.0f}, at most {LANDING_BLEND_TOLERANCE})")
+    consistent("the landing of two overlapping windows")
+
+
 def phase_capture():
     """The only app run with window captures on: thumbnails and switch snapshots are real
     pictures, and a quit with captures running waits for those in flight (an exit with one
     in flight makes macOS alert about screen access). The only phase that may raise that
     alert: on the first run from a new app path, which macOS approves once. Fixture 1 has a
     popup sticking out of it (the fixture's --child): its card picture shows the popup beside
-    the window (popup_picture_check). Its activation grows over the desktop's still (8L4: the
+    the window (popup_picture_check). A stage's two overlapping windows land as one picture
+    (landing_blend_check). Its activation grows over the desktop's still (8L4: the
     switch's cover forced to the still, STAGE_MANAGER_COVER=desktop, so it is seen on any
     desktop, icons in the corner or not)."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
@@ -3227,6 +3317,7 @@ def phase_capture():
     cap = state().get("capture", {})
     check(cap.get("images", 0) > (s or {}).get("capture", {}).get("images", 0),
           f"pictures keep coming ({cap.get('images')} so far)")
+    landing_blend_check()
 
     say("-- an activation grows over a still of the desktop (8L4: only desktop-level windows in it)")
     start_extra("a", 1)
