@@ -18,9 +18,10 @@
 //!   spring with the plane ([`ShadowLayers::spring_amount`]).
 //! - **The inner rim** ([`crate::ui::shadow_math::InnerRim`]): over the picture, the same
 //!   pair (a handover layer holding the rim's), so it comes and goes with the shadow. The rim
-//!   is a white border laid out at the window's size with its corner (continuous) and scaled
-//!   to the plane as the picture is ([`crate::ui::shadow_math::rim_scale`]), so it keeps to
-//!   the picture's edge and corner all the way; [`ShadowLayers::attach_rim`] puts it on top.
+//!   is a nine-part image on macOS's corner curve ([`crate::ui::shadow_math::render_rim`]),
+//!   laid out at the window's size and scaled to the plane as the picture is
+//!   ([`crate::ui::shadow_math::rim_scale`]), so it keeps to the picture's edge and corner all
+//!   the way; [`ShadowLayers::attach_rim`] puts it on top.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,29 +29,49 @@ use std::sync::{Arc, Mutex};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
 use objc2_foundation::{NSNumber, NSString, NSValue};
-use objc2_quartz_core::{CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, CATransform3D, kCACornerCurveContinuous, kCAFillModeBackwards};
+use objc2_quartz_core::{CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, CATransform3D, kCAFillModeBackwards};
 
 use crate::platform::capture::Picture;
 use crate::ui::motion_math::Spring;
 pub use crate::ui::shadow_math::{DEFAULT_CORNER, NinePart, WindowShadow};
-use crate::ui::shadow_math::{corner_from_inset, render, rim_scale};
+use crate::ui::shadow_math::{corner_from_diagonal, render, render_rim, rim_scale};
 
-/// What a rendered image is drawn for: the shadow's numbers, the corner (half points) and
-/// the scale (hundredths), as bits.
+/// What an image is: the shadow under the picture, or the inner rim over it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Kind {
+    Shadow,
+    Rim,
+}
+
+/// What a rendered image is drawn for: its kind, the shadow's numbers, the corner (half
+/// points) and the scale (hundredths), as bits.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
-    parts: [u64; 8],
+    kind: Kind,
+    parts: [u64; 16],
     corner_half_pt: u32,
     scale_pct: u32,
 }
 
 impl Key {
-    fn of(shadow: &WindowShadow, corner: f64, scale: f64) -> Self {
-        let p = &shadow.parts;
-        let parts = [p[0].blur, p[0].opacity, p[0].offset_y, p[0].spread, p[1].blur, p[1].opacity, p[1].offset_y, p[1].spread].map(f64::to_bits);
-        Self { parts, corner_half_pt: (corner.clamp(0.0, 40.0) * 2.0).round() as u32, scale_pct: (scale.clamp(0.5, 8.0) * 100.0).round() as u32 }
+    fn of(kind: Kind, shadow: &WindowShadow, corner: f64, scale: f64) -> Self {
+        let (p, l, r) = (&shadow.parts, &shadow.line, &shadow.rim);
+        let parts = [
+            l.s_in, l.s_out, l.s_out45, l.aa, l.aa45, l.opacity, p[0].blur, p[0].opacity, p[0].offset_y, p[0].spread, p[1].blur, p[1].opacity, p[1].offset_y,
+            p[1].spread, r.width, r.white,
+        ]
+        .map(f64::to_bits);
+        Self { kind, parts, corner_half_pt: (corner.clamp(0.0, 40.0) * 2.0).round() as u32, scale_pct: (scale.clamp(0.5, 8.0) * 100.0).round() as u32 }
+    }
+
+    /// Draws the image.
+    fn draw(&self, shadow: &WindowShadow) -> NinePart {
+        match self.kind {
+            Kind::Shadow => render(shadow, self.corner(), self.scale()),
+            Kind::Rim => render_rim(shadow, self.corner(), self.scale()),
+        }
     }
 
     fn corner(&self) -> f64 {
@@ -89,7 +110,7 @@ fn draw_later(key: Key, shadow: WindowShadow) {
         return;
     }
     let spawned = std::thread::Builder::new().name("snapshot-shadow".into()).spawn(move || {
-        let img = Arc::new(render(&shadow, key.corner(), key.scale()));
+        let img = Arc::new(key.draw(&shadow));
         with_rendered(|r| {
             r.drawing.retain(|k| *k != key);
             r.done.insert(key, img);
@@ -104,7 +125,10 @@ fn draw_later(key: Key, shadow: WindowShadow) {
 /// display of `scale`, off the main thread, so the first switch finds them drawn.
 pub fn prepare(shadows: &[WindowShadow], scale: f64) {
     for shadow in shadows {
-        draw_later(Key::of(shadow, DEFAULT_CORNER, scale), *shadow);
+        draw_later(Key::of(Kind::Shadow, shadow, DEFAULT_CORNER, scale), *shadow);
+        if !shadow.rim.is_none() {
+            draw_later(Key::of(Kind::Rim, shadow, DEFAULT_CORNER, scale), *shadow);
+        }
     }
 }
 
@@ -112,7 +136,16 @@ pub fn prepare(shadows: &[WindowShadow], scale: f64) {
 /// nearest corner at that scale while this one is drawn off the main thread for the next
 /// time, else drawn now (the first of its kind).
 pub fn rendered(shadow: &WindowShadow, corner: f64, scale: f64) -> Arc<NinePart> {
-    let key = Key::of(shadow, corner, scale);
+    rendered_kind(Kind::Shadow, shadow, corner, scale)
+}
+
+/// The inner rim's image of `shadow` at `corner` and `scale`, as [`rendered`] the shadow's.
+pub fn rendered_rim(shadow: &WindowShadow, corner: f64, scale: f64) -> Arc<NinePart> {
+    rendered_kind(Kind::Rim, shadow, corner, scale)
+}
+
+fn rendered_kind(kind: Kind, shadow: &WindowShadow, corner: f64, scale: f64) -> Arc<NinePart> {
+    let key = Key::of(kind, shadow, corner, scale);
     let near = with_rendered(|r| {
         if let Some(img) = r.done.get(&key) {
             return Ok(img.clone());
@@ -120,7 +153,7 @@ pub fn rendered(shadow: &WindowShadow, corner: f64, scale: f64) -> Arc<NinePart>
         let nearest = r
             .done
             .iter()
-            .filter(|(k, _)| k.parts == key.parts && k.scale_pct == key.scale_pct)
+            .filter(|(k, _)| k.kind == key.kind && k.parts == key.parts && k.scale_pct == key.scale_pct)
             .min_by_key(|(k, _)| k.corner_half_pt.abs_diff(key.corner_half_pt))
             .map(|(_, img)| img.clone());
         Err(nearest)
@@ -132,7 +165,7 @@ pub fn rendered(shadow: &WindowShadow, corner: f64, scale: f64) -> Arc<NinePart>
             img
         }
         Err(None) => {
-            let img = Arc::new(render(shadow, key.corner(), key.scale()));
+            let img = Arc::new(key.draw(shadow));
             with_rendered(|r| {
                 r.done.insert(key, img.clone());
             });
@@ -174,9 +207,9 @@ fn image_for(img: &Arc<NinePart>) -> Option<CFRetained<CGImage>> {
     })
 }
 
-/// The corner radius of the window in `picture` (points), its frame `size` points: how far in
-/// along the diagonal from its top-left corner the picture turns half opaque. `None` when it
-/// cannot be read.
+/// The corner radius of the window in `picture` (points), its frame `size` points: the curve
+/// its shadow follows, read from how much of the diagonal from its top-left corner the
+/// picture leaves clear ([`corner_from_diagonal`]). `None` when it cannot be read.
 pub fn corner_of(picture: &Picture, size: (f64, f64)) -> Option<f64> {
     let image = &picture.image;
     let (iw, ih) = (CGImage::width(Some(image)) as f64, CGImage::height(Some(image)) as f64);
@@ -199,8 +232,8 @@ pub fn corner_of(picture: &Picture, size: (f64, f64)) -> Option<f64> {
     let crop = CGImage::with_image_in_rect(Some(image), CGRect::new(CGPoint::new(x, y), CGSize::new(side, side)))?;
     let (bytes, w, _) = crate::platform::pixels::bgra(&crop, None)?;
     let n = side as usize;
-    let inset = (0..n).find(|d| bytes.get((d * w + d) * 4 + 3).is_some_and(|a| *a >= 128))?;
-    Some(corner_from_inset(inset as f64 / scale))
+    let diagonal: Vec<u8> = (0..n).filter_map(|d| bytes.get((d * w + d) * 4 + 3).copied()).collect();
+    corner_from_diagonal(&diagonal, scale)
 }
 
 fn as_object<T>(cf: &T) -> &AnyObject {
@@ -252,8 +285,6 @@ impl ShadowLayers {
         rim.setAnchorPoint(CGPoint::new(0.0, 0.0));
         rim.setPosition(CGPoint::new(0.0, 0.0));
         rim.setAllowsEdgeAntialiasing(true);
-        // SAFETY: framework constant.
-        rim.setCornerCurve(unsafe { kCACornerCurveContinuous });
         rim.setHidden(true);
         rim_handover.addSublayer(&rim);
         Self { handover, image, extent: 0.0, rim_handover, rim, window: CGSize::new(0.0, 0.0) }
@@ -270,13 +301,15 @@ impl ShadowLayers {
     pub fn set_shadow(&mut self, shadow: &WindowShadow, corner: f64, scale: f64, size: CGSize, window: CGSize) {
         self.window = window;
         let rim = &shadow.rim;
-        self.rim.setHidden(rim.is_none());
-        if !rim.is_none() {
+        let rim_image = (!rim.is_none()).then(|| rendered_rim(shadow, corner, scale)).and_then(|img| image_for(&img).map(|cg| (img, cg)));
+        self.rim.setHidden(rim_image.is_none());
+        if let Some((img, cg)) = rim_image {
             self.rim.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), window));
-            self.rim.setCornerRadius(corner);
-            self.rim.setBorderWidth(rim.width);
-            self.rim.setBorderColor(Some(&CGColor::new_srgb(1.0, 1.0, 1.0, rim.white)));
-            self.rim.setContentsScale(scale);
+            // SAFETY: a CGImage is valid layer contents.
+            unsafe { self.rim.setContents(Some(as_object(&*cg))) };
+            self.rim.setContentsScale(img.scale);
+            let [x, y, w, h] = img.slice;
+            self.rim.setContentsCenter(CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)));
         }
         let img = rendered(shadow, corner, scale);
         let Some(cg) = image_for(&img) else {

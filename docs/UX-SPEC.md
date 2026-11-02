@@ -148,7 +148,12 @@ each window's edge, with the shadow (a capture that leaves the shadow out lacks 
 wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
 shows only on dark content. The picture carries it too, over its edge and corner, coming
 and going with the window's shadow; without it every edge stepped lighter at the handover
-(the owner, 11-01, Dark Mode). A window's own
+(the owner, 11-01, Dark Mode). The hairline and the rim follow the curve macOS's shadow
+follows, measured on the dark hairline (nearly opaque, so a tenth of a point shows): Core
+Animation's continuous corner with a longer tail, the hairline a band just outside it, sharp
+where the edge runs along the pixels and softer at 45 degrees; the radius is read from how
+much of the picture's diagonal is clear. A filled shape grown by a spread put a darker notch
+at every corner (up to 126 alpha levels). A window's own
 shadow appears in one frame, so the picture keeps its shadow until the window server lists
 the window on screen at its frame (asked every half frame from the unveil), then fades it
 over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few

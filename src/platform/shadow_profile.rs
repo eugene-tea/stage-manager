@@ -117,6 +117,14 @@ impl AlphaPlane {
         [take(&|d| (x0 - 1 - d, cy)), take(&|d| (cx, y0 - 1 - d)), take(&|d| (x1 + d, cy)), take(&|d| (cx, y1 + d))]
     }
 
+    /// The corner radius a snapshot of the window reads from its picture without its framing
+    /// ([`crate::ui::window_shadow::corner_of`]), `None` without that picture.
+    pub fn picture_corner(&self) -> Option<f64> {
+        let (bytes, w, h) = self.bare.as_ref()?;
+        let diagonal: Vec<u8> = (0..(*w).min(*h) / 4).filter_map(|d| bytes.get((d * w + d) * 4 + 3).copied()).collect();
+        crate::ui::shadow_math::corner_from_diagonal(&diagonal, self.scale)
+    }
+
     /// The window's corner radius as drawn (points), read as a snapshot's is
     /// ([`crate::ui::window_shadow::corner_of`]): along the diagonal into the top-left corner,
     /// how far in its own pixels turn more than half opaque (the shadow under the corner is
@@ -180,7 +188,8 @@ pub fn run(
             let shadow = WindowShadow::of_window(key, windows_dark);
             // The window's whole frame (its title bar included), at the same top-left.
             let frame = NSSize::new(real.frame.w as f64 / real.scale, real.frame.h as f64 / real.scale);
-            let corner = corner_override().unwrap_or_else(|| real.corner_radius());
+            // The corner as a snapshot reads it, from the window's own picture.
+            let corner = corner_override().or_else(|| real.picture_corner()).unwrap_or_else(|| real.corner_radius());
             match drawn_snapshot(mtm, middle(main, size), frame, settle, &shadow, corner, real.bare_image.as_deref()) {
                 Ok(ours) => {
                     if let Some(dir) = dump {
@@ -209,6 +218,7 @@ fn profile_json(p: &AlphaPlane) -> Value {
         "ok": true,
         "scale": p.scale,
         "corner_radius": p.corner_radius(),
+        "picture_corner": p.picture_corner(),
         "reach_1": side(reach_pt(&sides, 1, p.scale)),
         "reach_2": side(reach_pt(&sides, 2, p.scale)),
         "sides": { "left": trim(&sides[0]), "top": trim(&sides[1]), "right": trim(&sides[2]), "bottom": trim(&sides[3]) },
