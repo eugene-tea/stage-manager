@@ -2489,7 +2489,11 @@ impl Controller {
     /// leaving windows park behind theirs, the arriving ones wait until the strip unveils
     /// them. Without the strip's cover the batch runs at once.
     fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
-        self.flush_pending(ob);
+        if supersedes(&actions) {
+            self.flush_superseded(ob, "a new switch");
+        } else {
+            self.flush_pending(ob);
+        }
         self.last_switch = Some(Instant::now());
         let mut run = std::mem::take(&mut self.activation);
         let hidden = self.hidden_arrivals(ob, &actions);
@@ -2816,7 +2820,30 @@ impl Controller {
     /// Brings held incoming windows to their frames now (their snapshots cover them, or other
     /// input arrived). Never interrupted: these windows are not parked in the model's eyes.
     fn flush_pending(&mut self, ob: &Observer) {
-        if let Some(p) = self.pending.take() {
+        self.flush_pending_as(ob, None);
+    }
+
+    /// The user acted, or a new switch begins (`why`), while a switch's windows may still be
+    /// on their way: they come to their frames, but nothing focuses a window or activates an
+    /// app for the switch left behind any more (11-02: two card clicks 0.56 s apart, the
+    /// first one's held focus and its focus again after its app's unhide ran after the second
+    /// one's, and its late notice switched stages a few seconds later). The held batch runs
+    /// without its focus ([`without_focus`]), and the focuses waiting for an app's unhide or
+    /// activation are forgotten ([`Self::supersede_focuses`]).
+    fn flush_superseded(&mut self, ob: &Observer, why: &'static str) {
+        self.flush_pending_as(ob, Some(why));
+        self.supersede_focuses(why);
+    }
+
+    fn flush_pending_as(&mut self, ob: &Observer, superseded: Option<&'static str>) {
+        if let Some(mut p) = self.pending.take() {
+            if let Some(why) = superseded {
+                let (kept, dropped) = without_focus(p.actions);
+                p.actions = kept;
+                if !dropped.is_empty() {
+                    tracing::debug!(id = p.id, why, dropped = ?dropped, "a switch superseded before its landing: its windows come, its focus is dropped");
+                }
+            }
             let now = Instant::now();
             let since = self.phase.switching().map_or(now, |s| s.since);
             self.phase.feed(phase::Event::SwitchDone, now);
@@ -3183,6 +3210,13 @@ impl Controller {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
+                if let Some(pid) = ob.window(id).map(|w| w.pid) {
+                    let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
+                    if !focus_may_switch(hidden, active, input::left_button_down()) {
+                        tracing::debug!(id, pid, ?hidden, ?active, "a focus in an app not in front (hidden, or not the active app): its own, or a late echo of ours; no switch");
+                        return;
+                    }
+                }
                 // Not our echo: the user's (or an app's own), remembered for the reconciler.
                 self.user_focus.insert(id, now);
                 let bundle = ob.window(id).and_then(|w| ob.bundle_id(w.pid));
@@ -3201,7 +3235,7 @@ impl Controller {
                         return;
                     }
                 }
-                self.flush_pending(ob);
+                self.flush_superseded(ob, "a focus");
                 self.show_strip_after_desktop("a window was focused");
                 let pid = ob.window(id).map(|w| w.pid);
                 let unknown = self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_none());
@@ -3310,7 +3344,7 @@ impl Controller {
                 // The user switched apps: a late echo of an earlier focus of ours is no
                 // longer one.
                 self.echoes.user_switched();
-                self.flush_pending(ob);
+                self.flush_superseded(ob, "an activation");
                 self.show_strip_after_desktop("an app was activated");
                 if self.frozen() {
                     tracing::debug!(pid, "activation held until the Desktop is recognized");
@@ -3573,7 +3607,13 @@ impl Controller {
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
-                self.flush_pending(ob);
+                // His click decides where the keyboard goes: no focus of ours follows it, but
+                // for a click on an arriving window, which lands now as the switch meant.
+                if for_arriving {
+                    self.flush_pending(ob);
+                } else {
+                    self.flush_superseded(ob, "a click");
+                }
                 self.end_drag();
                 self.echoes.user_switched();
                 self.press = self.model.as_ref().map(|m| Press {
@@ -3725,6 +3765,14 @@ impl Controller {
         let (live, waiting): (Vec<WindowMeta>, Vec<WindowMeta>) =
             candidates.into_iter().partition(|m| shown.contains(&m.id.0));
         self.unplaced = waiting.iter().map(|m| m.id.0).collect();
+        // On screen now but not listed through Accessibility (its app does not answer yet):
+        // found later, such a window was there all along and brings no stage forward.
+        let listed: HashSet<u32> = live.iter().map(|m| m.id.0).collect();
+        let unlisted: Vec<WindowId> = shown.iter().filter(|id| !listed.contains(id)).map(|id| WindowId(*id)).collect();
+        if !unlisted.is_empty() {
+            tracing::debug!(windows = unlisted.len(), "windows on screen at launch that Accessibility does not list yet: found later, they bring no stage forward");
+        }
+        model.set_launch_listed(unlisted);
         let state = Self::load_state(config.stages.restore_after_restart);
         let first_start = state.is_none();
         tracing::info!(
@@ -4837,7 +4885,7 @@ impl Controller {
         // The restore window's end (at this event or at the card's press) may have moved a
         // voter out of the stage the card showed: the card follows its window.
         let event = self.follow_event(event);
-        self.flush_pending(ob);
+        self.flush_superseded(ob, "a strip click");
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
         let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
@@ -5664,6 +5712,42 @@ fn on_main_screen(list: &[windows::CgWindow], main: Rect) -> HashSet<u32> {
         .collect()
 }
 
+/// Whether a batch begins a switch of its own (it parks or focuses a window): the switch still
+/// on its way is superseded ([`Controller::flush_superseded`]). A batch that only brings a
+/// window to its frame (a new window in the stage shown) leaves it landing as it was.
+fn supersedes(actions: &[Action]) -> bool {
+    actions.iter().any(|a| matches!(a, Action::Park { .. } | Action::Focus { .. }))
+}
+
+/// A superseded switch's held batch without its focuses: the windows still come to their
+/// frames and stack (the model counts them shown), but the keyboard is the new switch's, or
+/// where the user's click put it. Returns the batch kept and the windows whose focus went.
+fn without_focus(actions: Vec<Action>) -> (Vec<Action>, Vec<u32>) {
+    let mut dropped = Vec::new();
+    let kept = actions
+        .into_iter()
+        .filter(|a| match a {
+            Action::Focus { id } => {
+                dropped.push(id.0);
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    (kept, dropped)
+}
+
+/// Whether a window's focus notice may switch stages: its app is not `hidden` and is the
+/// `active` app now (`None`: not running), or the left button is down (a sliver grabbed, its
+/// app becoming active). A hidden app's window cannot be the user's choice, and a focus in an
+/// app behind is the app's own (an app's key window changes as it is hidden, unhidden or
+/// passed over) or a late echo of ours: 11-02, with Accessibility slow, such notices came up
+/// to a second late, past the echo window, and each switched stages nobody asked for. An
+/// activation of the app, the user's way to it, decides through its own notice.
+fn focus_may_switch(hidden: Option<bool>, active: Option<bool>, button_down: bool) -> bool {
+    hidden != Some(true) && (active == Some(true) || (active.is_some() && button_down))
+}
+
 /// Recency hints for windows placed on arrival: the window list's z-order and the frontmost
 /// app.
 fn launch_hints(list: &[windows::CgWindow]) -> LaunchHints {
@@ -5956,6 +6040,40 @@ mod tests {
         assert_eq!(unrestored_step(None, zone_off, tab, false), Wait);
         assert_eq!(LetGo::Other.candidate(), Candidate::Real);
         assert_eq!(LetGo::Destroyed.candidate(), Candidate::Destroyed);
+    }
+
+    /// 11-02: a card click 0.56 s after another: the first switch's held batch still brings
+    /// its windows, without its focus; a batch that parks or focuses supersedes it, one that
+    /// only places a window does not.
+    #[test]
+    fn a_superseded_switch_lands_without_its_focus() {
+        let frame = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let held = vec![
+            Action::SetFrame { id: WindowId(7), frame },
+            Action::Raise { id: WindowId(7) },
+            Action::Focus { id: WindowId(7) },
+            Action::StateChanged,
+        ];
+        let (kept, dropped) = without_focus(held);
+        assert_eq!(kept, vec![Action::SetFrame { id: WindowId(7), frame }, Action::Raise { id: WindowId(7) }, Action::StateChanged]);
+        assert_eq!(dropped, vec![7]);
+        assert!(supersedes(&[Action::Park { id: WindowId(1), frame }, Action::SetFrame { id: WindowId(2), frame }]));
+        assert!(supersedes(&[Action::Focus { id: WindowId(2) }]));
+        assert!(!supersedes(&[Action::SetFrame { id: WindowId(2), frame }, Action::StateChanged]));
+        assert!(!supersedes(&[]));
+    }
+
+    /// 11-02: Telegram, hidden by us, posted its window's focus a second late, and the stage
+    /// switched to it; Mail's, an app behind, the same. A focus switches only in the active app
+    /// (or with the button down on a sliver), never in a hidden one.
+    #[test]
+    fn only_a_focus_in_the_app_in_front_switches() {
+        assert!(focus_may_switch(Some(false), Some(true), false), "the active app's: ⌘`, a click");
+        assert!(!focus_may_switch(Some(false), Some(false), false), "an app behind: its own, or a late echo");
+        assert!(focus_may_switch(Some(false), Some(false), true), "a sliver grabbed, its app on its way to the front");
+        assert!(!focus_may_switch(Some(true), Some(true), true), "a hidden app's window is never the user's");
+        assert!(!focus_may_switch(Some(true), Some(false), false));
+        assert!(!focus_may_switch(None, None, true), "the app is gone");
     }
 
     /// The review of 6X, M2: only an unpark tries a busy app again; a switch's arrivals

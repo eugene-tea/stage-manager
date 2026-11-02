@@ -220,6 +220,16 @@ impl Hides {
         others
     }
 
+    /// The switch these focuses were for is superseded (another switch, the user's click or
+    /// activation): nothing is focused again for it, at its unhide's notice nor by the
+    /// activation's retry. Returns the apps whose focus was forgotten.
+    fn supersede(&mut self) -> BTreeSet<i32> {
+        let apps: BTreeSet<i32> = self.refocus.keys().chain(self.activation_wait.keys()).copied().collect();
+        self.refocus.clear();
+        self.activation_wait.clear();
+        apps
+    }
+
     /// The apps whose activation is overdue at `now`, taken out of the waits (with their
     /// wait).
     fn activations_due(&mut self, now: Instant) -> Vec<(i32, ActivationWait)> {
@@ -537,6 +547,18 @@ impl Controller {
                 tracing::debug!(pid, key, "hide: the key window cannot be focused again: {e}");
                 false
             }
+        }
+    }
+
+    /// A switch is superseded (`why`: a new switch, his click, an activation, a focus): the
+    /// focuses an app we unhid was still to get for it are forgotten ([`Hides::supersede`]),
+    /// never sent after the switch that asked for them is over (11-02: Telegram's window
+    /// focused again 120 ms into the next switch, to Messages, and the two apps took the
+    /// activation in turn for two seconds).
+    pub(super) fn supersede_focuses(&mut self, why: &'static str) {
+        let apps = self.hides.supersede();
+        if !apps.is_empty() {
+            tracing::debug!(?apps, why, "hide: a switch superseded; the apps we unhid for it are not focused again");
         }
     }
 
@@ -910,6 +932,23 @@ mod tests {
         h.shown_wait.insert(12, (5, vec![8]));
         h.forget(12);
         assert!(h.shown_wait.is_empty(), "a quit app forgotten");
+    }
+
+    /// 11-02: a card click on Telegram's stage (hidden by us), then 0.56 s later one on
+    /// Messages': Telegram's focus again at its unhide's notice, and its activation retry, are
+    /// forgotten with the switch that asked for them; never a later one's.
+    #[test]
+    fn a_superseded_switch_s_focuses_are_forgotten() {
+        let mut h = Hides::default();
+        let t0 = Instant::now();
+        h.refocus.insert(10, 7);
+        h.activation_wait.insert(11, ActivationWait { key: 8, sent: t0, tries: 1 });
+        assert_eq!(h.supersede(), [10, 11].into());
+        assert!(h.refocus.is_empty() && !h.awaits_activation());
+        assert!(h.activations_due(t0 + Duration::from_secs(1)).is_empty(), "no retry left");
+        assert!(h.supersede().is_empty(), "nothing left to forget");
+        h.remember_refocus(12, Some(9), |_| Some(12));
+        assert_eq!(h.refocus.get(&12), Some(&9), "the next switch's own focus is remembered as before");
     }
 
     /// 11-02: Telegram, unhidden by us and its key window focused again, was active before it

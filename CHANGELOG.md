@@ -20,6 +20,11 @@
   the focused window, so the shadow no longer lightens for a frame.
 - With hidden parked apps, a switch to a hidden app's stage now always gives it the keyboard:
   an app that does not take its activation is asked again.
+- When apps are slow to answer (right after a restart of Stage Manager, or under heavy
+  load), stages no longer switch by themselves: a window that was on screen all along but
+  found late goes quietly to its stage, a window focused in an app behind or a hidden app no
+  longer brings its stage, and quick clicks on several cards never let an earlier click's
+  window take the keyboard back.
 - An automatic update no longer installs while the screen is locked, when hidden windows
   could not come back until you unlocked; it waits until you are back and step away again.
 - The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges

@@ -183,6 +183,18 @@ its inactive look (11-01: Messages flipped to its key look 180 ms after it showe
 past the unveil at the most. An app that has not taken that activation 60 ms after its key window was focused
 again is focused once more, twice at most (11-01: Messages's window took the focus, the app
 never became active, and the keyboard stayed with the app before).
+**Deviation (superseded switches, 11-02):** a switch overtaken before it lands (another card
+click, a click of yours anywhere, an activation, a focus) still brings its windows, but
+never focuses one or activates its app afterwards: its held focus, the focus again after its
+app's unhide and the retries above are dropped, so the keyboard is the newer switch's or
+where you clicked (11-02: two card clicks 0.56 s apart on two hidden apps' stages; the first
+app's window was focused 120 ms into the second switch and the two apps took the activation
+in turn). A window's focus brings its stage only in the active app (or with the button down
+on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
+of ours (with apps slow to answer, notices came up to a second late, past the echo window,
+and each switched stages). A window on screen when Stage Manager started but found late (its
+app not answering then) goes to its stage as during the restore window, parked when that
+stage is inactive, never bringing it forward.
 Arriving windows
 wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS

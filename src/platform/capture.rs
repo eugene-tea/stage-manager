@@ -940,6 +940,9 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
         let windows = unsafe { content.windows() };
         let displays = display_frames(content);
         let mut issued = 0;
+        // At most one look a round: never every window's at once (at launch, after the
+        // system's appearance changed), each read a round or more apart instead.
+        let mut looked = false;
         for t in &targets {
             // SAFETY: plain getter on a live SCWindow.
             let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == t.id) else {
@@ -998,8 +1001,10 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 );
             }
             issued += 1;
-            // The window's look, from its shadow, when due (not counted in the round).
-            if let Some(generation) = super::window_look::due(id) {
+            // The window's look, from its shadow, when due (not counted in the round), one a
+            // round at most.
+            if !looked && let Some(generation) = super::window_look::due(id) {
+                looked = true;
                 probe_look(&filter, id, size_pt, generation, super::window_look::read);
             }
         }

@@ -209,6 +209,8 @@ impl Model {
         } else if let Home::Stage(s) = home {
             // While the login settles a new stage takes the front only from an empty saved
             // active stage still waiting for its windows (the review of 8F, M4).
+            // A window on screen since the launch, found late, was there all along: no switch.
+            let follow = follow && !self.listed_at_launch(id);
             if follow && (!self.settling() || (created && self.front_waits_empty(space))) {
                 actions.extend(self.switch_to(s, obs));
                 return actions;

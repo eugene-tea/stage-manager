@@ -347,6 +347,10 @@ pub struct Model {
     /// (`pool.rs`) joins the stage it was merged into, when that is on its Desktop, instead
     /// of making the old stage again.
     pub(crate) merged: HashMap<pool::Kin, StageId>,
+    /// Windows the window server listed on screen when the model was built that Accessibility
+    /// did not list then (their app did not answer at launch): found later, they were there all
+    /// along, so they never bring their stage forward ([`Model::set_launch_listed`]).
+    pub(crate) launch_listed: HashSet<WindowId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -407,6 +411,7 @@ impl Model {
             pooled: HashMap::new(),
             pooled_out: HashSet::new(),
             merged: HashMap::new(),
+            launch_listed: HashSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

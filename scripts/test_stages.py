@@ -5466,6 +5466,76 @@ def hide_arrival(how, k, what):
     consistent(what, hidden_ok=True)
 
 
+def supersede_check():
+    """Round broken-1021 (11-02: two card clicks 0.56 s apart, both to apps we hid; the
+    first switch's focus ran after the second began, the two apps took the activation in turn,
+    and a late focus notice switched stages by itself). Three stages, Alpha's and Bravo's apps
+    hidden, Charlie's shown: a click on Alpha's card, 0.5 s later one on Bravo's, 0.5 s later
+    one on Charlie's. Exactly the three switches asked for, Charlie's stage stays (3 s of looks),
+    Charlie the active app; nothing of the switches left behind focuses a window or activates
+    an app after the click that superseded it, and no focus or activation switches stages."""
+    say("-- 7. card clicks 0.5 s apart on two hidden apps' stages, then a third: no unasked switch, no stale focus")
+    s = state()
+    t = by_title(s)
+    do("send", len(s["stages"]) + 1, t["Charlie 1"]["id"])  # Charlie alone, no switch
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1"], ["Charlie 1"]],
+                   "Alpha, Bravo and Charlie each in a stage")
+    if not check(s is not None, f"supersede: three stages ({stage_titles(state())})"):
+        return
+    do("switch", number_of(s, "Charlie 1"))
+    s = wait_state(lambda x: "Charlie 1" in active_titles(x), "Charlie's stage")
+    check(s is not None, "supersede: Charlie's stage active")
+    time.sleep(1.0)
+    hidden_ok = all(wait_hidden(k, True, 4.0) for k in ("a", "b"))
+    if not check(hidden_ok, f"supersede: Alpha and Bravo hidden (their stages parked; {app_hidden('a')}, {app_hidden('b')})"):
+        return
+    time.sleep(0.8)  # past every echo window
+    pids = {k: extra_pid(k) for k in ("a", "b", "c")}
+    before = len(log_text())
+    click_card(state(), "Alpha 1", "Alpha's card")
+    time.sleep(0.5)
+    click_card(state(), "Bravo 1", "Bravo's card")
+    time.sleep(0.5)
+    click_card(state(), "Charlie 1", "Charlie's card")
+    looks = []
+    end = time.time() + 3.0
+    while time.time() < end:
+        looks.append(state().get("active"))
+        time.sleep(0.25)
+    charlie = number_of(state(), "Charlie 1")
+    check(bool(looks) and looks[-1] == charlie and all(a == charlie for a in looks[2:]),
+          f"supersede: Charlie's stage comes and stays for 3 s (active stage at each look: {looks}; Charlie's {charlie})")
+    lines = log_text()[before:].splitlines()
+    clicks = [n for n, ln in enumerate(lines) if "card clicked" in ln]
+    switches = [ln for ln in lines if "INFO  platform::controller: stage switch" in ln]
+    check(len(clicks) == 3 and len(switches) == 3,
+          f"supersede: three clicks, three switches ({len(clicks)} clicks, {len(switches)} switches)")
+    unasked = [ln.strip()[24:160] for ln in lines if "focused window is in another stage" in ln or "activated app lives in another stage" in ln]
+    check(not unasked, f"supersede: no focus or activation switches stages ({unasked[:3]})")
+    # After Bravo's click nothing more of Alpha's switch; after Charlie's nothing of Bravo's.
+    def stale(k, since):
+        pid = pids[k]
+        words = ("the key window focused again now that its app is unhidden", "focused once more")
+        return [ln.strip()[24:160] for ln in lines[since:] if f"pid={pid}" in ln and any(w in ln for w in words)]
+    if len(clicks) == 3:
+        late_a, late_b = stale("a", clicks[1]), stale("b", clicks[2])
+        check(not late_a and not late_b,
+              f"supersede: no focus of ours for a switch already superseded (Alpha's after Bravo's click: {late_a[:2]}; "
+              f"Bravo's after Charlie's: {late_b[:2]})")
+    time.sleep(0.5)
+    front = frontmost_bundle()
+    check(front == EXTRA["c"][0], f"supersede: the keyboard is Charlie's at the end (frontmost {front})")
+    consistent("supersede", hidden_ok=True)
+    # Back to step 7's layout: Bravo and Charlie together, their stage active.
+    s = state()
+    do("send", number_of(s, "Bravo 1"), by_title(s)["Charlie 1"]["id"])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1", "Charlie 1"]],
+                   "Bravo and Charlie together again")
+    check(s is not None, f"supersede: Bravo and Charlie together again ({stage_titles(state())})")
+    if s is not None and "Bravo 1" not in active_titles(s):
+        do("switch", number_of(s, "Bravo 1"))
+
+
 def phase_hide():
     """Round hide-phase: `[windows] hide_parked_apps = true` (a prototype, off by default;
     src/platform/controller/hide.rs) with Alpha (two windows), Bravo and Charlie. Run by name
@@ -5486,7 +5556,9 @@ def phase_hide():
        and back: never ours (hide.rs: the user's hides are never adopted, never unhidden by
        us); the switch back raises Bravo's window and macOS unhides it for that, as Apple's
        Stage Manager does when you click the stage of an app you hid.
-    7. A quit with Alpha hidden: Alpha unhidden or its windows back at their frames, and the
+    7. Card clicks 0.5 s apart on Alpha's and Bravo's stages (both hidden), then Charlie's
+       (`supersede_check`): three switches and no more, no stale focus, Charlie in front.
+    8. A quit with Alpha hidden: Alpha unhidden or its windows back at their frames, and the
        quit's leftovers check quiet.
     Throughout, `consistent` (a hidden app's parked window may wait at its own frame); at the
     end no fixture window is parked and no fixture app hidden."""
@@ -5628,7 +5700,9 @@ def hide_body():
     time.sleep(1.0)
     consistent("⌘H undone", hidden_ok=True)
 
-    say("-- 7. a quit with Alpha hidden")
+    supersede_check()
+
+    say("-- 8. a quit with Alpha hidden")
     activate("b")
     time.sleep(0.8)
     if not check(wait_hidden("a", True, 4.0), "quit: Alpha is hidden (its stage parked)"):

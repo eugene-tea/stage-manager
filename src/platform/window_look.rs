@@ -4,7 +4,9 @@
 //!
 //! A window's capture ([`super::capture`]) also asks for this reading when it is due
 //! ([`due`]): never read, read before the system's appearance last changed
-//! ([`appearance_changed`]), or [`REFRESH`] seconds ago. The reading is a second still of the
+//! ([`appearance_changed`]), or [`REFRESH`] seconds ago; one window a capture round at most
+//! (a round every 1.5 s or more), so never every window at once at launch or after the
+//! appearance changed. The reading is a second still of the
 //! same window with the same filter, its shadow not ignored and its child windows left out, at
 //! half a pixel a point ([`probe_size`]: at most 512 px on the longer side, a twentieth of the
 //! pixels of a full-size snapshot at 2x); it is read on ScreenCaptureKit's queue and only its
