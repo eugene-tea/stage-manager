@@ -773,6 +773,8 @@ mod app {
             wm_spaces.send(WmCommand::SpaceChanged);
         });
         let appearance = apps::observe_appearance(|| {
+            // Windows that follow the system's appearance change with it: read again.
+            stage_manager::platform::window_look::appearance_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::appearance_changed(mtm);
             }

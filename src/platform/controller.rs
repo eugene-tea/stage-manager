@@ -3177,6 +3177,8 @@ impl Controller {
                 if self.unplaced.contains(&id) {
                     self.on_found(ob, id);
                 }
+                // A late key window drawn key: its snapshot's shadow hands over (an echo too).
+                self.key_focus_heard(ob, id);
                 if self.echoes.is_window_echo(id, now) && !self.focus_beats_echo(ob, id, now) {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
@@ -3277,6 +3279,7 @@ impl Controller {
             WinEvent::AppActivated(pid) => {
                 // An app we unhid and focused again took it (or another app did: no retry).
                 self.activation_noticed(pid);
+                self.key_activation_heard(pid);
                 let waiting: Vec<u32> =
                     self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
                 for id in waiting {

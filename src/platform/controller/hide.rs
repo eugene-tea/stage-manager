@@ -131,6 +131,24 @@ pub(super) struct Hides {
     /// Apps whose key window was focused again after our unhide, until their activation is
     /// heard ([`ACTIVATION_WAIT`], [`Controller::activation_step`]).
     activation_wait: HashMap<i32, ActivationWait>,
+    /// The same apps, until their key window is drawn key ([`Hides::key_drawn`]): the late
+    /// key window's snapshot hands its shadow over then ([`Late::KeyDrawn`]).
+    key_look: HashMap<i32, KeyLook>,
+}
+
+/// An app focused again after our unhide, on its way to drawing its key window key: macOS
+/// draws a window's key shadow once its app is active and the window is its key one (the
+/// app's AXFocusedWindowChanged; 11-02, Telegram: active at +43 ms after its unhide, its
+/// window focused at +60, drawn key a frame or two later, its AXApplicationActivated only
+/// at +179).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct KeyLook {
+    /// Its key window.
+    key: u32,
+    /// The app focused it.
+    focused: bool,
+    /// The app is active.
+    active: bool,
 }
 
 /// An app focused again after our unhide whose activation is not heard yet.
@@ -174,8 +192,22 @@ impl Hides {
         self.landing.remove(&pid);
         self.shown_wait.remove(&pid);
         self.activation_wait.remove(&pid);
+        self.key_look.remove(&pid);
         self.reconcile.retain(|(p, _, _)| *p != pid);
         listed
+    }
+
+    /// App `pid` focused window `focused`, or is `active`: true once it is active with its
+    /// key window focused again after our unhide (drawn key now), told once.
+    fn key_drawn(&mut self, pid: i32, focused: Option<u32>, active: bool) -> bool {
+        let Some(k) = self.key_look.get_mut(&pid) else { return false };
+        k.focused |= focused == Some(k.key);
+        k.active |= active;
+        let drawn = k.focused && k.active;
+        if drawn {
+            self.key_look.remove(&pid);
+        }
+        drawn
     }
 
     /// An activation of app `pid` was heard (NSWorkspace, or the app's own): its wait is
@@ -224,10 +256,10 @@ impl Hides {
         match step {
             Late::UnhiddenFocusFollows => self.shown_wait.get(&pid).map(|(id, ws)| (*id, ws.clone(), false)),
             Late::Unhidden => self.shown_wait.remove(&pid).map(|(id, ws)| (id, ws, true)),
-            Late::Activated if !self.ours(pid) && !self.landing.contains_key(&pid) => {
+            Late::Activated | Late::KeyDrawn if !self.ours(pid) && !self.landing.contains_key(&pid) => {
                 self.shown_wait.remove(&pid).map(|(id, ws)| (id, ws, true))
             }
-            Late::Activated => None,
+            Late::Activated | Late::KeyDrawn => None,
         }
     }
 
@@ -249,6 +281,9 @@ enum Late {
     Unhidden,
     /// The app took its activation (AXApplicationActivated): drawn in its key look.
     Activated,
+    /// The app is active and has focused its key window: that window is drawn key (its
+    /// AXApplicationActivated comes later, 11-02: 120 ms).
+    KeyDrawn,
 }
 
 /// Whether an app's in-place windows that macOS's unhide left behind go to the corner now:
@@ -495,6 +530,7 @@ impl Controller {
             Ok(()) => {
                 tracing::debug!(pid, key, "hide: the key window focused again now that its app is unhidden");
                 self.hides.activation_wait.insert(pid, ActivationWait { key, sent: now, tries: 0 });
+                self.hides.key_look.insert(pid, KeyLook { key, ..KeyLook::default() });
                 true
             }
             Err(e) => {
@@ -511,6 +547,27 @@ impl Controller {
         tracing::debug!(id, pid, ?windows, ?step, "hide: the windows of the app we unhid are on screen; their snapshots follow");
         LateNote::add(&mut self.late_note, id, &windows, active);
         self.present();
+    }
+
+    /// Window `id` was focused (the app's own notice, an echo of ours too): an app we unhid
+    /// whose key window this is, active, draws it key now ([`Late::KeyDrawn`]).
+    pub(super) fn key_focus_heard(&mut self, ob: &Observer, id: u32) {
+        let Some(pid) = ob.window(id).map(|w| w.pid) else { return };
+        if !self.hides.key_look.contains_key(&pid) {
+            return;
+        }
+        let active = apps::is_active(pid) == Some(true);
+        if self.hides.key_drawn(pid, Some(id), active) {
+            self.note_late(pid, Late::KeyDrawn);
+        }
+    }
+
+    /// App `pid` became the active app (NSWorkspace): one we unhid whose key window it has
+    /// focused already draws it key now ([`Late::KeyDrawn`]).
+    pub(super) fn key_activation_heard(&mut self, pid: i32) {
+        if self.hides.key_drawn(pid, None, true) {
+            self.note_late(pid, Late::KeyDrawn);
+        }
     }
 
     /// App `pid` posted its own activation (AXApplicationActivated): one whose key window we
@@ -661,6 +718,7 @@ impl Controller {
     /// for them to show ([`Hides::shown_wait`]; a new switch forgets the last one's).
     pub(super) fn hold_for_landing(&mut self, id: u64, pids: impl IntoIterator<Item = i32>, late: &[u32], ob: &Observer, deadline: Instant) {
         self.hides.shown_wait.clear();
+        self.hides.key_look.clear();
         for pid in pids {
             tracing::info!(pid, "hide: the switch's snapshots bring the windows of an app we hid; it is unhidden when they land");
             self.hides.landing.insert(pid, deadline);
@@ -852,6 +910,31 @@ mod tests {
         h.shown_wait.insert(12, (5, vec![8]));
         h.forget(12);
         assert!(h.shown_wait.is_empty(), "a quit app forgotten");
+    }
+
+    /// 11-02: Telegram, unhidden by us and its key window focused again, was active before it
+    /// focused the window, and drew it key then, well before its own activation notice. The
+    /// late key window is told drawn key once both are heard, in either order, once; another
+    /// window's focus is not its.
+    #[test]
+    fn the_key_window_is_drawn_key_once_its_app_is_active_and_focused_it() {
+        let mut h = Hides::default();
+        h.shown_wait.insert(10, (4, vec![7]));
+        h.key_look.insert(10, KeyLook { key: 7, ..KeyLook::default() });
+        assert!(!h.key_drawn(10, None, true), "active, not focused yet");
+        assert!(!h.key_drawn(10, Some(8), false), "another window's focus");
+        assert!(h.key_drawn(10, Some(7), false), "focused, active before");
+        assert_eq!(h.late(10, Late::KeyDrawn), Some((4, vec![7], true)));
+        assert!(!h.key_drawn(10, Some(7), true), "told once");
+        h.key_look.insert(11, KeyLook { key: 9, ..KeyLook::default() });
+        assert!(!h.key_drawn(11, Some(9), false), "focused while not active yet");
+        assert!(h.key_drawn(11, None, true), "then active");
+        h.ours.insert(12, ours("com.example.alpha"));
+        h.shown_wait.insert(12, (5, vec![3]));
+        assert_eq!(h.late(12, Late::KeyDrawn), None, "still hidden by us");
+        h.key_look.insert(13, KeyLook { key: 2, ..KeyLook::default() });
+        h.forget(13);
+        assert!(!h.key_drawn(13, Some(2), true), "a quit app forgotten");
     }
 
     /// 11-01: Messages, unhidden by us and its key window focused again, never took the

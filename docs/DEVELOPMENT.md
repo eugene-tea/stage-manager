@@ -178,7 +178,9 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
   (the window's own picture, its shadow and rim) matches; `--appearance dark|light` draws
   the probe's windows in that appearance (the system's is never changed), `--background
   GREY` fills them with a grey (a rim shows on it), `--corner PT` draws the comparison at
-  that corner radius.
+  that corner radius. Each state's `look` is how the captures read the window's appearance
+  from its shadow: from the image above (`display`) and, when the process running the probe
+  has Screen Recording, from the still the captures take (`captures`, ScreenCaptureKit).
 
 ## Logs
 

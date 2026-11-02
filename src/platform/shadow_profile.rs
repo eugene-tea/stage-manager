@@ -46,6 +46,7 @@ use super::capture_pixels::PixelRect;
 use super::shadow_probe::{MARGIN, Variant, make_window, spin, window_image};
 use super::{desktop, pixels, windows};
 use crate::engine::geometry::Rect;
+use crate::ui::shadow_look;
 use crate::ui::shadow_math::corner_from_inset;
 use crate::ui::window_shadow::{ShadowLayers, WindowShadow};
 
@@ -64,6 +65,8 @@ pub struct AlphaPlane {
     pub frame: PixelRect,
     /// Pixels per point.
     pub scale: f64,
+    /// The window's look as read from its shadow ([`look_of`]); null for a model's plane.
+    pub look: Value,
 }
 
 impl AlphaPlane {
@@ -180,7 +183,7 @@ pub fn run(
         // The window's own pixels as a snapshot has them (its frame alone).
         if let (Some(dir), Some((bytes, w, h))) = (dump, real.bare.as_ref()) {
             let alpha = bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
-            let bare = AlphaPlane { w: *w, h: *h, alpha, bgra: Vec::new(), bare: None, bare_image: None, frame: PixelRect { x: 0, y: 0, w: *w, h: *h }, scale: real.scale };
+            let bare = AlphaPlane { w: *w, h: *h, alpha, bgra: Vec::new(), bare: None, bare_image: None, frame: PixelRect { x: 0, y: 0, w: *w, h: *h }, scale: real.scale, look: Value::Null };
             let _ = write_dump(dir, &format!("{state}-bare"), &bare);
         }
         let mut row = profile_json(&real);
@@ -226,6 +229,7 @@ fn profile_json(p: &AlphaPlane) -> Value {
         "edges": edges_json(p),
         "bare_size": p.bare.as_ref().map(|(_, w, h)| json!([w, h])),
         "bare_edges_outside_in": p.bare.as_ref().map(|b| { let e = bare_edges(b, EDGE_PX); json!({ "left": e[0], "top": e[1], "right": e[2], "bottom": e[3] }) }),
+        "look": p.look,
     })
 }
 
@@ -362,7 +366,7 @@ fn plane_of(id: u32) -> Result<AlphaPlane, String> {
         h: (listed.h * scale).round() as usize,
     };
     let alpha = bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
-    Ok(AlphaPlane { w, h, alpha, bgra: bytes, bare: None, bare_image: None, frame, scale })
+    Ok(AlphaPlane { w, h, alpha, bgra: bytes, bare: None, bare_image: None, frame, scale, look: Value::Null })
 }
 
 /// The probe windows' background grey (0-1, sRGB) when `--background` set one: a rim over a
@@ -468,6 +472,7 @@ fn real_window(mtm: MainThreadMarker, main: &crate::engine::model::Display, size
         }
         let id = u32::try_from(window.windowNumber()).map_err(|_| "no window number".to_string())?;
         let mut plane = plane_of(id)?;
+        plane.look = look_of(id, &plane);
         if let Some(image) = bare_image_of(id) {
             plane.bare = pixels::bgra(&image, None);
             plane.bare_image = Some(image);
@@ -486,6 +491,61 @@ fn real_window(mtm: MainThreadMarker, main: &crate::engine::model::Display, size
     }
     spin(Duration::from_millis(150));
     result
+}
+
+/// How the captures would read window `id`'s look ([`crate::ui::shadow_look`]): from `plane`
+/// (its image with its framing at the display's resolution), and, with Screen Recording
+/// granted to the process that runs the probe, from the still the captures take
+/// ([`crate::platform::capture::look_shot`]: ScreenCaptureKit, half a pixel a point).
+fn look_of(id: u32, plane: &AlphaPlane) -> Value {
+    let frame = (plane.frame.w as f64 / plane.scale, plane.frame.h as f64 / plane.scale);
+    let display = look_json(shadow_look::profiles(&plane.alpha, plane.w, plane.h, frame), (plane.w, plane.h));
+    let captures = if objc2_core_graphics::CGPreflightScreenCaptureAccess() {
+        *LOOK_SHOT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        crate::platform::capture::look_shot(id, look_shot_sink);
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(v) = LOOK_SHOT.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                break v;
+            }
+            if std::time::Instant::now() >= until {
+                break json!({ "ok": false, "why": "no still of the window came back" });
+            }
+            spin(Duration::from_millis(20));
+        }
+    } else {
+        json!({ "ok": false, "why": "Screen Recording is not granted to the process running the probe" })
+    };
+    json!({ "display": display, "captures": captures })
+}
+
+/// The reading of [`crate::platform::capture::look_shot`]'s still, as JSON.
+static LOOK_SHOT: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+fn look_shot_sink(_id: u32, _generation: u64, image: &objc2_core_graphics::CGImage, frame: (f64, f64)) {
+    let v = match pixels::bgra(image, None) {
+        Some((bytes, w, h)) => {
+            let alpha: Vec<u8> = bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+            look_json(shadow_look::profiles(&alpha, w, h, frame), (w, h))
+        }
+        None => json!({ "ok": false, "why": "the still could not be read" }),
+    };
+    *LOOK_SHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+}
+
+/// A reading as JSON: the look, the fit's error and the other appearance's, the scale and
+/// the first pixels of each profile.
+fn look_json(profiles: Option<Vec<shadow_look::Profile>>, size: (usize, usize)) -> Value {
+    let Some(profiles) = profiles else { return json!({ "ok": false, "size": size, "why": "the window was not found in its picture" }) };
+    let first: Vec<Value> = profiles.iter().map(|p| json!({ "side": format!("{:?}", p.side), "alpha": p.alpha.iter().take(16).collect::<Vec<_>>() })).collect();
+    let k = profiles.first().map_or(0.0, |p| p.px_per_pt);
+    match shadow_look::classify(&profiles) {
+        Some(f) => {
+            let (look, state) = f.look.words();
+            json!({ "ok": true, "look": look, "state": state, "rms": (f.rms * 10.0).round() / 10.0, "other": (f.other * 10.0).round() / 10.0, "px_per_pt": (k * 1000.0).round() / 1000.0, "size": size, "profiles": first })
+        }
+        None => json!({ "ok": false, "why": "no clear evidence", "px_per_pt": k, "size": size, "profiles": first }),
+    }
 }
 
 /// The probe's own borderless window drawing an opaque plane of `size` and `corner` radius
@@ -576,7 +636,7 @@ fn drawn_snapshot(
         let (bytes, w, h) = pixels::bgra(&image, None).ok_or("the image could not be read")?;
         let s = w as f64 / shot.w;
         let frame = PixelRect { x: (MARGIN * s).round() as usize, y: (MARGIN * s).round() as usize, w: (size.width * s).round() as usize, h: (size.height * s).round() as usize };
-        Ok(AlphaPlane { w, h, alpha: bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect(), bgra: bytes, bare: None, bare_image: None, frame, scale: s })
+        Ok(AlphaPlane { w, h, alpha: bytes.as_chunks::<4>().0.iter().map(|p| p[3]).collect(), bgra: bytes, bare: None, bare_image: None, frame, scale: s, look: Value::Null })
     })();
     panel.orderOut(None);
     panel.close();

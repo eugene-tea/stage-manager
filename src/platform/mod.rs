@@ -43,5 +43,6 @@ pub mod space_keys;
 pub mod update_check;
 pub mod updater;
 pub mod wallpaper;
+pub mod window_look;
 pub mod windows;
 pub mod wm_thread;

@@ -13,6 +13,11 @@
   shadow no longer lightens for a moment at the end of a switch.
 - In Dark Mode, moving windows carry the darker shadow and the thin light edge macOS gives
   windows there, so the edges no longer flicker as a switch ends.
+- A window that an app draws dark while the system is light (or light while it is dark), such
+  as Messages with a dark chat background, now moves with its own shadow, so its edges no
+  longer flicker as a switch ends.
+- A hidden app's window arriving in a switch keeps its picture's shadow until it is drawn as
+  the focused window, so the shadow no longer lightens for a frame.
 - With hidden parked apps, a switch to a hidden app's stage now always gives it the keyboard:
   an app that does not take its activation is asked again.
 - An automatic update no longer installs while the screen is locked, when hidden windows

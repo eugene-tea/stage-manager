@@ -495,6 +495,33 @@ pub struct GhostReport {
     /// For an incoming window: when its snapshot's shadow began to fade (ms after the unveil);
     /// never before `shown_ms`.
     pub handover_ms: Option<u64>,
+    /// The window shadow its snapshot carries ([`ShadowReport`]); `None` for a window
+    /// dragged onto the strip (its card's shadow).
+    pub shadow: Option<ShadowReport>,
+}
+
+/// The window shadow a snapshot carries, for the log and `ctl state`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct ShadowReport {
+    /// `"light"`, `"dark"`, or `"custom"` (`[animation] shadow = "custom"`).
+    pub look: &'static str,
+    /// `"active"` (the key window's) or `"inactive"`.
+    pub state: &'static str,
+    /// Where the appearance came from: `"window"` (its own shadow, read
+    /// [`Self::read_s_ago`]), or `"system"` (no reading of it).
+    pub from: &'static str,
+    /// How long before the switch its shadow was read (seconds), when it was.
+    pub read_s_ago: Option<u64>,
+}
+
+impl std::fmt::Display for ShadowReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.read_s_ago {
+            Some(s) => write!(f, "{} {} by the window's own shadow (read {s} s ago)", self.look, self.state),
+            None if self.look == "custom" => write!(f, "custom"),
+            None => write!(f, "{} {} by the system's appearance (no reading of the window)", self.look, self.state),
+        }
+    }
 }
 
 /// The ghosts of the last transition the strip drew.

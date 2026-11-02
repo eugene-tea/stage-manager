@@ -142,8 +142,16 @@ carries macOS's own window shadow, measured on a Studio Display (`stage-manager 
 window's): the key window's on the window that is or becomes key, an inactive window's on
 the others, turning into the card's shadow on the spring as it nears its card. macOS draws a
 window's shadow by the window's appearance: in Dark Mode the drop reaches as far but is
-nearly twice as dark and the hairline nearly opaque, so the picture takes the shadow of the
-appearance the system is in at each switch. macOS also draws a thin white line just inside
+nearly twice as dark and the hairline nearly opaque. The picture takes the shadow of the
+appearance macOS draws that window in, read from the window's own shadow: a small capture of
+the window with its shadow (half a pixel a point) next to its usual capture, when it was
+never read, read before the system's appearance last changed, or 20 seconds ago; the alpha
+past three of its sides is compared with the four shadows (light or dark, key or inactive).
+An app may draw its window in another appearance than the system's (11-02: Messages, a
+conversation with a dark chat background, drew its whole window dark on a light system, and
+the light shadow the system's appearance picked flickered at the handover). With no reading
+the system's appearance stands in. The log's `transition ghost` line names the shadow each
+picture carries and where its appearance came from. macOS also draws a thin white line just inside
 each window's edge, with the shadow (a capture that leaves the shadow out lacks it): a point
 wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
 shows only on dark content. The picture carries it too, over its edge and corner, coming
@@ -165,10 +173,14 @@ the unveil at the most; an outgoing picture's shadow comes in over twice
 switch's pictures move (a round of captures is the window server's work, and dropped a frame).
 With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
 unhide after the unveil has taken (about 100 ms later), when the window server lists it on
-screen: its picture's shadow hands over then, and the picture stays until the app has taken
-the activation of its key window focused again, so the window is never seen in its inactive
-look (11-01: Messages flipped to its key look 180 ms after it showed); 400 ms past the unveil
-at the most. An app that has not taken that activation 60 ms after its key window was focused
+screen: its picture's shadow hands over then, except the key window's: it shows inactive
+first, so its picture keeps the key shadow until the app is active and has focused it again
+(drawn key then; 11-02, Telegram: handed over as it showed, a frame of the inactive shadow
+alone read 4 levels lighter before it turned key, and the key shadow over the inactive one is
+the smaller error, as the inactive one lies mostly within it). The picture stays until the
+app has taken the activation of its key window focused again, so the window is never seen in
+its inactive look (11-01: Messages flipped to its key look 180 ms after it showed); 400 ms
+past the unveil at the most. An app that has not taken that activation 60 ms after its key window was focused
 again is focused once more, twice at most (11-01: Messages's window took the focus, the app
 never became active, and the keyboard stayed with the app before).
 Arriving windows

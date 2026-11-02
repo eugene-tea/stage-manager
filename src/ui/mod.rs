@@ -14,6 +14,7 @@ pub mod panels;
 pub mod patch_probe;
 pub mod preview;
 pub mod settings_window;
+pub mod shadow_look;
 pub mod shadow_math;
 pub mod shell;
 pub mod status_menu;

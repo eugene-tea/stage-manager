@@ -27,7 +27,10 @@
 //!   landing waits for that too. The incoming key window is captured again once it is key
 //!   ([`RECAPTURE_AFTER`]), its picture cross-fading in mid-flight. Late windows (an app we
 //!   hid, unhidden after the unveil: [`Transition::late`]) show once the app is unhidden and
-//!   land once drawn in their key look ([`Strip::late_shown`]). Meanwhile the park corner,
+//!   land once drawn in their key look ([`Strip::late_shown`]); the late key window shows
+//!   inactive first, so its shadow hands over once it is drawn key. Each snapshot's shadow
+//!   is in the appearance macOS draws its window in, read from the window's own shadow
+//!   ([`crate::platform::window_look`]), else the system's. Meanwhile the park corner,
 //!   where
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
@@ -64,7 +67,7 @@ use crate::ui::motion_math::{
 use crate::ui::overlay::{CardShadow, Ghost, GhostShadow, Overlay};
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
-use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, StripEvent, Transition, TransitionReport};
+use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowReport, StripEvent, Transition, TransitionReport};
 use crate::ui::window_shadow::{self, DEFAULT_CORNER, WindowShadow};
 
 /// The interval used when `snapshot_interval_ms = 0` (captures only on demand).
@@ -137,6 +140,12 @@ struct Running {
     late: Vec<u32>,
     /// Late incoming windows not drawn in their final look yet: the landing waits for them.
     late_inactive: Vec<u32>,
+    /// The incoming key window, when it is a late one: its shadow hands over once it is drawn
+    /// key ([`Strip::late_shown`]), not when it shows (it shows inactive first).
+    late_key: Option<u32>,
+    /// That window on screen at its frame and not drawn key yet: its snapshot keeps its
+    /// shadow ([`Strip::poll_shown`]).
+    unkeyed: Vec<u32>,
     /// The landing is not before this once every incoming window shows (its shadow handed
     /// over: [`shown_lands`]).
     shown_land: Option<Instant>,
@@ -388,21 +397,31 @@ impl Strip {
         }
     }
 
-    /// True when windows are drawn in the dark appearance now: the system's, read at each
-    /// snapshot so a change of Light, Dark or Auto is followed at the next switch (macOS
-    /// draws a window's shadow by the window's own appearance, which follows the system's
-    /// unless its app sets one).
+    /// True when the system draws windows in the dark appearance now, read at each snapshot
+    /// so a change of Light, Dark or Auto is followed at the next switch: the fallback for a
+    /// window whose own look has not been read ([`crate::platform::window_look`]).
     fn dark_now() -> bool {
         MainThreadMarker::new().is_some_and(crate::platform::wallpaper::dark_appearance)
     }
 
-    /// How a window's snapshot (`picture`, the window at `frame`) is shadowed: the key
-    /// window's shadow when `key`, an inactive window's otherwise, around its own corner
-    /// (read from the picture, else a titled window's; `[animation] corner_radius` when set),
-    /// and the card's shadow on a card; starting `amount` of the way to the window's (0 a
-    /// card, 1 the window).
-    fn ghost_shadow(&self, picture: Option<&Picture>, frame: Rect, key: bool, amount: f64) -> GhostShadow {
-        let [active, inactive] = self.window_shadows(Self::dark_now());
+    /// How window `id`'s snapshot (`picture`, the window at `frame`) is shadowed: the key
+    /// window's shadow when `key`, an inactive window's otherwise, in the appearance macOS
+    /// draws the window's shadow in (read from its shadow, [`crate::platform::window_look`];
+    /// else the system's), around its own corner (read from the picture, else a titled
+    /// window's; `[animation] corner_radius` when set), and the card's shadow on a card;
+    /// starting `amount` of the way to the window's (0 a card, 1 the window). With the words
+    /// for the log: which shadow, and where its appearance came from.
+    fn ghost_shadow(&self, id: u32, picture: Option<&Picture>, frame: Rect, key: bool, amount: f64) -> (GhostShadow, ShadowReport) {
+        let read = crate::platform::window_look::look(id);
+        let dark = read.map_or_else(Self::dark_now, |(l, _)| l.dark);
+        let custom = self.style.animation.shadow == SnapshotShadow::Custom;
+        let note = ShadowReport {
+            look: if custom { "custom" } else if dark { "dark" } else { "light" },
+            state: if key { "active" } else { "inactive" },
+            from: if read.is_some() && !custom { "window" } else { "system" },
+            read_s_ago: read.filter(|_| !custom).map(|(_, age)| age.round() as u64),
+        };
+        let [active, inactive] = self.window_shadows(dark);
         let set = self.style.animation.corner_radius;
         let corner = if set > 0.0 { set } else { picture.and_then(|p| window_shadow::corner_of(p, (frame.w, frame.h))).unwrap_or(DEFAULT_CORNER) };
         let c = &self.style.cards;
@@ -413,7 +432,7 @@ impl Strip {
             radius: c.shadow_radius * k,
             offset: (c.shadow_offset_x * k, c.shadow_offset_y * k),
         };
-        GhostShadow { window: if key { active } else { inactive }, corner, window_size: (frame.w, frame.h), card, amount }
+        (GhostShadow { window: if key { active } else { inactive }, corner, window_size: (frame.w, frame.h), card, amount }, note)
     }
 
     /// Lays the overlay over the main display with the strip's eye, and has the snapshots'
@@ -588,8 +607,8 @@ impl Strip {
             };
             // A window dropped on the strip: its card under the pointer becomes the snapshot.
             let dragged = self.motion.window_card.take_if(|c| c.window == id);
-            let ghost = match dragged {
-                Some(c) => c.ghost,
+            let (ghost, shadow_note) = match dragged {
+                Some(c) => (c.ghost, None),
                 None => {
                     let image = self.motion.cache.get(id).cloned();
                     if image.is_none() && !plain {
@@ -597,10 +616,10 @@ impl Strip {
                         continue;
                     }
                     let at = Plane::window(w.window.frame, o, style.corner_radius);
-                    let shadow = self.ghost_shadow(image.as_ref(), w.window.frame, key_out == Some(id), 1.0);
+                    let (shadow, note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_out == Some(id), 1.0);
                     let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0);
                     ghost.fade_shadow(0.0, 1.0, out_begin, out_duration);
-                    ghost
+                    (ghost, Some(note))
                 }
             };
             // It holds still over the window until the window has parked behind it.
@@ -617,6 +636,7 @@ impl Strip {
                 at_unveil: None,
                 shown_ms: None,
                 handover_ms: None,
+                shadow: shadow_note,
             });
             waiting.push((ghosts.len(), end));
             ghosts.push(ghost);
@@ -632,7 +652,7 @@ impl Strip {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
-            let shadow = self.ghost_shadow(image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
+            let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
             let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0);
             let end = Plane::window(w.window.frame, o, style.corner_radius);
             ghost.spring_to(end, spring);
@@ -649,6 +669,7 @@ impl Strip {
                 at_unveil: None,
                 shown_ms: None,
                 handover_ms: None,
+                shadow: Some(shadow_note),
             });
             ghosts.push(ghost);
             cover.incoming = true;
@@ -736,6 +757,7 @@ impl Strip {
                 engine_slot = ?g.slot,
                 start = %g.start,
                 end = %g.end,
+                shadow = %g.shadow.map_or_else(|| "the card's".to_string(), |s| s.to_string()),
                 "transition ghost"
             );
         }
@@ -768,8 +790,10 @@ impl Strip {
                 lands_after,
                 unveil_at,
                 unshown,
+                late_key: t.key_in.filter(|k| late.contains(k)),
                 late: late.clone(),
                 late_inactive: late,
+                unkeyed: Vec::new(),
                 shown_land: None,
                 final_land: None,
                 settled: false,
@@ -907,6 +931,17 @@ impl Strip {
             let seen = described.iter().find(|d| d.id == *w).map(|d| format!("{} onscreen={}", d.bounds, d.onscreen));
             tracing::debug!(id, window = w, ?seen, since_unveil_ms = (since * 1000.0).round() as u64, "transition: the window server never showed the incoming window at its frame; its snapshot hands over anyway");
         }
+        // The late key window shows inactive first (its app unhidden, then made active): its
+        // snapshot keeps the key shadow until it is drawn key (11-02, Telegram: handed over
+        // as it showed, a frame of both shadows and one of the inactive shadow alone, 4
+        // levels lighter, before it turned key). Over its inactive shadow the key one is
+        // the smaller error: that shadow lies mostly within the key one's.
+        let (unkeyed, shown): (Vec<u32>, Vec<u32>) = shown.into_iter().partition(|w| r.late_key == Some(*w) && r.late_inactive.contains(w));
+        if !unkeyed.is_empty() {
+            r.unshown.retain(|w| !unkeyed.contains(w));
+            r.unkeyed.extend(&unkeyed);
+            tracing::debug!(id, windows = ?unkeyed, since_unveil_ms = (since * 1000.0).round() as u64, "transition: the late key window shows, not key yet; its snapshot keeps its shadow until it is");
+        }
         self.windows_shown(id, &shown, true);
         self.windows_shown(id, &waited, false);
         if self.motion.running.as_ref().is_some_and(|r| r.id == id && !r.unshown.is_empty()) {
@@ -925,11 +960,12 @@ impl Strip {
     /// ([`Self::replan_landing`]). Kept for `ctl state` ([`GhostReport::shown_ms`]).
     fn windows_shown(&mut self, id: u64, windows: &[u32], seen: bool) {
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
-        let windows: Vec<u32> = windows.iter().copied().filter(|w| r.unshown.contains(w)).collect();
+        let windows: Vec<u32> = windows.iter().copied().filter(|w| r.unshown.contains(w) || r.unkeyed.contains(w)).collect();
         if windows.is_empty() {
             return;
         }
         r.unshown.retain(|w| !windows.contains(w));
+        r.unkeyed.retain(|w| !windows.contains(w));
         let now = Instant::now();
         let since = r.unveil_at.map_or(0.0, |u| now.saturating_duration_since(u).as_secs_f64());
         let begin = shown_handover(since);
@@ -991,6 +1027,12 @@ impl Strip {
         let since_unveil_ms = r.unveil_at.map(|u| now.saturating_duration_since(u).as_millis() as u64);
         let unshown = r.unshown.clone();
         tracing::debug!(id, on_screen = ?on_screen, final_look = ?done, waited_out = all, since_unveil_ms, ?unshown, "transition: late windows show");
+        // The late key window, on screen already, drawn key now: its shadow hands over.
+        let keyed: Vec<u32> = r.unkeyed.iter().copied().filter(|w| done.contains(w)).collect();
+        if !keyed.is_empty() {
+            self.windows_shown(id, &keyed, true);
+        }
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
         if done.is_empty() || !r.late_inactive.is_empty() {
             return;
         }
@@ -1298,7 +1340,7 @@ impl Strip {
             let image = self.motion.cache.get(w.id).cloned().or_else(|| self.thumbs.get(&w.id).cloned());
             let o = self.motion.overlay.origin();
             let at = Plane::under_pointer(Point::new(p.x - o.x, p.y - o.y), m.thumb_size(&f), grab, m.tilt, corner);
-            let shadow = self.ghost_shadow(image.as_ref(), f, false, 0.0);
+            let (shadow, _) = self.ghost_shadow(w.id, image.as_ref(), f, false, 0.0);
             let ghost = self.motion.overlay.ghost(w.id, image.as_ref(), at, &shadow, self.style.drag.ghost_opacity as f32);
             self.motion.window_card = Some(WindowCard { window: w.id, ghost, has_image: image.is_some() });
             self.motion.overlay.show_on_top();
