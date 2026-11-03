@@ -42,7 +42,10 @@ another app's stage grows from its card (round 8L: see `activation_grows_check`)
 `level = "above_windows"` keeps the strip on top), park (round park-reconcile: a parked window
 the fixture moves to the middle of the screen by itself, SIGALRM, is parked again within about a
 second, its restore frame untouched, and a switch brings it back exactly; round fixes-151:
-the corner patch is its sliver grown by a parked window's shadow reach per side), slots (a dozen card clicks in a mixed order,
+the corner patch is its sliver grown by a parked window's shadow reach per side), offscreen
+(round offscreen-windows: a window the fixture opens wholly off every display, as a headless
+browser does, never joins a stage, never moves, stays off screen through switches and a
+relaunch, and is never saved), slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
 in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
@@ -5649,6 +5652,78 @@ def phase_park():
     all_onscreen("park reconcile quit")
 
 
+def phase_offscreen():
+    """Round offscreen-windows (11-03: a headless Playwright WebKit window, untitled, at
+    -10000,-10180, joined Chrome's stage, was parked, and slid out of the corner onto the screen
+    at the switch back): a window wholly off every display is not the user's. The fixture opens
+    one (`--offscreen-ms`: borderless, untitled) while its own stage is in front; it never joins
+    a stage, never moves and stays off screen through a new stage and switches away and back,
+    and a relaunch of the app with it already there (the launch listing) leaves it alone too."""
+    say("\n== offscreen: a window off every display is never managed ==")
+    stop_app()
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(2, "--offscreen-ms", "5000")
+    s = start_app(2)
+    if not check(s is not None, "app manages the 2 fixture windows"):
+        return
+    t = by_title(s)
+    w1, w2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    check(len(s["stages"]) == 1 and s["active"] == 1, "both fixture windows in stage 1, in front")
+    before = log_text().count("window off every display")
+
+    def off_window():
+        wins, _ = fixture_windows([FIX_ID])
+        return next((w for w in wins if w["id"] not in (w1, w2) and w["bounds"]["x"] <= -9000), None)
+
+    off = wait_until(off_window, 12, "the fixture's window off every display")
+    if not check(off is not None, "the fixture opened a window off every display while its stage was in front"):
+        return
+    oid, at = off["id"], off["bounds"]
+    say(f"    window {oid} at {fmt(at)}, on screen: {off['onscreen']}")
+    time.sleep(2.5)  # past two once-a-second checks: a window that shows is taken in by then
+
+    def left_alone(what):
+        s = state()
+        managed = {w["id"] for w in s["windows"]}
+        staged = {i for st in s["stages"] for i in st["windows"]}
+        now = off_window()
+        ok = oid not in managed and oid not in staged
+        check(ok, f"{what}: the window off every display is not managed, in no stage")
+        check(now is not None and close(now["bounds"], at), f"{what}: it never moved ({fmt(now['bounds']) if now else 'not listed'}, was {fmt(at)})")
+        return s
+
+    left_alone("created while stage 1 was in front")
+    check(log_text().count("window off every display") > before, "the log says why it is left alone")
+    do("new", w2)
+    s = wait_state(lambda x: len(x["stages"]) == 2, "Fixture 2 in a stage of its own")
+    check(s is not None, "Fixture 2 has a stage of its own")
+    for n in (1, 2, 1):
+        do("switch", n)
+        s = wait_state(lambda x, n=n: x["active"] == n, f"stage {n} in front")
+        check(s is not None, f"switch to stage {n}")
+        time.sleep(0.8)
+        left_alone(f"after the switch to stage {n}")
+        consistent(f"after the switch to stage {n}")
+    # The launch listing: the app starts with the window already off every display.
+    stop_app()
+    s = start_app(2)
+    check(s is not None, "the app relaunched, managing the 2 fixture windows")
+    time.sleep(2.5)
+    left_alone("after a relaunch")
+    stop_app()
+    saved = sorted(t for t, _ in saved_windows(read_state_file()))
+    check(saved == ["Fixture 1", "Fixture 2"], f"never saved: state.json holds the two fixture windows only ({saved})")
+    all_onscreen("offscreen quit", never_ours=[oid])
+    final = off_window()
+    check(final is not None and close(final["bounds"], at), "after the quit it is still where its app put it")
+
+
 # ----- hide_parked_apps: the prototype's live phase (run by name only) ---------------------
 
 CONFIG_HIDE = "[windows]\nhide_parked_apps = true\n"
@@ -6100,7 +6175,7 @@ def hide_body():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -6118,7 +6193,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
+             "park": phase_park, "offscreen": phase_offscreen, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
              "glass": phase_glass}[p]()
     finally:
         stop_app()

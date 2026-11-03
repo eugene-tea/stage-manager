@@ -59,6 +59,12 @@
 //                                      corner, 1516x139 (Chrome's helper windows on 10-21):
 //                                      listed off screen by the window server in the park zone,
 //                                      never through Accessibility (round 8M)
+//   --offscreen-ms N | FIXTURE_OFFSCREEN_MS=N  N ms after launch, also open a borderless,
+//                                      untitled layer-0 window wholly off every display, at
+//                                      -10000,-10180 1440x900 (top-left points), ordered in
+//                                      without activating: listed on screen there by the window
+//                                      server and through Accessibility, as a headless browser's
+//                                      is (Playwright's WebKit on 11-03, round offscreen-windows)
 //   --hang-ms N  | FIXTURE_HANG_MS=N   with SIGURG: how long the main thread blocks after the
 //                                      close (default 3000)
 //   --raise-delay-ms N | FIXTURE_RAISE_DELAY_MS=N  the standard windows answer Accessibility's
@@ -108,6 +114,7 @@ struct Options {
     var child = false
     var childOver: Double? = nil
     var stray = false
+    var offscreenMs = -1
     var hangMs = 3000
     var raiseDelayMs = 0
     var colors: [NSColor] = []
@@ -156,6 +163,7 @@ struct Options {
         if env["FIXTURE_CHILD"] == "1" { o.child = true }
         if let n = env["FIXTURE_CHILD_OVER"].flatMap(Double.init) { o.childOver = n }
         if env["FIXTURE_STRAY"] == "1" { o.stray = true }
+        if let n = env["FIXTURE_OFFSCREEN_MS"].flatMap(Int.init) { o.offscreenMs = n }
         if let n = env["FIXTURE_HANG_MS"].flatMap(Int.init) { o.hangMs = n }
         if let n = env["FIXTURE_RAISE_DELAY_MS"].flatMap(Int.init) { o.raiseDelayMs = n }
         if let c = env["FIXTURE_COLORS"] { o.colors = parseColors(c) }
@@ -180,6 +188,7 @@ struct Options {
             case "--child": o.child = true
             case "--child-over": if let n = args.next().flatMap(Double.init) { o.childOver = n }
             case "--stray": o.stray = true
+            case "--offscreen-ms": if let n = args.next().flatMap(Int.init) { o.offscreenMs = n }
             case "--hang-ms": if let n = args.next().flatMap(Int.init) { o.hangMs = n }
             case "--raise-delay-ms": if let n = args.next().flatMap(Int.init) { o.raiseDelayMs = n }
             case "--colors": if let c = args.next() { o.colors = parseColors(c) }
@@ -310,6 +319,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if options.stray { makeStray() }
         if let path = options.colorFile { watchColor(path) }
+        if options.offscreenMs >= 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.offscreenMs)) { self.makeOffscreen() }
+        }
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -497,6 +509,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.isReleasedWhenClosed = false
         w.setFrame(rect, display: false)
         stray = w
+    }
+
+    /// `--offscreen-ms`: a window wholly off every display, shown there (a headless browser's).
+    var offscreen: NSWindow?
+
+    func makeOffscreen() {
+        guard let primary = NSScreen.screens.first?.frame else { return }
+        // Top-left at (-10000, -10180) in the window server's coordinates (y down from the
+        // primary screen's top); AppKit's origin is the bottom-left, y up.
+        let size = NSSize(width: 1440, height: 900)
+        let rect = NSRect(x: -10_000, y: primary.maxY + 10_180 - size.height, width: size.width, height: size.height)
+        let w = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.setFrame(rect, display: false)
+        w.orderFrontRegardless()
+        offscreen = w
     }
 
     /// SIGURG: the last standard window opened is closed and let go (nothing keeps it, so its

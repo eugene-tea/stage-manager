@@ -6,6 +6,10 @@
   drawn slightly see-through over the wallpaper's colour behind it, and a switch's windows
   take that look as they shrink into their card. `[cards] window_opacity = 1` brings back
   opaque cards; `backdrop_saturation` and `backdrop_brightness` tune the colour.
+- A window an app keeps off every screen, such as a headless browser's during automated
+  tests, is no longer taken into the current stage, so it no longer slides onto the screen
+  when you switch back to that stage. Such windows are left alone, as Apple's Stage Manager
+  leaves them.
 - Following the Dock, a Finder window that joins a stage no longer pulls that stage to the
   top of the strip: the stage keeps the place of its other app (a stage of Finder windows
   alone still sits at the Finder's place). `[strip] dock_ignore` lists the apps left out

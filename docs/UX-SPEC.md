@@ -86,6 +86,9 @@ Sheets and dialogs follow their window. An app that quits takes its windows out 
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 An app that saved a hidden window's corner place when it quit, and reopens the window there
 within a day, has the window put back where it was before the quit (else centered).
+A window an app keeps wholly off every screen (a headless browser's, an offscreen render
+window) is left alone, as Apple's leaves it: no stage, no card, never moved; it is taken in as
+a new window if it ever comes on screen.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.

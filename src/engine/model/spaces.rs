@@ -501,6 +501,24 @@ impl Model {
         (actions, group)
     }
 
+    /// A managed window its app moved off every display ([`crate::engine::displays`]: not
+    /// the user's) leaves the model where it is: unlike [`Self::window_left_space`] it is
+    /// never put back at its restore frame, parked or not, since that would bring onto a
+    /// display a window its app keeps off them. A standard window takes its children along
+    /// (parked ones come back, as with [`Self::remove_window`]); a child goes alone. Returns
+    /// the actions and every window the model forgot: the platform takes one in again, as
+    /// new, once it shows on a display.
+    pub fn window_went_off_screen(&mut self, id: WindowId) -> (Vec<Action>, Vec<WindowId>) {
+        let Some(w) = self.windows.get(&id) else { return (Vec::new(), Vec::new()) };
+        let mut group = vec![id];
+        if w.meta.role == WindowRole::Standard {
+            group.extend(self.children_of(id));
+        }
+        self.moved_from.remove(&id);
+        self.hops.remove(&id);
+        (self.remove_window(id), group)
+    }
+
     /// Each of `display`'s known Spaces scored by its standard windows: on screen
     /// (`present`) count one up, missing from the screen for no visible reason (`absent`) one
     /// down: (score, known Space, last seen). Sticky windows do not count; children count

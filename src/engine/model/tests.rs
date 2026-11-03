@@ -425,6 +425,38 @@ fn the_group_a_window_leaving_its_space_takes_along() {
     assert_eq!(forgotten, vec![1, 3]);
 }
 
+/// Round offscreen-windows: a managed window its app moved off every display is let go where
+/// it is, parked or not: never brought back onto a display, and its stage goes with it.
+#[test]
+fn a_window_gone_off_screen_is_let_go_where_it_is() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.app"), RuleAction::Current);
+    e.add(child(3, 10, Some(1)), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    assert!(e.d.parked(w(1)), "its stage was left");
+    let (a, forgotten) = e.m.window_went_off_screen(w(1));
+    let moved: Vec<u32> = a
+        .iter()
+        .filter_map(|a| match a {
+            Action::SetFrame { id, .. } | Action::Park { id, .. } => Some(id.0),
+            _ => None,
+        })
+        .collect();
+    assert!(!moved.contains(&1), "never moved: {a:?}");
+    let mut forgotten: Vec<u32> = forgotten.into_iter().map(|w| w.0).collect();
+    forgotten.sort_unstable();
+    assert_eq!(forgotten, vec![1, 3]);
+    assert!(e.m.window(w(1)).is_none() && e.m.window(w(3)).is_none());
+    assert_eq!(e.m.stage_of(w(2)), e.m.main_active_stage());
+    // A child goes alone; its parent stays.
+    e.add(meta(4, 12, "com.example.c"), RuleAction::Current);
+    e.add(child(5, 12, Some(4)), RuleAction::Current);
+    let (_, forgotten) = e.m.window_went_off_screen(w(5));
+    assert_eq!(forgotten, vec![w(5)]);
+    assert!(e.m.window(w(4)).is_some());
+    assert!(e.m.window_went_off_screen(w(9)).1.is_empty());
+}
+
 #[test]
 fn a_child_of_an_unmanaged_parent_stays_unmanaged() {
     let mut e = Env::new();
