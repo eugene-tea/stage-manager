@@ -789,9 +789,17 @@ mod app {
         });
 
         let wm_events = wm.clone();
-        let workspace = apps::observe_workspace(move |event| {
+        let to_wm = move |event| {
             wm_events.send(WmCommand::App(event));
-        });
+        };
+        // A live check's late notices (round stale-activations; the fixtures' runs only).
+        let workspace = match apps::debug_activation_delay() {
+            Some(delay) => {
+                tracing::info!(delay_ms = delay.as_millis() as u64, "test: activation notices held before they go to the WM thread");
+                apps::observe_workspace(apps::delayed_activations(delay, to_wm))
+            }
+            None => apps::observe_workspace(to_wm),
+        };
         // The running apps once their launches and quits are observed (the review's K10): an
         // app that finished launching before the observers were in was in neither. One seen
         // in both is observed once.

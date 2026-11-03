@@ -28,6 +28,15 @@
 //!   [`RETRY_MAX`]; a flag held off longer than [`MAX_OFF`] (a batch that never ended) is
 //!   restored by it too; quit, the panic hook and the signals restore everything
 //!   ([`Ledger::restore_all`]). An app gone has nothing to restore.
+//! - **An error is read back**: a write that answers with an error may still have taken
+//!   (Chromium's application element acts on the value in its legacy setter, then hands it to
+//!   AppKit's, whose answer is the one we get, plausibly an error as Electron's was for
+//!   `AXManualAccessibility`: 11-03, -25208 NotImplemented at every write to Chrome's, in the
+//!   same millisecond, so no timeout). The flag is read back; reading what was written,
+//!   the write counts as done.
+//! - **A refusal backs off**: an app whose flag would not turn off is neither read nor written
+//!   again before [`RETRY_FIRST`], doubling to [`RETRY_MAX`] at each refusal in a row
+//!   ([`Before::BackedOff`]); its moves meanwhile may animate. Not ended by its activation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -81,8 +90,12 @@ pub enum Before {
         /// The first time this app (pid) was found on.
         first: bool,
     },
-    /// Found on, but it would not turn off: the move may animate.
+    /// Found on, but it would not turn off: the move may animate. Not tried again for this
+    /// app until its backoff is over ([`Before::BackedOff`]).
     Refused,
+    /// Refused lately: neither read nor written until the backoff is over (from
+    /// [`RETRY_FIRST`], doubling to [`RETRY_MAX`]); the move may animate.
+    BackedOff,
 }
 
 /// What a restore did.
@@ -145,18 +158,31 @@ impl Off {
     }
 }
 
+/// An app whose flag would not turn off: not asked again before `until`.
+#[derive(Clone, Copy, Debug)]
+struct Refusal {
+    times: u32,
+    until: Instant,
+}
+
+/// How long after its `times`-th refusal in a row an app is left alone.
+fn backoff(times: u32) -> Duration {
+    RETRY_FIRST.saturating_mul(1u32 << times.saturating_sub(1).min(5)).min(RETRY_MAX)
+}
+
 /// The flags read and the flags held off, per app (pid).
 #[derive(Debug, Default)]
 pub struct Ledger {
     seen: BTreeMap<i32, Seen>,
     off: BTreeMap<i32, Off>,
     logged: BTreeSet<i32>,
+    refused: BTreeMap<i32, Refusal>,
 }
 
 impl Ledger {
     /// An empty ledger.
     pub const fn new() -> Self {
-        Self { seen: BTreeMap::new(), off: BTreeMap::new(), logged: BTreeSet::new() }
+        Self { seen: BTreeMap::new(), off: BTreeMap::new(), logged: BTreeSet::new(), refused: BTreeMap::new() }
     }
 
     /// Before a move of a window of app `pid` in `owner`'s batch: turns the app's flag off
@@ -172,18 +198,30 @@ impl Ledger {
         if self.seen.get(&pid).is_some_and(|s| !s.on && now.saturating_duration_since(s.at) < FRESH) {
             return Before::Nothing;
         }
+        if self.refused.get(&pid).is_some_and(|r| now < r.until) {
+            return Before::BackedOff;
+        }
         let on = io.read(pid) == Some(true);
         self.seen.insert(pid, Seen { on, at: now });
         if !on {
             return Before::Nothing;
         }
-        match io.write(pid, false) {
-            Ok(()) => {
-                self.off.insert(pid, Off { owner: Some(owner), since: now, failures: 0, last_try: None });
-                Before::TurnedOff { first: self.logged.insert(pid) }
-            }
-            Err(_) => Before::Refused,
+        let took = match io.write(pid, false) {
+            Ok(()) => true,
+            Err(WriteError::Gone) => false,
+            // An error is no proof it did not take: Chromium's setter acts on the value, then
+            // hands it to AppKit's (11-03: -25208 NotImplemented at every write to Chrome's).
+            // Read back, it tells.
+            Err(WriteError::Failed) => io.read(pid) == Some(false),
+        };
+        if !took {
+            let times = self.refused.get(&pid).map_or(1, |r| r.times.saturating_add(1));
+            self.refused.insert(pid, Refusal { times, until: now + backoff(times) });
+            return Before::Refused;
         }
+        self.refused.remove(&pid);
+        self.off.insert(pid, Off { owner: Some(owner), since: now, failures: 0, last_try: None });
+        Before::TurnedOff { first: self.logged.insert(pid) }
     }
 
     /// `owner`'s batch ended: every flag it turned off goes back on.
@@ -226,7 +264,12 @@ impl Ledger {
     }
 
     fn restore(&mut self, io: &mut impl Flags, pid: i32, now: Instant) -> Outcome {
-        match io.write(pid, true) {
+        let written = match io.write(pid, true) {
+            // Read back: it may have taken though it answered with an error (see `before`).
+            Err(WriteError::Failed) if io.read(pid) == Some(true) => Ok(()),
+            other => other,
+        };
+        match written {
             Ok(()) => {
                 self.off.remove(&pid);
                 self.seen.insert(pid, Seen { on: true, at: now });
@@ -258,6 +301,7 @@ impl Ledger {
         self.seen.remove(&pid);
         self.off.remove(&pid);
         self.logged.remove(&pid);
+        self.refused.remove(&pid);
     }
 
     /// The apps whose flag we hold off now.
@@ -278,6 +322,8 @@ mod tests {
         writes: Vec<(i32, bool)>,
         refuse: BTreeSet<i32>,
         gone: BTreeSet<i32>,
+        /// Takes the write but answers with an error (Chromium's setter).
+        lie: BTreeSet<i32>,
     }
 
     impl Fake {
@@ -301,7 +347,7 @@ mod tests {
             }
             self.writes.push((pid, on));
             self.flags.insert(pid, on);
-            Ok(())
+            if self.lie.contains(&pid) { Err(WriteError::Failed) } else { Ok(()) }
         }
     }
 
@@ -433,6 +479,48 @@ mod tests {
         assert_eq!(r, Restored { on: 1, gone: 1, kept: 0 });
         assert!(l.held().is_empty());
         assert!(io.flags[&CHROME]);
+    }
+
+    #[test]
+    fn a_refused_app_is_left_alone_for_a_while_not_asked_at_every_move() {
+        let mut io = Fake::with(&[(CHROME, true)]);
+        io.refuse.insert(CHROME);
+        let mut l = Ledger::new();
+        let t = Instant::now();
+        assert_eq!(l.before(&mut io, CHROME, 1, t), Before::Refused);
+        let asked = io.reads;
+        // Every move in the next second: nothing asked, nothing written.
+        for n in 1..10 {
+            assert_eq!(l.before(&mut io, CHROME, 1, t + Duration::from_millis(100 * n)), Before::BackedOff);
+        }
+        assert_eq!(io.reads, asked);
+        // An activation does not end the backoff (Chrome activated at every switch, 11-03).
+        l.forget(CHROME);
+        assert_eq!(l.before(&mut io, CHROME, 1, t + Duration::from_millis(999)), Before::BackedOff);
+        // Tried again after a second, then after two more, doubling.
+        assert_eq!(l.before(&mut io, CHROME, 1, t + RETRY_FIRST), Before::Refused);
+        assert_eq!(l.before(&mut io, CHROME, 1, t + RETRY_FIRST * 2), Before::BackedOff);
+        assert_eq!(l.before(&mut io, CHROME, 1, t + RETRY_FIRST * 3), Before::Refused);
+        // Once it takes, the backoff is forgotten.
+        io.refuse.clear();
+        assert_eq!(l.before(&mut io, CHROME, 1, t + RETRY_FIRST * 7), Before::TurnedOff { first: true });
+        l.end(&mut io, 1, t + RETRY_FIRST * 7);
+        assert!(io.flags[&CHROME]);
+        assert!(l.refused.is_empty());
+    }
+
+    #[test]
+    fn a_write_that_took_but_answered_an_error_counts_as_done() {
+        // Chromium acts on the value and answers with its superclass's error.
+        let mut io = Fake::with(&[(CHROME, true)]);
+        io.lie.insert(CHROME);
+        let mut l = Ledger::new();
+        let t = Instant::now();
+        assert_eq!(l.before(&mut io, CHROME, 1, t), Before::TurnedOff { first: true });
+        assert_eq!(l.held(), vec![CHROME]);
+        assert_eq!(l.end(&mut io, 1, t), Restored { on: 1, ..Restored::default() });
+        assert!(io.flags[&CHROME]);
+        assert!(l.held().is_empty());
     }
 
     #[test]

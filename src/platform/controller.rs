@@ -102,6 +102,7 @@ use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::{off_every_display, off_screen_not_ours, on_other_display};
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
+use crate::engine::stale_activation;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::park::{Corner, ParkRequest, choose_corner};
@@ -990,6 +991,9 @@ pub struct Controller {
     /// When the last animated switch was sent (the desktop's still rests after a while with
     /// no input and no switch, [`desktop_shot::rest`]).
     last_switch: Option<Instant>,
+    /// When the latest switch we began started (a batch of ours that parks or focuses): an
+    /// activation that fired before it never starts one ([`stale_activation::judge`]).
+    our_switch: Option<Instant>,
     /// When the window server's list was last checked for Space changes.
     space_checked: Instant,
     /// Managed windows of other Spaces on screen: counted once the same ones show at two
@@ -1221,6 +1225,7 @@ impl Controller {
             phase: phase::Tracker::default(),
             space_changes: 0,
             last_switch: None,
+            our_switch: None,
             space_checked: Instant::now(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
@@ -2525,6 +2530,10 @@ impl Controller {
             self.flush_pending(ob);
         }
         self.last_switch = Some(Instant::now());
+        if supersedes(&actions) {
+            // A switch of ours begins: an activation that fired before it is older than it.
+            self.our_switch = self.last_switch;
+        }
         let mut run = std::mem::take(&mut self.activation);
         let hidden = self.hidden_arrivals(ob, &actions);
         // A hidden app's windows this switch brings: in a switch of ours the strip draws, they
@@ -3162,7 +3171,7 @@ impl Controller {
         self.pressed_obs = None;
         // macOS raises an activated app's windows, parked ones too, above the corner patch:
         // the patch is ordered again now, not at the next 250 ms tick (L2).
-        if matches!(event, WinEvent::Focused(_) | WinEvent::AppActivated(_)) {
+        if matches!(event, WinEvent::Focused(_) | WinEvent::AppActivated(..)) {
             self.replan_patch(now);
         }
         // Any other event brings windows held behind a transition's snapshots in at once;
@@ -3173,7 +3182,7 @@ impl Controller {
             WinEvent::Moved(_)
                 | WinEvent::Retitled(_)
                 | WinEvent::Focused(_)
-                | WinEvent::AppActivated(_)
+                | WinEvent::AppActivated(..)
                 | WinEvent::AppTookActivation(_)
                 | WinEvent::AppHidden(_)
                 | WinEvent::AppUnhidden(_)
@@ -3315,6 +3324,26 @@ impl Controller {
                     self.hold_for_slide(ob, Wanted::Window { id: WindowId(id), pid }, false, now);
                     return;
                 }
+                if let Some(pid) = pid
+                    && self.window_elsewhere(id)
+                    && !input::left_button_down()
+                {
+                    // A focus that would switch stages, still true? Its notice carries no
+                    // stamp, so its app is asked (bounded) where its focus is now: a late
+                    // focus of a window its app has left since never switches (round
+                    // stale-activations).
+                    let now_focused = arrival::focused_window_of(pid);
+                    let stages = self.model.as_ref().map(|m| {
+                        let stage = |w: WindowId| m.resolve_standard(w).and_then(|s| m.stage_of(s));
+                        (stage(WindowId(id)), now_focused.and_then(stage))
+                    });
+                    if let Some((was, is)) = stages
+                        && stale_activation::focus_moved_on(was, is)
+                    {
+                        tracing::info!(id, pid, now_focused = ?now_focused.map(|w| w.0), reason = "its app's focus is in another stage now", "focus dropped: stale, no switch");
+                        return;
+                    }
+                }
                 let obs = self.observe_with(ob, &list);
                 if let Some(pid) = ob.window(id).map(|w| w.pid)
                     && self.window_elsewhere(id)
@@ -3344,7 +3373,7 @@ impl Controller {
                 self.app_terminated(pid);
                 enhanced_ui::gone(pid);
             }
-            WinEvent::AppActivated(pid) => {
+            WinEvent::AppActivated(pid, fired) => {
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
                 enhanced_ui::forget(pid);
                 // An app we unhid and focused again took it (or another app did: no retry).
@@ -3364,6 +3393,18 @@ impl Controller {
                 }
                 if self.desktop_echo.classify(ob.bundle_id(pid), now) == Cause::WallpaperEcho {
                     tracing::debug!(pid, "Finder activation after a wallpaper click: ignored (the desktop is Finder's)");
+                    return;
+                }
+                // Late under load: no longer true, or older than a switch we began since
+                // (round stale-activations). Not his: nothing below runs for it.
+                let front = super::apps::frontmost_pid();
+                if let Some(why) = stale_activation::judge(pid, fired, self.our_switch, front) {
+                    let age_ms = fired.elapsed().as_millis() as u64;
+                    let before_switch_ms = match why {
+                        stale_activation::Stale::BeforeOurSwitch { by } => Some(by.as_millis() as u64),
+                        stale_activation::Stale::NotFrontmost { .. } => None,
+                    };
+                    tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
                     return;
                 }
                 if self.model.as_ref().is_some_and(Model::settling) {

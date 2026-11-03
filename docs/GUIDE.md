@@ -372,6 +372,8 @@ Some limits to know about:
 - With ⌘M, macOS may show a short animation toward the corner.
 - When an accessibility tool has turned on an app's enhanced interface, Stage Manager turns
   it off for a moment around each switch and back on right after.
+- When the Mac is very busy, a ⌘-Tab or Dock click brings its stage late, once macOS tells
+  Stage Manager about it; word that arrives after you have moved on is ignored.
 - After ⌘-Tab to another Desktop, its stage is set up once the Desktop has slid in. (A Dock
   click sets it up before.)
 - An empty Desktop is forgotten when you leave it. A Desktop whose windows are all hidden or

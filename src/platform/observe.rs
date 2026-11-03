@@ -119,9 +119,10 @@ pub enum WinEvent {
     Retitled(u32),
     /// A window got focus.
     Focused(u32),
-    /// An observed app became frontmost (NSWorkspace; its notice's instant:
-    /// [`Observer::activated_at`]).
-    AppActivated(i32),
+    /// An observed app became frontmost (NSWorkspace), and when the main thread got the notice
+    /// (also [`Observer::activated_at`]): a late one may be stale
+    /// ([`crate::engine::stale_activation`]).
+    AppActivated(i32, Instant),
     /// An observed app posted its own activation (AXApplicationActivated): unlike the
     /// NSWorkspace notice ([`WinEvent::AppActivated`]), it comes once the app has taken it,
     /// about when its windows are redrawn in their active look.
@@ -904,7 +905,7 @@ impl Observer {
                             self.found(id, "window found");
                         }
                     }
-                    self.events.push(WinEvent::AppActivated(pid));
+                    self.events.push(WinEvent::AppActivated(pid, at));
                 }
             }
             AppEvent::Hidden(app) => {

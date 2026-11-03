@@ -93,7 +93,16 @@ An app whose `AXEnhancedUserInterface` an assistive client turned on animates th
 changes made through Accessibility (Chrome's window slid in from the park corner, 11-03).
 Apple's Stage Manager is no Accessibility client and never shows this; we turn the flag off
 around our moves, once per app per switch, and back on after (Rectangle's and yabai's way), on
-by default with no key.
+by default with no key. A write the app answers with an error is read back (Chromium's setter
+acts on the value, then passes it to AppKit's, whose answer may be an error: -25208 from Chrome); an app that refuses is left alone for a while (1 s, doubling to
+30 s), not asked at every move.
+**Deviation (stale activations, 11-03):** under load an activation notice reaches us seconds
+late (14:09:57: 1–2.6 s; each late one switched stages, each switch brought its own late one,
+ten switches back and forth). An activation that fired before the latest switch we began, or
+whose app is no longer frontmost when we decide, switches nothing (logged once with its
+reason and age); a focus that would switch stages switches nothing when its app's focused
+window is in another stage by then. His latest ⌘-Tab or Dock click is neither, so it still
+switches, late.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.

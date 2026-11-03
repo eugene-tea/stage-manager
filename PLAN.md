@@ -47,7 +47,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   0.25 s messaging timeout; the main thread never calls AX. Every frame write runs with its
   app's `AXEnhancedUserInterface` off (`platform::enhanced_ui`: an app with it on animates
   Accessibility's moves), once per app per batch, on again at the batch's end, the WM tick,
-  quit, the panic hook and SIGABRT. Commands go main → WM through a
+  quit, the panic hook and SIGABRT. An activation notice the WM thread decides late
+  (under load) acts only if it fired after our latest switch began and its app is still
+  frontmost (`engine::stale_activation`). Commands go main → WM through a
   channel plus `CFRunLoopPerformBlock`; strip snapshots go WM → main via GCD.
 
 ## macOS settings drive behavior

@@ -6300,8 +6300,88 @@ def hide_body():
     check(not left, f"hide: no fixture app left hidden at the end ({left})")
 
 
+# ----- stale activations: late notices never switch stages back ---------------------------
+
+def phase_stale():
+    """Round stale-activations (his 11-03 14:09:57: "my windows were flying like boomerangs";
+    the Mac's load at ~110, our activation notices 1-2.6 s late, each taken as his, each switch
+    bringing its own late notice: ten switches back and forth in 10 s). Alpha, Bravo and
+    Charlie each in a stage, the app run with every activation notice held 2 s before the WM
+    thread gets it (STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS, fixtures only), as under load.
+    1. Card clicks 0.4 s apart: Bravo, Charlie, Bravo, Alpha. Alpha's stage comes and stays for
+       6 s (past every late notice); after the last click exactly one switch (its own), no
+       activation or focus switches stages, and the late notices are dropped or echoes.
+    2. An activation of his under load (`open` of Charlie, as a ⌘Tab) still switches, late:
+       Charlie's stage comes within 5 s, and stays."""
+    say("\n== stale: late activations never switch stages back ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml"):
+        path = os.path.join(HOME, f)
+        if os.path.exists(path):
+            os.remove(path)
+    for k in ("a", "b", "c"):
+        start_extra(k, 1)
+    activate("a")
+    time.sleep(1.0)
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS": "2000"})
+    if not check(s is not None, "app up with three fixture apps, activation notices 2 s late"):
+        return
+    check("activation notices held before they go to the WM thread" in log_text(), "the app holds activation notices (the test knob)")
+    for title in ("Bravo 1", "Charlie 1"):
+        s = state()
+        mates = [t for t in stage_titles(s).get(by_title(s)[title]["home"], []) if t != title]
+        if mates:
+            do("new", by_title(s)[title]["id"])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1"], ["Bravo 1"], ["Charlie 1"]],
+                   "Alpha, Bravo and Charlie each in a stage")
+    if not check(s is not None, f"stale: three stages ({stage_titles(state())})"):
+        return
+    time.sleep(3.0)  # every late notice of the setup has come
+
+    say("-- 1. card clicks 0.4 s apart with notices 2 s late: no switch after the last click")
+    before = len(log_text())
+    for title in ("Bravo 1", "Charlie 1", "Bravo 1", "Alpha 1"):
+        click_card(state(landed=False), title, f"{title[:-2]}'s card")
+        time.sleep(0.4)
+    alpha = number_of(state(), "Alpha 1")
+    looks = []
+    end = time.time() + 6.0
+    while time.time() < end:
+        looks.append(state(landed=False).get("active"))
+        time.sleep(0.25)
+    check(bool(looks) and all(a == alpha for a in looks[4:]),
+          f"stale: Alpha's stage comes and stays for 6 s (active stage at each look: {looks}; Alpha's {alpha})")
+    lines = log_text()[before:].splitlines()
+    clicks = [n for n, ln in enumerate(lines) if "card clicked" in ln]
+    after = lines[clicks[-1]:] if clicks else []
+    switches = [ln for ln in after if "INFO  platform::controller: stage switch" in ln]
+    check(len(clicks) == 4 and len(switches) == 1,
+          f"stale: four clicks, one switch after the last ({len(clicks)} clicks, {len(switches)} switches after the last)")
+    unasked = [ln.strip()[24:160] for ln in after if "activated app lives in another stage" in ln or "focused window is in another stage" in ln]
+    check(not unasked, f"stale: no activation or focus switches stages after the last click ({unasked[:3]})")
+    dropped = [ln for ln in lines if "activation dropped: stale" in ln]
+    echoes = [ln for ln in lines if "activation echo of our own action ignored" in ln]
+    say(f"  late notices: {len(dropped)} dropped as stale, {len(echoes)} echoes")
+    check(frontmost_bundle() == EXTRA["a"][0], f"stale: the keyboard is Alpha's at the end (frontmost {frontmost_bundle()})")
+    consistent("stale clicks")
+
+    say("-- 2. his activation under load still switches, late")
+    before = len(log_text())
+    activate("c")
+    s = wait_state(lambda x: "Charlie 1" in active_titles(x), "Charlie's stage", timeout=5)
+    check(s is not None, "stale: Charlie's activation, 2 s late, still brings its stage")
+    time.sleep(3.0)
+    check("Charlie 1" in active_titles(state()), "stale: Charlie's stage stays")
+    late = [ln.strip()[24:180] for ln in log_text()[before:].splitlines() if "activation dropped: stale" in ln and f"pid={extra_pid('c')}" in ln]
+    check(not late, f"stale: Charlie's activation is never dropped ({late[:2]})")
+    consistent("stale activation")
+    stop_app()
+    all_onscreen("stale quit")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -6319,7 +6399,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
+             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
              "glass": phase_glass}[p]()
     finally:
         stop_app()
