@@ -154,6 +154,8 @@ pub struct CardStyle {
     pub fade_ms: u64,
     /// Each window's picture on a card (1: opaque; below, the wallpaper shows through).
     pub window_opacity: f64,
+    /// The same on the card under the pointer (or a drop's target), eased with its growth.
+    pub hover_window_opacity: f64,
     /// The wallpaper's colour behind it: saturation and brightness of the wallpaper's own.
     pub backdrop_saturation: f64,
     pub backdrop_brightness: f64,
@@ -890,6 +892,7 @@ impl Config {
                     press_ms: v.uint("cards.press_ms"),
                     fade_ms: v.uint("cards.fade_ms"),
                     window_opacity: v.num("cards.window_opacity"),
+                    hover_window_opacity: v.num("cards.hover_window_opacity"),
                     backdrop_saturation: v.num("cards.backdrop_saturation"),
                     backdrop_brightness: v.num("cards.backdrop_brightness"),
                 },
@@ -1551,6 +1554,15 @@ swipe = true
         let p = parse("[cards]\nwindow_opacity = 1.5\nbackdrop_saturation = -1");
         assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 1.0), "clamped");
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn the_hovered_card_turns_solid_by_default_as_apples_does() {
+        assert_eq!(Config::default().style.cards.hover_window_opacity, 1.0);
+        let p = parse("[cards]\nwindow_opacity = 0.6\nhover_window_opacity = 0.6");
+        let c = &p.config.style.cards;
+        assert_eq!((c.window_opacity, c.hover_window_opacity), (0.6, 0.6), "the fade off");
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
     }
 
     #[test]

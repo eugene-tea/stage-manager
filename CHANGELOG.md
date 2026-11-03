@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The card under the pointer turns solid as it grows, as Apple's does, and lets the
+  wallpaper through again when the pointer leaves. `[cards] hover_window_opacity` sets how
+  solid; the same value as `window_opacity` keeps the hovered card see-through.
 - A window coming back from the corner no longer slides in from the bottom right in apps
   where an accessibility tool has turned on that app's enhanced interface (Chrome, for one):
   Stage Manager turns it off for a moment around its own moves and back on right after, as

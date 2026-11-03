@@ -3337,15 +3337,73 @@ def overlay_opaque_reads(box, seconds=3.0):
     return reads
 
 
+# `[cards] hover_window_opacity`'s default: Apple's hovered card turns solid (hover-glass).
+HOVER_OPACITY = 1.0
+# Past the hover's ease (`[cards] hover_ms`, 210) and a frame or two.
+HOVER_SETTLE = 0.6
+
+
+def strip_hover(at):
+    """A mouse-moved event at global `at` (None: a mouse-exited one) handed to our own strip
+    view (`ctl debug-strip-hover`): the owner's pointer never moves, nothing is posted to the
+    system."""
+    return ctl("debug-strip-hover", *(at if at else ["leave"]))
+
+
+def hover_glass_check(window, name, page):
+    """Round hover-glass (11-03, "Apple's SM doing that"): `name`'s card (window id `window`,
+    a flat `page`), hovered by an event to our own strip view, is drawn solid: the probe's
+    glass at HOVER_OPACITY, and its middle read back from our strip pane is the page alone;
+    left, it is back at its rest opacity and the model. True when the hover reached the
+    card (the card is left hovered off again)."""
+    pl = glass_planes(strip_probe()).get(window) or {}
+    if not check(pl.get("glass") is not None, f"{name}'s card is drawn with its glass before the hover ({pl})"):
+        return False
+    rest = pl["glass"]["opacity"]
+    box = glass_box(pl["plane"])
+    r = strip_hover([box[0] + box[2] / 2, box[1] + box[3] / 2])
+    if not check(r.get("ok") and r.get("shown"), f"a mouse-moved event on {name}'s card reached our strip view ({r})"):
+        return False
+    time.sleep(HOVER_SETTLE)
+    pl = glass_planes(strip_probe()).get(window) or {}
+    g = pl.get("glass") or {}
+    check(abs(g.get("opacity", -1) - HOVER_OPACITY) < 1e-3 and abs(g.get("image_opacity", -1) - HOVER_OPACITY) < 1e-3,
+          f"hovered, {name}'s picture is drawn at hover_window_opacity ({g.get('opacity')}, drawn {g.get('image_opacity')}; at rest {rest})")
+    read = ctl("debug-glass", *glass_box(pl.get("plane") or {"x": 0, "y": 0, "w": 0, "h": 0}))
+    mean = read.get("mean") if read.get("ok") else None
+    if check(bool(mean) and mean[3] >= 250, f"the hovered card is read back opaque in its middle ({read})"):
+        off = glass_off(mean, [page] * 3)
+        check(off <= GLASS_TOLERANCE, f"hovered, {name}'s card shows its page alone, solid: {[round(v) for v in mean[:3]]} vs {page} "
+                                      f"(off {off:.1f}, at most {GLASS_TOLERANCE})")
+    strip_hover(None)
+    time.sleep(HOVER_SETTLE)
+    pl = glass_planes(strip_probe()).get(window) or {}
+    g = pl.get("glass") or {}
+    if check(abs(g.get("opacity", -1) - rest) < 1e-3 and abs(g.get("image_opacity", -1) - rest) < 1e-3,
+             f"left, {name}'s picture is back at its rest opacity ({g.get('opacity')}, drawn {g.get('image_opacity')}, rest {rest})"):
+        read = ctl("debug-glass", *glass_box(pl["plane"]))
+        mean = read.get("mean") if read.get("ok") else None
+        want = glass_model(page, g)
+        if check(bool(mean) and mean[3] >= 250, f"the card left is read back opaque in its middle ({read})"):
+            check(glass_off(mean, want) <= GLASS_TOLERANCE,
+                  f"left, {name}'s card is the model again: {[round(v) for v in mean[:3]]} vs {[round(v) for v in want]} "
+                  f"(off {glass_off(mean, want):.1f})")
+    return True
+
+
 def phase_glass():
     """Round card-glass (11-03): the strip's cards let the wallpaper through, as Apple's do.
     Flat white, grey and black fixture windows as cards: each card's middle, read back from
     our own strip pane (`ctl debug-glass`, our window only, never the screen), is the model
     (`ui::glass_math`: the picture at `[cards] window_opacity` over the under the strip
-    probe reports for that plane) within GLASS_TOLERANCE levels. Then the snapshots: one
-    shrinking into a card, read from our overlay (`ctl debug-overlay`) at rest on the card,
-    is the card as the strip draws it after the landing; one growing from a card is the
-    window, opaque, by the time it lands."""
+    probe reports for that plane) within GLASS_TOLERANCE levels. Round hover-glass: a card
+    hovered by a mouse-moved event to our own strip view (`ctl debug-strip-hover`; the
+    owner's pointer never moves) is read solid, and at rest again once left
+    ([`hover_glass_check`]). Then the snapshots: one shrinking into a card, read from our
+    overlay (`ctl debug-overlay`) at rest on the card, is the card as the strip draws it
+    after the landing; one growing from a card is the window, opaque, by the time it lands;
+    one growing from a hovered (solid) card is its page from the first read, no jump at the
+    hand-over."""
     say("\n== glass: the cards let the wallpaper through (captures on) ==")
     stop_app()
     stop_fixture()
@@ -3388,6 +3446,10 @@ def phase_glass():
             check(off <= GLASS_TOLERANCE,
                   f"{name}'s card ({GLASS_PAGES[name]} over the under {[round(u) for u in g['under']]}) shows {[round(v) for v in mean[:3]]}, "
                   f"the model {[round(v) for v in want]} (off {off:.1f}, at most {GLASS_TOLERANCE})")
+
+    # A hovered card turns solid, and lets the wallpaper through again once left: Fixture 3,
+    # black, shows most of what is behind it.
+    hover_glass_check(ids["Fixture 3"], "Fixture 3", GLASS_PAGES["Fixture 3"])
 
     # A snapshot shrinking into a card lands on its look: Fixture 4 leaves into the slot of
     # the card clicked (Apple's order), Fixture 1 arrives.
@@ -3435,6 +3497,30 @@ def phase_glass():
         say(f"    the growing snapshot over its window, last opaque reads: {[[round(v) for v in m[:3]] for m in reads[-3:]]}")
         if check(bool(reads), "the growing snapshot was read over its window"):
             check(glass_off(reads[-1], page) <= 3, f"it lands as the window, opaque: {[round(v) for v in reads[-1][:3]]} vs the page {page}")
+    time.sleep(1.0)
+
+    # A switch to a hovered card's stage: its snapshot leaves the card as drawn, solid, so it
+    # is the black page from its first read on the card (at rest it would read the glass).
+    s = state()
+    pl = glass_planes(strip_probe()).get(ids["Fixture 3"]) or {}
+    if pl.get("plane"):
+        box = glass_box(pl["plane"])
+        r = strip_hover([box[0] + box[2] / 2, box[1] + box[3] / 2])
+        time.sleep(HOVER_SETTLE)
+        g = (glass_planes(strip_probe()).get(ids["Fixture 3"]) or {}).get("glass") or {}
+        if check(r.get("shown") and abs(g.get("image_opacity", -1) - HOVER_OPACITY) < 1e-3,
+                 f"Fixture 3's card hovered, solid, before the switch ({r}, {g})"):
+            three = numbers_by_id(s).get(by_title(s)["Fixture 3"]["home"])
+            ctl("switch", three)
+            reads = overlay_opaque_reads(box)
+            page = [GLASS_PAGES["Fixture 3"]] * 3
+            say(f"    the snapshot leaving the hovered card, first opaque reads there: {[[round(v) for v in m[:3]] for m in reads[:3]]}")
+            if check(bool(reads), "the snapshot leaving the hovered card was read over it"):
+                check(glass_off(reads[0], page) <= GLASS_TOLERANCE,
+                      f"it leaves the hovered card solid, no jump: {[round(v) for v in reads[0][:3]]} vs the page {page}")
+        strip_hover(None)
+    else:
+        check(False, f"Fixture 3's card is drawn for the hand-over check ({pl})")
     consistent("the cards' glass")
     stop_app()
 

@@ -27,7 +27,9 @@
 //! in the corner patch's picture of the wallpaper and the desktop's still (`mean`,
 //! `wallpaper`, `still`: a switch's cover checked against the wallpaper); `debug-glass X Y W H`
 //! the strip pane's mean colour in a region, read back from its own window (the cards' glass
-//! checked against its model, which `debug-strip` gives per plane). `space` (any
+//! checked against its model, which `debug-strip` gives per plane); `debug-strip-hover X Y |
+//! leave` hands the strip's own view a mouse-moved (or mouse-exited) event there, the pointer
+//! never moving (a hovered card's glass). `space` (any
 //! time) is the Space shown as the engine sees it.
 //!
 //! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
@@ -179,6 +181,14 @@ pub enum Command {
         /// The region, global top-left coordinates.
         region: Rect,
     },
+    /// A mouse-moved event at a global point (`None`: a mouse-exited one) handed to the
+    /// strip pane's own view, as AppKit hands it the pointer's; the pointer never moves and
+    /// nothing is posted to the system (needs `STAGE_MANAGER_TEST=1`): a hovered card checked
+    /// without touching the owner's pointer.
+    DebugStripHover {
+        /// The point, global top-left coordinates.
+        at: Option<Point>,
+    },
     /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
     /// click on it (the Dock-click prediction runs as for a real click), then presses it
     /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
@@ -318,6 +328,11 @@ impl Command {
             ["debug-glass", x, y, w, h] => {
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
                 Ok(Self::DebugGlass { region: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?) })
+            }
+            ["debug-strip-hover", "leave"] => Ok(Self::DebugStripHover { at: None }),
+            ["debug-strip-hover", x, y] => {
+                let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
+                Ok(Self::DebugStripHover { at: Some(Point::new(coord(x)?, coord(y)?)) })
             }
             ["debug-expose", "escape"] => Ok(Self::DebugExpose { which: None }),
             ["debug-expose", word] => match Expose::parse(word) {
@@ -788,6 +803,9 @@ mod tests {
         assert!(Command::parse("debug-click 60").is_err());
         assert_eq!(Command::parse("debug-glass 20 300 40 30.5"), Ok(Command::DebugGlass { region: Rect::new(20.0, 300.0, 40.0, 30.5) }));
         assert!(Command::parse("debug-glass 20 300 40").is_err());
+        assert_eq!(Command::parse("debug-strip-hover 80 400.5"), Ok(Command::DebugStripHover { at: Some(Point::new(80.0, 400.5)) }));
+        assert_eq!(Command::parse("debug-strip-hover leave"), Ok(Command::DebugStripHover { at: None }));
+        assert!(Command::parse("debug-strip-hover 80").is_err());
         assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));
         assert!(Command::parse("debug-hover 1 720").is_err());
         assert_eq!(

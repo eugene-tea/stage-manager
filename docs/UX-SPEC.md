@@ -60,7 +60,14 @@ it from a tint; `scripts/measure-apple-card-glass.py` reads one card white, blac
 with Apple's Stage Manager on), dark mode, and what Apple shows through a window behind
 another on one card (here each window has the wallpaper behind it). A switch's snapshots
 take the card's look as they shrink into it and leave it as they grow into their windows.
-The wallpaper is drawn from its file, as the clean corner's is; where it cannot be (a
+The card under the pointer turns solid as it grows (the owner, 11-03: "Apple's SM doing
+that"): its pictures ease to `[cards] hover_window_opacity` (1) on the hover's own curve and
+time, and back as it shrinks on leave; a card a dragged card would merge into does the same,
+as it grows. A click on it hands the snapshot over at the look drawn that moment (solid, or
+part way), so nothing jumps; a card the snapshots land in under the pointer shows at rest,
+then grows and turns solid together. Not measured on Apple's yet: whether its hovered card
+turns fully solid, and on the same timing as the growth (`measure-apple-card-glass.py
+--hover` reads it). The wallpaper is drawn from its file, as the clean corner's is; where it cannot be (a
 shuffle, an unreadable picture), the cards are opaque.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
@@ -132,7 +139,7 @@ in the slot under the pointer.
 | Windows in a switch, the desktop reveal, ⌘M and drops | critically damped spring, 99 % at about 400 ms |
 | Cards gliding to new slots | spring, 99 % at about 375 ms |
 | The strip sliding out and in | spring, 99 % at about 400 ms, 286 pt |
-| Hover | grows 6 % in about 210 ms |
+| Hover | grows 6 % in about 210 ms, its windows turning solid as it grows |
 | Press | eases to 0.987 of its size in about 100 ms |
 
 ## Deliberate differences
