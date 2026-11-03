@@ -250,6 +250,10 @@ pub struct ModelOptions {
     pub settings: NativeSettings,
     /// Strip ordering and capacity.
     pub strip: StripOptions,
+    /// Bundle ids that give a stage its Dock place ([`StripOrder::Dock`]) only when no
+    /// other app of the stage has a Dock icon (`[strip] dock_ignore`): an app whose windows
+    /// join every stage, such as the Finder, never pulls a stage to its own place.
+    pub dock_ignore: Vec<String>,
     /// Stages declared in config (`[stages] names`): created up front in this order, they keep
     /// their numbers and survive being empty.
     pub named_stages: Vec<String>,

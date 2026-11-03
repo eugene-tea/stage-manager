@@ -297,6 +297,7 @@ until used; the rest are off.
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 | Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |
+| Following the Dock, the Finder gives a stage its place only when no other app of the stage is in the Dock (`[strip] dock_ignore`) | on |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
 
@@ -323,7 +324,13 @@ top-to-bottom order is the Dock's left-to-right order (top to bottom for a Dock 
 The Dock's application items are read through Accessibility (its lists' `AXDockItem`
 children and their `AXURL`), so running apps that are not kept in the Dock count where their
 icons show; its preferences are never read or written. A stage sits at the leftmost Dock
-position among its windows' apps (by bundle id, else by pid); stages at the same position
+position among its windows' apps (by bundle id, else by pid), the apps of `[strip]
+dock_ignore` (default `["com.apple.finder"]`) counting only when no other app of the stage
+has a Dock icon: the Finder's windows join stages of every kind and the Finder always sits
+first in the Dock, so a stage a Finder window joined would otherwise sit at the top and jump
+there whenever it is left (a stage of Finder windows alone still sits at the Finder's place;
+a stage of listed apps alone at the leftmost of them; a changed list re-sorts at once, as a
+changed Dock does; `[]` lets every app count). Stages at the same position
 keep creation order, and stages whose apps have no Dock icon come after all others, in
 creation order. Hotkey numbers follow the strip. The Dock is read at launch, half a second
 after an app launches or quits, and every two seconds while this order is on (no

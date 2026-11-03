@@ -32,6 +32,8 @@ pub enum Kind {
     NumberedHotkey,
     /// A list of stage names.
     Names,
+    /// A list of app bundle ids, such as `"com.apple.finder"`.
+    Bundles,
     /// A rule action (`native`, `current`, `new`, `stage:<name>`, `float`, `ignore`).
     Action,
     /// A placement (`as-is`, `center`, `cascade`).
@@ -51,6 +53,7 @@ impl Kind {
             Kind::Hotkey => "hotkey such as \"ctrl+alt+n\", or \"\" for none".into(),
             Kind::NumberedHotkey => "hotkey with {n} for the digits 1-9, or \"\" for none".into(),
             Kind::Names => "list of names".into(),
+            Kind::Bundles => "list of bundle ids such as \"com.apple.finder\"".into(),
             Kind::Action => "\"native\", \"current\", \"new\", \"stage:<name>\", \"float\", \"ignore\"".into(),
             Kind::Placement => "\"as-is\", \"center\", \"cascade\"".into(),
         }
@@ -191,7 +194,9 @@ pub const KEYS: &[KeyDef] = &[
         "Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first."),
     // [strip]
     k("strip", "order", Kind::Choice(&["native", "in_place", "fixed", "dock"]), "\"native\"",
-        "Card order (Settings: Strip order): \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (\"fixed\" is its older name); \"dock\" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app; apps not in the Dock last), and a card cannot be dragged to another slot."),
+        "Card order (Settings: Strip order): \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (\"fixed\" is its older name); \"dock\" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app, the apps of dock_ignore counting only when no other app of the stage is in the Dock; apps not in the Dock last), and a card cannot be dragged to another slot."),
+    k("strip", "dock_ignore", Kind::Bundles, "[\"com.apple.finder\"]",
+        "With order = \"dock\", apps (bundle ids) that give a stage its place only when no other app of the stage is in the Dock: the Finder, whose windows join every stage, would otherwise pull each stage it joins to the Finder's place at the top. A stage of these apps alone still sits at their place."),
     k("strip", "active", Kind::Choice(&["close", "gap", "card"]), "\"close\"",
         "With order = \"in_place\" or \"dock\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
@@ -509,6 +514,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-20.toml"),
     include_str!("legacy/default-21.toml"),
     include_str!("legacy/default-22.toml"),
+    include_str!("legacy/default-23.toml"),
 ];
 
 #[cfg(test)]

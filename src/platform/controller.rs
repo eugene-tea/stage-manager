@@ -5064,6 +5064,11 @@ impl Controller {
                 if let Some(m) = self.model.as_mut() {
                     let capacity = strip_capacity(m.main_display().visible, &config);
                     m.set_strip_options(config.strip_options(capacity));
+                    // Following the Dock, a changed [strip] dock_ignore re-sorts at once, as a
+                    // changed Dock does: the strip presents below.
+                    if m.set_dock_ignore(config.strip.dock_ignore.clone()) {
+                        tracing::info!("follow the Dock: [strip] dock_ignore changed the strip's order");
+                    }
                     let actions = m.set_named_stages(config.stages.names.clone());
                     self.execute(ob, actions);
                 }

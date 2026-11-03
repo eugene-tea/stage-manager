@@ -99,8 +99,11 @@ stage.
 **Follow the Dock** (`[strip] order = "dock"`) keeps those places in your Dock's order
 instead: the strip from top to bottom lists the stages as the Dock lists their apps from left
 to right, and the ⌃⌥1–9 shortcuts follow. A stage with windows of several apps sits at the
-one furthest left in the Dock; two stages of one app keep the order they were made in; apps
-with no Dock icon come last. Rearrange the Dock, or open or quit an app that is not kept in
+one furthest left in the Dock, leaving out the Finder: its windows tend to join every stage,
+and the Finder always sits first in the Dock, so a stage it joined would jump to the top. A
+stage of Finder windows alone still sits at the Finder's place. `[strip] dock_ignore` lists
+the apps left out this way (by bundle id; `[]` lets every app count). Two stages of one app
+keep the order they were made in; apps with no Dock icon come last. Rearrange the Dock, or open or quit an app that is not kept in
 the Dock, and the cards glide to their new places. The Dock decides, so a card dragged within
 the strip springs back; dropping it on another card still merges the two stages.
 

@@ -107,6 +107,9 @@ pub struct StripConfig {
     /// How the active stage shows in place (`[strip] active`; the older `show_active = true`
     /// reads as [`ActiveCard::Card`]).
     pub active: ActiveCard,
+    /// Bundle ids that give a stage its Dock place only when no other app of the stage has a
+    /// Dock icon (`[strip] dock_ignore`; the Finder by default).
+    pub dock_ignore: Vec<String>,
     /// Hide the strip while a wallpaper click shows the desktop (an option; Apple keeps it
     /// shown, as the way back to a stage). It comes back on any window activation.
     pub hide_while_desktop_shown: bool,
@@ -634,7 +637,7 @@ fn validate(d: &schema::KeyDef, v: &toml::Value, warnings: &mut Vec<String>) -> 
             hotkey::parse_numbered(v.as_str().ok_or_else(ty)?)?;
             v.clone()
         }
-        Kind::Names => {
+        Kind::Names | Kind::Bundles => {
             let items = v.as_array().ok_or_else(ty)?;
             if items.iter().any(|i| !i.is_str()) {
                 return Err(ty());
@@ -794,6 +797,16 @@ impl Config {
             }
         }
 
+        let mut dock_ignore: Vec<String> = Vec::new();
+        for b in v.get("strip.dock_ignore").as_array().into_iter().flatten().filter_map(toml::Value::as_str) {
+            let b = b.trim();
+            if b.is_empty() {
+                warnings.push("[strip] dock_ignore: an empty bundle id was ignored".to_string());
+            } else if !dock_ignore.iter().any(|d| d == b) {
+                dock_ignore.push(b.to_string());
+            }
+        }
+
         let speed = v.num("animation.speed");
         if speed > 0.0 && speed < MIN_SPEED {
             warnings.push(format!("animation.speed = {speed} is outside {MIN_SPEED}..4 (0 = none); using {MIN_SPEED}"));
@@ -818,6 +831,7 @@ impl Config {
                     _ if legacy_show_active && !active_set => ActiveCard::Card,
                     _ => ActiveCard::Close,
                 },
+                dock_ignore,
                 hide_while_desktop_shown: v.flag("strip.hide_while_desktop_shown"),
                 capacity: CapacityRule {
                     fixed: v.count("strip.capacity"),
@@ -980,6 +994,7 @@ impl Config {
         ModelOptions {
             settings,
             strip: self.strip_options(capacity),
+            dock_ignore: self.strip.dock_ignore.clone(),
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
             park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
@@ -1551,6 +1566,19 @@ swipe = true
         assert!(!dock.reorder, "the Dock decides: a card dragged within the strip springs back");
         assert!(dock.merge_on_drop, "dropping a card on a card still merges");
         assert!(!style("[strip]\nreorder = false").reorder);
+    }
+
+    #[test]
+    fn following_the_dock_the_finder_is_left_out_of_a_stages_place_by_default() {
+        let read = |t: &str| parse(t).config.strip.dock_ignore;
+        assert_eq!(Config::default().strip.dock_ignore, ["com.apple.finder"]);
+        assert_eq!(read("[strip]\ndock_ignore = []"), Vec::<String>::new(), "an empty list: every app counts");
+        let p = parse("[strip]\ndock_ignore = [\" com.example.files \", \"\", \"com.example.files\", \"com.apple.finder\"]");
+        assert_eq!(p.config.strip.dock_ignore, ["com.example.files", "com.apple.finder"], "trimmed, no empties, no repeats");
+        assert_eq!(p.warnings.len(), 1, "the empty id warns: {:?}", p.warnings);
+        assert_eq!(p.config.model_options(NativeSettings::default(), 5).dock_ignore, p.config.strip.dock_ignore);
+        assert!(Config::parse("[strip]\ndock_ignore = \"com.apple.finder\"").is_err(), "a list");
+        assert!(Config::parse("[strip]\ndock_ignore = [1]").is_err(), "of bundle ids");
     }
 
     #[test]

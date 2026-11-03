@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Following the Dock, a Finder window that joins a stage no longer pulls that stage to the
+  top of the strip: the stage keeps the place of its other app (a stage of Finder windows
+  alone still sits at the Finder's place). `[strip] dock_ignore` lists the apps left out
+  this way; `[]` lets every app count again.
 - After a restart, windows that macOS reopened on another Desktop than their own are listed
   in the menu bar menu, with a small dot on the icon, so you can drag them back in Mission
   Control. An entry goes away once its window is on its own Desktop; Dismiss clears the list.
