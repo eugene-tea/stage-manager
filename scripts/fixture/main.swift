@@ -66,6 +66,12 @@
 //                                      real app may that orders on a later run-loop pass
 //                                      (Mail and Safari landing swapped on 10-27, round
 //                                      raise-order); 0, the default, raises as AppKit does
+//   --colors C   | FIXTURE_COLORS=C    window colours instead of the palette, "rrggbb,..." in
+//                                      sRGB, cycled (the cards' glass: flat white, grey, black)
+//   --no-label   | FIXTURE_NO_LABEL=1  no title drawn in the windows (flat colour only)
+//   --color-file F | FIXTURE_COLOR_FILE=F  every window takes the colour "rrggbb" written in F,
+//                                      read again every 200 ms (scripts/measure-apple-card-glass.py
+//                                      turns one card white, black and grey in place)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -104,6 +110,16 @@ struct Options {
     var stray = false
     var hangMs = 3000
     var raiseDelayMs = 0
+    var colors: [NSColor] = []
+    var noLabel = false
+    var colorFile: String? = nil
+
+    static func parseColors(_ text: String) -> [NSColor] {
+        text.split(separator: ",").compactMap { part in
+            guard let v = UInt32(part.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: ""), radix: 16) else { return nil }
+            return NSColor(srgbRed: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255, blue: CGFloat(v & 0xff) / 255, alpha: 1)
+        }
+    }
 
     static func parseRetitle(_ text: String) -> [String: String] {
         var map: [String: String] = [:]
@@ -142,6 +158,9 @@ struct Options {
         if env["FIXTURE_STRAY"] == "1" { o.stray = true }
         if let n = env["FIXTURE_HANG_MS"].flatMap(Int.init) { o.hangMs = n }
         if let n = env["FIXTURE_RAISE_DELAY_MS"].flatMap(Int.init) { o.raiseDelayMs = n }
+        if let c = env["FIXTURE_COLORS"] { o.colors = parseColors(c) }
+        if env["FIXTURE_NO_LABEL"] == "1" { o.noLabel = true }
+        if let f = env["FIXTURE_COLOR_FILE"], !f.isEmpty { o.colorFile = f }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -163,6 +182,9 @@ struct Options {
             case "--stray": o.stray = true
             case "--hang-ms": if let n = args.next().flatMap(Int.init) { o.hangMs = n }
             case "--raise-delay-ms": if let n = args.next().flatMap(Int.init) { o.raiseDelayMs = n }
+            case "--colors": if let c = args.next() { o.colors = parseColors(c) }
+            case "--no-label": o.noLabel = true
+            case "--color-file": if let f = args.next() { o.colorFile = f }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -207,7 +229,9 @@ final class LateRaiseWindow: NSWindow {
 }
 
 final class LabelView: NSView {
-    let color: NSColor
+    var color: NSColor {
+        didSet { needsDisplay = true }
+    }
     let label: String
 
     init(frame: NSRect, color: NSColor, label: String) {
@@ -285,8 +309,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             addPopup(to: parent)
         }
         if options.stray { makeStray() }
+        if let path = options.colorFile { watchColor(path) }
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// `--color-file`: every window takes the colour written in `path` ("rrggbb"), read every
+    /// 200 ms.
+    func watchColor(_ path: String) {
+        var last = ""
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+            let hex = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard hex != last, let color = Options.parseColors(hex).first else { return }
+            last = hex
+            for w in self.windows { (w.contentView as? LabelView)?.color = color }
         }
     }
 
@@ -381,7 +419,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.raiseDelayMs = options.raiseDelayMs
         window.title = name
         window.isReleasedWhenClosed = false
-        window.contentView = LabelView(frame: .zero, color: palette[i % palette.count], label: name)
+        let fill = options.colors.isEmpty ? palette[i % palette.count] : options.colors[i % options.colors.count]
+        window.contentView = LabelView(frame: .zero, color: fill, label: options.noLabel ? "" : name)
         if !options.styles.isEmpty {
             applyStyle(options.styles[i % options.styles.count], to: window)
         }

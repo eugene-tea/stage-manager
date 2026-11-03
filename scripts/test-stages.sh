@@ -10,6 +10,8 @@
 #                                          # the same-session relaunch
 #   scripts/test-stages.sh m3 safety       # some phases
 #   scripts/test-stages.sh hide            # [windows] hide_parked_apps (a prototype): by name only
+#   scripts/test-stages.sh glass           # the cards' glass (captures on): white, grey and black
+#                                          # cards and a switch's snapshots against the model
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac

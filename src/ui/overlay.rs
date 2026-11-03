@@ -23,6 +23,12 @@
 //! window, the window behind's picture at `a·(1−a)`, a quarter at mid-fade (11-02, Photos
 //! under VS Code, seen at every switch to VS Code).
 //!
+//! **Glass.** A card lets the wallpaper through ([`crate::ui::glass_math`]): each ghost holds
+//! a flat colour under its picture, the under of the card it flies to or from
+//! ([`GlassLook`]), so a snapshot shrinking into a card lands on the card's look, the picture
+//! fading to the card's opacity and the under coming in on the flight's spring, and one
+//! growing from a card leaves it as the window, opaque ([`Ghost::spring_glass`]).
+//!
 //! **Coordinates.** Planes are given top-left (global minus [`Overlay::origin`]); the
 //! overlay's view is flipped ([`OverlayView`]), which is what keeps its root layer top-down.
 //! A plain `NSView` hosting a layer marked `geometryFlipped` does not: AppKit resets the flag
@@ -121,6 +127,29 @@ impl Look {
     }
 }
 
+/// A card's glass behind one window's picture: the flat colour under it and the picture's
+/// opacity there ([`crate::ui::glass_math`]). A card drawn opaque has none.
+#[derive(Clone)]
+pub struct GlassLook {
+    /// The under, in the display's colour space.
+    pub color: CFRetained<CGColor>,
+    /// The under as numbers (0–1), to tell two looks apart.
+    pub rgb: [f64; 3],
+    /// The picture's opacity on the card.
+    pub opacity: f32,
+}
+
+impl GlassLook {
+    /// The same look (within a hundredth of a level).
+    pub fn same(a: Option<&GlassLook>, b: Option<&GlassLook>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.opacity == b.opacity && a.rgb.iter().zip(b.rgb).all(|(x, y)| (x - y).abs() < 1e-5),
+            _ => false,
+        }
+    }
+}
+
 /// The card's shadow on a snapshot (`[cards] shadow_*`, at the strip's scale): a Core
 /// Animation shadow, as the strip draws its thumbnails'.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -162,6 +191,10 @@ pub struct Ghost {
     /// The image's frame on the plane; its Core Animation shadow is the card's.
     body: Retained<CALayer>,
     image: Retained<CALayer>,
+    /// The card's under, below the image on the body, over the window's part of the picture
+    /// (the plane; never under child windows sticking out: the card's plane is the window's
+    /// too) ([`GlassLook`]); clear while the ghost looks like its window.
+    glass: Retained<CALayer>,
     /// The window's shadow under the body (none on the corner's cover).
     shadow: Option<ShadowLayers>,
     /// The card shadow's opacity on a card (it fades out toward the window).
@@ -295,6 +328,9 @@ impl Ghost {
         self.body.setBounds(bounds);
         self.image.setPosition(CGPoint::new(0.0, 0.0));
         self.image.setBounds(bounds);
+        // The glass covers the plane (the window), wherever the picture reaches.
+        self.glass.setPosition(glass_position(position));
+        self.glass.setBounds(self.plane.bounds());
     }
 
     /// Shows `picture`; `place`: at its own extent on the plane (in a transaction).
@@ -322,7 +358,7 @@ impl Ghost {
     pub fn set(&mut self, p: Plane) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        for layer in [&self.plane, &self.body, &self.image] {
+        for layer in [&self.plane, &self.body, &self.image, &self.glass] {
             for key in KEYS {
                 layer.removeAnimationForKey(&NSString::from_str(key));
             }
@@ -335,6 +371,7 @@ impl Ghost {
         let (position, bounds) = image_frame(&self.extent, look.bounds);
         self.place_image(position, bounds);
         self.image.setCornerRadius(look.corner);
+        self.glass.setCornerRadius(look.corner);
         if let Some(s) = &self.shadow {
             s.layout(look.bounds.size);
         }
@@ -439,15 +476,61 @@ impl Ghost {
         add(&self.plane, "transform", &transform_value(from_transform), &transform_value(to.transform));
         add(&self.body, "bounds", &NSValue::new(from_image.1), &NSValue::new(to_image.1));
         add(&self.image, "bounds", &NSValue::new(from_image.1), &NSValue::new(to_image.1));
+        add(&self.glass, "bounds", &NSValue::new(from_bounds), &NSValue::new(to.bounds));
         if from_image.0 != to_image.0 {
             add(&self.body, "position", &NSValue::new(from_image.0), &NSValue::new(to_image.0));
+            add(&self.glass, "position", &NSValue::new(glass_position(from_image.0)), &NSValue::new(glass_position(to_image.0)));
         }
+        self.glass.setCornerRadius(to.corner);
         add(&self.image, "cornerRadius", &NSNumber::new_f64(from_corner), &NSNumber::new_f64(to.corner));
+        add(&self.glass, "cornerRadius", &NSNumber::new_f64(from_corner), &NSNumber::new_f64(to.corner));
         if let Some(s) = &self.shadow {
             s.spring_layout(from_bounds.size, to.bounds.size, spring, duration);
         }
         CATransaction::commit();
         self.target = p;
+    }
+
+    /// Shows `amount` of the card's look `look` (0 the window: the picture opaque, no under;
+    /// 1 the card: the under opaque, the picture at the card's opacity), at once. `None`: a
+    /// card drawn opaque, the window's look whatever the amount.
+    pub fn set_glass(&self, look: Option<&GlassLook>, amount: f64) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        let (picture, under) = glass_values(look, amount);
+        for (layer, value) in [(&self.image, picture), (&self.glass, under)] {
+            layer.removeAnimationForKey(&NSString::from_str("opacity"));
+            layer.setOpacity(value);
+        }
+        if let Some(l) = look {
+            self.glass.setBackgroundColor(Some(&l.color));
+        }
+        CATransaction::commit();
+    }
+
+    /// Moves toward `amount` of the card's look `look` ([`Self::set_glass`]) on `spring`, from
+    /// what is drawn now, as long as the flight started with it (call after
+    /// [`Self::spring_to`]).
+    pub fn spring_glass(&self, look: Option<&GlassLook>, amount: f64, spring: Spring) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(l) = look {
+            self.glass.setBackgroundColor(Some(&l.color));
+        }
+        let (picture, under) = glass_values(look, amount);
+        let key = NSString::from_str("opacity");
+        for (layer, to) in [(&self.image, picture), (&self.glass, under)] {
+            // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+            let from = unsafe { layer.presentationLayer() }.map_or(layer.opacity(), |l| l.opacity());
+            layer.setOpacity(to);
+            if (from - to).abs() > 1e-3 {
+                let anim = spring_anim(spring, "opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to), self.flight);
+                layer.addAnimation_forKey(&anim, Some(&key));
+            } else {
+                layer.removeAnimationForKey(&key);
+            }
+        }
+        CATransaction::commit();
     }
 
     /// True when it stacks in a [`GhostGroup`].
@@ -462,6 +545,32 @@ impl Ghost {
         self.depth.removeFromSuperlayer();
         CATransaction::commit();
     }
+}
+
+/// The picture's and the under's opacities at `amount` of `look` (the window's with none).
+fn glass_values(look: Option<&GlassLook>, amount: f64) -> (f32, f32) {
+    match look {
+        Some(l) => {
+            let (picture, under) = crate::ui::glass_math::ghost_mix(amount, f64::from(l.opacity));
+            (picture as f32, under as f32)
+        }
+        None => (1.0, 0.0),
+    }
+}
+
+/// Where the glass sits on the body (anchored at its top-left): over the plane, the body
+/// being at `body` on it.
+fn glass_position(body: CGPoint) -> CGPoint {
+    CGPoint::new(-body.x, -body.y)
+}
+
+/// A clear layer for a ghost's glass ([`Ghost::set_glass`]).
+fn glass_layer() -> Retained<CALayer> {
+    let glass = CALayer::new();
+    glass.setAnchorPoint(CGPoint::new(0.0, 0.0));
+    glass.setOpacity(0.0);
+    glass.setAllowsEdgeAntialiasing(true);
+    glass
 }
 
 define_class!(
@@ -756,6 +865,8 @@ impl Overlay {
                 img.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
             }
         }
+        let glass = glass_layer();
+        body.addSublayer(&glass);
         body.addSublayer(&img);
         plane.addSublayer(&body);
         layers.attach_rim(&plane);
@@ -767,6 +878,7 @@ impl Overlay {
             plane,
             body,
             image: img,
+            glass,
             shadow: Some(layers),
             card_opacity: shadow.card.opacity,
             extent,
@@ -817,7 +929,8 @@ impl Overlay {
         body.addSublayer(&img);
         plane.addSublayer(&body);
         let depth = self.stack(&plane, true, None);
-        let mut g = Ghost { window: 0, depth, plane, body, image: img, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, flight: 0.0, grouped: false };
+        let glass = glass_layer();
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, flight: 0.0, grouped: false };
         g.set(at);
         g
     }

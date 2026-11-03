@@ -3282,6 +3282,156 @@ def landing_blend_check():
     consistent("the landing of two overlapping windows")
 
 
+GLASS_TOLERANCE = 4
+# Flat neutral fixture windows (a neutral grey has the same values in sRGB and the display's
+# space, so the model's numbers need no conversion): Fixtures 1-3 white, grey and black as
+# cards, Fixture 4 a dark grey, the active stage.
+GLASS_PAGES = {"Fixture 1": 255, "Fixture 2": 128, "Fixture 3": 0, "Fixture 4": 64}
+
+
+def glass_box(r, part=0.3):
+    """The middle `part` of a rectangle (global), inside a turned card's plane."""
+    w, h = r["w"] * part, r["h"] * part
+    return [round(r["x"] + (r["w"] - w) / 2, 1), round(r["y"] + (r["h"] - h) / 2, 1), round(w, 1), round(h, 1)]
+
+
+def glass_planes(probe_):
+    """Window id -> the strip probe's plane (its glass included), for every card drawn."""
+    return {p["window"]: p for c in (probe_ or {}).get("cards", []) for p in c.get("planes", [])}
+
+
+def glass_model(page, glass):
+    """What a card shows over a flat `page` (0-255): the picture at the glass's opacity over
+    the under (`ui::glass_math`)."""
+    a = glass["opacity"]
+    return [a * page + (1 - a) * u for u in glass["under"]]
+
+
+def glass_off(read, want):
+    return max(abs(read[i] - want[i]) for i in range(3))
+
+
+def overlay_opaque_reads(box, seconds=3.0):
+    """Our overlay's opaque reads of `box` (global) through a switch, in order, until the
+    overlay hides after showing (the last one is the snapshot there at rest)."""
+    reads, shown_once, end = [], False, time.time() + seconds
+    while time.time() < end:
+        g = ctl("debug-overlay", *box)
+        if not g.get("ok"):
+            break
+        if not g.get("shown"):
+            if shown_once:
+                break
+            continue
+        shown_once = True
+        mean = g.get("mean")
+        if mean and mean[3] >= 250:
+            reads.append(mean)
+    return reads
+
+
+def phase_glass():
+    """Round card-glass (11-03): the strip's cards let the wallpaper through, as Apple's do.
+    Flat white, grey and black fixture windows as cards: each card's middle, read back from
+    our own strip pane (`ctl debug-glass`, our window only, never the screen), is the model
+    (`ui::glass_math`: the picture at `[cards] window_opacity` over the under the strip
+    probe reports for that plane) within GLASS_TOLERANCE levels. Then the snapshots: one
+    shrinking into a card, read from our overlay (`ctl debug-overlay`) at rest on the card,
+    is the card as the strip draws it after the landing; one growing from a card is the
+    window, opaque, by the time it lands."""
+    say("\n== glass: the cards let the wallpaper through (captures on) ==")
+    stop_app()
+    stop_fixture()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    colors = ",".join(f"{v:02x}" * 3 for v in GLASS_PAGES.values())
+    start_fixture(4, "--colors", colors, "--no-label")
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    if not check(s is not None, "app up with captures on"):
+        return
+    t = by_title(s)
+    for k, n in ((2, 1), (3, 2), (4, 3)):
+        do("send", k, t[f"Fixture {n}"]["id"])
+    s = wait_until(lambda: (lambda x: x if x.get("capture", {}).get("images", 0) >= 3 else None)(state()), 10, "window pictures")
+    ids = {n: w["id"] for n, w in by_title(state()).items() if n in GLASS_PAGES}
+
+    def painted():
+        planes = glass_planes(strip_probe())
+        got = [planes.get(ids[f"Fixture {n}"]) for n in (1, 2, 3)]
+        return planes if all(g and g.get("glass") and g.get("shows") for g in got) else None
+    planes = wait_until(painted, 12, "the cards' glass painted (the wallpaper read and drawn)")
+    if not check(planes is not None, "every card's picture is drawn over the wallpaper's under (the wallpaper could be drawn from its file)"):
+        say(f"  planes: {glass_planes(strip_probe())}")
+        stop_app()
+        return
+    time.sleep(0.6)
+    planes = glass_planes(strip_probe())
+    for n in (1, 2, 3):
+        name = f"Fixture {n}"
+        pl = planes[ids[name]]
+        g = pl["glass"]
+        check(abs(g["image_opacity"] - g["opacity"]) < 1e-3, f"{name}'s picture is drawn at the card's opacity ({g['image_opacity']} vs {g['opacity']})")
+        box = glass_box(pl["plane"])
+        r = ctl("debug-glass", *box)
+        mean = r.get("mean") if r.get("ok") else None
+        want = glass_model(GLASS_PAGES[name], g)
+        if check(bool(mean) and mean[3] >= 250, f"{name}'s card is read back opaque in its middle {box} ({r})"):
+            off = glass_off(mean, want)
+            check(off <= GLASS_TOLERANCE,
+                  f"{name}'s card ({GLASS_PAGES[name]} over the under {[round(u) for u in g['under']]}) shows {[round(v) for v in mean[:3]]}, "
+                  f"the model {[round(v) for v in want]} (off {off:.1f}, at most {GLASS_TOLERANCE})")
+
+    # A snapshot shrinking into a card lands on its look: Fixture 4 leaves into the slot of
+    # the card clicked (Apple's order), Fixture 1 arrives.
+    s = state()
+    nums = numbers_by_id(s)
+    one = nums.get(by_title(s)["Fixture 1"]["home"])
+    before = (s.get("last_transition") or {}).get("id")
+    ctl("switch", one)
+    report, end = None, time.time() + 2.0
+    while report is None and time.time() < end:
+        lt = state(landed=False).get("last_transition") or {}
+        if lt.get("id") != before and lt.get("ghosts"):
+            report = lt
+    out = next((g for g in (report or {}).get("ghosts", []) if g["outgoing"] and g["window"] == ids["Fixture 4"]), None)
+    if check(out is not None, f"Fixture 4's snapshot shrinks into a card ({report})"):
+        box = glass_box(out["end"])
+        reads = overlay_opaque_reads(box)
+        time.sleep(0.8)
+        card = ctl("debug-glass", *box)
+        drawn = card.get("mean") if card.get("ok") else None
+        pl = glass_planes(strip_probe()).get(ids["Fixture 4"]) or {}
+        say(f"    the snapshot at rest on the card: {[round(v) for v in reads[-1][:3]] if reads else None}; the card after: {drawn and [round(v) for v in drawn[:3]]}; glass {pl.get('glass')}")
+        if check(bool(reads) and bool(drawn) and pl.get("glass") is not None, "the snapshot was read at rest on the card, and the card after it landed"):
+            check(glass_off(reads[-1], drawn) <= GLASS_TOLERANCE,
+                  f"Fixture 4's snapshot lands on the card's look (off {glass_off(reads[-1], drawn):.1f}, at most {GLASS_TOLERANCE})")
+            want = glass_model(GLASS_PAGES["Fixture 4"], pl["glass"])
+            check(glass_off(drawn, want) <= GLASS_TOLERANCE, f"Fixture 4's card is the model {[round(v) for v in want]} (off {glass_off(drawn, want):.1f})")
+    time.sleep(1.0)
+
+    # A snapshot growing from a card leaves it as the window, opaque: Fixture 4 comes back.
+    s = state()
+    four = numbers_by_id(s).get(by_title(s)["Fixture 4"]["home"])
+    before = (s.get("last_transition") or {}).get("id")
+    ctl("switch", four)
+    report, end = None, time.time() + 2.0
+    while report is None and time.time() < end:
+        lt = state(landed=False).get("last_transition") or {}
+        if lt.get("id") != before and lt.get("ghosts"):
+            report = lt
+    inc = next((g for g in (report or {}).get("ghosts", []) if not g["outgoing"] and g["window"] == ids["Fixture 4"]), None)
+    if check(inc is not None, f"Fixture 4's snapshot grows from its card ({report})"):
+        box = glass_box(inc["end"], 0.2)
+        reads = overlay_opaque_reads(box)
+        page = [GLASS_PAGES["Fixture 4"]] * 3
+        say(f"    the growing snapshot over its window, last opaque reads: {[[round(v) for v in m[:3]] for m in reads[-3:]]}")
+        if check(bool(reads), "the growing snapshot was read over its window"):
+            check(glass_off(reads[-1], page) <= 3, f"it lands as the window, opaque: {[round(v) for v in reads[-1][:3]]} vs the page {page}")
+    consistent("the cards' glass")
+    stop_app()
+
+
 def phase_capture():
     """The only app run with window captures on: thumbnails and switch snapshots are real
     pictures, and a quit with captures running waits for those in flight (an exit with one
@@ -5968,7 +6118,8 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "still": phase_still, "hide": phase_hide, "notice": phase_notice}[p]()
+             "park": phase_park, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
+             "glass": phase_glass}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

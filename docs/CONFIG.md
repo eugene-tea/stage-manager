@@ -92,6 +92,9 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
 | `cards.press_ms` | `100` | whole number, 0 to 3000 | How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100). |
 | `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, in milliseconds (not measured on Apple's). |
+| `cards.window_opacity` | `0.7` | number, 0 to 1 | How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.7, measured from screenshots); 1 draws them opaque. |
+| `cards.backdrop_saturation` | `0.5` | number, 0 to 2 | Behind each window's picture on a card, the wallpaper's colour there (its average behind the thumbnail), at this saturation of the wallpaper's own: 0 grey, 1 as it is. |
+| `cards.backdrop_brightness` | `1.0` | number, 0 to 2 | ...and at this brightness of the wallpaper's own. |
 | `icons.size` | `38.0` | number, 0 to 300 | Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons. |
 | `icons.center_dx` | `10.5` | number, -300 to 300 | The icon's center, right of the card's bottom-left corner (its leftmost window's). |
 | `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom-left corner (up is negative). |

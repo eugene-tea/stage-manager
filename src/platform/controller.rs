@@ -5474,6 +5474,7 @@ impl Controller {
             | Command::DebugDesktop { .. }
             | Command::DebugStrip
             | Command::DebugOverlay { .. }
+            | Command::DebugGlass { .. }
             | Command::DebugSpace { .. }
             | Command::DebugExpose { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })

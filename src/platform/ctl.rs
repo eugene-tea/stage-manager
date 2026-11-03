@@ -25,7 +25,9 @@
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
 //! read back from a capture of our own overlay window, with a region's mean colour there and
 //! in the corner patch's picture of the wallpaper and the desktop's still (`mean`,
-//! `wallpaper`, `still`: a switch's cover checked against the wallpaper). `space` (any
+//! `wallpaper`, `still`: a switch's cover checked against the wallpaper); `debug-glass X Y W H`
+//! the strip pane's mean colour in a region, read back from its own window (the cards' glass
+//! checked against its model, which `debug-strip` gives per plane). `space` (any
 //! time) is the Space shown as the engine sees it.
 //!
 //! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
@@ -171,6 +173,12 @@ pub enum Command {
         /// The region, global top-left coordinates.
         region: Option<Rect>,
     },
+    /// What the strip's pane draws within a global region, read back from its own window's
+    /// pixels (needs `STAGE_MANAGER_TEST=1`): the cards' glass checked against its model.
+    DebugGlass {
+        /// The region, global top-left coordinates.
+        region: Rect,
+    },
     /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
     /// click on it (the Dock-click prediction runs as for a real click), then presses it
     /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
@@ -306,6 +314,10 @@ impl Command {
             ["debug-overlay", x, y, w, h] => {
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
                 Ok(Self::DebugOverlay { region: Some(Rect::new(n(x)?, n(y)?, n(w)?, n(h)?)) })
+            }
+            ["debug-glass", x, y, w, h] => {
+                let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
+                Ok(Self::DebugGlass { region: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?) })
             }
             ["debug-expose", "escape"] => Ok(Self::DebugExpose { which: None }),
             ["debug-expose", word] => match Expose::parse(word) {
@@ -774,6 +786,8 @@ mod tests {
             Ok(Command::DebugDesktop { at: Point::new(1.0, 2.0), double: false, to: None })
         );
         assert!(Command::parse("debug-click 60").is_err());
+        assert_eq!(Command::parse("debug-glass 20 300 40 30.5"), Ok(Command::DebugGlass { region: Rect::new(20.0, 300.0, 40.0, 30.5) }));
+        assert!(Command::parse("debug-glass 20 300 40").is_err());
         assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));
         assert!(Command::parse("debug-hover 1 720").is_err());
         assert_eq!(

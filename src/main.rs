@@ -28,6 +28,9 @@
 //!   `/tmp/stage-manager-patch.png`) and prints what it drew, one JSON line, with which way
 //!   its frame settled (`exact`; near a solar frame change `alike`, or `off`: the running
 //!   app settles that with one still of the desktop).
+//! - `stage-manager probe-glass --rect X,Y,W,H [--rect ...]` prints the wallpaper behind each
+//!   rectangle as the cards' glass reads it (from the picture's file) and the under the
+//!   default glass makes of it, one JSON line (`ui::card_glass::probe`).
 //! - `stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle]` opens
 //!   windows of its own, inactive, one at a time, and prints how far each one's shadow
 //!   reaches past its frame per side, one JSON object (`platform::shadow_probe`);
@@ -71,6 +74,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-patch") => stage_manager::ui::patch_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("probe-glass") => stage_manager::ui::card_glass::probe(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
@@ -84,7 +89,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
             );
             ExitCode::from(2)
         }
@@ -283,6 +288,7 @@ mod app {
             shell::poll(self.permissions, &self.settings, self.capture_refused);
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::poll(mtm);
+                stage_manager::ui::card_glass::poll(mtm);
             }
         }
 
@@ -606,6 +612,20 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugGlass { region } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-glass needs STAGE_MANAGER_TEST=1");
+                }
+                let mut pane = None;
+                DispatchQueue::main().exec_sync(|| pane = strip::strip_window());
+                let Some((number, origin)) = pane else {
+                    return json!({ "ok": true, "shown": false });
+                };
+                match stage_manager::platform::self_capture::read_back(number as u32, origin, Some(region), Duration::from_secs(3)) {
+                    Ok(b) => json!({ "ok": true, "shown": true, "bounds": b.bounds, "mean": b.mean }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
             Command::DebugExpose { which } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");
@@ -777,6 +797,7 @@ mod app {
         let wm_spaces = wm.clone();
         let spaces = apps::observe_space_changes(move || {
             strip::space_changed();
+            stage_manager::ui::card_glass::space_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::space_changed(mtm);
             }

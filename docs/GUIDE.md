@@ -72,9 +72,10 @@ and when you come back to a stage, every window is exactly where you left it.
 
 ### The strip
 
-Each card shows the stage's windows in miniature, with the app's icon in the corner. The
-strip sits below your windows: when a window covers it, it slides away. Rest the pointer at
-the left edge of the screen to bring it back.
+Each card shows the stage's windows in miniature, with the app's icon in the corner. As on
+Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity = 1` makes
+them opaque). The strip sits below your windows: when a window covers it, it slides away.
+Rest the pointer at the left edge of the screen to bring it back.
 
 ### Switching
 

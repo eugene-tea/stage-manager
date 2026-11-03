@@ -4,9 +4,11 @@
 pub mod about;
 pub mod alert;
 pub mod app_menu;
+pub mod card_glass;
 pub mod corner_patch;
 pub mod corner_settle;
 pub mod form;
+pub mod glass_math;
 pub mod glyph;
 pub mod motion_math;
 pub mod overlay;

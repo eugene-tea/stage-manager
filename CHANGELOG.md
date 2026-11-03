@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The cards on the strip let the wallpaper through, as Apple's do: each window's picture is
+  drawn slightly see-through over the wallpaper's colour behind it, and a switch's windows
+  take that look as they shrink into their card. `[cards] window_opacity = 1` brings back
+  opaque cards; `backdrop_saturation` and `backdrop_brightness` tune the colour.
 - Following the Dock, a Finder window that joins a stage no longer pulls that stage to the
   top of the strip: the stage keeps the place of its other app (a stage of Finder windows
   alone still sits at the Finder's place). `[strip] dock_ignore` lists the apps left out

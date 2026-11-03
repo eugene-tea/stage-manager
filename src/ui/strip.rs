@@ -21,6 +21,13 @@
 //! - Cards glide to new slots on the spring; the strip **slides** out to the left when
 //!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
 //! - Thumbnails come from [`capture`], refreshed every `thumbnail_interval_ms`.
+//! - **Glass** (`[cards] window_opacity`, on: Apple's let the wallpaper through): each
+//!   window's picture is drawn at that opacity over its plane, whose background is the
+//!   wallpaper's mean behind the thumbnail, toned ([`crate::ui::glass_math`], from the
+//!   backdrop of [`card_glass`]). A card moved to another slot takes the colour there on a
+//!   short fade; a new picture of the wallpaper repaints the strip shown; another Desktop's
+//!   pane laid out ahead keeps its colours until it shows. No picture of the wallpaper:
+//!   opaque cards.
 //! - **Level** (`[strip] level`): Apple's strip sits below windows, so a window moved over
 //!   it covers it (and auto-hide slides it away). It is lifted above windows only while a
 //!   window is dragged over it, while a card is dragged, and while the edge reveals it over
@@ -91,7 +98,10 @@ use crate::engine::stage_area::length_scale;
 use crate::platform::capture::{Capturer, Picture, Target};
 use crate::platform::capture_frame::Extent;
 use crate::platform::capture_pixels;
+use crate::ui::glass_math::Glass;
 use crate::ui::motion_math::{self, DropSpot};
+use crate::ui::overlay::GlassLook;
+use crate::ui::card_glass;
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
@@ -135,6 +145,9 @@ const TAB_PILL_WIDTH: f64 = 5.0;
 /// says: a click with a hand's tremor of a few points stays a click (owner 10-12: two clicks
 /// with a 2–4 pt wobble started a reorder and were lost).
 const MIN_DRAG_THRESHOLD: f64 = 5.0;
+/// How long a card's glass takes to change colour (a card moved to another slot, a new picture
+/// of the wallpaper), milliseconds at the animation's speed.
+const GLASS_FADE_MS: u64 = 300;
 /// The rim of the active stage's card (`[strip] active = "card"`), points.
 const ACTIVE_RIM: f64 = 2.0;
 /// Depth of a card lifted above the others while it is dragged and while it glides into its
@@ -284,6 +297,16 @@ pub fn probe() -> serde_json::Value {
 /// test's capture of what it draws. Main thread.
 pub fn overlay_window() -> Option<(isize, Point)> {
     with_strip(|s| s.motion_overlay()).flatten()
+}
+
+/// The shown strip pane's window number and its top-left corner (global), while it is
+/// ordered in (`ctl debug-glass` reads its pixels back). Main thread.
+pub fn strip_window() -> Option<(isize, Point)> {
+    with_strip(|s| {
+        let g = s.geometry.global;
+        s.pane.panel.isVisible().then(|| (s.pane.panel.windowNumber(), Point::new(g.x, g.y)))
+    })
+    .flatten()
 }
 
 /// Whether the strip is mid-transition or a card is being dragged (a ready update waits for
@@ -692,6 +715,8 @@ struct CardLayers {
     planes: Vec<(u32, Retained<CALayer>)>,
     /// Image layer per window id.
     images: Vec<(u32, Retained<CALayer>)>,
+    /// The glass behind each window's picture, as painted (none: opaque).
+    glass: Vec<(u32, Option<GlassLook>)>,
     /// App icon layers, in icon order.
     icons: Vec<Retained<CALayer>>,
     /// The number badge and its label (`[strip] show_numbers`): a renumbered card changes
@@ -860,6 +885,43 @@ fn fade_in(layer: &CALayer, seconds: f64) {
     }
     let anim = ease("opacity", &NSNumber::new_f32(0.0), &NSNumber::new_f32(1.0), seconds);
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("fade")));
+}
+
+/// Paints `plane`'s glass: its background the under and `image` at the card's opacity, or
+/// (none) the plain plate under an opaque picture; over `fade` seconds when above zero.
+fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>, fade: f64) {
+    let plate = color(0.22, 0.22, 0.24, 1.0);
+    let (to_color, to_opacity) = match look {
+        Some(l) => (l.color.clone(), l.opacity),
+        None => (plate, 1.0),
+    };
+    if fade > 0.0 {
+        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+        let from_color = unsafe { plane.presentationLayer() }.and_then(|l| l.backgroundColor()).or_else(|| plane.backgroundColor());
+        // SAFETY: as above.
+        let from_opacity = unsafe { image.presentationLayer() }.map_or(image.opacity(), |l| l.opacity());
+        if let Some(from) = from_color {
+            plane.addAnimation_forKey(&ease("backgroundColor", as_object(&*from), as_object(&*to_color), fade), Some(&NSString::from_str("glass")));
+        }
+        image.addAnimation_forKey(
+            &ease("opacity", &NSNumber::new_f32(from_opacity), &NSNumber::new_f32(to_opacity), fade),
+            Some(&NSString::from_str("glass")),
+        );
+    }
+    plane.setBackgroundColor(Some(&to_color));
+    image.setOpacity(to_opacity);
+}
+
+/// A new picture of the wallpaper for the cards' glass, or none ([`card_glass`]): the strip
+/// shown repaints it.
+pub fn glass_changed() {
+    if with_strip(|s| s.repaint_glass()).is_none() {
+        // Busy (or not installed yet): once more shortly; a strip built later paints its own.
+        let when = dispatch2::DispatchTime::try_from(Duration::from_millis(20)).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, || {
+            let _ = with_strip(|s| s.repaint_glass());
+        });
+    }
 }
 
 fn text_layer(text: &str, size: f64, scale: f64, center: bool) -> Retained<CATextLayer> {
@@ -1198,6 +1260,9 @@ struct Strip {
     /// The snapshot being laid out is a Desktop's arrival: its cards take their slots at
     /// once (no glide, no fade-in).
     instant: bool,
+    /// The pane being laid out is another Desktop's (`present_away`): its glass is left as
+    /// it is (the wallpaper read is the Desktop shown's), painted once it shows.
+    away: bool,
     hovered: Option<u64>,
     pressed: Option<u64>,
     /// The card drawn pressed (`[cards] press_scale`): from the mouse-down until its
@@ -1249,6 +1314,7 @@ impl Strip {
             snapshot: StripSnapshot::default(),
             has_snapshot: false,
             instant: false,
+            away: false,
             hovered: None,
             pressed: None,
             squeezed: None,
@@ -1343,6 +1409,7 @@ impl Strip {
             // (the strip was built with the defaults, so `hide_delay_ms` never applied).
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
+        card_glass::set_wanted(self.glass().on());
         let geometry = Geometry::current(self.mtm, &self.style);
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
@@ -1454,7 +1521,9 @@ impl Strip {
         let hovered = self.hovered.take();
         let drop_over = std::mem::replace(&mut self.drop_over, false);
         self.instant = true;
+        self.away = true;
         self.layout_cards(false);
+        self.away = false;
         self.instant = false;
         tracing::debug!(space = self.snapshot.space, order = ?self.logged_order, "strip: the arriving Desktop's pane arranged ahead");
         self.drop_over = drop_over;
@@ -1783,7 +1852,12 @@ impl Strip {
                     .iter()
                     .zip(&l.images)
                     .map(|((id, plane), (_, image))| {
-                        serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image), "shows": shows(image) })
+                        // The glass as painted: the under (0-255, the display's values) and the
+                        // picture's opacity; null when the card is opaque.
+                        let glass = l.glass.iter().find(|(w, _)| w == id).and_then(|(_, g)| g.as_ref()).map(|g| {
+                            serde_json::json!({ "under": g.rgb.map(|c| (c * 255.0 * 100.0).round() / 100.0), "opacity": g.opacity, "image_opacity": image.opacity() })
+                        });
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image), "shows": shows(image), "glass": glass })
                     })
                     .collect();
                 Some(serde_json::json!({
@@ -1905,6 +1979,7 @@ impl Strip {
                     top,
                     planes: Vec::new(),
                     images: Vec::new(),
+                    glass: Vec::new(),
                     icons: Vec::new(),
                     badge: None,
                     built: Point::new(layout.frame.x, layout.frame.y),
@@ -1956,6 +2031,81 @@ impl Strip {
             layers.card.setTransform(hover);
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
+        }
+        let fade = if immediate || self.instant { 0.0 } else { self.style.animation.seconds(GLASS_FADE_MS) };
+        self.paint_glass(card.stage, fade);
+    }
+
+    /// The cards' glass as the style sets it.
+    fn glass(&self) -> Glass {
+        let c = &self.style.cards;
+        Glass { opacity: c.window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
+    }
+
+    /// The glass behind `slot`'s picture on `layout`, from the wallpaper behind the thumbnail
+    /// as drawn (turned, at rest); `None` with the glass off or no picture of the wallpaper.
+    fn glass_at(&self, layout: &CardLayout, slot: &strip_layout::ThumbSlot) -> Option<GlassLook> {
+        let glass = self.glass();
+        if !glass.on() {
+            return None;
+        }
+        let shown = card_glass::current()?;
+        let g = self.geometry.global;
+        let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
+        let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
+        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.opacity as f32 })
+    }
+
+    /// The glass window `id` shows on the card of `layout` (its own thumbnail, else the
+    /// card's front one), as the card paints it, else as it would: what a snapshot flying to
+    /// or from that card takes, so it lands on the card's look exactly.
+    pub(super) fn card_glass_look(&self, layout: &CardLayout, id: u32) -> Option<GlassLook> {
+        let slot = layout.thumbs.iter().find(|t| t.id == id).or_else(|| layout.thumbs.first())?;
+        if let Some(layers) = self.pane.cards.get(&layout.stage)
+            && let Some((_, look)) = layers.glass.iter().find(|(w, _)| *w == slot.id)
+        {
+            return look.clone();
+        }
+        self.glass_at(layout, slot)
+    }
+
+    /// Paints the glass of `stage`'s card for where it is laid out: each plane's background
+    /// the under, each picture at the card's opacity; a change fades over `fade` seconds
+    /// (from a look to another; to or from opaque at once).
+    fn paint_glass(&mut self, stage: u64, fade: f64) {
+        if self.away {
+            return;
+        }
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
+        let looks: Vec<(u32, Option<GlassLook>)> = layers
+            .planes
+            .iter()
+            .map(|(id, _)| (*id, layers.layout.thumbs.iter().find(|t| t.id == *id).and_then(|t| self.glass_at(&layers.layout, t))))
+            .collect();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for (((id, plane), (_, image)), (_, look)) in layers.planes.iter().zip(&layers.images).zip(&looks) {
+            let painted = layers.glass.iter().find(|(w, _)| w == id);
+            let old = painted.and_then(|(_, l)| l.as_ref());
+            // A new plane is built opaque: only a look paints it.
+            if (painted.is_none() && look.is_none()) || (painted.is_some() && GlassLook::same(old, look.as_ref())) {
+                continue;
+            }
+            let fade = if old.is_some() && look.is_some() { fade } else { 0.0 };
+            paint_plane_glass(plane, image, look.as_ref(), fade);
+        }
+        CATransaction::commit();
+        if let Some(layers) = self.pane.cards.get_mut(&stage) {
+            layers.glass = looks;
+        }
+    }
+
+    /// A new picture of the wallpaper (or none): the strip shown takes its colours.
+    fn repaint_glass(&mut self) {
+        let fade = self.style.animation.seconds(GLASS_FADE_MS);
+        let stages: Vec<u64> = self.pane.cards.keys().copied().collect();
+        for stage in stages {
+            self.paint_glass(stage, fade);
         }
     }
 
@@ -2090,6 +2240,8 @@ impl Strip {
         if let Some(layers) = self.pane.cards.get_mut(&stage) {
             layers.planes = planes;
             layers.images = images;
+            // New planes: drawn opaque until `paint_glass` (the end of `place_card`) paints them.
+            layers.glass = Vec::new();
             layers.icons = icon_layers;
             layers.badge = badge_layers;
             layers.built = origin;
@@ -2858,13 +3010,13 @@ impl Strip {
 }
 
 /// Where incoming windows grow from, by window: the plane and the card slot, if any.
-type Starts = HashMap<u32, (motion_math::Plane, Option<usize>)>;
+type Starts = HashMap<u32, (motion_math::Plane, Option<usize>, Option<GlassLook>)>;
 
 /// Moves the incoming windows' starts that sit on a card (those with a slot) by `dx`, the
 /// strip's slide since they were measured; window and off-screen starts stay.
 fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
     if dx != 0.0 {
-        for (plane, slot) in starts.values_mut() {
+        for (plane, slot, _) in starts.values_mut() {
             if slot.is_some() {
                 plane.left_mid.x += dx;
             }

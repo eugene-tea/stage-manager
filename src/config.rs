@@ -152,6 +152,11 @@ pub struct CardStyle {
     pub press_scale: f64,
     pub press_ms: u64,
     pub fade_ms: u64,
+    /// Each window's picture on a card (1: opaque; below, the wallpaper shows through).
+    pub window_opacity: f64,
+    /// The wallpaper's colour behind it: saturation and brightness of the wallpaper's own.
+    pub backdrop_saturation: f64,
+    pub backdrop_brightness: f64,
 }
 
 /// `[icons]`.
@@ -884,6 +889,9 @@ impl Config {
                     press_scale: v.num("cards.press_scale"),
                     press_ms: v.uint("cards.press_ms"),
                     fade_ms: v.uint("cards.fade_ms"),
+                    window_opacity: v.num("cards.window_opacity"),
+                    backdrop_saturation: v.num("cards.backdrop_saturation"),
+                    backdrop_brightness: v.num("cards.backdrop_brightness"),
                 },
                 icons: IconStyle {
                     size: v.num("icons.size"),
@@ -1531,6 +1539,17 @@ swipe = true
         let p = parse("[strip]\nthumbnail_interval_ms = 10\n[cards]\nhover_scale = 9.0");
         assert_eq!(p.config.strip.thumbnail_interval_ms, 250);
         assert_eq!(p.config.style.cards.hover_scale, 2.0);
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn the_cards_let_the_wallpaper_through_by_default_as_apples_do() {
+        let glass = |c: &CardStyle| (c.window_opacity, c.backdrop_saturation, c.backdrop_brightness);
+        assert_eq!(glass(&Config::default().style.cards), (0.7, 0.5, 1.0));
+        let p = parse("[cards]\nwindow_opacity = 1.0\nbackdrop_saturation = 0\nbackdrop_brightness = 1.25");
+        assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 1.25), "opaque cards: the old look");
+        let p = parse("[cards]\nwindow_opacity = 1.5\nbackdrop_saturation = -1");
+        assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 1.0), "clamped");
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
     }
 

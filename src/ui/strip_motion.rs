@@ -41,6 +41,11 @@
 //!   the patch has been on screen a moment, a few hundred milliseconds at most
 //!   ([`cover_holds`], 10-23: the slivers flashed between the cover and the patch). A new
 //!   transition cuts a running one short, and takes over a cover still held.
+//! - **Glass.** A snapshot shrinking into a card takes on the card's glass on the flight's
+//!   spring (the picture to the card's opacity, the wallpaper's under in), and lands on the
+//!   card's look exactly; one growing from a card starts with its glass and leaves it as
+//!   the window, opaque ([`Ghost::spring_glass`], the look read from the card as painted:
+//!   [`Strip::card_glass_look`]).
 //! - **A window dragged over the strip** is shown as a card-sized snapshot, turned like a
 //!   card, under the pointer (following every drag event through a global monitor); dropped
 //!   there, it shrinks into its new card's slot as the transition's outgoing snapshot.
@@ -65,7 +70,7 @@ use crate::platform::windows;
 use crate::ui::motion_math::{
     Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, switch_spring, travel, unveil_time,
 };
-use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, Overlay};
+use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, Overlay};
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowReport, StripEvent, Transition, TransitionReport};
@@ -118,8 +123,9 @@ struct Running {
     /// The incoming snapshots' group, above the outgoing ones: they land as one picture
     /// ([`GhostGroup`]).
     incoming: Option<GhostGroup>,
-    /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane).
-    waiting: Vec<(usize, Plane)>,
+    /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane,
+    /// the card's glass there).
+    waiting: Vec<(usize, Plane, Option<GlassLook>)>,
     /// Cards hidden until their snapshots land.
     held: Vec<u64>,
     timers: Vec<Retained<NSTimer>>,
@@ -536,7 +542,7 @@ impl Strip {
     /// The planes incoming windows grow from, with the slot of the card each grows from:
     /// their cards as drawn now (before the transition's snapshot replaces them), or the
     /// ghost of a card just dragged out.
-    pub(super) fn incoming_starts(&mut self, t: &Transition) -> HashMap<u32, (Plane, Option<usize>)> {
+    pub(super) fn incoming_starts(&mut self, t: &Transition) -> HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)> {
         self.place_overlay();
         let o = self.motion.overlay.origin();
         let landing = self.motion.landing.as_ref().map(|l| (l.window, l.rect));
@@ -545,13 +551,13 @@ impl Strip {
             .map(|w| {
                 let id = w.window.id;
                 let start = match landing {
-                    Some((lw, rect)) if lw == id => (Plane::window(rect, o, self.style.cards.corner_radius * self.m().k), None),
+                    Some((lw, rect)) if lw == id => (Plane::window(rect, o, self.style.cards.corner_radius * self.m().k), None, None),
                     _ => match self.card_for(&self.layouts, w) {
                         Some((slot, l)) => match self.plane_on(l, id) {
-                            Some(p) => (p, Some(slot)),
-                            None => (self.offscreen_plane(w.window.frame), None),
+                            Some(p) => (p, Some(slot), self.card_glass_look(l, id)),
+                            None => (self.offscreen_plane(w.window.frame), None, None),
                         },
-                        None => (self.offscreen_plane(w.window.frame), None),
+                        None => (self.offscreen_plane(w.window.frame), None, None),
                     },
                 };
                 (id, start)
@@ -563,7 +569,7 @@ impl Strip {
     /// snapshots of the incoming ones grow from `starts`; tells the controller what is covered.
     /// A running one cut short, or a cover still held from the last switch, goes once this
     /// one is up: the overlay stays shown between the two (hidden after if nothing is in it).
-    pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
+    pub(super) fn begin_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)>) {
         let held = self.motion.hold.take();
         let fading = self.motion.fading.take();
         self.start_transition(t, starts);
@@ -580,7 +586,7 @@ impl Strip {
         }
     }
 
-    fn start_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>)>) {
+    fn start_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)>) {
         self.finish_transition(false);
         if !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
             strip_model::cover(t.id, Cover::default());
@@ -607,10 +613,11 @@ impl Strip {
         let (out_begin, out_duration) = handover(style.cover_ms as f64 / 1000.0, 2.0 * style.cover_ms as f64 / 1000.0);
         for w in &t.outgoing {
             let id = w.window.id;
-            let (end, card, aimed) = match self.card_for(&self.layouts, w).and_then(|(slot, l)| self.plane_on(l, id).map(|p| (p, l.stage, slot))) {
-                Some((p, stage, slot)) => (p, Some(stage), Some(slot)),
-                None => (self.offscreen_plane(w.window.frame), None, None),
-            };
+            let (end, card, aimed, glass) =
+                match self.card_for(&self.layouts, w).and_then(|(slot, l)| self.plane_on(l, id).map(|p| (p, l.stage, slot, self.card_glass_look(l, id)))) {
+                    Some((p, stage, slot, glass)) => (p, Some(stage), Some(slot), glass),
+                    None => (self.offscreen_plane(w.window.frame), None, None, None),
+                };
             // A window dropped on the strip: its card under the pointer becomes the snapshot.
             let dragged = self.motion.window_card.take_if(|c| c.window == id);
             let (ghost, shadow_note) = match dragged {
@@ -644,7 +651,7 @@ impl Strip {
                 handover_ms: None,
                 shadow: shadow_note,
             });
-            waiting.push((ghosts.len(), end));
+            waiting.push((ghosts.len(), end, glass));
             ghosts.push(ghost);
             cover.outgoing = true;
             if let Some(stage) = card.filter(|s| !held.contains(s)) {
@@ -656,16 +663,19 @@ impl Strip {
         for w in &t.incoming {
             let id = w.window.id;
             let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
-            let (true, Some((start, from))) = (image.is_some() || plain, starts.get(&id).copied()) else {
+            let (true, Some((start, from, glass))) = (image.is_some() || plain, starts.get(&id).cloned()) else {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
             let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
             let group = incoming.get_or_insert_with(|| self.motion.overlay.group());
             let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
+            // From its card's look.
+            ghost.set_glass(glass.as_ref(), 1.0);
             let end = Plane::window(w.window.frame, o, style.corner_radius);
             ghost.spring_to(end, spring);
             ghost.spring_shadow(1.0, spring);
+            ghost.spring_glass(glass.as_ref(), 0.0, spring);
             report.push(GhostReport {
                 window: id,
                 outgoing: false,
@@ -881,10 +891,11 @@ impl Strip {
     pub(super) fn outgoing_parked(&mut self, id: u64) {
         let spring = self.spring();
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.waiting.is_empty()) else { return };
-        for (i, end) in std::mem::take(&mut r.waiting) {
+        for (i, end, glass) in std::mem::take(&mut r.waiting) {
             if let Some(g) = r.ghosts.get_mut(i) {
                 g.spring_to(end, spring);
                 g.spring_shadow(0.0, spring);
+                g.spring_glass(glass.as_ref(), 1.0, spring);
             }
         }
         r.timers.push(after(settle_time(spring, SETTLED), move || {
