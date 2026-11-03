@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A window coming back from the corner no longer slides in from the bottom right in apps
+  where an accessibility tool has turned on that app's enhanced interface (Chrome, for one):
+  Stage Manager turns it off for a moment around its own moves and back on right after, as
+  other window managers do.
 - The cards on the strip let the wallpaper through, as Apple's do: each window's picture is
   drawn slightly see-through over the wallpaper's colour behind it, and a switch's windows
   take that look as they shrink into their card. `[cards] window_opacity = 1` brings back

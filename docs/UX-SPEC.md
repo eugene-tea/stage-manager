@@ -89,6 +89,11 @@ within a day, has the window put back where it was before the quit (else centere
 A window an app keeps wholly off every screen (a headless browser's, an offscreen render
 window) is left alone, as Apple's leaves it: no stage, no card, never moved; it is taken in as
 a new window if it ever comes on screen.
+An app whose `AXEnhancedUserInterface` an assistive client turned on animates the frame
+changes made through Accessibility (Chrome's window slid in from the park corner, 11-03).
+Apple's Stage Manager is no Accessibility client and never shows this; we turn the flag off
+around our moves, once per app per switch, and back on after (Rectangle's and yabai's way), on
+by default with no key.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.

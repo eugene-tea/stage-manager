@@ -44,7 +44,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   motion overlay. The overlay sits just below floating windows (an always-on-top player stays
   over a switch), and above everything only while a dragged window's card shows.
 - **Threads:** AX can block on hung apps, so every AX call runs on the WM thread with a
-  0.25 s messaging timeout; the main thread never calls AX. Commands go main → WM through a
+  0.25 s messaging timeout; the main thread never calls AX. Every frame write runs with its
+  app's `AXEnhancedUserInterface` off (`platform::enhanced_ui`: an app with it on animates
+  Accessibility's moves), once per app per batch, on again at the batch's end, the WM tick,
+  quit, the panic hook and SIGABRT. Commands go main → WM through a
   channel plus `CFRunLoopPerformBlock`; strip snapshots go WM → main via GCD.
 
 ## macOS settings drive behavior

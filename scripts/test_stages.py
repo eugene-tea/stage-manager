@@ -45,7 +45,11 @@ second, its restore frame untouched, and a switch brings it back exactly; round 
 the corner patch is its sliver grown by a parked window's shadow reach per side), offscreen
 (round offscreen-windows: a window the fixture opens wholly off every display, as a headless
 browser does, never joins a stage, never moves, stays off screen through switches and a
-relaunch, and is never saved), slots (a dozen card clicks in a mixed order,
+relaunch, and is never saved), enhanced (round enhanced-ui: the fixture's
+AXEnhancedUserInterface on, as an assistive client left Chrome's on 11-03, its windows slide to
+every frame Accessibility writes; switches away and back never list a fixture window between
+the park corner and its frame, its flag goes off and on once per switch, and is on at the end),
+slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
 in does nothing; a 2 pt and a 7 pt wobble are clicks; a card dragged down stays whole and
@@ -5724,6 +5728,128 @@ def phase_offscreen():
     check(final is not None and close(final["bounds"], at), "after the quit it is still where its app put it")
 
 
+# ----- enhanced UI: our moves never animate (round enhanced-ui) ----------------------------
+
+
+def enhanced_lines(path):
+    """The fixture's AXEnhancedUserInterface values, in order ("on" / "off")."""
+    try:
+        with open(path) as f:
+            return [ln.split()[1] for ln in f if len(ln.split()) == 2]
+    except OSError:
+        return []
+
+
+def between_looks(samples, frames, display):
+    """(t, id, bounds) of every look listing a window of `frames` (id -> its frame when shown)
+    on screen neither in the park zone nor at its frame (±2): a frame on the way."""
+    out = []
+    for x in samples:
+        for w in x["windows"]:
+            f = frames.get(w["id"])
+            if f is None or w["layer"] != 0 or not w["onscreen"]:
+                continue
+            if not is_parked(w["bounds"], display) and not close(w["bounds"], f, 2.0):
+                out.append((x["t"], w["id"], fmt(w["bounds"])))
+    return out
+
+
+def ax_move_slides(title):
+    """The fixture's own check: a move made through Accessibility from outside (System Events)
+    while its flag is on slides (a frame between the two listed). None when System Events
+    cannot read or move its window (no Accessibility for this terminal): skipped."""
+    proc = f'tell application "System Events" to tell (first process whose bundle identifier is "{FIX_ID}")'
+
+    def osa(what):
+        return subprocess.run(["osascript", "-e", f"{proc} to {what}"], capture_output=True, text=True)
+
+    r = osa(f'get {{position, size}} of window "{title}"')
+    try:
+        x, y, w, h = (float(v) for v in r.stdout.replace("{", "").replace("}", "").split(","))
+    except ValueError:
+        return None
+    frame = {"x": x, "y": y, "w": w, "h": h}
+    moved = dict(frame, x=x + 60, y=y + 40)
+    p = start_sampler([FIX_ID], 1500)
+    r = osa(f'set position of window "{title}" to {{{int(x) + 60}, {int(y) + 40}}}')
+    out = sampler_out(p, "the fixture's own slide")
+    osa(f'set position of window "{title}" to {{{int(x)}, {int(y)}}}')
+    time.sleep(1.0)
+    if r.returncode != 0 or out is None:
+        return None
+    looks = [v["bounds"] for x_ in out.get("samples", []) for v in x_["windows"]
+             if v["layer"] == 0 and abs(v["bounds"]["w"] - w) < 2 and abs(v["bounds"]["h"] - h) < 2]
+    return any(not close(b, frame, 2.0) and not close(b, moved, 2.0)
+               and x - 1 <= b["x"] <= x + 61 and y - 1 <= b["y"] <= y + 41 for b in looks)
+
+
+def phase_enhanced():
+    """Round enhanced-ui (his 11-03: "the Chrome window is sliding in from the bottom right
+    corner, not from the strip"; an assistive client had turned Chrome's
+    AXEnhancedUserInterface on, and with it on an app animates the frame changes made through
+    Accessibility). The fixture starts with its flag on (`--enhanced-ui`, set by this check)
+    and slides to every frame written from outside while it is on. Two stages of the fixture's
+    two windows, switched away and back three times: in the window server's looks every 20 ms
+    neither window is ever listed between the park corner and its frame; the fixture's flag
+    goes off and on again around each switch (once: both windows' moves in one batch), the log
+    says so once, and the flag is on after the quit."""
+    say("\n== enhanced: an app's enhanced UI never animates our moves ==")
+    stop_app()
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    flag = os.path.join(HOME, "enhanced-ui.txt")
+    if os.path.exists(flag):
+        os.remove(flag)
+    start_fixture(2, "--enhanced-ui", "--enhanced-ui-file", flag)
+    check(enhanced_lines(flag) == ["on"], f"the fixture's enhanced UI is on at launch ({enhanced_lines(flag)})")
+    time.sleep(1.5)  # the fixture slides moves from outside once its windows have settled
+    slides = ax_move_slides("Fixture 1")
+    if slides is None:
+        skip("enhanced: the fixture's own slide", "System Events cannot move its window (no Accessibility here)")
+    else:
+        check(slides, "the fixture slides a move made through Accessibility while its flag is on (without the fix, ours would too)")
+    s = start_app(2)
+    if not check(s is not None, "app manages the 2 fixture windows"):
+        return
+    t = by_title(s)
+    w1, w2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    do("new", w2)
+    s = wait_state(lambda x: len(x["stages"]) == 2, "Fixture 2 in a stage of its own")
+    if not check(s is not None, "Fixture 2 has a stage of its own"):
+        return
+    time.sleep(1.0)
+    frames = {w["id"]: w["restore"] for w in s["windows"] if w["id"] in (w1, w2)}
+    for n in (1, 2, 1, 2):
+        before = len(enhanced_lines(flag))
+        p = start_sampler([FIX_ID], 2500)
+        do("switch", n)
+        s = wait_state(lambda x, n=n: x["active"] == n, f"stage {n} in front")
+        check(s is not None, f"switch to stage {n}")
+        out = sampler_out(p, f"the switch to stage {n}")
+        if out is None:
+            continue
+        between = between_looks(out.get("samples", []), frames, out["display"])
+        check(not between, f"switch to stage {n}: no fixture window listed between the park corner and its frame ({between[:3]})")
+        # The switch's batch ends at its landing: the flag is on again by then.
+        wait_until(lambda: enhanced_lines(flag)[before:][-1:] == ["on"], 4, "the fixture's flag on again")
+        new = enhanced_lines(flag)[before:]
+        check(new == ["off", "on"], f"switch to stage {n}: the flag went off and on once, around both windows' moves ({new})")
+        consistent(f"after the switch to stage {n}")
+    lines = enhanced_lines(flag)
+    check(lines[-1:] == ["on"], f"the fixture's flag is on after the switches ({lines[-3:]})")
+    said = log_text().count("enhanced UI on: moves done with it off for a moment")
+    check(said == 1, f"the log says it once ({said})")
+    stop_app()
+    all_onscreen("enhanced quit")
+    lines = enhanced_lines(flag)
+    check(lines[-1:] == ["on"], f"the fixture's flag is on after the quit ({lines[-3:]})")
+
+
 # ----- hide_parked_apps: the prototype's live phase (run by name only) ---------------------
 
 CONFIG_HIDE = "[windows]\nhide_parked_apps = true\n"
@@ -6175,7 +6301,7 @@ def hide_body():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -6193,7 +6319,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "offscreen": phase_offscreen, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
+             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
              "glass": phase_glass}[p]()
     finally:
         stop_app()

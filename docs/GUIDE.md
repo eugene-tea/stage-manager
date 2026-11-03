@@ -370,6 +370,8 @@ Some limits to know about:
   window's as it takes its place, which can still show as a faint flicker at the shadow's
   edge. Card pictures refresh every 1.5 seconds rather than live.
 - With ⌘M, macOS may show a short animation toward the corner.
+- When an accessibility tool has turned on an app's enhanced interface, Stage Manager turns
+  it off for a moment around each switch and back on right after.
 - After ⌘-Tab to another Desktop, its stage is set up once the Desktop has slid in. (A Dock
   click sets it up before.)
 - An empty Desktop is forgotten when you leave it. A Desktop whose windows are all hidden or

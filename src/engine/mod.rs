@@ -8,6 +8,7 @@ pub mod corner_patch;
 pub mod desktop_echo;
 pub mod desktop_notice;
 pub mod displays;
+pub mod enhanced_ui;
 pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;

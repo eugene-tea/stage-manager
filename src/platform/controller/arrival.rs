@@ -49,6 +49,7 @@ use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
 use crate::platform::dock::{self, DockItem, DockPress};
+use crate::platform::enhanced_ui;
 use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::{self, ParkedEntry};
 use crate::platform::windows::{self, CgWindow};
@@ -1087,6 +1088,8 @@ impl Controller {
     /// (a Space change settling: the user may hold its windows); the arrival checks the
     /// moves once more.
     fn check_arrangement(&mut self, ob: &Observer, now: Instant) {
+        // Each app's enhanced UI off once for all these moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         let live = self.ahead.as_ref().is_some_and(|s| s.trigger == Trigger::DockClick);
         if !live {
             self.finish_verify("the arrangement is settled");
@@ -1180,6 +1183,8 @@ impl Controller {
     /// [`TAIL_OVER_TICKS`] ticks or [`TAIL_OVER_FOR`] the check ends with what is left logged
     /// at warn (R15 1, 2). The outcome is logged at info.
     fn arrival_round(&mut self, ob: &Observer, list: &[CgWindow], now: Instant) {
+        // Each app's enhanced UI off once for all these moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         if !self.verify_stands() {
             return;
         }

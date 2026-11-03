@@ -63,7 +63,7 @@ use crate::engine::focus_replay::Wanted;
 use crate::engine::model::{Action, WindowId};
 use crate::platform::observe::Observer;
 use crate::platform::windows::{self, FINDER_BUNDLE_ID};
-use crate::platform::{apps, safety};
+use crate::platform::{apps, enhanced_ui, safety};
 use crate::ui::strip_model::LateNote;
 
 /// How long a hide may take before macOS counts as refusing it.
@@ -376,6 +376,8 @@ impl Controller {
     }
 
     fn confirm_hides(&mut self, ob: &Observer, now: Instant) {
+        // Each app's enhanced UI off once for all these moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         let pending: Vec<i32> = self.hides.ours.iter().filter(|(_, o)| !o.confirmed).map(|(&p, _)| p).collect();
         for pid in pending {
             match apps::is_hidden(pid) {
@@ -640,6 +642,8 @@ impl Controller {
 
     /// Sends app `pid`'s in-place windows the model counts parked to the corner.
     fn repark(&mut self, ob: &Observer, pid: i32, in_place: &BTreeSet<u32>, now: Instant) {
+        // Each app's enhanced UI off once for all these moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         let Some(m) = &self.model else { return };
         let moves: Vec<(u32, Point)> = in_place
             .iter()

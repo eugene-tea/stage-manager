@@ -93,7 +93,7 @@ use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::{capture_pace, desktop, desktop_shot, hidden_tabs, logging, paths, session, windows};
+use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
 use crate::engine::park_reconcile::{self, Stray};
@@ -699,6 +699,9 @@ struct Pending {
     entries: BTreeMap<u32, ParkedEntry>,
     /// Their arrival frames: a click there during the wait was meant for them.
     frames: Vec<Rect>,
+    /// The switch's batch (round enhanced-ui): an app with its enhanced UI on keeps it off
+    /// from the switch's first park to its landing, once; on again when this drops.
+    _quiet: enhanced_ui::Batch,
 }
 
 /// A window whose restore (`SetFrame`) failed: the model counts it shown, but it may still sit
@@ -1908,6 +1911,8 @@ impl Controller {
         if actions.is_empty() {
             return 0;
         }
+        // Each app's enhanced UI off once for all its windows' moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         self.pressed_obs = None;
         let unhide = self.before_batch_hides(ob, &actions);
         let parked = self.parked_entries(ob);
@@ -2283,6 +2288,7 @@ impl Controller {
         if !force && now.duration_since(self.unrestored_checked) < UNRESTORED_RETRY {
             return;
         }
+        let _quiet = enhanced_ui::Batch::open();
         self.unrestored_checked = now;
         let list = windows::list_windows();
         let mut scan: Option<recovery::ScanDisplays> = None;
@@ -2510,6 +2516,9 @@ impl Controller {
     /// leaving windows park behind theirs, the arriving ones wait until the strip unveils
     /// them. Without the strip's cover the batch runs at once.
     fn execute_animated(&mut self, ob: &Observer, actions: Vec<Action>) -> usize {
+        // One batch for the switch (round enhanced-ui), opened before the switch left behind
+        // lands: an app in both keeps its enhanced UI off across them.
+        let quiet = enhanced_ui::Batch::open();
         if supersedes(&actions) {
             self.flush_superseded(ob, "a new switch");
         } else {
@@ -2586,7 +2595,10 @@ impl Controller {
             // Windows moved: the list read before is stale.
             early_corner = None;
         }
-        failed + self.execute_animated_rest(ob, actions, &first, run, early_corner, &landing)
+        let failed = failed + self.execute_animated_rest(ob, actions, &first, run, early_corner, &landing);
+        // The held arrivals keep the switch's batch open (their own, nested) until they land.
+        drop(quiet);
+        failed
     }
 
     /// The frontmost window of the main display's active stage already in place (shown, and
@@ -2823,7 +2835,7 @@ impl Controller {
             })
             .collect();
         let max = motion_math::unveil_backstop(&self.store.config().style);
-        self.pending = Some(Pending { id, actions: later, entries, frames });
+        self.pending = Some(Pending { id, actions: later, entries, frames, _quiet: enhanced_ui::Batch::open() });
         self.phase.feed(phase::Event::SwitchSent { id, max }, Instant::now());
         self.hold_for_landing(id, held, &late, ob, Instant::now() + max + hide::LANDING_MARGIN);
         let failed = self.execute(ob, now);
@@ -3330,8 +3342,11 @@ impl Controller {
                 self.dock_order.soon(now);
                 self.keep_quit_windows(pid, now);
                 self.app_terminated(pid);
+                enhanced_ui::gone(pid);
             }
             WinEvent::AppActivated(pid) => {
+                // Its enhanced UI is read again at its next move (round enhanced-ui).
+                enhanced_ui::forget(pid);
                 // An app we unhid and focused again took it (or another app did: no retry).
                 self.activation_noticed(pid);
                 self.key_activation_heard(pid);

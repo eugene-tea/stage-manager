@@ -441,6 +441,8 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        // No app is left with its enhanced UI off by us (round enhanced-ui).
+        stage_manager::platform::enhanced_ui::restore_all("quit");
         // An update ready to install: its helper waits for this process to exit (8C).
         stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the

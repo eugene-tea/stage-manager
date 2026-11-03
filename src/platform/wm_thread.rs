@@ -48,7 +48,7 @@ use super::ctl::Command;
 use super::input::InputEvent;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
-use super::safety;
+use super::{enhanced_ui, safety};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
@@ -711,6 +711,8 @@ impl WmState {
         self.rescan_pass();
         self.pump();
         self.controller.tick(&mut self.observer);
+        // An app's enhanced UI a restore could not put back, or held off too long: on again.
+        enhanced_ui::sweep();
     }
 
     /// One slice of the scans waiting ([`Rescan`]): apps a scan could not read, tried again

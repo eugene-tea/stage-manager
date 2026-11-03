@@ -78,6 +78,15 @@
 //   --color-file F | FIXTURE_COLOR_FILE=F  every window takes the colour "rrggbb" written in F,
 //                                      read again every 200 ms (scripts/measure-apple-card-glass.py
 //                                      turns one card white, black and grey in place)
+//   --enhanced-ui | FIXTURE_ENHANCED_UI=1  the app's AXEnhancedUserInterface starts on (as an
+//                                      assistive client leaves Chrome's: his 11-03); it is
+//                                      readable and settable through Accessibility, and while
+//                                      it is on a standard window animates every frame change
+//                                      made from outside (Accessibility's): it is put back and
+//                                      slides there over 400 ms, as Chrome's did from the park
+//                                      corner (round enhanced-ui)
+//   --enhanced-ui-file F | FIXTURE_ENHANCED_UI_FILE=F  every value the attribute takes is
+//                                      appended to F ("<unix time> on|off"), the first at launch
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -120,6 +129,8 @@ struct Options {
     var colors: [NSColor] = []
     var noLabel = false
     var colorFile: String? = nil
+    var enhancedUI = false
+    var enhancedUIFile: String? = nil
 
     static func parseColors(_ text: String) -> [NSColor] {
         text.split(separator: ",").compactMap { part in
@@ -169,6 +180,8 @@ struct Options {
         if let c = env["FIXTURE_COLORS"] { o.colors = parseColors(c) }
         if env["FIXTURE_NO_LABEL"] == "1" { o.noLabel = true }
         if let f = env["FIXTURE_COLOR_FILE"], !f.isEmpty { o.colorFile = f }
+        if env["FIXTURE_ENHANCED_UI"] == "1" { o.enhancedUI = true }
+        if let f = env["FIXTURE_ENHANCED_UI_FILE"], !f.isEmpty { o.enhancedUIFile = f }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -194,6 +207,8 @@ struct Options {
             case "--colors": if let c = args.next() { o.colors = parseColors(c) }
             case "--no-label": o.noLabel = true
             case "--color-file": if let f = args.next() { o.colorFile = f }
+            case "--enhanced-ui": o.enhancedUI = true
+            case "--enhanced-ui-file": if let f = args.next() { o.enhancedUIFile = f }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -281,9 +296,127 @@ final class PopupController: NSViewController {
     }
 }
 
+/// The app's `AXEnhancedUserInterface` (`--enhanced-ui`): readable and settable through
+/// Accessibility on the application element, as Chrome's is (legacy NSAccessibility
+/// overrides, Chromium's way). Every value it takes is appended to `--enhanced-ui-file`.
+final class FixtureApplication: NSApplication {
+    static let enhancedAttribute = NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
+    var enhancedUI = false
+    var enhancedUIFile: String? = nil
+
+    func noteEnhancedUI() {
+        guard let path = enhancedUIFile else { return }
+        let line = String(format: "%.3f %@\n", Date().timeIntervalSince1970, enhancedUI ? "on" : "off")
+        if let h = FileHandle(forWritingAtPath: path) {
+            h.seekToEndOfFile()
+            h.write(line.data(using: .utf8)!)
+            h.closeFile()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
+    override func accessibilityAttributeNames() -> [NSAccessibility.Attribute] {
+        var names = super.accessibilityAttributeNames()
+        if !names.contains(Self.enhancedAttribute) { names.append(Self.enhancedAttribute) }
+        return names
+    }
+
+    override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
+        if attribute == Self.enhancedAttribute { return NSNumber(value: enhancedUI) }
+        return super.accessibilityAttributeValue(attribute)
+    }
+
+    override func accessibilityIsAttributeSettable(_ attribute: NSAccessibility.Attribute) -> Bool {
+        attribute == Self.enhancedAttribute || super.accessibilityIsAttributeSettable(attribute)
+    }
+
+    override func accessibilitySetValue(_ value: Any?, forAttribute attribute: NSAccessibility.Attribute) {
+        if attribute == Self.enhancedAttribute {
+            enhancedUI = (value as? NSNumber)?.boolValue ?? false
+            noteEnhancedUI()
+            return
+        }
+        super.accessibilitySetValue(value, forAttribute: attribute)
+    }
+}
+
+/// While the app's enhanced UI is on, a frame change made from outside (Accessibility's
+/// writes: size, position, size) is put back at once and the window slides to it over
+/// [`duration`], each step a real frame the window server lists (Chrome's slide from the park
+/// corner, his 11-03). The writes of one move arrive together: the slide starts once they stop.
+final class EnhancedMotion {
+    let duration = 0.4
+    /// Frames are taken from outside only once the windows are in place.
+    var armed = false
+    var settled: [ObjectIdentifier: NSRect] = [:]
+    var target: [ObjectIdentifier: NSRect] = [:]
+    var ours: Set<ObjectIdentifier> = []
+
+    func watch(_ w: NSWindow) {
+        settled[ObjectIdentifier(w)] = w.frame
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: w, queue: nil) { [weak self, weak w] _ in
+                if let self, let w { self.changed(w) }
+            }
+        }
+    }
+
+    func changed(_ w: NSWindow) {
+        let k = ObjectIdentifier(w)
+        guard !ours.contains(k) else { return }
+        let on = (NSApp as? FixtureApplication)?.enhancedUI ?? false
+        guard armed, on, let from = settled[k] else {
+            if target[k] == nil { settled[k] = w.frame }
+            return
+        }
+        // Accessibility writes the top-left and the size: each write is kept apart.
+        let now = w.frame
+        var t = target[k] ?? from
+        let top = t.maxY
+        if abs(now.width - from.width) > 0.5 || abs(now.height - from.height) > 0.5 {
+            t.size = now.size
+            t.origin.y = top - now.height
+        }
+        if abs(now.minX - from.minX) > 0.5 || abs(now.maxY - from.maxY) > 0.5 {
+            t.origin.x = now.minX
+            t.origin.y = now.maxY - t.height
+        }
+        let first = target[k] == nil
+        target[k] = t
+        ours.insert(k)
+        w.setFrame(from, display: false)
+        ours.remove(k)
+        if first {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(40)) { self.slide(w) }
+        }
+    }
+
+    func slide(_ w: NSWindow) {
+        let k = ObjectIdentifier(w)
+        guard let to = target[k], let from = settled[k] else { return }
+        ours.insert(k)
+        let start = Date()
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
+            let p = min(1.0, Date().timeIntervalSince(start) / self.duration)
+            let f = NSRect(
+                x: from.minX + (to.minX - from.minX) * p, y: from.minY + (to.minY - from.minY) * p,
+                width: from.width + (to.width - from.width) * p, height: from.height + (to.height - from.height) * p)
+            w.setFrame(f, display: true)
+            if p >= 1.0 {
+                timer.invalidate()
+                self.ours.remove(k)
+                self.settled[k] = w.frame
+                self.target[k] = nil
+            }
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let options = Options.parse()
     var windows: [NSWindow] = []
+    let motion = EnhancedMotion()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -319,6 +452,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if options.stray { makeStray() }
         if let path = options.colorFile { watchColor(path) }
+        if let fixture = NSApp as? FixtureApplication {
+            fixture.enhancedUIFile = options.enhancedUIFile
+            fixture.enhancedUI = options.enhancedUI
+            if options.enhancedUI || options.enhancedUIFile != nil { fixture.noteEnhancedUI() }
+        }
+        if options.enhancedUI {
+            // Moves from outside slide once the windows have settled where they opened.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.delayMs + 1000)) {
+                for w in self.windows where w.styleMask.contains(.titled) && !(w is NSPanel) { self.motion.watch(w) }
+                self.motion.armed = true
+            }
+        }
         if options.offscreenMs >= 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.offscreenMs)) { self.makeOffscreen() }
         }
@@ -598,7 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
-let app = NSApplication.shared
+let app = FixtureApplication.shared
 app.setActivationPolicy(.regular)
 let mainMenu = NSMenu()
 let appItem = NSMenuItem()

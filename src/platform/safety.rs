@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, AxError, AxResult, names};
-use super::{desktop, hidden_tabs, logging, observe, paths, windows};
+use super::{desktop, enhanced_ui, hidden_tabs, logging, observe, paths, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
@@ -306,6 +306,8 @@ pub fn held_len() -> usize {
 /// Tries every held window again (its Space may show now); those back leave the hold and
 /// the registry. True when none is left.
 pub fn retry_held() -> bool {
+    // Each app's enhanced UI off once for all its windows here, not once per window.
+    let _quiet = enhanced_ui::Batch::open();
     let held = lock_held().clone();
     if held.is_empty() {
         return true;
@@ -490,6 +492,8 @@ static LAST_FAILURES: Mutex<Vec<(u32, bool, String)>> = Mutex::new(Vec::new());
 /// tried again quickly ([`set_frame_retrying`]) while `retry_budget` lasts, all windows
 /// together; then each window left gets its one try (the review of 6X, L1).
 pub fn unpark_registry(wait: Duration, retry_budget: Duration) -> Option<Report> {
+    // Each app's enhanced UI off once for all its windows here, not once per window.
+    let _quiet = enhanced_ui::Batch::open();
     let deadline = Instant::now() + wait;
     let mut guard = loop {
         match REGISTRY.try_lock() {
@@ -532,6 +536,13 @@ pub fn unpark_registry(wait: Duration, retry_budget: Duration) -> Option<Report>
 /// A registry entry that could not be moved (a fixed-size dialog, say) is not a failure when
 /// the recovery scan leaves no window stranded: it is logged at debug only.
 pub fn emergency_unpark(reason: &str) -> bool {
+    let ok = unpark_all(reason);
+    // No app is left with its enhanced UI off by us (round enhanced-ui).
+    enhanced_ui::restore_all(reason);
+    ok
+}
+
+fn unpark_all(reason: &str) -> bool {
     unhide_ours(reason);
     match unpark_registry(Duration::from_millis(200), REGISTRY_RETRY_BUDGET) {
         Some(r) if r.failed == 0 => {
@@ -859,6 +870,7 @@ fn nanosleep(d: Duration) {
 /// held by the aborting thread only makes this wait out the handler's bound.
 fn unpark_for_abort() {
     let r = unpark_registry(Duration::from_millis(100), Duration::ZERO);
+    enhanced_ui::restore_all("SIGABRT");
     ABORT_UNPARKED.store(true, Ordering::SeqCst);
     tracing::error!(restored = r.map(|r| r.restored), failed = r.map(|r| r.failed), "SIGABRT: the registry unparked from the signal watcher; the guardian covers the rest");
 }
@@ -980,6 +992,8 @@ pub fn recovery_scan(reason: &str) -> Report {
 /// could not be read: an app busy after a display change answers `CannotComplete`), so the
 /// caller can scan them again.
 pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
+    // Each app's enhanced UI off once for all its windows here, not once per window.
+    let _quiet = enhanced_ui::Batch::open();
     let only = observe::only_from_env();
     let own = std::process::id() as i32;
     let mut pids: Vec<i32> = windows::list_windows().iter().filter(|w| w.layer == 0).map(|w| w.pid).collect();
@@ -1198,6 +1212,8 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
 /// Desktop's, an app that does not answer, no time left).
 pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> Vec<u32> {
+    // Each app's enhanced UI off once for all its windows here, not once per window.
+    let _quiet = enhanced_ui::Batch::open();
     let displays = scan_displays();
     let state = ours.state.as_ref();
     let mut back = Vec::new();
