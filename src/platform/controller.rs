@@ -128,7 +128,10 @@ mod arrival;
 mod corner_still;
 mod dock_order;
 mod hide;
+mod notice;
 mod raise_order;
+
+pub use notice::NoticeCommand;
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
@@ -250,6 +253,9 @@ pub enum UiUpdate {
     StripVisible(bool),
     /// The wallpaper corner patch's plan (`[windows] corner_patch`).
     CornerPatch(crate::ui::corner_patch::PatchPlan),
+    /// The windows a restart brought back on another Desktop, as the status menu lists them
+    /// (empty: no list; [`notice`]).
+    DesktopNotice(Vec<crate::ui::status_menu::NoticeLine>),
 }
 
 type UiSink = Box<dyn Fn(UiUpdate) + Send + Sync>;
@@ -934,6 +940,8 @@ pub struct Controller {
     hides: hide::Hides,
     /// The corner patch's last plan sent to the main thread.
     patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
+    /// The desktop notice's lines last sent to the main thread ([`notice`]).
+    notice_sent: Option<Vec<crate::ui::status_menu::NoticeLine>>,
     /// The corner patch's rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
     patch_rect: Option<Rect>,
     /// The patch's rectangle in use on each Desktop (the engine's Space ids): each Desktop
@@ -1189,6 +1197,7 @@ impl Controller {
             fallback_said: HashSet::new(),
             hides: hide::Hides::default(),
             patch_sent: None,
+            notice_sent: None,
             patch_rect: None,
             patch_rects: HashMap::new(),
             patch_order: Default::default(),
@@ -5194,6 +5203,7 @@ impl Controller {
         if self.strip_dirty {
             self.present();
         }
+        self.publish_notice(ob);
     }
 
     /// Closes the restore window (the first user action, apps quiet, or its time up; see
@@ -5210,17 +5220,20 @@ impl Controller {
         // minute), before a still-empty front gives way (`front_after_restore`).
         self.absent_due = Some(clock.give_up_absent_at(now));
         let mut voters = Vec::new();
+        let mut line = None;
         if let Some(m) = self.model.as_mut()
             && let Some(actions) = m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
-            if let Some(line) = m.restore_line(clock.age(now).as_secs()) {
-                tracing::info!("{line}");
-            }
+            line = m.restore_line(clock.age(now).as_secs());
             self.front_after_restore = end.brings_front();
             // Only after a restart: a relaunch in the same session changed no focus.
             self.focus_after_restore = end.by_itself() && m.after_restart();
             voters = actions;
+        }
+        if let Some(line) = line {
+            // The windows back on another Desktop follow the counts, titles hashed.
+            tracing::info!("{line}{}", self.notice_log());
         }
         // The windows that voted for a saved Desktop, back in their saved stages (round 8I2):
         // run now, before the action that ended the window acts on the model.
@@ -5363,6 +5376,12 @@ impl Controller {
                     Ok(reply) => reply,
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
+            }
+            Command::DebugNotice(id) => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-notice needs STAGE_MANAGER_TEST=1" });
+                }
+                self.notice_command(ob, id.map_or(NoticeCommand::Dismiss, NoticeCommand::Show))
             }
             Command::DebugClose { id } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
@@ -5578,6 +5597,8 @@ impl Controller {
             "windows": windows,
         });
         state["corner_patch"] = corner_patch;
+        // The windows a restart brought back on another Desktop (round desktop-notice).
+        state["restore"]["notice"] = self.notice_json();
         state["strays"] = Value::Array(strays);
         // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
         state["strip_gap"] = json!(m.strip().iter().position(|c| c.gap));

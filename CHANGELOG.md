@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- After a restart, windows that macOS reopened on another Desktop than their own are listed
+  in the menu bar menu, with a small dot on the icon, so you can drag them back in Mission
+  Control. An entry goes away once its window is on its own Desktop; Dismiss clears the list.
+  `[stages] restore_notice = false` turns it off.
 - A window arriving in a switch no longer jumps a little as the motion ends: it takes its
   place only once its picture is right over it.
 - Moving windows carry the same shadow as the windows themselves, the focused window's

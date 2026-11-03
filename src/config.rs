@@ -379,6 +379,10 @@ pub struct StagesConfig {
     /// for their apps to reopen them (on by default); off is 1.2.0's behaviour. Read at
     /// launch.
     pub restore_after_restart: bool,
+    /// After a restart, the windows macOS reopened on another Desktop than their own are
+    /// listed in the status menu, with a mark on its icon (on by default: it serves the
+    /// restore; round desktop-notice).
+    pub restore_notice: bool,
     /// A newly opened app's first windows join the active stage instead of a stage of their
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
@@ -387,7 +391,7 @@ pub struct StagesConfig {
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
+        Self { names: Vec::new(), restore_after_restart: true, restore_notice: true, new_apps_join_current: false }
     }
 }
 
@@ -945,6 +949,7 @@ impl Config {
             stages: StagesConfig {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
+                restore_notice: v.flag("stages.restore_notice"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
             },
             sugar: SugarConfig {
@@ -1255,6 +1260,7 @@ mod tests {
         assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
+        assert!(c.stages.restore_notice, "windows back on another Desktop are listed (it serves the restore: his word, 11-03)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
         assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");

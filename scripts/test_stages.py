@@ -85,7 +85,10 @@ icon opens with a double click through the patch and drags out, a new still foll
 volume is ejected after), and hide (`[windows] hide_parked_apps`, a prototype: an app whose
 every window is parked is hidden and comes back in place by ⌘Tab, a card click and a Dock
 click; never hidden with a window shown; the user's own ⌘H never undone; a quit with an app
-hidden; see `phase_hide`).
+hidden; see `phase_hide`), and notice (round desktop-notice: after a simulated restart the
+windows saved on one Desktop and shown on another are listed once the restore window ends, in
+`ctl state` and the restore's line, titles hashed there; an entry's click, the config key off
+and on, Dismiss; hands off the Mac, as in restore; see `phase_notice`).
 
 Tests that need an extension turn it on in their own config.toml.
 
@@ -4985,6 +4988,131 @@ def restore_pool(run_id):
     stop_all_fixtures()
 
 
+# ----- the desktop notice after a restart (round desktop-notice) -----------------------------
+
+
+def phase_notice():
+    """Round desktop-notice: after a restart the windows macOS reopened on another Desktop than
+    their own are listed (the menu's section, `ctl state`'s restore.notice, the restore's line).
+    A hand-written state.json (session N1) saves Desktop 1 (id 4) with Alpha 1 and 2 in one
+    stage and Alpha 3 in another, and Desktop 2 (id 8, shown when saved) with Bravo 1 and 2. In
+    session N2 (STAGE_MANAGER_SESSION: the restore takes the file as from another window server
+    session) Bravo adopts the Desktop shown as Desktop 2, then Alpha's windows come there too:
+    saved on Desktop 1, shown on Desktop 2. Nothing is listed while the restore window is open;
+    once it ends by itself (hands off the Mac) the three are listed with both Desktops, the
+    restore's line lists them with hashed titles, an entry's click brings its window's stage
+    forward, the config key off empties the list and on brings it back, and Dismiss empties it.
+    The phase cannot switch Desktops, so an entry leaving once its window shows on its own
+    Desktop is checked in engine::model::pool::tests only."""
+    say("\n== desktop notice: windows back on another Desktop after a restart are listed ==")
+    run_id = str(int(time.time()))
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    sess = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"notice {k} {run_id}"} for k in ("N1", "N2")}
+    a, b = EXTRA["a"][0], EXTRA["b"][0]
+
+    def sw(bundle, title, i, z):
+        return {"bundle_id": bundle, "title": title, "frame": {"x": 140.0 + 40 * i, "y": 120.0 + 30 * i, "w": 520.0, "h": 380.0},
+                "z": z, "key": z == 0, "pinned": False, "role": "standard"}
+
+    saved = {
+        "version": 2,
+        "session": sess["N1"]["STAGE_MANAGER_SESSION"],
+        "saved_at": int(time.time()),
+        "spaces": [
+            {"id": 4, "current": False, "active_index": 0, "strip_slots": [1], "stages": [
+                {"name": None, "last_active": 90, "windows": [sw(a, "Alpha 1", 0, 0), sw(a, "Alpha 2", 1, 1)]},
+                {"name": None, "last_active": 80, "windows": [sw(a, "Alpha 3", 2, 0)]},
+            ]},
+            {"id": 8, "current": True, "active_index": 0, "strip_slots": [1], "stages": [
+                {"name": None, "last_active": 40, "windows": [sw(b, "Bravo 1", 3, 0)]},
+                {"name": None, "last_active": 30, "windows": [sw(b, "Bravo 2", 4, 0)]},
+            ]},
+        ],
+    }
+    with open(os.path.join(HOME, "state.json"), "w", encoding="utf-8") as f:
+        json.dump(saved, f, indent=2)
+
+    def notice(s):
+        return ((s or {}).get("restore") or {}).get("notice") or {}
+
+    s = start_app(0, extra_env=sess["N2"])
+    if not check(s is not None, "app up in session N2 on an empty screen"):
+        return
+    r = s.get("restore") or {}
+    check(r.get("after_restart") is True and r.get("pooling") is True, f"a restart: one pool ({r})")
+    n = notice(s)
+    check(n.get("on") is True and n.get("due") is False, f"restore_notice on by default; nothing shown while the restore window is open ({n})")
+
+    say("-- Desktop 2's own windows (Bravo) adopt the Desktop shown; Desktop 1's (Alpha) come there too")
+    start_extra("b", 2)
+    s = wait_state(lambda x: x["space"] == 8 and len(x["windows"]) >= 2, "the Desktop shown taken for Desktop 2", timeout=10)
+    if not check(s is not None, "the Desktop shown is Desktop 2 (id 8)"):
+        return
+    start_extra("a", 3)
+    s = wait_state(lambda x: all(t in by_title(x) for t in ("Alpha 1", "Alpha 2", "Alpha 3")), "Alpha's three windows managed", timeout=10)
+    if not check(s is not None, "Alpha's windows are managed"):
+        return
+    time.sleep(1.5)
+    s = state()
+    n = notice(s)
+    check(n.get("due") is False and not n.get("menu"), f"still nothing in the menu while apps open ({n.get('menu')})")
+    check(len(n.get("entries") or []) == 3, f"the model already knows three ({len(n.get('entries') or [])})")
+
+    say("-- the restore window ends by itself (hands off the Mac: a click or key press ends it early)")
+    s = wait_state(lambda x: (x.get("restore") or {}).get("restoring") is False, "the restore window ends by itself", timeout=90)
+    if not check(s is not None, "the restore window ended with no user action"):
+        return
+    s = wait_state(lambda x: len(notice(x).get("menu") or []) == 3, "three entries in the menu", timeout=5)
+    n = notice(s)
+    entries = n.get("entries") or []
+    titles = [base_title(e["title"]) for e in entries]
+    check(sorted(titles) == ["Alpha 1", "Alpha 2", "Alpha 3"], f"Alpha's three windows listed, no Bravo ({titles})")
+    check(all(e["saved_desktop"] == 4 and e["now_desktop"] == 8 for e in entries),
+          f"saved on Desktop 1 (id 4), now on Desktop 2 (id 8) ({[(e['saved_desktop'], e['now_desktop']) for e in entries]})")
+    check(all(e["now"] == "this Desktop" and e["saved"] == "another Desktop" for e in entries),
+          f"named for him: this Desktop; Desktop 1, nothing left there, another Desktop ({[(e['saved'], e['now']) for e in entries]})")
+    menu = n.get("menu") or []
+    check(all(m["detail"] == "Belongs on another Desktop; now on this Desktop" and " — Alpha " in m["title"] for m in menu),
+          f"each entry: the app and title, then where it belongs and where it is ({menu})")
+    line = next((l for l in log_text().splitlines() if "restore: " in l and "from other Desktops" in l), "")
+    check(line.count(f"{a} #") == 3 and line.count("(saved 4, now 8)") == 3 and "Alpha" not in line,
+          f"the restore's line lists the three, titles hashed ({line[line.find('restore: '):]})")
+
+    say("-- an entry's click brings its window's stage forward")
+    t = by_title(s)
+    alpha3 = t.get("Alpha 3") or {}
+    check(not active_titles(s) or "Alpha 3" not in {base_title(x) for x in active_titles(s)}, "Alpha 3's stage is not in front yet")
+    r = ctl("debug-notice", "show", alpha3.get("id"))
+    s = wait_state(lambda x: {base_title(y) for y in active_titles(x)} == {"Alpha 3"}, "Alpha 3's stage in front", timeout=5)
+    check(r.get("ok") and s is not None, f"Alpha 3's stage came forward ({r})")
+    check(len(notice(state()).get("menu") or []) == 3, "the entry stays: the window is still on the wrong Desktop")
+    consistent("notice show")
+
+    say("-- [stages] restore_notice = false empties the menu; true brings the list back")
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write("[stages]\nrestore_notice = false\n")
+    ctl("reload")
+    s = wait_state(lambda x: not notice(x).get("menu"), "the menu's section gone", timeout=5)
+    check(s is not None and notice(s).get("on") is False and notice(s).get("due") is False, f"off: nothing in the menu ({notice(s)})")
+    with open(os.path.join(HOME, "config.toml"), "w") as f:
+        f.write("[stages]\nrestore_notice = true\n")
+    ctl("reload")
+    s = wait_state(lambda x: len(notice(x).get("menu") or []) == 3, "the list back", timeout=5)
+    check(s is not None, "on again: the three listed")
+
+    say("-- Dismiss empties the list for good")
+    r = ctl("debug-notice", "dismiss")
+    s = wait_state(lambda x: not notice(x).get("menu") and not notice(x).get("entries"), "the list dismissed", timeout=5)
+    check(r.get("ok") and s is not None, f"dismissed ({r})")
+    check("desktop notice: dismissed" in log_text(), "the dismissal logged")
+    stop_app()
+    all_onscreen("notice phase quit")
+    stop_all_fixtures()
+    write_config(None)
+
+
 # ----- a logout, simulated (round 8H) -----------------------------------------------------
 
 
@@ -5840,7 +5968,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "still": phase_still, "hide": phase_hide}[p]()
+             "park": phase_park, "still": phase_still, "hide": phase_hide, "notice": phase_notice}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

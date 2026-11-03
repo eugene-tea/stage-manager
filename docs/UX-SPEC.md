@@ -293,6 +293,7 @@ until used; the rest are off.
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
+| Windows reopened on another Desktop than their own are listed in the menu (`[stages] restore_notice`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 | Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |
@@ -357,13 +358,25 @@ squeezed into the park corner goes to its saved frame when it is matched, and is
 it is (and counted) when it is not. A window an app reopens on another Desktop than the one
 it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
 again on the Desktop where it shows. No apps are relaunched (that is macOS's
-"Reopen windows when logging back in") and no window moves between Desktops. When the
+"Reopen windows when logging back in") and no window moves between Desktops: when the
+restore window ends, those windows are listed at the top of the status menu instead (a
+section headed "Reopened on Another Desktop": per window the app and title, under it
+"Belongs on … ; now on …", then Dismiss), with one passive dot on the menu bar icon while
+any is listed. No alert, no notification: apps are still opening at the login, and the menu
+keeps the list until it is done. An entry leaves once its window shows on its saved Desktop,
+closes or leaves its Desktop; a click brings its window forward (its stage with it, on the
+Desktop shown). A Desktop is named by its apps ("the Desktop with Terminal and Mail") or as
+"this Desktop", not by Mission Control's number: no public API says which number the
+Desktop shown has (`com.apple.spaces`' "Current Space" does not follow a switch). Apple's
+Stage Manager has no such list: a deviation that contradicts nothing it does
+(`[stages] restore_notice`, on). When the
 restore window ends (no sooner than a minute after the login), the saved windows of apps
 not running then are given up (one log line names them): an app opened later goes by the
 new-window rules, never back to a stage of the last session. A running app keeps its saved
 windows until it has opened none for a minute. Off, a restart
-starts every app in a stage of its own, as Apple's does. One log line sums it up
-(`stage-manager log summary` repeats it).
+starts every app in a stage of its own, as Apple's does. One log line sums it up, ending
+with the windows back on another Desktop (bundle id, hashed title, the Desktops' ids;
+`stage-manager log summary` repeats the counts).
 
 ## Known gaps
 

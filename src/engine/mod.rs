@@ -6,6 +6,7 @@
 pub mod busy_apps;
 pub mod corner_patch;
 pub mod desktop_echo;
+pub mod desktop_notice;
 pub mod displays;
 pub mod focus_replay;
 pub mod fullscreen;

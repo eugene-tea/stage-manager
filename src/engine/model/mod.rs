@@ -23,6 +23,7 @@
 
 mod ahead;
 mod hide;
+mod notice;
 mod ops;
 mod pending;
 mod pool;
@@ -340,6 +341,9 @@ pub struct Model {
     /// Windows placed from another Desktop's saved entry (`pool.rs`), with the saved stage
     /// they stand for.
     pub(crate) pooled: HashMap<WindowId, pool::Kin>,
+    /// Windows the pool placed from another Desktop's saved entry, with that saved Desktop,
+    /// in the order they came back, until they leave the list (`notice.rs`).
+    pub(crate) away: Vec<(WindowId, u64)>,
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
     pub(crate) pooled_out: HashSet<(u64, usize)>,
@@ -409,6 +413,7 @@ impl Model {
             kin: HashMap::new(),
             pool_rank: HashMap::new(),
             pooled: HashMap::new(),
+            away: Vec::new(),
             pooled_out: HashSet::new(),
             merged: HashMap::new(),
             launch_listed: HashSet::new(),

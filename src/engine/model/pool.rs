@@ -123,6 +123,8 @@ struct Origin {
     rank: Rank,
     /// Its name.
     name: Option<String>,
+    /// The saved Desktop it was on (the model's id).
+    desktop: u64,
 }
 
 /// Where a matched window goes.
@@ -323,7 +325,8 @@ impl Model {
             if j >= saved.stages.len() {
                 continue;
             }
-            let origin = Origin { root: Kin::Saved(saved.id, j), rank: rank_of_saved(saved, j), name: saved.stages[j].name.clone() };
+            let origin =
+                Origin { root: Kin::Saved(saved.id, j), rank: rank_of_saved(saved, j), name: saved.stages[j].name.clone(), desktop: saved.id };
             if let Some(entry) = self.take_saved_entry(l, j, k) {
                 out.push((i, Dest::Part(origin), entry, grade, points));
             }
@@ -385,7 +388,7 @@ impl Model {
             };
             (pos, Reverse(s.map_or(0, |s| s.last_active)))
         });
-        Origin { root: self.root_of(stage), rank, name: s.and_then(|s| s.name.clone()) }
+        Origin { root: self.root_of(stage), rank, name: s.and_then(|s| s.name.clone()), desktop: s.map_or(0, |s| s.space.0) }
     }
 
     /// Puts window `meta` into the part of `origin` on `space` (see the module docs) from its
@@ -408,6 +411,7 @@ impl Model {
         let went = self.insert_from_pending(meta, space, part, &entry, grade, obs, actions);
         tracing::debug!(id = meta.id.0, stage = part.0, "restore: a window of another Desktop's saved stage, in its part here");
         self.pooled.insert(meta.id, origin.root);
+        self.note_away(meta.id, origin.desktop);
         went
     }
 
@@ -563,7 +567,12 @@ impl Model {
             Spot::Stage(s, _) => self.origin_of_stage(s),
             Spot::Saved(l, j, _) => {
                 let Some(saved) = self.leftovers.get(l).filter(|saved| j < saved.stages.len()) else { return false };
-                Origin { root: Kin::Saved(saved.id, j), rank: rank_of_saved(saved, j), name: saved.stages[j].name.clone() }
+                Origin {
+                    root: Kin::Saved(saved.id, j),
+                    rank: rank_of_saved(saved, j),
+                    name: saved.stages[j].name.clone(),
+                    desktop: saved.id,
+                }
             }
         };
         let elsewhere = self.stages.iter().any(|s| s.space == space && s.id != stage && self.kin.get(&s.id) == Some(&origin.root))

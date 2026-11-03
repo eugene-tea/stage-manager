@@ -309,6 +309,11 @@ impl Observer {
         self.apps.get(&pid).and_then(|a| a.bundle_id.as_deref())
     }
 
+    /// The name of a running app with bundle id `bundle` (as the Dock shows it), if known.
+    pub fn app_name(&self, bundle: &str) -> Option<&str> {
+        self.apps.values().find(|a| a.bundle_id.as_deref() == Some(bundle)).and_then(|a| a.name.as_deref())
+    }
+
     /// True once the running apps are known (the first list came).
     pub fn knows_apps(&self) -> bool {
         !self.apps.is_empty()
