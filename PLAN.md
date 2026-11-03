@@ -31,8 +31,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 - **Spaces by their windows.** No public API names a Space: the engine gives each a
   synthetic id and recognizes it on `activeSpaceDidChangeNotification` from the window
   server's on-screen list. A window is given to the engine only once it shows on screen
-  (another Space, minimized, app hidden: it waits). A once-a-second check catches moves
-  between Spaces and missed notifications. No SkyLight/CGS calls.
+  (another Space, minimized, app hidden: it waits). A window wholly off every display (a
+  headless browser's) is not the user's: it waits until it shows on one, and a managed one its
+  app moves there is let go where it is (`engine::displays`). A once-a-second check catches
+  moves between Spaces and missed notifications. No SkyLight/CGS calls.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`): no Objective-C types, fully unit
   tested. Observations in (frames, z-order, focus, the Dock's order), `Action`s out (`Park`,
   `SetFrame`, `Raise`, `Focus`) for the platform layer to execute.

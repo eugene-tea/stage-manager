@@ -99,7 +99,7 @@ use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply
 use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
-use crate::engine::displays::on_other_display;
+use crate::engine::displays::{off_every_display, off_screen_not_ours, on_other_display};
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::hidden_tab::Candidate;
@@ -1044,6 +1044,9 @@ pub struct Controller {
     /// Managed windows showing mostly on another display than the main one: checks in a
     /// row (left alone there, the guide).
     elsewhere: HashMap<u32, u32>,
+    /// Managed windows listed on screen off every display, not in a park zone (moved there by
+    /// their app: not the user's, [`crate::engine::displays`]): checks in a row.
+    off_screen: HashMap<u32, u32>,
     /// Each Space's active stage at its last strip snapshot (the day's log counts a switch
     /// when a Space's stage changed since: a click, or the stage its arrival brought).
     seen_active: HashMap<u64, Option<u64>>,
@@ -1235,6 +1238,7 @@ impl Controller {
             absent: HashMap::new(),
             busy_apps: std::cell::RefCell::new(BusyApps::default()),
             elsewhere: HashMap::new(),
+            off_screen: HashMap::new(),
             seen_active: HashMap::new(),
             seen_stages: None,
             desktop_echo: DesktopEcho::default(),
@@ -2131,6 +2135,7 @@ impl Controller {
         }
         // The focused window is asked (two Accessibility messages) only once a stray shows.
         let mut focused: Option<Option<u32>> = None;
+        let mut displays: Option<Vec<Rect>> = None;
         let mut verdicts: Vec<(u32, Verdict, Rect)> = Vec::new();
         for (id, pid) in model_parked {
             let listed = list.iter().find(|w| w.id == id && w.layer == 0);
@@ -2151,6 +2156,13 @@ impl Controller {
                 continue;
             }
             let bounds = listed.map(|w| w.bounds).unwrap_or_default();
+            if off_every_display(bounds, displays.get_or_insert_with(desktop::cg_display_bounds)) {
+                // Moved off every display by its app: parked again, a later restore would put
+                // it on the display. The off-screen check lets it go where it is
+                // ([`Self::leave_off_screen`]).
+                self.strays.remove(&id);
+                continue;
+            }
             // The user's choice only: focused now, and by a focus of theirs since our park
             // (macOS's focus at an un-minimize, or our own, counts for nothing).
             let is_focused = *focused.get_or_insert_with(focused_window) == Some(id);
@@ -3762,8 +3774,9 @@ impl Controller {
         if !self.can_build(ob, &list) {
             return;
         }
-        // Windows on another display are left alone; they wait until they show on the main one.
-        let shown = on_main_screen(&list, main.frame);
+        // Windows on another display are left alone; they wait until they show on the main one
+        // (and so do windows off every display: none is managed yet).
+        let shown = on_main_screen(&list, main.frame, |_| false);
         let z = windows::z_order(&list);
         let candidates: Vec<WindowMeta> = ob
             .windows()
@@ -3822,6 +3835,12 @@ impl Controller {
         }
         self.present();
         self.mark_dirty();
+    }
+
+    /// [`on_main_screen`] with the model's windows as the managed ones.
+    pub(super) fn shown_main(&self, list: &[windows::CgWindow], main: Rect) -> HashSet<u32> {
+        let m = self.model.as_ref();
+        on_main_screen(list, main, |id| m.is_some_and(|m| m.window(WindowId(id)).is_some()))
     }
 
     /// True unless a rule says to ignore the window (children always count).
@@ -3918,6 +3937,7 @@ impl Controller {
             self.foreign.clear();
             self.absent.clear();
             self.elsewhere.clear();
+            self.off_screen.clear();
         }
         frozen
     }
@@ -4100,7 +4120,7 @@ impl Controller {
     fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display, view: Option<ScreenView>) {
         let Some(m) = self.model.as_ref() else { return };
         let before = m.current_space(main.id);
-        let shown = on_main_screen(list, main.frame);
+        let shown = self.shown_main(list, main.frame);
         // Known windows' frames read fresh: the engine matches the screen to the model on
         // arrival (a parked window found shown is parked again, a shown one found parked is
         // brought back), so a frame missed by a notification must not mislead it.
@@ -4177,7 +4197,7 @@ impl Controller {
     /// missing).
     fn screen_view(&self, ob: &Observer, list: &[windows::CgWindow], main: Display) -> ScreenView {
         let Some(m) = self.model.as_ref() else { return (Vec::new(), Vec::new()) };
-        let shown = on_main_screen(list, main.frame);
+        let shown = self.shown_main(list, main.frame);
         let z = windows::z_order(list);
         let live = ob
             .windows()
@@ -4410,7 +4430,7 @@ impl Controller {
             return;
         }
         let shown = on_screen(&list);
-        let shown_main = on_main_screen(&list, main.frame);
+        let shown_main = self.shown_main(&list, main.frame);
         if self.active_shown_changed(&shown) {
             tracing::debug!("a shown window was hidden or came back: the strip looks again");
             self.strip_dirty = true;
@@ -4421,6 +4441,7 @@ impl Controller {
             self.on_found(ob, id);
         }
         self.leave_other_displays(ob, &shown, &shown_main);
+        self.leave_off_screen(ob, &list);
 
         let Some(m) = self.model.as_ref() else { return };
         let space = m.current_space(main.id);
@@ -4555,11 +4576,66 @@ impl Controller {
         }
     }
 
+    /// Managed windows its app moved off every display ([`off_screen_not_ours`]; one we
+    /// parked beyond the edges is not judged), listed so in two checks in a row, are let go
+    /// where they are ([`Model::window_went_off_screen`]): never parked, never brought back,
+    /// so no restore puts on a display a window its app keeps off them. They wait in
+    /// `unplaced` and come back as new windows once they show on the display. A user cannot
+    /// drag a window there (macOS keeps a title bar on screen), so no user's window is let go.
+    fn leave_off_screen(&mut self, ob: &Observer, list: &[windows::CgWindow]) {
+        let Some(m) = self.model.as_ref() else { return };
+        let displays = desktop::cg_display_bounds();
+        let away: Vec<u32> = list
+            .iter()
+            .filter(|w| w.onscreen && w.layer == 0 && m.window(WindowId(w.id)).is_some())
+            .filter(|w| off_screen_not_ours(w.bounds, &displays, true))
+            .map(|w| w.id)
+            .collect();
+        self.off_screen.retain(|id, _| away.contains(id));
+        let mut leave = Vec::new();
+        for id in away {
+            let n = self.off_screen.entry(id).or_insert(0);
+            *n += 1;
+            if *n >= SPACE_CHECKS {
+                leave.push(id);
+            }
+        }
+        if !leave.is_empty() {
+            // What a card press read no longer holds (the model forgets these windows).
+            self.pressed_obs = None;
+        }
+        for id in leave {
+            self.off_screen.remove(&id);
+            let Some(m) = self.model.as_mut() else { return };
+            let Some(w) = m.window(WindowId(id)) else { continue };
+            let at = list.iter().find(|l| l.id == id).map(|l| l.bounds).unwrap_or_default();
+            tracing::info!(id, %at, parked = w.parked, "window moved off every display by its app (not the user's: a headless or offscreen window); let go where it is, left alone until it shows on a display");
+            let group = if w.meta.role == WindowRole::Standard { m.group_of(WindowId(id)) } else { vec![id] };
+            let kept = self.parked_entries_of(&group);
+            let Some(m) = self.model.as_mut() else { return };
+            let (actions, forgotten) = m.window_went_off_screen(WindowId(id));
+            self.execute(ob, actions);
+            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+        }
+    }
+
     /// A window appeared after launch: the rules decide where it goes. One that is not on
     /// screen (another Space, minimized, app hidden; or any window while a full-screen app's
     /// Space shows) waits in `unplaced` until it shows.
     fn on_found(&mut self, ob: &mut Observer, id: u32) {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
+            return;
+        }
+        let displays = desktop::cg_display_bounds();
+        if let Some(w) = windows::describe(&[id]).into_iter().find(|w| w.onscreen && w.layer == 0)
+            && off_screen_not_ours(w.bounds, &displays, false)
+        {
+            // A headless browser's or an offscreen render window ([`on_main_screen`]): not the
+            // user's, and no sign its app is reopening windows. Taken in as new once it shows.
+            if self.unplaced.insert(id) {
+                tracing::info!(id, at = %w.bounds, "window off every display: not the user's (a headless or offscreen window); left alone until it shows on a display");
+            }
             return;
         }
         if let Some(bundle) = ob.window(id).and_then(|w| ob.bundle_id(w.pid)).map(str::to_string) {
@@ -4569,7 +4645,7 @@ impl Controller {
         self.flush_pending(ob);
         let list = windows::list_windows();
         let main = self.model.as_ref().map_or(Rect::default(), |m| m.main_display().frame);
-        let shown = on_main_screen(&list, main);
+        let shown = self.shown_main(&list, main);
         if self.frozen() || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
@@ -5728,12 +5804,20 @@ fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
 
 /// The windows on screen on the main display: [`on_screen`] minus those that show mostly on
 /// another display ([`on_other_display`]), which are left alone (docs/GUIDE.md: stages live on the
-/// main display only). `main` is the main display's frame.
-fn on_main_screen(list: &[windows::CgWindow], main: Rect) -> HashSet<u32> {
-    let others: Vec<Rect> = desktop::cg_display_bounds().into_iter().skip(1).collect();
+/// main display only), and minus those off every display ([`off_screen_not_ours`]: a headless
+/// browser's, an offscreen render window; `managed` tells the model's, whose parked frame
+/// beyond the edges stays in). `main` is the main display's frame.
+///
+/// The one gate every path that takes a window in goes through (a new window, the launch
+/// listing, an arrival on a Desktop and the restore riding on them): a window off every
+/// display waits in `unplaced` and is taken in as new only once it shows on the display.
+fn on_main_screen(list: &[windows::CgWindow], main: Rect, managed: impl Fn(u32) -> bool) -> HashSet<u32> {
+    let displays = desktop::cg_display_bounds();
+    let others = displays.get(1..).unwrap_or_default();
     list.iter()
         .filter(|w| w.onscreen && w.layer == 0)
-        .filter(|w| others.is_empty() || !on_other_display(w.bounds, main, &others))
+        .filter(|w| !off_screen_not_ours(w.bounds, &displays, managed(w.id)))
+        .filter(|w| others.is_empty() || !on_other_display(w.bounds, main, others))
         .map(|w| w.id)
         .collect()
 }

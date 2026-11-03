@@ -362,6 +362,8 @@ Some limits to know about:
 
 - Only the main screen is managed: windows on a second monitor are left alone. Every
   Desktop on the main screen has its own stages.
+- Windows an app keeps wholly off every screen, as headless browsers and test tools do, are
+  left alone: they get no stage and no card, and are never moved onto the screen.
 - Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
   jump when the motion ends. Their shadow is drawn like macOS's own and hands over to the
   window's as it takes its place, which can still show as a faint flicker at the shadow's
