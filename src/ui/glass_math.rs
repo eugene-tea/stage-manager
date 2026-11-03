@@ -23,6 +23,10 @@
 //! Safari card read alike 100 pt apart where the wallpaper beside it changed by 26 levels, so
 //! it is a mean over the thumbnail, not a local blur (a blur keeps a ramp a ramp).
 //!
+//! **The hover.** The card under the pointer (or a dragged card's target) draws its pictures
+//! at `[cards] hover_window_opacity` (`h`, 1: solid, as Apple's hovered card turns), eased
+//! with its growth and back on leave ([`Glass::picture`]); the under stays.
+//!
 //! **The backdrop** ([`Backdrop`]): the wallpaper as a small grid of mean colours (a summed
 //! table), so a thumbnail's mean is four lookups however large it is.
 
@@ -31,11 +35,14 @@ use crate::engine::geometry::Rect;
 /// Rec. 709 luma weights (the saturation's pivot, as Core Image's colour controls).
 const LUMA: [f64; 3] = [0.2126, 0.7152, 0.0722];
 
-/// `[cards] window_opacity`, `backdrop_saturation` and `backdrop_brightness`.
+/// `[cards] window_opacity`, `hover_window_opacity`, `backdrop_saturation` and
+/// `backdrop_brightness`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glass {
     /// A window's picture on a card (1: opaque, the glass off).
     pub opacity: f64,
+    /// The same on a card drawn grown (hovered, or a dragged card's target).
+    pub hover_opacity: f64,
     /// The under's saturation, of the wallpaper's (0 grey, 1 as it is).
     pub saturation: f64,
     /// The under's level, of the wallpaper's.
@@ -44,11 +51,18 @@ pub struct Glass {
 
 impl Glass {
     /// Apple's, as fitted (module notes).
-    pub const APPLE: Glass = Glass { opacity: 0.7, saturation: 0.5, brightness: 1.0 };
+    pub const APPLE: Glass = Glass { opacity: 0.7, hover_opacity: 1.0, saturation: 0.5, brightness: 1.0 };
 
     /// True when the cards let anything through.
     pub fn on(&self) -> bool {
         self.opacity < 1.0
+    }
+
+    /// A window's picture's opacity on a card drawn `grown` (hovered, or a dragged card's
+    /// target) or at rest. The card eases between the two with its growth, on the same curve
+    /// and time, so the glass and the size move as one.
+    pub fn picture(&self, grown: bool) -> f64 {
+        (if grown { self.hover_opacity } else { self.opacity }).clamp(0.0, 1.0)
     }
 
     /// The under for a mean wallpaper colour `mean` (0–1 a channel).
@@ -197,7 +211,7 @@ mod tests {
 
     #[test]
     fn the_under_keeps_the_luma_and_scales_the_colour_about_it() {
-        let g = Glass { opacity: 0.7, saturation: 0.5, brightness: 1.0 };
+        let g = Glass::APPLE;
         let wall = rgb(244.0, 93.0, 29.0);
         let u = g.under(wall);
         assert!((luma(u) - luma(wall)).abs() < 1e-9);
@@ -231,6 +245,34 @@ mod tests {
         let (page, wall) = (0.9, 0.3);
         let drawn = p * page + (1.0 - p) * (u * wall);
         assert!((drawn - Glass::APPLE.card([page; 3], [wall; 3])[0]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_hovered_card_turns_solid_and_its_rest_comes_back_on_leave() {
+        let g = Glass::APPLE;
+        assert_eq!((g.picture(false), g.picture(true)), (0.7, 1.0), "Apple's: solid when hovered");
+        let (page, under) = ([0.0; 3], [0.4; 3]);
+        assert_eq!(Glass { opacity: g.picture(true), ..g }.card(page, under), page, "the window alone: no wallpaper");
+        let off = Glass { hover_opacity: 0.7, ..g };
+        assert_eq!(off.picture(true), off.picture(false), "hover_window_opacity = window_opacity: no fade");
+        assert_eq!(Glass { hover_opacity: 1.5, ..g }.picture(true), 1.0, "clamped");
+    }
+
+    #[test]
+    fn a_ghost_leaves_a_card_at_its_look_drawn_mid_fade_and_a_solid_one_as_the_window() {
+        // The ghost starts from the picture's opacity as drawn at the click (the hover fade
+        // part way: 0.85), with the under in: exactly the card then.
+        let (p, u) = ghost_mix(1.0, 0.85);
+        let (page, wall) = (0.1, 0.6);
+        let drawn = p * page + (1.0 - p) * (u * wall);
+        let card = 0.85 * page + 0.15 * wall;
+        assert!((drawn - card).abs() < 1e-12, "no jump at the hand-over: {drawn} vs {card}");
+        // A solid card's ghost: the picture opaque from the start to the window; only the
+        // under, behind it, goes.
+        assert_eq!(ghost_mix(1.0, 1.0), (1.0, 1.0));
+        for amount in [0.75, 0.5, 0.25, 0.0] {
+            assert_eq!(ghost_mix(amount, 1.0).0, 1.0, "the picture never fades at {amount}");
+        }
     }
 
     #[test]

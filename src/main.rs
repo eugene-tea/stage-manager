@@ -628,6 +628,14 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugStripHover { at } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-strip-hover needs STAGE_MANAGER_TEST=1");
+                }
+                let mut shown = false;
+                DispatchQueue::main().exec_sync(|| shown = strip::debug_hover(at));
+                json!({ "ok": true, "shown": shown })
+            }
             Command::DebugExpose { which } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");

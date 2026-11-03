@@ -27,7 +27,8 @@
 //!   backdrop of [`card_glass`]). A card moved to another slot takes the colour there on a
 //!   short fade; a new picture of the wallpaper repaints the strip shown; another Desktop's
 //!   pane laid out ahead keeps its colours until it shows. No picture of the wallpaper:
-//!   opaque cards.
+//!   opaque cards. The card under the pointer (or a dragged card's target) eases to
+//!   `[cards] hover_window_opacity` (solid) with its growth, and back on leave.
 //! - **Level** (`[strip] level`): Apple's strip sits below windows, so a window moved over
 //!   it covers it (and auto-hide slides it away). It is lifted above windows only while a
 //!   window is dragged over it, while a card is dragged, and while the edge reveals it over
@@ -79,13 +80,13 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel,
     NSNormalWindowLevel, NSPanel, NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, NSValue};
+use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSTimer, NSValue};
 use objc2_quartz_core::{
     CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CASpringAnimation, CATextLayer,
     CATransaction, CATransform3D, CATransformLayer, NSValueCATransform3DAdditions, kCAAlignmentCenter, kCAAlignmentLeft,
@@ -307,6 +308,60 @@ pub fn strip_window() -> Option<(isize, Point)> {
         s.pane.panel.isVisible().then(|| (s.pane.panel.windowNumber(), Point::new(g.x, g.y)))
     })
     .flatten()
+}
+
+/// Test support (`ctl debug-strip-hover`): a mouse-moved event at `p` (global, top-left), or
+/// a mouse-exited one for `None`, handed to the strip pane's own view as AppKit hands it the
+/// pointer's: the pointer itself never moves, nothing is posted to the system. False when
+/// the strip is not shown. Main thread.
+pub fn debug_hover(p: Option<Point>) -> bool {
+    let target = with_strip(|s| {
+        let g = s.geometry.global;
+        s.pane.panel.isVisible().then(|| (s.pane.view.clone(), s.pane.panel.windowNumber(), g))
+    })
+    .flatten();
+    let Some((view, number, g)) = target else { return false };
+    let local = p.map_or(NSPoint::new(-1.0, -1.0), |p| NSPoint::new(p.x - g.x, p.y - g.y));
+    let at = view.convertPoint_toView(local, None);
+    let now = NSProcessInfo::processInfo().systemUptime();
+    match p {
+        Some(_) => {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::MouseMoved,
+                at,
+                NSEventModifierFlags::empty(),
+                now,
+                number,
+                None,
+                0,
+                0,
+                0.0,
+            );
+            if let Some(e) = event {
+                view.mouseMoved(&e);
+            }
+        }
+        None => {
+            // SAFETY: a null user-data pointer is allowed; nothing reads it.
+            let event = unsafe {
+                NSEvent::enterExitEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_trackingNumber_userData(
+                    NSEventType::MouseExited,
+                    at,
+                    NSEventModifierFlags::empty(),
+                    now,
+                    number,
+                    None,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if let Some(e) = event {
+                view.mouseExited(&e);
+            }
+        }
+    }
+    true
 }
 
 /// Whether the strip is mid-transition or a card is being dragged (a ready update waits for
@@ -1124,7 +1179,8 @@ enum Spot {
 /// panels themselves (`isOnActiveSpace`), never from the engine's synthetic Space ids.
 struct Pane {
     panel: Retained<NSPanel>,
-    _view: Retained<StripView>,
+    /// Its content view: the cards' layers and the pointer's events.
+    view: Retained<StripView>,
     root: Retained<CALayer>,
     /// The cards' perspective containers (each card whole: planes, icons, badge, name).
     cards_root: Retained<CALayer>,
@@ -1195,7 +1251,7 @@ impl Pane {
         let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()));
         Self {
             panel,
-            _view: view,
+            view,
             root,
             cards_root,
             cards: HashMap::new(),
@@ -2039,11 +2095,12 @@ impl Strip {
     /// The cards' glass as the style sets it.
     fn glass(&self) -> Glass {
         let c = &self.style.cards;
-        Glass { opacity: c.window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
+        Glass { opacity: c.window_opacity, hover_opacity: c.hover_window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
     }
 
     /// The glass behind `slot`'s picture on `layout`, from the wallpaper behind the thumbnail
-    /// as drawn (turned, at rest); `None` with the glass off or no picture of the wallpaper.
+    /// as drawn (turned, at rest), the picture at the card's opacity for its hover now
+    /// ([`Glass::picture`]); `None` with the glass off or no picture of the wallpaper.
     fn glass_at(&self, layout: &CardLayout, slot: &strip_layout::ThumbSlot) -> Option<GlassLook> {
         let glass = self.glass();
         if !glass.on() {
@@ -2053,7 +2110,7 @@ impl Strip {
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
-        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.opacity as f32 })
+        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.picture(self.grown(layout.stage)) as f32 })
     }
 
     /// The glass window `id` shows on the card of `layout` (its own thumbnail, else the
@@ -2067,6 +2124,22 @@ impl Strip {
             return look.clone();
         }
         self.glass_at(layout, slot)
+    }
+
+    /// The glass window `id` shows on the card of `layout` as drawn this moment: its look
+    /// ([`Self::card_glass_look`]) with the picture's opacity read from what Core Animation
+    /// draws, part way through a hover's fade included. What a snapshot growing from the card
+    /// starts with, so a click on a card turning solid hands it over without a jump.
+    pub(super) fn card_glass_drawn(&self, layout: &CardLayout, id: u32) -> Option<GlassLook> {
+        let mut look = self.card_glass_look(layout, id)?;
+        let slot = layout.thumbs.iter().find(|t| t.id == id).or_else(|| layout.thumbs.first())?;
+        if let Some(layers) = self.pane.cards.get(&layout.stage)
+            && let Some((_, image)) = layers.images.iter().find(|(w, _)| *w == slot.id)
+        {
+            // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+            look.opacity = unsafe { image.presentationLayer() }.map_or(image.opacity(), |l| l.opacity());
+        }
+        Some(look)
     }
 
     /// Paints the glass of `stage`'s card for where it is laid out: each plane's background
@@ -2784,14 +2857,16 @@ impl Strip {
         self.ease_growth([previous, card]);
     }
 
-    /// Eases each of `stages`' cards to its size now ([`Strip::card_scale`]) over
-    /// `[cards] hover_ms`.
-    fn ease_growth(&self, stages: [Option<u64>; 2]) {
+    /// Eases each of `stages`' cards to its size now ([`Strip::card_scale`]) and its glass
+    /// ([`Glass::picture`]) over `[cards] hover_ms`.
+    fn ease_growth(&mut self, stages: [Option<u64>; 2]) {
         self.ease_cards(stages, self.style.animation.seconds(self.style.cards.hover_ms));
     }
 
-    /// Eases each of `stages`' cards to its size now over `seconds` (0: at once).
-    fn ease_cards(&self, stages: [Option<u64>; 2], seconds: f64) {
+    /// Eases each of `stages`' cards to its size now and its glass to its hover's (a hovered
+    /// card turns solid as it grows) over `seconds` (0: at once), on the one curve, so the
+    /// two move as one. A press changes the size alone: the pressed card is still hovered.
+    fn ease_cards(&mut self, stages: [Option<u64>; 2], seconds: f64) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for stage in stages.into_iter().flatten() {
@@ -2800,6 +2875,9 @@ impl Strip {
             if let Some(layers) = self.pane.cards.get(&stage) {
                 ease_transform(&layers.card, t, seconds);
             }
+        }
+        for stage in stages.into_iter().flatten() {
+            self.paint_glass(stage, seconds);
         }
         CATransaction::commit();
     }

@@ -6,6 +6,9 @@
   you click a card: macOS's late word that an app became active no longer switches stages
   when that app is no longer in front, or when you have switched since. A ⌘-Tab or Dock
   click still brings its stage, only later.
+- The card under the pointer turns solid as it grows, as Apple's does, and lets the
+  wallpaper through again when the pointer leaves. `[cards] hover_window_opacity` sets how
+  solid; the same value as `window_opacity` keeps the hovered card see-through.
 - A window coming back from the corner no longer slides in from the bottom right in apps
   where an accessibility tool has turned on that app's enhanced interface (Chrome, for one):
   Stage Manager turns it off for a moment around its own moves and back on right after, as

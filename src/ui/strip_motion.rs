@@ -43,9 +43,12 @@
 //!   transition cuts a running one short, and takes over a cover still held.
 //! - **Glass.** A snapshot shrinking into a card takes on the card's glass on the flight's
 //!   spring (the picture to the card's opacity, the wallpaper's under in), and lands on the
-//!   card's look exactly; one growing from a card starts with its glass and leaves it as
-//!   the window, opaque ([`Ghost::spring_glass`], the look read from the card as painted:
-//!   [`Strip::card_glass_look`]).
+//!   card's look exactly; one growing from a card starts with its glass as drawn that
+//!   moment (a hovered card's solid, or part way through its hover fade:
+//!   [`Strip::card_glass_drawn`]) and leaves it as the window, opaque
+//!   ([`Ghost::spring_glass`], the look read from the card as painted:
+//!   [`Strip::card_glass_look`]). A card the snapshots land in under the pointer shows at
+//!   rest, then grows and turns solid together, as any card the pointer comes onto.
 //! - **A window dragged over the strip** is shown as a card-sized snapshot, turned like a
 //!   card, under the pointer (following every drag event through a global monitor); dropped
 //!   there, it shrinks into its new card's slot as the transition's outgoing snapshot.
@@ -540,8 +543,8 @@ impl Strip {
     }
 
     /// The planes incoming windows grow from, with the slot of the card each grows from:
-    /// their cards as drawn now (before the transition's snapshot replaces them), or the
-    /// ghost of a card just dragged out.
+    /// their cards as drawn now (before the transition's snapshot replaces them; their glass
+    /// too, a hovered card's solid), or the ghost of a card just dragged out.
     pub(super) fn incoming_starts(&mut self, t: &Transition) -> HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)> {
         self.place_overlay();
         let o = self.motion.overlay.origin();
@@ -554,7 +557,7 @@ impl Strip {
                     Some((lw, rect)) if lw == id => (Plane::window(rect, o, self.style.cards.corner_radius * self.m().k), None, None),
                     _ => match self.card_for(&self.layouts, w) {
                         Some((slot, l)) => match self.plane_on(l, id) {
-                            Some(p) => (p, Some(slot), self.card_glass_look(l, id)),
+                            Some(p) => (p, Some(slot), self.card_glass_drawn(l, id)),
                             None => (self.offscreen_plane(w.window.frame), None, None),
                         },
                         None => (self.offscreen_plane(w.window.frame), None, None),
