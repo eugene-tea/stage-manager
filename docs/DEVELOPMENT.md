@@ -159,8 +159,10 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 
 Exit status is 0 on success, 1 on an error reply and 2 when the app is not running. With
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
-Control shortcuts, and full-screen toggles for the scripted checks; each refuses to act
-outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs`.
+Control shortcuts, and full-screen toggles for the scripted checks, and `debug-stale-handle
+ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
+handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
+`src/platform/ctl.rs`.
 
 ## Other tools
 

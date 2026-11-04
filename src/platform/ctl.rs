@@ -17,7 +17,8 @@
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, `debug-close ID` closes one (its close button), `debug-notice show ID|dismiss` clicks
+//! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
+//! for dead until it is looked up afresh (round stale-handles), `debug-notice show ID|dismiss` clicks
 //! the desktop notice's menu entry for a window or its Dismiss, `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
 //! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
@@ -205,6 +206,13 @@ pub enum Command {
         /// The window id.
         id: u32,
     },
+    /// Takes our Accessibility handle on a `STAGE_MANAGER_ONLY` app's window for dead
+    /// (`kAXErrorInvalidUIElement`) until it is looked up afresh, as Music's was on 11-04
+    /// (round stale-handles); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
+    DebugStaleHandle {
+        /// The window id.
+        id: u32,
+    },
     /// Types one of Mission Control's shortcuts ("Mission Control", "Application windows",
     /// "Show Desktop") as the user's settings have it, or Escape (`None`) to leave Mission
     /// Control or App Exposé, at the HID tap (needs `STAGE_MANAGER_TEST=1`). Never changes the
@@ -363,6 +371,10 @@ impl Command {
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
+            }
+            ["debug-stale-handle", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugStaleHandle { id })
             }
             [] => Err("empty command".into()),
             _ => Err(format!("unknown command: {}", words.join(" "))),
@@ -849,6 +861,8 @@ mod tests {
         assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
         assert_eq!(Command::parse("debug-close 42"), Ok(Command::DebugClose { id: 42 }));
         assert!(Command::parse("debug-close").is_err());
+        assert_eq!(Command::parse("debug-stale-handle 42"), Ok(Command::DebugStaleHandle { id: 42 }));
+        assert!(Command::parse("debug-stale-handle").is_err());
         assert_eq!(Command::parse("debug-notice show 42"), Ok(Command::DebugNotice(Some(42))));
         assert_eq!(Command::parse("debug-notice dismiss"), Ok(Command::DebugNotice(None)));
         assert!(Command::parse("debug-notice show").is_err());

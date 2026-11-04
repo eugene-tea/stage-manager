@@ -28,6 +28,16 @@
 //! (each pass) are tested ([`Observer::reap_gone`]); a process that no longer exists goes the
 //! way of a termination notice. A termination notice for a pid we do not know is logged, and
 //! taken for the known apps of its bundle id whose process is gone.
+//!
+//! **Dead handles** (round stale-handles, [`crate::engine::stale_handle`]): a window's element
+//! can go stale while the window lives on (Music on 11-04: every call through it answered
+//! `kAXErrorInvalidUIElement` from the first, and no destroyed notification ever came for it).
+//! The controller looks such a window up afresh and notes, on `&self` paths, a fresh element
+//! ([`Observer::note_fresh`], used at once through [`Observer::element`]) or the window
+//! closed ([`Observer::note_closed`]); both are applied at the next [`Observer::take_events`]:
+//! the fresh element replaces the tracked one (its notifications moved over), and a closed
+//! window is dropped and reported destroyed, so if it comes back it is a new window. A focus
+//! naming a new element for a tracked window whose handle is dead takes it at once.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -233,6 +243,21 @@ pub struct Observer {
     /// Apps whose Accessibility calls failed or timed out: their process is tested at the next
     /// pass ([`Self::reap_gone`]). A cell: the failures are seen on `&self` paths.
     gone: RefCell<GoneCheck>,
+    /// Dead handles judged on `&self` paths, applied at the next [`Self::take_events`]
+    /// (module docs).
+    stale: RefCell<StaleNotes>,
+}
+
+/// What the controller found of windows whose handle died ([`Observer::note_fresh`],
+/// [`Observer::note_closed`]), and the test knob's poisoned handles.
+#[derive(Default)]
+struct StaleNotes {
+    /// Fresh elements for windows whose tracked one died.
+    fresh: HashMap<u32, AxElement>,
+    /// Windows judged closed.
+    closed: Vec<u32>,
+    /// Test only (`ctl debug-stale-handle`): handles taken for dead until a fresh one comes.
+    poisoned: HashSet<u32>,
 }
 
 /// The AX callback type, installed by the WM thread.
@@ -267,12 +292,150 @@ impl Observer {
             last_launch: None,
             vanished: Vanished::default(),
             gone: RefCell::new(GoneCheck::default()),
+            stale: RefCell::new(StaleNotes::default()),
         }
     }
 
-    /// The events since the last call.
+    /// The events since the last call (dead handles noted since are applied first: a window
+    /// judged closed is among them as destroyed).
     pub fn take_events(&mut self) -> Vec<WinEvent> {
+        self.apply_stale();
         std::mem::take(&mut self.events)
+    }
+
+    /// Window `id`'s element: a fresh one noted for it ([`Self::note_fresh`]), else the
+    /// tracked one.
+    pub fn element(&self, id: u32) -> Option<AxElement> {
+        if let Some(e) = self.stale.borrow().fresh.get(&id) {
+            return Some(e.clone());
+        }
+        self.windows.get(&id).map(|w| w.element.clone())
+    }
+
+    /// Window `id`'s handle was found dead and its app lists it afresh: `element` is its
+    /// handle from now on (applied to the tracked window at the next [`Self::take_events`]).
+    pub fn note_fresh(&self, id: u32, element: AxElement) {
+        let mut stale = self.stale.borrow_mut();
+        stale.poisoned.remove(&id);
+        stale.fresh.insert(id, element);
+    }
+
+    /// Window `id`'s handle was found dead and the window judged closed: it is dropped and
+    /// reported destroyed at the next [`Self::take_events`].
+    pub fn note_closed(&self, id: u32) {
+        let mut stale = self.stale.borrow_mut();
+        stale.fresh.remove(&id);
+        if !stale.closed.contains(&id) {
+            stale.closed.push(id);
+        }
+    }
+
+    /// True when window `id` was judged closed and is not dropped yet.
+    pub fn noted_closed(&self, id: u32) -> bool {
+        self.stale.borrow().closed.contains(&id)
+    }
+
+    /// Test only (`ctl debug-stale-handle`, `STAGE_MANAGER_TEST`): window `id`'s handle is
+    /// taken for dead ([`Self::poisoned`]) until a fresh one is noted. False when the window
+    /// is not tracked.
+    pub fn poison(&mut self, id: u32) -> bool {
+        if !self.windows.contains_key(&id) {
+            return false;
+        }
+        let mut stale = self.stale.borrow_mut();
+        stale.fresh.remove(&id);
+        stale.poisoned.insert(id);
+        true
+    }
+
+    /// True while window `id`'s handle is poisoned by the test knob ([`Self::poison`]).
+    pub fn poisoned(&self, id: u32) -> bool {
+        self.stale.borrow().poisoned.contains(&id)
+    }
+
+    /// Whether window `id`'s handle is dead now: a cheap read through it answers
+    /// `kAXErrorInvalidUIElement` (or the test knob poisoned it). Any other failure (a busy
+    /// app) is not taken for dead; the app is a suspect then ([`Self::suspect`]).
+    pub fn handle_dead(&self, id: u32) -> bool {
+        if self.poisoned(id) {
+            return true;
+        }
+        let Some(w) = self.windows.get(&id) else { return false };
+        let Some(element) = self.element(id) else { return false };
+        match element.role() {
+            Ok(_) => false,
+            Err(e) if e == AxError::INVALID_ELEMENT => true,
+            Err(_) => {
+                self.suspect(w.pid);
+                false
+            }
+        }
+    }
+
+    /// Window `id`'s tracked element becomes `element` (a fresh one for a dead one), its
+    /// window notifications moved over. Nothing when it is the same element.
+    fn replace_element(&mut self, id: u32, element: AxElement) {
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        if w.element == element {
+            return;
+        }
+        if let Some(app) = self.observed.get(&w.pid) {
+            for name in n::WINDOW_LEVEL {
+                let _ = app.observer.remove(&w.element, name);
+                if let Err(e) = app.observer.add(&element, name, refcon(w.pid)) {
+                    tracing::debug!(id, pid = w.pid, "a fresh handle: cannot register {name}: {e}");
+                }
+            }
+        }
+        w.element = element;
+        tracing::debug!(id, pid = w.pid, "a fresh handle replaces the dead one");
+    }
+
+    /// A focus named `element`, which matches no tracked element: when it is a tracked
+    /// window's (same window id) whose handle is dead, it is that window's handle from now on
+    /// (Music on 11-04 focused its window through a new element 3 s after ours died). The
+    /// window's id when it was.
+    fn refocus_dead(&mut self, pid: i32, element: &AxElement) -> Option<u32> {
+        let id = element.window_id().ok()?;
+        let tracked = self.windows.get(&id).filter(|w| w.pid == pid)?;
+        let dead = matches!(tracked.element.role(), Err(e) if e == AxError::INVALID_ELEMENT);
+        if !dead {
+            return None;
+        }
+        tracing::info!(id, pid, bundle = self.bundle_of(pid), "a window whose handle died is focused through a new one: its new handle is kept");
+        self.stale.borrow_mut().poisoned.remove(&id);
+        self.replace_element(id, element.clone());
+        Some(id)
+    }
+
+    /// Applies the dead handles noted since the last call (module docs).
+    fn apply_stale(&mut self) {
+        let (fresh, closed) = {
+            let mut stale = self.stale.borrow_mut();
+            if stale.fresh.is_empty() && stale.closed.is_empty() {
+                return;
+            }
+            (std::mem::take(&mut stale.fresh), std::mem::take(&mut stale.closed))
+        };
+        for (id, element) in fresh {
+            self.replace_element(id, element);
+        }
+        for id in closed {
+            self.stale.borrow_mut().poisoned.remove(&id);
+            let Some(w) = self.windows.remove(&id) else { continue };
+            if let Some(app) = self.observed.get(&w.pid) {
+                for name in n::WINDOW_LEVEL {
+                    let _ = app.observer.remove(&w.element, name);
+                }
+            }
+            tracing::info!(
+                id,
+                pid = w.pid,
+                bundle = self.bundle_of(w.pid),
+                "a window whose handle died is gone: let go (its app lists it no more and the window server shows it off screen, or not at all)"
+            );
+            self.events.push(WinEvent::Destroyed(id));
+        }
     }
 
     /// True while windows are observed.
@@ -782,7 +945,7 @@ impl Observer {
                 }
             }
             n::FOCUSED_WINDOW_CHANGED => {
-                let id = self.find_window(pid, &element).or_else(|| {
+                let id = self.find_window(pid, &element).or_else(|| self.refocus_dead(pid, &element)).or_else(|| {
                     let cg = cg_lookup();
                     let id = self.track_window(pid, element.clone(), &cg);
                     if let Some(id) = id {

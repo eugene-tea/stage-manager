@@ -1278,7 +1278,8 @@ impl Controller {
         let Some(first) = round_timeout(RESEND_ROUND_CAP, round.elapsed()).filter(|_| move_fits(round.elapsed())) else {
             return Resent::Deferred;
         };
-        let element = ob.window(e.id).map(|w| w.element.clone()).or_else(|| safety::registry_entry(e.id).map(|r| r.element));
+        // A fresh handle found for a dead one (stale-handles) wins over the tracked one.
+        let element = ob.element(e.id).or_else(|| safety::registry_entry(e.id).map(|r| r.element));
         let Some(element) = element else {
             tracing::debug!(id = e.id, "arrival: a move to send again has no element; given up");
             e.gave_up = true;

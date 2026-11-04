@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A window Stage Manager had lost its grip on (Music's, right after it launched) is found
+  again: it now parks with its stage instead of staying over the next one, and once you
+  close it, its card goes instead of showing its old picture and flying a ghost in at every
+  switch there.
 - When the Mac is very busy, windows no longer fly back and forth between two stages after
   you click a card: macOS's late word that an app became active no longer switches stages
   when that app is no longer in front, or when you have switched since. A ⌘-Tab or Dock

@@ -49,7 +49,12 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   Accessibility's moves), once per app per batch, on again at the batch's end, the WM tick,
   quit, the panic hook and SIGABRT. An activation notice the WM thread decides late
   (under load) acts only if it fired after our latest switch began and its app is still
-  frontmost (`engine::stale_activation`). Commands go main → WM through a
+  frontmost (`engine::stale_activation`). A move whose window handle answers
+  `kAXErrorInvalidUIElement` looks the window up afresh by id in its app's `AXWindows` and
+  tries once more with the new handle, kept; unlisted, off screen, on the Desktop shown, its
+  app not hidden and no hidden tab's signature, on two looks a second apart, it is closed and
+  let go as destroyed; the Space check looks at off-screen managed windows the same way
+  (`engine::stale_handle`). Commands go main → WM through a
   channel plus `CFRunLoopPerformBlock`; strip snapshots go WM → main via GCD.
 
 ## macOS settings drive behavior

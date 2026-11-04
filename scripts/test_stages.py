@@ -49,6 +49,10 @@ relaunch, and is never saved), enhanced (round enhanced-ui: the fixture's
 AXEnhancedUserInterface on, as an assistive client left Chrome's on 11-03, its windows slide to
 every frame Accessibility writes; switches away and back never list a fixture window between
 the park corner and its frame, its flag goes off and on once per switch, and is on at the end),
+handles (round stale-handles: our handle on a fixture window taken for dead, `ctl
+debug-stale-handle`: a switch away still parks it, found again in its app's list, and back
+brings it; then, its handle dead again and the window ordered out unlisted, as Music kept its
+closed window on 11-04, it leaves the model with its stage and card),
 slots (a dozen card clicks in a mixed order,
 one at a time and fast, each a strict swap with every snapshot starting on its window and
 landing on the card or window it aimed at; a click on the slot a transition is still landing
@@ -6466,8 +6470,118 @@ def phase_stale():
     all_onscreen("stale quit")
 
 
+def phase_handles():
+    """Round stale-handles (his 11-04: Music's window joined Safari's stage with a handle dead
+    from the first: it never parked, and once he closed it, Music keeping it ordered out, its
+    card kept the old picture and flew a ghost in at every switch there). Fixture 1 and 2 at
+    frames of different sizes (no hidden tab's signature), each in a stage; the app run with
+    destroyed notices ignored (STAGE_MANAGER_DROP_AX_DESTROYED: an ordered-out window's handle
+    dies with no notice, as Music's did) and our handle on Fixture 2 taken for dead on demand
+    (`ctl debug-stale-handle`).
+    1. Its handle dead, a switch away parks Fixture 2 (found again in its app's list, the park
+       tried with the new handle), and back brings it to its frame.
+    2. Parked, its handle dead again, the fixture orders it out (SIGWINCH: off screen, not in
+       its app's list, as Music's closed window): it leaves the model within 5 s, its stage and
+       card with it, logged once.
+    3. The fixture orders it in again (SIGINFO, in the park corner): it is brought out of the
+       corner (the watch any window let go while parked gets)."""
+    say("\n== handles: a window whose handle died is found again, or let go when closed ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml"):
+        path = os.path.join(HOME, f)
+        if os.path.exists(path):
+            os.remove(path)
+    start_fixture(2, "--frames", "80,80,640,420;260,160,560,380")
+    fixture = pids_of(FIX_EXE)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_DROP_AX_DESTROYED": "1"})
+    if not check(s is not None and bool(fixture), "handles: app up with two fixture windows"):
+        return
+    two = by_title(s).get("Fixture 2")
+    if not check(two is not None, "handles: Fixture 2 managed"):
+        return
+    wid = two["id"]
+    if [t for t in stage_titles(s).get(two["home"], []) if t != "Fixture 2"]:
+        do("new", wid)
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]],
+                   "Fixture 1 and 2 each in a stage")
+    if not check(s is not None, f"handles: two stages ({stage_titles(state())})"):
+        return
+    one_n, two_n = number_of(s, "Fixture 1"), number_of(s, "Fixture 2")
+    do("switch", two_n)
+
+    def listed():
+        wins, d = fixture_windows([FIX_ID])
+        w = next((w for w in wins if w["id"] == wid), None)
+        return w, d
+
+    def parked():
+        w, d = listed()
+        return w if w and is_parked(w["bounds"], d) else None
+
+    def shown():
+        w, d = listed()
+        return w if w and w["onscreen"] and not is_parked(w["bounds"], d) else None
+
+    say("-- 1. its handle dead, a switch away parks it and back brings it")
+    before = len(log_text())
+    r = do("debug-stale-handle", wid)
+    if not check(r.get("ok"), f"handles: our handle on Fixture 2 taken for dead ({r})"):
+        return
+    do("switch", one_n)
+    check(wait_until(parked, 4, "Fixture 2 to park") is not None, "handles: Fixture 2 parks though its handle was dead")
+    lines = log_text()[before:].splitlines()
+    found = [ln for ln in lines if "found again in its app's list" in ln and f"id={wid} " in ln]
+    check(len(found) == 1, f"handles: found again in its app's list, said once ({len(found)} lines)")
+    do("switch", two_n)
+    back = wait_until(shown, 4, "Fixture 2 to come back")
+    check(back is not None and close(back["bounds"], by_title(state())["Fixture 2"]["restore"]),
+          f"handles: Fixture 2 comes back to its frame ({fmt(back['bounds']) if back else None})")
+    consistent("handles: after the dead handle's switch away and back")
+
+    say("-- 2. parked, its handle dead, ordered out and unlisted: its card goes")
+    do("switch", one_n)
+    if not check(wait_until(parked, 4, "Fixture 2 to park") is not None, "handles: Fixture 2 parked again"):
+        return
+    stages_before = len(state()["stages"])
+    before = len(log_text())
+    check(do("debug-stale-handle", wid).get("ok"), "handles: our handle on Fixture 2 dead again")
+    t0 = time.time()
+    os.kill(fixture[0], signal.SIGWINCH)
+    away = wait_until(lambda: (lambda w: w if w and not w[0]["onscreen"] else None)(listed()), 3, "Fixture 2 off screen")
+    if not check(away is not None, "handles: Fixture 2 ordered out (listed off screen, its app lists it no more)"):
+        os.kill(fixture[0], signal.SIGINFO)
+        return
+
+    def gone():
+        x = ctl("state")
+        return x if x.get("ok") and not any(w["id"] == wid for w in x["windows"]) else None
+
+    after = wait_until(gone, 5, "Fixture 2 to leave the model")
+    took = time.time() - t0
+    check(after is not None, f"handles: the closed window left the model ({took:.1f} s after it was ordered out)")
+    if after is not None:
+        check(len(after["stages"]) == stages_before - 1, f"handles: its stage went with it ({stages_before} -> {len(after['stages'])})")
+        check(not any(not st["windows"] for st in after["stages"]), "handles: no empty stage (no card without a window)")
+    lines = log_text()[before:].splitlines()
+    let_go = [ln for ln in lines if "a window whose handle died is gone: let go" in ln and f"id={wid} " in ln]
+    check(len(let_go) == 1, f"handles: the log says so once ({len(let_go)} lines)")
+    left = [ln for ln in lines if "window left this Space" in ln and f"id={wid}" in ln]
+    check(not left, "handles: never taken for a window gone to another Desktop")
+
+    say("-- 3. ordered in again in the park corner: brought out of it")
+    os.kill(fixture[0], signal.SIGINFO)
+    out = wait_until(shown, 5, "Fixture 2 out of the park corner")
+    if out is None:
+        skip("handles: the window ordered in again is brought out of the corner", "it stays in the park corner (left to the quit)")
+    else:
+        check(True, f"handles: the window ordered in again is brought out of the corner ({fmt(out['bounds'])})")
+    stop_app()
+    all_onscreen("handles quit")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -6485,7 +6599,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
+             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
              "glass": phase_glass}[p]()
     finally:
         stop_app()

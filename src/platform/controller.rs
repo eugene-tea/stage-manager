@@ -131,6 +131,7 @@ mod dock_order;
 mod hide;
 mod notice;
 mod raise_order;
+mod stale;
 
 pub use notice::NoticeCommand;
 
@@ -1078,6 +1079,9 @@ pub struct Controller {
     /// zone, or whose park failed: parked again or adopted every tick
     /// ([`Self::reconcile_parked`], [`crate::engine::park_reconcile`]).
     strays: BTreeMap<u32, Stray>,
+    /// Windows whose Accessibility handle died: when each was looked up afresh, and those
+    /// judged closed once ([`stale`], [`crate::engine::stale_handle`]).
+    stale: stale::StaleHandles,
     /// When the user last focused each window (a focus event that was not our echo), kept
     /// until our next park of it: the reconciler adopts a parked window the user focused
     /// since it was parked, never one macOS focused at an un-minimize or our own focus
@@ -1256,6 +1260,7 @@ impl Controller {
             unparked: BTreeMap::new(),
             unrestored_checked: Instant::now(),
             strays: BTreeMap::new(),
+            stale: stale::StaleHandles::default(),
             user_focus: HashMap::new(),
             patch_fast_until: None,
             active_off_screen: BTreeSet::new(),
@@ -1440,7 +1445,9 @@ impl Controller {
                 match ob.window(id.0) {
                     Some(w) => {
                         let child = w.kind == WindowKind::Child;
-                        Some((id.0, ParkedEntry { element: w.element.clone(), restore, child, fitted }))
+                        // A fresh handle found for a dead one this batch, else the tracked one.
+                        let element = ob.element(id.0).unwrap_or_else(|| w.element.clone());
+                        Some((id.0, ParkedEntry { element, restore, child, fitted }))
                     }
                     None => {
                         let kept = safety::registry_entry(id.0)?;
@@ -1984,18 +1991,21 @@ impl Controller {
                 // A focus before this park is not the user's choice about where it is now.
                 self.user_focus.remove(&id);
             }
-            let result = match action {
+            if matches!(action, Action::Focus { .. }) {
+                self.echoes.touch_app(w.pid, now);
+            }
+            let pid = w.pid;
+            // A dead handle is looked up afresh and the move tried once more (stale-handles).
+            let element = ob.element(id).unwrap_or_else(|| w.element.clone());
+            let result = self.write_window(ob, id, pid, &element, |e| match action {
                 // An unpark (quit, stand-down) tries a busy app again quickly (6X).
-                Action::SetFrame { frame, .. } if retrying => safety::set_frame_retrying(&w.element, id, frame, leftovers::RESTORE_RETRY.budget),
-                Action::SetFrame { frame, .. } => w.element.set_frame(frame),
-                Action::Park { frame, .. } => w.element.set_position(frame.origin()),
-                Action::Raise { .. } => w.element.raise(),
-                Action::Focus { .. } => {
-                    self.echoes.touch_app(w.pid, now);
-                    ax_focus(&w.element, w.pid)
-                }
+                Action::SetFrame { frame, .. } if retrying => safety::set_frame_retrying(e, id, frame, leftovers::RESTORE_RETRY.budget),
+                Action::SetFrame { frame, .. } => e.set_frame(frame),
+                Action::Park { frame, .. } => e.set_position(frame.origin()),
+                Action::Raise { .. } => e.raise(),
+                Action::Focus { .. } => ax_focus(e, pid),
                 Action::StateChanged => Ok(()),
-            };
+            });
             if let Err(e) = result {
                 failed += 1;
                 tracing::warn!(id, ?action, "action failed: {e}");
@@ -2003,7 +2013,8 @@ impl Controller {
                 ob.suspect(w.pid);
                 if let Action::SetFrame { frame, .. } = action {
                     let child = w.kind == WindowKind::Child;
-                    self.restore_failed(id, ParkedEntry { element: w.element.clone(), restore: frame, child, fitted: None });
+                    let element = ob.element(id).unwrap_or_else(|| w.element.clone());
+                    self.restore_failed(id, ParkedEntry { element, restore: frame, child, fitted: None });
                 } else if matches!(action, Action::Park { .. }) {
                     self.park_failed(id, now);
                 }
@@ -2349,7 +2360,7 @@ impl Controller {
                 UnrestoredStep::Wait => {}
                 UnrestoredStep::Retry => {
                     u.tries += 1;
-                    let element = ob.window(id).map(|w| w.element.clone()).unwrap_or_else(|| u.entry.element.clone());
+                    let element = ob.element(id).unwrap_or_else(|| u.entry.element.clone());
                     let restore = u.entry.restore;
                     let set = |e: &AxElement, end: Instant| {
                         if force { safety::set_frame_retrying(e, id, restore, end.saturating_duration_since(Instant::now())) } else { e.set_frame(restore) }
@@ -2369,10 +2380,13 @@ impl Controller {
                             // At quit, the try only when it still fits after the lookup.
                             Ok(fresh) if !force || leftovers::leftover_fits(end.saturating_duration_since(Instant::now()), true) => {
                                 result = set(&fresh, end);
+                                // The observer keeps it too (stale-handles): every later move.
+                                ob.note_fresh(id, fresh.clone());
                                 u.entry.element = fresh;
                             }
                             Ok(fresh) => {
                                 tracing::warn!(id, "a stale element's lookup ran long: no time left to try the window afresh");
+                                ob.note_fresh(id, fresh.clone());
                                 u.entry.element = fresh;
                             }
                             Err(why) => tracing::debug!(id, "a stale element's lookup: {why}"),
@@ -4498,6 +4512,8 @@ impl Controller {
         }
         self.leave_other_displays(ob, &shown, &shown_main);
         self.leave_off_screen(ob, &list);
+        // A managed window off screen whose handle died: found again, or let go if closed.
+        self.check_stale_handles(ob, &list);
 
         let Some(m) = self.model.as_ref() else { return };
         let space = m.current_space(main.id);
@@ -4531,6 +4547,8 @@ impl Controller {
             .filter(standard)
             .filter(|w| w.space == space && !shown.contains(&w.meta.id.0))
             .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
+            // Judged closed just now (its handle dead): it goes as destroyed, not elsewhere.
+            .filter(|w| !ob.noted_closed(w.meta.id.0))
             .map(|w| (w.meta.id.0, w.meta.pid))
             .collect();
         // In full screen, a window is on a Space of its own but still this Desktop's: it is
@@ -5532,6 +5550,19 @@ impl Controller {
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
             }
+            Command::DebugStaleHandle { id } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-stale-handle needs STAGE_MANAGER_TEST=1" });
+                }
+                match test_window(ob, id, "debug-stale-handle") {
+                    Ok(_) if ob.poison(id) => {
+                        tracing::info!(id, "debug-stale-handle: our handle is taken for dead until looked up afresh");
+                        json!({ "ok": true })
+                    }
+                    Ok(_) => json!({ "ok": false, "error": format!("window {id} is not tracked") }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            }
             Command::Dump => {
                 let mut dump = ob.dump();
                 dump["spaces"] = self.spaces_json();
@@ -5739,6 +5770,8 @@ impl Controller {
         // The windows a restart brought back on another Desktop (round desktop-notice).
         state["restore"]["notice"] = self.notice_json();
         state["strays"] = Value::Array(strays);
+        // Windows whose handle died judged closed once, waiting for a second look.
+        state["stale_closing"] = json!(self.stale.waiting());
         // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
         state["strip_gap"] = json!(m.strip().iter().position(|c| c.gap));
         state["strip_order"] = json!(format!("{:?}", m.options().strip.order));

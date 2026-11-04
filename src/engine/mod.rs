@@ -37,6 +37,7 @@ pub mod show_desktop;
 pub mod slide_hold;
 pub mod solar_settle;
 pub mod stale_activation;
+pub mod stale_handle;
 pub mod sliver;
 pub mod vanished;
 pub mod stage_area;
