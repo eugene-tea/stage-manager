@@ -25,7 +25,10 @@
 //! - **not listed, and on screen**: kept (never drop a visible window), looked at again;
 //! - **not listed, off screen or not listed by the window server either**: closed, unless it
 //!   may be out of reach for a reason: on a Desktop not shown (`AXWindows` lists only the
-//!   current Space's windows for most apps), its app hidden, or a hidden tab (8J: off screen
+//!   current Space's windows for most apps), on a full-screen Space of its own (the model
+//!   keeps such a window on its Desktop, and no public API names a window's Space: the window
+//!   server listing it off screen at about a display's size is the evidence,
+//!   [`on_full_screen_space`]), its app hidden, or a hidden tab (8J: off screen
 //!   beside a same-size window of its app, [`super::hidden_tab::may_be_hidden_tab`]); those
 //!   are kept ([`Keep`]).
 //!
@@ -40,6 +43,9 @@
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+use super::fullscreen;
+use super::geometry::Rect;
 
 /// Two looks judging a dead handle's window closed at least this far apart let it go.
 pub const LOOK_APART: Duration = Duration::from_millis(700);
@@ -80,6 +86,8 @@ pub struct Facts {
     pub server: Server,
     /// The model has it on a Desktop not shown.
     pub other_space: bool,
+    /// It may be on a full-screen Space of its own ([`on_full_screen_space`]).
+    pub full_screen: bool,
     /// Its app is hidden (by the user or by us), or whether it is cannot be told.
     pub app_hidden: bool,
     /// It may be a hidden tab: off screen beside a same-size window of its app (8J).
@@ -95,6 +103,8 @@ pub enum Keep {
     OnScreen,
     /// On a Desktop not shown.
     OtherSpace,
+    /// Perhaps on a full-screen Space of its own.
+    FullScreen,
     /// Its app is hidden.
     AppHidden,
     /// Perhaps a hidden tab.
@@ -108,6 +118,7 @@ impl Keep {
             Self::NoAnswer => "its app did not answer",
             Self::OnScreen => "it is on screen",
             Self::OtherSpace => "its Desktop is not shown",
+            Self::FullScreen => "it may be on a full-screen Space of its own",
             Self::AppHidden => "its app is hidden",
             Self::MaybeTab => "it may be a hidden tab",
         }
@@ -136,6 +147,8 @@ pub fn judge(f: Facts) -> Judgement {
         Judgement::Keep(Keep::OnScreen)
     } else if f.other_space {
         Judgement::Keep(Keep::OtherSpace)
+    } else if f.full_screen {
+        Judgement::Keep(Keep::FullScreen)
     } else if f.app_hidden {
         Judgement::Keep(Keep::AppHidden)
     } else if f.maybe_tab {
@@ -143,6 +156,14 @@ pub fn judge(f: Facts) -> Judgement {
     } else {
         Judgement::Gone
     }
+}
+
+/// Whether a window the window server lists off screen at `bounds` may be on a full-screen
+/// Space of its own: about the size of one of `displays` (most of it: some displays keep a
+/// band at the top, [`fullscreen::could_be_fullscreen`]). Kept on doubt: a closed window of
+/// that size keeps its card, never a full-screen window loses it.
+pub fn on_full_screen_space(bounds: Rect, displays: &[Rect]) -> bool {
+    displays.iter().any(|&d| fullscreen::could_be_fullscreen(bounds, d))
 }
 
 /// When each window's app was last asked for its windows ([`LOOK_AGAIN`]).
@@ -223,7 +244,14 @@ mod tests {
     /// Music's window on 11-04 after he closed it: its app lists no window, the window server
     /// lists it off screen, on the Desktop shown, Music not hidden, no window of its size.
     fn closed() -> Facts {
-        Facts { lookup: Lookup::NotListed, server: Server::OffScreen, other_space: false, app_hidden: false, maybe_tab: false }
+        Facts {
+            lookup: Lookup::NotListed,
+            server: Server::OffScreen,
+            other_space: false,
+            full_screen: false,
+            app_hidden: false,
+            maybe_tab: false,
+        }
     }
 
     #[test]
@@ -252,6 +280,20 @@ mod tests {
         assert_eq!(judge(Facts { app_hidden: true, ..closed() }), Judgement::Keep(Keep::AppHidden));
         assert_eq!(judge(Facts { maybe_tab: true, ..closed() }), Judgement::Keep(Keep::MaybeTab));
         assert_eq!(judge(Facts { lookup: Lookup::NoAnswer, ..closed() }), Judgement::Keep(Keep::NoAnswer));
+    }
+
+    /// A full-screen window lives on a Space of its own: off screen from its Desktop, not in
+    /// its app's list there, the model still placing it on the Desktop shown. Never let go.
+    #[test]
+    fn a_full_screen_window_with_a_dead_handle_is_kept() {
+        let displays = [Rect::new(0.0, 0.0, 2560.0, 1440.0), Rect::new(2560.0, 0.0, 1920.0, 1080.0)];
+        assert!(on_full_screen_space(Rect::new(0.0, 0.0, 2560.0, 1440.0), &displays));
+        assert!(on_full_screen_space(Rect::new(0.0, 32.0, 2560.0, 1408.0), &displays), "a display's band left at the top");
+        assert!(on_full_screen_space(Rect::new(2560.0, 0.0, 1920.0, 1080.0), &displays), "on another display");
+        assert!(!on_full_screen_space(Rect::new(1367.0, 313.0, 1193.0, 921.0), &displays), "Music's closed window on 11-04");
+        let full = Facts { full_screen: true, ..closed() };
+        assert_eq!(judge(full), Judgement::Keep(Keep::FullScreen));
+        assert_eq!(judge(Facts { server: Server::Unlisted, ..full }), Judgement::Keep(Keep::FullScreen));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use super::Controller;
 use crate::engine::hidden_tab::{self, Candidate, TabListed};
 use crate::engine::model::WindowId;
 use crate::engine::stale_handle::{self as sh, Facts, Judgement, Keep, Lookup, Server};
-use crate::platform::apps;
+use crate::platform::{apps, desktop};
 use crate::platform::ax::{AxElement, AxError, AxResult};
 use crate::platform::observe::Observer;
 use crate::platform::windows::{self, CgWindow};
@@ -143,15 +143,21 @@ impl Controller {
                 let other_space = model.and_then(|m| m.window(WindowId(id)).map(|w| (m, w))).is_none_or(|(m, w)| {
                     !w.sticky && w.space != m.current_space(m.main_display().id)
                 });
+                // A full-screen window is on a Space of its own: the window server's bounds
+                // are the only public evidence (no public API names a window's Space).
+                let full_screen = list.iter().find(|w| w.id == id).is_some_and(|w| {
+                    !w.onscreen && sh::on_full_screen_space(w.bounds, &desktop::cg_display_bounds())
+                });
                 Facts {
                     lookup,
                     server: server_of(list, id),
                     other_space,
+                    full_screen,
                     app_hidden: self.counts_hidden(pid) || apps::is_hidden(pid) != Some(false),
                     maybe_tab: maybe_tab(list, id),
                 }
             }
-            _ => Facts { lookup, server: Server::Unlisted, other_space: false, app_hidden: false, maybe_tab: false },
+            _ => Facts { lookup, server: Server::Unlisted, other_space: false, full_screen: false, app_hidden: false, maybe_tab: false },
         };
         match sh::judge(facts) {
             Judgement::Refresh => {
