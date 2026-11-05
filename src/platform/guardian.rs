@@ -159,8 +159,9 @@ pub fn run(args: &[String]) -> ExitCode {
         Some(v) => safety::assume_visible_frame(v),
         None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide parked windows from the scan)"),
     }
-    // Windows may sit at any corner the app parked them in this run.
+    // Windows may sit at any corner the app parked them in this run, on any of its screens.
     safety::assume_corners(&file.corners);
+    safety::assume_zones(&file.zones);
     // Apps the app hid instead of parking: shown again first (their windows sit at their own
     // frames, or parked, which the scan and the watch below cover).
     if !file.hidden.is_empty() {

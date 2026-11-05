@@ -186,7 +186,8 @@ mod app {
         thumbnail_interval_ms: Option<u64>,
         /// Window captures were refused when the menu was last drawn.
         capture_refused: bool,
-        display: Option<Display>,
+        /// Every display as last sent to the WM thread, the main one first.
+        displays: Vec<Display>,
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
         _appearance: WorkspaceObservers,
@@ -292,23 +293,30 @@ mod app {
             }
         }
 
+        /// Every display (the main one first), sent when any changes: added, removed, moved,
+        /// resized, or its park corner moved (round displays).
         fn send_display_if_changed(&mut self) {
             let Some(mtm) = MainThreadMarker::new() else { return };
-            let Some(main) = desktop::main_display(mtm) else { return };
-            if self.display != Some(main) {
-                tracing::info!(frame = %main.frame, visible = %main.visible, corner = ?main.corner, "main display");
-                let choice = desktop::park_corner(main.frame, main.visible);
+            let displays = desktop::displays(mtm);
+            if displays.is_empty() || self.displays == displays {
+                return;
+            }
+            for (i, d) in displays.iter().enumerate() {
+                tracing::info!(id = d.id.0, key = %d.key.text(), frame = %d.frame, visible = %d.visible, corner = ?d.corner, main = i == 0, "display");
+                let others: Vec<_> = displays.iter().filter(|o| o.id != d.id).map(|o| o.frame).collect();
+                let choice = stage_manager::engine::park::choose_corner(d.frame, d.visible, &others);
                 if choice.overlap > 0.0 {
                     tracing::warn!(
+                        id = d.id.0,
                         corner = ?choice.corner,
                         overlap = choice.overlap.round(),
-                        "every corner of the main display has another display beyond it: parked windows may show there; this corner overlaps the least"
+                        "every corner of this display has another display beyond it: parked windows may show there; this corner overlaps the least"
                     );
                 }
-                self.display = Some(main);
-                self.wm.send(WmCommand::Displays(vec![main]));
-                stage_manager::ui::corner_patch::display_changed(mtm);
             }
+            self.displays = displays.clone();
+            self.wm.send(WmCommand::Displays(displays));
+            stage_manager::ui::corner_patch::display_changed(mtm);
         }
 
         fn on_ui(&mut self, update: UiUpdate) {
@@ -879,7 +887,7 @@ mod app {
             hotkeys: None,
             thumbnail_interval_ms: None,
             capture_refused: false,
-            display: None,
+            displays: Vec::new(),
             _workspace: workspace,
             _spaces: spaces,
             _appearance: appearance,

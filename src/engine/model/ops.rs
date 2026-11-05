@@ -1331,8 +1331,17 @@ impl Model {
     /// still active and the revealed stage is still the most recent, brings the stage back.
     /// A no-op when the active stage is empty and nothing is pending.
     pub fn reveal_desktop(&mut self, obs: &Observation) -> Vec<Action> {
+        self.reveal_desktop_on(None, obs)
+    }
+
+    /// [`Model::reveal_desktop`] on the Space `display` shows (a wallpaper click on that
+    /// screen); `None`: the focused window's display, else the main one.
+    pub fn reveal_desktop_on(&mut self, display: Option<DisplayId>, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let space = self.current_space_for(obs);
+        let space = match display {
+            Some(d) => self.current_space(d),
+            None => self.current_space_for(obs),
+        };
         let current = self.ensure_active(space);
         let current_empty = self.stage(current).is_some_and(|s| s.windows.is_empty());
         if let Some(r) = self.revealed.get(&space).copied()

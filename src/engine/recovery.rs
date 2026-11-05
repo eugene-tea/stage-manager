@@ -50,6 +50,18 @@ pub struct LiveWindow {
     pub frame: Rect,
 }
 
+/// A secondary display's park zone (round displays: every screen parks its own inactive
+/// stages at its own corner): its full and visible frames and the corners that count there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParkZone {
+    /// The display's full frame.
+    pub frame: Rect,
+    /// Its visible frame (no menu bar, no Dock).
+    pub visible: Rect,
+    /// The park corners that count there (the arrangement's choice, and any used this run).
+    pub corners: Vec<Corner>,
+}
+
 /// The main display as the scan sees it, plus every other display's frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanDisplays {
@@ -63,6 +75,9 @@ pub struct ScanDisplays {
     /// choice now ([`choose_corner`]) and every corner the app used this run (its parked
     /// file), sorted, no duplicates.
     pub corners: Vec<Corner>,
+    /// The other managed displays' park zones (round displays): a window in one of them is
+    /// parked there, as one in the main display's zone is.
+    pub zones: Vec<ParkZone>,
 }
 
 impl ScanDisplays {
@@ -73,12 +88,19 @@ impl ScanDisplays {
         corners.extend(used);
         corners.sort();
         corners.dedup();
-        Self { main, visible, others, corners }
+        Self { main, visible, others, corners, zones: Vec::new() }
     }
 
-    /// True when `frame` is in the main display's park zone at any corner that counts
-    /// ([`super::park::is_parked_in_at`], slivers included), whatever shows on other
-    /// displays. For frames we put windows at (never a sliver) and windows we know.
+    /// The same, with the other managed displays' park zones (round displays).
+    pub fn with_zones(mut self, zones: Vec<ParkZone>) -> Self {
+        self.zones = zones;
+        self
+    }
+
+    /// True when `frame` is in a park zone at any corner that counts (the main display's,
+    /// [`super::park::is_parked_in_at`], slivers included, or another managed display's
+    /// own), whatever shows on other displays. For frames we put windows at (never a
+    /// sliver) and windows we know.
     pub fn parks(&self, frame: Rect) -> bool {
         self.parks_with(frame, Slivers::Count)
     }
@@ -86,6 +108,22 @@ impl ScanDisplays {
     /// [`Self::parks`], counting slivers or not ([`Slivers`]).
     pub fn parks_with(&self, frame: Rect, slivers: Slivers) -> bool {
         self.corners.iter().any(|c| is_parked_in_at_with(frame, self.main, self.visible, *c, slivers))
+            || self.zone_of_with(frame, slivers).is_some()
+    }
+
+    /// The secondary display whose park zone holds `frame`, if one does.
+    pub fn zone_of(&self, frame: Rect) -> Option<&ParkZone> {
+        self.zone_of_with(frame, Slivers::Count)
+    }
+
+    fn zone_of_with(&self, frame: Rect, slivers: Slivers) -> Option<&ParkZone> {
+        self.zones.iter().find(|z| z.corners.iter().any(|c| is_parked_in_at_with(frame, z.frame, z.visible, *c, slivers)))
+    }
+
+    /// The visible frame a window at `frame` belongs to: the secondary display whose park
+    /// zone holds it, else the main display's.
+    pub fn visible_for(&self, frame: Rect) -> Rect {
+        self.zone_of(frame).map_or(self.visible, |z| z.visible)
     }
 }
 
@@ -123,7 +161,10 @@ pub fn is_stranded(frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
     if (tiny && known != Known::Registered) || !displays.parks_with(frame, known.slivers()) {
         return false;
     }
-    !displays.others.iter().any(|d| {
+    // Parked at a secondary display's own corner: what shows of it on that display is the
+    // sliver macOS keeps, not a window meaningfully on another display.
+    let own = displays.zone_of_with(frame, known.slivers()).map(|z| z.frame);
+    !displays.others.iter().filter(|d| Some(**d) != own).any(|d| {
         frame
             .intersect(d)
             .is_some_and(|seen| seen.w > PARK_MARGIN || seen.h > PARK_MARGIN)
@@ -281,6 +322,10 @@ pub struct ParkedFile {
     /// of earlier versions (bottom-right only).
     #[serde(default)]
     pub corners: Vec<Corner>,
+    /// The other managed displays' park zones (round displays, [`ScanDisplays::zones`]);
+    /// empty in files of earlier versions.
+    #[serde(default)]
+    pub zones: Vec<ParkZone>,
     /// Apps we hid (`[windows] hide_parked_apps`): the guardian unhides each one still
     /// running under the same bundle id. Empty in files of earlier versions.
     #[serde(default)]
@@ -307,7 +352,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), hidden: Vec::new() },
+            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new(), hidden: Vec::new() },
         })
     }
 }
@@ -329,9 +374,11 @@ pub struct Listed {
 
 /// A restore frame clamped onto the visible display and never in a park zone.
 pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
-    let mut f = clamp_to_visible(frame, displays.visible);
+    // On the display whose park zone holds it (a secondary one's, else the main).
+    let visible = displays.visible_for(frame);
+    let mut f = clamp_to_visible(frame, visible);
     if displays.parks(f) {
-        f = clamp_to_visible(Rect::new(f64::NAN, 0.0, 0.0, 0.0), displays.visible);
+        f = clamp_to_visible(Rect::new(f64::NAN, 0.0, 0.0, 0.0), visible);
     }
     f
 }
@@ -352,6 +399,7 @@ mod tests {
             main: MAIN,
             visible: VISIBLE,
             others: vec![],
+            zones: vec![],
         }
     }
 
@@ -625,12 +673,13 @@ mod tests {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
             corners: vec![Corner::BottomLeft],
+            zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
             hidden: vec![HiddenApp { pid: 12, bundle: "com.example.a".into() }],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         let old = serde_json::to_vec(&f.windows).unwrap_or_default();
-        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], hidden: vec![], ..f.clone() }));
+        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], zones: vec![], hidden: vec![], ..f.clone() }));
         // A file of the version before corners: bottom-right only.
         let before = br#"{"visible":null,"windows":[]}"#;
         assert_eq!(ParkedFile::from_json(before).ok().map(|f| f.corners), Some(vec![]));

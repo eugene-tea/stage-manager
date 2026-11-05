@@ -859,7 +859,7 @@ impl Controller {
         let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
         let list = windows::list_windows();
         let overview = self.look_for_overview(&list, main.frame, now) || self.overview.holds_arrival(now);
-        let shown = self.shown_main(&list, main.frame);
+        let shown = self.shown_managed(&list);
         let listed = self.ahead.as_ref().map(|s| listed_for_arrival(&list, s.ahead.window.0, &shown, main.frame));
         match notice_step(overview, listed) {
             NoticeStep::Nothing | NoticeStep::Keep => return,
@@ -904,7 +904,7 @@ impl Controller {
         let Some(standard) = m.resolve_standard(id) else { return false };
         let target = m.space_of(standard);
         let elsewhere = |w: u32| m.space_of(WindowId(w)).is_some_and(|s| Some(s) != target);
-        let shown = self.shown_main(list, main);
+        let shown = self.shown_managed(list);
         if !listed_for_arrival(list, standard.0, &shown, main) || display_covered(list, main, elsewhere) {
             return false;
         }
@@ -1521,6 +1521,7 @@ impl Controller {
             active_stage: m.active_stage_in(space).map(|s| s.0),
             style: self.style.clone(),
             space: space.0,
+            display: m.main_display().id.0,
             away: true,
             ..StripSnapshot::default()
         });

@@ -54,6 +54,9 @@ pub struct StripSnapshot {
     /// has its own strip: when it changes, the strip drops the old cards at once and shows
     /// itself on the Space now shown.
     pub space: u64,
+    /// The display whose strip this is (its `CGDirectDisplayID`; 0: the main display).
+    /// Every display has a strip of its own (round displays).
+    pub display: u32,
     /// The shown Space is a full-screen app's: no strip there.
     pub fullscreen: bool,
     /// The active stage's standard windows, front to back, at their live frames: the strip

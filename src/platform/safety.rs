@@ -65,7 +65,8 @@ use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
-use crate::engine::recovery::{self, HiddenApp, Known, LiveWindow, ParkedFile, Registered, ScanDisplays};
+use crate::engine::model::Display;
+use crate::engine::recovery::{self, HiddenApp, Known, LiveWindow, ParkZone, ParkedFile, Registered, ScanDisplays};
 use crate::logbook::counters::{self, Count};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
@@ -245,6 +246,16 @@ pub fn unhide_apps(reason: &str, apps: impl IntoIterator<Item = HiddenApp>) -> u
 /// The main display's visible frame as last reported (for scans in this process).
 static VISIBLE: Mutex<Option<Rect>> = Mutex::new(None);
 
+/// The other managed displays' park zones as last reported (round displays; the
+/// guardian's: those the app's parked file names), so a window parked at a secondary
+/// display's corner counts as parked in every scan.
+static ZONES: Mutex<Vec<ParkZone>> = Mutex::new(Vec::new());
+
+/// The other managed displays' park zones (or those named by the guardian's parked file).
+pub(crate) fn zones_used() -> Vec<ParkZone> {
+    ZONES.lock().map(|z| z.clone()).unwrap_or_default()
+}
+
 /// Every park corner used this run (the guardian's: those the app's parked file names), so a
 /// window parked at a corner the arrangement no longer picks still counts as parked.
 static CORNERS: Mutex<BTreeSet<Corner>> = Mutex::new(BTreeSet::new());
@@ -367,7 +378,7 @@ fn lock_written() -> MutexGuard<'static, Option<ParkedFile>> {
 fn write_parked_file(listed: &[Registered]) {
     let hidden = hidden_now();
     let empty = listed.is_empty() && hidden.is_empty();
-    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), hidden };
+    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), hidden };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
@@ -435,6 +446,48 @@ fn registry_forget(ids: &[u32]) {
         registered(&guard)
     };
     write_parked_file(&listed);
+}
+
+/// Remembers every managed display's park zone (the main one first: its visible frame and
+/// corner, [`set_main_display`]; the others as zones of their own) for the park test and
+/// clamping in scans, and writes them to the parked file for the guardian. A display's
+/// corners add up over the run, as the main display's do.
+pub fn set_displays(displays: &[Display]) {
+    let Some(main) = displays.first() else { return };
+    let mut zones = zones_used();
+    for d in &displays[1..] {
+        match zones.iter_mut().find(|z| z.frame == d.frame) {
+            Some(z) => {
+                z.visible = d.visible;
+                if !z.corners.contains(&d.corner) {
+                    z.corners.push(d.corner);
+                }
+            }
+            None => zones.push(ParkZone { frame: d.frame, visible: d.visible, corners: vec![d.corner] }),
+        }
+    }
+    let changed = ZONES.lock().is_ok_and(|mut z| {
+        let changed = *z != zones;
+        *z = zones;
+        changed
+    });
+    set_main_display(main.visible, main.corner);
+    if changed {
+        let listed = registered(&lock_registry());
+        write_parked_file(&listed);
+    }
+}
+
+/// Takes the other displays' park zones without writing a parked file (the guardian, from
+/// the app's parked file).
+pub fn assume_zones(zones: &[ParkZone]) {
+    if let Ok(mut z) = ZONES.lock() {
+        for zone in zones {
+            if !z.contains(zone) {
+                z.push(zone.clone());
+            }
+        }
+    }
 }
 
 /// Remembers the main display's visible frame and park corner for the park test and
@@ -959,7 +1012,7 @@ pub(crate) fn scan_displays() -> ScanDisplays {
     let visible = visible_frame()
         .filter(|v| main.contains_rect(v))
         .unwrap_or_else(|| Rect::new(main.x, main.y + MENU_BAR_GUESS, main.w, main.h - MENU_BAR_GUESS));
-    ScanDisplays::new(main, visible, bounds, corners_used())
+    ScanDisplays::new(main, visible, bounds, corners_used()).with_zones(zones_used())
 }
 
 /// Which windows a recovery scan looks at.
