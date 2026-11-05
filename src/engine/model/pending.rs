@@ -31,7 +31,7 @@
 use std::collections::HashSet;
 
 use super::pool::Scope;
-use super::{Action, DisplayId, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
+use super::{Action, DisplayId, Home, Kin, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
 use crate::engine::restore::{Restore, Summary, clamped_at_corner, slot_for};
@@ -230,19 +230,29 @@ impl Model {
         self.after_restart().then(|| self.restore_summary(seconds))
     }
 
-    /// True when saved frames apply on the main display now (its size is the saved one, or
-    /// the file did not say); logs once why not.
-    pub(crate) fn saved_frames_fit(&mut self) -> bool {
-        let main = self.main_display().frame;
-        let fits = self.restore.frames_fit(main.w, main.h);
+    /// True when the frames saved with Desktop `saved` (none: the file's main display) apply
+    /// on `display`: that Desktop was saved on a screen of this identity and size
+    /// ([`crate::engine::restore::Restore::frames_fit_on`]); with no screen saved, on the
+    /// main display at the size the file names. Logged once a run when they do not.
+    pub(crate) fn saved_frames_fit_for(&mut self, display: DisplayId, saved: Option<u64>) -> bool {
+        let d = *self.display(display);
+        let main = d.id == self.main_display().id;
+        let fits = match saved {
+            Some(id) => self.restore.frames_fit_on(id, &d.key.text(), d.frame.w, d.frame.h, main),
+            None => main && self.restore.frames_fit(d.frame.w, d.frame.h),
+        };
         if !fits && !std::mem::replace(&mut self.restore.frames_noted, true) {
-            let (w, h) = self.restore.saved_display.unwrap_or_default();
+            let (w, h) = saved
+                .and_then(|id| self.restore.screens.get(&id).map(|(_, w, h)| (*w as f64, *h as f64)))
+                .or_else(|| self.restore.saved_display.map(|(w, h)| (w as f64, h as f64)))
+                .unwrap_or_default();
             tracing::info!(
                 saved_w = w,
                 saved_h = h,
-                now_w = main.w,
-                now_h = main.h,
-                "restore: the main display is not the size it had when saved; windows keep the frames their apps give them"
+                now_w = d.frame.w,
+                now_h = d.frame.h,
+                display = d.id.0,
+                "restore: the display is not the one (or the size) the stages were saved on; windows keep the frames their apps give them"
             );
         }
         fits
@@ -607,7 +617,7 @@ impl Model {
             assignment.active_index = None;
         }
         // Their saved frames on a confident match, as any window back from a saved entry.
-        actions.extend(self.launch_with(&moved, &assignment, LaunchFrames::Matched, &LaunchHints::default(), Some(saved.id)));
+        actions.extend(self.launch_with(&moved, &assignment, LaunchFrames::Matched, &LaunchHints::default(), Some(saved.id), target));
         actions.retain(|a| *a != Action::StateChanged);
         self.arrange_pool_slots(target);
         tracing::info!(desktop = saved.id, stages = saved.stages.len(), voters = moved.len(), "restore: a Desktop made from an empty screen is the saved Desktop its windows belong to");
@@ -655,11 +665,16 @@ impl Model {
         let display: DisplayId = self.known_display(meta.display);
         let live_parked = self.display(display).parks(meta.frame);
         let sure = grade.confident();
-        // Saved frames only on a main display of the saved size; there a live frame in a park
-        // zone takes the saved one even from a doubtful match. On another size it is centered
-        // at its own size, as the recovery scan does (S6 of the Fable review of 10-29): a
-        // frame from another display, clamped onto this one, is no frame the user gave it.
-        let fit = self.saved_frames_fit();
+        // Saved frames only on the screen of the saved size they were saved on; there a live
+        // frame in a park zone takes the saved one even from a doubtful match. On another it
+        // is centered at its own size, as the recovery scan does (S6 of the Fable review of
+        // 10-29): a frame from another display, clamped onto this one, is no frame the user
+        // gave it.
+        let saved_desktop = match self.kin.get(&stage) {
+            Some(Kin::Saved(id, _)) => Some(*id),
+            _ => Some(space.0),
+        };
+        let fit = self.saved_frames_fit_for(display, saved_desktop);
         let frames = sure && fit;
         let base = if frames || (live_parked && fit) || meta.frame.is_degenerate() { entry.frame } else { meta.frame };
         let restore = self.safe_restore(base, display);
@@ -728,7 +743,7 @@ impl Model {
 
     /// [`Model::strip_enter_restored`] for a stage of the Desktop's own saved order.
     fn strip_enter_saved(&mut self, space: SpaceId, stage: StageId) {
-        let capacity = self.options.strip.capacity;
+        let capacity = self.capacity_of(space);
         let place = self
             .slot_order
             .get(&space)

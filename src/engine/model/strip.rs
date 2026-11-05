@@ -186,7 +186,7 @@ impl Model {
             places.into_iter().map(|c| (c.stage, c)).collect()
         };
         let holds = |c: &StripCard| !c.active || opts.active != ActiveCard::Close;
-        let capacity = opts.capacity;
+        let capacity = self.capacity_of(space);
         let shown: Vec<(StageId, StripCard)> = if places.iter().filter(|(_, c)| holds(c)).count() <= capacity {
             places.into_iter().filter(|(_, c)| holds(c)).collect()
         } else {
@@ -365,9 +365,18 @@ impl Model {
         self.normalize_slots();
     }
 
-    /// Sets how many cards fit (the platform computes it from the display height).
+    /// Sets how many cards fit on every display (the platform computes it from the display
+    /// height); a display's own number ([`Model::set_display_capacity`]) is forgotten.
     pub fn set_strip_capacity(&mut self, capacity: usize) {
         self.options.strip.capacity = capacity;
+        self.capacity.clear();
+        self.normalize_slots();
+    }
+
+    /// Sets how many cards fit on one display's strip (its height decides: Apple shows 5 on
+    /// a laptop's screen, 6 on a 5K one).
+    pub fn set_display_capacity(&mut self, display: DisplayId, capacity: usize) {
+        self.capacity.insert(display, capacity);
         self.normalize_slots();
     }
 
@@ -444,7 +453,7 @@ impl Model {
         if self.options.strip.order.in_place() && self.stage(stage).is_some_and(|s| s.last_active == 0) {
             self.touch(stage);
         }
-        let capacity = self.options.strip.capacity;
+        let capacity = self.capacity_of(space);
         if capacity == 0 {
             return;
         }
@@ -476,10 +485,10 @@ impl Model {
     /// (evicting least recently used), and free room refilled with the most recent stages
     /// that are out of view.
     pub(crate) fn normalize_slots(&mut self) {
-        let capacity = self.options.strip.capacity;
         let spaces: Vec<SpaceId> = self.spaces.iter().map(|s| s.id).collect();
         self.slots.retain(|d, _| spaces.contains(d));
         for space in spaces {
+            let capacity = self.capacity_of(space);
             let mut slots = self.slots.remove(&space).unwrap_or_default();
             let mut seen = Vec::new();
             slots.retain(|&s| {

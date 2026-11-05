@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use super::displays::ScreenKey;
 use super::geometry::Rect;
 use super::park::MACOS_KEEPS_TITLE;
 use super::model::{
@@ -34,6 +35,7 @@ pub fn macos_places_in(asked: Rect, visible: Rect) -> Rect {
 pub fn display() -> Display {
     Display {
         id: MAIN,
+        key: ScreenKey::new(0x610, 0xae2f, 0x4d6),
         frame: FRAME,
         visible: VISIBLE,
         corner: Default::default(),

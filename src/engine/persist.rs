@@ -160,11 +160,30 @@ pub struct SavedStage {
     pub last_active: Option<u64>,
 }
 
+/// The screen a Space was saved on: its identity ([`ScreenKey::text`]) and size in points.
+/// A restart puts the Space's stages back on the screen with that identity, when connected
+/// ([`Model::saved_fits_display`]), with their saved frames on one of the same size.
+///
+/// [`ScreenKey::text`]: crate::engine::displays::ScreenKey::text
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedScreen {
+    /// The screen's identity ([`crate::engine::displays::ScreenKey::text`]).
+    pub key: String,
+    /// Width in points.
+    pub w: f64,
+    /// Height in points.
+    pub h: f64,
+}
+
 /// One saved Space: its stages, active stage and strip, like a whole Stage Manager.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedSpace {
     /// The model's synthetic Space id (never Apple's).
     pub id: u64,
+    /// The screen it was on when saved (absent in files written before round displays, and
+    /// for a screen with no identity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<SavedScreen>,
     /// The Space shown when saved.
     #[serde(default)]
     pub current: bool,
@@ -234,8 +253,8 @@ pub struct SavedDisplay {
     pub w: f64,
     /// Height in points.
     pub h: f64,
-    /// Reserved: the display arrangement (each display's vendor, model and serial), for
-    /// frames per arrangement later.
+    /// The main display's identity ([`crate::engine::displays::ScreenKey::text`]), when
+    /// known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -401,6 +420,7 @@ impl StateFile {
                 let v1: StateFileV1 =
                     serde_json::from_value(value).map_err(|e| format!("state.json: {e}"))?;
                 Ok(Self::single(SavedSpace {
+                    screen: None,
                     id: 1,
                     current: true,
                     stages: v1.stages,
@@ -665,12 +685,12 @@ impl Model {
             l.remove_stages(&gone);
             l
         }));
-        let main = self.main_display().frame;
+        let main = self.main_display();
         StateFile {
             version: STATE_VERSION,
             session: None,
             saved_at: None,
-            display: Some(SavedDisplay { w: main.w, h: main.h, key: None }),
+            display: Some(SavedDisplay { w: main.frame.w, h: main.frame.h, key: main.key.known().then(|| main.key.text()) }),
             spaces,
         }
     }
@@ -752,8 +772,10 @@ impl Model {
         // Windows whose app quit a moment ago, in their stages (round 8H).
         let ids: Vec<StageId> = here.iter().map(|s| s.id).collect();
         let (stages, active_index, strip_slots) = self.with_quit(space, &ids, stages, active_index, strip_slots);
+        let screen = self.display(self.space_display(space));
         SavedSpace {
             id: space.0,
+            screen: screen.key.known().then(|| SavedScreen { key: screen.key.text(), w: screen.frame.w, h: screen.frame.h }),
             current: self.current.values().any(|&c| c == space),
             stages,
             active_index,
@@ -801,12 +823,13 @@ impl Model {
         hints: &LaunchHints,
     ) -> Vec<Action> {
         let frames = if restore_frames { LaunchFrames::Saved } else { LaunchFrames::Live };
-        self.launch_with(live, assignment, frames, hints, None)
+        let space = self.current_space(self.main_display().id);
+        self.launch_with(live, assignment, frames, hints, None, space)
     }
 
-    /// [`Model::apply_launch`] with the frames `frames` says; `origin`: the saved Desktop the
-    /// assignment's stages come from, when one does (each stage built is noted as standing
-    /// for its saved stage, for the pool after a restart, `pool.rs`).
+    /// [`Model::apply_launch`] with the frames `frames` says, on `space`; `origin`: the saved
+    /// Desktop the assignment's stages come from, when one does (each stage built is noted as
+    /// standing for its saved stage, for the pool after a restart, `pool.rs`).
     pub(crate) fn launch_with(
         &mut self,
         live: &[WindowMeta],
@@ -814,13 +837,14 @@ impl Model {
         frames: LaunchFrames,
         hints: &LaunchHints,
         origin: Option<u64>,
+        space: SpaceId,
     ) -> Vec<Action> {
         let restore_frames = frames == LaunchFrames::Saved;
-        // Saved frames only on a main display of the saved size (else the live ones).
-        let matched_frames = frames != LaunchFrames::Live && self.saved_frames_fit();
+        // Saved frames only on a display of the saved size (else the live ones).
+        let display = self.space_display(space);
+        let matched_frames = frames != LaunchFrames::Live && self.saved_frames_fit_for(display, origin.or(Some(space.0)));
         let mut actions = Vec::new();
         let metas: HashMap<WindowId, &WindowMeta> = live.iter().map(|m| (m.id, m)).collect();
-        let space = self.current_space(self.main_display().id);
         let mut built: Vec<Option<StageId>> = vec![None; assignment.stages.len()];
         let mut placed: HashSet<WindowId> = HashSet::new();
         let saved_clock = assignment.stages.iter().filter_map(|s| s.last_active).max().unwrap_or(0);

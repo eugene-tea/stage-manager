@@ -159,6 +159,13 @@ pub const SECTIONS: &[SectionDef] = &[
     },
     SectionDef { name: "windows", doc: &["How windows are treated."] },
     SectionDef {
+        name: "displays",
+        doc: &[
+            "Screens. Every screen has its own strip and stages, as Apple's Stage Manager does: a",
+            "window dragged to another screen starts a stage of its own there.",
+        ],
+    },
+    SectionDef {
         name: "sugar",
         doc: &["Extras that ride on gestures you already make; invisible until used."],
     },
@@ -345,6 +352,9 @@ pub const KEYS: &[KeyDef] = &[
         "How far past a sliver the corner patch reaches, in points, to cover its shadow: \"auto\" is a parked (inactive) window's shadow, side by side; a number is used on every side."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
+    // [displays]
+    k("displays", "main_only", Kind::Bool, "false",
+        "Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages."),
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
         "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),

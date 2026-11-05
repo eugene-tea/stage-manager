@@ -368,6 +368,14 @@ impl WindowsConfig {
     }
 }
 
+/// The `[displays]` section: screens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaysConfig {
+    /// Only the main screen is managed (the first version's behaviour; off by default: every
+    /// screen has its own strip and stages, as Apple's).
+    pub main_only: bool,
+}
+
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SugarConfig {
@@ -508,6 +516,8 @@ pub struct Config {
     pub style: StripStyle,
     /// Window treatment.
     pub windows: WindowsConfig,
+    /// Screens.
+    pub displays: DisplaysConfig,
     /// New-window rules with the `[defaults]` decision.
     pub rules: RuleSet,
     /// Hotkeys (an extension; off unless `[hotkeys] enabled = true`).
@@ -969,6 +979,7 @@ impl Config {
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
             },
+            displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
             stages: StagesConfig {
@@ -1009,6 +1020,7 @@ impl Config {
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
             park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
+            main_only: self.displays.main_only,
         }
     }
 }

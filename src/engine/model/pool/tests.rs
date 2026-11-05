@@ -43,6 +43,7 @@ fn stage(windows: Vec<SavedWindow>, last_active: u64) -> SavedStage {
 /// team chat, music, two git windows, mail. Strip: chat, git, music, mail.
 fn desktop_1() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 4,
         current: true,
         stages: vec![
@@ -62,6 +63,7 @@ fn desktop_1() -> SavedSpace {
 /// Strip: calendar, terminal, web.
 fn desktop_2() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 8,
         current: false,
         stages: vec![

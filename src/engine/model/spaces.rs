@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Model, NativeTarget, Observation, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::displays::ScreenKey;
 use crate::engine::persist::{LaunchFrames, LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
 use crate::engine::rules::Decision;
 use crate::engine::window_match::LowRule;
@@ -168,6 +169,7 @@ impl Model {
         let saved = self
             .leftovers
             .iter()
+            .filter(|l| self.saved_fits_display(l, display))
             .filter(|l| {
                 let n = exact_matches(l, &arrivals);
                 n >= 2 || 2 * n > l.standard_windows()
@@ -202,7 +204,7 @@ impl Model {
         self.current.values().any(|&s| s == space)
     }
 
-    fn has_space(&self, space: SpaceId) -> bool {
+    pub(crate) fn has_space(&self, space: SpaceId) -> bool {
         self.spaces.iter().any(|s| s.id == space)
     }
 
@@ -289,6 +291,10 @@ impl Model {
     /// ([`Model::arrive`]) and saved again untouched until then. The model's own Spaces are
     /// renumbered past the saved ids so none collides. Call it before the first arrival.
     pub fn restore_spaces(&mut self, saved: Vec<SavedSpace>) {
+        self.restore.screens = saved
+            .iter()
+            .filter_map(|s| s.screen.as_ref().map(|sc| (s.id, (sc.key.clone(), sc.w.round() as i64, sc.h.round() as i64))))
+            .collect();
         let top = saved.iter().map(|s| s.id).max().unwrap_or(0);
         if self.spaces.iter().any(|s| s.id.0 <= top) {
             let own: Vec<SpaceId> = self.spaces.iter().map(|s| s.id).collect();
@@ -300,7 +306,26 @@ impl Model {
             }
         }
         self.leftovers = saved.into_iter().filter(|s| s.id != 0).collect();
-        self.restore.saved_front = self.leftovers.iter().find(|l| l.current).and_then(|l| l.active_index.map(|i| (l.id, i)));
+        // The main display's shown Desktop first (several are `current`, one per screen).
+        let main = self.main_display().key;
+        self.restore.saved_front = self
+            .leftovers
+            .iter()
+            .filter(|l| l.current)
+            .max_by_key(|l| l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(main) && main.known())
+            .and_then(|l| l.active_index.map(|i| (l.id, i)));
+    }
+
+    /// True when saved Desktop `saved` may form on `display`: it was saved on that screen,
+    /// or on one not connected now (its windows are wherever macOS put them: the 10-23 login
+    /// on the laptop's screen, then the lid closed onto the external display), or the file
+    /// does not say. A Desktop saved on another screen that is connected waits for it.
+    pub(crate) fn saved_fits_display(&self, saved: &SavedSpace, display: DisplayId) -> bool {
+        let Some(key) = saved.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) else { return true };
+        match self.display_keyed(key) {
+            Some(d) => d.id == self.known_display(display),
+            None => true,
+        }
     }
 
     // ----- arrival and learning ----------------------------------------------------------
@@ -341,7 +366,7 @@ impl Model {
         let mut scores = all.clone();
         scores.retain(|_, (n, _, _)| *n > 0);
         let parks = |m: &WindowMeta| self.display(m.display).parks(m.frame);
-        for saved in &self.leftovers {
+        for saved in self.leftovers.iter().filter(|l| self.saved_fits_display(l, display)) {
             let n = if self.restore.new_session { confident_matches(saved, &arrivals, parks) } else { exact_matches(saved, &arrivals) } as i64;
             if n > 0 {
                 scores.entry(SpaceId(saved.id)).or_insert((0, false, 0)).0 += n;
@@ -354,7 +379,7 @@ impl Model {
             .iter()
             .max_by_key(|(id, (n, known, seen))| (*n, *known, *seen, std::cmp::Reverse(**id)))
             .map(|(id, _)| *id)
-            .or_else(|| launch.then(|| self.launch_fallback(&arrivals)).flatten());
+            .or_else(|| launch.then(|| self.launch_fallback(display, &arrivals)).flatten());
         let target = match winner {
             Some(id) if self.has_space(id) => id,
             Some(id) => {
@@ -408,7 +433,7 @@ impl Model {
                 self.note_by_apple(unmatched.iter().filter(|m| !pooled.contains(&m.id)));
             }
             let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = arrivals.iter().cloned().partition(|m| pooled.contains(&m.id));
-            let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id));
+            let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id), target);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
             if !claimed.is_empty() {
                 let placed = self.match_waiting(target, &claimed, LowRule::default(), None, Scope::Pool, &mut actions);
@@ -471,10 +496,18 @@ impl Model {
     /// title: taken only when at least one window on screen matches it by app and no other
     /// saved Space matches more windows by app; else `None` (a new Space; every saved one
     /// waits for its own visit).
-    fn launch_fallback(&self, arrivals: &[WindowMeta]) -> Option<SpaceId> {
-        let current = self.leftovers.iter().find(|l| l.current)?;
+    fn launch_fallback(&self, display: DisplayId, arrivals: &[WindowMeta]) -> Option<SpaceId> {
+        let key = self.display(display).key;
+        let fits = |l: &&SavedSpace| self.saved_fits_display(l, display);
+        // The Desktop shown on this very screen when saved, else any shown one that may form here.
+        let current = self
+            .leftovers
+            .iter()
+            .filter(|l| l.current)
+            .filter(fits)
+            .max_by_key(|l| key.known() && l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(key))?;
         let n = bundle_matches(current, arrivals);
-        let beaten = self.leftovers.iter().any(|l| !l.current && bundle_matches(l, arrivals) > n);
+        let beaten = self.leftovers.iter().filter(fits).any(|l| l.id != current.id && bundle_matches(l, arrivals) > n);
         (n > 0 && !beaten).then_some(SpaceId(current.id))
     }
 
@@ -740,7 +773,7 @@ impl Model {
 
     /// Makes an empty stage `space`'s active one: an unnamed empty stage of its own when it
     /// has one (no child windows either), else a new one.
-    fn fresh_active(&mut self, space: SpaceId) -> StageId {
+    pub(crate) fn fresh_active(&mut self, space: SpaceId) -> StageId {
         let empty = self
             .stages
             .iter()
@@ -906,7 +939,7 @@ impl Model {
         self.hops.remove(&id);
     }
 
-    fn set_space(&mut self, ids: &[WindowId], space: SpaceId) {
+    pub(crate) fn set_space(&mut self, ids: &[WindowId], space: SpaceId) {
         for id in ids {
             if let Some(w) = self.windows.get_mut(id) {
                 w.space = space;

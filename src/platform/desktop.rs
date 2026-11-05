@@ -1,16 +1,22 @@
-//! The desktop: displays (from `NSScreen`, converted to top-left coordinates) and wallpaper
-//! clicks (the global mouse-down monitor in [`super::input`] plus a window-list hit test).
+//! The desktop: displays (from `NSScreen`, converted to top-left coordinates, every screen
+//! with its identity and park corner) and wallpaper clicks (the global mouse-down monitor in
+//! [`super::input`] plus a window-list hit test).
 //!
 //! A click counts as a wallpaper click when no window of layer 0 or above contains the
 //! point: the desktop picture and Finder's desktop icons are desktop elements, which the
 //! window list leaves out. A click on the Dock, the menu bar, our strip or any app window
 //! hits a window and is ignored.
 
+use objc2::runtime::AnyObject;
 use objc2_app_kit::NSScreen;
-use objc2_core_graphics::{CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID};
-use objc2_foundation::{MainThreadMarker, NSRect};
+use objc2_core_graphics::{
+    CGDisplayBounds, CGDisplayModelNumber, CGDisplaySerialNumber, CGDisplayVendorNumber, CGGetActiveDisplayList,
+    CGMainDisplayID,
+};
+use objc2_foundation::{MainThreadMarker, NSNumber, NSRect, NSString};
 
 use super::windows::CgWindow;
+use crate::engine::displays::{ScreenKey, number_duplicates};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
 use crate::engine::park::{CornerChoice, choose_corner};
@@ -33,12 +39,48 @@ fn rect(r: NSRect) -> Rect {
 /// The main display (the one with the menu bar): full and visible frames, top-left
 /// coordinates. `None` when AppKit reports no screen.
 pub fn main_display(mtm: MainThreadMarker) -> Option<Display> {
+    displays(mtm).into_iter().next()
+}
+
+/// Every display, the main one (the menu bar's) first: full and visible frames in top-left
+/// coordinates, the `CGDirectDisplayID`, the identity ([`screen_key`]) and the park corner
+/// chosen against the other displays ([`choose_corner`]). Empty when AppKit reports no screen.
+pub fn displays(mtm: MainThreadMarker) -> Vec<Display> {
     let screens = NSScreen::screens(mtm);
-    let primary = screens.firstObject()?;
-    let frame = rect(primary.frame());
-    let visible = to_top_left(rect(primary.visibleFrame()), frame.h);
-    let frame = to_top_left(frame, frame.h);
-    Some(Display { id: DisplayId(CGMainDisplayID()), frame, visible, corner: park_corner(frame, visible).corner })
+    let Some(primary) = screens.firstObject() else { return Vec::new() };
+    let primary_height = primary.frame().size.height;
+    let raw: Vec<(u32, Rect, Rect)> = screens
+        .iter()
+        .map(|s| {
+            let frame = to_top_left(rect(s.frame()), primary_height);
+            let visible = to_top_left(rect(s.visibleFrame()), primary_height);
+            (screen_number(&s).unwrap_or_else(|| CGMainDisplayID()), frame, visible)
+        })
+        .collect();
+    let mut keys: Vec<ScreenKey> = raw.iter().map(|(id, _, _)| screen_key(*id)).collect();
+    number_duplicates(&mut keys);
+    raw.iter()
+        .zip(keys)
+        .map(|(&(id, frame, visible), key)| {
+            let others: Vec<Rect> = raw.iter().filter(|(o, _, _)| *o != id).map(|(_, f, _)| *f).collect();
+            Display { id: DisplayId(id), key, frame, visible, corner: choose_corner(frame, visible, &others).corner }
+        })
+        .collect()
+}
+
+/// A screen's `CGDirectDisplayID` (`NSScreenNumber` in its device description).
+fn screen_number(screen: &NSScreen) -> Option<u32> {
+    let description = screen.deviceDescription();
+    let value: objc2::rc::Retained<AnyObject> = description.objectForKey(&NSString::from_str("NSScreenNumber"))?;
+    let number = value.downcast::<NSNumber>().ok()?;
+    Some(number.unsignedIntValue())
+}
+
+/// A display's identity across reconnects and restarts: vendor, model and serial number
+/// from CoreGraphics ([`ScreenKey`]; the serial is 0 for many displays, and identical ones
+/// are told apart by their order, [`number_duplicates`]).
+pub fn screen_key(id: u32) -> ScreenKey {
+    ScreenKey::new(CGDisplayVendorNumber(id), CGDisplayModelNumber(id), CGDisplaySerialNumber(id))
 }
 
 /// The park corner for the main display (`frame`, `visible`) among the other active

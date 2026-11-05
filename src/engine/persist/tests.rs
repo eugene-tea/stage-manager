@@ -31,6 +31,7 @@ fn live(id: u32, bundle: &str, title: &str) -> WindowMeta {
 
 fn state(stages: Vec<(Option<&str>, Vec<SavedWindow>)>, active: Option<usize>) -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 1,
         current: true,
         stages: stages

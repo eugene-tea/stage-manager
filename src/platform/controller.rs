@@ -6018,6 +6018,7 @@ fn fallback_displays() -> Vec<Display> {
     let visible = Rect::new(main.x, main.y + menu, main.w, main.h - menu);
     vec![Display {
         id: DisplayId(objc2_core_graphics::CGMainDisplayID()),
+        key: desktop::screen_key(objc2_core_graphics::CGMainDisplayID()),
         frame: main,
         visible,
         corner: choose_corner(main, visible, &bounds).corner,
@@ -6763,7 +6764,7 @@ mod tests {
     fn a_frame_read_that_times_out_takes_the_window_servers_bounds() {
         // W3: a busy app's timed-out read kept the tracked frame, and for an app that posts no
         // move notice that is where the window was before the user moved it.
-        let display = Display { id: DisplayId(1), frame: DISPLAY, visible: DISPLAY, corner: Corner::BottomRight };
+        let display = Display { id: DisplayId(1), key: crate::engine::displays::ScreenKey::NONE, frame: DISPLAY, visible: DISPLAY, corner: Corner::BottomRight };
         let read = |id: u32, frame: Rect, fresh: bool| FrameRead { id: WindowId(id), display, sticky: false, frame, fresh };
         let tracked = Rect::new(100.0, 200.0, 800.0, 600.0);
         let moved = Rect::new(400.0, 260.0, 800.0, 600.0);

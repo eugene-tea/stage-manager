@@ -8,6 +8,16 @@
 //! one, [`Model::remove_window`], has nothing to bring back). [`Model::unpark_all`] therefore
 //! always covers every parked window.
 //!
+//! **Displays.** Every display has its own strip and stages, as Apple's does (round
+//! displays): its own Spaces, each with its own stages, active stage and strip; its own park
+//! corner and strip capacity. A window belongs to the display that shows most of it
+//! ([`crate::engine::displays`]); moved to another display it starts a stage of its own there
+//! ([`Model::windows_moved_to_display`]), and a display removed hands its stages to the main
+//! one ([`Model::set_displays`]). Displays are told apart across reconnects by
+//! [`ScreenKey`], never by `CGDirectDisplayID` alone. With `[displays] main_only`
+//! ([`ModelOptions::main_only`]) only the main display is known: a window elsewhere is not
+//! the model's.
+//!
 //! **Spaces.** Every Space (Desktop) has its own Stage Manager, as Apple's does: its own
 //! stages, active stage, strip order and recency. A stage belongs to one Space ([`SpaceId`],
 //! a synthetic id the model gives each Space as the platform reports visits, see
@@ -31,12 +41,15 @@ mod quit;
 mod spaces;
 mod strip;
 #[cfg(test)]
+mod displays_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::displays::ScreenKey;
 use super::geometry::Rect;
 use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked, reach_in};
 use super::settings::NativeSettings;
@@ -102,8 +115,10 @@ pub struct WindowMeta {
 /// A display: its full frame and the visible frame (minus menu bar and Dock).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Display {
-    /// The display's ID.
+    /// The display's ID (`CGDirectDisplayID`, this connection's).
     pub id: DisplayId,
+    /// Its identity across reconnects and restarts ([`ScreenKey`]; `NONE` when unknown).
+    pub key: ScreenKey,
     /// The full frame in global coordinates.
     pub frame: Rect,
     /// The usable frame (no menu bar, no Dock).
@@ -128,6 +143,20 @@ impl Display {
     /// left edge in the upper half) is the user's, and stays (S2).
     pub fn reach(&self, frame: Rect) -> Rect {
         reach_in(frame, self.visible, self.frame, |f| self.parks(f))
+    }
+
+    /// `frame`, a window's frame on display `from`, carried onto this display: at the same
+    /// place relative to the visible frame's top-left corner, then within reach
+    /// ([`Display::reach`]). Where a window of a display removed (the lid closed) is
+    /// remembered until it is seen on this display.
+    pub fn adopt(&self, frame: Rect, from: &Display) -> Rect {
+        let moved = frame.translate(self.visible.x - from.visible.x, self.visible.y - from.visible.y);
+        self.reach(moved)
+    }
+
+    /// True when `key` is this display's known identity.
+    pub fn is_keyed(&self, key: ScreenKey) -> bool {
+        self.key.known() && self.key == key
     }
 }
 
@@ -261,6 +290,10 @@ pub struct ModelOptions {
     pub fit: FitOptions,
     /// How park frames are asked (`[windows] park_inside`, `park_drop`).
     pub park: ParkRequest,
+    /// Only the main display is managed (`[displays] main_only`): the model keeps the first
+    /// display alone, and a window moved to another is not its own any more
+    /// ([`Model::windows_moved_to_display`]).
+    pub main_only: bool,
 }
 
 /// State of a desktop reveal, so a second reveal brings the stage back.
@@ -279,6 +312,7 @@ const PARK_LANDED_SLACK: f64 = 2.0;
 /// Nominal display used only when the platform reports none, so the model never panics.
 const FALLBACK_DISPLAY: Display = Display {
     id: DisplayId(0),
+    key: ScreenKey::NONE,
     frame: Rect::new(0.0, 0.0, 1440.0, 900.0),
     visible: Rect::new(0.0, 25.0, 1440.0, 875.0),
     corner: Corner::BottomRight,
@@ -289,6 +323,9 @@ const FALLBACK_DISPLAY: Display = Display {
 pub struct Model {
     /// Displays; the first is the main display.
     pub(crate) displays: Vec<Display>,
+    /// How many cards each display's strip holds (its height decides), where the platform
+    /// said; else [`StripOptions::capacity`].
+    pub(crate) capacity: HashMap<DisplayId, usize>,
     /// Stages in creation order (stage N of a Space = its Nth stage in this list).
     pub(crate) stages: Vec<Stage>,
     /// Every managed window, standard and child.
@@ -389,13 +426,17 @@ impl Model {
     /// own. Declared named stages are created on the main display's Space; the first becomes
     /// active, else an empty stage does. Every other display gets an empty active stage.
     pub fn new(displays: Vec<Display>, options: ModelOptions) -> Self {
-        let displays = if displays.is_empty() {
+        let mut displays = if displays.is_empty() {
             vec![FALLBACK_DISPLAY]
         } else {
             displays
         };
+        if options.main_only {
+            displays.truncate(1);
+        }
         let mut model = Self {
             displays,
+            capacity: HashMap::new(),
             stages: Vec::new(),
             windows: BTreeMap::new(),
             active: HashMap::new(),
@@ -457,6 +498,23 @@ impl Model {
     /// The main display.
     pub fn main_display(&self) -> &Display {
         &self.displays[0]
+    }
+
+    /// The display with this identity, when connected.
+    pub fn display_keyed(&self, key: ScreenKey) -> Option<&Display> {
+        self.displays.iter().find(|d| d.is_keyed(key))
+    }
+
+    /// The display a Space belongs to (the main one for an unknown Space).
+    pub fn display_of_space(&self, space: SpaceId) -> DisplayId {
+        self.space_display(space)
+    }
+
+    /// The strip capacity of a Space's display ([`Model::set_display_capacity`], else
+    /// [`StripOptions::capacity`]).
+    pub fn capacity_of(&self, space: SpaceId) -> usize {
+        let display = self.space_display(space);
+        self.capacity.get(&display).copied().unwrap_or(self.options.strip.capacity)
     }
 
     /// Stages of every Space in creation order (see [`Model::stages_in`] for one Space's).

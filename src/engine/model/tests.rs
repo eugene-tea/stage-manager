@@ -6,6 +6,7 @@ use crate::engine::geometry::Point;
 use crate::engine::park::{GRAB_WIDTH, TITLE_BAR_HEIGHT, clamp_to_visible};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
+use crate::engine::displays::ScreenKey;
 use crate::engine::testkit::*;
 
 /// A model plus a fake desktop that executes every action.
@@ -956,6 +957,7 @@ fn an_activation_asks_the_focus_only_when_the_answer_depends_on_it() {
 fn an_activation_asks_the_focus_when_it_could_pick_another_display() {
     let second = Display {
         id: DisplayId(2),
+        key: ScreenKey::new(0x10ac, 0x4123, 0x1),
         frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         corner: Default::default(),
@@ -1295,9 +1297,12 @@ fn unpark_all_restores_every_parked_window_clamped() {
 }
 
 #[test]
-fn removed_display_moves_its_stages_to_main() {
+fn a_removed_displays_front_stage_comes_to_main_in_front() {
+    // Round displays (Apple's, measured 11-05): the removed display's front stage becomes the
+    // main display's front; an empty front there gives way.
     let second = Display {
         id: DisplayId(2),
+        key: ScreenKey::new(0x10ac, 0x4123, 0x1),
         frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         corner: Default::default(),
@@ -1312,17 +1317,13 @@ fn removed_display_moves_its_stages_to_main() {
     assert_eq!(e.m.stages().len(), 2);
     let a = e.m.set_displays(vec![display()]);
     e.run(a);
-    assert!(
-        e.d.parked(w(5)),
-        "the second display's active stage is parked on main"
-    );
+    assert_eq!(e.m.main_active_stage(), e.m.stage_of(w(5)), "the second display's front stage is the main display's now");
+    assert!(!e.d.parked(w(5)));
     assert!(e.m.stages().iter().all(|s| s.display == MAIN));
-    let a = e.m.unpark_all();
-    e.run(a);
-    assert!(VISIBLE.contains_rect(&Rect {
-        h: 28.0,
-        ..e.d.frames[&w(5)]
-    }));
+    assert_eq!(e.m.stages().len(), 1, "the empty front gave way");
+    // Its frame is macOS's to move; the restore frame remembered is within reach here.
+    let restore = e.m.window(w(5)).expect("w5").restore;
+    assert!(VISIBLE.contains_rect(&Rect { h: 28.0, ..restore }) && !display().parks(restore), "{restore:?}");
 }
 
 /// The 5K the owner docks to (menu bar on it).
@@ -1355,7 +1356,7 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     // V1-A: same id, a bigger frame (scaling changed, or the panel became main).
     let mut e = three_stages();
     let active = e.m.main_active_stage();
-    let big = Display { id: MAIN, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
+    let big = Display { id: MAIN, key: ScreenKey::NONE, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![big]);
     let mut parks = parks_in(&a);
     parks.sort_by_key(|p| p.0);
@@ -1409,7 +1410,7 @@ fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
     let space = e.m.current_space(MAIN);
     let stages: Vec<StageId> = e.m.stages().iter().map(|s| s.id).collect();
     let slots = e.m.strip_slots(MAIN);
-    let ext = Display { id: DisplayId(7), frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
+    let ext = Display { id: DisplayId(7), key: ScreenKey::NONE, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![ext]);
     assert_eq!(e.m.main_active_stage(), active, "the active stage stays active, never the oldest");
     assert_eq!(e.m.current_space(DisplayId(7)), space, "same Space");
@@ -2153,6 +2154,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         2 => Display { id: DisplayId(9), ..display() },
                         3 => Display {
                             id: DisplayId(9),
+                            key: ScreenKey::NONE,
                             frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
                             visible: Rect::new(0.0, 30.0, 1920.0, 1050.0),
                             corner: Default::default(),

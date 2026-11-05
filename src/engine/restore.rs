@@ -73,6 +73,7 @@
 //! press) has a window matching a saved one in an inactive stage parked there (a card),
 //! not switched to; the restore cannot tell it from the app reopening its saved windows.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -125,6 +126,10 @@ pub struct Restore {
     /// The main display's size (points, rounded) when `state.json` was saved, if it says:
     /// saved frames are used only on a main display of this size.
     pub saved_display: Option<(i64, i64)>,
+    /// Per saved Desktop (its id), the screen it was saved on: identity and size (points,
+    /// rounded), where the file says ([`crate::engine::persist::SavedScreen`]): its saved
+    /// frames are used only on that screen at that size.
+    pub screens: BTreeMap<u64, (String, i64, i64)>,
     /// Why saved frames are not used was logged already (once a run).
     pub frames_noted: bool,
     /// Windows placed by Apple's rule while the restore window was open (they matched no
@@ -176,6 +181,16 @@ impl Restore {
     /// that size, or the file does not say.
     pub fn frames_fit(&self, w: f64, h: f64) -> bool {
         self.saved_display.is_none_or(|d| d == (w.round() as i64, h.round() as i64))
+    }
+
+    /// True when the frames saved with Desktop `saved` apply on a display of identity `key`
+    /// and `w`×`h` points: the Desktop was saved on that screen at that size; a Desktop saved
+    /// with no screen goes by [`Restore::frames_fit`] on the main display (`main`) alone.
+    pub fn frames_fit_on(&self, saved: u64, key: &str, w: f64, h: f64, main: bool) -> bool {
+        match self.screens.get(&saved) {
+            Some((k, sw, sh)) => k == key && (*sw, *sh) == (w.round() as i64, h.round() as i64),
+            None => main && self.frames_fit(w, h),
+        }
     }
 }
 

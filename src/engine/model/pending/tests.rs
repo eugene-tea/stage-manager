@@ -37,6 +37,7 @@ fn stage(name: Option<&str>, windows: Vec<SavedWindow>) -> SavedStage {
 /// browser; the strip showed the browser above Chat.
 fn desktop_5() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 5,
         current: true,
         stages: vec![
@@ -118,6 +119,7 @@ fn a_declared_stage_keeps_its_card_while_its_windows_wait() {
     // not declared has no card while it waits (a card is a picture of real windows).
     // Declared stages are made up front, so the saved layout has Chat first.
     let saved = SavedSpace {
+        screen: None,
         id: 5,
         current: true,
         stages: vec![
@@ -211,6 +213,7 @@ fn a_doubtful_window_is_never_parked() {
     // Two saved "Untitled" windows in two inactive stages, the active stage waiting for its
     // own: a new "Untitled" at another frame could be either, so Apple's rule decides.
     let space = SavedSpace {
+        screen: None,
         id: 5,
         current: true,
         stages: vec![
@@ -1079,6 +1082,7 @@ fn an_empty_saved_active_stage_given_up_still_gives_way() {
 /// active stage the editor's third window and Chat's, the browser a stage of its own.
 fn mail_desktop() -> (Model, StageId) {
     let saved = SavedSpace {
+        screen: None,
         id: 7,
         current: true,
         stages: vec![
@@ -1318,6 +1322,7 @@ fn new_apps_join_current_waits_for_the_restore_window_to_close() {
 /// the browser's three windows.
 fn desktop_7() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 7,
         current: true,
         stages: vec![
