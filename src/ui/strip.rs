@@ -2138,6 +2138,7 @@ impl Strip {
         {
             // SAFETY: presentationLayer returns a copy of the drawn state or nil.
             look.opacity = unsafe { image.presentationLayer() }.map_or(image.opacity(), |l| l.opacity());
+            tracing::debug!(window = id, drawn = look.opacity, model = image.opacity(), hovered = ?self.hovered, stage = layout.stage, "card glass drawn: the look a snapshot leaves the card with");
         }
         Some(look)
     }

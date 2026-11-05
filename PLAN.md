@@ -222,6 +222,9 @@ Known gaps the owner accepted as rare:
   - **Card glass, not measured:** Dark Mode; a window behind another on one card; the
     hovered card's growth (Apple's read 11 % wider, 11-05) against ours. The script's
     reading beside the card is in the display's colours, the fit's from the picture file.
+  - **The hide trial's live phase, 11-05:** 88 of 89; "supersede: Bravo and Charlie
+    together again" left an empty stage 3 ({1: Charlie, Bravo; 2: Alpha 1, 2; 3: none}).
+    `hide_parked_apps` is off and stays off; look before it is ever offered again.
   - **Chrome's enhanced interface:** we turn its flag off around our moves and restore it
     after; Rectangle leaves it off. Keep restoring unless an assistive tool complains.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
