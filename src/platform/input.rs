@@ -272,6 +272,12 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
     let list = windows::list_windows();
     let own = std::process::id() as i32;
     let cards = strip_model::published_cards();
+    // The Dock draws its bar in one window as large as its display, clear and click-through
+    // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
+    // it counts only on the bar's own frame, read through Accessibility, and wherever that
+    // frame is unknown.
+    let dock = std::cell::OnceCell::new();
+    let dock_bar = || *dock.get_or_init(|| super::dock::dock_pid().map(|pid| (pid, super::dock::bar_frame(pid))));
     for (i, p) in path.iter().enumerate() {
         // Our own strip sits below normal windows (layer -1): it counts where nothing covers
         // it, and for the press only on a card: off the cards its pane lets clicks through
@@ -281,7 +287,9 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
         let on_card = !press || i > 0 || cards.iter().any(|(_, r)| r.contains(*p));
         let top = list.iter().find(|w| {
             let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || (w.bounds.w > TAB_MAX_WIDTH && !on_card));
-            w.onscreen && !click_through && (w.layer >= 0 || pids.contains(&w.pid)) && w.alpha > 0.0 && w.bounds.contains(*p)
+            let clear_dock = w.layer == super::dock::DOCK_LAYER
+                && dock_bar().is_some_and(|(pid, bar)| pid == w.pid && bar.is_some_and(|b| !b.contains(*p)));
+            w.onscreen && !click_through && !clear_dock && (w.layer >= 0 || pids.contains(&w.pid)) && w.alpha > 0.0 && w.bounds.contains(*p)
         });
         match top {
             Some(w) if pids.contains(&w.pid) => {}
