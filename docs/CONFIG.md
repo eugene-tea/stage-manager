@@ -54,7 +54,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
-| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area a window must cover to hide the strip. |
+| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area windows keep clear of with fit. |
 | `strip.capacity` | `0` | whole number, 0 to 30 | Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt). |
 | `strip.capacity_pitch` | `190.0` | number, 20 to 2000 | With capacity = 0: room per card, in points of visible height. |
 | `strip.capacity_margin` | `60.0` | number, 0 to 2000 | With capacity = 0: visible height kept free above and below the cards. |

@@ -75,7 +75,7 @@ and when you come back to a stage, every window is exactly where you left it.
 Each card shows the stage's windows in miniature, with the app's icon in the corner. As on
 Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity = 1` makes
 them opaque); the card under the pointer turns solid as it grows (`[cards]
-hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through). The strip sits below your windows: when a window covers it, it slides away.
+hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through). The strip sits below your windows: a window over the cards covers them, and when a window comes within about 50 points of the screen's left edge, the strip slides away.
 Rest the pointer at the left edge of the screen to bring it back.
 
 ### Switching

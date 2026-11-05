@@ -3020,11 +3020,12 @@ impl Strip {
         self.geometry.global_point(NSEvent::mouseLocation())
     }
 
-    /// True when the strip is on but a window of the active stage covers it.
+    /// True when the strip is on but a window of the active stage at the screen's left edge
+    /// hides it ([`strip_visibility::hides_strip`]).
     fn covered(&self) -> bool {
         self.snapshot.user_visible
             && !self.snapshot.hide_recent_apps
-            && strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global)
+            && strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global)
     }
 
     /// A click on the edge tab reveals the strip at once (on release).
@@ -3097,8 +3098,8 @@ impl Strip {
     }
 
     fn update_visibility(&mut self) {
-        let overlapped = strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global);
-        let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, overlapped);
+        let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global);
+        let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, covered);
         self.visibility.set_tab(self.pane.tab.shown.then(|| self.geometry.tab()));
         let window_drag = self.snapshot.window_drag.is_some();
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());

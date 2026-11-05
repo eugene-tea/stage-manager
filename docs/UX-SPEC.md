@@ -36,8 +36,12 @@ off an edge or is taller than the screen. Only a window that could not be grabbe
 title bar comes below the menu bar and above the Dock with at least 80 points of it on
 screen, and one left in the hiding corner comes back just out of it.
 
-**The strip.** It sits below windows: a window moved over it covers it, and the strip slides
-away. Resting the pointer at the left edge brings it back. Each card draws the stage's
+**The strip.** It sits below windows: a window moved over the cards covers them and the strip
+stays up under it. It slides away only once a window of the front stage comes within 50 pt of
+the screen's left edge, as Apple's does (measured 11-05 on a Studio Display: Apple's stayed up
+under VS Code dragged left over the cards from about 308 pt, and went at about 50 pt; a laptop's
+windows nearly fill the screen, so there it goes more often). Each screen's strip follows its
+own front stage. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
 laptop, 6 on a 5K screen. A popup open on a window (a popover, a child window sticking out

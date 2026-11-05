@@ -1,5 +1,6 @@
 //! When the strip shows, pure: the user's toggle, Apple's "Show recent apps" (`AutoHide`),
-//! auto-hide while an active window overlaps the strip, and the left-edge reveal.
+//! auto-hide while an active window reaches the screen's left edge ([`hides_strip`]), and the
+//! left-edge reveal.
 //!
 //! The strip feeds this with the pointer position and the current time; it answers whether the
 //! strip shows. The pointer is polled (every ~60 ms) only while [`Decision::poll`] says so: a
@@ -54,16 +55,17 @@ pub enum Mode {
     /// Shown, nothing in the way.
     Shown,
     /// Hidden until the pointer rests at the left edge (Apple's `AutoHide`, or an active
-    /// window overlapping the strip area).
+    /// window at the screen's left edge, [`hides_strip`]).
     EdgeOnly,
 }
 
 impl Mode {
-    /// The mode for a snapshot's flags and whether an active window overlaps the strip.
-    pub fn of(user_visible: bool, hide_recent_apps: bool, overlapped: bool) -> Self {
+    /// The mode for a snapshot's flags and whether an active window hides the strip
+    /// ([`hides_strip`]).
+    pub fn of(user_visible: bool, hide_recent_apps: bool, covered: bool) -> Self {
         if !user_visible {
             Self::Off
-        } else if hide_recent_apps || overlapped {
+        } else if hide_recent_apps || covered {
             Self::EdgeOnly
         } else {
             Self::Shown
@@ -71,9 +73,19 @@ impl Mode {
     }
 }
 
-/// Whether any of `frames` intersects the strip area `strip` (global coordinates).
-pub fn overlaps(frames: &[Rect], strip: &Rect) -> bool {
-    frames.iter().any(|f| f.intersect(strip).is_some_and(|i| i.w > 0.5 && i.h > 0.5))
+/// How close to the screen's left edge (the strip's left edge) a window's left edge must come
+/// for the strip to slide away, in points. Apple's strip stays up under a window that covers
+/// the cards and goes only once the window's left edge is about 50 pt from the screen's left
+/// edge (the owner's eye on his Studio Display, 11-05: VS Code dragged left over the cards
+/// from about 308 pt); before, ours hid at any overlap of the column.
+pub const COVER_EDGE: f64 = 50.0;
+
+/// Whether any of `frames` (the active stage's shown windows) hides the strip whose area is
+/// `strip` (global coordinates): it reaches into the strip's area and its left edge is within
+/// [`COVER_EDGE`] of the strip's left edge (or past it). A window over the cards but further
+/// right leaves the strip shown, under the window.
+pub fn hides_strip(frames: &[Rect], strip: &Rect) -> bool {
+    frames.iter().any(|f| f.x <= strip.x + COVER_EDGE && f.intersect(strip).is_some_and(|i| i.w > 0.5 && i.h > 0.5))
 }
 
 /// The answer for one step.
@@ -129,8 +141,8 @@ impl Visibility {
     }
 
     /// Drops the carry-over of a strip in plain view ([`Self::step`]): only a switch the strip
-    /// itself started (a card click) keeps it under the pointer; a window resized into the
-    /// strip's column or a keyboard switch hides it, as Apple's does.
+    /// itself started (a card click) keeps it under the pointer; a window resized to the
+    /// screen's left edge or a keyboard switch hides it, as Apple's does.
     pub fn forget_shown(&mut self) {
         self.was_shown = false;
     }
@@ -214,11 +226,30 @@ mod tests {
         assert_eq!(Mode::of(true, false, true), Mode::EdgeOnly);
     }
 
+    /// 11-05: only a window whose left edge comes within 50 pt of the screen's left edge
+    /// hides the strip; one over the cards further right leaves it shown, as Apple's does.
     #[test]
-    fn overlap_needs_a_real_intersection() {
-        assert!(overlaps(&[Rect::new(150.0, 100.0, 500.0, 400.0)], &STRIP));
-        assert!(!overlaps(&[Rect::new(200.0, 100.0, 500.0, 400.0)], &STRIP));
-        assert!(!overlaps(&[], &STRIP));
+    fn only_a_window_at_the_left_edge_hides_the_strip() {
+        // Every one covers the cards: a strip 320 pt wide (his Studio Display's cards end near
+        // 308 pt).
+        let wide = Rect::new(0.0, 30.0, 320.0, 1410.0);
+        let at = |x: f64| Rect::new(x, 100.0, 900.0, 400.0);
+        assert!(hides_strip(&[at(0.0)], &wide), "flush left");
+        assert!(hides_strip(&[at(49.0)], &wide), "49 pt in");
+        assert!(hides_strip(&[at(50.0)], &wide), "50 pt in: the threshold itself");
+        assert!(!hides_strip(&[at(51.0)], &wide), "51 pt in: shown, under the window");
+        assert!(!hides_strip(&[at(300.0)], &wide), "300 pt in, over the cards: shown");
+        assert!(!hides_strip(&[at(320.0)], &wide), "clear of the column");
+        assert!(hides_strip(&[at(-40.0)], &wide), "past the left edge");
+        assert!(hides_strip(&[at(300.0), at(20.0)], &STRIP), "any one of the stage's windows");
+        // The threshold counts from the screen's left edge (a screen further right).
+        let right = Rect::new(1440.0, 30.0, 200.0, 1410.0);
+        assert!(hides_strip(&[Rect::new(1480.0, 100.0, 900.0, 400.0)], &right));
+        assert!(!hides_strip(&[Rect::new(1500.0, 100.0, 900.0, 400.0)], &right));
+        // At the edge but not in the strip's area (another screen, above its rows): shown.
+        assert!(!hides_strip(&[Rect::new(0.0, 1500.0, 900.0, 400.0)], &STRIP));
+        assert!(!hides_strip(&[Rect::new(-950.0, 100.0, 900.0, 400.0)], &STRIP));
+        assert!(!hides_strip(&[], &STRIP));
     }
 
     #[test]

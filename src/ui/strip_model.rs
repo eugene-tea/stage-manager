@@ -37,8 +37,9 @@ pub struct StripSnapshot {
     pub user_visible: bool,
     /// How the strip looks and moves (config; changes apply live).
     pub style: Arc<StripStyle>,
-    /// Frames of the active stage's onscreen windows, for auto-hide when one overlaps the
-    /// strip area (a window being dragged is left out).
+    /// Frames of the active stage's onscreen windows, for auto-hide when one reaches the
+    /// screen's left edge over the strip ([`crate::ui::strip_visibility::hides_strip`]; a
+    /// window being dragged is left out).
     pub active_frames: Vec<Rect>,
     /// A managed window is being dragged by its title bar: the strip reveals itself while the
     /// pointer is over the strip area and shows a drop target (a placeholder card sized

@@ -145,6 +145,10 @@ EXTRA = {
 }
 ALL_IDS = [FIX_ID] + [e[0] for e in EXTRA.values()]
 PARK_MARGIN = 64.0
+# A shown window of the front stage hides the strip only when its left edge is within this of
+# the screen's left edge (strip_visibility::COVER_EDGE, Apple's as measured 11-05); one over
+# the cards further right leaves the strip shown, under the window.
+STRIP_COVER_EDGE = 50.0
 
 HOME = os.environ.get("TEST_HOME") or tempfile.mkdtemp(prefix="sm-test.", dir="/tmp")
 os.makedirs(HOME, exist_ok=True)
@@ -1106,6 +1110,7 @@ def phase_strip():
     s = state()
     check(s["active"] == 1 and s["strip"] == [2], "one card (stage 2) in the strip")
     vis = s["display"]["visible"]
+    strip_cover_checks(s, t["Fixture 3"]["id"])
     x, y = vis["x"] + 70, vis["y"] + vis["h"] / 2
     time.sleep(1.5)
     r = ctl("debug-click", x, y)
@@ -1122,6 +1127,29 @@ def phase_strip():
     consistent("after the shift-click")
     stop_app()
     all_onscreen("strip quit")
+
+
+def strip_cover_checks(s, wid):
+    """Apple's strip stays up under a window over its cards and slides away only once the
+    window's left edge is about 50 pt from the screen's left edge (11-05, his Studio Display).
+    Window `wid` (the front stage's only one, clear of the strip) goes 100 pt in, over the
+    cards: the strip stays shown, below windows; then flush left: it slides away; then back."""
+    say("-- the strip stays up under a window over its cards; it slides away once the window reaches the left edge")
+    vis = s["display"]["visible"]
+    r = next(w for w in s["windows"] if w["id"] == wid)["restore"]
+    panel_shown = lambda: (state().get("strip_panel") or {}).get("shown")
+    ctl("debug-frame", wid, vis["x"] + 100, r["y"], r["w"], r["h"])
+    time.sleep(0.9)  # past the echo window
+    p = strip_panel()
+    check(panel_shown() is True and p is not None and p["layer"] == -1,
+          f"a window 100 pt in, over the cards: the strip stays shown, below it (shown {panel_shown()}, layer {p and p['layer']})")
+    ctl("debug-frame", wid, vis["x"], r["y"], r["w"], r["h"])
+    gone = wait_until(lambda: panel_shown() is False, 3, "the strip to slide away")
+    check(gone is not None, "the window flush with the left edge: the strip slides away")
+    ctl("debug-frame", wid, r["x"], r["y"], r["w"], r["h"])
+    back = wait_until(lambda: panel_shown() is True, 3, "the strip back")
+    check(back is not None, "the window back where it was: the strip is back")
+    time.sleep(0.5)
 
 
 # ----- native: Apple's defaults, Shift sugar, drag and drop ------------------------------
@@ -1812,12 +1840,13 @@ def wallpaper_click(pt, what):
 
 def click_card(s, title, what):
     """Clicks the card of the stage holding `title` (its drawn frame); True when posted. A
-    strip hidden under a window over its column (the fixtures' default frames reach it)
-    publishes no cards: it is revealed at the left edge first, as a person would."""
+    strip hidden by a window at the screen's left edge publishes no cards, and one shown under
+    a window over its cards (the fixtures' default frames, 80 pt in, reach them) takes no
+    click there: it is revealed at the left edge first, as a person would."""
     home = by_title(s)[title]["home"]
     frame_of = lambda st: next((c["frame"] for c in st.get("strip_cards", []) if c["number"] == home), None)
     b = frame_of(s)
-    if b is None and not s.get("strip_cards"):
+    if (b is None and not s.get("strip_cards")) or (b is not None and card_under_window(s, b)):
         if reveal_strip(f"{what}: the strip, covered") is None:
             return False
         b = frame_of(state())
@@ -2096,18 +2125,39 @@ def start_backdrop(s):
     time.sleep(0.8)
 
 
+def hides_strip(f, vis):
+    """True when a shown window at frame `f` hides the strip of the screen whose visible
+    frame is `vis` (strip_visibility::hides_strip): its left edge within STRIP_COVER_EDGE of
+    the screen's left edge, its right edge past it."""
+    return f["x"] <= vis["x"] + STRIP_COVER_EDGE and f["x"] + f["w"] > vis["x"]
+
+
+def card_under_window(s, card):
+    """True when a shown window's frame reaches over the card's drawn frame `card`: the strip
+    stays shown under a window over the cards that does not reach the screen's left edge, and
+    a click there would land on that window."""
+    return any(not w["parked"] and w["role"] == "standard" and overlap_area(w["restore"], card) > 0
+               for w in s["windows"])
+
+
+def overlap_area(a, b):
+    w = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+    h = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+    return w * h if w > 0 and h > 0 else 0
+
+
 def reveal_strip(what):
-    """Reaches the strip the way a person does when a window covers its column (his editor
-    on the 5K display): an active window over the strip column hides it (Apple's auto-hide);
-    the pointer resting at the left edge brings it back above every window. None (skipped)
-    when another process's window covers the edge."""
+    """Reaches the strip the way a person does when a window covers it (his editor on the 5K
+    display): an active window at the screen's left edge hides it (Apple's auto-hide; one
+    over the cards further right leaves it shown, under the window), and the pointer resting
+    at the left edge brings it back above every window. When no active window is at the edge,
+    one is moved there first. None (skipped) when another process's window covers the edge."""
     s = state()
     vis = s["display"]["visible"]
-    edge = vis["x"] + s["strip_width"]
     active = [w for w in s["windows"] if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]]
-    if active and not any(w["restore"]["x"] < edge for w in active):
+    if active and not any(hides_strip(w["restore"], vis) for w in active):
         r = active[0]["restore"]
-        ctl("debug-frame", active[0]["id"], edge - 100, r["y"], r["w"], r["h"])
+        ctl("debug-frame", active[0]["id"], vis["x"], r["y"], r["w"], r["h"])
         time.sleep(0.9)  # past the echo window; the strip hides
     r = ctl("debug-hover", vis["x"] + 1, vis["y"] + vis["h"] / 2, 900)
     if blocked(r, f"{what} (the strip's reveal at the left edge, and what needs it)"):
@@ -3251,9 +3301,9 @@ def landing_blend_check():
     ids = by_title(s)
     ctl("debug-frame", ids[back]["id"], left, vis["y"] + 60, 640, 420)
     ctl("debug-frame", ids[front]["id"], left + 200, vis["y"] + 200, 640, 420)
-    # The stage switched to and from keeps clear of the strip too: a window over the strip's
-    # area hides it, and a switch with the strip hidden lands at once, with no snapshots to
-    # read (11-05: Fixture 1 at its first frame, 80,78).
+    # The stage switched to and from keeps clear of the strip too: a window at the screen's
+    # left edge hides it, one over the cards covers them, and a switch with the strip hidden
+    # lands at once, with no snapshots to read (11-05: Fixture 1 at its first frame, 80,78).
     do("switch", away)
     time.sleep(1.2)
     ctl("debug-frame", ids["Fixture 1"]["id"], left + 900, vis["y"] + 60, 520, 392)
@@ -3436,9 +3486,9 @@ def phase_glass():
     if os.path.exists(p):
         os.remove(p)
     colors = ",".join(f"{v:02x}" * 3 for v in GLASS_PAGES.values())
-    # Every window clear of the strip's column: one there hides the strip when its stage is in
-    # front, and a hidden card reads as nothing (11-05: Fixture 1 at its default 80,78 read the
-    # card black after its switch).
+    # Every window clear of the strip's column: one there covers the cards (or, at the
+    # screen's left edge, hides the strip) when its stage is in front, and a covered card reads
+    # as nothing (11-05: Fixture 1 at its default 80,78 read the card black after its switch).
     frames = ";".join(f"{420 + 120 * i},{120 + 70 * i},520,392" for i in range(4))
     start_fixture(4, "--colors", colors, "--no-label", "--frames", frames)
     s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
@@ -3834,9 +3884,10 @@ def popup_over_check(over):
         return
     t = by_title(s)
     w1 = t["Fixture 1"]["id"]
-    # The windows left shown keep clear of the strip: one over its area hides the strip, as
-    # Apple's does, and a hidden strip takes no pictures (11-05: from a fresh start Fixture 2
-    # and 3 sit at 190,148 and 300,218; the check had passed on the stages earlier checks left).
+    # The windows left shown keep clear of the strip: one over the cards covers them, one at
+    # the screen's left edge hides the strip, as Apple's does, and a hidden strip takes no
+    # pictures (11-05: from a fresh start Fixture 2 and 3 sit at 190,148 and 300,218; the
+    # check had passed on the stages earlier checks left).
     vis = s["display"]["visible"]
     left = vis["x"] + s["strip_width"] + 60
     for n, title in enumerate(("Fixture 2", "Fixture 3")):
@@ -6762,7 +6813,7 @@ def phase_displays():
     # A card click on the main screen switches the main screen alone.
     other_active = screen(s, other)["active"]
     main_card = next((c for c in s["strip_cards"] if c["number"] != screen(s, main)["active"]), None)
-    if main_card is None and reveal_strip("displays: the main strip, covered") is not None:
+    if (main_card is None or card_under_window(s, main_card["frame"])) and reveal_strip("displays: the main strip, covered") is not None:
         s = state()
         main_card = next((c for c in s["strip_cards"] if c["number"] != screen(s, main)["active"]), None)
     if check(main_card is not None, f"the main screen's strip draws a card (cards {[c['number'] for c in s['strip_cards']]})"):

@@ -14,6 +14,8 @@
   arranges it before it slides in, and a full-screen app on one screen no longer holds up
   windows opening on the other. After a restart the log says when a Desktop came back on
   another screen than it was saved on.
+- The strip stays up under a window that covers its cards, as Apple's does, and slides away
+  only once the window comes within 50 pt of the screen's left edge.
 
 ## 1.6.0 — 2026-11-05
 

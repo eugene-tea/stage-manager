@@ -217,7 +217,7 @@ pub const KEYS: &[KeyDef] = &[
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
     k("strip", "show_names", Kind::Bool, "false", "Draw stage names under cards. Apple shows none."),
     k("strip", "width", f(60.0, 800.0), "200.0",
-        "Width of the strip column: the panel, and the area a window must cover to hide the strip."),
+        "Width of the strip column: the panel, and the area windows keep clear of with fit."),
     k("strip", "capacity", i(0, 30), "0",
         "Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt)."),
     k("strip", "capacity_pitch", f(20.0, 2000.0), "190.0", "With capacity = 0: room per card, in points of visible height."),
@@ -535,6 +535,8 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-24.toml"),
     include_str!("legacy/default-25.toml"),
     include_str!("legacy/default-26.toml"),
+    include_str!("legacy/default-27.toml"),
+    include_str!("legacy/default-28.toml"),
 ];
 
 #[cfg(test)]
