@@ -27,6 +27,7 @@
 //! worked yet ([`super::capture::desktop_may_capture`]); then a switch has no still and an
 //! activation arrives at once (8L2).
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -283,26 +284,21 @@ struct State {
     patch: Option<Still>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State {
-    shot: None,
-    taking: None,
-    tried: None,
-    generation: 0,
-    said: None,
-    why_none: None,
-    had: false,
-    take_logged: None,
-    failed: false,
-    serial: 0,
-    dropped_at: None,
-    again: Vec::new(),
-    frame_at: None,
-    missing_since: None,
-    patch: None,
-});
+/// Every screen's state, by its `CGDirectDisplayID` (round displays-2).
+static STATE: Mutex<BTreeMap<u32, State>> = Mutex::new(BTreeMap::new());
 
-fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> Option<T> {
-    STATE.lock().ok().map(|mut s| f(&mut s))
+/// Runs `f` on `screen`'s state (made on first use).
+fn with_state<T>(screen: u32, f: impl FnOnce(&mut State) -> T) -> Option<T> {
+    STATE.lock().ok().map(|mut all| f(all.entry(screen).or_default()))
+}
+
+/// Runs `f` on every screen's state.
+fn with_every_state(mut f: impl FnMut(&mut State)) {
+    if let Ok(mut all) = STATE.lock() {
+        for s in all.values_mut() {
+            f(s);
+        }
+    }
 }
 
 /// Logs why no still could be taken, once per reason (until one is taken).
@@ -324,11 +320,11 @@ fn marks(s: &State) -> Vec<Instant> {
 /// capture when one is [`due`], none is in flight, the last try allows it ([`may_try`]), and
 /// it may be taken now (the capture gate, the Mac not at [`rest`], `safety` from the WM
 /// thread: [`ps::may_take`]).
-pub fn keep_fresh(key: Key, region: Rect, moment: Moment, wants: Wants, safety: Result<(), Block>, now: Instant) {
+pub fn keep_fresh(screen: u32, key: Key, region: Rect, moment: Moment, wants: Wants, safety: Result<(), Block>, now: Instant) {
     if !(wants.cover || wants.patch) {
         return;
     }
-    let start = with_state(|s| {
+    let start = with_state(screen, |s| {
         // The capture gate first (pure and cheap): with captures off that is the reason the
         // switch logs, whatever else holds (the scripts expect exactly it).
         if let Err(block) = take_now(moment, wants.patch, safety) {
@@ -354,9 +350,9 @@ pub fn keep_fresh(key: Key, region: Rect, moment: Moment, wants: Wants, safety: 
     .flatten();
     let Some(generation) = start else { return };
     let wanted = key.clone();
-    let done = Box::new(move |still: DesktopStill| arrived(still, wanted, region, generation, now));
-    if let Err(why) = capture::capture_desktop(region, done) {
-        with_state(|s| {
+    let done = Box::new(move |still: DesktopStill| arrived(screen, still, wanted, region, generation, now));
+    if let Err(why) = capture::capture_desktop(screen, region, done) {
+        with_state(screen, |s| {
             s.taking = None;
             s.failed = true;
             s.why_none = Some(why);
@@ -370,9 +366,9 @@ pub fn keep_fresh(key: Key, region: Rect, moment: Moment, wants: Wants, safety: 
 /// whether one is coming ([`ps::state`]: it may be taken now or shortly, for at most
 /// [`ps::HOLD_MAX`]), redrawn when the icons changed under `rect` ([`ps::redraw`]: the patch
 /// hides meanwhile). Call after [`keep_fresh`] with the same `key`.
-pub fn for_patch(rect: Rect, key: &Key, moment: Moment, safety: Result<(), Block>, now: Instant) -> Still {
+pub fn for_patch(screen: u32, rect: Rect, key: &Key, moment: Moment, safety: Result<(), Block>, now: Instant) -> Still {
     let take = take_now(moment, true, safety);
-    with_state(|s| {
+    with_state(screen, |s| {
         let meta = s.shot.as_ref().map(|x| &x.meta);
         let ready = match usable(meta, rect, key, now) {
             Ok(Layers::Alone) => meta.map(|m| m.serial),
@@ -406,16 +402,16 @@ pub fn for_patch(rect: Rect, key: &Key, moment: Moment, safety: Result<(), Block
 /// The still kept, its block (global, top-left points) and its pixels a point, for the corner
 /// patch (main thread), when it is the one with `serial` and stands alone; the patch crops it
 /// ([`crop`]) and keeps it to hold while the next one comes.
-pub fn patch_still(serial: u64) -> Option<(CFRetained<CGImage>, Rect, f64)> {
-    with_state(|s| s.shot.as_ref().filter(|x| x.meta.serial == serial && x.meta.opaque).map(|x| (x.image.clone(), x.meta.region, x.meta.scale)))
+pub fn patch_still(screen: u32, serial: u64) -> Option<(CFRetained<CGImage>, Rect, f64)> {
+    with_state(screen, |s| s.shot.as_ref().filter(|x| x.meta.serial == serial && x.meta.opaque).map(|x| (x.image.clone(), x.meta.region, x.meta.scale)))
         .flatten()
 }
 
 /// The block (global, top-left points) of the still kept, when it stands alone (the patch's
 /// picture can be cropped from it): what the patch may cover while Show Desktop is up, when
 /// no new still is taken.
-pub fn kept_region() -> Option<Rect> {
-    with_state(|s| s.shot.as_ref().filter(|x| x.meta.opaque).map(|x| x.meta.region)).flatten()
+pub fn kept_region(screen: u32) -> Option<Rect> {
+    with_state(screen, |s| s.shot.as_ref().filter(|x| x.meta.opaque).map(|x| x.meta.region)).flatten()
 }
 
 /// The pixels of `rect` (global, top-left, whole points) out of a still of `region` at
@@ -425,10 +421,11 @@ pub fn crop(still: &CGImage, region: Rect, scale: f64, rect: Rect) -> Option<CFR
     wallpaper::crop(still, px)
 }
 
-/// A press on the desktop, or a release in the corner (WM thread): a still taken before is
-/// taken again [`AGAIN_AFTER_TOUCH`] later (an icon selected, deselected or dropped).
-pub fn touched(now: Instant) {
-    with_state(|s| add_mark(s, now + AGAIN_AFTER_TOUCH));
+/// A press on the desktop, or a release in the corner of `screen` (WM thread): a still taken
+/// before is taken again [`AGAIN_AFTER_TOUCH`] later (an icon selected, deselected or
+/// dropped).
+pub fn touched(screen: u32, now: Instant) {
+    with_state(screen, |s| add_mark(s, now + AGAIN_AFTER_TOUCH));
 }
 
 /// Keeps a moment in [`State::again`] (a few at most: the older ones a still has passed go).
@@ -445,17 +442,19 @@ fn add_mark(s: &mut State, at: Instant) {
 
 /// The wallpaper read names another picture, placement or look (main thread): the still is
 /// of the old one; dropped, and taken again once the fade is over ([`FADE`]).
-pub fn wallpaper_changed(now: Instant) {
-    forget();
-    with_state(|s| add_mark(s, now + FADE));
+pub fn wallpaper_changed(screen: u32, now: Instant) {
+    with_state(screen, |s| {
+        forget_one(s);
+        add_mark(s, now + FADE);
+    });
 }
 
 /// When the clock predicts the next frame of a dynamic wallpaper (main thread, at every
 /// wallpaper read; `None`: none): a still taken before is taken again once it and its fade
 /// ([`FADE`]) are past ([`next_frame_mark`]).
-pub fn set_frame_due(due: Option<Instant>) {
+pub fn set_frame_due(screen: u32, due: Option<Instant>) {
     let now = Instant::now();
-    with_state(|s| {
+    with_state(screen, |s| {
         let taken = s.shot.as_ref().map(|x| x.meta.taken);
         s.frame_at = next_frame_mark(s.frame_at, due.map(|d| d + FADE), now, taken);
     });
@@ -475,20 +474,20 @@ pub fn next_frame_mark(kept: Option<Instant>, new: Option<Instant>, now: Instant
 
 /// Since the still was last dropped (a Space, appearance, display or picture change), for
 /// [`ps::TakeFacts::since_dropped`].
-pub fn since_dropped(now: Instant) -> Option<Duration> {
-    with_state(|s| s.dropped_at.map(|t| now.saturating_duration_since(t))).flatten()
+pub fn since_dropped(screen: u32, now: Instant) -> Option<Duration> {
+    with_state(screen, |s| s.dropped_at.map(|t| now.saturating_duration_since(t))).flatten()
 }
 
 /// A capture started at `started` answered (a ScreenCaptureKit queue): kept unless [`forget`]
 /// came since or a newer still is kept ([`newer`]); stamped with its start (what it shows is
 /// at least that old).
-fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started: Instant) {
+fn arrived(screen: u32, still: DesktopStill, key: Key, region: Rect, generation: u64, started: Instant) {
     // Judged before the lock: a small draw.
     let still = still.map(|(image, scale)| {
         let opaque = pixels::min_alpha(&image).is_some_and(|a| a >= OPAQUE_ALPHA);
         (image, scale, opaque)
     });
-    with_state(|s| {
+    with_state(screen, |s| {
         if s.taking == Some(started) {
             s.taking = None;
         }
@@ -501,7 +500,7 @@ fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started
             Ok((image, scale, opaque)) => {
                 if !s.had {
                     s.had = true;
-                    tracing::info!(%region, opaque, "a still of the desktop stands for the park corner (the corner patch's picture, a switch's cover)");
+                    tracing::info!(screen, %region, opaque, "a still of the desktop stands for the park corner (the corner patch's picture, a switch's cover)");
                 }
                 let now = Instant::now();
                 if s.take_logged.is_none_or(|t| now.saturating_duration_since(t) >= TAKE_LOG_EVERY) {
@@ -522,8 +521,8 @@ fn arrived(still: DesktopStill, key: Key, region: Rect, generation: u64, started
 /// Whether the still kept stands for the desktop at `rect` now ([`usable`]; any thread),
 /// with `wallpaper` (whether the patch's picture holds `rect`) for a still that holds the
 /// icons only. With no still at all, why none was taken ([`decide`]).
-pub fn ready(rect: Rect, key: &Key, wallpaper: impl FnOnce(Rect) -> Result<(), &'static str>) -> Result<(), &'static str> {
-    let (found, why_none) = with_state(|s| (usable(s.shot.as_ref().map(|x| &x.meta), rect, key, Instant::now()), s.why_none))
+pub fn ready(screen: u32, rect: Rect, key: &Key, wallpaper: impl FnOnce(Rect) -> Result<(), &'static str>) -> Result<(), &'static str> {
+    let (found, why_none) = with_state(screen, |s| (usable(s.shot.as_ref().map(|x| &x.meta), rect, key, Instant::now()), s.why_none))
         .ok_or("the desktop's still is not readable")?;
     decide(found, why_none, || wallpaper(rect))
 }
@@ -550,8 +549,8 @@ fn decide(
 /// them (the strip, main thread, drawing a switch's cover the WM thread found [`ready`]); one
 /// that holds the icons only is laid over the patch's picture of the wallpaper. Logs why
 /// not when it finds nothing.
-pub fn image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
-    let found = with_state(|s| s.shot.as_ref().map(|x| (x.image.clone(), x.meta.region, x.meta.scale, x.meta.opaque))).flatten();
+pub fn image(screen: u32, rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
+    let found = with_state(screen, |s| s.shot.as_ref().map(|x| (x.image.clone(), x.meta.region, x.meta.scale, x.meta.opaque))).flatten();
     let picture = (|| {
         let (image, region, scale, opaque) = found.ok_or("no still of the desktop now (dropped since it was ready)")?;
         let px = wp::crop_px(region, rect, scale).ok_or("the still does not hold the corner")?;
@@ -559,7 +558,7 @@ pub fn image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
         if opaque {
             return Ok((top, scale));
         }
-        let (base, base_scale) = crate::ui::corner_patch::cover_image(rect).ok_or("no picture of the wallpaper to lay the icons on")?;
+        let (base, base_scale) = crate::ui::corner_patch::cover_image(screen, rect).ok_or("no picture of the wallpaper to lay the icons on")?;
         pixels::over(&base, &top).map(|i| (i, base_scale)).ok_or("the icons could not be laid on the wallpaper")
     })();
     picture
@@ -570,27 +569,31 @@ pub fn image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
 /// Whether a switch's cover may need the corner patch's picture under the still: none taken
 /// yet (it may hold the icons only), or the one kept does (WM thread: the patch keeps its
 /// picture rendered while hidden then).
-pub fn needs_wallpaper() -> bool {
-    with_state(|s| s.shot.as_ref().is_none_or(|x| !x.meta.opaque)).unwrap_or(false)
+pub fn needs_wallpaper(screen: u32) -> bool {
+    with_state(screen, |s| s.shot.as_ref().is_none_or(|x| !x.meta.opaque)).unwrap_or(false)
 }
 
-/// Drops the still (a Space, appearance or display change); a capture in flight is not kept.
-/// The patch holds what a still drew for a moment ([`ps::HOLD_MAX`]) while the next one comes
-/// ([`ps::SETTLE`] later).
+/// Drops every screen's still (a Space, appearance or display change: no notice says which
+/// screen's); a capture in flight is not kept. The patch holds what a still drew for a
+/// moment ([`ps::HOLD_MAX`]) while the next one comes ([`ps::SETTLE`] later).
 pub fn forget() {
-    with_state(|s| {
-        s.shot = None;
-        s.generation = s.generation.wrapping_add(1);
-        s.tried = None;
-        s.failed = false;
-        s.dropped_at = Some(Instant::now());
-        s.missing_since = None;
-    });
+    with_every_state(forget_one);
 }
 
-/// The still for `ctl state` (tests): its block, age, whether it stands alone, why none.
-pub fn status() -> serde_json::Value {
-    with_state(|s| {
+/// [`forget`] for one screen's state.
+fn forget_one(s: &mut State) {
+    s.shot = None;
+    s.generation = s.generation.wrapping_add(1);
+    s.tried = None;
+    s.failed = false;
+    s.dropped_at = Some(Instant::now());
+    s.missing_since = None;
+}
+
+/// The still of `screen` for `ctl state` (tests): its block, age, whether it stands alone,
+/// why none.
+pub fn status(screen: u32) -> serde_json::Value {
+    with_state(screen, |s| {
         serde_json::json!({
             "region": s.shot.as_ref().map(|x| x.meta.region),
             "age_ms": s.shot.as_ref().map(|x| x.meta.taken.elapsed().as_millis() as u64),

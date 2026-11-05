@@ -473,6 +473,8 @@ pub fn visibility(f: &PatchFacts) -> Result<Rect, &'static str> {
 pub struct CoverFacts {
     /// `[windows] corner_patch`.
     pub on: bool,
+    /// The screen the switch plays on (its `CGDirectDisplayID`; round displays-2).
+    pub screen: u32,
     /// Mission Control, App Exposé or Show Desktop is up (or settling), or a Space change
     /// settles.
     pub overview: bool,
@@ -544,6 +546,9 @@ impl From<&'static str> for Refused {
 /// What a switch's motion overlay paints over the park corner ([`switch_cover`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwitchCover {
+    /// The screen it is on (its `CGDirectDisplayID`; round displays-2): whose patch and
+    /// still the picture comes from.
+    pub screen: u32,
     /// Where (global, top-left): always inside [`Self::cap`].
     pub rect: Rect,
     /// The park corner's square the cover is held to ([`cover_cap`], round 8L6), logged with
@@ -665,7 +670,7 @@ pub fn switch_cover(f: &CoverFacts) -> Result<SwitchCover, Refused> {
         return Err(why.into());
     }
     let over = reaching.iter().rev().map(|w| (w.id, w.bounds)).collect();
-    Ok(SwitchCover { rect, cap, picture, over })
+    Ok(SwitchCover { screen: f.screen, rect, cap, picture, over })
 }
 
 /// The visible frame, or the display when it is degenerate.
@@ -843,6 +848,7 @@ mod tests {
     fn cover_facts() -> CoverFacts {
         CoverFacts {
             on: true,
+            screen: 1,
             slivers: vec![sliver(32.0)],
             display: MAIN,
             reach: Reach::even(60.0),

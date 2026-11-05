@@ -187,6 +187,66 @@ fn sooner(due: Option<Instant>, at: Instant) -> Instant {
     due.map_or(at, |d| d.min(at))
 }
 
+/// One screen's corner patch as the WM thread plans it (round displays-2: a patch per
+/// screen, each with its own rectangle, order, Show Desktop state and plan).
+#[derive(Default)]
+struct PatchTrack {
+    /// The last plan sent to the main thread.
+    sent: Option<crate::ui::corner_patch::PatchPlan>,
+    /// The rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
+    rect: Option<Rect>,
+    /// The rectangle in use on each of the screen's Desktops (the engine's Space ids): each
+    /// Desktop has a panel of its own ([`crate::ui::corner_patch`]), steady on its own.
+    rects: HashMap<u64, Rect>,
+    /// The order as last checked ([`crate::engine::corner_patch::order_step`]).
+    order: crate::engine::corner_patch::OrderState,
+    /// Why the last plan hid the patch (logged once a change).
+    why: Option<&'static str>,
+    /// The patch was once found ordered right (logged once).
+    honoured: bool,
+    /// The Desktop's windows while Show Desktop is listed: their slide back is its close's
+    /// first sign ([`show_desktop::CloseWatch`]).
+    reveal_close: CloseWatch,
+    /// Where macOS listed the panel at the last plan during Show Desktop (logged when it
+    /// changes; `None` outside Show Desktop).
+    reveal_panel: Option<PanelPlace>,
+    /// The rectangle through Show Desktop: grown over the parked windows macOS pushes into
+    /// view, until they are back ([`show_desktop::PushedCover`]).
+    reveal_cover: PushedCover,
+    /// Since when the list shows this screen's Desktop sliding (the main screen's slide is
+    /// the phase's clock, [`phase::Tracker::slide_seen`]; another screen's is kept here).
+    slide_since: Option<Instant>,
+}
+
+/// Another screen's full-screen settle and overview watch, and what its once-a-second check
+/// counts (round displays-2). The main screen's live on the controller (`settle`, `overview`,
+/// `absent`) and feed the phase; each other screen has its own, so a full-screen app or an
+/// overview on one screen never gates windows arriving on another, and a window left behind
+/// on another screen's Desktop is let go as on the main one.
+#[derive(Default)]
+struct ScreenWatch {
+    settle: Settle,
+    overview: OverviewWatch,
+    /// A full-screen app's Space shows there (logged once a change).
+    fullscreen: bool,
+    /// Windows of its Desktop missing from the screen for no visible reason, by the checks
+    /// in a row ([`SPACE_CHECKS`]).
+    absent: HashMap<u32, u32>,
+}
+
+/// What another screen's window list shows ([`Controller::other_screen_seen`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtherSeen {
+    /// Mission Control, App Exposé or Show Desktop shows there (or just closed).
+    Overview,
+    /// A full-screen animation runs.
+    Animation,
+    /// A full-screen app's Space.
+    FullScreen,
+    /// A Desktop.
+    Desktop,
+}
+
 /// Finder's desktop icons for the corner patch, read on a thread of their own
 /// ([`super::desktop_items::start_read`]).
 #[derive(Default)]
@@ -194,8 +254,9 @@ struct PatchItems {
     /// The icons (grown by their labels) of the last read that knew them; `None` before one,
     /// or after a read found too many to read: the patch stays off.
     known: Option<Vec<Rect>>,
-    /// The rectangle the last read was started for.
-    read_for: Option<Rect>,
+    /// The rectangle the last read was started for, per screen (a new rectangle on a screen
+    /// starts a read; the icons read are every screen's).
+    read_for: BTreeMap<u32, Rect>,
     /// When the next read is due (`None`: at once).
     due: Option<Instant>,
     /// The read running.
@@ -943,22 +1004,13 @@ pub struct Controller {
     fallback_said: HashSet<&'static str>,
     /// `[windows] hide_parked_apps`: the apps we hid ([`hide`]).
     hides: hide::Hides,
-    /// The corner patch's last plan sent to the main thread.
-    patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
+    /// Each screen's corner patch as planned here ([`PatchTrack`], by the screen's id; round
+    /// displays-2).
+    patches: BTreeMap<u32, PatchTrack>,
     /// The desktop notice's lines last sent to the main thread ([`notice`]).
     notice_sent: Option<Vec<crate::ui::status_menu::NoticeLine>>,
-    /// The corner patch's rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
-    patch_rect: Option<Rect>,
-    /// The patch's rectangle in use on each Desktop (the engine's Space ids): each Desktop
-    /// has a panel of its own ([`crate::ui::corner_patch`]), steady on its own.
-    patch_rects: HashMap<u64, Rect>,
-    /// The patch's order as last checked ([`crate::engine::corner_patch::order_step`]).
-    patch_order: crate::engine::corner_patch::OrderState,
-    /// Why the last plan hid the patch (logged once a change).
-    patch_why: Option<&'static str>,
-    /// The patch was once found ordered right (logged once).
-    patch_honoured: bool,
-    /// Finder's desktop icons as last read for the patch ([`PatchItems`]).
+    /// Finder's desktop icons as last read for the patches ([`PatchItems`]; the icons are
+    /// read for every screen at once).
     patch_items: PatchItems,
     /// Widgets shown on the desktop were logged as possibly under the patch.
     patch_widgets_logged: bool,
@@ -981,6 +1033,9 @@ pub struct Controller {
     ax_silent_rescan: Option<Instant>,
     /// Waits out full-screen animations.
     settle: Settle,
+    /// The other screens' full-screen settles and overview watches ([`ScreenWatch`], by the
+    /// screen's id; round displays-2): the main screen's are `settle` and `overview`.
+    screens: BTreeMap<u32, ScreenWatch>,
     /// The Desktop and transition axis as one state ([`phase::Tracker`]): a Desktop steady,
     /// a switch's windows held behind their snapshots, a Space change waiting to be
     /// recognized (and for what), a full-screen app's Space; with the settle after a Space
@@ -1003,15 +1058,6 @@ pub struct Controller {
     /// Mission Control, App Exposé and Show Desktop: no Space is inferred from the window
     /// list while one shows and for a settle after ([`OverviewWatch`]).
     overview: OverviewWatch,
-    /// The Desktop's windows while Show Desktop is listed: their slide back is its close's
-    /// first sign, for the corner patch ([`show_desktop::CloseWatch`]).
-    reveal_close: CloseWatch,
-    /// Where macOS listed the patch's panel at the last plan during Show Desktop (logged when
-    /// it changes; `None` outside Show Desktop).
-    reveal_panel: Option<PanelPlace>,
-    /// The patch's rectangle through Show Desktop: grown over the parked windows macOS pushes
-    /// into view, until they are back ([`show_desktop::PushedCover`]).
-    reveal_cover: PushedCover,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
     /// release. Any event, batch, Space change, config reload, retried restore or window
@@ -1096,9 +1142,9 @@ pub struct Controller {
     /// Space change.
     macos_reveal_at: Option<Instant>,
     /// Shown windows (the active stage's, pinned ones) the window server did not show at the
-    /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
-    /// a change seen by the once-a-second check sends a new snapshot.
-    active_off_screen: BTreeSet<u32>,
+    /// last strip snapshot (app hidden, minimized), per display: left out of the strip's
+    /// overlap test; a change seen by the once-a-second check sends a new snapshot.
+    active_off_screen: HashMap<DisplayId, BTreeSet<u32>>,
     /// When each app with pending windows was last busy: a quiet one's pending windows are
     /// given up ([`crate::engine::restore`]).
     quiet: AppQuiet,
@@ -1210,13 +1256,8 @@ impl Controller {
             activation: ActivationRun::default(),
             fallback_said: HashSet::new(),
             hides: hide::Hides::default(),
-            patch_sent: None,
+            patches: BTreeMap::new(),
             notice_sent: None,
-            patch_rect: None,
-            patch_rects: HashMap::new(),
-            patch_order: Default::default(),
-            patch_why: None,
-            patch_honoured: false,
             patch_items: PatchItems::default(),
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
@@ -1226,6 +1267,7 @@ impl Controller {
             ax_silent_since: None,
             ax_silent_rescan: None,
             settle: Settle::default(),
+            screens: BTreeMap::new(),
             phase: phase::Tracker::default(),
             space_changes: 0,
             last_switch: None,
@@ -1233,9 +1275,6 @@ impl Controller {
             space_checked: Instant::now(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
-            reveal_close: CloseWatch::default(),
-            reveal_panel: None,
-            reveal_cover: PushedCover::default(),
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
@@ -1263,7 +1302,7 @@ impl Controller {
             stale: stale::StaleHandles::default(),
             user_focus: HashMap::new(),
             patch_fast_until: None,
-            active_off_screen: BTreeSet::new(),
+            active_off_screen: HashMap::new(),
             macos_reveal_at: None,
             quiet: AppQuiet::default(),
             quiet_checked: Instant::now(),
@@ -1557,7 +1596,7 @@ impl Controller {
     /// [`super::desktop_items::start_read`]) for a new rectangle or when one is due: the last
     /// good read [`PATCH_ITEMS_FRESH`] old, a failed one [`items_retry`] old. A read
     /// that fails keeps the icons known. None starts while `quiet` (a drag, the fast tick).
-    fn patch_items(&mut self, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
+    fn patch_items(&mut self, screen: u32, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
         use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
         let answer = match self.patch_items.reading.as_ref().map(|r| r.try_recv()) {
             Some(Ok(answer)) => Some(answer),
@@ -1570,11 +1609,11 @@ impl Controller {
             let said = match answer {
                 Some(DesktopIcons::Icons(icons)) => {
                     let items: Vec<Rect> = icons.into_iter().map(item_reach).collect();
-                    if let Some(r) = p.read_for {
-                        let under = items.iter().filter(|i| i.intersect(&r).is_some()).count();
-                        let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(&r).is_some()));
+                    for (screen, r) in &p.read_for {
+                        let under = items.iter().filter(|i| i.intersect(r).is_some()).count();
+                        let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(r).is_some()));
                         if under > 0 && !was {
-                            tracing::info!(under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
+                            tracing::info!(screen, under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
                         }
                     }
                     p.known = Some(items);
@@ -1614,9 +1653,9 @@ impl Controller {
         }
         let rect = rect?;
         let p = &mut self.patch_items;
-        let due = p.read_for != Some(rect) || p.due.is_none_or(|d| now >= d);
+        let due = p.read_for.get(&screen) != Some(&rect) || p.due.is_none_or(|d| now >= d);
         if due && p.reading.is_none() && !quiet {
-            p.read_for = Some(rect);
+            p.read_for.insert(screen, rect);
             p.due = Some(now + PATCH_ITEMS_FRESH);
             p.reading = super::desktop_items::start_read();
         }
@@ -1629,17 +1668,15 @@ impl Controller {
         self.patch_items.known.clone()
     }
 
-    /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
-    /// it to the main thread when it changed. Reads the window server's on-screen list only
-    /// while `[windows] corner_patch` is on; checks the patch's order in it every time (an
+    /// Works out the wallpaper corner patch's plan for every screen ([`crate::engine::corner_patch`];
+    /// one patch per screen, round displays-2) and sends each to the main thread when it
+    /// changed. Reads the window server's on-screen list only while `[windows] corner_patch`
+    /// is on, once for every screen; checks each patch's order in it every time (an
     /// activation raising a parked window undoes it), and has it ordered again when it was
     /// right and is not any more. Returns the list when it read one, for the rest of the tick
     /// ([`super::sliver_tap::refresh`]).
     fn update_patch(&mut self) -> Option<Vec<windows::CgWindow>> {
-        use crate::engine::corner_patch::{
-            Listed, PatchFacts, desktop_slides, order_step, ordered_right, patch_rect, slide_waits, steady_rect, visibility, would_be_right,
-        };
-        use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
+        use crate::ui::corner_patch::PatchPlan;
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.patch_reach(), self.space_changes);
         // Mission Control and App Exposé: the panel is Stationary (round show-desktop-patch;
@@ -1668,7 +1705,8 @@ impl Controller {
             self.look_for_overview(&list, display, now);
             early = Some(list);
         }
-        if on && !self.phase.changing() && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
+        let any_shown = self.patches.values().any(|t| t.sent.as_ref().is_some_and(|p| p.show.is_some()));
+        if on && !self.phase.changing() && self.overview.showing() == Some(Overview::MissionControl) && any_shown {
             return early;
         }
         // A Space change being recognized: no plan. Each Desktop has its own panel, which
@@ -1678,244 +1716,287 @@ impl Controller {
         if on && self.phase.changing() && self.model.is_some() {
             return None;
         }
-        let mut read = None;
-        let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
-        let plan = match &self.model {
-            Some(m) if on => {
-                let list = early.take().unwrap_or_else(windows::on_screen);
-                let own = std::process::id() as i32;
-                let main = m.main_display();
-                let display = main.frame;
-                // Only those listed in the park zone (8L6): one the model has parked but the
-                // window server lists elsewhere shows there, and grew the patch's rectangle
-                // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
-                // This Desktop's parked windows only: another Desktop's listed on screen means
-                // it slides in (or out) before the Space change's notice.
-                let here = m.current_space(main.id);
-                // With the windows whose restore failed while they are still listed in the
-                // zone (W4): their slivers are there, whatever the model says.
-                let model_parked: HashSet<u32> = shield_parked(
-                    m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0),
-                    self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
-                );
-                let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
-                let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
-                // Show Desktop pushes the parked windows partly into view (round
-                // show-desktop-patch, part 2): the patch covers what of them shows, until they
-                // are back at their park frames.
-                let show_desktop = self.overview.show_desktop_up(now);
-                let parked_listed: Vec<(u32, Rect)> =
-                    list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| (w.id, w.bounds)).collect();
-                let cover = self.reveal_cover.see(&CoverLook {
-                    up: show_desktop,
-                    parked: &parked_listed,
-                    in_zone: &parked,
-                    in_use: self.patch_rects.get(&here.0).copied(),
-                    display,
-                    reach,
-                    cap: reveal_cap(display, main.corner, desktop_shot::kept_region()),
-                    now,
-                });
-                // This Desktop's windows as listed while Show Desktop is: their slide back is its
-                // close's first sign (round show-desktop-patch).
-                let listed_sd = self.overview.showing() == Some(Overview::ShowDesktop);
-                let ours: Vec<(u32, Rect)> = if listed_sd {
-                    list.iter()
-                        .filter(|w| w.layer == 0 && m.window(WindowId(w.id)).is_some_and(|x| x.space == here))
-                        .map(|w| (w.id, w.bounds))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                // A Desktop slides before the Space change's notice (10-23: the parked windows
-                // listed at x=110, all together; at 11:51 the next Desktop's listed in the zone
-                // and planned as this one's): the plan stays as it was, so the panel slides away
-                // with its Desktop drawn and is there when it slides back.
-                let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
-                // Never while Show Desktop is up or its cover held: it moves the parked windows
-                // out of the zone too.
-                let slides = !show_desktop
-                    && !self.reveal_cover.holding()
-                    && (elsewhere || parked.is_empty())
-                    && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
-                self.phase.slide_seen(slides, now);
-                let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
-                if slide_waits(self.phase.sliding_for(now), shown_now) {
-                    if self.patch_why != Some("the Desktop slides") {
-                        tracing::debug!("corner patch: the Desktop slides; the plan stays as it was");
-                        self.patch_why = Some("the Desktop slides");
-                    }
-                    return Some(list);
-                }
-                // While the cover is held every parked window listed counts as parked, wherever
-                // Show Desktop put it: the patch is ordered just above them and never taken for
-                // over a shown window there.
-                let parked: HashSet<u32> = match cover {
-                    Cover::Held(_) => parked.into_iter().chain(parked_listed.iter().map(|(id, _)| *id)).collect(),
-                    _ => parked,
-                };
-                let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let usual = patch_rect(&slivers, display, reach);
-                let rect = match cover {
-                    Cover::Held(r) => Some(r),
-                    // The windows are back: the slivers' rectangle at once, not kept at the
-                    // bigger one in use.
-                    Cover::Released => usual,
-                    Cover::Usual => usual.map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r, reach)),
-                };
-                match cover {
-                    Cover::Held(r) if self.patch_rect != Some(r) => {
-                        tracing::info!(rect = %r, "Show Desktop: the corner patch covers the parked windows it pushes into view");
-                    }
-                    Cover::Released => {
-                        tracing::info!(rect = %rect.map_or_else(|| "none".to_owned(), |r| r.to_string()), "Show Desktop: the parked windows are back; the corner patch covers their slivers");
-                    }
-                    _ => {}
-                }
-                match rect {
-                    Some(r) => self.patch_rects.insert(here.0, r),
-                    None => self.patch_rects.remove(&here.0),
-                };
-                self.patch_rect = rect;
-                let listed: Vec<Listed> =
-                    list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds, drawn: w.alpha > 0.0 && w.pid != own }).collect();
-                // The topmost parked window under the patch: what it is ordered against.
-                let above = rect.and_then(|r| {
-                    list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
-                });
-                // Whether just above it could be right at all (no shown window under it that
-                // reaches the patch); when not, the fallback, without a show to find out.
-                let number = patch_ui::window_number();
-                let possible = match (rect, above) {
-                    (Some(r), Some(a)) => would_be_right(&listed, number.unwrap_or(0), a, r, &parked),
-                    _ => false,
-                };
-                // Checked only while the panel is on screen ordered against that window with
-                // this reorder count, and that order could be right; otherwise not known.
-                let check = match (number, rect, above) {
-                    (Some(n), Some(r), Some(a))
-                        if possible && patch_ui::ordered_against() == Some((a, reorder)) && list.iter().any(|w| w.id == n) =>
-                    {
-                        Some(ordered_right(&listed, n, r, &parked))
-                    }
-                    _ => None,
-                };
-                let was = self.patch_order;
-                let step = order_step(&mut self.patch_order, above, check);
-                if step.reorder {
-                    reorder = reorder.wrapping_add(1);
-                    tracing::debug!("corner patch: no longer just above the parked windows; ordered again");
-                } else if check == Some(true) && !self.patch_honoured {
-                    self.patch_honoured = true;
-                    tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
-                } else if self.patch_order.refused.is_some() && self.patch_order.refused != was.refused {
-                    tracing::info!(
-                        refused_against = self.patch_order.refused,
-                        "corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches (the fallback mode; `ctl state` names it)"
-                    );
-                } else if check.is_some() && check != was.last {
-                    tracing::debug!(?check, "corner patch: order checked");
-                }
-                let ordered = step.ordered;
-                let dragging = input::left_button_down() || self.drag.is_some();
-                let items = self.patch_items(rect, now, dragging || self.wants_fast_tick());
-                // The desktop's still: the patch's picture wherever one can be taken (round
-                // desktop-still-patch), and a switch's cover where a desktop icon lies (8L3).
-                let corner = self.corner_still(rect, items.as_deref(), now);
-                // Show Desktop (round show-desktop-patch): where macOS lists the panel, and the
-                // close's first sign, this Desktop's windows sliding back.
-                let closing = self.reveal_close.see(listed_sd, ours, now);
-                if closing == show_desktop::Closing::Began {
-                    tracing::info!("Show Desktop closes: the windows slide back; the corner patch is planned again");
-                }
-                let panel = if show_desktop {
-                    let listed = number.and_then(|n| list.iter().find(|w| w.id == n)).map(|w| w.bounds);
-                    let asked = self.patch_sent.as_ref().and_then(|p| p.show);
-                    let place = show_desktop::panel_place(listed, patch_ui::placed_at(), asked, display);
-                    if self.reveal_panel != Some(place) {
-                        tracing::info!(listed = ?listed, placed = ?patch_ui::placed_at(), "Show Desktop: the corner patch's panel is {}", place.name());
-                        self.reveal_panel = Some(place);
-                    }
-                    place
-                } else {
-                    self.reveal_panel = None;
-                    PanelPlace::Unknown
-                };
-                let gate = show_desktop::gate(&RevealFacts {
-                    mission_control: self.overview.showing() == Some(Overview::MissionControl),
-                    show_desktop,
-                    closing: closing.is(),
-                    still: matches!(corner.still, crate::engine::patch_still::Still::Ready(_)),
-                    panel,
-                });
-                let facts = PatchFacts {
-                    on,
-                    rect,
-                    // Not the settle after an overview (that is for Space inference): the patch
-                    // comes back with the windows.
-                    overview: gate.err().or(self.phase.changing().then_some(show_desktop::OVERVIEW_UP)),
-                    ordered,
-                    can_order: possible,
-                    fullscreen: self.phase.fullscreen(),
-                    // The same filter as the order's check (`Listed::counts`, the rectangle
-                    // tested by `visibility`).
-                    shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
-                    dragging,
-                    transition: self.phase.switching().is_some(),
-                    items,
-                    still: corner.still,
-                };
-                let visible = visibility(&facts);
-                let why = visible.err();
-                if why != self.patch_why {
-                    if let Some(why) = why {
-                        tracing::debug!(why, "corner patch: hidden by the plan");
-                    }
-                    self.patch_why = why;
-                }
-                let show = visible.ok();
-                read = Some(list);
-                // The test's forced still is compared with the patch's picture (`debug-overlay`).
-                let wanted = desktop_shot::needs_wallpaper() || cover_desktop_forced();
-                let picture = if show.is_none() && corner.picture && wanted { rect } else { None };
-                let clear = rect.is_some_and(|r| crate::engine::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
-                let source = crate::engine::patch_still::source(facts.still, clear);
-                // The icons as last read well, whatever this plan's rectangle (none read for a
-                // plan with no sliver): they are the same on every Desktop, and other Desktops'
-                // panels are checked against them (10-23: `None` here hid them all).
-                PatchPlan {
-                    show,
-                    above: show.and(above),
-                    reorder,
-                    space,
-                    picture,
-                    on: true,
-                    items: self.patch_items.known.clone(),
-                    still: show.and(source.still),
-                    hold: show.is_some() && source.hold,
-                    file: source.file,
-                }
+        let displays: Vec<Display> = if on { self.model.as_ref().map(|m| m.displays().to_vec()).unwrap_or_default() } else { Vec::new() };
+        if displays.is_empty() {
+            // Off, or no model: every screen's patch off (its icons known stay: they do not
+            // depend on the patch; a read is due when the patch is wanted again).
+            self.phase.forget_slide();
+            self.patch_items.read_for.clear();
+            let screens: Vec<u32> = self.patches.keys().copied().collect();
+            for screen in screens {
+                let reorder = self.patches.get(&screen).and_then(|t| t.sent.as_ref()).map_or(0, |p| p.reorder);
+                let track = self.patches.entry(screen).or_default();
+                *track = PatchTrack { sent: track.sent.take(), ..PatchTrack::default() };
+                let plan = PatchPlan { screen, reorder, space, ..PatchPlan::default() };
+                self.send_patch(plan);
             }
-            _ => {
-                self.patch_rect = None;
-                self.patch_rects.clear();
-                self.reveal_cover = PushedCover::default();
-                self.phase.forget_slide();
-                self.patch_order = Default::default();
-                self.patch_why = None;
-                // The icons known stay (they do not depend on the patch); a read is due when
-                // the patch is wanted again.
-                self.patch_items.read_for = None;
-                PatchPlan { show: None, above: None, reorder, space, picture: None, on: false, items: None, still: None, hold: false, file: false }
-            }
-        };
-        if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {
-            return read;
+            return None;
         }
-        self.patch_sent = Some(plan.clone());
+        let list = early.take().unwrap_or_else(windows::on_screen);
+        // The screens gone are forgotten (their patches close on the main thread with the
+        // display change).
+        self.patches.retain(|screen, _| displays.iter().any(|d| d.id.0 == *screen));
+        for d in displays {
+            if let Some(plan) = self.plan_patch_on(d, &list, now, reach, space) {
+                self.send_patch(plan);
+            }
+        }
+        Some(list)
+    }
+
+    /// Sends `plan` to the main thread when it differs from the last one sent for its screen
+    /// (a first plan that shows nothing is not sent).
+    fn send_patch(&mut self, plan: crate::ui::corner_patch::PatchPlan) {
+        let track = self.patches.entry(plan.screen).or_default();
+        if track.sent.as_ref() == Some(&plan) || (track.sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {
+            return;
+        }
+        track.sent = Some(plan.clone());
         notify_ui(UiUpdate::CornerPatch(plan));
-        read
+    }
+
+    /// The corner patch's plan for one screen `d` from the window server's list `list`
+    /// ([`Self::update_patch`]); `None` while that screen's Desktop slides (the plan stays as
+    /// it was).
+    fn plan_patch_on(&mut self, d: Display, list: &[windows::CgWindow], now: Instant, reach: crate::engine::corner_patch::Reach, space: u64) -> Option<crate::ui::corner_patch::PatchPlan> {
+        use crate::engine::corner_patch::{
+            Listed, PatchFacts, desktop_slides, order_step, ordered_right, patch_rect, slide_waits, steady_rect, visibility, would_be_right,
+        };
+        use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
+        let screen = d.id.0;
+        let m = self.model.as_ref()?;
+        let is_main = d.id == m.main_display().id;
+        let reorder = self.patches.get(&screen).and_then(|t| t.sent.as_ref()).map_or(0, |p| p.reorder);
+        let mut reorder = reorder;
+        let own = std::process::id() as i32;
+        let display = d.frame;
+        // Only those listed in the park zone (8L6): one the model has parked but the
+        // window server lists elsewhere shows there, and grew the patch's rectangle
+        // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
+        // This Desktop's parked windows only: another Desktop's listed on screen means
+        // it slides in (or out) before the Space change's notice.
+        let here = m.current_space(d.id);
+        // With the windows whose restore failed while they are still listed in the
+        // zone (W4): their slivers are there, whatever the model says.
+        let model_parked: HashSet<u32> = shield_parked(
+            m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0),
+            self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
+        );
+        let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
+        let parked = parked_in_zone(list, model_parked.iter().copied(), d.frame, d.visible, d.corner);
+        // Show Desktop pushes the parked windows partly into view (round
+        // show-desktop-patch, part 2): the patch covers what of them shows, until they
+        // are back at their park frames.
+        let show_desktop = self.overview.show_desktop_up(now);
+        let parked_listed: Vec<(u32, Rect)> =
+            list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| (w.id, w.bounds)).collect();
+        let track = self.patches.entry(screen).or_default();
+        let cover = track.reveal_cover.see(&CoverLook {
+            up: show_desktop,
+            parked: &parked_listed,
+            in_zone: &parked,
+            in_use: track.rects.get(&here.0).copied(),
+            display,
+            reach,
+            cap: reveal_cap(display, d.corner, desktop_shot::kept_region(screen)),
+            now,
+        });
+        // This Desktop's windows as listed while Show Desktop is: their slide back is its
+        // close's first sign (round show-desktop-patch).
+        let listed_sd = self.overview.showing() == Some(Overview::ShowDesktop);
+        let ours: Vec<(u32, Rect)> = if listed_sd {
+            list.iter()
+                .filter(|w| w.layer == 0 && m.window(WindowId(w.id)).is_some_and(|x| x.space == here))
+                .map(|w| (w.id, w.bounds))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // A Desktop slides before the Space change's notice (10-23: the parked windows
+        // listed at x=110, all together; at 11:51 the next Desktop's listed in the zone
+        // and planned as this one's): the plan stays as it was, so the panel slides away
+        // with its Desktop drawn and is there when it slides back.
+        let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
+        let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
+        // Never while Show Desktop is up or its cover held: it moves the parked windows
+        // out of the zone too.
+        let slides = !show_desktop
+            && !track.reveal_cover.holding()
+            && (elsewhere || parked.is_empty())
+            && desktop_slides(model_parked.len(), &listed_parked, elsewhere, d.frame, d.visible, d.corner);
+        // The main screen's slide is the phase's clock (other holds read it); another
+        // screen's is the track's.
+        let sliding_for = if is_main {
+            self.phase.slide_seen(slides, now);
+            self.phase.sliding_for(now)
+        } else {
+            let track = self.patches.entry(screen).or_default();
+            if !slides {
+                track.slide_since = None;
+            }
+            track.slide_since.get_or_insert(now);
+            slides.then(|| now.saturating_duration_since(track.slide_since.unwrap_or(now)))
+        };
+        let track = self.patches.entry(screen).or_default();
+        let shown_now = track.sent.as_ref().is_some_and(|p| p.show.is_some());
+        if slide_waits(sliding_for, shown_now) {
+            if track.why != Some("the Desktop slides") {
+                tracing::debug!(screen, "corner patch: the Desktop slides; the plan stays as it was");
+                track.why = Some("the Desktop slides");
+            }
+            return None;
+        }
+        // While the cover is held every parked window listed counts as parked, wherever
+        // Show Desktop put it: the patch is ordered just above them and never taken for
+        // over a shown window there.
+        let parked: HashSet<u32> = match cover {
+            Cover::Held(_) => parked.into_iter().chain(parked_listed.iter().map(|(id, _)| *id)).collect(),
+            _ => parked,
+        };
+        let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
+        let usual = patch_rect(&slivers, display, reach);
+        let rect = match cover {
+            Cover::Held(r) => Some(r),
+            // The windows are back: the slivers' rectangle at once, not kept at the
+            // bigger one in use.
+            Cover::Released => usual,
+            Cover::Usual => usual.map(|r| steady_rect(track.rects.get(&here.0).copied(), r, reach)),
+        };
+        match cover {
+            Cover::Held(r) if track.rect != Some(r) => {
+                tracing::info!(screen, rect = %r, "Show Desktop: the corner patch covers the parked windows it pushes into view");
+            }
+            Cover::Released => {
+                tracing::info!(screen, rect = %rect.map_or_else(|| "none".to_owned(), |r| r.to_string()), "Show Desktop: the parked windows are back; the corner patch covers their slivers");
+            }
+            _ => {}
+        }
+        match rect {
+            Some(r) => track.rects.insert(here.0, r),
+            None => track.rects.remove(&here.0),
+        };
+        track.rect = rect;
+        let listed: Vec<Listed> =
+            list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds, drawn: w.alpha > 0.0 && w.pid != own }).collect();
+        // The topmost parked window under the patch: what it is ordered against.
+        let above = rect.and_then(|r| {
+            list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
+        });
+        // Whether just above it could be right at all (no shown window under it that
+        // reaches the patch); when not, the fallback, without a show to find out.
+        let number = patch_ui::window_number(screen);
+        let possible = match (rect, above) {
+            (Some(r), Some(a)) => would_be_right(&listed, number.unwrap_or(0), a, r, &parked),
+            _ => false,
+        };
+        // Checked only while the panel is on screen ordered against that window with
+        // this reorder count, and that order could be right; otherwise not known.
+        let check = match (number, rect, above) {
+            (Some(n), Some(r), Some(a))
+                if possible && patch_ui::ordered_against(screen) == Some((a, reorder)) && list.iter().any(|w| w.id == n) =>
+            {
+                Some(ordered_right(&listed, n, r, &parked))
+            }
+            _ => None,
+        };
+        let was = track.order;
+        let step = order_step(&mut track.order, above, check);
+        if step.reorder {
+            reorder = reorder.wrapping_add(1);
+            tracing::debug!(screen, "corner patch: no longer just above the parked windows; ordered again");
+        } else if check == Some(true) && !track.honoured {
+            track.honoured = true;
+            tracing::info!(screen, "corner patch: ordered just above the parked windows (macOS honours the order across apps)");
+        } else if track.order.refused.is_some() && track.order.refused != was.refused {
+            tracing::info!(
+                screen,
+                refused_against = track.order.refused,
+                "corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches (the fallback mode; `ctl state` names it)"
+            );
+        } else if check.is_some() && check != was.last {
+            tracing::debug!(screen, ?check, "corner patch: order checked");
+        }
+        let ordered = step.ordered;
+        let dragging = input::left_button_down() || self.drag.is_some();
+        let quiet = dragging || self.wants_fast_tick();
+        let items = self.patch_items(screen, rect, now, quiet);
+        // The desktop's still: the patch's picture wherever one can be taken (round
+        // desktop-still-patch), and a switch's cover where a desktop icon lies (8L3).
+        let corner = self.corner_still(&d, rect, items.as_deref(), now);
+        // Show Desktop (round show-desktop-patch): where macOS lists the panel, and the
+        // close's first sign, this Desktop's windows sliding back.
+        let track = self.patches.entry(screen).or_default();
+        let closing = track.reveal_close.see(listed_sd, ours, now);
+        if closing == show_desktop::Closing::Began {
+            tracing::info!(screen, "Show Desktop closes: the windows slide back; the corner patch is planned again");
+        }
+        let panel = if show_desktop {
+            let listed = number.and_then(|n| list.iter().find(|w| w.id == n)).map(|w| w.bounds);
+            let asked = track.sent.as_ref().and_then(|p| p.show);
+            let place = show_desktop::panel_place(listed, patch_ui::placed_at(screen), asked, display);
+            if track.reveal_panel != Some(place) {
+                tracing::info!(screen, listed = ?listed, placed = ?patch_ui::placed_at(screen), "Show Desktop: the corner patch's panel is {}", place.name());
+                track.reveal_panel = Some(place);
+            }
+            place
+        } else {
+            track.reveal_panel = None;
+            PanelPlace::Unknown
+        };
+        let gate = show_desktop::gate(&RevealFacts {
+            mission_control: self.overview.showing() == Some(Overview::MissionControl),
+            show_desktop,
+            closing: closing.is(),
+            still: matches!(corner.still, crate::engine::patch_still::Still::Ready(_)),
+            panel,
+        });
+        let facts = PatchFacts {
+            on: true,
+            rect,
+            // Not the settle after an overview (that is for Space inference): the patch
+            // comes back with the windows.
+            overview: gate.err().or(self.phase.changing().then_some(show_desktop::OVERVIEW_UP)),
+            ordered,
+            can_order: possible,
+            fullscreen: self.phase.fullscreen(),
+            // The same filter as the order's check (`Listed::counts`, the rectangle
+            // tested by `visibility`).
+            shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
+            dragging,
+            transition: self.phase.switching().is_some(),
+            items,
+            still: corner.still,
+        };
+        let visible = visibility(&facts);
+        let why = visible.err();
+        if why != track.why {
+            if let Some(why) = why {
+                tracing::debug!(screen, why, "corner patch: hidden by the plan");
+            }
+            track.why = why;
+        }
+        let show = visible.ok();
+        // The test's forced still is compared with the patch's picture (`debug-overlay`).
+        let wanted = desktop_shot::needs_wallpaper(screen) || cover_desktop_forced();
+        let picture = if show.is_none() && corner.picture && wanted { rect } else { None };
+        let clear = rect.is_some_and(|r| crate::engine::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
+        let source = crate::engine::patch_still::source(facts.still, clear);
+        // The icons as last read well, whatever this plan's rectangle (none read for a
+        // plan with no sliver): they are the same on every Desktop, and other Desktops'
+        // panels are checked against them (10-23: `None` here hid them all).
+        Some(PatchPlan {
+            screen,
+            show,
+            above: show.and(above),
+            reorder,
+            space,
+            picture,
+            on: true,
+            items: self.patch_items.known.clone(),
+            still: show.and(source.still),
+            hold: show.is_some() && source.hold,
+            file: source.file,
+        })
     }
 
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
@@ -1924,8 +2005,13 @@ impl Controller {
         let (strip_visible, settings) = (self.strip_visible, self.settings);
         let config = self.store.config();
         if let Some(m) = self.model.as_mut() {
+            // The main display's as the model's own, then each display's against its own
+            // strip's column (round displays-2).
             let fit = fit_options(m.main_display().visible, strip_visible, &settings, config);
             m.set_fit(fit);
+            for d in m.displays().to_vec() {
+                m.set_display_fit(d.id, fit_options(d.visible, strip_visible, &settings, config));
+            }
             m.set_park_request(ParkRequest { inside: config.windows.park_inside, drop: config.windows.park_drop });
         }
     }
@@ -2071,18 +2157,22 @@ impl Controller {
     /// set) differ from those at the last strip snapshot.
     fn active_shown_changed(&self, shown: &HashSet<u32>) -> bool {
         let Some(m) = &self.model else { return false };
-        let Some(active) = m.main_active_stage() else { return !self.active_off_screen.is_empty() };
-        let space = m.current_space(m.main_display().id);
-        let off: BTreeSet<u32> = m
-            .windows()
-            .filter(|w| {
-                !w.parked
-                    && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || w.home == Home::Stage(active))
-            })
-            .map(|w| w.meta.id.0)
-            .filter(|id| !shown.contains(id))
-            .collect();
-        off != self.active_off_screen
+        // Any screen's strip (round displays-2).
+        m.displays().iter().any(|d| {
+            let was = self.active_off_screen.get(&d.id);
+            let Some(active) = m.active_stage(d.id) else { return was.is_some_and(|w| !w.is_empty()) };
+            let space = m.current_space(d.id);
+            let off: BTreeSet<u32> = m
+                .windows()
+                .filter(|w| {
+                    !w.parked
+                        && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || w.home == Home::Stage(active))
+                })
+                .map(|w| w.meta.id.0)
+                .filter(|id| !shown.contains(id))
+                .collect();
+            was.is_none_or(|w| *w != off)
+        })
     }
 
     /// Keeps a window whose `SetFrame` failed registered (with the frame it was asked to
@@ -2133,12 +2223,14 @@ impl Controller {
             self.strays.clear();
             return;
         };
-        let main = *m.main_display();
-        let here = m.current_space(main.id);
+        let displays = m.displays().to_vec();
         let hidden = |pid: i32| self.hides.ours(pid);
+        // Every screen's shown Desktop (round displays-2): a parked window is judged against
+        // its own screen's park zone.
+        let shown_spaces: Vec<SpaceId> = displays.iter().map(|d| m.current_space(d.id)).collect();
         let model_parked: Vec<(u32, i32)> = m
             .windows()
-            .filter(|w| w.parked && w.space == here && w.home != Home::Pinned && !hidden(w.meta.pid))
+            .filter(|w| w.parked && shown_spaces.contains(&w.space) && w.home != Home::Pinned && !hidden(w.meta.pid))
             .map(|w| (w.meta.id.0, w.meta.pid))
             .collect();
         // Shown, closed, or moved on: no stray any more.
@@ -2167,13 +2259,19 @@ impl Controller {
             }
         };
         let parked_here: HashSet<u32> = model_parked.iter().map(|(id, _)| *id).collect();
-        let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked_here.contains(&w.id)).map(|w| w.bounds).collect();
-        let elsewhere = list.iter().any(|w| {
-            w.layer == 0 && w.onscreen && m.window(WindowId(w.id)).is_some_and(|x| x.parked && x.space != here)
-        });
-        if desktop_slides(parked_here.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner) {
-            return;
+        for d in &displays {
+            let here = m.current_space(d.id);
+            let on_d = |id: u32| m.window(WindowId(id)).is_some_and(|x| x.space == here);
+            let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked_here.contains(&w.id) && on_d(w.id)).map(|w| w.bounds).collect();
+            let elsewhere = list.iter().any(|w| {
+                w.layer == 0 && w.onscreen && m.window(WindowId(w.id)).is_some_and(|x| x.parked && x.space != here && m.display_of_space(x.space) == d.id)
+            });
+            let parked_on_d = parked_here.iter().filter(|id| on_d(**id)).count();
+            if desktop_slides(parked_on_d, &listed_parked, elsewhere, d.frame, d.visible, d.corner) {
+                return;
+            }
         }
+        let zone_of = |id: u32| m.window(WindowId(id)).map(|x| *m.display(x.meta.display));
         // The focused window is asked (two Accessibility messages) only once a stray shows.
         let mut focused: Option<Option<u32>> = None;
         let mut displays: Option<Vec<Rect>> = None;
@@ -2182,7 +2280,7 @@ impl Controller {
             let listed = list.iter().find(|w| w.id == id && w.layer == 0);
             let seen = match listed {
                 None => Seen::NotListed,
-                Some(w) if main.parks(w.bounds) => Seen::InZone,
+                Some(w) if zone_of(id).is_some_and(|d| d.parks(w.bounds)) => Seen::InZone,
                 Some(_) => Seen::OutOfZone,
             };
             if seen != Seen::OutOfZone {
@@ -2282,20 +2380,23 @@ impl Controller {
     /// expected from a wallpaper click, with the patch on ([`show_desktop::fast_look`]).
     pub(super) fn reveal_fast(&self, now: Instant) -> bool {
         let patch_on = self.model.is_some() && self.store.config().windows.corner_patch;
-        show_desktop::fast_look(self.overview.show_desktop_up(now) || self.reveal_cover.holding(), patch_on)
+        let holding = self.patches.values().any(|t| t.reveal_cover.holding());
+        show_desktop::fast_look(self.overview.show_desktop_up(now) || holding, patch_on)
     }
 
     /// The corner patch as it runs, for `ctl state` (the Fable review's L3): `mode` is
     /// `ordered` (macOS keeps it just above the parked windows), `fallback` (it refused:
     /// the patch shows only where no shown window reaches), `unknown` (not checked yet) or
     /// `off`; `refused_against` the parked window macOS would not keep it above.
-    fn patch_status(&self) -> Value {
+    fn patch_status(&self, screen: u32) -> Value {
         let on = self.store.config().windows.corner_patch && self.model.is_some();
+        let track = self.patches.get(&screen);
+        let order = track.map(|t| t.order).unwrap_or_default();
         let mode = if !on {
             "off"
-        } else if self.patch_order.refused.is_some() {
+        } else if order.refused.is_some() {
             "fallback"
-        } else if self.patch_order.last == Some(true) || self.patch_honoured {
+        } else if order.last == Some(true) || track.is_some_and(|t| t.honoured) {
             "ordered"
         } else {
             "unknown"
@@ -2303,11 +2404,18 @@ impl Controller {
         json!({
             "on": on,
             "mode": mode,
-            "shown": self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()),
-            "rect": self.patch_rect,
-            "refused_against": self.patch_order.refused,
-            "hidden_why": self.patch_why,
+            "shown": track.and_then(|t| t.sent.as_ref()).is_some_and(|p| p.show.is_some()),
+            "rect": track.and_then(|t| t.rect),
+            "refused_against": order.refused,
+            "hidden_why": track.and_then(|t| t.why),
         })
+    }
+
+    /// The corner patch's last plan on `screen` for `ctl state`: where it shows, and from
+    /// which picture (round desktop-still-patch: the still's serial, held while one comes,
+    /// the file's).
+    fn patch_plan_status(&self, screen: u32) -> Value {
+        json!(self.patches.get(&screen).and_then(|t| t.sent.as_ref()).map(|p| json!({ "show": p.show, "still": p.still, "hold": p.hold, "file": p.file })))
     }
 
     /// Checks windows whose restore failed against the window server, about once a second:
@@ -2336,7 +2444,7 @@ impl Controller {
             let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
             let listed = list.iter().find(|w| w.id == id).map(|w| {
                 let zone = match model_parked {
-                    Some(_) => self.model.as_ref().is_some_and(|m| m.main_display().parks(w.bounds)),
+                    Some(_) => self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.display(x.meta.display).parks(w.bounds))),
                     // A window the model forgot: the safety paths' test, which honours the
                     // other displays (it may sit on one now) and knows it is ours (L2).
                     None => recovery::is_stranded(w.bounds, scan.get_or_insert_with(safety::scan_displays), Known::Registered),
@@ -2660,7 +2768,9 @@ impl Controller {
             return None;
         }
         let m = self.model.as_ref()?;
-        let stage = m.stage(m.main_active_stage()?)?;
+        // The screen the switch plays on: the arriving windows' (round displays-2).
+        let display = arriving.iter().find_map(|id| m.window(WindowId(*id)).map(|w| w.meta.display)).unwrap_or(m.main_display().id);
+        let stage = m.stage(m.active_stage(display)?)?;
         let shown: HashSet<u32> = stage
             .windows
             .iter()
@@ -2704,19 +2814,19 @@ impl Controller {
     /// the desktop's still (round 8L3), whichever is ready; the cover as it will be drawn, or
     /// why not.
     fn cover_ready(&self, c: SwitchCover) -> Result<SwitchCover, &'static str> {
-        let key = self.shot_key();
-        resolve_cover(c, crate::ui::corner_patch::cover_ready, |rect| match &key {
+        let screen = c.screen;
+        let key = self.model.as_ref().and_then(|m| m.displays().iter().find(|d| d.id.0 == screen)).map(|d| self.shot_key(d));
+        resolve_cover(c, |rect| crate::ui::corner_patch::cover_ready(screen, rect), |rect| match &key {
             // A still that holds the icons only is laid over the patch's picture (8L4).
-            Some(key) => desktop_shot::ready(rect, key, crate::ui::corner_patch::cover_ready),
+            Some(key) => desktop_shot::ready(screen, rect, key, |r| crate::ui::corner_patch::cover_ready(screen, r)),
             None => Err("no model"),
         })
     }
 
-    /// What a still of the desktop in the park corner is of now ([`desktop_shot::Key`]): the
-    /// Space count, the main display, Finder's icons as last read.
-    fn shot_key(&self) -> Option<desktop_shot::Key> {
-        let m = self.model.as_ref()?;
-        Some(desktop_shot::Key::new(self.space_changes, m.main_display().frame, self.patch_items.known.as_deref()))
+    /// What a still of the desktop in the park corner of display `d` is of now
+    /// ([`desktop_shot::Key`]): the Space count, the display, Finder's icons as last read.
+    fn shot_key(&self, d: &Display) -> desktop_shot::Key {
+        desktop_shot::Key::new(self.space_changes, d.frame, self.patch_items.known.as_deref())
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
@@ -2740,7 +2850,8 @@ impl Controller {
         }
         let m = self.model.as_ref().ok_or("no model")?;
         let config = self.store.config();
-        let display = m.main_display();
+        // The screen the switch plays on: the arriving windows' (round displays-2).
+        let display = arriving.iter().find_map(|id| m.window(WindowId(*id)).map(|w| m.display(w.meta.display))).unwrap_or(m.main_display());
         let own = std::process::id() as i32;
         // Parked where the window server lists them in the park zone; one the model has parked
         // listed elsewhere shows there and stays shown through the switch (8L6).
@@ -2758,6 +2869,7 @@ impl Controller {
         let now = Instant::now();
         let facts = CoverFacts {
             on: config.windows.corner_patch,
+            screen: display.id.0,
             overview: self.overview.showing_or_expected(now) || self.phase.changing(),
             fullscreen: self.phase.fullscreen(),
             slivers,
@@ -2767,7 +2879,7 @@ impl Controller {
             visible: display.visible,
             dock_bars: self.dock_bar.as_ref().map(|(_, b)| b.bars.clone()).filter(|b| !b.is_empty()),
             reach: config.windows.patch_reach(),
-            in_use: self.patch_rect,
+            in_use: self.patches.get(&display.id.0).and_then(|t| t.rect),
             items: self.patch_items.known.clone(),
             staying,
         };
@@ -3017,8 +3129,7 @@ impl Controller {
     /// [`arrival`]).
     fn strip_space(&self, display: DisplayId) -> Option<SpaceId> {
         let m = self.model.as_ref()?;
-        let main = display == m.main_display().id;
-        let ahead = (main && self.phase.changing()).then(|| self.ahead_space()).flatten();
+        let ahead = self.phase.changing().then(|| self.ahead_space()).flatten().filter(|s| m.display_of_space(*s) == m.known_display(display));
         Some(ahead.unwrap_or_else(|| m.current_space(display)))
     }
 
@@ -3064,9 +3175,7 @@ impl Controller {
             .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
             .partition(|w| on.contains(&w.meta.id.0));
         let active_frames = active_frames.into_iter().map(|w| w.meta.frame).collect();
-        if main {
-            self.active_off_screen = off.into_iter().map(|w| w.meta.id.0).collect();
-        }
+        self.active_off_screen.insert(display, off.into_iter().map(|w| w.meta.id.0).collect());
         let active_windows = active
             .and_then(|a| m.stage(a))
             .map(|s| {
@@ -3664,13 +3773,16 @@ impl Controller {
     /// inside one of its windows, to extend a selection, must not pull in its other windows).
     fn app_present(&self, pid: i32) -> bool {
         self.model.as_ref().is_some_and(|m| {
-            let active = m.main_active_stage();
-            let space = m.current_space(m.main_display().id);
-            m.windows().any(|w| {
-                w.meta.pid == pid
-                    && w.meta.role == WindowRole::Standard
-                    && ((w.home == Home::Pinned && (w.space == space || w.sticky))
-                        || active.is_some_and(|a| w.home == Home::Stage(a)))
+            // On any screen's shown Desktop (round displays-2).
+            m.displays().iter().any(|d| {
+                let active = m.active_stage(d.id);
+                let space = m.current_space(d.id);
+                m.windows().any(|w| {
+                    w.meta.pid == pid
+                        && w.meta.role == WindowRole::Standard
+                        && ((w.home == Home::Pinned && (w.space == space || w.sticky))
+                            || active.is_some_and(|a| w.home == Home::Stage(a)))
+                })
             })
         })
     }
@@ -3887,6 +3999,7 @@ impl Controller {
             if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
                 let list = windows::list_windows();
                 self.arrive_here(ob, &list, main, None);
+                self.arrive_others(ob, &list);
             }
             return;
         }
@@ -3897,6 +4010,9 @@ impl Controller {
         options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, &config);
         let main = displays[0];
         let mut model = Model::new(displays, options);
+        for d in model.displays().to_vec() {
+            model.set_display_fit(d.id, fit_options(d.visible, self.strip_visible, &self.settings, &config));
+        }
         let list = windows::list_windows();
         if !self.can_build(ob, &list) {
             return;
@@ -4048,6 +4164,137 @@ impl Controller {
         Seen::of(covering, full)
     }
 
+    /// What another screen `d` (not the main one) shows in `list` ([`OtherSeen`]): its own
+    /// overview watch and full-screen settle step (round displays-2), logged once a change.
+    fn other_screen_seen(&mut self, ob: &Observer, list: &[windows::CgWindow], d: Display, now: Instant) -> OtherSeen {
+        let screen = d.id.0;
+        let sightings = list.iter().map(|w| Sighting { owner: &w.owner, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen });
+        let sight = overview::overview_in(sightings, d.frame);
+        let watch = self.screens.entry(screen).or_default();
+        match watch.overview.see(sight, now) {
+            overview::Change::None => {}
+            overview::Change::Began(kind) => tracing::info!(screen, "{} shows on another screen: no Space is inferred from its windows until it closes", kind.name()),
+            overview::Change::Ended(kind) => tracing::info!(screen, "{} closed on another screen", kind.name()),
+            overview::Change::Stuck(kind) => tracing::warn!(screen, "{} has been listed on another screen for {} s without a break: taken for something else", kind.name(), overview::OVERVIEW_STUCK.as_secs()),
+        }
+        if watch.overview.freezes(now) {
+            watch.absent.clear();
+            return OtherSeen::Overview;
+        }
+        let seen = self.screen_seen(ob, list, d.frame);
+        let watch = self.screens.entry(screen).or_default();
+        let verdict = watch.settle.step(seen, now);
+        let fullscreen = match verdict {
+            Verdict::Wait => return OtherSeen::Animation,
+            Verdict::FullScreen => true,
+            Verdict::Desktop => false,
+        };
+        if watch.fullscreen != fullscreen {
+            watch.fullscreen = fullscreen;
+            watch.absent.clear();
+            if fullscreen {
+                tracing::info!(screen, "a full-screen app's Space shows on another screen (no strip there; the other screens go on)");
+            } else {
+                tracing::info!(screen, "another screen shows a Desktop again");
+            }
+        }
+        if fullscreen { OtherSeen::FullScreen } else { OtherSeen::Desktop }
+    }
+
+    /// Whether another screen `screen` shows a full-screen app's Space, as last seen
+    /// ([`Self::other_screen_seen`]).
+    fn other_screen_fullscreen(&self, screen: u32) -> bool {
+        self.screens.get(&screen).is_some_and(|w| w.fullscreen)
+    }
+
+    /// The once-a-second "left this Space" check for every screen but the main one (round
+    /// displays-2; the main one's is [`Self::check_spaces`] itself): on a screen showing a
+    /// Desktop, windows of another of its Desktops on screen there mean its Desktop changed
+    /// (recognized again, [`Self::arrive_others`]); windows of its Desktop missing from the
+    /// screen for no visible reason at [`SPACE_CHECKS`] checks in a row are let go (most of
+    /// them at once: its Desktop changed instead). Nothing is inferred on a screen showing an
+    /// overview, a full-screen animation or a full-screen app's Space.
+    fn check_other_screens(&mut self, ob: &mut Observer, list: &[windows::CgWindow], now: Instant) {
+        let others: Vec<Display> = self.model.as_ref().map(|m| m.displays().iter().skip(1).copied().collect()).unwrap_or_default();
+        if others.is_empty() {
+            self.screens.clear();
+            return;
+        }
+        self.screens.retain(|screen, _| others.iter().any(|d| d.id.0 == *screen));
+        let shown = on_screen(list);
+        let mut arrive = false;
+        let mut left: Vec<u32> = Vec::new();
+        for d in others {
+            if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop {
+                continue;
+            }
+            let Some(m) = self.model.as_ref() else { return };
+            let space = m.current_space(d.id);
+            let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
+            // Windows of another of this screen's Desktops on screen there: its Desktop
+            // changed (no notice names the screen); recognized again.
+            let elsewhere = m.windows().filter(standard).any(|w| w.space != space && m.display_of_space(w.space) == d.id && shown.contains(&w.meta.id.0));
+            if elsewhere {
+                arrive = true;
+                continue;
+            }
+            let here = m.windows().filter(standard).filter(|w| w.space == space).count();
+            let here_shown = m.windows().filter(standard).filter(|w| w.space == space && shown.contains(&w.meta.id.0)).count();
+            let missing: Vec<(u32, i32)> = m
+                .windows()
+                .filter(standard)
+                .filter(|w| w.space == space && !shown.contains(&w.meta.id.0))
+                .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
+                .filter(|w| !ob.noted_closed(w.meta.id.0))
+                .filter(|w| ob.window(w.meta.id.0).is_some())
+                .map(|w| (w.meta.id.0, w.meta.pid))
+                .collect();
+            let excused = self.off_screen_for_a_reason(ob, &missing);
+            let missing: Vec<u32> = missing.into_iter().map(|(id, _)| id).filter(|id| !excused.contains(id)).collect();
+            let watch = self.screens.entry(d.id.0).or_default();
+            watch.absent.retain(|id, _| missing.contains(id));
+            let mut gone = Vec::new();
+            for &id in &missing {
+                let n = watch.absent.entry(id).or_insert(0);
+                *n += 1;
+                if *n >= SPACE_CHECKS {
+                    gone.push(id);
+                }
+            }
+            if gone.is_empty() {
+                continue;
+            }
+            if missed_space_change(here, here_shown, gone.len()) {
+                tracing::info!(screen = d.id.0, missing = gone.len(), of = here, "most windows of another screen's Desktop are gone from it; recognizing that screen's Desktop again");
+                watch.absent.clear();
+                arrive = true;
+                continue;
+            }
+            let listed: HashSet<u32> = list.iter().map(|w| w.id).collect();
+            for id in gone.into_iter().filter(|id| listed.contains(id)) {
+                watch.absent.remove(&id);
+                left.push(id);
+            }
+        }
+        if arrive {
+            self.arrive_others(ob, list);
+        }
+        for id in left {
+            let Some(m) = self.model.as_mut() else { return };
+            if m.window(WindowId(id)).is_none() {
+                continue;
+            }
+            tracing::info!(id, "window left its Space on another screen (not on screen, not minimized, app not hidden)");
+            let group = m.group_of(WindowId(id));
+            let kept = self.parked_entries_of(&group);
+            let Some(m) = self.model.as_mut() else { return };
+            let (actions, forgotten) = m.window_left_space(WindowId(id));
+            self.execute(ob, actions);
+            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+        }
+    }
+
     /// Looks for Mission Control, App Exposé or Show Desktop in the window list `list`
     /// (macOS's own windows covering the main display `display`, [`overview::overview_in`])
     /// and says in the log when one shows, closes, or is listed too long to be trusted.
@@ -4090,18 +4337,18 @@ impl Controller {
     /// Space change under way, its notification not handled yet): a known window of another
     /// Space is on screen, or none of this Space's windows is while one of them is missing
     /// for no visible reason.
-    fn space_in_doubt(&self, ob: &Observer, shown: &HashSet<u32>) -> bool {
+    fn space_in_doubt(&self, ob: &Observer, shown: &HashSet<u32>, display: DisplayId) -> bool {
         let Some(m) = &self.model else { return false };
-        let space = m.current_space(m.main_display().id);
+        let space = m.current_space(display);
         let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
-        if m.windows().filter(standard).any(|w| w.space != space && shown.contains(&w.meta.id.0)) {
+        if m.windows().filter(standard).any(|w| w.space != space && m.display_of_space(w.space) == display && shown.contains(&w.meta.id.0)) {
             return true;
         }
         let here: Vec<WindowId> = m.windows().filter(standard).filter(|w| w.space == space).map(|w| w.meta.id).collect();
         if here.is_empty() || here.iter().any(|id| shown.contains(&id.0)) {
             return false;
         }
-        let absent = self.absent_windows(ob, shown, m.main_display().id);
+        let absent = self.absent_windows(ob, shown, display);
         here.iter().any(|id| absent.contains(id))
     }
 
@@ -4314,6 +4561,7 @@ impl Controller {
             on_screen = live.len(),
             new = arrivals.len(),
             rebuilt = ?note.rebuilt,
+            other_screen = note.other_screen,
             moved = note.moved,
             carried = note.carried,
             beside = ?note.beside,
@@ -4369,7 +4617,13 @@ impl Controller {
             return;
         }
         let hints = launch_hints(list);
+        let now = Instant::now();
         for d in others {
+            // A screen showing an overview, a full-screen animation or a full-screen app's
+            // Space: its windows say nothing of its Desktop now (round displays-2).
+            if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop {
+                continue;
+            }
             let (live, absent) = self.screen_view(ob, list, d);
             let Some(m) = self.model.as_ref() else { return };
             let new = live.iter().filter(|meta| m.window(meta.id).is_none()).count();
@@ -4389,6 +4643,7 @@ impl Controller {
                     on_screen = live.len(),
                     new,
                     rebuilt = ?note.rebuilt,
+                    other_screen = note.other_screen,
                     moved = note.moved,
                     carried = note.carried,
                     "Space changed on another display"
@@ -4577,6 +4832,9 @@ impl Controller {
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
         let list = windows::list_windows();
+        // The other screens first (round displays-2): each is judged on its own, whatever
+        // the main screen shows.
+        self.check_other_screens(ob, &list, now);
         // Mission Control, App Exposé, Show Desktop: the list shows their layout (other
         // Desktops' windows, windows slid aside), not the Desktop. Nothing is inferred while
         // one shows and for a settle after; a Desktop clicked there comes with its
@@ -4649,16 +4907,6 @@ impl Controller {
             .map(|w| w.meta.id.0)
             .collect();
         foreign.sort_unstable();
-        // Windows of another screen's Desktop not shown, on screen there: that screen's
-        // Desktop changed (round displays); recognized again, with no settle of its own.
-        let elsewhere = m
-            .windows()
-            .filter(standard)
-            .any(|w| m.display_of_space(w.space) != main.id && !m.is_shown_space(w.space) && shown.contains(&w.meta.id.0));
-        if elsewhere {
-            self.arrive_others(ob, &list);
-        }
-        let Some(m) = self.model.as_ref() else { return };
         if !foreign.is_empty() {
             // Maybe a Space change the notification missed: a focus held for it stays held
             // through the looks that confirm it (R3 4).
@@ -4905,34 +5153,55 @@ impl Controller {
         }
         self.flush_pending(ob);
         let list = windows::list_windows();
-        let main = self.model.as_ref().map_or(Rect::default(), |m| m.main_display().frame);
         let shown = self.shown_managed(&list);
-        if self.frozen() || !shown.contains(&id) {
+        // The screen the window shows on: its own overview and full-screen checks gate it
+        // (round displays-2), so a full-screen app on one screen never stops windows arriving
+        // on another. A Space change settling holds every screen (the arrival places it).
+        let screen = list.iter().find(|w| w.id == id).map(|w| w.bounds).map(|b| self.display_at(b));
+        let Some(screen) = screen.and_then(|s| self.managed_displays().into_iter().find(|d| d.id == s)) else {
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "window not on screen; it is placed once it shows");
+            }
+            return;
+        };
+        let is_main = screen.id == self.main_display_id();
+        let frozen = self.locked || self.phase.changing() || (is_main && self.phase.fullscreen());
+        if frozen || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
             return;
         }
-        if self.look_for_overview(&list, main, Instant::now()) {
-            // App Exposé lists other Desktops' windows on screen: placed once it has closed
-            // (the once-a-second check offers it again).
-            if self.unplaced.insert(id) {
-                tracing::debug!(id, "Mission Control, App Exposé or Show Desktop shows; the window is placed once it has closed");
+        let now = Instant::now();
+        if is_main {
+            if self.look_for_overview(&list, screen.frame, now) {
+                // App Exposé lists other Desktops' windows on screen: placed once it has closed
+                // (the once-a-second check offers it again).
+                if self.unplaced.insert(id) {
+                    tracing::debug!(id, "Mission Control, App Exposé or Show Desktop shows; the window is placed once it has closed");
+                }
+                return;
             }
-            return;
-        }
-        let display = self.model.as_ref().map(|m| m.main_display().frame);
-        if let Some(display) = display
-            && self.settle.step(self.screen_seen(ob, &list, display), Instant::now()) != Verdict::Desktop
-        {
-            // Most likely the full-screen animation's stand-in window (it goes away once the
-            // animation is over), or a window on a full-screen Space not handled yet.
-            if self.unplaced.insert(id) {
-                tracing::debug!(id, "a full-screen animation or Space shows; the window is placed once a Desktop shows");
+            if self.settle.step(self.screen_seen(ob, &list, screen.frame), now) != Verdict::Desktop {
+                // Most likely the full-screen animation's stand-in window (it goes away once the
+                // animation is over), or a window on a full-screen Space not handled yet.
+                if self.unplaced.insert(id) {
+                    tracing::debug!(id, "a full-screen animation or Space shows; the window is placed once a Desktop shows");
+                }
+                return;
             }
-            return;
+        } else {
+            match self.other_screen_seen(ob, &list, screen, now) {
+                OtherSeen::Desktop => {}
+                seen => {
+                    if self.unplaced.insert(id) {
+                        tracing::debug!(id, screen = screen.id.0, ?seen, "the window's screen shows no Desktop now; the window is placed once it does");
+                    }
+                    return;
+                }
+            }
         }
-        if self.space_in_doubt(ob, &on_screen(&list)) {
+        if self.space_in_doubt(ob, &on_screen(&list), screen.id) {
             // Its notification came before the Space change's: placing it now would put it
             // (and maybe a stage switch, a focus) on the Space being left.
             if self.unplaced.insert(id) {
@@ -5910,17 +6179,17 @@ impl Controller {
                 })
             })
             .collect();
-        // The desktop's still for a switch's cover (8L3-8L4) and the icons it is keyed by.
-        let mut desktop_still = desktop_shot::status();
+        // The desktop's still for a switch's cover (8L3-8L4) and the icons it is keyed by
+        // (the main display's; every display's in `displays`).
+        let main_screen = m.main_display().id.0;
+        let mut desktop_still = desktop_shot::status(main_screen);
         desktop_still["icons"] = json!(self.patch_items.known);
         // The parked windows the screen contradicts, being parked again or adopted
         // ([`Self::reconcile_parked`]), and the corner patch's mode (L3).
         let strays: Vec<Value> =
             self.strays.iter().map(|(id, s)| json!({ "id": id, "tries": s.tries, "gave_up": s.gave_up, "user_moved": s.user_moved })).collect();
-        let corner_patch = self.patch_status();
-        // The corner patch's last plan: where it shows, and from which picture (round
-        // desktop-still-patch: the still's serial, held while one comes, the file's).
-        desktop_still["patch_plan"] = json!(self.patch_sent.as_ref().map(|p| json!({ "show": p.show, "still": p.still, "hold": p.hold, "file": p.file })));
+        let corner_patch = self.patch_status(main_screen);
+        desktop_still["patch_plan"] = self.patch_plan_status(main_screen);
         // The reach its rectangle grows each sliver by (round fixes-151: per side).
         let reach = self.store.config().windows.patch_reach();
         desktop_still["patch_reach"] = json!({ "left": reach.left, "top": reach.top, "right": reach.right, "bottom": reach.bottom });
@@ -5930,6 +6199,9 @@ impl Controller {
             .iter()
             .map(|d| {
                 let space = m.current_space(d.id);
+                let strip_key = if d.id == m.main_display().id { strip_model::MAIN_STRIP } else { d.id.0 };
+                let mut still = desktop_shot::status(d.id.0);
+                still["patch_plan"] = self.patch_plan_status(d.id.0);
                 json!({
                     "id": d.id.0,
                     "key": d.key.text(),
@@ -5937,14 +6209,25 @@ impl Controller {
                     "visible": d.visible,
                     "corner": format!("{:?}", d.corner).to_lowercase(),
                     "space": space.0,
+                    // A full-screen app's Space shows there (the main screen's is the phase's,
+                    // the others' their own watch; round displays-2).
+                    "fullscreen": if d.id == m.main_display().id { self.phase.fullscreen() } else { self.other_screen_fullscreen(d.id.0) },
                     "active": m.active_stage(d.id).and_then(number),
                     "strip": m.strip_slots(d.id).iter().filter_map(|s| m.stage_number(*s)).collect::<Vec<_>>(),
                     "capacity": m.capacity_of(space),
                     // The cards its strip draws now (the main display's strip publishes as 0).
-                    "cards": strip_model::published_cards_of(if d.id == m.main_display().id { strip_model::MAIN_STRIP } else { d.id.0 })
+                    "cards": strip_model::published_cards_of(strip_key)
                         .into_iter()
                         .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))
                         .collect::<Vec<_>>(),
+                    // Its strip panel and panes, its corner patch and the still of its corner
+                    // (round displays-2: every screen has its own).
+                    "strip_panel": strip_model::panel_status_of(strip_key),
+                    "strip_panels": strip_model::pane_statuses_of(strip_key),
+                    // The windows its strip holds a thumbnail of (drawn on its cards).
+                    "pictures": strip_model::pictures_of(strip_key),
+                    "corner_patch": self.patch_status(d.id.0),
+                    "desktop_still": still,
                 })
             })
             .collect();
@@ -6822,7 +7105,7 @@ mod tests {
         // 8L3: the owner's corner has desktop icons; the patch's picture would hide them.
         let rect = Rect::new(2499.0, 1348.0, 61.0, 92.0);
         let cap = Rect::new(2240.0, 1120.0, 320.0, 320.0);
-        let cover = |picture| SwitchCover { rect, cap, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
+        let cover = |picture| SwitchCover { screen: 1, rect, cap, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
         let ok = |_: Rect| Ok(());
         let no = |_: Rect| Err("not ready");
         // Icons there: the still, or nothing (the activation then arrives at once).

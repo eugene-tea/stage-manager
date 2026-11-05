@@ -417,6 +417,27 @@ pub fn has_snapshot(id: u32) -> bool {
     snapshot_ids().lock().is_ok_and(|s| s.values().any(|ids| ids.contains(&id)))
 }
 
+fn picture_ids() -> &'static Mutex<SnapshotIds> {
+    static S: OnceLock<Mutex<SnapshotIds>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A display's strip publishes the windows whose thumbnail it holds and draws on its cards
+/// (main thread, whenever one arrives or goes; `display` as [`publish_cards`]): `ctl state`
+/// lists them per screen (round displays-2).
+pub fn publish_pictures(display: u32, ids: impl IntoIterator<Item = u32>) {
+    if let Ok(mut s) = picture_ids().lock() {
+        s.insert(display, ids.into_iter().collect());
+    }
+}
+
+/// The windows `display`'s strip holds a thumbnail of (any thread), sorted.
+pub fn pictures_of(display: u32) -> Vec<u32> {
+    let mut ids: Vec<u32> = picture_ids().lock().ok().and_then(|s| s.get(&display).map(|i| i.iter().copied().collect())).unwrap_or_default();
+    ids.sort_unstable();
+    ids
+}
+
 /// The strip panel's state as the window server and AppKit see it, for `ctl state` and the
 /// guided Spaces check (a card click that found no window there).
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
@@ -438,21 +459,39 @@ pub struct PanelStatus {
     pub window: u32,
 }
 
-fn panel_status_slot() -> &'static Mutex<PanelStatus> {
-    static S: OnceLock<Mutex<PanelStatus>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(PanelStatus::default()))
+fn panel_status_slot() -> &'static Mutex<BTreeMap<u32, PanelStatus>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, PanelStatus>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// The strip publishes its panel's state after every change (main thread).
-pub fn publish_panel_status(status: PanelStatus) {
+/// A strip publishes its panel's state after every change (main thread); `display` as the
+/// strip is keyed ([`MAIN_STRIP`] for the main display's; round displays-2).
+pub fn publish_panel_status(display: u32, status: PanelStatus) {
     if let Ok(mut s) = panel_status_slot().lock() {
-        *s = status;
+        s.insert(display, status);
     }
 }
 
-/// The panel's state last published (any thread).
+/// The main display's strip panel's state last published (any thread).
 pub fn panel_status() -> PanelStatus {
-    panel_status_slot().lock().map(|s| *s).unwrap_or_default()
+    panel_status_of(MAIN_STRIP)
+}
+
+/// `display`'s strip panel's state last published (any thread; [`MAIN_STRIP`] or the main
+/// display's own id for the main one, which publishes as [`MAIN_STRIP`]).
+pub fn panel_status_of(display: u32) -> PanelStatus {
+    panel_status_slot().lock().ok().and_then(|s| s.get(&display).copied()).unwrap_or_default()
+}
+
+/// The strips of displays gone forget their statuses (`kept`: the strips' display keys
+/// still there).
+pub fn retain_panel_statuses_of(kept: &[u32]) {
+    if let Ok(mut s) = panel_status_slot().lock() {
+        s.retain(|d, _| kept.contains(d));
+    }
+    if let Ok(mut s) = pane_status_slot().lock() {
+        s.retain(|d, _| kept.contains(d));
+    }
 }
 
 /// One Desktop's strip panel (the strip keeps one per Desktop visited), for `ctl state`.
@@ -473,21 +512,27 @@ pub struct PaneStatus {
     pub behavior: usize,
 }
 
-fn pane_status_slot() -> &'static Mutex<Vec<PaneStatus>> {
-    static S: OnceLock<Mutex<Vec<PaneStatus>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Vec::new()))
+fn pane_status_slot() -> &'static Mutex<BTreeMap<u32, Vec<PaneStatus>>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, Vec<PaneStatus>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// The strip publishes every pane's state, the active one first (main thread).
-pub fn publish_pane_statuses(panes: Vec<PaneStatus>) {
+/// A strip publishes every pane's state, the active one first (main thread); `display` as
+/// the strip is keyed.
+pub fn publish_pane_statuses(display: u32, panes: Vec<PaneStatus>) {
     if let Ok(mut s) = pane_status_slot().lock() {
-        *s = panes;
+        s.insert(display, panes);
     }
 }
 
-/// Every pane's state last published, the active one first (any thread).
+/// The main display's strip's panes' state last published (any thread).
 pub fn pane_statuses() -> Vec<PaneStatus> {
-    pane_status_slot().lock().map(|s| s.clone()).unwrap_or_default()
+    pane_statuses_of(MAIN_STRIP)
+}
+
+/// `display`'s strip's panes' state last published (any thread).
+pub fn pane_statuses_of(display: u32) -> Vec<PaneStatus> {
+    pane_status_slot().lock().ok().and_then(|s| s.get(&display).cloned()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------

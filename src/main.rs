@@ -318,7 +318,7 @@ mod app {
             let ids: Vec<u32> = displays.iter().map(|d| d.id.0).collect();
             strip::displays_changed(&ids);
             self.wm.send(WmCommand::Displays(displays));
-            stage_manager::ui::corner_patch::display_changed(mtm);
+            stage_manager::ui::corner_patch::display_changed(mtm, &ids);
         }
 
         fn on_ui(&mut self, update: UiUpdate) {
@@ -605,10 +605,12 @@ mod app {
                 let mut pictures = (None, None);
                 if let Some(r) = region {
                     let mean = |p: Option<(objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>, f64)>| p.and_then(|(i, _)| stage_manager::platform::pixels::mean_rgba(&i));
+                    // The main display's (the test tool's screen).
+                    let screen = objc2_core_graphics::CGMainDisplayID();
                     DispatchQueue::main().exec_sync(|| {
                         pictures = (
-                            mean(stage_manager::ui::corner_patch::cover_image(r)),
-                            mean(stage_manager::platform::desktop_shot::image(r)),
+                            mean(stage_manager::ui::corner_patch::cover_image(screen, r)),
+                            mean(stage_manager::platform::desktop_shot::image(screen, r)),
                         );
                     });
                 }

@@ -68,6 +68,11 @@ pub fn displays(mtm: MainThreadMarker) -> Vec<Display> {
         .collect()
 }
 
+/// The screen with `CGDirectDisplayID` `id`, when AppKit reports it (round displays-2).
+pub fn screen_with_id(mtm: MainThreadMarker, id: u32) -> Option<objc2::rc::Retained<NSScreen>> {
+    NSScreen::screens(mtm).iter().find(|s| screen_number(s) == Some(id))
+}
+
 /// A screen's `CGDirectDisplayID` (`NSScreenNumber` in its device description).
 pub(crate) fn screen_number(screen: &NSScreen) -> Option<u32> {
     let description = screen.deviceDescription();

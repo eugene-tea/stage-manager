@@ -1156,7 +1156,7 @@ static DESKTOP_LAYERS_SAID: AtomicBool = AtomicBool::new(false);
 /// nothing goes before the gate is open); a refusal closes the gate for every capturer. `done`
 /// runs once, on a ScreenCaptureKit queue (`Err` when no desktop-level window is listed).
 /// `Err` when it is not taken at all.
-pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static str> {
+pub fn capture_desktop(display_id: u32, region: Rect, done: DesktopDone) -> Result<(), &'static str> {
     desktop_may_capture()?;
     let done = Arc::new(Mutex::new(Some(done)));
     let finish = move |slot: &Mutex<Option<DesktopDone>>, still: DesktopStill| {
@@ -1182,11 +1182,11 @@ pub fn capture_desktop(region: Rect, done: DesktopDone) -> Result<(), &'static s
             finish(&done, Err("quitting".into()));
             return;
         }
-        let main = objc2_core_graphics::CGMainDisplayID();
+        // The screen asked for (round displays-2: each screen's own still).
         // SAFETY: plain getters on a live SCShareableContent and its SCDisplays.
-        let display = unsafe { content.displays() }.iter().find(|d| unsafe { d.displayID() } == main);
+        let display = unsafe { content.displays() }.iter().find(|d| unsafe { d.displayID() } == display_id);
         let Some(display) = display else {
-            finish(&done, Err("the main display is not in the shareable content".into()));
+            finish(&done, Err(format!("display {display_id} is not in the shareable content")));
             return;
         };
         // SAFETY: plain getters on live SCWindows and their apps.

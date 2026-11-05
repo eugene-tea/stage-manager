@@ -618,7 +618,7 @@ impl WmState {
                 Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(|| {
                     crate::ui::strip::stand_down("a logout, restart or shutdown is coming");
                     if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
-                        crate::ui::corner_patch::apply(mtm, crate::ui::corner_patch::PatchPlan::default());
+                        crate::ui::corner_patch::stand_down(mtm);
                     }
                 }),
                 Task::DropSavedStages | Task::RetryHeld | Task::StartObserving => {}

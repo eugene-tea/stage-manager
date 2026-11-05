@@ -217,6 +217,18 @@ fn with_strips(mut f: impl FnMut(&mut Strip)) {
     }
 }
 
+/// Runs `f` on the strip of `display` (as a strip is keyed: [`strip_model::MAIN_STRIP`] or
+/// the main display's id for the main one, else the display's id), where up and free.
+fn with_strip_of<R>(display: u32, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
+    if is_main_display(display) {
+        return with_strip(f);
+    }
+    OTHERS.with(|o| {
+        let mut others = o.try_borrow_mut().ok()?;
+        others.get_mut(&display).map(f)
+    })
+}
+
 /// Runs `f` on the first strip (the main display's first) whose column holds `p`, if any.
 fn with_strip_at<R>(p: Point, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
     let main = with_strip(|s| s.geometry.global.contains(p)).unwrap_or(false);
@@ -289,6 +301,8 @@ pub fn displays_changed(ids: &[u32]) {
     let mut kept: Vec<u32> = ids.iter().copied().filter(|d| *d != main).collect();
     kept.push(strip_model::MAIN_STRIP);
     strip_model::retain_cards_of(&kept);
+    card_glass::displays_changed(&kept);
+    strip_model::retain_panel_statuses_of(&kept);
     if gone > 0 {
         tracing::info!(gone, "strip: the strips of displays no longer there closed");
     }
@@ -1077,14 +1091,15 @@ fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>,
     image.setOpacity(to_opacity);
 }
 
-/// A new picture of the wallpaper for the cards' glass, or none ([`card_glass`]): the strip
-/// shown repaints it.
-pub fn glass_changed() {
-    if with_strip(|s| s.repaint_glass()).is_none() {
+/// A new picture of the wallpaper for the cards' glass of `display`'s strip, or none
+/// ([`card_glass`]; `display` as the strip is keyed, [`strip_model::MAIN_STRIP`] for the
+/// main one): that strip repaints it.
+pub fn glass_changed(display: u32) {
+    if with_strip_of(display, |s| s.repaint_glass()).is_none() {
         // Busy (or not installed yet): once more shortly; a strip built later paints its own.
         let when = dispatch2::DispatchTime::try_from(Duration::from_millis(20)).unwrap_or(dispatch2::DispatchTime::NOW);
-        let _ = DispatchQueue::main().after(when, || {
-            let _ = with_strip(|s| s.repaint_glass());
+        let _ = DispatchQueue::main().after(when, move || {
+            let _ = with_strip_of(display, |s| s.repaint_glass());
         });
     }
 }
@@ -1579,7 +1594,7 @@ impl Strip {
             // (the strip was built with the defaults, so `hide_delay_ms` never applied).
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
-        card_glass::set_wanted(self.glass().on());
+        card_glass::set_wanted(self.display, self.glass().on());
         let geometry = Geometry::for_display(self.mtm, self.display, &self.style);
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
@@ -2220,7 +2235,7 @@ impl Strip {
         if !glass.on() {
             return None;
         }
-        let shown = card_glass::current()?;
+        let shown = card_glass::current(self.display)?;
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
@@ -2459,6 +2474,7 @@ impl Strip {
             ghost.set_image(&picture);
         }
         self.thumbs.insert(id, picture);
+        strip_model::publish_pictures(self.display, self.thumbs.keys().copied());
     }
 
     /// Tells the capturer what to capture: every shown thumbnail while the strip shows.
@@ -2474,6 +2490,7 @@ impl Strip {
             let dropped: Vec<u32> = self.thumbs.keys().copied().filter(|id| !shown_ids.contains(id)).collect();
             tracing::debug!(?dropped, "strip: pictures of windows no card shows now are let go");
             self.thumbs.retain(|id, _| shown_ids.contains(id));
+            strip_model::publish_pictures(self.display, self.thumbs.keys().copied());
         }
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
         let targets = if self.pane.shown {
@@ -3060,23 +3077,23 @@ impl Strip {
         self.motion.space_changed(self.mtm);
     }
 
-    /// Publishes the panes' state for `ctl state` ([`strip_model::panel_status`]): the main
-    /// display's strip's (the other displays' are not reported).
+    /// Publishes the panes' state for `ctl state` ([`strip_model::panel_status_of`]): every
+    /// display's strip's, by the strip's display key (round displays-2).
     fn publish_panel(&self) {
-        if self.display != strip_model::MAIN_STRIP {
-            return;
-        }
-        strip_model::publish_panel_status(strip_model::PanelStatus {
-            shown: self.pane.shown,
-            lifted: self.pane.lifted.unwrap_or(false),
-            ordered_in: self.pane.panel.isVisible(),
-            on_active_space: self.pane.panel.isOnActiveSpace(),
-            frame: self.geometry.global,
-            space: self.snapshot.space,
-            window: u32::try_from(self.pane.panel.windowNumber()).unwrap_or(0),
-        });
+        strip_model::publish_panel_status(
+            self.display,
+            strip_model::PanelStatus {
+                shown: self.pane.shown,
+                lifted: self.pane.lifted.unwrap_or(false),
+                ordered_in: self.pane.panel.isVisible(),
+                on_active_space: self.pane.panel.isOnActiveSpace(),
+                frame: self.geometry.global,
+                space: self.snapshot.space,
+                window: u32::try_from(self.pane.panel.windowNumber()).unwrap_or(0),
+            },
+        );
         let panes = std::iter::once(self.pane.status(true)).chain(self.others.iter().map(|p| p.status(false))).collect();
-        strip_model::publish_pane_statuses(panes);
+        strip_model::publish_pane_statuses(self.display, panes);
     }
 
     fn update_visibility(&mut self) {

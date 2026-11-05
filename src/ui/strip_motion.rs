@@ -136,8 +136,8 @@ struct Running {
     under: Option<u32>,
     /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
     corner: Option<Ghost>,
-    /// Where that cover is and what it shows.
-    corner_at: Option<(Rect, CoverPicture)>,
+    /// Where that cover is, what it shows, and the screen it is on.
+    corner_at: Option<(Rect, CoverPicture, u32)>,
     /// The incoming windows' frames: aimed at, then read back once in place.
     arrived: Vec<(u32, Rect)>,
     /// The transition does not land before this (its incoming windows shown under their
@@ -183,6 +183,8 @@ struct Fading {
 /// ([`cover_holds`]).
 struct Hold {
     ghost: Ghost,
+    /// The screen the cover is on (its patch's `shown_for`).
+    ghost_screen: u32,
     facts: HoldFacts,
     since: Instant,
     timer: Retained<NSTimer>,
@@ -287,7 +289,7 @@ impl Motion {
         let now = Instant::now();
         let Some(h) = self.hold.as_mut() else { return };
         h.facts.held_for = now.saturating_duration_since(h.since);
-        h.facts.patch_shown_for = crate::ui::corner_patch::shown_for(now);
+        h.facts.patch_shown_for = crate::ui::corner_patch::shown_for(h.ghost_screen, now);
         if cover_holds(&h.facts) {
             h.timer = after(HOLD_POLL, poll_hold);
             return;
@@ -705,7 +707,7 @@ impl Strip {
         }
         // The park corner, under every snapshot, while the incoming windows wait there (8L).
         let corner = if cover.incoming { t.corner.clone().and_then(|c| self.corner_cover(t.id, c)) } else { None };
-        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.picture));
+        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.picture, c.screen));
         let arrived = t.incoming.iter().map(|w| (w.window.id, w.window.frame)).collect();
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
@@ -834,8 +836,8 @@ impl Strip {
     fn corner_cover(&self, id: u64, cover: SwitchCover) -> Option<Ghost> {
         let rect = cover.rect;
         let image = match cover.picture {
-            CoverPicture::Wallpaper => crate::ui::corner_patch::cover_image(rect),
-            CoverPicture::Desktop => crate::platform::desktop_shot::image(rect),
+            CoverPicture::Wallpaper => crate::ui::corner_patch::cover_image(cover.screen, rect),
+            CoverPicture::Desktop => crate::platform::desktop_shot::image(cover.screen, rect),
         };
         let Some((image, scale)) = image else {
             tracing::debug!(id, %rect, picture = ?cover.picture, "transition: no picture of the corner now; it is not covered");
@@ -1162,16 +1164,19 @@ impl Strip {
         // Landed with the corner covered by the patch's picture: the cover stays until the
         // patch shows (10-23), unless nothing is to wait for.
         let facts = match (landed, &r.corner, r.corner_at) {
-            (true, Some(_), Some((cover, picture))) => Some(HoldFacts {
-                cover,
-                picture,
-                arrived: r.arrived.iter().map(|(_, f)| *f).collect(),
-                patch_shown_for: crate::ui::corner_patch::shown_for(Instant::now()),
-                held_for: Duration::ZERO,
-            }),
+            (true, Some(_), Some((cover, picture, screen))) => Some((
+                HoldFacts {
+                    cover,
+                    picture,
+                    arrived: r.arrived.iter().map(|(_, f)| *f).collect(),
+                    patch_shown_for: crate::ui::corner_patch::shown_for(screen, Instant::now()),
+                    held_for: Duration::ZERO,
+                },
+                screen,
+            )),
             _ => None,
         };
-        let hold = facts.filter(cover_holds).and_then(|f| r.corner.take().map(|g| (g, f)));
+        let hold = facts.filter(|(f, _)| cover_holds(f)).and_then(|(f, screen)| r.corner.take().map(|g| (g, f, screen)));
         // Landed, the incoming snapshots fade out over their windows as one picture (their
         // group: never one through another, 11-02); the rest go at once.
         let (fade, gone): (Vec<Ghost>, Vec<Ghost>) = std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped());
@@ -1209,10 +1214,10 @@ impl Strip {
             });
             self.motion.fading = Some(Fading { group, _ghosts: fade, timer });
         }
-        if let Some((ghost, facts)) = hold {
+        if let Some((ghost, facts, ghost_screen)) = hold {
             tracing::debug!(id = r.id, cover = %facts.cover, "transition: landed; the corner's cover stays until the corner patch shows");
             let timer = after(HOLD_POLL, poll_hold);
-            let old = self.motion.hold.replace(Hold { ghost, facts, since: Instant::now(), timer });
+            let old = self.motion.hold.replace(Hold { ghost, ghost_screen, facts, since: Instant::now(), timer });
             if let Some(old) = old {
                 // Never two (a new switch takes the last one's over), but never one left behind.
                 old.timer.invalidate();

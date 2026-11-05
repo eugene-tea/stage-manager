@@ -127,6 +127,8 @@ pub fn frames(c: &[usize]) -> String {
 /// The settling state (main thread).
 #[derive(Default)]
 pub struct Settler {
+    /// The screen whose patch it settles for (its `CGDirectDisplayID`; round displays-2).
+    screen: u32,
     set: Option<Set>,
     /// The set whose renders are in flight, and the one whose renders failed.
     rendering: Option<String>,
@@ -149,6 +151,11 @@ enum Ready {
 }
 
 impl Settler {
+    /// A settler for `screen`'s patch.
+    pub fn for_screen(screen: u32) -> Self {
+        Self { screen, ..Self::default() }
+    }
+
     /// Drops the renders (a display change); verdicts and the last still stay keyed.
     pub fn clear(&mut self) {
         self.set = None;
@@ -172,7 +179,7 @@ impl Settler {
         }
         if self.rendering.as_deref() != Some(key.as_str()) {
             self.rendering = Some(key.clone());
-            start_renders(job.clone(), all.to_vec(), region, key);
+            start_renders(self.screen, job.clone(), all.to_vec(), region, key);
         }
         Ready::Rendering
     }
@@ -287,12 +294,13 @@ impl Settler {
         let size = Size::new(global.w, global.h);
         let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
         let (b, path) = (base.clone(), job.path.clone());
+        let screen_id = self.screen;
         let done = Box::new(move |still: capture::DesktopStill| {
             let result = still.map(|(image, _)| (wallpaper::thumb(&image, space.as_deref(), size), wallpaper::space_name(&image)));
             dispatch2::DispatchQueue::main()
-                .exec_async(move || super::corner_patch::settle_news(News::Still { token, base: b, path, key, global, unix, result }));
+                .exec_async(move || super::corner_patch::settle_news(screen_id, News::Still { token, base: b, path, key, global, unix, result }));
         });
-        match capture::capture_desktop(global, done) {
+        match capture::capture_desktop(screen_id, global, done) {
             Ok(()) => tracing::debug!(%global, "corner patch: a still of the desktop to settle a solar frame"),
             Err(why) => {
                 self.in_flight = None;
@@ -358,7 +366,7 @@ impl Settler {
 
 /// Renders the block once per frame on a thread of its own, keeping each one's thumb, and
 /// hands the set to the main thread.
-fn start_renders(job: Job, all: Vec<usize>, region: Rect, key: String) {
+fn start_renders(screen: u32, job: Job, all: Vec<usize>, region: Rect, key: String) {
     let k = key.clone();
     let spawned = std::thread::Builder::new().name("corner-patch-frames".into()).spawn(move || {
         let started = Instant::now();
@@ -374,7 +382,7 @@ fn start_renders(job: Job, all: Vec<usize>, region: Rect, key: String) {
         })
         .unwrap_or_else(|| Err("the render panicked".to_string()));
         tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: the picture's frames rendered");
-        dispatch2::DispatchQueue::main().exec_async(move || super::corner_patch::settle_news(News::Rendered { key: k, result }));
+        dispatch2::DispatchQueue::main().exec_async(move || super::corner_patch::settle_news(screen, News::Rendered { key: k, result }));
     });
     if let Err(e) = spawned {
         tracing::warn!("corner patch: cannot start the frame renders: {e}");

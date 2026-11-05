@@ -1,5 +1,10 @@
 //! The wallpaper corner patch's panel and picture (`[windows] corner_patch`, on by
-//! default; the geometry and the rules are [`crate::engine::corner_patch`]).
+//! default; the geometry and the rules are [`crate::engine::corner_patch`]). One patch per
+//! screen (round displays-2), keyed by the screen's `CGDirectDisplayID`: each screen's plan
+//! names its screen ([`PatchPlan::screen`]), each patch reads that screen's own desktop
+//! picture and draws that screen's own still, and what the WM thread and the strip read of
+//! a patch ([`window_number`], [`ordered_against`], [`placed_at`], [`shown_for`],
+//! [`cover_ready`], [`cover_image`]) is asked for a screen.
 //!
 //! - **Panels, one per Desktop** ([`Sheet`]): borderless, non-activating, click-through, no
 //!   shadow, opaque, at the normal window level, never key or main; collection behavior
@@ -72,7 +77,7 @@
 //!   shows the patch only where it may, sending the plan again to order it anew when it
 //!   was right and is not any more.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -95,6 +100,8 @@ use crate::platform::{desktop, desktop_shot};
 /// What the WM thread asks of the patch.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PatchPlan {
+    /// The screen it is for (its `CGDirectDisplayID`; round displays-2).
+    pub screen: u32,
     /// Show it, at this rectangle (global, top-left); `None` hides it.
     pub show: Option<Rect>,
     /// The topmost parked window under it, to order the patch just above.
@@ -144,40 +151,63 @@ fn arrival_waits(arrival: Option<(u64, Instant)>, plan_space: u64, now: Instant)
     arrival.is_some_and(|(after, since)| plan_space <= after && now.saturating_duration_since(since) < ARRIVAL_WAIT)
 }
 
-/// The patch panel's window number once it exists (0 before).
-static NUMBER: AtomicU32 = AtomicU32::new(0);
+/// What the WM thread and the strip read of a screen's shown panel ([`Patch::publish_active`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Published {
+    /// The panel's window number once it exists (0 before).
+    number: u32,
+    /// What the shown panel was last ordered against: the window number above the reorder
+    /// count; [`NOT_ORDERED`] while hidden or ordered to the front.
+    ordered: u64,
+    /// Where the panel was last put (global, top-left); `None` before it is ordered in.
+    placed: Option<Rect>,
+    /// When the panel was last ordered in at its rectangle (moved, or shown after hidden);
+    /// `None` while hidden.
+    shown_at: Option<Instant>,
+}
 
-/// What the shown panel was last ordered against: the window number above the reorder
-/// count; [`NOT_ORDERED`] while hidden or ordered to the front.
-static ORDERED_AGAINST: AtomicU64 = AtomicU64::new(NOT_ORDERED);
 const NOT_ORDERED: u64 = u64::MAX;
 
-/// The window the shown panel was last ordered just above, and the plan's reorder count
-/// then; `None` while it is hidden (or was ordered to the front, nothing under it).
-pub fn ordered_against() -> Option<(u32, u32)> {
-    match ORDERED_AGAINST.load(Ordering::SeqCst) {
+/// Every screen's [`Published`], by its `CGDirectDisplayID` (any thread).
+fn published() -> &'static Mutex<BTreeMap<u32, Published>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, Published>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn published_of(screen: u32) -> Published {
+    published().lock().ok().and_then(|p| p.get(&screen).copied()).unwrap_or_default()
+}
+
+/// The window `screen`'s shown panel was last ordered just above, and the plan's reorder
+/// count then; `None` while it is hidden (or was ordered to the front, nothing under it).
+pub fn ordered_against(screen: u32) -> Option<(u32, u32)> {
+    match published_of(screen).ordered {
         NOT_ORDERED => None,
         v => Some(((v >> 32) as u32, v as u32)),
     }
 }
 
-/// Where the shown Desktop's panel was last put (global, top-left; its alpha hides it there),
-/// for the WM thread's look at where macOS lists it during Show Desktop
+/// Where `screen`'s shown Desktop's panel was last put (global, top-left; its alpha hides it
+/// there), for the WM thread's look at where macOS lists it during Show Desktop
 /// ([`crate::engine::show_desktop::panel_place`]); `None` before it is ordered in.
-pub fn placed_at() -> Option<Rect> {
-    PLACED.lock().ok().and_then(|p| *p)
+pub fn placed_at(screen: u32) -> Option<Rect> {
+    published_of(screen).placed
 }
 
-/// [`placed_at`]'s value, published with the panel's number.
-static PLACED: Mutex<Option<Rect>> = Mutex::new(None);
-
-/// The patch panel's window number, for the WM thread's ordering check; `None` before the
-/// panel exists.
-pub fn window_number() -> Option<u32> {
-    match NUMBER.load(Ordering::SeqCst) {
+/// `screen`'s patch panel's window number, for the WM thread's ordering check; `None` before
+/// the panel exists.
+pub fn window_number(screen: u32) -> Option<u32> {
+    match published_of(screen).number {
         0 => None,
         n => Some(n),
     }
+}
+
+/// How long `screen`'s patch has been on screen at its rectangle by `now` (any thread);
+/// `None` while hidden. A switch's cover of the corner waits on it
+/// ([`crate::engine::corner_patch::cover_holds`]).
+pub fn shown_for(screen: u32, now: Instant) -> Option<Duration> {
+    published_of(screen).shown_at.map(|t| now.saturating_duration_since(t))
 }
 
 /// A rendered block of the corner.
@@ -364,9 +394,11 @@ impl Drop for Sheet {
     }
 }
 
-/// The patch: the shown Desktop's panel, the others left on their Desktops, and what they
-/// share (main thread).
+/// One screen's patch: the shown Desktop's panel, the others left on their Desktops, and
+/// what they share (main thread).
 struct Patch {
+    /// The screen it is for (its `CGDirectDisplayID`).
+    screen: u32,
     /// The panel of the Desktop shown (one never ordered in until it shows).
     active: Sheet,
     /// Other Desktops' panels, each ordered in on its own Desktop as it was left.
@@ -445,22 +477,11 @@ impl RenderMemo {
 }
 
 thread_local! {
-    /// When the panel was last ordered in at its rectangle (moved, or shown after hidden);
-    /// `None` while hidden. Apart from [`PATCH`], which may be busy in a call into AppKit.
-    static SHOWN_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
-}
-
-/// How long the patch has been on screen at its rectangle by `now` (main thread); `None`
-/// while hidden. A switch's cover of the corner waits on it ([`crate::engine::corner_patch::cover_holds`]).
-pub fn shown_for(now: Instant) -> Option<Duration> {
-    SHOWN_AT.with(|s| s.get()).map(|t| now.saturating_duration_since(t))
-}
-
-thread_local! {
-    static PATCH: std::cell::RefCell<Option<Patch>> = const { std::cell::RefCell::new(None) };
-    /// The latest plan that found the patch busy, applied [`BUSY_RETRY`] later unless a newer
-    /// one is applied first.
-    static WAITING: std::cell::RefCell<Option<PatchPlan>> = const { std::cell::RefCell::new(None) };
+    /// Every screen's patch, by its `CGDirectDisplayID`, made at its first plan.
+    static PATCH: std::cell::RefCell<BTreeMap<u32, Patch>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+    /// Per screen, the latest plan that found the patches busy, applied [`BUSY_RETRY`] later
+    /// unless a newer one is applied first.
+    static WAITING: std::cell::RefCell<BTreeMap<u32, PatchPlan>> = const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
 /// How long a call that found the patch busy (a call into AppKit that ran the main queue)
@@ -473,22 +494,24 @@ fn again_shortly(f: impl FnOnce() + Send + 'static) {
     let _ = dispatch2::DispatchQueue::main().after(when, f);
 }
 
-/// Applies a plan (main thread); while the patch is busy, [`BUSY_RETRY`] later. Plans come
-/// in order, so the latest wins: one waiting is dropped when a newer one is applied.
+/// Applies a plan to its screen's patch (main thread); while the patches are busy,
+/// [`BUSY_RETRY`] later. Plans come in order, so the latest wins: one waiting for the same
+/// screen is dropped when a newer one is applied.
 pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else {
-            if WAITING.with(|w| w.replace(Some(plan))).is_none() {
+            if WAITING.with(|w| w.borrow_mut().insert(plan.screen, plan)).is_none() {
                 again_shortly(apply_waiting);
             }
             return;
         };
-        WAITING.with(|w| w.take());
-        let patch = p.get_or_insert_with(|| Patch::new(mtm));
+        WAITING.with(|w| w.borrow_mut().remove(&plan.screen));
+        let screen = plan.screen;
+        let patch = p.entry(screen).or_insert_with(|| Patch::new(mtm, screen));
         let wants = |p: &PatchPlan| p.show.or(p.picture).is_some();
         let fresh = wants(&plan) && (!wants(&patch.plan) || plan.space != patch.plan.space);
         if !plan.on && !patch.others.is_empty() {
-            tracing::debug!(closed = patch.others.len(), "corner patch: off; the other Desktops' panels close");
+            tracing::debug!(screen, closed = patch.others.len(), "corner patch: off; the other Desktops' panels close");
             patch.others.clear();
         }
         patch.plan = plan;
@@ -500,31 +523,47 @@ pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
     });
 }
 
-/// The plan that found the patch busy, if no newer one was applied meanwhile.
+/// Every screen's patch off (a stand-down: Apple's Stage Manager took over, a logout is
+/// coming): hidden, the other Desktops' panels closed.
+pub fn stand_down(mtm: MainThreadMarker) {
+    let screens: Vec<u32> = PATCH.with(|p| p.try_borrow().map(|p| p.keys().copied().collect()).unwrap_or_default());
+    for screen in screens {
+        apply(mtm, PatchPlan { screen, ..PatchPlan::default() });
+    }
+}
+
+/// The plans that found the patches busy, if no newer one was applied meanwhile.
 fn apply_waiting() {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    if let Some(plan) = WAITING.with(|w| w.take()) {
+    let plans: Vec<PatchPlan> = WAITING.with(|w| std::mem::take(&mut *w.borrow_mut())).into_values().collect();
+    for plan in plans {
         apply(mtm, plan);
     }
 }
 
-/// The app's poll (each second, main thread): reads the wallpaper again while the patch is
-/// wanted and the last read is [`READ_EVERY`] old, a frame boundary passed, or the
+/// Runs `f` on every screen's patch (main thread); false when they are busy.
+fn with_patches(mtm: MainThreadMarker, mut f: impl FnMut(MainThreadMarker, &mut Patch)) -> bool {
+    PATCH.with(|p| {
+        let Ok(mut p) = p.try_borrow_mut() else { return false };
+        for patch in p.values_mut() {
+            f(mtm, patch);
+        }
+        true
+    })
+}
+
+/// The app's poll (each second, main thread): reads each screen's wallpaper again while its
+/// patch is wanted and the last read is [`READ_EVERY`] old, a frame boundary passed, or the
 /// appearance differs from the read's (a backstop: [`appearance_changed`] comes first).
 pub fn poll(mtm: MainThreadMarker) {
-    PATCH.with(|p| {
-        let Ok(mut p) = p.try_borrow_mut() else { return };
-        let Some(patch) = p.as_mut() else { return };
+    let dark = wallpaper::dark_appearance(mtm);
+    with_patches(mtm, |mtm, patch| {
         patch.check_others(mtm);
         if patch.plan.show.is_none() && patch.plan.picture.is_none() {
             return;
         }
         let now = Instant::now();
-        let stale = patch.wall.as_ref().is_none_or(|(at, w)| {
-            now.duration_since(*at) >= READ_EVERY
-                || w.recheck_at.is_some_and(|r| now >= r)
-                || w.dark != wallpaper::dark_appearance(mtm)
-        });
+        let stale = patch.wall.as_ref().is_none_or(|(at, w)| now.duration_since(*at) >= READ_EVERY || w.recheck_at.is_some_and(|r| now >= r) || w.dark != dark);
         if stale {
             patch.wall = None;
             patch.reconcile(mtm);
@@ -532,21 +571,15 @@ pub fn poll(mtm: MainThreadMarker) {
     });
 }
 
-/// The user went to another Space (main thread, at the notification): the Desktop left
-/// keeps its panel as it is, the arriving one's panel takes over as it slid in
-/// ([`Patch::arrive`]); the wallpaper is read again now and once more [`SETTLE`] later,
-/// nothing new shown before.
+/// The user went to another Space (main thread, at the notification; no notice says on
+/// which screen, so every screen's patch arrives): the Desktop left keeps its panel as it
+/// is, the arriving one's panel takes over as it slid in ([`Patch::arrive`]); the wallpaper
+/// is read again now and once more [`SETTLE`] later, nothing new shown before.
 pub fn space_changed(mtm: MainThreadMarker) {
     // A switch's still of the desktop is of the old Desktop (8L3).
     crate::platform::desktop_shot::forget();
-    let busy = PATCH.with(|p| {
-        let Ok(mut p) = p.try_borrow_mut() else { return true };
-        if let Some(patch) = p.as_mut() {
-            patch.arrive(mtm, "a Space change");
-        }
-        false
-    });
-    if busy {
+    let done = with_patches(mtm, |mtm, patch| patch.arrive(mtm, "a Space change"));
+    if !done {
         // Busy (a call into AppKit that ran the main queue): once more shortly.
         again_shortly(move || {
             if let Some(mtm) = MainThreadMarker::new() {
@@ -556,7 +589,7 @@ pub fn space_changed(mtm: MainThreadMarker) {
     }
 }
 
-/// The appearance changed (main thread, at `AppleInterfaceThemeChangedNotification`): the
+/// The appearance changed (main thread, at `AppleInterfaceThemeChangedNotification`): every
 /// patch hides until the wallpaper is read again, the picture kept (a frame's key tells
 /// whether it is still the one); other Desktops' panels whose frame changed hide.
 pub fn appearance_changed(mtm: MainThreadMarker) {
@@ -573,19 +606,15 @@ fn settle(mtm: MainThreadMarker, why: &'static str) {
     // A switch's still of the desktop is of the old Desktop or appearance (8L3).
     crate::platform::desktop_shot::forget();
     let until = Instant::now() + SETTLE;
-    let busy = PATCH.with(|p| {
-        let Ok(mut p) = p.try_borrow_mut() else { return true };
-        if let Some(patch) = p.as_mut() {
-            tracing::debug!(why, "corner patch: hidden until the wallpaper is read again");
-            patch.hide();
-            patch.settle_until = Some(until);
-            patch.wall = None;
-            patch.check_others(mtm);
-            patch.reconcile(mtm);
-        }
-        false
+    let done = with_patches(mtm, |mtm, patch| {
+        tracing::debug!(screen = patch.screen, why, "corner patch: hidden until the wallpaper is read again");
+        patch.hide();
+        patch.settle_until = Some(until);
+        patch.wall = None;
+        patch.check_others(mtm);
+        patch.reconcile(mtm);
     });
-    if busy {
+    if !done {
         // Busy (a call into AppKit that ran the main queue): the change is not lost; once
         // more shortly, the settling counted from then.
         again_shortly(move || {
@@ -598,16 +627,10 @@ fn settle(mtm: MainThreadMarker, why: &'static str) {
     settle_later();
 }
 
-/// [`SETTLE`] after a change: the second read, and the patch may show again.
+/// [`SETTLE`] after a change: the second read, and the patches may show again.
 fn settled() {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    PATCH.with(|p| {
-        let Ok(mut p) = p.try_borrow_mut() else {
-            // Busy: once more, shortly.
-            again_shortly(settled);
-            return;
-        };
-        let Some(patch) = p.as_mut() else { return };
+    let done = with_patches(mtm, |mtm, patch| {
         // A later change settles later.
         if patch.settle_until.is_some_and(|t| Instant::now() + Duration::from_millis(5) >= t) {
             patch.settle_until = None;
@@ -615,6 +638,10 @@ fn settled() {
             patch.reconcile(mtm);
         }
     });
+    if !done {
+        // Busy: once more, shortly.
+        again_shortly(settled);
+    }
 }
 
 /// Where a switch's cover can come from (round 8L2): the rendered block of the picture the
@@ -630,16 +657,23 @@ struct CoverSource {
     screen: Rect,
 }
 
-/// The cover's source and the settling deadline, for any thread.
-fn cover_slot() -> &'static Mutex<(Option<CoverSource>, Option<Instant>)> {
-    static S: OnceLock<Mutex<(Option<CoverSource>, Option<Instant>)>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new((None, None)))
+/// A screen's cover source and settling deadline ([`cover_slot`]).
+type CoverSlot = (Option<CoverSource>, Option<Instant>);
+
+/// Each screen's cover source and settling deadline, for any thread.
+fn cover_slot() -> &'static Mutex<BTreeMap<u32, CoverSlot>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, CoverSlot>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn cover_slot_of(screen: u32) -> Option<CoverSlot> {
+    cover_slot().lock().ok().map(|g| g.get(&screen).copied().unwrap_or_default())
 }
 
 thread_local! {
-    /// The picture of [`cover_slot`]'s source (main thread): the strip crops it without
-    /// borrowing the patch, which may be busy in a call into AppKit.
-    static COVER_PICTURE: std::cell::RefCell<Option<CFRetained<CGImage>>> = const { std::cell::RefCell::new(None) };
+    /// Each screen's picture of [`cover_slot`]'s source (main thread): the strip crops it
+    /// without borrowing the patch, which may be busy in a call into AppKit.
+    static COVER_PICTURE: std::cell::RefCell<BTreeMap<u32, CFRetained<CGImage>>> = const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
 /// Why `rect` (global, top-left) could not be covered with the patch's picture now.
@@ -652,52 +686,75 @@ fn cover_from(source: Option<CoverSource>, settle_until: Option<Instant>, rect: 
     Ok(c)
 }
 
-/// Whether the switch's cover of `rect` (global, top-left, whole points) can be drawn now
-/// (any thread; round 8L2): the picture the patch would show holds it, and no Space or
-/// appearance change settles. The reason when not: an activation then arrives at once
+/// Whether the switch's cover of `rect` (global, top-left, whole points) on `screen` can be
+/// drawn now (any thread; round 8L2): the picture the patch would show holds it, and no Space
+/// or appearance change settles. The reason when not: an activation then arrives at once
 /// instead of growing (the WM thread decides before the strip is told).
-pub fn cover_ready(rect: Rect) -> Result<(), &'static str> {
-    let (source, settle) = cover_slot().lock().map(|g| *g).map_err(|_| "the corner patch's state is not readable")?;
+pub fn cover_ready(screen: u32, rect: Rect) -> Result<(), &'static str> {
+    let (source, settle) = cover_slot_of(screen).ok_or("the corner patch's state is not readable")?;
     cover_from(source, settle, rect, Instant::now()).map(|_| ())
 }
 
-/// The patch's picture of `rect` (global, top-left, whole points) and its scale, for a
+/// `screen`'s patch's picture of `rect` (global, top-left, whole points) and its scale, for a
 /// switch's motion overlay to cover the park corner while incoming windows wait there (round
 /// 8L, [`crate::engine::corner_patch::switch_cover`]); main thread. Only the picture the patch
 /// would show now ([`cover_ready`]). `None` otherwise: the corner is left as it is.
-pub fn cover_image(rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
-    let (source, settle) = cover_slot().lock().map(|g| *g).ok()?;
+pub fn cover_image(screen: u32, rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
+    let (source, settle) = cover_slot_of(screen)?;
     let c = cover_from(source, settle, rect, Instant::now()).ok()?;
-    let picture = COVER_PICTURE.with(|p| p.borrow().clone())?;
+    let picture = COVER_PICTURE.with(|p| p.borrow().get(&screen).cloned())?;
     let image = crop_for(&picture, c.region, c.scale, c.screen, rect)?;
     Some((image, c.scale))
 }
 
-/// The main display changed (size, scale, color space): read the wallpaper again (while the
-/// patch is busy, [`BUSY_RETRY`] later).
-pub fn display_changed(mtm: MainThreadMarker) {
+/// The displays changed (size, scale, colour space, arrangement; `kept`: the screens still
+/// there, by id): the patches of screens gone close, the rest read the wallpaper again
+/// (while the patches are busy, [`BUSY_RETRY`] later).
+pub fn display_changed(mtm: MainThreadMarker, kept: &[u32]) {
     crate::platform::desktop_shot::forget();
-    PATCH.with(|p| match p.try_borrow_mut() {
+    let kept = kept.to_vec();
+    let done = PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
-            if let Some(patch) = p.as_mut() {
+            let before = p.len();
+            p.retain(|screen, _| kept.contains(screen));
+            if p.len() != before {
+                tracing::info!(gone = before - p.len(), "corner patch: the patches of screens no longer there closed");
+                if let Ok(mut published) = published().lock() {
+                    published.retain(|screen, _| kept.contains(screen));
+                }
+                if let Ok(mut slots) = cover_slot().lock() {
+                    slots.retain(|screen, _| kept.contains(screen));
+                }
+                COVER_PICTURE.with(|c| {
+                    if let Ok(mut c) = c.try_borrow_mut() {
+                        c.retain(|screen, _| kept.contains(screen));
+                    }
+                });
+            }
+            for patch in p.values_mut() {
                 // Drawn for the old arrangement: other Desktops' panels go.
                 patch.others.clear();
                 patch.settler.clear();
                 patch.wall = None;
                 patch.reconcile(mtm);
             }
+            true
         }
-        Err(_) => again_shortly(|| {
-            if let Some(mtm) = MainThreadMarker::new() {
-                display_changed(mtm);
-            }
-        }),
+        Err(_) => false,
     });
+    if !done {
+        again_shortly(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                display_changed(mtm, &kept);
+            }
+        });
+    }
 }
 
 impl Patch {
-    fn new(mtm: MainThreadMarker) -> Self {
+    fn new(mtm: MainThreadMarker, screen: u32) -> Self {
         Self {
+            screen,
             active: Sheet::new(mtm),
             others: Vec::new(),
             plan: PatchPlan::default(),
@@ -707,7 +764,7 @@ impl Patch {
             settle_until: None,
             arrival: None,
             said: None,
-            settler: Settler::default(),
+            settler: Settler::for_screen(screen),
             settled: None,
             check_arrival: true,
             identity: None,
@@ -718,17 +775,15 @@ impl Patch {
     /// order check and a switch's cover ([`window_number`], [`ordered_against`], [`shown_for`]).
     fn publish_active(&self) {
         let number = if self.active.placed { self.active.panel.windowNumber() as u32 } else { 0 };
-        NUMBER.store(number, Ordering::SeqCst);
-        ORDERED_AGAINST.store(self.active.ordered, Ordering::SeqCst);
-        if let Ok(mut p) = PLACED.lock() {
-            *p = if self.active.placed { self.active.frame } else { None };
+        let placed = if self.active.placed { self.active.frame } else { None };
+        if let Ok(mut p) = published().lock() {
+            p.insert(self.screen, Published { number, ordered: self.active.ordered, placed, shown_at: self.active.shown_at });
         }
-        SHOWN_AT.with(|s| s.set(self.active.shown_at));
     }
 
     fn hide(&mut self) {
         if self.active.hide() {
-            tracing::debug!("corner patch: hidden");
+            tracing::debug!(screen = self.screen, "corner patch: hidden");
         }
         self.publish_active();
     }
@@ -828,9 +883,9 @@ impl Patch {
     fn say(&mut self, line: String, off: bool) {
         if self.said.as_deref() != Some(line.as_str()) {
             if off {
-                tracing::info!("corner patch: off: {line}");
+                tracing::info!(screen = self.screen, "corner patch: off: {line}");
             } else {
-                tracing::info!("corner patch: {line}");
+                tracing::info!(screen = self.screen, "corner patch: {line}");
             }
             self.said = Some(line);
         }
@@ -856,11 +911,14 @@ impl Patch {
         let source = picture.map(|(screen, p)| CoverSource { region: p.region, scale: p.scale, screen });
         COVER_PICTURE.with(|c| {
             if let Ok(mut c) = c.try_borrow_mut() {
-                *c = picture.map(|(_, p)| p.image.clone());
+                match picture.map(|(_, p)| p.image.clone()) {
+                    Some(image) => c.insert(self.screen, image),
+                    None => c.remove(&self.screen),
+                };
             }
         });
         if let Ok(mut slot) = cover_slot().lock() {
-            *slot = (source, self.settle_until);
+            slot.insert(self.screen, (source, self.settle_until));
         }
     }
 
@@ -933,7 +991,7 @@ impl Patch {
             self.hide();
             let region = wp::region(Size::new(wall.screen.w, wall.screen.h), wp::local(rect, wall.screen));
             if self.renders.want(&key, region) == Want::Start {
-                start_render(job, wall.screen, rect, region);
+                start_render(self.screen, job, wall.screen, rect, region);
             }
             return;
         };
@@ -984,7 +1042,7 @@ impl Patch {
         if self.active.showing.as_ref().is_some_and(|(k, plan)| *k == key && *plan == self.plan) {
             return true;
         }
-        let Some((block, region, scale)) = desktop_shot::patch_still(serial) else { return false };
+        let Some((block, region, scale)) = desktop_shot::patch_still(self.screen, serial) else { return false };
         let Some(image) = desktop_shot::crop(&block, region, scale, rect) else { return false };
         self.say("drawing a still of the desktop (Screen Recording: the wallpaper, icons and widgets as shown)".into(), false);
         let (dark, frame_due) = self.wall.as_ref().map_or((false, None), |(_, w)| (w.dark, w.frame_due));
@@ -1021,14 +1079,19 @@ impl Patch {
     /// picture, frame or look since the last read takes a new one once the fade is over, and
     /// the next frame the clock predicts takes one then.
     fn read_wall(&mut self, mtm: MainThreadMarker) -> Wall {
-        let wall = self.reader.read(mtm);
+        // This screen's own desktop picture (round displays-2); the main screen's when the
+        // screen is not reported (gone: its plan goes next).
+        let wall = match desktop::screen_with_id(mtm, self.screen) {
+            Some(screen) => self.reader.read_screen(mtm, &screen),
+            None => self.reader.read(mtm),
+        };
         let identity = wall_identity(&wall);
         if self.identity.as_ref().is_some_and(|was| *was != identity) {
-            tracing::debug!("corner patch: the wallpaper read changed; the desktop's still is taken again");
-            desktop_shot::wallpaper_changed(Instant::now());
+            tracing::debug!(screen = self.screen, "corner patch: the wallpaper read changed; the desktop's still is taken again");
+            desktop_shot::wallpaper_changed(self.screen, Instant::now());
         }
         self.identity = Some(identity);
-        desktop_shot::set_frame_due(wall.frame_due);
+        desktop_shot::set_frame_due(self.screen, wall.frame_due);
         wall
     }
 
@@ -1054,7 +1117,7 @@ impl Patch {
         }
         let region = wp::region(Size::new(wall.screen.w, wall.screen.h), local);
         if self.renders.want(&key, region) == Want::Start {
-            start_render(job, wall.screen, rect, region);
+            start_render(self.screen, job, wall.screen, rect, region);
         }
     }
 
@@ -1115,7 +1178,7 @@ impl Patch {
         if crate::platform::session::screen_locked() {
             return Err("the screen is locked");
         }
-        if objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()) {
+        if objc2_core_graphics::CGDisplayIsAsleep(self.screen) {
             return Err("the display sleeps");
         }
         if self.plan.items.is_none() {
@@ -1142,27 +1205,27 @@ impl Patch {
     }
 }
 
-/// Hands a finished render of `region` to the patch (main thread); while the patch is busy
-/// (a call into AppKit that ran the main queue), once more [`BUSY_RETRY`] later.
-fn deliver(key: String, region: Rect, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
+/// Hands a finished render of `region` to `screen`'s patch (main thread); while the patches
+/// are busy (a call into AppKit that ran the main queue), once more [`BUSY_RETRY`] later.
+fn deliver(screen: u32, key: String, region: Rect, scale: f64, result: Result<(Rect, CFRetained<CGImage>), String>) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
-            if let Some(p) = p.as_mut() {
+            if let Some(p) = p.get_mut(&screen) {
                 p.rendered(mtm, key, region, scale, result);
             }
         }
-        Err(_) => again_shortly(move || deliver(key, region, scale, result)),
+        Err(_) => again_shortly(move || deliver(screen, key, region, scale, result)),
     });
 }
 
-/// Hands what came back for settling a solar frame ([`News`]) to the patch (main thread);
-/// while the patch is busy, once more [`BUSY_RETRY`] later.
-pub(super) fn settle_news(news: News) {
+/// Hands what came back for settling a solar frame ([`News`]) to `screen`'s patch (main
+/// thread); while the patches are busy, once more [`BUSY_RETRY`] later.
+pub(super) fn settle_news(screen: u32, news: News) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
-            if let Some(patch) = p.as_mut() {
+            if let Some(patch) = p.get_mut(&screen) {
                 let items = patch.plan.items.clone();
                 if let Some(seen) = patch.settler.news(news, items.as_deref()) {
                     patch.narrow(seen);
@@ -1170,23 +1233,24 @@ pub(super) fn settle_news(news: News) {
                 patch.reconcile(mtm);
             }
         }
-        Err(_) => again_shortly(move || settle_news(news)),
+        Err(_) => again_shortly(move || settle_news(screen, news)),
     });
 }
 
 /// Renders on a thread of its own (decoding a large HEIC frame takes a moment) and hands
-/// the result to the main thread, with the `region` it was started for.
-fn start_render(job: Job, screen: Rect, rect: Rect, region: Rect) {
+/// the result to the main thread, with the `region` it was started for, for `screen`'s
+/// patch.
+fn start_render(screen: u32, job: Job, screen_frame: Rect, rect: Rect, region: Rect) {
     let key = job.key();
     let spawned = std::thread::Builder::new().name("corner-patch-render".into()).spawn(move || {
         let started = Instant::now();
         // A panic in the decoder (an odd HEIC, say) must not take the app down (Fable M2):
         // it reads as a failed render, so the patch stays off until the picture changes.
-        let result = crate::platform::safety::guarded("the corner patch's render", || picture_for(&job, screen, rect))
+        let result = crate::platform::safety::guarded("the corner patch's render", || picture_for(&job, screen_frame, rect))
             .unwrap_or_else(|| Err("the render panicked".to_string()));
-        tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: rendered");
+        tracing::debug!(screen, ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "corner patch: rendered");
         let scale = job.scale;
-        dispatch2::DispatchQueue::main().exec_async(move || deliver(key, region, scale, result));
+        dispatch2::DispatchQueue::main().exec_async(move || deliver(screen, key, region, scale, result));
     });
     if let Err(e) = spawned {
         tracing::warn!("corner patch: cannot start a render: {e}");
