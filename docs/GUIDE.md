@@ -226,7 +226,7 @@ looks empty. With Screen Recording allowed, the patch is a picture of the deskto
 any wallpaper, and the icons and widgets in that corner, which you can still click and drag.
 Without it, the patch is drawn from your wallpaper's file. If a second screen sits beyond
 that corner, a free corner is used instead. Each Desktop has its own patch, which slides in
-with it. A second screen's corner has no patch yet: the thin edges show there.
+with it, and each screen's corner has its own, drawn from that screen's desktop.
 
 ## Settings
 

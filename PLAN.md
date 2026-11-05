@@ -178,15 +178,26 @@ Known gaps the owner accepted as rare:
     stages macOS moves back are the laptop's again, the one in front before as its front
     (`displays[1]`), the one that came over stays on the 5K; (3) a restart with both
     screens: each screen's stages on its screen (the log's "Space changed on another
-    display" with `rebuilt`); (4) ⌘-Tab to an app whose stage is on the other screen:
-    that screen switches, the other does not. The restore summary does not yet say a
-    Desktop formed on another screen than it was saved on.
-  - **Still the main screen's only, by choice:** the cards' glass (sampled from the main
-    screen's wallpaper), the corner patch and the desktop still (a second screen's slivers
-    show), the Dock's arrangement ahead of a Desktop slide, the full-screen and overview
-    checks that gate new windows, the once-a-second "left this Space" check (another
-    screen's Desktop is re-recognized on arrival instead), `[windows] fit` (the main
-    strip's column), the panel status in `ctl state`, the probes and debug hooks.
+    display" with `rebuilt`; a Desktop saved on a screen not connected: `other_screen`, and
+    the restore line's "N Desktops on another screen"); (4) ⌘-Tab to an app whose stage is
+    on the other screen: that screen switches, the other does not, and the Desktop there is
+    arranged ahead of its slide (the log's "arranged ahead" for a window on `displays[1]`);
+    (5) round displays-2, on the laptop's screen: its cards' glass takes its own wallpaper
+    (set a different picture there), its corner patch covers the slivers at its bottom-left
+    corner (`displays[1].corner_patch.shown`, from a still: `displays[1].desktop_still.patch`
+    "ready"), a window opened there with the 5K in a full-screen app is placed at once (the
+    log's "the window's screen shows no Desktop now" never for it), a full-screen app on the
+    laptop (`displays[1].fullscreen`) leaves the 5K's windows arriving, Mission Control on
+    either screen, and a window moved by hand to another Desktop on the laptop's screen
+    (the log's "window left its Space on another screen").
+  - **Still the main screen's, by design (round displays-2):** the phase (a Space change
+    settling, a switch under way) and the slide hold, which gate every screen while a
+    change settles (no notice names the screen); the stage hotkeys, `ctl switch`, `ctl
+    merge` and `ctl space`, which count the main screen's strip; the park, patch, glass
+    and shadow probes and the debug hooks (`debug-overlay`, `debug-dock-press`); the sliver
+    shield's zone for the main screen, always on; `ctl state`'s top-level `space`,
+    `display`, `strip_width`, `strip_panel`, `corner_patch` and `desktop_still` (every
+    screen's are under `displays[i]`).
   - The first launch after the 10-23 login drew card switches wrong (the incoming window
     showed at its place before its snapshot reached it; the log identical to a good run); a
     relaunch cured it. Catch it with a screen recording if it comes back; check what the

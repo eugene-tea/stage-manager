@@ -148,8 +148,14 @@ stays where it is. A stage belongs to the screen its windows are on. Decided, no
 a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
 Dock to an app whose stage is on the other screen switches that screen only. Each screen's
 hidden stages wait in a corner of that screen with no screen beyond it (the laptop's
-bottom-left, its right edge touching the 5K). `[displays] main_only` (off) is the first
-version's behaviour: only the main screen, a window moved off it left alone.
+bottom-left, its right edge touching the 5K). Each screen's strip samples its own desktop
+picture for the cards' glass, each screen's hidden corner has a patch of its own (a still of
+that screen's desktop where Screen Recording is allowed, else its own wallpaper's file),
+`[windows] fit` keeps a window clear of its own screen's strip, a ⌘-Tab or Dock click to a
+Desktop on either screen arranges that Desktop ahead of its slide, and a full-screen app or
+Mission Control on one screen stops nothing on the other (round displays-2). `[displays]
+main_only` (off) is the first version's behaviour: only the main screen, a window moved off
+it left alone.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. The strip never appears in ⌘-Tab or the ⌘\`
@@ -448,10 +454,12 @@ with the windows back on another Desktop (bundle id, hashed title, the Desktops'
 
 ## Known gaps
 
-- On a second screen the cards' glass takes the main screen's wallpaper, and the hidden
-  windows' corner is not covered by a patch of the desktop: their thin edges show there.
 - The lid closed and opened (above) is what Apple's does, built and unit tested, not yet
-  seen live with ours.
+  seen live with ours; so are a second screen's own card glass, corner patch and desktop
+  still, and a full-screen app on one screen while windows arrive on the other (round
+  displays-2, built from the one-screen code, checked by the suite's `displays` phase).
+- Stage hotkeys and `ctl switch N` count the main screen's strip; which screen Apple's
+  hotkeys address is not measured.
 - No public API names a Desktop, so Desktops are told apart by their windows. An empty
   Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
   looks new until one of them shows.

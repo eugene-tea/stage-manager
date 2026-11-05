@@ -6653,7 +6653,15 @@ def phase_displays():
     front before going to a card parked in that screen's park zone (its own corner, never the
     main screen's); the main screen keeps its stages. A card click on each screen switches
     that screen alone. After the quit every window is on screen, on both screens. The lid
-    cannot be scripted: PLAN "Screens" has the steps for the main thread."""
+    cannot be scripted: PLAN "Screens" has the steps for the main thread.
+
+    Round displays-2 (the second screen looks as the main one): the app runs with window
+    captures on (as the capture and still phases do), so the other screen's strip draws its
+    cards' pictures (`displays[i].pictures` names the windows its strip holds a thumbnail
+    of); while a window is parked on the other screen its own corner patch is up
+    (`displays[i].corner_patch.shown`, its rectangle on that screen, one of our windows
+    listed at it), and the main screen's patch is where it was; `ctl state` names each
+    screen's strip panel (`displays[i].strip_panel`, its frame on that screen)."""
     say("\n== displays: a strip and stages on every screen ==")
     stop_app()
     stop_fixture()
@@ -6664,7 +6672,7 @@ def phase_displays():
         if os.path.exists(p):
             os.remove(p)
     start_fixture(4)
-    s = start_app(4)
+    s = start_app(4, capture=True)
     if not check(s is not None, "app manages the 4 fixture windows"):
         return
     screens = s.get("displays", [])
@@ -6673,6 +6681,7 @@ def phase_displays():
         stop_app()
         all_onscreen("displays quit")
         return
+    check(s.get("capture", {}).get("mode") == "on", f"displays: captures are on ({s.get('capture')})")
     main, other = screens[0], screens[1]
     zone = lambda d: {**d["frame"], "visible": d["visible"]}
     say(f"  main {main['id']} {fmt(main['frame'])} corner {main['corner']}; other {other['id']} {fmt(other['frame'])} corner {other['corner']}")
@@ -6719,6 +6728,26 @@ def phase_displays():
         check(is_parked(c3["bounds"], zone(other)), f"Fixture 3 waits in the other screen's park zone (corner {other['corner']}): {fmt(c3['bounds'])}")
         check(not is_parked(c3["bounds"], zone(main)), "not in the main screen's")
     check(not by_title(s)["Fixture 1"]["parked"] or not by_title(s)["Fixture 2"]["parked"], "the main screen still shows a stage")
+    # Round displays-2: the second screen looks as the main one.
+    def on_screen_of(r, d):
+        f = d["frame"]
+        return r is not None and r["x"] >= f["x"] - 1 and r["y"] >= f["y"] - 1 and r["x"] + r["w"] <= f["x"] + f["w"] + 1 and r["y"] + r["h"] <= f["y"] + f["h"] + 1
+    panel = screen(s, other).get("strip_panel") or {}
+    check(panel.get("shown") is not None and on_screen_of(panel.get("frame"), other), f"ctl state names the other screen's strip panel, on that screen ({panel})")
+    check(on_screen_of((screen(s, main).get("strip_panel") or {}).get("frame"), main), "and the main screen's, on the main screen")
+    x = wait_state(lambda y: ids[3] in screen(y, other).get("pictures", []) or ids[4] in screen(y, other).get("pictures", []),
+                   "a thumbnail on the other screen's strip", timeout=12)
+    check(x is not None, f"the other screen's strip draws its cards' pictures (thumbnails of {sorted(screen(x or s, other).get('pictures', []))})")
+    x = wait_state(lambda y: (screen(y, other).get("corner_patch") or {}).get("shown"), "the other screen's corner patch", timeout=12)
+    patch = (screen(x or s, other).get("corner_patch") or {})
+    if check(x is not None, f"the other screen's own corner patch is up while a window is parked there ({patch}, still {(screen(x or s, other).get('desktop_still') or {}).get('patch')})"):
+        s = x
+        rect = patch.get("rect")
+        check(on_screen_of(rect, other) and is_parked(rect, zone(other)), f"its rectangle is at the other screen's own corner: {fmt(rect) if rect else rect}")
+        ours = [w for w in our_windows() if contains(w["bounds"], rect, tol=2.0) and contains(rect, w["bounds"], tol=2.0)]
+        check(bool(ours), f"one of our windows is listed at it ({len(ours)})")
+        main_patch = screen(s, main).get("corner_patch") or {}
+        check(not main_patch.get("shown") or on_screen_of(main_patch.get("rect"), main), f"the main screen's patch, if up, stays on the main screen ({main_patch})")
     # A card click on the other screen switches that screen alone.
     card = next((c["frame"] for c in screen(s, other)["cards"] if c["number"] == stage3), None)
     if check(card is not None, f"the other screen's strip draws Fixture 3's card (cards {[c['number'] for c in screen(s, other)['cards']]})"):
