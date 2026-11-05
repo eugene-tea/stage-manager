@@ -315,6 +315,8 @@ mod app {
                 }
             }
             self.displays = displays.clone();
+            let ids: Vec<u32> = displays.iter().map(|d| d.id.0).collect();
+            strip::displays_changed(&ids);
             self.wm.send(WmCommand::Displays(displays));
             stage_manager::ui::corner_patch::display_changed(mtm);
         }

@@ -5940,6 +5940,11 @@ impl Controller {
                     "active": m.active_stage(d.id).and_then(number),
                     "strip": m.strip_slots(d.id).iter().filter_map(|s| m.stage_number(*s)).collect::<Vec<_>>(),
                     "capacity": m.capacity_of(space),
+                    // The cards its strip draws now (the main display's strip publishes as 0).
+                    "cards": strip_model::published_cards_of(if d.id == m.main_display().id { strip_model::MAIN_STRIP } else { d.id.0 })
+                        .into_iter()
+                        .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))
+                        .collect::<Vec<_>>(),
                 })
             })
             .collect();

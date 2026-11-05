@@ -69,7 +69,7 @@ pub fn displays(mtm: MainThreadMarker) -> Vec<Display> {
 }
 
 /// A screen's `CGDirectDisplayID` (`NSScreenNumber` in its device description).
-fn screen_number(screen: &NSScreen) -> Option<u32> {
+pub(crate) fn screen_number(screen: &NSScreen) -> Option<u32> {
     let description = screen.deviceDescription();
     let value: objc2::rc::Retained<AnyObject> = description.objectForKey(&NSString::from_str("NSScreenNumber"))?;
     let number = value.downcast::<NSNumber>().ok()?;

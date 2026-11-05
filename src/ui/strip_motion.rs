@@ -1260,7 +1260,7 @@ impl Strip {
             .collect();
         let running: Vec<u32> = self.motion.running.as_ref().map(|r| r.ghosts.iter().map(|g| g.window).collect()).unwrap_or_default();
         self.motion.cache.retain(|id| known.contains(&id) || running.contains(&id));
-        strip_model::publish_snapshots(self.motion.cache.ids());
+        strip_model::publish_snapshots(self.display, self.motion.cache.ids());
         self.update_snapshot_targets(None, false);
         if let Some(l) = &self.motion.landing
             && !self.snapshot.cards.iter().any(|c| c.windows.iter().any(|w| w.id == l.window))
@@ -1342,7 +1342,7 @@ impl Strip {
             c.has_image = true;
         }
         self.motion.cache.insert(id, picture, bytes);
-        strip_model::publish_snapshots(self.motion.cache.ids());
+        strip_model::publish_snapshots(self.display, self.motion.cache.ids());
     }
 
     /// While a window is dragged with the pointer over the strip column (`over`, global), its

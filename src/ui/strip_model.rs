@@ -14,6 +14,7 @@
 //! so, [`StripSnapshot::parked`], so theirs start shrinking), and incoming ones are held
 //! until the strip says their growing snapshots cover their frames ([`StripEvent::Unveil`]).
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -356,41 +357,64 @@ pub fn emit(event: StripEvent) {
 // ---------------------------------------------------------------------------------------
 // Where the cards are (for `ctl state` and scripted tests)
 
-fn card_frames() -> &'static Mutex<Vec<(u64, Rect)>> {
-    static F: OnceLock<Mutex<Vec<(u64, Rect)>>> = OnceLock::new();
-    F.get_or_init(|| Mutex::new(Vec::new()))
+/// The display id the main display's strip publishes under (it is the first screen,
+/// whatever that screen's id).
+pub const MAIN_STRIP: u32 = 0;
+
+/// Each display's cards (stage id, global bounds), by the display they were published under.
+type CardFrames = BTreeMap<u32, Vec<(u64, Rect)>>;
+
+fn card_frames() -> &'static Mutex<CardFrames> {
+    static F: OnceLock<Mutex<CardFrames>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// The strip publishes its cards' frames (stage id, global bounds, top to bottom; empty
-/// while it is hidden) after every layout (main thread).
-pub fn publish_cards(frames: Vec<(u64, Rect)>) {
+/// A display's strip publishes its cards' frames (stage id, global bounds, top to bottom;
+/// empty while it is hidden) after every layout (main thread). `display`: [`MAIN_STRIP`]
+/// for the main display's strip, else the display's id (round displays).
+pub fn publish_cards(display: u32, frames: Vec<(u64, Rect)>) {
     if let Ok(mut f) = card_frames().lock() {
-        *f = frames;
+        f.insert(display, frames);
     }
 }
 
-/// The cards' frames last published (any thread).
+/// The main display's cards' frames last published (any thread).
 pub fn published_cards() -> Vec<(u64, Rect)> {
-    card_frames().lock().map(|f| f.clone()).unwrap_or_default()
+    published_cards_of(MAIN_STRIP)
 }
 
-fn snapshot_ids() -> &'static Mutex<std::collections::HashSet<u32>> {
-    static S: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+/// The cards' frames a display's strip last published (any thread; [`publish_cards`]).
+pub fn published_cards_of(display: u32) -> Vec<(u64, Rect)> {
+    card_frames().lock().ok().and_then(|f| f.get(&display).cloned()).unwrap_or_default()
 }
 
-/// The strip publishes the windows it holds a full-size snapshot of (main thread, whenever
-/// its snapshot cache changes).
-pub fn publish_snapshots(ids: impl IntoIterator<Item = u32>) {
-    if let Ok(mut s) = snapshot_ids().lock() {
-        *s = ids.into_iter().collect();
+/// Forgets the cards of displays no longer there (`kept`: the strips still up).
+pub fn retain_cards_of(kept: &[u32]) {
+    if let Ok(mut f) = card_frames().lock() {
+        f.retain(|d, _| kept.contains(d));
     }
 }
 
-/// Whether the strip holds a full-size snapshot of window `id` (any thread): a switch's cover
+/// Each display's strip's full-size snapshots (window ids), by display.
+type SnapshotIds = BTreeMap<u32, std::collections::HashSet<u32>>;
+
+fn snapshot_ids() -> &'static Mutex<SnapshotIds> {
+    static S: OnceLock<Mutex<SnapshotIds>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A display's strip publishes the windows it holds a full-size snapshot of (main thread,
+/// whenever its snapshot cache changes; `display` as [`publish_cards`]).
+pub fn publish_snapshots(display: u32, ids: impl IntoIterator<Item = u32>) {
+    if let Ok(mut s) = snapshot_ids().lock() {
+        s.insert(display, ids.into_iter().collect());
+    }
+}
+
+/// Whether a strip holds a full-size snapshot of window `id` (any thread): a switch's cover
 /// can draw a window that stays shown into the park corner from it (round 8L5).
 pub fn has_snapshot(id: u32) -> bool {
-    snapshot_ids().lock().is_ok_and(|s| s.contains(&id))
+    snapshot_ids().lock().is_ok_and(|s| s.values().any(|ids| ids.contains(&id)))
 }
 
 /// The strip panel's state as the window server and AppKit see it, for `ctl state` and the
