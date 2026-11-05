@@ -210,10 +210,23 @@ def wait_until(fn, timeout, what):
 
 
 def is_parked(b, d):
-    """engine::park::is_parked_in on the main display: its full frame's park zone or, when
-    `d` carries it, its visible frame's (macOS keeps a parked window above a bottom Dock)."""
+    """engine::park::is_parked_in_at: the park zone at `d`'s corner (`d["corner"]` as
+    `ctl state`'s displays name it, bottom right when absent) of its full frame or, when `d`
+    carries it, of its visible frame (macOS keeps a parked window above a bottom Dock)."""
+    corner = d.get("corner") or "bottomright"
     v = d.get("visible")
-    return is_parked_on(b, d) or (bool(v) and v["w"] > 0 and v["h"] > 0 and is_parked_on(b, v))
+    return is_parked_at(b, d, corner) or (bool(v) and v["w"] > 0 and v["h"] > 0 and is_parked_at(b, v, corner))
+
+
+def is_parked_at(b, d, corner):
+    """engine::park::is_parked_at (no slivers): the bottom corners as is_parked_on, mirrored
+    across the display for the left ones; the top ones by the origin at the side's edge in the
+    display's top half (round displays-live-1: a bottom-left park read as not parked)."""
+    if "left" in corner:
+        b = {**b, "x": d["x"] + (d["x"] + d["w"]) - (b["x"] + b["w"])}
+    if corner.startswith("bottom"):
+        return is_parked_on(b, d)
+    return b["x"] >= d["x"] + d["w"] - PARK_MARGIN and d["y"] - PARK_MARGIN <= b["y"] <= d["y"] + d["h"] / 2
 
 
 def is_parked_on(b, d):
@@ -6706,6 +6719,11 @@ def phase_displays():
     that screen alone. After the quit every window is on screen, on both screens. The lid
     cannot be scripted: PLAN "Screens" has the steps for the main thread.
 
+    Stage numbers count on each screen's own Desktop (both screens have a stage 1), so the
+    checks across screens compare stage ids (`windows[i].stage`, `displays[i].active_stage`;
+    round displays-live-1). `do new` sends a window to a stage of its own without bringing
+    it in front: the main screen's front stage is whichever shows after it.
+
     Round displays-2 (the second screen looks as the main one): the app runs with window
     captures on (as the capture and still phases do), so the other screen's strip draws its
     cards' pictures (`displays[i].pictures` names the windows its strip holds a thumbnail
@@ -6723,7 +6741,7 @@ def phase_displays():
         if os.path.exists(p):
             os.remove(p)
     start_fixture(4)
-    s = start_app(4, capture=True)
+    s = start_app(4, capture=True, extra_env={"STAGE_MANAGER_TEST": "1"})
     if not check(s is not None, "app manages the 4 fixture windows"):
         return
     screens = s.get("displays", [])
@@ -6734,31 +6752,41 @@ def phase_displays():
         return
     check(s.get("capture", {}).get("mode") == "on", f"displays: captures are on ({s.get('capture')})")
     main, other = screens[0], screens[1]
-    zone = lambda d: {**d["frame"], "visible": d["visible"]}
+    zone = lambda d: {**d["frame"], "visible": d["visible"], "corner": d["corner"]}
     say(f"  main {main['id']} {fmt(main['frame'])} corner {main['corner']}; other {other['id']} {fmt(other['frame'])} corner {other['corner']}")
     t = by_title(s)
     ids = {n: t[f"Fixture {n}"]["id"] for n in (1, 2, 3, 4)}
-    check(all(w["display"] == main["id"] for w in s["windows"]), "every fixture window is the main screen's at launch")
-    do("new", ids[2])
-    s = wait_state(lambda x: by_title(x)["Fixture 2"]["home"] != by_title(x)["Fixture 1"]["home"], "Fixture 2 in a stage of its own")
-    if not check(s is not None, "Fixture 2 sent to a stage of its own on the main screen"):
-        stop_app()
-        return
-    stage_main = by_title(s)["Fixture 2"]["home"]
-    ov = other["visible"]
 
     def screen(x, d):
         return next(k for k in x["displays"] if k["id"] == d["id"])
 
+    check(all(w["display"] == main["id"] for w in s["windows"]), "every fixture window is the main screen's at launch")
+    do("new", ids[2])
+    s = wait_state(lambda x: by_title(x)["Fixture 2"]["stage"] != by_title(x)["Fixture 1"]["stage"], "Fixture 2 in a stage of its own")
+    if not check(s is not None, "Fixture 2 sent to a stage of its own on the main screen"):
+        stop_app()
+        return
+    main_front = screen(s, main)["active_stage"]
+    shown_main = sorted(n for n in (1, 2) if not by_title(s)[f"Fixture {n}"]["parked"])
+    ov = other["visible"]
+
     def moved_to_other(n, at, what):
-        ctl("debug-frame", ids[n], ov["x"] + at[0], ov["y"] + at[1], 640, 420)
+        r = ctl("debug-frame", ids[n], ov["x"] + at[0], ov["y"] + at[1], 640, 420)
+        if not check(r.get("ok"), f"{what}: Fixture {n} moved to the other screen ({r.get('error', 'ok')})"):
+            return None
         x = wait_state(lambda y: by_title(y)[f"Fixture {n}"]["display"] == other["id"], f"Fixture {n} on the other screen", timeout=8)
         if not check(x is not None, f"{what}: Fixture {n}, moved by Accessibility, is the other screen's within a few seconds"):
             return None
-        w = by_title(x)[f"Fixture {n}"]
-        check(w["home"] != stage_main and screen(x, other)["active"] == w["home"], f"{what}: a stage of its own there, in front (stage {w['home']}, the other screen's front {screen(x, other)['active']})")
+        t = by_title(x)
+        w = t[f"Fixture {n}"]
+        shared = [m for m in (1, 2, 3, 4) if m != n and t[f"Fixture {m}"]["stage"] == w["stage"]]
+        front = screen(x, other)["active_stage"]
+        check(w["stage"] is not None and not shared and front == w["stage"],
+              f"{what}: a stage of its own there, in front (stage id {w['stage']}, number {w['home']} there; the other screen's front id {front}; sharing it: {shared})")
         check(not w["parked"], f"{what}: shown there")
-        check(screen(x, main)["active"] == stage_main and not by_title(x)["Fixture 2"]["parked"], f"{what}: the main screen's front stage did not move")
+        shown = sorted(m for m in (1, 2) if not t[f"Fixture {m}"]["parked"])
+        check(screen(x, main)["active_stage"] == main_front and shown == shown_main,
+              f"{what}: the main screen's front stage did not move (front id {screen(x, main)['active_stage']}, was {main_front}; Fixtures shown {shown}, were {shown_main})")
         return x
 
     s = moved_to_other(3, (120.0, 100.0), "first move")

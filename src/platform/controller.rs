@@ -6131,9 +6131,13 @@ impl Controller {
         };
         let active = m.main_active_stage();
         let number = |s: StageId| m.stage_number(s);
+        // The main screen's stages, as before round displays (every other screen's are under
+        // `displays[i]`): the suite's counts are of the main screen's.
+        let main_id = m.main_display().id;
         let stages: Vec<Value> = m
             .stages()
             .iter()
+            .filter(|s| m.display_of_space(s.space) == main_id)
             .map(|s| {
                 json!({
                     "id": s.id.0,
@@ -6167,6 +6171,9 @@ impl Controller {
                     "role": match w.meta.role { WindowRole::Standard => "standard", WindowRole::Child { .. } => "child" },
                     "parent": match w.meta.role { WindowRole::Child { parent } => parent.map(|p| p.0), WindowRole::Standard => None },
                     "home": match w.home { Home::Pinned => json!("pinned"), Home::Stage(s) => json!(number(s)) },
+                    // Its stage's id: `home` is a number on its own Desktop, so two screens
+                    // each have a stage 2 (round displays-live-1).
+                    "stage": match w.home { Home::Pinned => None, Home::Stage(s) => Some(s.0) },
                     "display": w.meta.display.0,
                     "restore": w.restore,
                     "original": w.original,
@@ -6213,6 +6220,8 @@ impl Controller {
                     // the others' their own watch; round displays-2).
                     "fullscreen": if d.id == m.main_display().id { self.phase.fullscreen() } else { self.other_screen_fullscreen(d.id.0) },
                     "active": m.active_stage(d.id).and_then(number),
+                    // Its front stage's id (`active` is its number, on this screen's Desktop).
+                    "active_stage": m.active_stage(d.id).map(|s| s.0),
                     "strip": m.strip_slots(d.id).iter().filter_map(|s| m.stage_number(*s)).collect::<Vec<_>>(),
                     "capacity": m.capacity_of(space),
                     // The cards its strip draws now (the main display's strip publishes as 0).

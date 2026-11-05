@@ -78,7 +78,7 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel,
     NSNormalWindowLevel, NSPanel, NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
@@ -219,11 +219,25 @@ fn with_strips(mut f: impl FnMut(&mut Strip)) {
 
 /// Runs `f` on the strip of `display` (as a strip is keyed: [`strip_model::MAIN_STRIP`] or
 /// the main display's id for the main one, else the display's id), where up and free.
+///
+/// Every strip's views, tab and timers carry their strip's key and come back through here
+/// (round displays-live-1: they went to the main display's strip, so a card click on another
+/// screen's strip hit nothing there, and that strip's transitions never landed).
 fn with_strip_of<R>(display: u32, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
     if is_main_display(display) {
         return with_strip(f);
     }
-    OTHERS.with(|o| {
+    with_other(&OTHERS, display, f)
+}
+
+/// Runs `f` on the entry keyed `display` of `others` (the other displays' strips), where
+/// there and free.
+fn with_other<S, R>(
+    others: &'static std::thread::LocalKey<RefCell<BTreeMap<u32, S>>>,
+    display: u32,
+    f: impl FnOnce(&mut S) -> R,
+) -> Option<R> {
+    others.with(|o| {
         let mut others = o.try_borrow_mut().ok()?;
         others.get_mut(&display).map(f)
     })
@@ -553,6 +567,7 @@ define_class!(
     #[unsafe(super = NSView)]
     #[thread_kind = MainThreadOnly]
     #[name = "SMStripView"]
+    #[ivars = Cell<u32>]
     pub struct StripView;
 
     // SAFETY: NSObjectProtocol has no safety requirements.
@@ -574,14 +589,14 @@ define_class!(
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.local_point(event);
             // Emit outside the borrow, as on release: the sink may call back into the strip.
-            if let Some(Some(e)) = with_strip(|s| s.mouse_down(p)) {
+            if let Some(Some(e)) = with_strip_of(self.strip(), |s| s.mouse_down(p)) {
                 strip_model::emit(e);
             }
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, _event: &NSEvent) {
-            with_strip(Strip::mouse_dragged);
+            with_strip_of(self.strip(), Strip::mouse_dragged);
         }
 
         #[unsafe(method(mouseUp:))]
@@ -589,7 +604,7 @@ define_class!(
             let p = self.local_point(event);
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
             // Emit outside the borrow: the sink may call back into the strip.
-            if let Some(Some(e)) = with_strip(|s| s.mouse_up(p, shift)) {
+            if let Some(Some(e)) = with_strip_of(self.strip(), |s| s.mouse_up(p, shift)) {
                 tracing::debug!(?e, "strip click");
                 strip_model::emit(e);
             }
@@ -598,27 +613,35 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.hover_at(Some(p)));
+            with_strip_of(self.strip(), |s| s.hover_at(Some(p)));
         }
 
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.hover_at(Some(p)));
+            with_strip_of(self.strip(), |s| s.hover_at(Some(p)));
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
-            with_strip(|s| s.hover_at(None));
+            with_strip_of(self.strip(), |s| s.hover_at(None));
         }
     }
 );
 
 impl StripView {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    /// A view of the strip keyed `strip` ([`with_strip_of`]): its events go to that strip.
+    fn new(mtm: MainThreadMarker, frame: NSRect, strip: u32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(strip));
         // SAFETY: NSView's designated initializer on a fresh instance.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// The key of the strip this view draws (the main display's, or another screen's; round
+    /// displays-live-1: every view's events went to the main display's strip, so a card
+    /// click on another screen's strip did nothing).
+    fn strip(&self) -> u32 {
+        self.ivars().get()
     }
 
     /// The event's location in view coordinates (top-left origin).
@@ -633,6 +656,7 @@ define_class!(
     #[unsafe(super = NSView)]
     #[thread_kind = MainThreadOnly]
     #[name = "SMEdgeTabView"]
+    #[ivars = Cell<u32>]
     pub struct EdgeTabView;
 
     // SAFETY: NSObjectProtocol has no safety requirements.
@@ -653,7 +677,7 @@ define_class!(
         // our own windows, and nothing is polled while the strip waits at the edge).
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
-            with_strip(Strip::update_visibility);
+            with_strip_of(self.ivars().get(), Strip::update_visibility);
         }
 
         // The tab acts on release, once the click is over: ordered out while its own click
@@ -661,16 +685,18 @@ define_class!(
         // (measured 10-12: gone for 60 ms, then listed again over the revealed strip).
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            DispatchQueue::main().exec_async(|| {
-                with_strip(Strip::tab_clicked);
+            let strip = self.ivars().get();
+            DispatchQueue::main().exec_async(move || {
+                with_strip_of(strip, Strip::tab_clicked);
             });
         }
     }
 );
 
 impl EdgeTabView {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    /// The tab of the strip keyed `strip` ([`with_strip_of`]): its events go to that strip.
+    fn new(mtm: MainThreadMarker, frame: NSRect, strip: u32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(strip));
         // SAFETY: NSView's designated initializer on a fresh instance.
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
@@ -685,7 +711,7 @@ struct EdgeTab {
 }
 
 impl EdgeTab {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Self {
+    fn new(mtm: MainThreadMarker, frame: NSRect, strip: u32) -> Self {
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
             frame,
@@ -705,7 +731,7 @@ impl EdgeTab {
         // SAFETY: the panel is owned by the tab for the life of the app.
         unsafe { panel.setReleasedWhenClosed(false) };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
-        let view = EdgeTabView::new(mtm, bounds);
+        let view = EdgeTabView::new(mtm, bounds, strip);
         let options =
             NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
         // SAFETY: the view owns the tracking area and outlives it; no user info.
@@ -1330,8 +1356,9 @@ struct Pane {
 }
 
 impl Pane {
-    /// A new pane (not ordered in, so not on any Desktop yet), sized for `geometry`.
-    fn new(mtm: MainThreadMarker, geometry: &Geometry) -> Self {
+    /// A new pane of the strip keyed `strip` (not ordered in, so not on any Desktop yet),
+    /// sized for `geometry`.
+    fn new(mtm: MainThreadMarker, geometry: &Geometry, strip: u32) -> Self {
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -1354,7 +1381,7 @@ impl Pane {
         unsafe { panel.setReleasedWhenClosed(false) };
 
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), geometry.panel.size);
-        let view = StripView::new(mtm, bounds);
+        let view = StripView::new(mtm, bounds, strip);
         let root = CALayer::new();
         root.setGeometryFlipped(true);
         // Layer-hosting: set the layer before turning layers on.
@@ -1373,7 +1400,7 @@ impl Pane {
 
         let cards_root = CALayer::new();
         root.addSublayer(&cards_root);
-        let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()));
+        let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()), strip);
         Self {
             panel,
             view,
@@ -1484,7 +1511,7 @@ impl Strip {
     fn new(mtm: MainThreadMarker, interval: Duration, display: u32) -> Self {
         let style = Arc::new(StripStyle::default());
         let geometry = Geometry::for_display(mtm, display, &style);
-        let pane = Pane::new(mtm, &geometry);
+        let pane = Pane::new(mtm, &geometry, display);
         let scale = pane.panel.backingScaleFactor();
         let capturer = Capturer::start(interval, thumbnail_arrived);
         let mut strip = Self {
@@ -1517,7 +1544,7 @@ impl Strip {
             drop_before: None,
             announced: false,
             space_epoch: 0,
-            motion: motion::Motion::new(mtm),
+            motion: motion::Motion::new(mtm, display),
         };
         strip.apply_geometry();
         strip.slide(false, false);
@@ -1667,10 +1694,10 @@ impl Strip {
                 self.order_in();
                 // Ordered in for the first time while the Space still slides, a new pane
                 // could land on the Desktop being left: look again once the slide is over.
-                let epoch = self.space_epoch;
+                let (epoch, display) = (self.space_epoch, self.display);
                 for seconds in REHOME_CHECKS {
                     let _once = motion::after(seconds, move || {
-                        with_strip(|s| s.ensure_on_active_space(epoch));
+                        with_strip_of(display, |s| s.ensure_on_active_space(epoch));
                     });
                 }
             }
@@ -1758,7 +1785,7 @@ impl Strip {
         } else if let Some(i) = self.others.iter().position(|p| !p.placed) {
             self.others.swap_remove(i)
         } else {
-            let mut pane = Pane::new(self.mtm, &self.geometry);
+            let mut pane = Pane::new(self.mtm, &self.geometry, self.display);
             pane.shown = self.pane.shown;
             pane
         };
@@ -1804,7 +1831,7 @@ impl Strip {
         self.others.retain(|p| !p.on_space_shown());
         let mut gone = before - self.others.len();
         if self.pane.on_space_shown() {
-            let fresh = Pane::new(self.mtm, &self.geometry);
+            let fresh = Pane::new(self.mtm, &self.geometry, self.display);
             drop(std::mem::replace(&mut self.pane, fresh));
             self.layouts.clear();
             gone += 1;
@@ -2571,9 +2598,9 @@ impl Strip {
         if let Some(t) = timer.take() {
             t.invalidate();
         }
-        let stage = *stage;
+        let (stage, display) = (*stage, self.display);
         let t = motion::after(settle, move || {
-            with_strip(|s| {
+            with_strip_of(display, |s| {
                 if s.lifted_card.as_ref().is_some_and(|l| l.0 == stage && l.1.is_some()) {
                     s.lifted_card = None;
                     s.set_card_z(stage, 0.0);
@@ -2818,21 +2845,21 @@ impl Strip {
         }
         // The card stays pressed until its transition takes it (the incoming snapshots grow
         // from it as drawn); if none comes, it lets go.
-        Self::release_squeeze_later(pressed);
+        Self::release_squeeze_later(self.display, pressed);
         Some(self.click_event(pressed, p, shift))
     }
 
     /// In [`SQUEEZE_MAX`]: a released card still drawn pressed lets go, unless a transition
     /// holds it (then it is looked at again after as long, so one that a later transition
     /// took never stays pressed: R3 6). A new press of any card ends the watch.
-    fn release_squeeze_later(stage: u64) {
+    fn release_squeeze_later(display: u32, stage: u64) {
         let _once = motion::after(SQUEEZE_MAX, move || {
-            with_strip(|s| {
+            with_strip_of(display, |s| {
                 if s.squeezed != Some(stage) || s.pressed.is_some() {
                     return;
                 }
                 if s.motion.holds(stage) {
-                    Self::release_squeeze_later(stage);
+                    Self::release_squeeze_later(display, stage);
                 } else {
                     s.squeeze(None);
                 }
@@ -3066,7 +3093,7 @@ impl Strip {
         // left (the review's U9): a new one takes over (the stray one closes) and shows here.
         if self.pane.tab.shown && !self.pane.tab.panel.isOnActiveSpace() {
             tracing::info!("strip: the edge tab is not on the Space shown; a new one takes over");
-            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()));
+            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()), self.display);
             self.update_visibility();
         }
         self.publish_panel();
@@ -3206,8 +3233,9 @@ impl Strip {
     fn set_polling(&mut self, on: bool) {
         match (on, self.poll_timer.is_some()) {
             (true, false) => {
-                let tick = RcBlock::new(|_t: NonNull<NSTimer>| {
-                    with_strip(Strip::update_visibility);
+                let display = self.display;
+                let tick = RcBlock::new(move |_t: NonNull<NSTimer>| {
+                    with_strip_of(display, Strip::update_visibility);
                 });
                 let seconds = (self.style.reveal.poll_ms.max(10) as f64) / 1000.0;
                 // SAFETY: the block runs on the main run loop only.
@@ -3247,6 +3275,32 @@ mod tests {
     thread_local! {
         static SEEN: RefCell<Option<Vec<u32>>> = const { RefCell::new(Some(Vec::new())) };
         static QUEUE: RefCell<VecDeque<u32>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    thread_local! {
+        static SCREENS: RefCell<BTreeMap<u32, Vec<&'static str>>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    /// Round displays-live-1: an event keyed by another screen's strip reaches that strip
+    /// alone (a card click on the second screen went to the main display's strip and did
+    /// nothing); the main display's key never names another screen's strip.
+    #[test]
+    fn an_event_keyed_by_another_screen_reaches_that_screens_strip() {
+        SCREENS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.insert(1, Vec::new());
+            s.insert(7, Vec::new());
+        });
+        assert_eq!(with_other(&SCREENS, 1, |s| s.push("card click")), Some(()));
+        assert_eq!(SCREENS.with(|s| s.borrow().clone()), BTreeMap::from([(1, vec!["card click"]), (7, Vec::new())]));
+        assert_eq!(with_other(&SCREENS, 3, |s| s.push("hover")), None, "no strip on that screen: nothing");
+        let busy = SCREENS.with(|s| {
+            let _held = s.borrow_mut();
+            with_other(&SCREENS, 7, |s| s.push("timer"))
+        });
+        assert_eq!(busy, None, "borrowed: dropped, never sent to another strip");
+        assert!(is_main_display(strip_model::MAIN_STRIP), "the main display's views carry MAIN_STRIP");
+        assert!(!is_main_display(1) && !is_main_display(7), "another screen's key is never the main strip's");
     }
 
     /// U7: an item that finds the receiver borrowed waits, and goes before the next one once

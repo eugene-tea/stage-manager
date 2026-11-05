@@ -64,7 +64,7 @@ use objc2_app_kit::{NSEvent, NSEventMask};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTimer};
 
-use super::{Ghost as CardGhost, Strip, with_strip};
+use super::{Ghost as CardGhost, Strip, with_strip_of};
 use crate::config::SnapshotShadow;
 use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
@@ -209,6 +209,9 @@ struct Landing {
 
 /// Motion state kept by the strip.
 pub(super) struct Motion {
+    /// The key of the strip this is the motion of ([`with_strip_of`]): its timers come back
+    /// to that strip, never to the main display's when it is another screen's.
+    display: u32,
     overlay: Overlay,
     cache: SnapshotCache<Picture>,
     capturer: Capturer,
@@ -233,8 +236,9 @@ impl Motion {
         self.cache.get(id)
     }
 
-    pub(super) fn new(mtm: MainThreadMarker) -> Self {
+    pub(super) fn new(mtm: MainThreadMarker, display: u32) -> Self {
         Self {
+            display,
             overlay: Overlay::new(mtm),
             cache: SnapshotCache::new(512 << 20),
             capturer: Capturer::start_quiet(ON_DEMAND, super::snapshot_arrived),
@@ -291,7 +295,8 @@ impl Motion {
         h.facts.held_for = now.saturating_duration_since(h.since);
         h.facts.patch_shown_for = crate::ui::corner_patch::shown_for(h.ghost_screen, now);
         if cover_holds(&h.facts) {
-            h.timer = after(HOLD_POLL, poll_hold);
+            let display = self.display;
+            h.timer = after(HOLD_POLL, move || poll_hold(display));
             return;
         }
         tracing::debug!(
@@ -335,10 +340,10 @@ impl Motion {
             old.timer.invalidate();
         }
         self.landing_seq += 1;
-        let seq = self.landing_seq;
+        let (seq, display) = (self.landing_seq, self.display);
         // Clears this landing only, never a newer one (review R1-ui 6).
         let timer = after(LANDING_MAX, move || {
-            with_strip(|s| {
+            with_strip_of(display, |s| {
                 if s.motion.landing.as_ref().is_some_and(|l| l.seq == seq) {
                     s.motion.landing = None;
                 }
@@ -357,9 +362,9 @@ impl Drop for Motion {
     }
 }
 
-/// A held cover's look ([`Motion::check_hold`]), from its timer.
-fn poll_hold() {
-    with_strip(|s| s.motion.check_hold());
+/// A held cover's look ([`Motion::check_hold`]), from its timer, on the strip keyed `display`.
+fn poll_hold(display: u32) {
+    with_strip_of(display, |s| s.motion.check_hold());
 }
 
 /// True when a transition is drawn: animation on, and not on a full-screen Space, where the
@@ -592,6 +597,8 @@ impl Strip {
     }
 
     fn start_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)>) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
         self.finish_transition(false);
         if !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
             strip_model::cover(t.id, Cover::default());
@@ -745,30 +752,30 @@ impl Strip {
         let lands_after = unveil.map(|u| started + Duration::from_secs_f64(u + wait + SHOWN_FADE + AFTER_UNVEIL));
         if let Some(u) = unveil.filter(|_| !late.is_empty()) {
             timers.push(after(u + LATE_MAX, move || {
-                with_strip(|s| s.late_shown(id, None, None));
+                with_strip_of(display, |s| s.late_shown(id, None, None));
             }));
         }
         // The key window's snapshot, taken parked and inactive, again once it is key.
         if let Some(key) = t.key_in.filter(|k| !late.contains(k) && ghosts.iter().any(|g| g.window == *k) && !plain) {
             timers.push(after(RECAPTURE_AFTER, move || {
-                with_strip(|s| s.recapture_key(id, key));
+                with_strip_of(display, |s| s.recapture_key(id, key));
             }));
         }
         if let Some(unveil) = unveil {
             timers.push(after(unveil, move || {
                 // The strip busy (never expected from a timer): the unveil still goes.
-                if with_strip(|s| s.unveil(id)).is_none() {
+                if with_strip_of(display, |s| s.unveil(id)).is_none() {
                     strip_model::emit(StripEvent::Unveil { id });
                 }
             }));
         }
         if waiting.is_empty() {
             timers.push(after(settle_time(spring, SETTLED), move || {
-                with_strip(|s| s.end_transition(id));
+                with_strip_of(display, |s| s.end_transition(id));
             }));
         } else {
             timers.push(after(PARK_WAIT_MAX, move || {
-                with_strip(|s| s.outgoing_parked(id));
+                with_strip_of(display, |s| s.outgoing_parked(id));
             }));
         }
         let unveil_ms = unveil.map(|u| (u * 1000.0).round() as u64);
@@ -894,6 +901,8 @@ impl Strip {
     /// The outgoing windows of transition `id` have parked: their snapshots shrink into their
     /// cards now, and the transition ends when they land.
     pub(super) fn outgoing_parked(&mut self, id: u64) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
         let spring = self.spring();
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.waiting.is_empty()) else { return };
         for (i, end, glass) in std::mem::take(&mut r.waiting) {
@@ -904,7 +913,7 @@ impl Strip {
             }
         }
         r.timers.push(after(settle_time(spring, SETTLED), move || {
-            with_strip(|s| s.end_transition(id));
+            with_strip_of(display, |s| s.end_transition(id));
         }));
     }
 
@@ -936,6 +945,8 @@ impl Strip {
     /// [`SHOWN_MAX`] after the unveil ([`LATE_MAX`] for a late window) one left hands over
     /// anyway (logged).
     fn poll_shown(&mut self, id: u64) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.unshown.is_empty()) else { return };
         let now = Instant::now();
         let since = r.unveil_at.map_or(0.0, |u| now.saturating_duration_since(u).as_secs_f64());
@@ -975,7 +986,7 @@ impl Strip {
         self.windows_shown(id, &waited, false);
         if self.motion.running.as_ref().is_some_and(|r| r.id == id && !r.unshown.is_empty()) {
             let timer = after(SHOWN_POLL, move || {
-                with_strip(|s| s.poll_shown(id));
+                with_strip_of(display, |s| s.poll_shown(id));
             });
             if let Some(r) = self.motion.running.as_mut() {
                 r.timers.push(timer);
@@ -1011,14 +1022,14 @@ impl Strip {
                 g.handover_ms = Some(handover_ms);
             }
         });
-        Self::replan_landing(r, now);
+        Self::replan_landing(r, now, self.display);
     }
 
     /// Plans transition `r`'s landing once every incoming window shows and every late one is
     /// in its final look: not before [`AFTER_UNVEIL`] past the unveil, each shadow handed over
     /// ([`Running::shown_land`]) and each late window [`AFTER_UNVEIL`] past its final look
     /// ([`Running::final_land`]); a timer of its own when the landing was due already.
-    fn replan_landing(r: &mut Running, now: Instant) {
+    fn replan_landing(r: &mut Running, now: Instant, display: u32) {
         if !r.unshown.is_empty() || !r.late_inactive.is_empty() {
             return;
         }
@@ -1031,7 +1042,7 @@ impl Strip {
         if r.settled {
             let id = r.id;
             r.timers.push(after(at.saturating_duration_since(now).as_secs_f64(), move || {
-                with_strip(|s| s.end_transition(id));
+                with_strip_of(display, |s| s.end_transition(id));
             }));
         }
     }
@@ -1069,7 +1080,7 @@ impl Strip {
         let from_now = r.unveil_at.map_or(0.0, |u| u.saturating_duration_since(now).as_secs_f64());
         let land = now + Duration::from_secs_f64(from_now + AFTER_UNVEIL);
         r.final_land = Some(r.final_land.map_or(land, |l| l.max(land)));
-        Self::replan_landing(r, now);
+        Self::replan_landing(r, now, self.display);
     }
 
     /// Captures transition `id`'s incoming key window `key` again (its snapshot was taken
@@ -1088,12 +1099,14 @@ impl Strip {
     /// (the incoming snapshots fade out over their windows, [`LANDING_FADE`]); not before its
     /// incoming windows show under their snapshots (else it looks again then).
     fn end_transition(&mut self, id: u64) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
         r.settled = true;
         let now = Instant::now();
         if let Some(wait) = r.lands_after.map(|at| at.saturating_duration_since(now)).filter(|w| !w.is_zero()) {
             r.timers.push(after(wait.as_secs_f64(), move || {
-                with_strip(|s| s.end_transition(id));
+                with_strip_of(display, |s| s.end_transition(id));
             }));
             return;
         }
@@ -1156,6 +1169,8 @@ impl Strip {
     /// Ends the running transition: it `landed` (its corner's cover may stay a moment,
     /// [`cover_holds`]), or a new one starts and hides the overlay itself if it draws nothing.
     fn finish_transition(&mut self, landed: bool) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
         let Some(mut r) = self.motion.running.take() else { return };
         self.capturer.hold_until(None);
         for t in &r.timers {
@@ -1209,14 +1224,15 @@ impl Strip {
                 old.timer.invalidate();
                 old.group.remove();
             }
-            let timer = after(LANDING_FADE, || {
-                with_strip(|s| s.motion.drop_fading());
+            let timer = after(LANDING_FADE, move || {
+                with_strip_of(display, |s| s.motion.drop_fading());
             });
             self.motion.fading = Some(Fading { group, _ghosts: fade, timer });
         }
         if let Some((ghost, facts, ghost_screen)) = hold {
             tracing::debug!(id = r.id, cover = %facts.cover, "transition: landed; the corner's cover stays until the corner patch shows");
-            let timer = after(HOLD_POLL, poll_hold);
+            let display = self.display;
+            let timer = after(HOLD_POLL, move || poll_hold(display));
             let old = self.motion.hold.replace(Hold { ghost, ghost_screen, facts, since: Instant::now(), timer });
             if let Some(old) = old {
                 // Never two (a new switch takes the last one's over), but never one left behind.
@@ -1248,6 +1264,8 @@ impl Strip {
 
     /// After every snapshot: what to keep snapshots of, the drag monitor, a stale landing.
     pub(super) fn after_snapshot(&mut self) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
         let a = self.style.animation.clone();
         let interval = (a.snapshot_interval_ms > 0).then_some(a.snapshot_interval_ms);
         if self.motion.interval_ms != Some(interval.unwrap_or(0)) {
@@ -1279,8 +1297,8 @@ impl Strip {
         match (dragging, self.motion.drag_monitor.is_some()) {
             (true, false) => {
                 self.motion.drag_seen = self.snapshot.window_drag.map(|w| (w.id, self.pointer()));
-                let block = RcBlock::new(|_e: NonNull<NSEvent>| {
-                    with_strip(Strip::update_visibility);
+                let block = RcBlock::new(move |_e: NonNull<NSEvent>| {
+                    with_strip_of(display, Strip::update_visibility);
                 });
                 self.motion.drag_monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseDragged, &block);
             }
