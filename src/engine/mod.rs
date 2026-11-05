@@ -6,7 +6,9 @@
 pub mod busy_apps;
 pub mod corner_patch;
 pub mod desktop_echo;
+pub mod desktop_notice;
 pub mod displays;
+pub mod enhanced_ui;
 pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;
@@ -34,6 +36,8 @@ pub mod settings;
 pub mod show_desktop;
 pub mod slide_hold;
 pub mod solar_settle;
+pub mod stale_activation;
+pub mod stale_handle;
 pub mod sliver;
 pub mod vanished;
 pub mod stage_area;

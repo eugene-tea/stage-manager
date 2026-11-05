@@ -209,6 +209,8 @@ impl Model {
         } else if let Home::Stage(s) = home {
             // While the login settles a new stage takes the front only from an empty saved
             // active stage still waiting for its windows (the review of 8F, M4).
+            // A window on screen since the launch, found late, was there all along: no switch.
+            let follow = follow && !self.listed_at_launch(id);
             if follow && (!self.settling() || (created && self.front_waits_empty(space))) {
                 actions.extend(self.switch_to(s, obs));
                 return actions;
@@ -244,6 +246,7 @@ impl Model {
         self.windows.remove(&id);
         self.restored.remove(&id);
         self.pooled.remove(&id);
+        self.away.retain(|(w, _)| *w != id);
         // A window gone no longer vouches for a saved Desktop.
         for votes in self.adopt_votes.values_mut() {
             votes.retain(|v| v.1 != id);

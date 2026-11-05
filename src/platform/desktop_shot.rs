@@ -368,7 +368,8 @@ pub fn keep_fresh(key: Key, region: Rect, moment: Moment, wants: Wants, safety: 
 /// The still for the corner patch at `rect` (WM thread, at every plan while slivers show):
 /// one that stands for it now ([`usable`], whole: the desktop picture's window in it), else
 /// whether one is coming ([`ps::state`]: it may be taken now or shortly, for at most
-/// [`ps::HOLD_MAX`]). Call after [`keep_fresh`] with the same `key`.
+/// [`ps::HOLD_MAX`]), redrawn when the icons changed under `rect` ([`ps::redraw`]: the patch
+/// hides meanwhile). Call after [`keep_fresh`] with the same `key`.
 pub fn for_patch(rect: Rect, key: &Key, moment: Moment, safety: Result<(), Block>, now: Instant) -> Still {
     let take = take_now(moment, true, safety);
     with_state(|s| {
@@ -388,7 +389,9 @@ pub fn for_patch(rect: Rect, key: &Key, moment: Moment, safety: Result<(), Block
             None => {
                 let since = *s.missing_since.get_or_insert(now);
                 let opaque_known = meta.is_none_or(|m| m.opaque);
-                if opaque_known { ps::state(None, take, now.saturating_duration_since(since)) } else { Still::Absent }
+                let still = if opaque_known { ps::state(None, take, now.saturating_duration_since(since)) } else { Still::Absent };
+                // An icon changed under the patch itself: hidden until the new still (fixes-151).
+                ps::redraw(still, ps::icons_changed_under(meta.and_then(|m| m.key.icons.as_deref()), key.icons.as_deref(), rect))
             }
         };
         if s.patch.as_ref().map(std::mem::discriminant) != Some(std::mem::discriminant(&still)) {
@@ -600,6 +603,7 @@ pub fn status() -> serde_json::Value {
             "patch": s.patch.map(|p| match p {
                 Still::Ready(_) => "ready",
                 Still::Coming => "coming",
+                Still::Redrawing => "redrawing",
                 Still::Absent => "absent",
             }),
         })

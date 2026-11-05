@@ -494,6 +494,33 @@ fn after_the_restore_window_a_pending_match_brings_its_stage_forward() {
     assert_eq!(m.pending_count(), before);
 }
 
+/// 11-02 (an Accessibility slowdown at launch): Telegram's, Mail's and Fork's windows were on
+/// screen when the app started, but their apps did not answer, so they were found 4-8 s later,
+/// after his first click had ended the restore window; each brought its saved stage forward,
+/// three switches nobody asked for. A window the window server listed on screen at launch goes
+/// to its stage parked, as during the restore window; one that shows later (opened, shown by
+/// the user) still brings its stage forward.
+#[test]
+fn a_window_on_screen_since_the_launch_found_late_never_switches() {
+    let mut m = adopted();
+    m.set_launch_listed([w(21)]);
+    m.end_restore();
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert_eq!(number_of(&m, 21), Some(2), "its saved stage");
+    assert!(parks(&a, 21) && !switches(&a), "parked in its stage, no switch: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(23)), "the stage shown stays");
+    assert_eq!(m.last_pending().map(|n| (n.parked, n.switched)), Some((true, false)));
+    let a = add_focused(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    assert!(switches(&a), "a window not listed at launch still brings its stage: {a:?}");
+    // Apple's rule (no saved entry): an app with a stage elsewhere, not listed at launch,
+    // brings it; listed at launch, it joins it parked.
+    m.set_launch_listed([w(41)]);
+    let before = m.main_active_stage();
+    let a = add_focused(&mut m, win(41, 30, CHAT, "Another chat", DEFAULT));
+    assert!(!switches(&a) && parks(&a, 41), "on screen since the launch: parked with its app: {a:?}");
+    assert_eq!(m.main_active_stage(), before);
+}
+
 #[test]
 fn an_unminimized_pending_window_during_and_after_the_restore_window() {
     // H1: a window the app reopened minimized shows when un-minimized. During the restore

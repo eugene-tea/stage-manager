@@ -166,7 +166,7 @@ pub const HOLD_AFTER: Duration = Duration::from_secs(2);
 /// bounds as listed, wherever Show Desktop put it) shows on `display`, grown by `reach` (its
 /// shadow; [`super::corner_patch::patch_rect`]), each kept within `cap` (the still's block),
 /// together. `None` when nothing of them shows within the cap.
-pub fn pushed_rect(parts: &[Rect], display: Rect, reach: f64, cap: Rect) -> Option<Rect> {
+pub fn pushed_rect(parts: &[Rect], display: Rect, reach: super::corner_patch::Reach, cap: Rect) -> Option<Rect> {
     let area = cap.intersect(&display)?;
     parts
         .iter()
@@ -188,8 +188,9 @@ pub struct CoverLook<'a> {
     pub in_use: Option<Rect>,
     /// The main display.
     pub display: Rect,
-    /// `[windows] corner_patch_reach`.
-    pub reach: f64,
+    /// The parked windows' shadow reach ([`super::corner_patch::DEFAULT_REACH`], or
+    /// `[windows] corner_patch_reach`).
+    pub reach: super::corner_patch::Reach,
     /// What the patch may cover: the park corner's square within the still's block.
     pub cap: Rect,
     /// This look's time.
@@ -448,25 +449,25 @@ mod tests {
 
     #[test]
     fn the_pushed_parts_are_covered_with_their_shadow_within_the_still() {
-        let r = pushed_rect(&[PUSHED], MAIN, 60.0, CAP).expect("a part shows");
+        let r = pushed_rect(&[PUSHED], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP).expect("a part shows");
         assert_eq!(r, Rect::new(2410.0, 1250.0, 150.0, 190.0), "90x130 grown by 60, kept on the display");
         // Two windows: one rectangle holding both.
         let other = Rect::new(2500.0, 1360.0, 900.0, 700.0);
-        let both = pushed_rect(&[PUSHED, other], MAIN, 60.0, CAP).expect("parts");
+        let both = pushed_rect(&[PUSHED, other], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP).expect("parts");
         assert!(both.contains_rect(&r) && both.contains_rect(&Rect::new(2440.0, 1300.0, 120.0, 140.0)), "{both:?}");
         // Pushed further than the still's block holds: only the block is covered.
         let far = Rect::new(2100.0, 1000.0, 1500.0, 1100.0);
-        assert_eq!(pushed_rect(&[far], MAIN, 60.0, CAP), Some(CAP));
+        assert_eq!(pushed_rect(&[far], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), Some(CAP));
         // A part wholly outside the block (a window listed mid-screen) adds nothing.
         let mid = Rect::new(800.0, 400.0, 600.0, 400.0);
-        assert_eq!(pushed_rect(&[mid, PUSHED], MAIN, 60.0, CAP), Some(r));
-        assert_eq!(pushed_rect(&[mid], MAIN, 60.0, CAP), None);
+        assert_eq!(pushed_rect(&[mid, PUSHED], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), Some(r));
+        assert_eq!(pushed_rect(&[mid], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), None);
         // Off the display: nothing.
-        assert_eq!(pushed_rect(&[Rect::new(2600.0, 1300.0, 500.0, 500.0)], MAIN, 60.0, CAP), None);
+        assert_eq!(pushed_rect(&[Rect::new(2600.0, 1300.0, 500.0, 500.0)], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), None);
     }
 
     fn look<'a>(up: bool, parked: &'a [(u32, Rect)], in_zone: &'a HashSet<u32>, now: Instant) -> CoverLook<'a> {
-        CoverLook { up, parked, in_zone, in_use: Some(PATCH), display: MAIN, reach: 60.0, cap: CAP, now }
+        CoverLook { up, parked, in_zone, in_use: Some(PATCH), display: MAIN, reach: crate::engine::corner_patch::Reach::even(60.0), cap: CAP, now }
     }
 
     #[test]

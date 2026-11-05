@@ -28,6 +28,17 @@
 //!   `/tmp/stage-manager-patch.png`) and prints what it drew, one JSON line, with which way
 //!   its frame settled (`exact`; near a solar frame change `alike`, or `off`: the running
 //!   app settles that with one still of the desktop).
+//! - `stage-manager probe-glass --rect X,Y,W,H [--rect ...]` prints the wallpaper behind each
+//!   rectangle as the cards' glass reads it (from the picture's file) and the under the
+//!   default glass makes of it, one JSON line (`ui::card_glass::probe`).
+//! - `stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle]` opens
+//!   windows of its own, inactive, one at a time, and prints how far each one's shadow
+//!   reaches past its frame per side, one JSON object (`platform::shadow_probe`);
+//!   `--profile [--dump DIR]` prints the falloff of a key window's shadow and an inactive
+//!   one's, `--compare` also the largest alpha difference from a snapshot's shadow as the
+//!   overlay draws it (`platform::shadow_profile`); `--appearance dark|light|system` draws
+//!   the probe's windows in that appearance, `--background GREY` fills them with a grey,
+//!   `--corner PT` draws the comparison at that corner radius.
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
 //!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
 //!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.
@@ -63,7 +74,11 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-patch") => stage_manager::ui::patch_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("probe-glass") => stage_manager::ui::card_glass::probe(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
@@ -74,7 +89,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-park <fixture-bundle-id> | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
             );
             ExitCode::from(2)
         }
@@ -116,7 +131,7 @@ mod app {
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
     use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::shell;
-    use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
+    use stage_manager::ui::status_menu::{self, MenuAction, MenuState, NoticeLine, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
     /// Permission, settings (Apple's Stage Manager coming on included) and display poll
@@ -165,6 +180,8 @@ mod app {
         strip_visible: bool,
         config_error: Option<String>,
         last_mark: Option<String>,
+        /// The desktop notice's entries, as the WM thread last sent them.
+        notice: Vec<NoticeLine>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
         /// Window captures were refused when the menu was last drawn.
@@ -225,6 +242,7 @@ mod app {
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
                 last_mark: self.last_mark.clone(),
+                notice: self.notice.clone(),
             }
         }
 
@@ -270,6 +288,7 @@ mod app {
             shell::poll(self.permissions, &self.settings, self.capture_refused);
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::poll(mtm);
+                stage_manager::ui::card_glass::poll(mtm);
             }
         }
 
@@ -309,6 +328,7 @@ mod app {
                     }
                 }
                 UiUpdate::StripVisible(v) => self.strip_visible = v,
+                UiUpdate::DesktopNotice(lines) => self.notice = lines,
                 UiUpdate::CornerPatch(plan) => {
                     if let Some(mtm) = MainThreadMarker::new() {
                         stage_manager::ui::corner_patch::apply(mtm, plan);
@@ -345,6 +365,12 @@ mod app {
                     if let Err(e) = spawned {
                         tracing::warn!("cannot mark a problem: {e}");
                     }
+                }
+                MenuAction::ShowNoticed(id) => {
+                    self.wm.send(WmCommand::Notice(controller::NoticeCommand::Show(id)));
+                }
+                MenuAction::DismissNotice => {
+                    self.wm.send(WmCommand::Notice(controller::NoticeCommand::Dismiss));
                 }
                 MenuAction::Quit => quit(),
             }
@@ -415,6 +441,8 @@ mod app {
             tracing::error!("not every window could be restored; the guardian will scan after exit");
         }
         ctl::remove_socket();
+        // No app is left with its enhanced UI off by us (round enhanced-ui).
+        stage_manager::platform::enhanced_ui::restore_all("quit");
         // An update ready to install: its helper waits for this process to exit (8C).
         stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the
@@ -586,6 +614,28 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugGlass { region } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-glass needs STAGE_MANAGER_TEST=1");
+                }
+                let mut pane = None;
+                DispatchQueue::main().exec_sync(|| pane = strip::strip_window());
+                let Some((number, origin)) = pane else {
+                    return json!({ "ok": true, "shown": false });
+                };
+                match stage_manager::platform::self_capture::read_back(number as u32, origin, Some(region), Duration::from_secs(3)) {
+                    Ok(b) => json!({ "ok": true, "shown": true, "bounds": b.bounds, "mean": b.mean }),
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
+            Command::DebugStripHover { at } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-strip-hover needs STAGE_MANAGER_TEST=1");
+                }
+                let mut shown = false;
+                DispatchQueue::main().exec_sync(|| shown = strip::debug_hover(at));
+                json!({ "ok": true, "shown": shown })
+            }
             Command::DebugExpose { which } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");
@@ -747,9 +797,17 @@ mod app {
         });
 
         let wm_events = wm.clone();
-        let workspace = apps::observe_workspace(move |event| {
+        let to_wm = move |event| {
             wm_events.send(WmCommand::App(event));
-        });
+        };
+        // A live check's late notices (round stale-activations; the fixtures' runs only).
+        let workspace = match apps::debug_activation_delay() {
+            Some(delay) => {
+                tracing::info!(delay_ms = delay.as_millis() as u64, "test: activation notices held before they go to the WM thread");
+                apps::observe_workspace(apps::delayed_activations(delay, to_wm))
+            }
+            None => apps::observe_workspace(to_wm),
+        };
         // The running apps once their launches and quits are observed (the review's K10): an
         // app that finished launching before the observers were in was in neither. One seen
         // in both is observed once.
@@ -757,12 +815,15 @@ mod app {
         let wm_spaces = wm.clone();
         let spaces = apps::observe_space_changes(move || {
             strip::space_changed();
+            stage_manager::ui::card_glass::space_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::space_changed(mtm);
             }
             wm_spaces.send(WmCommand::SpaceChanged);
         });
         let appearance = apps::observe_appearance(|| {
+            // Windows that follow the system's appearance change with it: read again.
+            stage_manager::platform::window_look::appearance_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::appearance_changed(mtm);
             }
@@ -814,6 +875,7 @@ mod app {
             strip_visible: true,
             config_error: None,
             last_mark: None,
+            notice: Vec::new(),
             hotkeys: None,
             thumbnail_interval_ms: None,
             capture_refused: false,

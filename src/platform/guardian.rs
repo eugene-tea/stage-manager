@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use super::ax::AxElement;
 use super::safety::{self, guarded};
-use super::{ctl, handoff, hidden_tabs, observe, paths, windows};
+use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, windows};
 use crate::engine::guard_watch::{Event, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
@@ -176,6 +176,8 @@ pub fn run(args: &[String]) -> ExitCode {
     // The window server lists moved windows at their new frames a moment later.
     std::thread::sleep(SETTLE);
     watch(parent as u32, &registered, &scope);
+    // No app is left with its enhanced UI off by the guardian (round enhanced-ui).
+    enhanced_ui::restore_all("guardian");
     let _ = std::fs::remove_file(&parked_file);
     ExitCode::SUCCESS
 }
@@ -238,6 +240,8 @@ fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope) {
         let pass = guarded("the guardian's watch", || {
             watch_pass(&mut w, &mut reported, &mut attempts, &mut asked, &mut busy, &mut handoff)
         });
+        // A flag a restore could not put back (round enhanced-ui): tried again.
+        enhanced_ui::sweep();
         if matches!(pass, Some(Pass::Done)) {
             return;
         }
@@ -486,6 +490,8 @@ pub(crate) fn reach(
     who: &str,
     log: &dyn Fn(&Event),
 ) {
+    // Each app's enhanced UI off once for all the windows brought back (round enhanced-ui).
+    let _quiet = enhanced_ui::Batch::open();
     let mut scanned: Vec<Waiting> = Vec::new();
     for x in windows {
         let a = attempts.entry(x.id).or_default();

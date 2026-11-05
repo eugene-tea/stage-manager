@@ -72,9 +72,11 @@ and when you come back to a stage, every window is exactly where you left it.
 
 ### The strip
 
-Each card shows the stage's windows in miniature, with the app's icon in the corner. The
-strip sits below your windows: when a window covers it, it slides away. Rest the pointer at
-the left edge of the screen to bring it back.
+Each card shows the stage's windows in miniature, with the app's icon in the corner. As on
+Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity = 1` makes
+them opaque); the card under the pointer turns solid as it grows (`[cards]
+hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through). The strip sits below your windows: when a window covers it, it slides away.
+Rest the pointer at the left edge of the screen to bring it back.
 
 ### Switching
 
@@ -99,8 +101,11 @@ stage.
 **Follow the Dock** (`[strip] order = "dock"`) keeps those places in your Dock's order
 instead: the strip from top to bottom lists the stages as the Dock lists their apps from left
 to right, and the ⌃⌥1–9 shortcuts follow. A stage with windows of several apps sits at the
-one furthest left in the Dock; two stages of one app keep the order they were made in; apps
-with no Dock icon come last. Rearrange the Dock, or open or quit an app that is not kept in
+one furthest left in the Dock, leaving out the Finder: its windows tend to join every stage,
+and the Finder always sits first in the Dock, so a stage it joined would jump to the top. A
+stage of Finder windows alone still sits at the Finder's place. `[strip] dock_ignore` lists
+the apps left out this way (by bundle id; `[]` lets every app count). Two stages of one app
+keep the order they were made in; apps with no Dock icon come last. Rearrange the Dock, or open or quit an app that is not kept in
 the Dock, and the cards glide to their new places. The Dock decides, so a card dragged within
 the strip springs back; dropping it on another card still merges the two stages.
 
@@ -142,13 +147,22 @@ back too: an app that quits keeps its windows' places in your saved stages for t
 Some apps (Electron ones, VS Code or Slack say) reopen their windows on whichever Desktop
 shows at login rather than their own; their stages are made again there.
 
+Once things settle, those windows are listed at the top of the menu bar menu, under
+**Reopened on Another Desktop**, and the menu bar icon shows a small dot. Each entry names
+the app and window, the Desktop it belongs on and the one it is on now. Click an entry to
+bring that window forward, then drag it to its own Desktop in Mission Control. An entry
+leaves the list by itself once its window shows on its own Desktop; **Dismiss** clears the
+whole list. macOS does not tell apps which number Mission Control gives a Desktop, so the
+list names a Desktop by the apps on it ("the Desktop with Terminal and Mail") or as "this
+Desktop". `[stages] restore_notice = false` turns the list off.
+
 What it cannot do:
 
 - It does not open apps. macOS does that when "Reopen windows when logging back in" is on
   in the Log Out or Restart dialog. An app macOS did not reopen loses its saved windows
   once things settle: opened later, it goes where any app you open goes.
 - It cannot move a window to another Desktop. A Desktop's stages come back as far as macOS
-  puts their windows there.
+  puts their windows there; the ones on another Desktop are listed in the menu.
 - A window it is not sure about (two of one app with the same name, say) stays in view and
   goes where a new window of its app would.
 - On a main screen of another size, windows keep the places their apps give them.
@@ -283,7 +297,8 @@ approvals stay. If any step fails, the old version stays (or is put back) and sa
 even putting it back fails, both copies are kept and the note at the next launch says where.
 
 Turn on **Install updates automatically** in Settings to skip the question: an update then
-installs while you are away from the Mac, never in the middle of a drag or a switch. You
+installs while you are away from the Mac, never in the middle of a drag or a switch, and
+never while the screen is locked (it waits until you unlock and step away again). You
 can turn the daily check off, and **Check for Updates…** in the menu works either way. If
 Stage Manager can't replace itself where it is (it runs from the disk image, or from a
 folder you can't write to), it offers the download instead.
@@ -337,7 +352,9 @@ video and aerial wallpapers, shuffled or Photos wallpapers, the Center and Tile 
 Fit with no fill color, or a desktop icon in the corner; a desktop widget there may be
 covered. Pictures that change with the time of day or with light and dark, Apple's own
 included, are usually matched. A Desktop you visit for the first time may show the edges for
-a moment. You can turn the patch off with `[windows] corner_patch = false`.
+a moment. You can turn the patch off with `[windows] corner_patch = false`. If a faint
+shadow shows beside it, `[windows] corner_patch_reach = 60` makes it reach that many points
+past every edge.
 
 **A window seems lost.** Quit Stage Manager from its menu: every hidden window comes back.
 If the app crashed, a small helper process brings the windows back by itself, each where it
@@ -347,9 +364,17 @@ Some limits to know about:
 
 - Only the main screen is managed: windows on a second monitor are left alone. Every
   Desktop on the main screen has its own stages.
+- Windows an app keeps wholly off every screen, as headless browsers and test tools do, are
+  left alone: they get no stage and no card, and are never moved onto the screen.
 - Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
-  jump when the motion ends. Card pictures refresh every 1.5 seconds rather than live.
+  jump when the motion ends. Their shadow is drawn like macOS's own and hands over to the
+  window's as it takes its place, which can still show as a faint flicker at the shadow's
+  edge. Card pictures refresh every 1.5 seconds rather than live.
 - With ⌘M, macOS may show a short animation toward the corner.
+- When an accessibility tool has turned on an app's enhanced interface, Stage Manager turns
+  it off for a moment around each switch and back on right after.
+- When the Mac is very busy, a ⌘-Tab or Dock click brings its stage late, once macOS tells
+  Stage Manager about it; word that arrives after you have moved on is ignored.
 - After ⌘-Tab to another Desktop, its stage is set up once the Desktop has slid in. (A Dock
   click sets it up before.)
 - An empty Desktop is forgotten when you leave it. A Desktop whose windows are all hidden or

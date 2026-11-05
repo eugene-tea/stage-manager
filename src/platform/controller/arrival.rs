@@ -42,13 +42,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use super::{Controller, Unrestored, cards_in, on_main_screen};
+use super::{Controller, Unrestored, cards_in};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
 use crate::platform::dock::{self, DockItem, DockPress};
+use crate::platform::enhanced_ui;
 use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::{self, ParkedEntry};
 use crate::platform::windows::{self, CgWindow};
@@ -858,7 +859,7 @@ impl Controller {
         let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
         let list = windows::list_windows();
         let overview = self.look_for_overview(&list, main.frame, now) || self.overview.holds_arrival(now);
-        let shown = on_main_screen(&list, main.frame);
+        let shown = self.shown_main(&list, main.frame);
         let listed = self.ahead.as_ref().map(|s| listed_for_arrival(&list, s.ahead.window.0, &shown, main.frame));
         match notice_step(overview, listed) {
             NoticeStep::Nothing | NoticeStep::Keep => return,
@@ -903,7 +904,7 @@ impl Controller {
         let Some(standard) = m.resolve_standard(id) else { return false };
         let target = m.space_of(standard);
         let elsewhere = |w: u32| m.space_of(WindowId(w)).is_some_and(|s| Some(s) != target);
-        let shown = on_main_screen(list, main);
+        let shown = self.shown_main(list, main);
         if !listed_for_arrival(list, standard.0, &shown, main) || display_covered(list, main, elsewhere) {
             return false;
         }
@@ -984,7 +985,11 @@ impl Controller {
     /// activation, the corner patch after a focus or through Show Desktop.
     pub fn wants_fast_tick(&self) -> bool {
         let now = Instant::now();
-        self.verify.as_ref().is_some_and(|v| v.polling) || self.slide_held() || self.patch_replans(now) || self.reveal_fast(now)
+        self.verify.as_ref().is_some_and(|v| v.polling)
+            || self.slide_held()
+            || self.patch_replans(now)
+            || self.reveal_fast(now)
+            || self.hides.awaits_activation()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -994,6 +999,8 @@ impl Controller {
     /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
+        // An app we unhid that has not taken its activation is focused once more.
+        self.activation_step(ob);
         let now = Instant::now();
         // The corner patch after a focus or an activation (round park-reconcile, L2), else
         // through Show Desktop (round show-desktop-patch): one plan a fast tick at most.
@@ -1081,6 +1088,8 @@ impl Controller {
     /// (a Space change settling: the user may hold its windows); the arrival checks the
     /// moves once more.
     fn check_arrangement(&mut self, ob: &Observer, now: Instant) {
+        // Each app's enhanced UI off once for all these moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         let live = self.ahead.as_ref().is_some_and(|s| s.trigger == Trigger::DockClick);
         if !live {
             self.finish_verify("the arrangement is settled");
@@ -1174,6 +1183,8 @@ impl Controller {
     /// [`TAIL_OVER_TICKS`] ticks or [`TAIL_OVER_FOR`] the check ends with what is left logged
     /// at warn (R15 1, 2). The outcome is logged at info.
     fn arrival_round(&mut self, ob: &Observer, list: &[CgWindow], now: Instant) {
+        // Each app's enhanced UI off once for all these moves (round enhanced-ui).
+        let _quiet = enhanced_ui::Batch::open();
         if !self.verify_stands() {
             return;
         }
@@ -1267,7 +1278,8 @@ impl Controller {
         let Some(first) = round_timeout(RESEND_ROUND_CAP, round.elapsed()).filter(|_| move_fits(round.elapsed())) else {
             return Resent::Deferred;
         };
-        let element = ob.window(e.id).map(|w| w.element.clone()).or_else(|| safety::registry_entry(e.id).map(|r| r.element));
+        // A fresh handle found for a dead one (stale-handles) wins over the tracked one.
+        let element = ob.element(e.id).or_else(|| safety::registry_entry(e.id).map(|r| r.element));
         let Some(element) = element else {
             tracing::debug!(id = e.id, "arrival: a move to send again has no element; given up");
             e.gave_up = true;

@@ -18,7 +18,7 @@
 //! starts a restore. Tests simulate a new session with `STAGE_MANAGER_SESSION=<text>`,
 //! honoured only with `STAGE_MANAGER_TEST` set.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType};
@@ -134,6 +134,25 @@ pub fn screen_locked() -> bool {
         value.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()).map(|n| n != 0)
     };
     flag("CGSSessionScreenIsLocked").unwrap_or(false) || flag("kCGSSessionOnConsoleKey") == Some(false)
+}
+
+/// The last moment any reader saw the screen locked or the main display asleep
+/// ([`saw_rest`]).
+static LAST_REST: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Notes that the screen was seen locked (or the main display asleep) at `at`: the WM
+/// thread's lock poll and a ready update's quiet tick both tell.
+pub fn saw_rest(at: Instant) {
+    if let Ok(mut last) = LAST_REST.lock() {
+        *last = Some(last.map_or(at, |t| t.max(at)));
+    }
+}
+
+/// How long since the screen was last seen locked or the display asleep (`None`: never,
+/// since launch). An automatic update counts the user's idle time from there at most
+/// ([`crate::self_update::idle_after_rest`]).
+pub fn since_rest(now: Instant) -> Option<Duration> {
+    LAST_REST.lock().ok().and_then(|last| *last).map(|t| now.saturating_duration_since(t))
 }
 
 /// The window server session this process runs in, as a string kept in `state.json`

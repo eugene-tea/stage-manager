@@ -23,6 +23,7 @@
 
 mod ahead;
 mod hide;
+mod notice;
 mod ops;
 mod pending;
 mod pool;
@@ -249,6 +250,10 @@ pub struct ModelOptions {
     pub settings: NativeSettings,
     /// Strip ordering and capacity.
     pub strip: StripOptions,
+    /// Bundle ids that give a stage its Dock place ([`StripOrder::Dock`]) only when no
+    /// other app of the stage has a Dock icon (`[strip] dock_ignore`): an app whose windows
+    /// join every stage, such as the Finder, never pulls a stage to its own place.
+    pub dock_ignore: Vec<String>,
     /// Stages declared in config (`[stages] names`): created up front in this order, they keep
     /// their numbers and survive being empty.
     pub named_stages: Vec<String>,
@@ -340,6 +345,9 @@ pub struct Model {
     /// Windows placed from another Desktop's saved entry (`pool.rs`), with the saved stage
     /// they stand for.
     pub(crate) pooled: HashMap<WindowId, pool::Kin>,
+    /// Windows the pool placed from another Desktop's saved entry, with that saved Desktop,
+    /// in the order they came back, until they leave the list (`notice.rs`).
+    pub(crate) away: Vec<(WindowId, u64)>,
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
     pub(crate) pooled_out: HashSet<(u64, usize)>,
@@ -347,6 +355,10 @@ pub struct Model {
     /// (`pool.rs`) joins the stage it was merged into, when that is on its Desktop, instead
     /// of making the old stage again.
     pub(crate) merged: HashMap<pool::Kin, StageId>,
+    /// Windows the window server listed on screen when the model was built that Accessibility
+    /// did not list then (their app did not answer at launch): found later, they were there all
+    /// along, so they never bring their stage forward ([`Model::set_launch_listed`]).
+    pub(crate) launch_listed: HashSet<WindowId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -405,8 +417,10 @@ impl Model {
             kin: HashMap::new(),
             pool_rank: HashMap::new(),
             pooled: HashMap::new(),
+            away: Vec::new(),
             pooled_out: HashSet::new(),
             merged: HashMap::new(),
+            launch_listed: HashSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

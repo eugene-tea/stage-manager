@@ -699,3 +699,85 @@ fn a_voter_placed_at_its_own_frame_keeps_the_frame_it_had_before_fitting() {
     assert_eq!(x.restore.x, 216.0, "at its own (fitted) frame");
     assert_eq!(x.original, Some(under_strip), "its frame before fitting kept");
 }
+
+// ----- the list of windows back on another Desktop (round desktop-notice) ------------------
+
+fn listed(m: &Model) -> Vec<u32> {
+    m.desktop_notice().iter().map(|e| e.window.0).collect()
+}
+
+#[test]
+fn the_strays_are_listed_with_the_desktop_they_belong_on_and_the_one_they_are_on() {
+    let m = login_on_desktop_2();
+    let here = m.current_space(MAIN);
+    let list = m.desktop_notice();
+    assert_eq!(listed(&m), [41, 42, 43, 44, 45], "Desktop 1's strays, in the order they came back; no native");
+    for e in &list {
+        assert_eq!((e.saved.id, e.saved.shown), (4, false), "window {}", e.window.0);
+        assert_eq!((e.now.id, e.now.shown), (here.0, true));
+    }
+    let e = &list[2];
+    assert_eq!((e.bundle_id.as_str(), e.title.as_str(), e.pid), (TEAMCHAT, "General", 21));
+    // Desktop 1 (not visited) by the natives waiting there, its saved active stage first;
+    // this Desktop by its own windows, never by the listed ones.
+    assert_eq!(e.saved.apps, [TERM, MUSIC]);
+    assert_eq!(e.now.apps.len(), 2);
+    assert!(e.now.apps.iter().all(|a| ![IDE, TEAMCHAT, GIT].contains(&a.as_str())), "{:?}", e.now.apps);
+    let name = |b: &str| b.rsplit('.').next().unwrap_or(b).to_string();
+    assert_eq!(
+        crate::engine::desktop_notice::entry_detail(e, name),
+        "Belongs on the Desktop with term and music; now on this Desktop"
+    );
+}
+
+#[test]
+fn an_entry_leaves_once_its_window_shows_on_its_saved_desktop_for_good() {
+    let mut m = login_on_desktop_2();
+    let d2 = m.current_space(MAIN);
+    m.end_restore();
+    // In Mission Control he drags the team chat onto Desktop 1, then goes there.
+    let natives = [win(51, 30, TERM, "build", r(2.0)), win(52, 31, MUSIC, "Library", r(4.0)), win(53, 12, MAIL, "Inbox", r(7.0))];
+    let chat = m.window(w(43)).map(|x| x.meta.clone()).expect("managed");
+    let mut live = natives.to_vec();
+    live.push(chat.clone());
+    let absent: Vec<WindowId> = m.windows().filter(|x| x.space == d2 && x.meta.id != w(43)).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &live, &absent, &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 4);
+    assert_eq!(m.window(w(43)).map(|x| x.space.0), Some(4), "moved here");
+    assert_eq!(listed(&m), [41, 42, 44, 45], "on its saved Desktop: off the list");
+    let e = &m.desktop_notice()[0];
+    assert!(e.saved.shown && !e.now.shown, "the others belong on this Desktop, now on another");
+    assert!(m.tidy_desktop_notice(), "forgotten");
+    assert!(!m.tidy_desktop_notice());
+    // Back on Desktop 2 with it: never listed again.
+    let back: Vec<WindowMeta> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.clone()).chain([chat]).collect();
+    let d1: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 4 && x.meta.id != w(43)).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &back, &d1, &LaunchHints::default());
+    assert_eq!(m.window(w(43)).map(|x| x.space), Some(d2));
+    assert_eq!(listed(&m), [41, 42, 44, 45]);
+}
+
+#[test]
+fn a_closed_window_leaves_the_list_and_a_dismissal_empties_it() {
+    let mut m = login_on_desktop_2();
+    m.remove_window(w(42));
+    assert_eq!(listed(&m), [41, 43, 44, 45]);
+    m.dismiss_desktop_notice();
+    assert!(m.desktop_notice().is_empty());
+    // Nothing restored from another Desktop: nothing listed (a relaunch in the same session).
+    let m = launched(vec![desktop_1(), desktop_2()], Restore::same_session("A"));
+    assert!(m.desktop_notice().is_empty());
+}
+
+#[test]
+fn a_listed_window_comes_forward_with_its_stage() {
+    let mut m = login_on_desktop_2();
+    m.end_restore();
+    let chat = m.stage_of(w(43)).expect("in its part");
+    assert_ne!(m.main_active_stage(), Some(chat));
+    let actions = m.show_noticed(w(43), &Observation::default());
+    assert_eq!(m.main_active_stage(), Some(chat), "its stage in front");
+    assert!(actions.iter().any(|a| matches!(a, Action::Focus { id } if *id == w(43))), "{actions:?}");
+    assert_eq!(m.show_noticed(w(43), &Observation::default()), vec![Action::Focus { id: w(43) }], "in front: the keyboard");
+    assert!(m.show_noticed(w(83), &Observation::default()).is_empty(), "not listed: nothing");
+}

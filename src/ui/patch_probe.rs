@@ -29,7 +29,7 @@ use objc2_foundation::MainThreadMarker;
 use serde_json::json;
 
 use super::corner_patch::{crop_for, picture_for};
-use crate::engine::corner_patch::{DEFAULT_REACH, DesktopIcons, item_reach, patch_rect};
+use crate::engine::corner_patch::{DEFAULT_REACH, DesktopIcons, Reach, item_reach, patch_rect};
 use crate::engine::geometry::{Rect, Size};
 use crate::engine::solar_settle::{self, Thumb};
 use crate::engine::park::is_parked_in_at;
@@ -86,7 +86,7 @@ pub fn run(args: &[String]) -> ExitCode {
                 None => return usage(),
             },
             ("--reach", Some(r)) => match r.parse::<f64>() {
-                Ok(v) if v.is_finite() => reach = v,
+                Ok(v) if v.is_finite() => reach = Reach::even(v),
                 _ => return usage(),
             },
             _ => return usage(),

@@ -19,12 +19,12 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSEvent, NSPasteboard, NSPasteboardTypeString, NSWorkspace};
-use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
+use objc2_core_graphics::{CGDisplayIsAsleep, CGEventSource, CGEventSourceStateID, CGEventType, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, NSURL};
 
 use super::alert::{self, AlertSpec};
@@ -41,7 +41,7 @@ use crate::platform::native_settings::{self, RawSettings};
 use crate::platform::permissions::{self, Approval, PermissionState};
 use crate::platform::wm_thread::{WmCommand, WmHandle};
 use crate::platform::updater::{self, PrepareError, Prepared};
-use crate::platform::{capture, paths, update_check};
+use crate::platform::{capture, paths, session, update_check};
 use crate::self_update::{self, Moment, Refusal};
 use crate::updates::{self, Outcome, Release};
 
@@ -79,8 +79,9 @@ enum Install {
     Idle,
     /// Downloading and verifying `version`; `asked`: a click started it (or joined it).
     Preparing { version: updates::Version, asked: bool },
-    /// Verified and staged; waiting for a quiet moment.
-    Ready { prepared: Prepared, asked: bool, timer: Retained<NSTimer> },
+    /// Verified and staged; waiting for a quiet moment. `told`: the wait for an unlock (or
+    /// the display's wake) was logged, once per ready update.
+    Ready { prepared: Prepared, asked: bool, timer: Retained<NSTimer>, told: bool },
 }
 
 struct Shell {
@@ -459,7 +460,7 @@ pub fn menu(action: MenuAction) {
         MenuAction::Settings => show_settings(),
         MenuAction::Allow(a) => allow(a),
         MenuAction::TurnOffAppleStageManager => turn_off_apple(),
-        MenuAction::MarkProblem | MenuAction::Quit => {}
+        MenuAction::MarkProblem | MenuAction::ShowNoticed(_) | MenuAction::DismissNotice | MenuAction::Quit => {}
     }
 }
 
@@ -741,7 +742,7 @@ fn prepared(release: Release, result: Result<Prepared, PrepareError>) {
             // SAFETY: the block runs on the main run loop, which keeps the timer; the install
             // state keeps it too and invalidates it.
             let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(QUIET_TICK, true, &tick) };
-            with(|s| s.install = Install::Ready { prepared, asked, timer });
+            with(|s| s.install = Install::Ready { prepared, asked, timer, told: false });
             install_if_quiet();
         }
         Err(PrepareError::Manual(refusal, dmg)) => {
@@ -823,8 +824,24 @@ fn install_if_quiet() {
     }) else {
         return;
     };
-    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), idle_secs: idle_secs() };
-    if !self_update::may_install_now(asked, moment) {
+    let now = Instant::now();
+    let locked = session::screen_locked();
+    let asleep = CGDisplayIsAsleep(CGMainDisplayID());
+    if locked || asleep {
+        session::saw_rest(now);
+    }
+    let idle = self_update::idle_after_rest(idle_secs(), session::since_rest(now).map(|d| d.as_secs_f64()));
+    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), locked, asleep, idle_secs: idle };
+    if let Some(wait) = self_update::wait_reason(asked, moment) {
+        if wait.is_rest() {
+            with(|s| {
+                if let Install::Ready { prepared, told, .. } = &mut s.install
+                    && !std::mem::replace(told, true)
+                {
+                    tracing::info!(version = %prepared.version, ?moment, "update: waiting; {}: it installs after the unlock and {} s without input", wait.name(), self_update::AUTO_IDLE_SECS);
+                }
+            });
+        }
         return;
     }
     let Some(prepared) = with(|s| match std::mem::replace(&mut s.install, Install::Idle) {

@@ -31,8 +31,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 - **Spaces by their windows.** No public API names a Space: the engine gives each a
   synthetic id and recognizes it on `activeSpaceDidChangeNotification` from the window
   server's on-screen list. A window is given to the engine only once it shows on screen
-  (another Space, minimized, app hidden: it waits). A once-a-second check catches moves
-  between Spaces and missed notifications. No SkyLight/CGS calls.
+  (another Space, minimized, app hidden: it waits). A window wholly off every display (a
+  headless browser's) is not the user's: it waits until it shows on one, and a managed one its
+  app moves there is let go where it is (`engine::displays`). A once-a-second check catches
+  moves between Spaces and missed notifications. No SkyLight/CGS calls.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`): no Objective-C types, fully unit
   tested. Observations in (frames, z-order, focus, the Dock's order), `Action`s out (`Park`,
   `SetFrame`, `Raise`, `Focus`) for the platform layer to execute.
@@ -42,7 +44,17 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   motion overlay. The overlay sits just below floating windows (an always-on-top player stays
   over a switch), and above everything only while a dragged window's card shows.
 - **Threads:** AX can block on hung apps, so every AX call runs on the WM thread with a
-  0.25 s messaging timeout; the main thread never calls AX. Commands go main → WM through a
+  0.25 s messaging timeout; the main thread never calls AX. Every frame write runs with its
+  app's `AXEnhancedUserInterface` off (`platform::enhanced_ui`: an app with it on animates
+  Accessibility's moves), once per app per batch, on again at the batch's end, the WM tick,
+  quit, the panic hook and SIGABRT. An activation notice the WM thread decides late
+  (under load) acts only if it fired after our latest switch began and its app is still
+  frontmost (`engine::stale_activation`). A move whose window handle answers
+  `kAXErrorInvalidUIElement` looks the window up afresh by id in its app's `AXWindows` and
+  tries once more with the new handle, kept; unlisted, off screen, on the Desktop shown (not
+  at a display's size: a full-screen Space's), its app not hidden and no hidden tab's signature, on two looks a second apart, it is closed and
+  let go as destroyed; the Space check looks at off-screen managed windows the same way
+  (`engine::stale_handle`). Commands go main → WM through a
   channel plus `CFRunLoopPerformBlock`; strip snapshots go WM → main via GCD.
 
 ## macOS settings drive behavior
@@ -141,7 +153,9 @@ Known gaps the owner accepted as rare:
 - **One pool after a restart (8I):** Electron apps reopen on the Desktop shown at login; a
   window matching another Desktop's saved entry with confidence recreates its stage as a part
   where it shows. Left: two Desktops' same-named stages both feed the one stage of that name
-  (`find_named`).
+  (`find_named`). Those windows are listed in the status menu once the restore window ends
+  (desktop-notice, `[stages] restore_notice`, on), a dot on the icon; an entry leaves once its
+  window shows on its saved Desktop.
 
 ## Open
 
@@ -156,6 +170,12 @@ Known gaps the owner accepted as rare:
     at its place before its snapshot reached it; the log identical to a good run); a
     relaunch cured it. Catch it with a screen recording if it comes back; check what the
     overlay and the strip panels hold from a launch while the screens settle.
+- **Desktop numbers in the desktop notice:** the list names a Desktop by its apps or "this
+  Desktop", not "Desktop 2": no public API says which Mission Control number the Desktop shown
+  has (`com.apple.spaces`' "Current Space" stayed put through a dozen switches, 11-03). A way
+  in: the order of Desktops from the slide's direction at each switch, with the count from
+  `com.apple.spaces`; `DesktopRef::number` is ready for it. The menu itself and its icon mark
+  are unverified on screen (no restart yet).
 - **Real-restart check (8G)**, with the owner, from the day's log:
   - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
     coming …", "asked to quit by the system", "quitting after the logout's head start".
@@ -168,14 +188,13 @@ Known gaps the owner accepted as rare:
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the
   strip, the floating level, so an always-on-top window may still be covered then.
 - **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
-  - **`hide_parked_apps` trial on the owner's Mac** (on in his config since 10-29; the live
-    `hide` phase 65/0). 1.5.0 shipped it off, as before; decide the default after a few
-    days, from how ⌘Tab and the Dock feel.
+  - **`hide_parked_apps` trial on the owner's Mac** (10-29 to 11-04; the live `hide` phase
+    65/0). Ended 11-04 by the owner: a hidden app ⌘-Tabbed to shows its windows at once,
+    without the switch's motion (macOS unhides them natively). Stays off.
   - **Deferred findings:**
     - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
     - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
       needs a look at the screen.
-    - L6: measure the shadow's reach.
     - C4: a step journal for non-APFS swaps.
   - **Skipped, with reasons in the rounds' reports:** E6, W6, the S11 peer rule.
   - **Live checks the rounds named but never wrote:**
@@ -190,6 +209,24 @@ Known gaps the owner accepted as rare:
     click check then refuses. Have the suite wait for it to go, and name it when it
     doesn't. The owner's own unmanaged windows do the same while his app is quit (Messages
     at the left edge, 1.5.0's run: 849/13, 12 of them refused clicks).
+- **After 1.6.0:**
+  - **Full-screen windows in the closed-window rule:** a window whose handle died is kept
+    when the window server lists it off screen at about a display's size
+    (`engine::stale_handle::on_full_screen_space`), since no public API names a window's
+    Space. It only ever keeps a window; a surer source (the window's last read AXFullScreen)
+    would retire the size test.
+  - **Short-lived windows taken in and let go:** Safari's 53x48 dialog and Chrome's
+    address-bar suggestion list (AXUnknown, 89 pt tall) are placed in a stage, then let go
+    as closed a second later, many times a day (11-05 log). Apple's Stage Manager shows
+    neither on a card: decide whether such windows are ever managed.
+  - **Card glass, not measured:** Dark Mode; a window behind another on one card; the
+    hovered card's growth (Apple's read 11 % wider, 11-05) against ours. The script's
+    reading beside the card is in the display's colours, the fit's from the picture file.
+  - **The hide trial's live phase, 11-05:** 88 of 89; "supersede: Bravo and Charlie
+    together again" left an empty stage 3 ({1: Charlie, Bravo; 2: Alpha 1, 2; 3: none}).
+    `hide_parked_apps` is off and stays off; look before it is ever offered again.
+  - **Chrome's enhanced interface:** we turn its flag off around our moves and restore it
+    after; Rectangle leaves it off. Keep restoring unless an assistive tool complains.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.

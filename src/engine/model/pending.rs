@@ -72,6 +72,21 @@ impl Model {
         self.restore = restore;
     }
 
+    /// The windows the window server listed on screen at launch that Accessibility did not
+    /// list (their app did not answer then; 11-02, an Accessibility slowdown: Telegram, Mail
+    /// and Fork found 4-8 s after the launch). A window among them found later was on screen
+    /// all along, not shown by the user: it goes to its stage as during the restore window
+    /// (parked when that stage is inactive), never bringing it forward.
+    pub fn set_launch_listed(&mut self, ids: impl IntoIterator<Item = WindowId>) {
+        self.launch_listed = ids.into_iter().collect();
+    }
+
+    /// True when window `id` was on screen at launch before Accessibility listed it
+    /// ([`Model::set_launch_listed`]): its finding is no one's action.
+    pub(crate) fn listed_at_launch(&self, id: WindowId) -> bool {
+        self.launch_listed.contains(&id)
+    }
+
     /// True while the restore window is open ([`crate::engine::restore`]).
     pub fn restoring(&self) -> bool {
         self.restore.restoring
@@ -623,7 +638,8 @@ impl Model {
     /// among the stage's restored windows, the stage's key when it was saved as the key (not
     /// over a window of the stage the user has focused, `obs`). A window of an inactive stage
     /// is parked and the stage's card takes its saved strip place, or, for a window appearing
-    /// after the restore window (`obs` given), the stage comes forward with it as its key;
+    /// after the restore window (`obs` given; not one on screen since the launch,
+    /// [`Model::listed_at_launch`]), the stage comes forward with it as its key;
     /// one shown is moved only when its frame differs.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn insert_from_pending(
@@ -659,7 +675,7 @@ impl Model {
             Home::Pinned => true,
             Home::Stage(s) => self.is_active(s),
         };
-        let follow = obs.filter(|_| !shown && sure && !self.restore.restoring);
+        let follow = obs.filter(|_| !shown && sure && !self.restore.restoring && !self.listed_at_launch(id));
         if let Home::Stage(s) = home {
             let at = self.stage(s).map_or(0, |st| {
                 st.windows

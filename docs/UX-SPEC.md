@@ -48,6 +48,27 @@ screen) is left off: the card shows the window alone. So is a popup over a windo
 macOS's capture does not place (a calendar's event popup reaching past the window's top):
 never a fill around a window on a card.
 
+**Cards let the wallpaper through**, as Apple's do (seen on the owner's screenshots
+11-03, measured 11-05): each window's picture is drawn at 78 % over a flat colour of its own,
+the wallpaper's average behind the thumbnail at 95 % of its saturation and 78 % of its
+brightness (`[cards] window_opacity`, `backdrop_saturation`, `backdrop_brightness`).
+`scripts/measure-apple-card-glass.py` read one of Apple's cards with its window flat white,
+black and grey: the opacity 0.78 in two runs, the colour behind within a level of the model,
+the grey a blend in the display's encoded values; the hovered card read fully solid. Apple's
+colour is flat over a card where the wallpaper behind it changes, so it is an average, not a
+blur. Not measured yet: dark mode, and what Apple shows through a window behind
+another on one card (here each window has the wallpaper behind it). A switch's snapshots
+take the card's look as they shrink into it and leave it as they grow into their windows.
+The card under the pointer turns solid as it grows (the owner, 11-03: "Apple's SM doing
+that"): its pictures ease to `[cards] hover_window_opacity` (1) on the hover's own curve and
+time, and back as it shrinks on leave; a card a dragged card would merge into does the same,
+as it grows. A click on it hands the snapshot over at the look drawn that moment (solid, or
+part way), so nothing jumps; a card the snapshots land in under the pointer shows at rest,
+then grows and turns solid together. Not measured on Apple's yet: whether its hovered card
+turns fully solid, and on the same timing as the growth (`measure-apple-card-glass.py
+--hover` reads it). The wallpaper is drawn from its file, as the clean corner's is; where it cannot be (a
+shuffle, an unreadable picture), the cards are opaque.
+
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
 of the least recently used card. (Keep stages in place, an extra below, orders it otherwise.)
@@ -71,6 +92,23 @@ Sheets and dialogs follow their window. An app that quits takes its windows out 
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 An app that saved a hidden window's corner place when it quit, and reopens the window there
 within a day, has the window put back where it was before the quit (else centered).
+A window an app keeps wholly off every screen (a headless browser's, an offscreen render
+window) is left alone, as Apple's leaves it: no stage, no card, never moved; it is taken in as
+a new window if it ever comes on screen.
+An app whose `AXEnhancedUserInterface` an assistive client turned on animates the frame
+changes made through Accessibility (Chrome's window slid in from the park corner, 11-03).
+Apple's Stage Manager is no Accessibility client and never shows this; we turn the flag off
+around our moves, once per app per switch, and back on after (Rectangle's and yabai's way), on
+by default with no key. A write the app answers with an error is read back (Chromium's setter
+acts on the value, then passes it to AppKit's, whose answer may be an error: -25208 from Chrome); an app that refuses is left alone for a while (1 s, doubling to
+30 s), not asked at every move.
+**Deviation (stale activations, 11-03):** under load an activation notice reaches us seconds
+late (14:09:57: 1–2.6 s; each late one switched stages, each switch brought its own late one,
+ten switches back and forth). An activation that fired before the latest switch we began, or
+whose app is no longer frontmost when we decide, switches nothing (logged once with its
+reason and age); a focus that would switch stages switches nothing when its app's focused
+window is in another stage by then. His latest ⌘-Tab or Dock click is neither, so it still
+switches, late.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.
@@ -109,7 +147,7 @@ in the slot under the pointer.
 | Windows in a switch, the desktop reveal, ⌘M and drops | critically damped spring, 99 % at about 400 ms |
 | Cards gliding to new slots | spring, 99 % at about 375 ms |
 | The strip sliding out and in | spring, 99 % at about 400 ms, 286 pt |
-| Hover | grows 6 % in about 210 ms |
+| Hover | grows 6 % in about 210 ms, its windows turning solid as it grows |
 | Press | eases to 0.987 of its size in about 100 ms |
 
 ## Deliberate differences
@@ -127,7 +165,79 @@ so switches are animated with snapshots in a click-through layer above everythin
 the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
 nears a card, so content that changed meanwhile can jump when the motion ends. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
-already the new stage's). Arriving windows wait in the corner behind their pictures, and
+already the new stage's). An arriving window takes its place under its picture once the
+picture as shown on screen is within a point of it on every edge (about 600 ms after the
+click for a window growing from its card, 450 ms at the least: `[animation] unpark_at` is the
+floor), so the hand-over shows no step. The picture comes to rest on the spring's own curve
+(within a tenth of a point, about 750 ms for a 2000-point travel; Core Animation's settling
+time stopped it 1 pt short and jumped, the owner's recording 11-01), and fades out over its
+window over 200 ms a moment after the unveil, so a look that differs (a picture taken while
+the window was parked and inactive, a window's own late redraw) melts instead of flipping.
+The arriving pictures fade as one picture, overlapping as their windows do: a window behind
+never shows through the one in front as both fade (each faded on its own showed the one
+behind at a quarter at mid-fade, 11-02).
+The incoming key window is captured again about 180 ms into the switch, once it is key, and
+that picture cross-fades into its growing snapshot. Each picture
+carries macOS's own window shadow, measured on a Studio Display (`stage-manager probe-shadow
+--profile`: a hairline rim and a soft drop, the key window's 2.5 times as wide as an inactive
+window's): the key window's on the window that is or becomes key, an inactive window's on
+the others, turning into the card's shadow on the spring as it nears its card. macOS draws a
+window's shadow by the window's appearance: in Dark Mode the drop reaches as far but is
+nearly twice as dark and the hairline nearly opaque. The picture takes the shadow of the
+appearance macOS draws that window in, read from the window's own shadow: a small capture of
+the window with its shadow (half a pixel a point) next to its usual capture, when it was
+never read, read before the system's appearance last changed, or 20 seconds ago; the alpha
+past three of its sides is compared with the four shadows (light or dark, key or inactive).
+An app may draw its window in another appearance than the system's (11-02: Messages, a
+conversation with a dark chat background, drew its whole window dark on a light system, and
+the light shadow the system's appearance picked flickered at the handover). With no reading
+the system's appearance stands in. The log's `transition ghost` line names the shadow each
+picture carries and where its appearance came from. macOS also draws a thin white line just inside
+each window's edge, with the shadow (a capture that leaves the shadow out lacks it): a point
+wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
+shows only on dark content. The picture carries it too, over its edge and corner, coming
+and going with the window's shadow; without it every edge stepped lighter at the handover
+(the owner, 11-01, Dark Mode). The hairline and the rim follow the curve macOS's shadow
+follows, measured on the dark hairline (nearly opaque, so a tenth of a point shows): Core
+Animation's continuous corner with a longer tail, the hairline a band just outside it, sharp
+where the edge runs along the pixels and softer at 45 degrees; the radius is read from how
+much of the picture's diagonal is clear. A filled shape grown by a spread put a darker notch
+at every corner (up to 126 alpha levels). A window's own
+shadow appears in one frame, so the picture keeps its shadow until the window server lists
+the window on screen at its frame (asked every half frame from the unveil), then fades it
+over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few
+frames read about 2 levels darker, while a shadow faded before its window showed read 16
+lighter for 80 ms (the owner's third recording, 11-01; the window reached the screen a frame
+after a fade centred on the unveil had ended). The picture goes only after that, 300 ms past
+the unveil at the most; an outgoing picture's shadow comes in over twice
+`[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
+switch's pictures move (a round of captures is the window server's work, and dropped a frame).
+With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
+unhide after the unveil has taken (about 100 ms later), when the window server lists it on
+screen: its picture's shadow hands over then, except the key window's: it shows inactive
+first, so its picture keeps the key shadow until the app is active and has focused it again
+(drawn key then; 11-02, Telegram: handed over as it showed, a frame of the inactive shadow
+alone read 4 levels lighter before it turned key, and the key shadow over the inactive one is
+the smaller error, as the inactive one lies mostly within it). The picture stays until the
+app has taken the activation of its key window focused again, so the window is never seen in
+its inactive look (11-01: Messages flipped to its key look 180 ms after it showed); 400 ms
+past the unveil at the most. An app that has not taken that activation 60 ms after its key window was focused
+again is focused once more, twice at most (11-01: Messages's window took the focus, the app
+never became active, and the keyboard stayed with the app before).
+**Deviation (superseded switches, 11-02):** a switch overtaken before it lands (another card
+click, a click of yours anywhere, an activation, a focus) still brings its windows, but
+never focuses one or activates its app afterwards: its held focus, the focus again after its
+app's unhide and the retries above are dropped, so the keyboard is the newer switch's or
+where you clicked (11-02: two card clicks 0.56 s apart on two hidden apps' stages; the first
+app's window was focused 120 ms into the second switch and the two apps took the activation
+in turn). A window's focus brings its stage only in the active app (or with the button down
+on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
+of ours (with apps slow to answer, notices came up to a second late, past the echo window,
+and each switched stages). A window on screen when Stage Manager started but found late (its
+app not answering then) goes to its stage as during the restore window, parked when that
+stage is inactive, never bringing it forward.
+Arriving windows
+wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window
@@ -154,12 +264,15 @@ windows come to their places at once instead of growing.
 **Hidden stages wait in a corner.** Without private APIs, the only way to hide a window but
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
 visible in the bottom-right corner (another corner if a second screen sits beyond it). To
-keep the corner as clean as Apple's, those edges ignore clicks and a patch covers them.
+keep the corner as clean as Apple's, those edges ignore clicks and a patch covers them,
+reaching past each edge only as far as a hidden (inactive) window's shadow does: least above,
+most below (`[windows] corner_patch_reach` sets one number for every side).
 Where window thumbnails are captured (Screen Recording), the patch is a still of the corner
 showing only the desktop's own layers (the picture, Finder's icons, widgets; never a window,
 ours included), exact by construction, so nothing on the desktop keeps it off and icons
-under it take clicks and drags as usual; it is taken again on arriving at a Desktop once the
-slide settles, when an icon there changes, after a click on the desktop, a moment after the
+under it take clicks and drags as usual (an icon dropped, moved or taken away under the patch
+hides it until the new still is drawn, so a stale picture never cuts the icon); it is taken
+again on arriving at a Desktop once the slide settles, when an icon there changes, after a click on the desktop, a moment after the
 picture or its predicted frame changes, and every 10 seconds otherwise (never during a
 switch's motion, a slide, Mission Control or Show Desktop; none while the screen is locked
 or asleep). The patch stays where it is through Show Desktop, Mission Control and App
@@ -218,9 +331,11 @@ until used; the rest are off.
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
+| Windows reopened on another Desktop than their own are listed in the menu (`[stages] restore_notice`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 | Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |
+| Following the Dock, the Finder gives a stage its place only when no other app of the stage is in the Dock (`[strip] dock_ignore`) | on |
 
 Shift never changes the app switcher: ⌘-Tab and ⌘⇧-Tab always switch stages.
 
@@ -247,7 +362,13 @@ top-to-bottom order is the Dock's left-to-right order (top to bottom for a Dock 
 The Dock's application items are read through Accessibility (its lists' `AXDockItem`
 children and their `AXURL`), so running apps that are not kept in the Dock count where their
 icons show; its preferences are never read or written. A stage sits at the leftmost Dock
-position among its windows' apps (by bundle id, else by pid); stages at the same position
+position among its windows' apps (by bundle id, else by pid), the apps of `[strip]
+dock_ignore` (default `["com.apple.finder"]`) counting only when no other app of the stage
+has a Dock icon: the Finder's windows join stages of every kind and the Finder always sits
+first in the Dock, so a stage a Finder window joined would otherwise sit at the top and jump
+there whenever it is left (a stage of Finder windows alone still sits at the Finder's place;
+a stage of listed apps alone at the leftmost of them; a changed list re-sorts at once, as a
+changed Dock does; `[]` lets every app count). Stages at the same position
 keep creation order, and stages whose apps have no Dock icon come after all others, in
 creation order. Hotkey numbers follow the strip. The Dock is read at launch, half a second
 after an app launches or quits, and every two seconds while this order is on (no
@@ -282,13 +403,25 @@ squeezed into the park corner goes to its saved frame when it is matched, and is
 it is (and counted) when it is not. A window an app reopens on another Desktop than the one
 it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
 again on the Desktop where it shows. No apps are relaunched (that is macOS's
-"Reopen windows when logging back in") and no window moves between Desktops. When the
+"Reopen windows when logging back in") and no window moves between Desktops: when the
+restore window ends, those windows are listed at the top of the status menu instead (a
+section headed "Reopened on Another Desktop": per window the app and title, under it
+"Belongs on … ; now on …", then Dismiss), with one passive dot on the menu bar icon while
+any is listed. No alert, no notification: apps are still opening at the login, and the menu
+keeps the list until it is done. An entry leaves once its window shows on its saved Desktop,
+closes or leaves its Desktop; a click brings its window forward (its stage with it, on the
+Desktop shown). A Desktop is named by its apps ("the Desktop with Terminal and Mail") or as
+"this Desktop", not by Mission Control's number: no public API says which number the
+Desktop shown has (`com.apple.spaces`' "Current Space" does not follow a switch). Apple's
+Stage Manager has no such list: a deviation that contradicts nothing it does
+(`[stages] restore_notice`, on). When the
 restore window ends (no sooner than a minute after the login), the saved windows of apps
 not running then are given up (one log line names them): an app opened later goes by the
 new-window rules, never back to a stage of the last session. A running app keeps its saved
 windows until it has opened none for a minute. Off, a restart
-starts every app in a stage of its own, as Apple's does. One log line sums it up
-(`stage-manager log summary` repeats it).
+starts every app in a stage of its own, as Apple's does. One log line sums it up, ending
+with the windows back on another Desktop (bundle id, hashed title, the Desktops' ids;
+`stage-manager log summary` repeats the counts).
 
 ## Known gaps
 
@@ -313,7 +446,7 @@ starts every app in a stage of its own, as Apple's does. One log line sums it up
   window.
 - Not measured yet on Apple's: the edge-reveal and auto-hide delays (ours: 250 ms and
   500 ms), the hover's exact easing, a new card's fade, a Shift-click on a card holding
-  several apps, the cards' shadow and corner radius, and the shadow of moving windows.
+  several apps, and the cards' shadow and corner radius.
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a
   stage of its own, shown in front. Several apps moved at once get a stage each; the front

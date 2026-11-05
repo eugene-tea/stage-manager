@@ -325,15 +325,77 @@ pub struct Moment {
     pub buttons_down: bool,
     /// The strip is mid-transition or a card is dragged.
     pub strip_busy: bool,
-    /// Seconds since the last input event.
+    /// The screen is locked (or the login session is not on the console): Accessibility
+    /// cannot move a window then (`-25202`), so the quit could not bring parked ones back.
+    pub locked: bool,
+    /// The main display sleeps.
+    pub asleep: bool,
+    /// Seconds since the last input event, counted from the last lock or display sleep at
+    /// most ([`idle_after_rest`]).
     pub idle_secs: f64,
 }
 
-/// Whether a ready install may quit the app now: never mid-drag or mid-transition; an
-/// automatic one (not asked for by a click) only once the user has been away
-/// [`AUTO_IDLE_SECS`].
+/// Why a ready install does not go now ([`wait_reason`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// A mouse button is down, or the strip is mid-transition.
+    Busy,
+    /// The screen is locked (an automatic install only).
+    Locked,
+    /// The display sleeps (an automatic install only).
+    Asleep,
+    /// The user has not been away [`AUTO_IDLE_SECS`] (an automatic install only).
+    NotAway,
+}
+
+impl Wait {
+    /// Its words for the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Wait::Busy => "a drag or a transition is under way",
+            Wait::Locked => "the screen is locked",
+            Wait::Asleep => "the display sleeps",
+            Wait::NotAway => "the user is not away",
+        }
+    }
+
+    /// The screen is locked or the display sleeps: logged once per ready update.
+    pub fn is_rest(self) -> bool {
+        matches!(self, Wait::Locked | Wait::Asleep)
+    }
+}
+
+/// Why a ready install may not quit the app now, if it may not: never mid-drag or
+/// mid-transition; an automatic one (not asked for by a click) never while the screen is
+/// locked or the display sleeps (a quit then cannot bring the parked windows back), and only
+/// once the user has been away [`AUTO_IDLE_SECS`].
+pub fn wait_reason(asked: bool, m: Moment) -> Option<Wait> {
+    if m.buttons_down || m.strip_busy {
+        Some(Wait::Busy)
+    } else if asked {
+        None
+    } else if m.locked {
+        Some(Wait::Locked)
+    } else if m.asleep {
+        Some(Wait::Asleep)
+    } else if m.idle_secs < AUTO_IDLE_SECS {
+        Some(Wait::NotAway)
+    } else {
+        None
+    }
+}
+
+/// Whether a ready install may quit the app now ([`wait_reason`] gives none).
 pub fn may_install_now(asked: bool, m: Moment) -> bool {
-    !m.buttons_down && !m.strip_busy && (asked || m.idle_secs >= AUTO_IDLE_SECS)
+    wait_reason(asked, m).is_none()
+}
+
+/// The idle time an automatic install reads: the seconds since the last input event
+/// (`input_idle`), but never more than the seconds since the screen was last seen locked or
+/// the display asleep (`since_rest`). The input clock may still count from before the lock,
+/// and the user who just unlocked is back at the desk.
+pub fn idle_after_rest(input_idle: f64, since_rest: Option<f64>) -> f64 {
+    since_rest.map_or(input_idle, |r| input_idle.min(r.max(0.0)))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -837,15 +899,42 @@ Runtime Version=26.0.0";
 
     #[test]
     fn never_mid_drag_or_mid_transition_and_automatic_only_when_away() {
-        let calm = Moment { buttons_down: false, strip_busy: false, idle_secs: 0.5 };
+        let calm = Moment { buttons_down: false, strip_busy: false, locked: false, asleep: false, idle_secs: 0.5 };
         assert!(may_install_now(true, calm), "a click on Install and Relaunch goes at once");
         assert!(!may_install_now(false, calm), "an automatic install waits for the user to be away");
+        assert_eq!(wait_reason(false, calm), Some(Wait::NotAway));
         let away = Moment { idle_secs: AUTO_IDLE_SECS, ..calm };
         assert!(may_install_now(false, away));
         for asked in [true, false] {
             assert!(!may_install_now(asked, Moment { buttons_down: true, ..away }), "never mid-drag");
             assert!(!may_install_now(asked, Moment { strip_busy: true, ..away }), "never mid-transition");
         }
+    }
+
+    #[test]
+    fn an_automatic_install_never_goes_while_the_screen_is_locked_or_the_display_sleeps() {
+        // His log, 10-30: locked at 08:31, 38 min idle at 08:59, the install quit and every
+        // parked window failed to come back (AX -25202) until the unlock.
+        let away = Moment { buttons_down: false, strip_busy: false, locked: false, asleep: false, idle_secs: 2294.0 };
+        assert_eq!(wait_reason(false, Moment { locked: true, ..away }), Some(Wait::Locked));
+        assert_eq!(wait_reason(false, Moment { asleep: true, ..away }), Some(Wait::Asleep));
+        assert_eq!(wait_reason(false, Moment { locked: true, asleep: true, ..away }), Some(Wait::Locked));
+        assert!(Wait::Locked.is_rest() && Wait::Asleep.is_rest() && !Wait::NotAway.is_rest() && !Wait::Busy.is_rest());
+        // A click-asked install is unchanged.
+        assert!(may_install_now(true, Moment { locked: true, asleep: true, idle_secs: 0.0, ..away }));
+        assert!(may_install_now(false, away));
+    }
+
+    #[test]
+    fn after_an_unlock_the_idle_time_counts_from_the_unlock() {
+        assert_eq!(idle_after_rest(2294.0, None), 2294.0, "never locked: the input clock");
+        assert_eq!(idle_after_rest(2294.0, Some(3.0)), 3.0, "unlocked 3 s ago: back at the desk");
+        assert_eq!(idle_after_rest(10.0, Some(600.0)), 10.0, "input since the unlock counts");
+        assert_eq!(idle_after_rest(2294.0, Some(-1.0)), 0.0);
+        let back = Moment { buttons_down: false, strip_busy: false, locked: false, asleep: false, idle_secs: idle_after_rest(2294.0, Some(5.0)) };
+        assert_eq!(wait_reason(false, back), Some(Wait::NotAway));
+        let later = Moment { idle_secs: idle_after_rest(2294.0 + AUTO_IDLE_SECS, Some(AUTO_IDLE_SECS)), ..back };
+        assert!(may_install_now(false, later), "away {AUTO_IDLE_SECS} s after the unlock: it goes");
     }
 
     #[test]

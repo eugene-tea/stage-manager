@@ -73,6 +73,8 @@ pub struct StripSnapshot {
     /// The incoming windows of this transition are in place, at these frames as read back
     /// from the windows (global, top-left): their snapshots land exactly there.
     pub arrived: Option<(u64, Vec<(u32, Rect)>)>,
+    /// Late incoming windows of a transition ([`Transition::late`]) that show now.
+    pub late: Option<LateNote>,
     /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.
@@ -106,6 +108,47 @@ pub struct Transition {
     /// controller found ready: macOS raises an activated app's windows above the patch.
     /// `None`: the corner is left as it is.
     pub corner: Option<SwitchCover>,
+    /// The outgoing window that is key now (its stage's key window, else its front one): its
+    /// snapshot has the key window's shadow, the others an inactive window's.
+    pub key_out: Option<u32>,
+    /// The incoming window the switch makes key (the batch's focus, else the front one; none
+    /// when the focus goes to a window already in place).
+    pub key_in: Option<u32>,
+    /// Incoming windows that show only once their app is unhidden and active again after the
+    /// unveil (`[windows] hide_parked_apps`: hidden in place, our unhide at the landing): their
+    /// snapshots hand over and land when [`StripSnapshot::late`] says so, not at the unveil.
+    pub late: Vec<u32>,
+}
+
+/// Late incoming windows of transition `id` ([`Transition::late`]) on their way to the screen.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LateNote {
+    pub id: u64,
+    /// On screen now (their app unhidden; the strip hands the shadow over once the window
+    /// server shows them).
+    pub shown: Vec<u32>,
+    /// Drawn in their final look now (their app took the activation of its key window focused
+    /// again, or none follows): their snapshots may land. Each is also shown.
+    pub active: Vec<u32>,
+}
+
+impl LateNote {
+    /// Adds `windows` of transition `id`, `active` or only shown; a note of an older
+    /// transition is replaced.
+    pub fn add(note: &mut Option<LateNote>, id: u64, windows: &[u32], active: bool) {
+        let n = note.get_or_insert_with(|| LateNote { id, ..LateNote::default() });
+        if n.id != id {
+            *n = LateNote { id, ..LateNote::default() };
+        }
+        for &w in windows {
+            if !n.shown.contains(&w) {
+                n.shown.push(w);
+            }
+            if active && !n.active.contains(&w) {
+                n.active.push(w);
+            }
+        }
+    }
 }
 
 /// One window of a [`Transition`].
@@ -444,6 +487,41 @@ pub struct GhostReport {
     pub end: Rect,
     /// For an incoming window: its frame read back from the window once in place.
     pub real: Option<Rect>,
+    /// For an incoming window: where its snapshot was drawn when the strip unveiled it.
+    pub at_unveil: Option<Rect>,
+    /// For an incoming window: when the window server showed it at its frame (ms after the
+    /// unveil; `None`: not seen, the wait ran out).
+    pub shown_ms: Option<u64>,
+    /// For an incoming window: when its snapshot's shadow began to fade (ms after the unveil);
+    /// never before `shown_ms`.
+    pub handover_ms: Option<u64>,
+    /// The window shadow its snapshot carries ([`ShadowReport`]); `None` for a window
+    /// dragged onto the strip (its card's shadow).
+    pub shadow: Option<ShadowReport>,
+}
+
+/// The window shadow a snapshot carries, for the log and `ctl state`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct ShadowReport {
+    /// `"light"`, `"dark"`, or `"custom"` (`[animation] shadow = "custom"`).
+    pub look: &'static str,
+    /// `"active"` (the key window's) or `"inactive"`.
+    pub state: &'static str,
+    /// Where the appearance came from: `"window"` (its own shadow, read
+    /// [`Self::read_s_ago`]), or `"system"` (no reading of it).
+    pub from: &'static str,
+    /// How long before the switch its shadow was read (seconds), when it was.
+    pub read_s_ago: Option<u64>,
+}
+
+impl std::fmt::Display for ShadowReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.read_s_ago {
+            Some(s) => write!(f, "{} {} by the window's own shadow (read {s} s ago)", self.look, self.state),
+            None if self.look == "custom" => write!(f, "custom"),
+            None => write!(f, "{} {} by the system's appearance (no reading of the window)", self.look, self.state),
+        }
+    }
 }
 
 /// The ghosts of the last transition the strip drew.
@@ -461,6 +539,10 @@ pub struct TransitionReport {
     /// What stood for the corner there: `"wallpaper"` (the patch's picture) or `"desktop"` (a
     /// still of the desktop, icons and all; round 8L3).
     pub corner_picture: Option<&'static str>,
+    /// The farthest an incoming snapshot's edge travels (points; 0 with none).
+    pub travel: f64,
+    /// When the strip unveils the incoming windows, after the motion starts (ms), if any.
+    pub unveil_ms: Option<u64>,
 }
 
 fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {
@@ -536,6 +618,19 @@ pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A late window shown at the unhide, then active at its app's activation, in one note
+    /// or two; a newer transition's note replaces an older one's.
+    #[test]
+    fn a_late_note_gathers_shown_and_active_windows() {
+        let mut n = None;
+        LateNote::add(&mut n, 4, &[7], false);
+        assert_eq!(n, Some(LateNote { id: 4, shown: vec![7], active: vec![] }));
+        LateNote::add(&mut n, 4, &[7, 8], true);
+        assert_eq!(n, Some(LateNote { id: 4, shown: vec![7, 8], active: vec![7, 8] }), "active is shown too, once each");
+        LateNote::add(&mut n, 5, &[9], false);
+        assert_eq!(n, Some(LateNote { id: 5, shown: vec![9], active: vec![] }));
+    }
 
     #[test]
     fn a_number_alone_never_rebuilds_a_card() {

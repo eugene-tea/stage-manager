@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.6.0 — 2026-11-05
+
+- The cards on the strip let the wallpaper through as Apple's do, and the card under the
+  pointer turns solid as it grows.
+- After a restart, windows that macOS reopened on another Desktop than their own are listed
+  in the menu bar menu, with a dot on the icon, so you can move them back.
+- Switches end cleanly: no last jump or flicker as the windows land, steady shadows (in Dark
+  Mode and in apps drawn dark too), and overlapping windows no longer show through each other.
+- When the Mac is very busy, stages no longer switch by themselves or bounce between two
+  stages after you click a card. A ⌘-Tab or Dock click still brings its stage, only later.
+- In Chrome and other apps whose enhanced accessibility interface is on, windows no longer
+  slide in from the bottom right.
+- A window Stage Manager had lost track of (Music's, right after it launched) goes into the
+  corner with its stage again, and once you close it, its card goes too.
+- A Finder window that joins a stage no longer pulls that stage to the top when the strip
+  follows the Dock order.
+- Windows an app keeps off every screen, such as a headless browser's during automated tests,
+  are left alone instead of sliding onto the screen.
+- An automatic update waits until the screen is unlocked, so hidden windows can always come
+  back.
+- The patch that keeps the corner clean is smaller, and a desktop icon dropped into the
+  corner is no longer cut in half for a moment.
+
 ## 1.5.0 — 2026-10-29
 
 - The corner stays clean on any wallpaper when Screen Recording is allowed, also with desktop

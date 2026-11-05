@@ -17,14 +17,20 @@
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, `debug-close ID` closes one (its close button), `debug-expose
+//! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
+//! for dead until it is looked up afresh (round stale-handles), `debug-notice show ID|dismiss` clicks
+//! the desktop notice's menu entry for a window or its Dismiss, `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
 //! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
 //! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
 //! read back from a capture of our own overlay window, with a region's mean colour there and
 //! in the corner patch's picture of the wallpaper and the desktop's still (`mean`,
-//! `wallpaper`, `still`: a switch's cover checked against the wallpaper). `space` (any
+//! `wallpaper`, `still`: a switch's cover checked against the wallpaper); `debug-glass X Y W H`
+//! the strip pane's mean colour in a region, read back from its own window (the cards' glass
+//! checked against its model, which `debug-strip` gives per plane); `debug-strip-hover X Y |
+//! leave` hands the strip's own view a mouse-moved (or mouse-exited) event there, the pointer
+//! never moving (a hovered card's glass). `space` (any
 //! time) is the Space shown as the engine sees it.
 //!
 //! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
@@ -170,6 +176,20 @@ pub enum Command {
         /// The region, global top-left coordinates.
         region: Option<Rect>,
     },
+    /// What the strip's pane draws within a global region, read back from its own window's
+    /// pixels (needs `STAGE_MANAGER_TEST=1`): the cards' glass checked against its model.
+    DebugGlass {
+        /// The region, global top-left coordinates.
+        region: Rect,
+    },
+    /// A mouse-moved event at a global point (`None`: a mouse-exited one) handed to the
+    /// strip pane's own view, as AppKit hands it the pointer's; the pointer never moves and
+    /// nothing is posted to the system (needs `STAGE_MANAGER_TEST=1`): a hovered card checked
+    /// without touching the owner's pointer.
+    DebugStripHover {
+        /// The point, global top-left coordinates.
+        at: Option<Point>,
+    },
     /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
     /// click on it (the Dock-click prediction runs as for a real click), then presses it
     /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
@@ -177,9 +197,19 @@ pub enum Command {
         /// The app's bundle id.
         bundle: String,
     },
+    /// The desktop notice's menu actions, as a click on them does: bring listed window `Some(id)`
+    /// forward, or dismiss the list (`None`) (needs `STAGE_MANAGER_TEST=1`).
+    DebugNotice(Option<u32>),
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
+        /// The window id.
+        id: u32,
+    },
+    /// Takes our Accessibility handle on a `STAGE_MANAGER_ONLY` app's window for dead
+    /// (`kAXErrorInvalidUIElement`) until it is looked up afresh, as Music's was on 11-04
+    /// (round stale-handles); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
+    DebugStaleHandle {
         /// The window id.
         id: u32,
     },
@@ -303,6 +333,15 @@ impl Command {
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
                 Ok(Self::DebugOverlay { region: Some(Rect::new(n(x)?, n(y)?, n(w)?, n(h)?)) })
             }
+            ["debug-glass", x, y, w, h] => {
+                let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
+                Ok(Self::DebugGlass { region: Rect::new(n(x)?, n(y)?, n(w)?, n(h)?) })
+            }
+            ["debug-strip-hover", "leave"] => Ok(Self::DebugStripHover { at: None }),
+            ["debug-strip-hover", x, y] => {
+                let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
+                Ok(Self::DebugStripHover { at: Some(Point::new(coord(x)?, coord(y)?)) })
+            }
             ["debug-expose", "escape"] => Ok(Self::DebugExpose { which: None }),
             ["debug-expose", word] => match Expose::parse(word) {
                 Some(which) => Ok(Self::DebugExpose { which: Some(which) }),
@@ -324,9 +363,18 @@ impl Command {
                 .collect::<Result<Vec<u32>, String>>()
                 .map(Self::Adopted),
             [handoff::COMMAND, rest @ ..] => Offer::parse(rest).map(Self::TakeWatch),
+            ["debug-notice", "dismiss"] => Ok(Self::DebugNotice(None)),
+            ["debug-notice", "show", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugNotice(Some(id)))
+            }
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
+            }
+            ["debug-stale-handle", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugStaleHandle { id })
             }
             [] => Err("empty command".into()),
             _ => Err(format!("unknown command: {}", words.join(" "))),
@@ -765,6 +813,11 @@ mod tests {
             Ok(Command::DebugDesktop { at: Point::new(1.0, 2.0), double: false, to: None })
         );
         assert!(Command::parse("debug-click 60").is_err());
+        assert_eq!(Command::parse("debug-glass 20 300 40 30.5"), Ok(Command::DebugGlass { region: Rect::new(20.0, 300.0, 40.0, 30.5) }));
+        assert!(Command::parse("debug-glass 20 300 40").is_err());
+        assert_eq!(Command::parse("debug-strip-hover 80 400.5"), Ok(Command::DebugStripHover { at: Some(Point::new(80.0, 400.5)) }));
+        assert_eq!(Command::parse("debug-strip-hover leave"), Ok(Command::DebugStripHover { at: None }));
+        assert!(Command::parse("debug-strip-hover 80").is_err());
         assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));
         assert!(Command::parse("debug-hover 1 720").is_err());
         assert_eq!(
@@ -808,6 +861,11 @@ mod tests {
         assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
         assert_eq!(Command::parse("debug-close 42"), Ok(Command::DebugClose { id: 42 }));
         assert!(Command::parse("debug-close").is_err());
+        assert_eq!(Command::parse("debug-stale-handle 42"), Ok(Command::DebugStaleHandle { id: 42 }));
+        assert!(Command::parse("debug-stale-handle").is_err());
+        assert_eq!(Command::parse("debug-notice show 42"), Ok(Command::DebugNotice(Some(42))));
+        assert_eq!(Command::parse("debug-notice dismiss"), Ok(Command::DebugNotice(None)));
+        assert!(Command::parse("debug-notice show").is_err());
         assert!(Command::parse("debug-fullscreen 42 toggle").is_err());
         assert!(Command::parse("debug-fullscreen x on").is_err());
         assert!(Command::parse("debug-fullscreen 42").is_err());

@@ -32,6 +32,8 @@ pub enum Kind {
     NumberedHotkey,
     /// A list of stage names.
     Names,
+    /// A list of app bundle ids, such as `"com.apple.finder"`.
+    Bundles,
     /// A rule action (`native`, `current`, `new`, `stage:<name>`, `float`, `ignore`).
     Action,
     /// A placement (`as-is`, `center`, `cascade`).
@@ -51,6 +53,7 @@ impl Kind {
             Kind::Hotkey => "hotkey such as \"ctrl+alt+n\", or \"\" for none".into(),
             Kind::NumberedHotkey => "hotkey with {n} for the digits 1-9, or \"\" for none".into(),
             Kind::Names => "list of names".into(),
+            Kind::Bundles => "list of bundle ids such as \"com.apple.finder\"".into(),
             Kind::Action => "\"native\", \"current\", \"new\", \"stage:<name>\", \"float\", \"ignore\"".into(),
             Kind::Placement => "\"as-is\", \"center\", \"cascade\"".into(),
         }
@@ -191,7 +194,9 @@ pub const KEYS: &[KeyDef] = &[
         "Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first."),
     // [strip]
     k("strip", "order", Kind::Choice(&["native", "in_place", "fixed", "dock"]), "\"native\"",
-        "Card order (Settings: Strip order): \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (\"fixed\" is its older name); \"dock\" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app; apps not in the Dock last), and a card cannot be dragged to another slot."),
+        "Card order (Settings: Strip order): \"native\" is Apple's (the stage you leave takes the clicked card's slot); \"in_place\" keeps every stage in a place of its own, in creation order, whatever you click (\"fixed\" is its older name); \"dock\" keeps those places in the Dock's order of the stages' apps (a stage sits at its leftmost app, the apps of dock_ignore counting only when no other app of the stage is in the Dock; apps not in the Dock last), and a card cannot be dragged to another slot."),
+    k("strip", "dock_ignore", Kind::Bundles, "[\"com.apple.finder\"]",
+        "With order = \"dock\", apps (bundle ids) that give a stage its place only when no other app of the stage is in the Dock: the Finder, whose windows join every stage, would otherwise pull each stage it joins to the Finder's place at the top. A stage of these apps alone still sits at their place."),
     k("strip", "active", Kind::Choice(&["close", "gap", "card"]), "\"close\"",
         "With order = \"in_place\" or \"dock\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
@@ -252,6 +257,13 @@ pub const KEYS: &[KeyDef] = &[
         "A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more)."),
     k("cards", "press_ms", i(0, 3000), "100", "How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100)."),
     k("cards", "fade_ms", i(0, 3000), "200", "How long a new card takes to fade in, in milliseconds (not measured on Apple's)."),
+    k("cards", "window_opacity", f(0.0, 1.0), "0.78",
+        "How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.78, measured on a card read white, black and grey); 1 draws them opaque."),
+    k("cards", "hover_window_opacity", f(0.0, 1.0), "1.0",
+        "The same on the card under the pointer (or a dragged card's target), eased with its growth: Apple's hovered card turns solid. The value of window_opacity turns the fade off."),
+    k("cards", "backdrop_saturation", f(0.0, 2.0), "0.95",
+        "Behind each window's picture on a card, the wallpaper's colour there (its average behind the thumbnail), at this saturation of the wallpaper's own: 0 grey, 1 as it is."),
+    k("cards", "backdrop_brightness", f(0.0, 2.0), "0.78", "...and at this brightness of the wallpaper's own (Apple's darkens it a little)."),
     // [icons]
     k("icons", "size", f(0.0, 300.0), "38.0", "Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons."),
     k("icons", "center_dx", f(-300.0, 300.0), "10.5", "The icon's center, right of the card's bottom-left corner (its leftmost window's)."),
@@ -298,12 +310,14 @@ pub const KEYS: &[KeyDef] = &[
     k("animation", "spring_damping", f(0.0, 1000.0), "33.0", "Spring damping of the windows' motion (33 with stiffness 272 and mass 1: critically damped, no overshoot)."),
     k("animation", "spring_mass", f(0.01, 100.0), "1.0", "Spring mass of the windows' motion."),
     k("animation", "unpark_at", f(0.5, 1.0), "0.99",
-        "An incoming window takes its place behind its growing snapshot once the motion is this far along (0.99 = 99 %, about 400 ms)."),
+        "The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 600 ms for a window growing from its card)."),
     k("animation", "cover_ms", i(0, 500), "20",
         "Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first."),
     k("animation", "corner_radius", f(0.0, 60.0), "0.0",
         "Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius)."),
-    k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow."),
+    k("animation", "shadow", Kind::Choice(&["window", "custom"]), "\"window\"",
+        "A moving snapshot's shadow: \"window\" is macOS's own window shadow (the key window's on the window that is or becomes key, an inactive window's on the others), turning into the card's shadow on a card; \"custom\" is one shadow from shadow_radius, shadow_opacity and shadow_offset_y."),
+    k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow with shadow = \"custom\"."),
     k("animation", "shadow_opacity", f(0.0, 1.0), "0.35", "Opacity of that shadow."),
     k("animation", "shadow_offset_y", f(-100.0, 100.0), "10.0", "Vertical offset of that shadow (down is positive)."),
     k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
@@ -327,8 +341,8 @@ pub const KEYS: &[KeyDef] = &[
         "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
     k("windows", "corner_patch", Kind::Bool, "true",
         "Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it."),
-    k("windows", "corner_patch_reach", f(0.0, 400.0), "60.0",
-        "How far past a sliver the corner patch reaches, in points, to cover its shadow."),
+    k("windows", "corner_patch_reach", Kind::FloatOrAuto { min: 0.0, max: 400.0 }, "\"auto\"",
+        "How far past a sliver the corner patch reaches, in points, to cover its shadow: \"auto\" is a parked (inactive) window's shadow, side by side; a number is used on every side."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [sugar]
@@ -348,6 +362,8 @@ pub const KEYS: &[KeyDef] = &[
         "Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty."),
     k("stages", "restore_after_restart", Kind::Bool, "true",
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
+    k("stages", "restore_notice", Kind::Bool, "true",
+        "After a restart, list in the menu bar menu the windows macOS reopened on another Desktop than the one they were on (a mark on the icon while any is listed), to drag them back in Mission Control; an entry leaves once its window shows on its own Desktop. macOS gives apps no way to move a window to another Desktop."),
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
     // [defaults]
@@ -501,6 +517,14 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-16.toml"),
     include_str!("legacy/default-17.toml"),
     include_str!("legacy/default-18.toml"),
+    include_str!("legacy/default-19.toml"),
+    include_str!("legacy/default-20.toml"),
+    include_str!("legacy/default-21.toml"),
+    include_str!("legacy/default-22.toml"),
+    include_str!("legacy/default-23.toml"),
+    include_str!("legacy/default-24.toml"),
+    include_str!("legacy/default-25.toml"),
+    include_str!("legacy/default-26.toml"),
 ];
 
 #[cfg(test)]

@@ -119,6 +119,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item |
 | `STAGE_MANAGER_NO_CAPTURE` | window captures off, whatever the config says |
 | `STAGE_MANAGER_TEST` | enables the test-only `ctl debug-*` commands |
+| `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
 | `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` toggle Apple's Stage Manager (it restores the setting on exit) |
@@ -158,8 +159,10 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 
 Exit status is 0 on success, 1 on an error reply and 2 when the app is not running. With
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
-Control shortcuts, and full-screen toggles for the scripted checks; each refuses to act
-outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs`.
+Control shortcuts, and full-screen toggles for the scripted checks, and `debug-stale-handle
+ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
+handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
+`src/platform/ctl.rs`.
 
 ## Other tools
 
@@ -171,6 +174,16 @@ outside the app's own and `STAGE_MANAGER_ONLY` windows. See `src/platform/ctl.rs
 - `stage-manager probe-windows <bundle-id>…`, `probe-screen` and `probe-patch` print the
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
+- `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
+  each side of its frame, from windows of its own (the corner patch's reach). `--profile`
+  prints the falloff of a key and an inactive window's shadow and the colour across each
+  edge (the inner rim), `--compare` how closely a snapshot drawn as the overlay draws it
+  (the window's own picture, its shadow and rim) matches; `--appearance dark|light` draws
+  the probe's windows in that appearance (the system's is never changed), `--background
+  GREY` fills them with a grey (a rim shows on it), `--corner PT` draws the comparison at
+  that corner radius. Each state's `look` is how the captures read the window's appearance
+  from its shadow: from the image above (`display`) and, when the process running the probe
+  has Screen Recording, from the still the captures take (`captures`, ScreenCaptureKit).
 
 ## Logs
 

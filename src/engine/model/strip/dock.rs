@@ -5,9 +5,11 @@
 //! The platform reads the Dock's application items (pinned and running, as the Dock shows
 //! them) and hands the model their order ([`Model::set_dock_order`]); the model sorts. A
 //! stage sits at the leftmost Dock position among its windows' apps (an app matched by bundle
-//! id first, then by pid). Stages at the same position (two stages of one app) and stages
-//! whose apps have no Dock icon (an agent app, an app not read yet) keep creation order,
-//! the latter after every stage in the Dock. Everything else in place works as with
+//! id first, then by pid), leaving out the apps of `[strip] dock_ignore` (the Finder by
+//! default, whose windows join every stage) unless no other app of the stage has a Dock icon.
+//! Stages at the same position (two stages of one app) and stages whose apps have no Dock
+//! icon (an agent app, an app not read yet) keep creation order, the latter after every
+//! stage in the Dock. Everything else in place works as with
 //! [`StripOrder::InPlace`]: the active stage's modes, the overflow, hotkey numbers following
 //! the strip.
 
@@ -46,12 +48,26 @@ impl Model {
         if self.dock == dock {
             return false;
         }
-        let places = |m: &Model| -> Vec<Vec<StageId>> {
-            m.spaces.iter().map(|s| m.place_order(s.id).into_iter().map(|st| st.id).collect()).collect()
-        };
-        let before = places(self);
+        let before = self.all_places();
         self.dock = dock;
-        places(self) != before
+        self.all_places() != before
+    }
+
+    /// Sets the apps left out of a stage's Dock place while another app of the stage has one
+    /// ([`Model::dock_place`]; `[strip] dock_ignore`). True when the strip's order changed, on
+    /// any Space (the caller presents the strip again, as for a changed Dock).
+    pub fn set_dock_ignore(&mut self, ignore: Vec<String>) -> bool {
+        if self.options.dock_ignore == ignore {
+            return false;
+        }
+        let before = self.all_places();
+        self.options.dock_ignore = ignore;
+        self.all_places() != before
+    }
+
+    /// Every Space's stages in their places.
+    fn all_places(&self) -> Vec<Vec<StageId>> {
+        self.spaces.iter().map(|s| self.place_order(s.id).into_iter().map(|st| st.id).collect()).collect()
     }
 
     /// The stages of `space` in their places, top to bottom (hotkey numbers follow it):
@@ -66,10 +82,27 @@ impl Model {
         stages
     }
 
-    /// A stage's Dock position: the leftmost Dock position among its windows' apps. `None`
-    /// when none of them has a Dock icon (or the stage has no window).
+    /// A stage's Dock position: the leftmost Dock position among its windows' apps, the apps
+    /// of `[strip] dock_ignore` counting only when no other app of the stage has one (a VS
+    /// Code stage a Finder window joined sits at VS Code's place; a stage of Finder windows
+    /// alone at the Finder's). `None` when none of them has a Dock icon (or the stage has no
+    /// window).
     pub(crate) fn dock_place(&self, stage: &Stage) -> Option<usize> {
-        stage.windows.iter().filter_map(|w| self.dock_position(*w)).min()
+        let (mut kept, mut ignored) = (None::<usize>, None::<usize>);
+        for &w in &stage.windows {
+            let Some(at) = self.dock_position(w) else { continue };
+            let slot = if self.dock_ignored(w) { &mut ignored } else { &mut kept };
+            *slot = Some(slot.map_or(at, |s| s.min(at)));
+        }
+        kept.or(ignored)
+    }
+
+    /// True when a window's app is one of `[strip] dock_ignore` (by bundle id).
+    fn dock_ignored(&self, id: WindowId) -> bool {
+        self.windows.get(&id).is_some_and(|w| {
+            let bundle = w.meta.bundle_id.as_str();
+            !bundle.is_empty() && self.options.dock_ignore.iter().any(|b| b == bundle)
+        })
     }
 
     /// The Dock position of a window's app: its bundle id's item, else its pid's.

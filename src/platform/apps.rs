@@ -344,9 +344,18 @@ pub fn hide(pid: i32) -> bool {
 }
 
 /// Asks app `pid` to unhide, without activating it. False when there is no such app or macOS
-/// refused the request.
+/// answered NO, which is not the outcome: on macOS 27 it answers NO for another app and
+/// unhides it a few milliseconds later (11-01: `answer=false` at every unhide, its notice
+/// 5 ms on). The unhide notice tells when it took.
 pub fn unhide(pid: i32) -> bool {
     running(pid).is_some_and(|a| a.unhide())
+}
+
+/// Asks macOS to activate app `pid` (no options: its key window comes forward). macOS may
+/// pass over a request from an app that is not active; false when there is no such app or it
+/// answered NO.
+pub fn activate(pid: i32) -> bool {
+    running(pid).is_some_and(|a| a.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty()))
 }
 
 /// Whether app `pid` is hidden now; `None` when it is not running.
@@ -357,6 +366,63 @@ pub fn is_hidden(pid: i32) -> Option<bool> {
 /// Whether app `pid` is the active (frontmost) app now; `None` when it is not running.
 pub fn is_active(pid: i32) -> Option<bool> {
     running(pid).map(|a| a.isActive())
+}
+
+/// The frontmost app's pid now (`NSWorkspace.frontmostApplication`): the main thread's view,
+/// updated before the activation notice is posted, so never older than the latest notice it
+/// stamped. `None` when there is none.
+pub fn frontmost_pid() -> Option<i32> {
+    NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier())
+}
+
+/// Test only: how long activation notices are held before they go to the WM thread
+/// (`STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS`, honored only with `STAGE_MANAGER_ONLY` set: the
+/// fixtures' runs), so a live check sees them as late as under load. Their stamps stay when
+/// the main thread got them.
+pub fn debug_activation_delay() -> Option<std::time::Duration> {
+    activation_delay_from(
+        std::env::var("STAGE_MANAGER_ONLY").ok().as_deref(),
+        std::env::var("STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS").ok().as_deref(),
+    )
+}
+
+fn activation_delay_from(only: Option<&str>, ms: Option<&str>) -> Option<std::time::Duration> {
+    if only.is_none_or(|o| o.trim().is_empty()) {
+        return None;
+    }
+    let ms: u64 = ms?.trim().parse().ok()?;
+    (ms > 0).then(|| std::time::Duration::from_millis(ms.min(10_000)))
+}
+
+/// Wraps `sink` so that activation notices reach it `delay` after the main thread got them
+/// (in order, on a thread of their own); every other event goes at once.
+pub fn delayed_activations(
+    delay: std::time::Duration,
+    sink: impl Fn(AppEvent) + Send + Sync + 'static,
+) -> impl Fn(AppEvent) + 'static {
+    let sink = std::sync::Arc::new(sink);
+    let (tx, rx) = std::sync::mpsc::channel::<AppEvent>();
+    let late = sink.clone();
+    let spawned = std::thread::Builder::new().name("activation-delay".into()).spawn(move || {
+        for event in rx {
+            if let AppEvent::Activated(_, at) = &event {
+                std::thread::sleep(delay.saturating_sub(at.elapsed()));
+            }
+            late(event);
+        }
+    });
+    if let Err(e) = &spawned {
+        tracing::warn!("activation delay: no thread ({e}); notices go at once");
+    }
+    let tx = spawned.is_ok().then_some(tx);
+    move |event| match (&event, &tx) {
+        (AppEvent::Activated(..), Some(tx)) => {
+            if let Err(std::sync::mpsc::SendError(event)) = tx.send(event) {
+                sink(event);
+            }
+        }
+        _ => sink(event),
+    }
 }
 
 /// The bundle id of running app `pid`, if any.
@@ -404,6 +470,18 @@ fn process_info(pid: i32) -> Option<libc::proc_bsdinfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_activation_delay_is_for_the_fixtures_runs_only() {
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(activation_delay_from(Some("dev.fixture"), Some("2000")), Some(ms(2000)));
+        assert_eq!(activation_delay_from(None, Some("2000")), None);
+        assert_eq!(activation_delay_from(Some(" "), Some("2000")), None);
+        assert_eq!(activation_delay_from(Some("dev.fixture"), None), None);
+        assert_eq!(activation_delay_from(Some("dev.fixture"), Some("0")), None);
+        assert_eq!(activation_delay_from(Some("dev.fixture"), Some("soon")), None);
+        assert_eq!(activation_delay_from(Some("dev.fixture"), Some("99999")), Some(ms(10_000)));
+    }
 
     #[test]
     fn the_tests_logout_note_needs_test_mode() {

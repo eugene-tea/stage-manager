@@ -281,3 +281,101 @@ fn a_window_dropped_on_the_strip_takes_its_dock_place_not_the_drop_position() {
     let dropped = e.s(9);
     assert!(e.m.strip().iter().any(|c| c.stage == dropped), "the dropped window's stage shows: {:?}", e.m.strip());
 }
+
+/// The Finder's bundle id, the default of `[strip] dock_ignore`.
+const FINDER: &str = "com.apple.finder";
+
+impl Env {
+    /// A Finder window `id` (the Finder runs as pid 50), placed by `action`.
+    fn finder(&mut self, id: u32, action: RuleAction) {
+        self.add_meta(WindowMeta { title: format!("Folder {id}"), ..meta(id, 50, FINDER) }, action);
+    }
+}
+
+/// A Dock with the Finder first (as macOS keeps it), then these apps.
+fn dock_with_finder(pids: &[i32]) -> Vec<DockApp> {
+    let mut d = vec![DockApp::new(FINDER, Some(50))];
+    d.extend(dock(pids));
+    d
+}
+
+#[test]
+fn a_finder_window_joining_a_stage_leaves_it_at_its_other_apps_place() {
+    for mode in MODES {
+        // VS Code-like 101 with a Finder window joined; Messages-like 102; Notes-like 103.
+        let mut e = Env::new(mode, 9);
+        e.add(1, 101, RuleAction::Current);
+        e.finder(2, RuleAction::Current);
+        e.add(3, 102, RuleAction::New);
+        e.add(4, 103, RuleAction::New);
+        assert_eq!(e.s(1), e.s(2), "{mode:?}: the Finder window joined the first stage");
+        assert!(!e.m.set_dock_ignore(vec![FINDER.into()]), "{mode:?}: no Dock read yet, nothing moves");
+        e.m.set_dock_order(dock_with_finder(&[102, 101, 103]));
+        assert_eq!(e.ids(), e.want(&[3, 1, 4], mode), "{mode:?}: the stage at 101's place, not the Finder's");
+        // Leaving it for 102's stage keeps it there (it never jumps to the top).
+        let target = e.s(3);
+        e.switch(target);
+        assert_eq!(e.ids(), e.want(&[3, 1, 4], mode), "{mode:?}: after a switch to 102's stage");
+        let space = e.m.current_space(e.m.main_display().id);
+        assert_eq!(e.m.stage_by_number(space, 2), Some(e.s(1)), "{mode:?}: its number is its place");
+    }
+}
+
+#[test]
+fn a_stage_of_finder_windows_alone_sits_at_the_finders_place() {
+    let mut e = Env::new(ActiveCard::Card, 9);
+    e.add(1, 101, RuleAction::Current);
+    e.finder(2, RuleAction::New);
+    e.finder(3, RuleAction::Current);
+    e.add(4, 102, RuleAction::New);
+    assert_eq!(e.s(2), e.s(3), "one stage of two Finder windows");
+    e.m.set_dock_ignore(vec![FINDER.into()]);
+    e.m.set_dock_order(dock_with_finder(&[102, 101]));
+    assert_eq!(e.ids(), [2, 4, 1], "the Finder's stage first, at the Finder's place");
+}
+
+#[test]
+fn an_empty_list_lets_every_app_count_as_before_and_a_change_re_sorts() {
+    let mut e = Env::new(ActiveCard::Card, 9);
+    e.add(1, 101, RuleAction::Current);
+    e.finder(2, RuleAction::Current);
+    e.add(3, 102, RuleAction::New);
+    // The engine's own default is empty: the Finder's place wins, as before.
+    assert!(e.m.options().dock_ignore.is_empty());
+    e.m.set_dock_order(dock_with_finder(&[102, 101]));
+    assert_eq!(e.ids(), [1, 3], "at the Finder's place (first)");
+    // The key set: the strip re-sorts at once (the caller presents), and the same list again
+    // changes nothing.
+    assert!(e.m.set_dock_ignore(vec![FINDER.into()]), "the strip's order changed");
+    assert_eq!(e.ids(), [3, 1], "at 101's place, after 102");
+    assert!(!e.m.set_dock_ignore(vec![FINDER.into()]), "the same list: nothing to present");
+    // Emptied again: back at the Finder's place.
+    assert!(e.m.set_dock_ignore(Vec::new()));
+    assert_eq!(e.ids(), [1, 3]);
+    // A list with no app of any stage moves nothing.
+    assert!(!e.m.set_dock_ignore(vec!["com.example.nothing".into()]));
+    // In place, ignoring the Dock, the list moves nothing either.
+    e.m.set_strip_options(StripOptions { order: StripOrder::InPlace, active: ActiveCard::Card, capacity: 9 });
+    assert!(!e.m.set_dock_ignore(vec![FINDER.into()]), "in place: creation order");
+}
+
+#[test]
+fn a_stage_of_listed_apps_alone_sits_at_the_leftmost_of_them() {
+    let mut e = Env::new(ActiveCard::Card, 9);
+    // Stage A: a Finder window and app 103 (both listed); stage B: 101; stage C: 102; stage
+    // D: app 103 with app 201, which has no Dock icon (an agent app).
+    e.finder(1, RuleAction::Current);
+    e.add(2, 103, RuleAction::Current);
+    e.add(3, 101, RuleAction::New);
+    e.add(4, 102, RuleAction::New);
+    e.add(5, 103, RuleAction::New);
+    e.add(6, 201, RuleAction::Current);
+    assert_eq!((e.s(1), e.s(5)), (e.s(2), e.s(6)), "A and D each hold two apps");
+    e.m.set_dock_ignore(vec![FINDER.into(), bundle(103)]);
+    // The Dock: Finder, 101, 103, 102.
+    e.m.set_dock_order(dock_with_finder(&[101, 103, 102]));
+    assert_eq!(e.ids(), [1, 3, 5, 4], "A at the Finder's place; D at 103's (201 has none); then 102");
+    // 103 moves to the Dock's front: A sits at 103's place now, the leftmost of its listed apps.
+    e.m.set_dock_order(vec![DockApp::new(&bundle(103), Some(103)), DockApp::new(FINDER, Some(50)), DockApp::new(&bundle(101), Some(101)), DockApp::new(&bundle(102), Some(102))]);
+    assert_eq!(e.ids(), [1, 5, 3, 4], "A and D both at 103's place, in creation order");
+}

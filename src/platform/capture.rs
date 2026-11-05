@@ -327,6 +327,8 @@ struct Shared {
     interval: Duration,
     /// Capture every target now, whatever the interval says.
     force: bool,
+    /// No round starts before this ([`Capturer::hold_until`]).
+    held_until: Option<Instant>,
     shutdown: bool,
 }
 
@@ -392,6 +394,30 @@ impl Capturer {
         let (lock, cv) = &*self.shared;
         if let Ok(mut s) = lock.lock() {
             s.force = true;
+            cv.notify_all();
+        }
+    }
+
+    /// Captures targets `ids` again as soon as the current round ends, the others on their
+    /// interval (a window whose look changed: made key while parked).
+    pub fn recapture(&self, ids: &[u32]) {
+        let (lock, cv) = &*self.shared;
+        if let Ok(mut s) = lock.lock() {
+            s.captured.retain(|id| !ids.contains(id));
+            cv.notify_all();
+        }
+    }
+
+    /// Starts no round before `until` (`None`: as usual again); a round due meanwhile runs
+    /// then. The strip's thumbnails wait while a switch's snapshots move: a round of window
+    /// captures is the window server's work, and the frames it drops show in the motion
+    /// (11-01: a dropped frame mid-switch as a round of five thumbnails ran).
+    pub fn hold_until(&self, until: Option<Instant>) {
+        let (lock, cv) = &*self.shared;
+        if let Ok(mut s) = lock.lock()
+            && s.held_until != until
+        {
+            s.held_until = until;
             cv.notify_all();
         }
     }
@@ -466,9 +492,10 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                         }
                     }
                 }
-                let ready = on && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
+                let held = s.held_until.map(|t| t.saturating_duration_since(Instant::now())).filter(|d| !d.is_zero());
+                let ready = on && held.is_none() && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
                 let due_in = last_full.map_or(Duration::ZERO, |t| s.interval.saturating_sub(t.elapsed()));
-                let mut wait = IDLE_CHECK;
+                let mut wait = held.map_or(IDLE_CHECK, |h| h.min(IDLE_CHECK));
                 // Paused (nobody sees the screen: woken when that ends) or backing off.
                 let paced = if ready { pace().wait(Instant::now()) } else { Some(Duration::ZERO) };
                 if let Some(left) = paced.filter(|d| !d.is_zero()) {
@@ -810,6 +837,77 @@ enum Msg {
     Declined { round: u64 },
 }
 
+/// Receives a still of a window with its shadow ([`probe_look`]): the window, the
+/// generation it was asked under, the picture and the window's frame (points).
+pub type LookSink = fn(u32, u64, &CGImage, (f64, f64));
+
+/// A small still of window `id` (the capture's `filter`, its frame `size_pt` points) with its
+/// shadow, over a clear background, its child windows left out, handed to `sink` on
+/// ScreenCaptureKit's queue (the captures': [`super::window_look::read`]). Fire and forget: a
+/// failure only leaves the look unread (quit still waits for it, [`InFlight`]).
+fn probe_look(filter: &SCContentFilter, id: u32, size_pt: (f64, f64), generation: u64, sink: LookSink) {
+    // SAFETY: a plain getter on a live filter.
+    let content = unsafe { filter.contentRect() };
+    let (w, h) = crate::ui::shadow_look::probe_size(content.size.width, content.size.height);
+    // SAFETY: reading an immutable CoreGraphics constant.
+    let clear = CGColor::constant_color(Some(unsafe { kCGColorClear }));
+    // SAFETY: a plain initializer, then plain setters on the live configuration; the
+    // background color is kept alive by the handler until the capture answered.
+    let config = unsafe { SCStreamConfiguration::new() };
+    unsafe {
+        config.setWidth(w);
+        config.setHeight(h);
+        config.setPixelFormat(PIXEL_BGRA);
+        config.setShowsCursor(false);
+        config.setIgnoreShadowsSingleWindow(false);
+        config.setScalesToFit(true);
+        if let Some(clear) = clear.as_deref() {
+            config.setBackgroundColor(clear);
+        }
+    }
+    let sel = objc2::sel!(setIncludeChildWindows:);
+    // SAFETY: asking whether a live object responds to a selector.
+    let can: bool = unsafe { objc2::msg_send![&*config, respondsToSelector: sel] };
+    if can {
+        // SAFETY: a plain setter, present (checked above).
+        unsafe { config.setIncludeChildWindows(false) };
+    }
+    let flight = InFlight::issue();
+    let on_image = RcBlock::new(move |image: *mut CGImage, _error: *mut NSError| {
+        let _answered = &flight;
+        let _background = &clear;
+        if let Some(ptr) = NonNull::new(image) {
+            // SAFETY: SCK hands a valid CGImage for the duration of the block.
+            let image = unsafe { ptr.as_ref() };
+            sink(id, generation, image, size_pt);
+        }
+    });
+    // SAFETY: filter, configuration and handler are valid; SCK copies the block.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(filter, &config, Some(&on_image));
+    }
+}
+
+/// Window `id`'s still with its shadow as the captures take it ([`probe_look`]), handed to
+/// `sink`, for `probe-shadow` (its own windows only, which sit at the desktop's level: those
+/// count here). Nothing when the window is not in the shareable content.
+pub fn look_shot(id: u32, sink: LookSink) {
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, _error: *mut NSError| {
+        // SAFETY: SCK passes a valid object or null.
+        let Some(content) = (unsafe { content.as_ref() }) else { return };
+        // SAFETY: plain getters on a live SCShareableContent and its SCWindows.
+        let windows = unsafe { content.windows() };
+        let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == id) else { return };
+        // SAFETY: designated initializer with a live SCWindow; a plain getter.
+        let (filter, frame) = unsafe { (SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window), to_rect(window.frame())) };
+        probe_look(&filter, id, (frame.w, frame.h), 0, sink);
+    });
+    // SAFETY: the handler matches the documented signature; SCK copies the block.
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, false, &handler);
+    }
+}
+
 /// Captures `batch` once; returns the window ids that produced an image or were found
 /// missing (so they are not retried as "fresh" in a tight loop) and the outcome for the gate.
 /// Counts every outcome and logs the windows whose outcome changed since `outcomes` last saw
@@ -842,6 +940,9 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
         let windows = unsafe { content.windows() };
         let displays = display_frames(content);
         let mut issued = 0;
+        // At most one look a round: never every window's at once (at launch, after the
+        // system's appearance changed), each read a round or more apart instead.
+        let mut looked = false;
         for t in &targets {
             // SAFETY: plain getter on a live SCWindow.
             let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == t.id) else {
@@ -900,6 +1001,12 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
                 );
             }
             issued += 1;
+            // The window's look, from its shadow, when due (not counted in the round), one a
+            // round at most.
+            if !looked && let Some(generation) = super::window_look::due(id) {
+                looked = true;
+                probe_look(&filter, id, size_pt, generation, super::window_look::read);
+            }
         }
         let _ = content_tx.send(Msg::Issued { round, n: issued });
     });

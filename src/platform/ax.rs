@@ -34,6 +34,7 @@ pub mod names {
     pub const CLOSE_BUTTON: &str = "AXCloseButton";
     pub const PRESS: &str = "AXPress";
     pub const HIDDEN: &str = "AXHidden";
+    pub const ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
     pub const FRONTMOST: &str = "AXFrontmost";
     pub const RAISE: &str = "AXRaise";
     pub const FOCUSED_APPLICATION: &str = "AXFocusedApplication";
@@ -401,25 +402,50 @@ impl AxElement {
         }
     }
 
-    /// Sets `AXPosition`.
+    /// `AXEnhancedUserInterface` of an application element (an assistive client turned it
+    /// on: the app animates frame changes made through Accessibility).
+    pub fn enhanced_user_interface(&self) -> AxResult<bool> {
+        self.bool_attr(names::ENHANCED_USER_INTERFACE)
+    }
+
+    /// Sets `AXEnhancedUserInterface` on an application element (only
+    /// [`super::enhanced_ui`] does, around our moves).
+    pub fn set_enhanced_user_interface(&self, on: bool) -> AxResult<()> {
+        self.set_bool_attr(names::ENHANCED_USER_INTERFACE, on)
+    }
+
+    /// Sets `AXPosition`, with the app's enhanced UI off ([`super::enhanced_ui`]).
     pub fn set_position(&self, p: Point) -> AxResult<()> {
+        super::enhanced_ui::around(self, || self.write_position(p))
+    }
+
+    /// Sets `AXSize`, with the app's enhanced UI off ([`super::enhanced_ui`]).
+    pub fn set_size(&self, s: Size) -> AxResult<()> {
+        super::enhanced_ui::around(self, || self.write_size(s))
+    }
+
+    fn write_position(&self, p: Point) -> AxResult<()> {
         self.set_value_attr(names::POSITION, AXValueType::CGPoint, &CGPoint { x: p.x, y: p.y })
     }
 
-    /// Sets `AXSize`.
-    pub fn set_size(&self, s: Size) -> AxResult<()> {
+    fn write_size(&self, s: Size) -> AxResult<()> {
         self.set_value_attr(names::SIZE, AXValueType::CGSize, &CGSize { width: s.w, height: s.h })
     }
 
     /// Sets the frame: size, then position, then size again (a window that cannot grow past
-    /// a display edge at its old position gets its full size once moved).
+    /// a display edge at its old position gets its full size once moved). With the app's
+    /// enhanced UI off ([`super::enhanced_ui`]): the app never animates it.
     ///
     /// A window that refuses a resize (a fixed-size dialog) still counts as done when its
     /// size already is the one asked for: only the move mattered.
     pub fn set_frame(&self, r: Rect) -> AxResult<()> {
-        let first = self.set_size(r.size());
-        self.set_position(r.origin())?;
-        match self.set_size(r.size()).or(first) {
+        super::enhanced_ui::around(self, || self.write_frame(r))
+    }
+
+    fn write_frame(&self, r: Rect) -> AxResult<()> {
+        let first = self.write_size(r.size());
+        self.write_position(r.origin())?;
+        match self.write_size(r.size()).or(first) {
             Ok(()) => Ok(()),
             Err(e) => match self.frame() {
                 Ok(now) if (now.w - r.w).abs() <= 1.0 && (now.h - r.h).abs() <= 1.0 => Ok(()),

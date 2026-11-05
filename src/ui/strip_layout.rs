@@ -128,15 +128,26 @@ impl Metrics {
 
     /// How much the far edge of a plane `u` wide shrinks (`D / (D + u sin tilt)`).
     pub fn far_ratio(&self, u: f64) -> f64 {
+        self.far_ratio_turned(u, self.tilt)
+    }
+
+    /// [`Metrics::far_ratio`] for a plane turned by `tilt` (radians), not the cards' turn.
+    fn far_ratio_turned(&self, u: f64, tilt: f64) -> f64 {
         let d = self.perspective.max(1.0);
-        d / (d + u * self.tilt.sin())
+        d / (d + u * tilt.sin())
     }
 
     /// The four corners of a thumbnail whose left edge runs from (`x`, `top`) down `v`, `u`
     /// wide before the turn: top-left, top-right, bottom-right, bottom-left.
     pub fn project(&self, x: f64, top: f64, u: f64, v: f64) -> [Point; 4] {
-        let f = self.far_ratio(u);
-        let rx = self.eye.x + (x + u * self.tilt.cos() - self.eye.x) * f;
+        self.project_turned(x, top, u, v, self.tilt)
+    }
+
+    /// [`Metrics::project`] for a plane turned by `tilt` (radians) about its left edge, seen
+    /// from the cards' eye: a snapshot on its way between a card and its window.
+    pub fn project_turned(&self, x: f64, top: f64, u: f64, v: f64, tilt: f64) -> [Point; 4] {
+        let f = self.far_ratio_turned(u, tilt);
+        let rx = self.eye.x + (x + u * tilt.cos() - self.eye.x) * f;
         let ry = |y: f64| self.eye.y + (y - self.eye.y) * f;
         [Point::new(x, top), Point::new(rx, ry(top)), Point::new(rx, ry(top + v)), Point::new(x, top + v)]
     }
@@ -151,7 +162,12 @@ impl Metrics {
 
     /// The bounding box of [`Metrics::project`].
     pub fn projected_bounds(&self, x: f64, top: f64, u: f64, v: f64) -> Rect {
-        let q = self.project(x, top, u, v);
+        self.projected_bounds_turned(x, top, u, v, self.tilt)
+    }
+
+    /// The bounding box of [`Metrics::project_turned`].
+    pub fn projected_bounds_turned(&self, x: f64, top: f64, u: f64, v: f64, tilt: f64) -> Rect {
+        let q = self.project_turned(x, top, u, v, tilt);
         let (x0, x1) = (q.iter().map(|p| p.x).fold(f64::INFINITY, f64::min), q.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max));
         let (y0, y1) = (q.iter().map(|p| p.y).fold(f64::INFINITY, f64::min), q.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max));
         Rect::new(x0, y0, x1 - x0, y1 - y0)
@@ -526,6 +542,18 @@ mod tests {
         assert!((1350.0..1430.0).contains(&v), "{v}");
         assert_eq!(auto_perspective(5000.0), (47.9, 2260.0));
         assert_eq!(auto_perspective(1000.0), (44.2, 1346.0));
+    }
+
+    /// 11-01: a snapshot a hair from flat (the spring not quite at rest at the unveil) was
+    /// measured with the cards' turn, 1217 pt wide reading 355. Its own turn: as wide as flat.
+    #[test]
+    fn a_plane_is_measured_with_its_own_turn() {
+        let m = five_k();
+        let b = m.projected_bounds_turned(813.0, 215.0, 1217.0, 790.0, 1e-6);
+        assert!((b.x - 813.0).abs() < 0.1 && (b.w - 1217.0).abs() < 0.1 && (b.y - 215.0).abs() < 0.1 && (b.h - 790.0).abs() < 0.1, "{b:?}");
+        let card = m.projected_bounds(15.0, 100.0, 200.0, 140.0);
+        assert_eq!(m.projected_bounds_turned(15.0, 100.0, 200.0, 140.0, m.tilt), card, "the cards' turn as before");
+        assert!(card.w < 200.0 * 0.8, "a card is narrower than flat: {card:?}");
     }
 
     #[test]

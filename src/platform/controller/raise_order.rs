@@ -145,7 +145,9 @@ impl Controller {
             let Some(w) = ob.window(id) else { continue };
             let budget = deadline.saturating_duration_since(now).clamp(order::POLL, order::PER_WINDOW);
             self.echoes.touch_window(id, now);
-            let _ = w.element.bounded(budget.as_secs_f32(), |e| e.raise());
+            // A fresh handle found this batch for a dead one wins (stale-handles).
+            let element = ob.element(id).unwrap_or_else(|| w.element.clone());
+            let _ = element.bounded(budget.as_secs_f32(), |e| e.raise());
             for child in children_raised_after(raises, id, |c| ob.window(c).is_some_and(|w| w.kind == WindowKind::Child)) {
                 if let Some(c) = ob.window(child) {
                     self.echoes.touch_window(child, now);
@@ -171,7 +173,7 @@ impl Controller {
             let now = Instant::now();
             self.echoes.touch_window(key, now);
             self.echoes.touch_app(w.pid, now);
-            let _ = ax_focus(&w.element, w.pid);
+            let _ = ax_focus(&ob.element(key).unwrap_or_else(|| w.element.clone()), w.pid);
         }
         if late { Err(OUT_OF_TIME) } else { Ok(()) }
     }

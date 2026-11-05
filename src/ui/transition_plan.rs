@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Action, Home, Model, StripCard};
+use crate::engine::model::{Action, Home, Model, StripCard, WindowId};
 use crate::ui::strip_model::{CardWindow, MovingWindow, Transition};
 
 /// The strip's cards as slots: (stage, its windows), top to bottom.
@@ -104,7 +104,23 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
         return None;
     }
     outgoing.reverse();
-    Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None })
+    // The key windows (their snapshots carry the key window's shadow): the outgoing one its
+    // stage keeps as key, else its front one; the incoming one the batch focuses (none when it
+    // focuses a window already in place), else the front one.
+    let key_out = outgoing
+        .iter()
+        .map(|w| w.window.id)
+        .find(|&id| m.stage_of(WindowId(id)).and_then(|s| m.stage(s)).is_some_and(|s| s.key == Some(WindowId(id))))
+        .or_else(|| outgoing.last().map(|w| w.window.id));
+    let focus = actions.iter().rev().find_map(|a| match *a {
+        Action::Focus { id: w } => Some(w.0),
+        _ => None,
+    });
+    let key_in = match focus {
+        Some(w) => incoming.iter().any(|x| x.window.id == w).then_some(w),
+        None => incoming.first().map(|w| w.window.id),
+    };
+    Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None, key_out, key_in, late: Vec::new() })
 }
 
 /// The stage ids of `slots`, top to bottom (for the logs).

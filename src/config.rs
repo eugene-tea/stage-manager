@@ -107,6 +107,9 @@ pub struct StripConfig {
     /// How the active stage shows in place (`[strip] active`; the older `show_active = true`
     /// reads as [`ActiveCard::Card`]).
     pub active: ActiveCard,
+    /// Bundle ids that give a stage its Dock place only when no other app of the stage has a
+    /// Dock icon (`[strip] dock_ignore`; the Finder by default).
+    pub dock_ignore: Vec<String>,
     /// Hide the strip while a wallpaper click shows the desktop (an option; Apple keeps it
     /// shown, as the way back to a stage). It comes back on any window activation.
     pub hide_while_desktop_shown: bool,
@@ -149,6 +152,13 @@ pub struct CardStyle {
     pub press_scale: f64,
     pub press_ms: u64,
     pub fade_ms: u64,
+    /// Each window's picture on a card (1: opaque; below, the wallpaper shows through).
+    pub window_opacity: f64,
+    /// The same on the card under the pointer (or a drop's target), eased with its growth.
+    pub hover_window_opacity: f64,
+    /// The wallpaper's colour behind it: saturation and brightness of the wallpaper's own.
+    pub backdrop_saturation: f64,
+    pub backdrop_brightness: f64,
 }
 
 /// `[icons]`.
@@ -215,6 +225,9 @@ pub struct AnimationStyle {
     pub unpark_at: f64,
     pub cover_ms: u64,
     pub corner_radius: f64,
+    /// A moving snapshot's shadow: macOS's window shadow, or one of its own.
+    pub shadow: SnapshotShadow,
+    /// `shadow = "custom"`: its blur radius, opacity and offset down.
     pub shadow_radius: f64,
     pub shadow_opacity: f64,
     pub shadow_offset_y: f64,
@@ -225,6 +238,17 @@ pub struct AnimationStyle {
     /// corner, where macOS has raised them, is covered meanwhile); off, they come to their
     /// frames at once.
     pub activation_grows: bool,
+}
+
+/// `[animation] shadow`: a moving snapshot's shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapshotShadow {
+    /// macOS's own window shadow: the key window's on the window that is or becomes key, an
+    /// inactive window's on the others (Apple's look).
+    #[default]
+    Window,
+    /// One shadow from `shadow_radius`, `shadow_opacity` and `shadow_offset_y`.
+    Custom,
 }
 
 /// `[strip] level`: where the strip sits among windows.
@@ -326,8 +350,22 @@ pub struct WindowsConfig {
     /// The desktop picture, drawn from its file, over the parked windows' slivers (a
     /// prototype).
     pub corner_patch: bool,
-    /// How far past a sliver the patch reaches (its shadow).
-    pub corner_patch_reach: f64,
+    /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
+    /// shadow side by side ([`crate::engine::corner_patch::DEFAULT_REACH`]), or one number for
+    /// every side ([`WindowsConfig::patch_reach`]).
+    pub corner_patch_reach: Auto,
+}
+
+impl WindowsConfig {
+    /// The corner patch's reach past each side of a sliver: the user's number on every side
+    /// when `[windows] corner_patch_reach` is set, else an inactive window's shadow.
+    pub fn patch_reach(&self) -> crate::engine::corner_patch::Reach {
+        use crate::engine::corner_patch::{DEFAULT_REACH, Reach};
+        match self.corner_patch_reach {
+            Auto::Auto => DEFAULT_REACH,
+            Auto::Value(v) => Reach::even(v).clean(),
+        }
+    }
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -351,6 +389,10 @@ pub struct StagesConfig {
     /// for their apps to reopen them (on by default); off is 1.2.0's behaviour. Read at
     /// launch.
     pub restore_after_restart: bool,
+    /// After a restart, the windows macOS reopened on another Desktop than their own are
+    /// listed in the status menu, with a mark on its icon (on by default: it serves the
+    /// restore; round desktop-notice).
+    pub restore_notice: bool,
     /// A newly opened app's first windows join the active stage instead of a stage of their
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
@@ -359,7 +401,7 @@ pub struct StagesConfig {
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
+        Self { names: Vec::new(), restore_after_restart: true, restore_notice: true, new_apps_join_current: false }
     }
 }
 
@@ -602,7 +644,7 @@ fn validate(d: &schema::KeyDef, v: &toml::Value, warnings: &mut Vec<String>) -> 
             hotkey::parse_numbered(v.as_str().ok_or_else(ty)?)?;
             v.clone()
         }
-        Kind::Names => {
+        Kind::Names | Kind::Bundles => {
             let items = v.as_array().ok_or_else(ty)?;
             if items.iter().any(|i| !i.is_str()) {
                 return Err(ty());
@@ -762,6 +804,16 @@ impl Config {
             }
         }
 
+        let mut dock_ignore: Vec<String> = Vec::new();
+        for b in v.get("strip.dock_ignore").as_array().into_iter().flatten().filter_map(toml::Value::as_str) {
+            let b = b.trim();
+            if b.is_empty() {
+                warnings.push("[strip] dock_ignore: an empty bundle id was ignored".to_string());
+            } else if !dock_ignore.iter().any(|d| d == b) {
+                dock_ignore.push(b.to_string());
+            }
+        }
+
         let speed = v.num("animation.speed");
         if speed > 0.0 && speed < MIN_SPEED {
             warnings.push(format!("animation.speed = {speed} is outside {MIN_SPEED}..4 (0 = none); using {MIN_SPEED}"));
@@ -786,6 +838,7 @@ impl Config {
                     _ if legacy_show_active && !active_set => ActiveCard::Card,
                     _ => ActiveCard::Close,
                 },
+                dock_ignore,
                 hide_while_desktop_shown: v.flag("strip.hide_while_desktop_shown"),
                 capacity: CapacityRule {
                     fixed: v.count("strip.capacity"),
@@ -838,6 +891,10 @@ impl Config {
                     press_scale: v.num("cards.press_scale"),
                     press_ms: v.uint("cards.press_ms"),
                     fade_ms: v.uint("cards.fade_ms"),
+                    window_opacity: v.num("cards.window_opacity"),
+                    hover_window_opacity: v.num("cards.hover_window_opacity"),
+                    backdrop_saturation: v.num("cards.backdrop_saturation"),
+                    backdrop_brightness: v.num("cards.backdrop_brightness"),
                 },
                 icons: IconStyle {
                     size: v.num("icons.size"),
@@ -884,6 +941,10 @@ impl Config {
                     unpark_at: v.num("animation.unpark_at"),
                     cover_ms: v.uint("animation.cover_ms"),
                     corner_radius: v.num("animation.corner_radius"),
+                    shadow: match v.text("animation.shadow") {
+                        "custom" => SnapshotShadow::Custom,
+                        _ => SnapshotShadow::Window,
+                    },
                     shadow_radius: v.num("animation.shadow_radius"),
                     shadow_opacity: v.num("animation.shadow_opacity"),
                     shadow_offset_y: v.num("animation.shadow_offset_y"),
@@ -906,13 +967,14 @@ impl Config {
                 park_drop: v.num("windows.park_drop"),
                 hide_parked_apps: v.flag("windows.hide_parked_apps"),
                 corner_patch: v.flag("windows.corner_patch"),
-                corner_patch_reach: v.num("windows.corner_patch_reach"),
+                corner_patch_reach: v.auto("windows.corner_patch_reach"),
             },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
             stages: StagesConfig {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
+                restore_notice: v.flag("stages.restore_notice"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
             },
             sugar: SugarConfig {
@@ -943,6 +1005,7 @@ impl Config {
         ModelOptions {
             settings,
             strip: self.strip_options(capacity),
+            dock_ignore: self.strip.dock_ignore.clone(),
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
             park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
@@ -1159,6 +1222,21 @@ mod tests {
     }
 
     #[test]
+    fn the_corner_patch_reach_is_an_inactive_shadow_unless_set() {
+        use crate::engine::corner_patch::{DEFAULT_REACH, Reach};
+        assert_eq!(Config::default().windows.corner_patch_reach, Auto::Auto);
+        assert_eq!(Config::default().windows.patch_reach(), DEFAULT_REACH, "not set: per side");
+        assert_eq!(parse("[windows]\ncorner_patch_reach = \"auto\"\n").config.windows.patch_reach(), DEFAULT_REACH);
+        let set = parse("[windows]\ncorner_patch_reach = 60\n");
+        assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+        assert_eq!(set.config.windows.patch_reach(), Reach::even(60.0), "set: one number, every side");
+        assert_eq!(parse("[windows]\ncorner_patch_reach = 0.0\n").config.windows.patch_reach(), Reach::even(0.0));
+        let far = parse("[windows]\ncorner_patch_reach = 900\n");
+        assert_eq!(far.config.windows.patch_reach(), Reach::even(400.0));
+        assert!(!far.warnings.is_empty());
+    }
+
+    #[test]
     fn restore_after_restart_can_be_turned_off() {
         let p = parse("[stages]\nrestore_after_restart = false\n");
         assert!(!p.config.stages.restore_after_restart && p.warnings.is_empty(), "{:?}", p.warnings);
@@ -1208,6 +1286,7 @@ mod tests {
         assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
+        assert!(c.stages.restore_notice, "windows back on another Desktop are listed (it serves the restore: his word, 11-03)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
         assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
@@ -1467,6 +1546,26 @@ swipe = true
     }
 
     #[test]
+    fn the_cards_let_the_wallpaper_through_by_default_as_apples_do() {
+        let glass = |c: &CardStyle| (c.window_opacity, c.backdrop_saturation, c.backdrop_brightness);
+        assert_eq!(glass(&Config::default().style.cards), (0.78, 0.95, 0.78));
+        let p = parse("[cards]\nwindow_opacity = 1.0\nbackdrop_saturation = 0\nbackdrop_brightness = 1.25");
+        assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 1.25), "opaque cards: the old look");
+        let p = parse("[cards]\nwindow_opacity = 1.5\nbackdrop_saturation = -1");
+        assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 0.78), "clamped");
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn the_hovered_card_turns_solid_by_default_as_apples_does() {
+        assert_eq!(Config::default().style.cards.hover_window_opacity, 1.0);
+        let p = parse("[cards]\nwindow_opacity = 0.6\nhover_window_opacity = 0.6");
+        let c = &p.config.style.cards;
+        assert_eq!((c.window_opacity, c.hover_window_opacity), (0.6, 0.6), "the fade off");
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
     fn hotkey_conflicts_warn_only_when_enabled() {
         assert_eq!(parse("[hotkeys]\ntoggle_pin = \"ctrl+alt+n\"").warnings.len(), 0);
         let p = parse("[hotkeys]\nenabled = true\ntoggle_pin = \"ctrl+alt+n\"");
@@ -1498,6 +1597,19 @@ swipe = true
         assert!(!dock.reorder, "the Dock decides: a card dragged within the strip springs back");
         assert!(dock.merge_on_drop, "dropping a card on a card still merges");
         assert!(!style("[strip]\nreorder = false").reorder);
+    }
+
+    #[test]
+    fn following_the_dock_the_finder_is_left_out_of_a_stages_place_by_default() {
+        let read = |t: &str| parse(t).config.strip.dock_ignore;
+        assert_eq!(Config::default().strip.dock_ignore, ["com.apple.finder"]);
+        assert_eq!(read("[strip]\ndock_ignore = []"), Vec::<String>::new(), "an empty list: every app counts");
+        let p = parse("[strip]\ndock_ignore = [\" com.example.files \", \"\", \"com.example.files\", \"com.apple.finder\"]");
+        assert_eq!(p.config.strip.dock_ignore, ["com.example.files", "com.apple.finder"], "trimmed, no empties, no repeats");
+        assert_eq!(p.warnings.len(), 1, "the empty id warns: {:?}", p.warnings);
+        assert_eq!(p.config.model_options(NativeSettings::default(), 5).dock_ignore, p.config.strip.dock_ignore);
+        assert!(Config::parse("[strip]\ndock_ignore = \"com.apple.finder\"").is_err(), "a list");
+        assert!(Config::parse("[strip]\ndock_ignore = [1]").is_err(), "of bundle ids");
     }
 
     #[test]
