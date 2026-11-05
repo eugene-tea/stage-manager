@@ -188,9 +188,6 @@ Known gaps the owner accepted as rare:
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the
   strip, the floating level, so an always-on-top window may still be covered then.
 - **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
-  - **`hide_parked_apps` trial on the owner's Mac** (10-29 to 11-04; the live `hide` phase
-    65/0). Ended 11-04 by the owner: a hidden app ⌘-Tabbed to shows its windows at once,
-    without the switch's motion (macOS unhides them natively). Stays off.
   - **Deferred findings:**
     - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
     - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
@@ -222,11 +219,9 @@ Known gaps the owner accepted as rare:
   - **Card glass, not measured:** Dark Mode; a window behind another on one card; the
     hovered card's growth (Apple's read 11 % wider, 11-05) against ours. The script's
     reading beside the card is in the display's colours, the fit's from the picture file.
-  - **The hide trial's live phase, 11-05:** 88 of 89; "supersede: Bravo and Charlie
-    together again" left an empty stage 3 ({1: Charlie, Bravo; 2: Alpha 1, 2; 3: none}).
-    `hide_parked_apps` is off and stays off; look before it is ever offered again.
-  - **Chrome's enhanced interface:** we turn its flag off around our moves and restore it
-    after; Rectangle leaves it off. Keep restoring unless an assistive tool complains.
+  - **`hide_parked_apps` stays off** (its trial ended 11-04: a hidden app ⌘-Tabbed to
+    skips the switch's motion). Its live phase 11-05 was 88 of 89: "supersede: Bravo and
+    Charlie together again" left an empty stage 3. Look there before it is ever offered again.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.
