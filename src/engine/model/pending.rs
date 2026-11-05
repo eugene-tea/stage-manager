@@ -220,6 +220,7 @@ impl Model {
             by_apple: self.restore.by_apple,
             corner: self.restore.corner,
             pooled: self.pooled_count(),
+            other_screen: self.restore.other_screen,
         }
     }
 

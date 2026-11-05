@@ -517,6 +517,41 @@ fn a_saved_desktop_of_a_screen_not_connected_forms_where_its_windows_are() {
     let studio_saved = state.spaces.iter().find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == STUDIO_KEY.text())).expect("saved").id;
     assert_eq!(m.last_arrival().rebuilt, Some(studio_saved));
     assert!(m.stages_in(SpaceId(studio_saved)).all(|s| s.display == LAPTOP));
+    // The restore says so (round displays-2): the arrival's note and the summary's line.
+    assert!(m.last_arrival().other_screen, "formed on another screen than it was saved on");
+    assert_eq!(m.restore_summary(0).other_screen, 1);
+    assert!(m.restore_summary(0).to_string().ends_with("1 Desktop on another screen"));
+}
+
+#[test]
+fn a_saved_desktop_on_its_own_screen_is_not_counted_as_moved() {
+    let (state, live) = saved_desk();
+    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    m.restore_spaces(state.spaces.clone());
+    let laptop_apps: Vec<WindowMeta> = live.iter().filter(|w| w.display == LAPTOP).cloned().collect();
+    m.arrive(LAPTOP, &laptop_apps, &[], &LaunchHints::default());
+    assert!(m.last_arrival().rebuilt.is_some());
+    assert!(!m.last_arrival().other_screen);
+    assert_eq!(m.restore_summary(0).other_screen, 0);
+    assert!(!m.restore_summary(0).to_string().contains("another screen"));
+}
+
+#[test]
+fn fit_keeps_a_window_clear_of_its_own_screens_strip() {
+    use crate::engine::stage_area::FitOptions;
+    let mut e = Env::both();
+    // The Studio's strip column is wider than the laptop's (its cards are bigger).
+    e.m.set_display_fit(STUDIO, FitOptions { inset: 216.0, shrink: false });
+    e.m.set_display_fit(LAPTOP, FitOptions { inset: 160.0, shrink: false });
+    e.open(1, 20, &studio(), (40.0, 100.0), RuleAction::New);
+    e.open(2, 21, &laptop(), (40.0, 100.0), RuleAction::New);
+    assert_eq!(e.d.frames[&WindowId(1)].x, studio().visible.x + 216.0, "moved clear of the Studio's strip");
+    assert_eq!(e.d.frames[&WindowId(2)].x, laptop().visible.x + 160.0, "moved clear of the laptop's own strip, not the Studio's");
+    assert_eq!(e.m.fit_of(LAPTOP).inset, 160.0);
+    // The whole-model setting forgets the per-display ones.
+    e.m.set_fit(FitOptions { inset: 0.0, shrink: false });
+    assert_eq!(e.m.fit_of(LAPTOP).inset, 0.0);
+    assert_eq!(e.m.fit_of(STUDIO).inset, 0.0);
 }
 
 #[test]

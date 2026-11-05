@@ -129,6 +129,9 @@ pub struct Display {
 }
 
 impl Display {
+    /// The nominal display used when the platform reports none ([`FALLBACK_DISPLAY`]).
+    pub const FALLBACK: Display = FALLBACK_DISPLAY;
+
     /// True when `frame` sits in this display's park zone at its corner, where macOS really
     /// leaves a parked window (above a bottom Dock too): the one park test
     /// ([`is_parked_in_at`]).
@@ -326,6 +329,9 @@ pub struct Model {
     /// How many cards each display's strip holds (its height decides), where the platform
     /// said; else [`StripOptions::capacity`].
     pub(crate) capacity: HashMap<DisplayId, usize>,
+    /// How placed windows are kept clear of each display's strip (its own strip's width;
+    /// round displays-2), where the platform said; else [`ModelOptions::fit`].
+    pub(crate) fits: HashMap<DisplayId, FitOptions>,
     /// Stages in creation order (stage N of a Space = its Nth stage in this list).
     pub(crate) stages: Vec<Stage>,
     /// Every managed window, standard and child.
@@ -437,6 +443,7 @@ impl Model {
         let mut model = Self {
             displays,
             capacity: HashMap::new(),
+            fits: HashMap::new(),
             stages: Vec::new(),
             windows: BTreeMap::new(),
             active: HashMap::new(),
@@ -606,9 +613,22 @@ impl Model {
         }
     }
 
-    /// Sets how placed windows are kept clear of the strip.
+    /// Sets how placed windows are kept clear of the strip (every display's, unless
+    /// [`Model::set_display_fit`] said otherwise for one).
     pub fn set_fit(&mut self, fit: FitOptions) {
         self.options.fit = fit;
+        self.fits.clear();
+    }
+
+    /// Sets how placed windows are kept clear of one display's strip (its own column:
+    /// `[windows] fit` against the strip of the window's own screen, round displays-2).
+    pub fn set_display_fit(&mut self, display: DisplayId, fit: FitOptions) {
+        self.fits.insert(display, fit);
+    }
+
+    /// The fit in force on `display` ([`Model::set_display_fit`], else [`ModelOptions::fit`]).
+    pub fn fit_of(&self, display: DisplayId) -> FitOptions {
+        self.fits.get(&self.known_display(display)).copied().unwrap_or(self.options.fit)
     }
 
     /// How park frames are asked from now on (windows parked already stay where they are).
@@ -861,13 +881,14 @@ impl Model {
     /// ([`fit_frame`]) when fitting is on; remembers the frame it had before (once). Returns
     /// true when the restore frame changed.
     pub(crate) fn fit_window(&mut self, id: WindowId) -> bool {
-        let fit = self.options.fit;
-        if !fit.active() {
-            return false;
-        }
         let Some(w) = self.windows.get(&id) else {
             return false;
         };
+        // The window's own display's strip (round displays-2).
+        let fit = self.fit_of(w.meta.display);
+        if !fit.active() {
+            return false;
+        }
         if w.meta.role != WindowRole::Standard || w.home == Home::Pinned {
             return false;
         }

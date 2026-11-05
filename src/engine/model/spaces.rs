@@ -81,6 +81,9 @@ pub const BESIDE_ARRIVALS: u32 = 2;
 pub struct ArrivalNote {
     /// The saved Space (`state.json`) rebuilt on this visit, if any.
     pub rebuilt: Option<u64>,
+    /// The saved Space rebuilt was saved on another screen than this one (that screen not
+    /// connected, [`Model::saved_fits_display`]; round displays-2).
+    pub other_screen: bool,
     /// Known windows of other Spaces taken as moved here.
     pub moved: usize,
     /// Stages carried over whole (a known Desktop seen under a new id).
@@ -328,6 +331,14 @@ impl Model {
         }
     }
 
+    /// True when saved Desktop `saved` names a screen with an identity and it is not
+    /// `display`'s: it forms here only because its own screen is not connected
+    /// ([`Model::saved_fits_display`]).
+    fn saved_on_other_screen(&self, saved: &SavedSpace, display: DisplayId) -> bool {
+        let Some(key) = saved.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) else { return false };
+        key.known() && !self.display(display).is_keyed(key)
+    }
+
     // ----- arrival and learning ----------------------------------------------------------
 
     /// The platform arrived on a Space of `display` (a Space change, launch, or the window
@@ -398,6 +409,12 @@ impl Model {
             .iter()
             .position(|l| SpaceId(l.id) == target)
             .map(|i| self.leftovers.remove(i));
+        // Saved on a screen that is not this one (round displays-2): said in the arrival's
+        // line and counted for the restore's summary.
+        let other_screen = saved.as_ref().is_some_and(|s| self.saved_on_other_screen(s, display));
+        if other_screen {
+            self.restore.other_screen += 1;
+        }
         // No window of its own and no saved stages: a known Desktop seen under a new id (or
         // a new Desktop), whose stages that moved here whole are carried over before the
         // windows seen here for the first time are placed.
@@ -465,6 +482,7 @@ impl Model {
         self.normalize_slots();
         self.last_arrival = ArrivalNote {
             rebuilt: saved.map(|s| s.id),
+            other_screen,
             moved,
             carried,
             beside: beside.iter().map(|s| s.0).collect(),
