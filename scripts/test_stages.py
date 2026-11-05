@@ -735,7 +735,10 @@ def drill_closed_unanswered():
     if after is not None:
         check(len(after["stages"]) == stages_before - 1, f"its stage went with it ({stages_before} -> {len(after['stages'])} stages)")
         check(not any(not st["windows"] for st in after["stages"]), "no empty stage (no card without a window)")
-    lines = [ln for ln in log_text().splitlines() if "window closed while its app did not answer" in ln and f"id={last['id']} " in ln]
+    # Either rule may take it first: the sweep's ("closed while its app did not answer") or,
+    # since round stale-handles, the dead handle's ("a window whose handle died is gone").
+    said = ("window closed while its app did not answer", "a window whose handle died is gone: let go")
+    lines = [ln for ln in log_text().splitlines() if any(w in ln for w in said) and f"id={last['id']} " in ln]
     check(len(lines) == 1, f"the log says so once ({len(lines)} lines)")
     time.sleep(max(0.0, 3.5 - (time.time() - t0)))  # the fixture answers again
     consistent("after a window closed while its app answered nothing")
