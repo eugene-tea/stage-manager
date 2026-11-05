@@ -1,69 +1,27 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 — 2026-11-05
 
-- A window Stage Manager had lost its grip on (Music's, right after it launched) is found
-  again: it now parks with its stage instead of staying over the next one, and once you
-  close it, its card goes instead of showing its old picture and flying a ghost in at every
-  switch there.
-- When the Mac is very busy, windows no longer fly back and forth between two stages after
-  you click a card: macOS's late word that an app became active no longer switches stages
-  when that app is no longer in front, or when you have switched since. A ⌘-Tab or Dock
-  click still brings its stage, only later.
-- The card under the pointer turns solid as it grows, as Apple's does, and lets the
-  wallpaper through again when the pointer leaves. `[cards] hover_window_opacity` sets how
-  solid; the same value as `window_opacity` keeps the hovered card see-through.
-- A window coming back from the corner no longer slides in from the bottom right in apps
-  where an accessibility tool has turned on that app's enhanced interface (Chrome, for one):
-  Stage Manager turns it off for a moment around its own moves and back on right after, as
-  other window managers do.
-- The cards on the strip let the wallpaper through, as Apple's do: each window's picture is
-  drawn slightly see-through over the wallpaper's colour behind it, and a switch's windows
-  take that look as they shrink into their card. `[cards] window_opacity = 1` brings back
-  opaque cards; `backdrop_saturation` and `backdrop_brightness` tune the colour.
-- A window an app keeps off every screen, such as a headless browser's during automated
-  tests, is no longer taken into the current stage, so it no longer slides onto the screen
-  when you switch back to that stage. Such windows are left alone, as Apple's Stage Manager
-  leaves them.
-- Following the Dock, a Finder window that joins a stage no longer pulls that stage to the
-  top of the strip: the stage keeps the place of its other app (a stage of Finder windows
-  alone still sits at the Finder's place). `[strip] dock_ignore` lists the apps left out
-  this way; `[]` lets every app count again.
+- The cards on the strip let the wallpaper through as Apple's do, and the card under the
+  pointer turns solid as it grows.
 - After a restart, windows that macOS reopened on another Desktop than their own are listed
-  in the menu bar menu, with a small dot on the icon, so you can drag them back in Mission
-  Control. An entry goes away once its window is on its own Desktop; Dismiss clears the list.
-  `[stages] restore_notice = false` turns it off.
-- A window arriving in a switch no longer jumps a little as the motion ends: it takes its
-  place only once its picture is right over it.
-- Moving windows carry the same shadow as the windows themselves, the focused window's
-  larger one included, so the shadow no longer wobbles as a switch starts and ends.
-- The end of a switch no longer flickers: the arriving window comes to rest without a last
-  small snap, shows in its focused look as its picture fades away, and a hidden app's window
-  keeps its shadow until it is really on screen.
-- When a stage's windows overlap, the window behind no longer shows faintly through the one
-  in front at the end of a switch.
-- The arriving window's picture keeps its shadow until the window itself is on screen, so the
-  shadow no longer lightens for a moment at the end of a switch.
-- In Dark Mode, moving windows carry the darker shadow and the thin light edge macOS gives
-  windows there, so the edges no longer flicker as a switch ends.
-- A window that an app draws dark while the system is light (or light while it is dark), such
-  as Messages with a dark chat background, now moves with its own shadow, so its edges no
-  longer flicker as a switch ends.
-- A hidden app's window arriving in a switch keeps its picture's shadow until it is drawn as
-  the focused window, so the shadow no longer lightens for a frame.
-- With hidden parked apps, a switch to a hidden app's stage now always gives it the keyboard:
-  an app that does not take its activation is asked again.
-- When apps are slow to answer (right after a restart of Stage Manager, or under heavy
-  load), stages no longer switch by themselves: a window that was on screen all along but
-  found late goes quietly to its stage, a window focused in an app behind or a hidden app no
-  longer brings its stage, and quick clicks on several cards never let an earlier click's
-  window take the keyboard back.
-- An automatic update no longer installs while the screen is locked, when hidden windows
-  could not come back until you unlocked; it waits until you are back and step away again.
-- The patch that keeps the corner clean is smaller: it reaches past the hidden windows' edges
-  only as far as their shadow does.
-- A desktop icon dropped into the corner is no longer cut in half for a moment: the patch steps
-  aside until it has redrawn the corner with the icon.
+  in the menu bar menu, with a dot on the icon, so you can move them back.
+- Switches end cleanly: no last jump or flicker as the windows land, steady shadows (in Dark
+  Mode and in apps drawn dark too), and overlapping windows no longer show through each other.
+- When the Mac is very busy, stages no longer switch by themselves or bounce between two
+  stages after you click a card. A ⌘-Tab or Dock click still brings its stage, only later.
+- In Chrome and other apps whose enhanced accessibility interface is on, windows no longer
+  slide in from the bottom right.
+- A window Stage Manager had lost track of (Music's, right after it launched) goes into the
+  corner with its stage again, and once you close it, its card goes too.
+- A Finder window that joins a stage no longer pulls that stage to the top when the strip
+  follows the Dock order.
+- Windows an app keeps off every screen, such as a headless browser's during automated tests,
+  are left alone instead of sliding onto the screen.
+- An automatic update waits until the screen is unlocked, so hidden windows can always come
+  back.
+- The patch that keeps the corner clean is smaller, and a desktop icon dropped into the
+  corner is no longer cut in half for a moment.
 
 ## 1.5.0 — 2026-10-29
 

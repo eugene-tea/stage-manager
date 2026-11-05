@@ -188,9 +188,9 @@ Known gaps the owner accepted as rare:
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the
   strip, the floating level, so an always-on-top window may still be covered then.
 - **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
-  - **`hide_parked_apps` trial on the owner's Mac** (on in his config since 10-29; the live
-    `hide` phase 65/0). 1.5.0 shipped it off, as before; decide the default after a few
-    days, from how ⌘Tab and the Dock feel.
+  - **`hide_parked_apps` trial on the owner's Mac** (10-29 to 11-04; the live `hide` phase
+    65/0). Ended 11-04 by the owner: a hidden app ⌘-Tabbed to shows its windows at once,
+    without the switch's motion (macOS unhides them natively). Stays off.
   - **Deferred findings:**
     - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
     - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
@@ -209,6 +209,21 @@ Known gaps the owner accepted as rare:
     click check then refuses. Have the suite wait for it to go, and name it when it
     doesn't. The owner's own unmanaged windows do the same while his app is quit (Messages
     at the left edge, 1.5.0's run: 849/13, 12 of them refused clicks).
+- **After 1.6.0:**
+  - **Full-screen windows in the closed-window rule:** a window whose handle died is kept
+    when the window server lists it off screen at about a display's size
+    (`engine::stale_handle::on_full_screen_space`), since no public API names a window's
+    Space. It only ever keeps a window; a surer source (the window's last read AXFullScreen)
+    would retire the size test.
+  - **Short-lived windows taken in and let go:** Safari's 53x48 dialog and Chrome's
+    address-bar suggestion list (AXUnknown, 89 pt tall) are placed in a stage, then let go
+    as closed a second later, many times a day (11-05 log). Apple's Stage Manager shows
+    neither on a card: decide whether such windows are ever managed.
+  - **Card glass, not measured:** Dark Mode; a window behind another on one card; the
+    hovered card's growth (Apple's read 11 % wider, 11-05) against ours. The script's
+    reading beside the card is in the display's colours, the fit's from the picture file.
+  - **Chrome's enhanced interface:** we turn its flag off around our moves and restore it
+    after; Rectangle leaves it off. Keep restoring unless an assistive tool complains.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.
