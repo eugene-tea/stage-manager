@@ -11,15 +11,15 @@
 //! under = k · (s · mean + (1 − s) · luma(mean))
 //! ```
 //!
-//! all in the display's encoded values (Core Animation composites them so). Fitted to three
-//! of Apple's cards over an orange wallpaper (Safari's empty page, Mail's and Fork's white),
-//! `a = 0.70, s = 0.5, k = 1.0` misses by 5 levels on average, within what sampling the
-//! wallpaper beside a card rather than under it explains. Other readings fit worse or say
-//! nothing: plain alpha over the wallpaper as it is (12 levels: Fork's card is far greyer than
-//! the dark wallpaper around it), a multiply (12), alpha over a darkened wallpaper (6.7, Fork
-//! 13 off in red); a flat grey tint over the wallpaper fits as well as the model for any `a`
-//! from 0.3 to 0.75, so white pages alone cannot tell `a` from a tint: black, grey and white
-//! fixtures can (`scripts/measure-apple-card-glass.py`). The under is flat over a card: Apple's
+//! all in the display's encoded values (Core Animation composites them so). Measured 11-05
+//! with `scripts/measure-apple-card-glass.py`, Apple's Stage Manager on: one card read with its
+//! window flat white, black and grey (`a` = white − black, the under = black / (1 − a)), two
+//! runs: `a = 0.78` both times; the under against the wallpaper behind the card (from its
+//! file, as the app reads it) fits `s = 0.95, k = 0.78` within 0.3 levels; the grey read
+//! follows an encoded blend (1 level off; linear light, 5). The 11-03 fit to screenshots of app
+//! pages (`a = 0.70, s = 0.5, k = 1.0`) took Mail's and Fork's pages for white, which they
+//! are not; Safari's empty page, the one known page, fits the measured values within 2 levels
+//! (the old ones, 7). The under is flat over a card: Apple's
 //! Safari card read alike 100 pt apart where the wallpaper beside it changed by 26 levels, so
 //! it is a mean over the thumbnail, not a local blur (a blur keeps a ramp a ramp).
 //!
@@ -51,7 +51,7 @@ pub struct Glass {
 
 impl Glass {
     /// Apple's, as fitted (module notes).
-    pub const APPLE: Glass = Glass { opacity: 0.7, hover_opacity: 1.0, saturation: 0.5, brightness: 1.0 };
+    pub const APPLE: Glass = Glass { opacity: 0.78, hover_opacity: 1.0, saturation: 0.95, brightness: 0.78 };
 
     /// True when the cards let anything through.
     pub fn on(&self) -> bool {
@@ -187,31 +187,32 @@ mod tests {
     }
 
     #[test]
-    fn apples_cards_over_an_orange_wallpaper_come_out_within_a_few_levels() {
-        // (page, the card on Apple's strip, the wallpaper beside it), the owner's screenshots 11-03.
+    fn apples_cards_come_out_within_a_few_levels() {
+        // (page, the card on Apple's strip, the wallpaper behind it). The 11-05 measurement: a
+        // fixture's flat white and black pages over the wallpaper's mean behind the card, read
+        // from its file (the card's own reads, a = 0.78, the under 180.0, 127.5, 50.6); and
+        // Safari's empty page on the owner's screenshot 11-03, the wallpaper beside the card.
+        let wall = rgb(232.91, 163.22, 59.33);
+        let card = |page: f64| rgb(0.78 * page + 0.22 * 180.0, 0.78 * page + 0.22 * 127.5, 0.78 * page + 0.22 * 50.6);
         let cases = [
-            ("Safari", rgb(240.0, 240.0, 240.0), rgb(223.0, 198.0, 190.0), rgb(224.0, 70.0, 0.5)),
-            ("Mail", rgb(255.0, 255.0, 255.0), rgb(231.0, 207.0, 194.0), rgb(244.0, 93.0, 29.0)),
-            ("Fork", rgb(255.0, 255.0, 255.0), rgb(201.0, 190.0, 188.0), rgb(138.0, 31.0, 6.0)),
+            ("white", rgb(255.0, 255.0, 255.0), card(255.0), wall, 1.0),
+            ("black", rgb(0.0, 0.0, 0.0), card(0.0), wall, 1.0),
+            ("grey", rgb(128.0, 128.0, 128.0), card(128.0), wall, 1.0),
+            ("Safari", rgb(240.0, 240.0, 240.0), rgb(223.0, 198.0, 190.0), rgb(224.0, 70.0, 0.5), 3.0),
         ];
         let g = Glass::APPLE;
-        let mut sq = 0.0;
-        for (name, page, apple, wall) in cases {
+        for (name, page, apple, wall, within) in cases {
             let ours = levels(g.card(page, g.under(wall)));
             let want = levels(apple);
             for i in 0..3 {
-                let d = ours[i] - want[i];
-                assert!(d.abs() <= 10.0, "{name}: {ours:?} vs Apple's {want:?}");
-                sq += d * d;
+                assert!((ours[i] - want[i]).abs() <= within, "{name}: {ours:?} vs Apple's {want:?}");
             }
         }
-        let rms = (sq / 9.0f64).sqrt();
-        assert!(rms < 5.5, "{rms}");
     }
 
     #[test]
     fn the_under_keeps_the_luma_and_scales_the_colour_about_it() {
-        let g = Glass::APPLE;
+        let g = Glass { saturation: 0.5, brightness: 1.0, ..Glass::APPLE };
         let wall = rgb(244.0, 93.0, 29.0);
         let u = g.under(wall);
         assert!((luma(u) - luma(wall)).abs() < 1e-9);
@@ -233,15 +234,16 @@ mod tests {
 
     #[test]
     fn a_ghost_lands_on_the_cards_look_and_leaves_it_as_the_window() {
-        assert_eq!(ghost_mix(0.0, 0.7), (1.0, 0.0), "the window: opaque, no under");
-        let (picture, under) = ghost_mix(1.0, 0.7);
-        assert!((picture - 0.7).abs() < 1e-12 && under == 1.0, "the card");
+        let a = Glass::APPLE.opacity;
+        assert_eq!(ghost_mix(0.0, a), (1.0, 0.0), "the window: opaque, no under");
+        let (picture, under) = ghost_mix(1.0, a);
+        assert!((picture - a).abs() < 1e-12 && under == 1.0, "the card");
         // A spring past its end draws no more than the card, nor less than the window.
-        assert_eq!(ghost_mix(1.2, 0.7), ghost_mix(1.0, 0.7));
-        assert_eq!(ghost_mix(-0.1, 0.7), ghost_mix(0.0, 0.7));
+        assert_eq!(ghost_mix(1.2, a), ghost_mix(1.0, a));
+        assert_eq!(ghost_mix(-0.1, a), ghost_mix(0.0, a));
         // The picture at `p` over the under at `u` (opaque colour) composites, at the end, to
         // the card's blend.
-        let (p, u) = ghost_mix(1.0, 0.7);
+        let (p, u) = ghost_mix(1.0, a);
         let (page, wall) = (0.9, 0.3);
         let drawn = p * page + (1.0 - p) * (u * wall);
         assert!((drawn - Glass::APPLE.card([page; 3], [wall; 3])[0]).abs() < 1e-12);
@@ -250,10 +252,10 @@ mod tests {
     #[test]
     fn a_hovered_card_turns_solid_and_its_rest_comes_back_on_leave() {
         let g = Glass::APPLE;
-        assert_eq!((g.picture(false), g.picture(true)), (0.7, 1.0), "Apple's: solid when hovered");
+        assert_eq!((g.picture(false), g.picture(true)), (0.78, 1.0), "Apple's: solid when hovered");
         let (page, under) = ([0.0; 3], [0.4; 3]);
         assert_eq!(Glass { opacity: g.picture(true), ..g }.card(page, under), page, "the window alone: no wallpaper");
-        let off = Glass { hover_opacity: 0.7, ..g };
+        let off = Glass { hover_opacity: g.opacity, ..g };
         assert_eq!(off.picture(true), off.picture(false), "hover_window_opacity = window_opacity: no fade");
         assert_eq!(Glass { hover_opacity: 1.5, ..g }.picture(true), 1.0, "clamped");
     }
@@ -281,7 +283,7 @@ mod tests {
         let under = rgb(180.0, 100.0, 70.0);
         let (black, white) = (g.card([0.0; 3], under), g.card([1.0; 3], under));
         let (a, u) = solve(black, white).expect("a blend");
-        assert!((a - 0.7).abs() < 1e-9);
+        assert!((a - 0.78).abs() < 1e-9);
         assert!(u.iter().zip(under).all(|(x, y)| (x - y).abs() < 1e-9));
         assert_eq!(solve([0.5; 3], [0.5; 3]), None, "opaque: the page alone");
     }

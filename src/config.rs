@@ -1548,11 +1548,11 @@ swipe = true
     #[test]
     fn the_cards_let_the_wallpaper_through_by_default_as_apples_do() {
         let glass = |c: &CardStyle| (c.window_opacity, c.backdrop_saturation, c.backdrop_brightness);
-        assert_eq!(glass(&Config::default().style.cards), (0.7, 0.5, 1.0));
+        assert_eq!(glass(&Config::default().style.cards), (0.78, 0.95, 0.78));
         let p = parse("[cards]\nwindow_opacity = 1.0\nbackdrop_saturation = 0\nbackdrop_brightness = 1.25");
         assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 1.25), "opaque cards: the old look");
         let p = parse("[cards]\nwindow_opacity = 1.5\nbackdrop_saturation = -1");
-        assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 1.0), "clamped");
+        assert_eq!(glass(&p.config.style.cards), (1.0, 0.0, 0.78), "clamped");
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
     }
 

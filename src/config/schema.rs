@@ -257,13 +257,13 @@ pub const KEYS: &[KeyDef] = &[
         "A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more)."),
     k("cards", "press_ms", i(0, 3000), "100", "How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100)."),
     k("cards", "fade_ms", i(0, 3000), "200", "How long a new card takes to fade in, in milliseconds (not measured on Apple's)."),
-    k("cards", "window_opacity", f(0.0, 1.0), "0.7",
-        "How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.7, measured from screenshots); 1 draws them opaque."),
+    k("cards", "window_opacity", f(0.0, 1.0), "0.78",
+        "How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.78, measured on a card read white, black and grey); 1 draws them opaque."),
     k("cards", "hover_window_opacity", f(0.0, 1.0), "1.0",
         "The same on the card under the pointer (or a dragged card's target), eased with its growth: Apple's hovered card turns solid. The value of window_opacity turns the fade off."),
-    k("cards", "backdrop_saturation", f(0.0, 2.0), "0.5",
+    k("cards", "backdrop_saturation", f(0.0, 2.0), "0.95",
         "Behind each window's picture on a card, the wallpaper's colour there (its average behind the thumbnail), at this saturation of the wallpaper's own: 0 grey, 1 as it is."),
-    k("cards", "backdrop_brightness", f(0.0, 2.0), "1.0", "...and at this brightness of the wallpaper's own."),
+    k("cards", "backdrop_brightness", f(0.0, 2.0), "0.78", "...and at this brightness of the wallpaper's own (Apple's darkens it a little)."),
     // [icons]
     k("icons", "size", f(0.0, 300.0), "38.0", "Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons."),
     k("icons", "center_dx", f(-300.0, 300.0), "10.5", "The icon's center, right of the card's bottom-left corner (its leftmost window's)."),
@@ -524,6 +524,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-23.toml"),
     include_str!("legacy/default-24.toml"),
     include_str!("legacy/default-25.toml"),
+    include_str!("legacy/default-26.toml"),
 ];
 
 #[cfg(test)]

@@ -194,6 +194,34 @@ def fit_under(wall, under):
     return best
 
 
+def card_box(inner):
+    """(x0, x1, y0, y1) of the longest run of rows holding many inside pixels."""
+    rows = {}
+    for x, y in inner:
+        rows.setdefault(y, []).append(x)
+    full = sorted(y for y, xs in rows.items() if len(xs) >= 20)
+    if not full:
+        return 0, -1, 0, -1
+    best, start = (full[0], full[0]), full[0]
+    for prev, y in zip(full, full[1:] + [None]):
+        if y != prev + 1:
+            if prev - start > best[1] - best[0]:
+                best = (start, prev)
+            start = y
+    y0, y1 = best
+    xs = [x for y in range(y0, y1 + 1) for x in rows.get(y, [])]
+    return min(xs), max(xs), y0, y1
+
+
+def beside(shot, x0, x1, y0, y1, scale):
+    """The wallpaper as shown just right of the card (10 to 50 pt off its edge, its rows), the
+    median per channel: the screen's own colour there, not the file's."""
+    w = len(shot[0])
+    xa, xb = x1 + int(10 * scale), min(w - 1, x1 + int(50 * scale))
+    px = [shot[y][x] for y in range(y0, y1 + 1) for x in range(xa, xb + 1)]
+    return [percentile([c[i] for c in px], 0.5) for i in range(3)] if px else None
+
+
 def to_lin(v):
     c = v / 255
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
@@ -243,7 +271,7 @@ def main():
         if hover:
             with open(color_file, "w") as f:
                 f.write("ffffff")
-            input("Put the pointer on Glass A's card (the top card) and keep it there; then press Return... ")
+            input("Put the pointer on Glass A's card (the white one) and keep it there; then press Return... ")
             for name, hex_ in (("hover_white", "ffffff"), ("hover_black", "000000")):
                 with open(color_file, "w") as f:
                     f.write(hex_)
@@ -260,8 +288,10 @@ def main():
     pts, inner = card_mask(white, black)
     if not pts:
         sys.exit("no card changed with A's window: was A on the strip? (screenshots kept in " + folder + ")")
-    x0, x1 = min(p[0] for p in pts), max(p[0] for p in pts)
-    y0, y1 = min(p[1] for p in pts), max(p[1] for p in pts)
+    # The card's box from its inside, the largest run of rows: stray pixels elsewhere in the
+    # column that change with A's colour (11-05: a box 443 and 621 pt tall) never stretch it.
+    x0, x1, y0, y1 = card_box(inner)
+    inner = [(x, y) for (x, y) in inner if x0 <= x <= x1 and y0 <= y <= y1]
     alphas, unders, by_row, grey_off, grey_lin, steady = [], [], {}, [], [], []
     for x, y in inner:
         wv, kv, gv, w2 = white[y][x], black[y][x], grey[y][x], white2[y][x]
@@ -284,6 +314,8 @@ def main():
     probe = json.loads(r.stdout.strip().splitlines()[-1])
     wall = probe["rects"][0]["wallpaper"] if probe.get("ok") else None
     fit = fit_under(wall, under) if wall else None
+    shown = beside(black, x0, x1, y0, y1, scale)
+    fit_shown = fit_under(shown, under) if shown else None
     out = {
         "card_px": [x0, y0, x1 - x0 + 1, y1 - y0 + 1],
         "card_points": rect,
@@ -298,6 +330,9 @@ def main():
         "wallpaper_behind_card_from_file": wall,
         "picture": probe.get("picture"),
         "fit": fit and {"backdrop_brightness": round(fit[1], 3), "backdrop_saturation": round(fit[2], 2), "rms": round((fit[0] / 3) ** 0.5, 2)},
+        "wallpaper_beside_card_on_screen": shown,
+        "fit_to_screen": fit_shown and {"backdrop_brightness": round(fit_shown[1], 3), "backdrop_saturation": round(fit_shown[2], 2),
+                                        "rms": round((fit_shown[0] / 3) ** 0.5, 2)},
         "suggested": fit and {"window_opacity": round(percentile(alphas, 0.5), 2), "backdrop_saturation": round(fit[2], 2),
                               "backdrop_brightness": round(fit[1], 2)},
     }

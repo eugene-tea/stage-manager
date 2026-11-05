@@ -48,16 +48,15 @@ screen) is left off: the card shows the window alone. So is a popup over a windo
 macOS's capture does not place (a calendar's event popup reaching past the window's top):
 never a fill around a window on a card.
 
-**Cards let the wallpaper through**, as Apple's do (measured on the owner's screenshots,
-11-03): each window's picture is drawn at 70 % over a flat colour of its own, the wallpaper's
-average behind the thumbnail at half its saturation and its own brightness
-(`[cards] window_opacity`, `backdrop_saturation`, `backdrop_brightness`). Over an orange
-wallpaper this matched three of Apple's cards (Safari's empty page, Mail's and Fork's white)
-within 5 levels on average; the readings beside the cards, not under them, explain the rest.
-Apple's colour is flat over a card where the wallpaper behind it changes, so it is an
-average, not a blur. Not measured yet: the opacity on its own (white pages alone cannot tell
-it from a tint; `scripts/measure-apple-card-glass.py` reads one card white, black and grey
-with Apple's Stage Manager on), dark mode, and what Apple shows through a window behind
+**Cards let the wallpaper through**, as Apple's do (seen on the owner's screenshots
+11-03, measured 11-05): each window's picture is drawn at 78 % over a flat colour of its own,
+the wallpaper's average behind the thumbnail at 95 % of its saturation and 78 % of its
+brightness (`[cards] window_opacity`, `backdrop_saturation`, `backdrop_brightness`).
+`scripts/measure-apple-card-glass.py` read one of Apple's cards with its window flat white,
+black and grey: the opacity 0.78 in two runs, the colour behind within a level of the model,
+the grey a blend in the display's encoded values; the hovered card read fully solid. Apple's
+colour is flat over a card where the wallpaper behind it changes, so it is an average, not a
+blur. Not measured yet: dark mode, and what Apple shows through a window behind
 another on one card (here each window has the wallpaper behind it). A switch's snapshots
 take the card's look as they shrink into it and leave it as they grow into their windows.
 The card under the pointer turns solid as it grows (the owner, 11-03: "Apple's SM doing
