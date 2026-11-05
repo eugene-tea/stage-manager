@@ -384,6 +384,13 @@ pub fn published_cards() -> Vec<(u64, Rect)> {
     published_cards_of(MAIN_STRIP)
 }
 
+/// Every strip's cards' frames last published, every screen's (any thread): a synthetic
+/// press is safe on any of them (round displays-live-1: the test's click on the second
+/// screen's card was refused, its pane counted click-through as off the main strip's cards).
+pub fn every_published_card() -> Vec<(u64, Rect)> {
+    card_frames().lock().map(|f| f.values().flatten().copied().collect()).unwrap_or_default()
+}
+
 /// The cards' frames a display's strip last published (any thread; [`publish_cards`]).
 pub fn published_cards_of(display: u32) -> Vec<(u64, Rect)> {
     card_frames().lock().ok().and_then(|f| f.get(&display).cloned()).unwrap_or_default()
@@ -691,6 +698,18 @@ pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round displays-live-1: a card on another screen's strip is among every strip's cards
+    /// (the synthetic click's safety check), and the main strip's own list stays its own.
+    #[test]
+    fn every_screens_cards_count_for_a_press() {
+        let other = Rect::new(-1780.0, 830.0, 80.0, 98.0);
+        publish_cards(9_101, vec![(4, other)]);
+        assert!(every_published_card().contains(&(4, other)));
+        assert!(!published_cards().contains(&(4, other)), "the main strip's cards are its own");
+        publish_cards(9_101, Vec::new());
+        assert!(!every_published_card().contains(&(4, other)), "a strip hidden publishes none");
+    }
 
     /// A late window shown at the unhide, then active at its app's activation, in one note
     /// or two; a newer transition's note replaces an older one's.

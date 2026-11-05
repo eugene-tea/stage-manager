@@ -271,7 +271,9 @@ pub fn test_pids() -> Vec<i32> {
 pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), String> {
     let list = windows::list_windows();
     let own = std::process::id() as i32;
-    let cards = strip_model::published_cards();
+    // Every screen's strip: off the main one's cards, another screen's pane read as
+    // click-through and its card's press was refused (round displays-live-1).
+    let cards = strip_model::every_published_card();
     // The Dock draws its bar in one window as large as its display, clear and click-through
     // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
     // it counts only on the bar's own frame, read through Accessibility, and wherever that

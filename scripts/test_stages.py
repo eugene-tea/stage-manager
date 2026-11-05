@@ -6832,7 +6832,9 @@ def phase_displays():
     if check(card is not None, f"the other screen's strip draws Fixture 3's card (cards {[c['number'] for c in screen(s, other)['cards']]})"):
         before_main = screen(s, main)["active"]
         r = ctl("debug-click", card["x"] + card["w"] / 2, card["y"] + card["h"] / 2)
-        if not blocked(r, "a card click on the other screen"):
+        # A refused click says why (round displays-live-1: refused as off every card, it
+        # read as a click that changed nothing).
+        if not blocked(r, "a card click on the other screen") and check(r.get("ok"), f"the click on the other screen's card is posted ({r.get('error', 'ok')})"):
             x = wait_state(lambda y: screen(y, other)["active"] == stage3, "Fixture 3's stage in front on the other screen")
             if check(x is not None, "a card click on the other screen brings its stage in front there"):
                 s = x
@@ -6847,7 +6849,7 @@ def phase_displays():
     if check(main_card is not None, f"the main screen's strip draws a card (cards {[c['number'] for c in s['strip_cards']]})"):
         b = main_card["frame"]
         r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
-        if not blocked(r, "a card click on the main screen"):
+        if not blocked(r, "a card click on the main screen") and check(r.get("ok"), f"the click on the main screen's card is posted ({r.get('error', 'ok')})"):
             x = wait_state(lambda y: screen(y, main)["active"] == main_card["number"], "the clicked stage in front on the main screen")
             if check(x is not None, "a card click on the main screen brings its stage in front there"):
                 s = x
