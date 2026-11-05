@@ -22,9 +22,17 @@ NSWorkspace notifications     persists state.json               ctl socket (test
               ◀──snapshot───  StripModel to main via GCD
 ```
 
-- **Stages per Space.** A stage is a group of windows on one Space (Desktop); every Space
+- **Stages per screen and Space.** Every screen has its own strip and stages, as Apple's
+  does (round displays, UX-SPEC "Screens"): its own Spaces, park corner (one with no screen
+  beyond it, `engine::park::choose_corner`) and strip capacity; a window belongs to the
+  screen showing most of it (`engine::displays`), moved to another it starts a stage of its
+  own there (`Model::windows_moved_to_display`), and a screen removed hands its stages to the
+  main one (`Model::set_displays`). Screens are known by vendor, model and serial
+  (`ScreenKey`), never by `CGDirectDisplayID`, in the model and in `state.json` (a Space
+  names its screen). `[displays] main_only` keeps the first version's main-screen-only way.
+  A stage is a group of windows on one Space (Desktop); every Space
   has its own stages, active stage and strip, as Apple's does. Inactive stages are parked in
-  the bottom-right corner of their display (macOS keeps a sliver onscreen). Switching = save
+  the park corner of their display (macOS keeps a sliver onscreen). Switching = save
   the active stage's live frames and z-order, park it, restore the target's frames, raise
   back to front, focus the remembered key window last. Nothing acts on another Space's
   windows except the safety paths.
@@ -159,15 +167,28 @@ Known gaps the owner accepted as rare:
 
 ## Open
 
-- **Screens (after 1.4.0):** follow-up update for external and several screens.
-  - A strip and stages per screen, as Apple's (today only the main screen is managed; a
-    window on a second monitor is left alone). FEATURE-REQUESTS R8: medium.
-  - A login on another screen (10-23: laptop screen at login, then the lid closed onto the
-    external display): macOS reopens every window on one Desktop, and the other Desktop's
-    saved stages wait for windows that will not come. Let those saved stages form where
-    their windows are, and say so in the restore summary.
-  - The first launch after that login drew card switches wrong (the incoming window showed
-    at its place before its snapshot reached it; the log identical to a good run); a
+- **Screens, after round displays** (built: a strip and stages per screen, Apple's rules
+  as measured 11-05; a saved Desktop of a screen not connected forms where its windows are,
+  the 10-23 login):
+  - **Live with the owner:** the `displays` phase of the suite (fixtures on both screens;
+    its first run), then the lid, by hand: (1) on the laptop a stage in front and two cards,
+    on the 5K a stage in front and a card; close the lid: the laptop's front stage comes to
+    the 5K in front, the 5K's front to a card, the laptop's cards after the 5K's own, every
+    window on screen (`ctl state`: one display, `displays[0].strip`); (2) open the lid: the
+    stages macOS moves back are the laptop's again, the one in front before as its front
+    (`displays[1]`), the one that came over stays on the 5K; (3) a restart with both
+    screens: each screen's stages on its screen (the log's "Space changed on another
+    display" with `rebuilt`); (4) ⌘-Tab to an app whose stage is on the other screen:
+    that screen switches, the other does not. The restore summary does not yet say a
+    Desktop formed on another screen than it was saved on.
+  - **Still the main screen's only, by choice:** the cards' glass (sampled from the main
+    screen's wallpaper), the corner patch and the desktop still (a second screen's slivers
+    show), the Dock's arrangement ahead of a Desktop slide, the full-screen and overview
+    checks that gate new windows, the once-a-second "left this Space" check (another
+    screen's Desktop is re-recognized on arrival instead), `[windows] fit` (the main
+    strip's column), the panel status in `ctl state`, the probes and debug hooks.
+  - The first launch after the 10-23 login drew card switches wrong (the incoming window
+    showed at its place before its snapshot reached it; the log identical to a good run); a
     relaunch cured it. Catch it with a screen recording if it comes back; check what the
     overlay and the strip panels hold from a launch while the screens settle.
 - **Desktop numbers in the desktop notice:** the list names a Desktop by its apps or "this
@@ -228,6 +249,6 @@ Known gaps the owner accepted as rare:
 
 ## Out of scope
 
-Multi-monitor beyond the main display (the model keys stages by display), fullscreen
+A unified stage across screens (FEATURE-REQUESTS R8: hard; Apple's has none), fullscreen
 windows (ignored). UX-SPEC's measurement record of Apple's Stage Manager is that file as of
 commit 20665a3.

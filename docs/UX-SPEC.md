@@ -128,6 +128,29 @@ Desktop shows that window's stage. An app macOS activates as a Desktop slides in
 Desktop is recognized, as Apple's never touches the Desktop left. Full-screen apps have no
 strip.
 
+**Screens.** Every screen has its own strip and stages, as Apple's (measured 11-05 on the
+owner's Mac: a 5K Studio Display main, the MacBook's screen to its left, "Displays have
+separate Spaces" on): a strip on the left edge of each screen, its cards sized and counted
+for that screen (6 on the 5K, 5 on the laptop), each screen with its own front stage and
+cards, each strip sliding away under its own windows. A window dragged to another screen
+starts a stage of its own there, in front; the stage that was in front there goes to a
+card; the screen it left, its front stage now empty, brings its most recent card forward. A
+card click changes only its own screen. A new app opens on the screen with keyboard focus,
+as its own stage there, by the one-screen rules (macOS picks the screen; the window is
+taken where it shows). A window straddling two screens belongs to the one showing most of
+it (macOS's rule). The lid closed: that screen's front stage comes to the remaining screen
+as its front stage (its windows where macOS puts them, at their size), the remaining
+screen's front goes to a card, and the removed screen's other stages become cards there
+too, after the remaining screen's own (past the capacity, hidden). The lid opened: the
+stages whose windows macOS moves back to that screen are its stages again (the one in front
+before, a card; a stage moved whole stays one stage); the stage that came over in front
+stays where it is. A stage belongs to the screen its windows are on. Decided, not measured:
+a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
+Dock to an app whose stage is on the other screen switches that screen only. Each screen's
+hidden stages wait in a corner of that screen with no screen beyond it (the laptop's
+bottom-left, its right edge touching the 5K). `[displays] main_only` (off) is the first
+version's behaviour: only the main screen, a window moved off it left alone.
+
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. The strip never appears in ⌘-Tab or the ⌘\`
 window cycle.
@@ -425,8 +448,10 @@ with the windows back on another Desktop (bundle id, hashed title, the Desktops'
 
 ## Known gaps
 
-- Only the main screen is managed: windows on a second monitor are left alone. Every
-  Desktop on the main screen has its own stages.
+- On a second screen the cards' glass takes the main screen's wallpaper, and the hidden
+  windows' corner is not covered by a patch of the desktop: their thin edges show there.
+- The lid closed and opened (above) is what Apple's does, built and unit tested, not yet
+  seen live with ours.
 - No public API names a Desktop, so Desktops are told apart by their windows. An empty
   Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
   looks new until one of them shows.

@@ -77,8 +77,8 @@ own `NSPanel` strip.
 ### R8. Multiple displays: leave the others alone (2022 → 2024)
 - **Sources:** two displays make it "in the way of any productivity" (Philip on [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); moving a window to another display "creates a new group" ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)); "I wish the Stage Manager will only work with my main monitor" (Topre) and "treated as a single, unified stage" (iPersuade), both in [MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=2).
 - **Gap:** Apple's per-display stages cannot be turned off.
-- **Sugar (done, 1.0.0):** ours manages the main screen only, which is exactly Topre's wish: a window moved to a second monitor leaves its stage and is left alone.
-- **Feasibility: easy** for "leave alone". Per-display strips are **medium**. A unified stage across displays is **hard**.
+- **Sugar (done, 1.0.0; the switch since round displays):** `[displays] main_only = true` manages the main screen only, which is exactly Topre's wish: a window moved to a second monitor leaves its stage and is left alone. Off (the default, by the hard rule), every screen has its own strip and stages as Apple's, measured on the owner's Mac (UX-SPEC, "Screens").
+- **Feasibility: easy** for "leave alone" (done). Per-display strips: **done** (round displays). A unified stage across displays is **hard**.
 
 ### R9. Minimize to the Dock when I mean the Dock (2022 → 2025)
 - **Sources:** it "sends things to the strip more often than I'd like" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); how do I minimize to the Dock with Stage Manager on? Answer: you can't ([Apple Community 2023](https://discussions.apple.com/thread/254954825)); minimized windows can't be moved between sets ([MacSales 2025](https://eshop.macsales.com/blog/97454-on-the-eve-of-macos-tahoe-has-stage-manager-improved/)).

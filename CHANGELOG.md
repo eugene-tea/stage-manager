@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Every screen has its own strip and stages, as Apple's Stage Manager does: a window
+  dragged to another screen starts a stage of its own there, a card click changes only its
+  screen, each screen hides its stages in a corner of its own, and closing or opening the
+  lid moves stages between screens the way Apple's does. After a restart each screen's
+  stages come back on that screen. `[displays] main_only` keeps the old way: the main
+  screen only.
+
 ## 1.6.0 — 2026-11-05
 
 - The cards on the strip let the wallpaper through as Apple's do, and the card under the

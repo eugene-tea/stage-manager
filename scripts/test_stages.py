@@ -113,6 +113,8 @@ ever signalled.
 
 SM_FIXTURE_ID sets the main fixture's bundle ID (default dev.eugene.stagemanager.fixture.stages);
 the native phase's apps are <id>.a, <id>.b and <id>.c.
+displays (round displays: a strip and stages on every screen; fixtures moved to the other
+screen by Accessibility, a card click on each screen alone; skipped with one screen).
 """
 
 import json
@@ -6642,8 +6644,117 @@ def phase_handles():
     all_onscreen("handles quit")
 
 
+def phase_displays():
+    """Round displays: a strip and stages on every screen, as Apple's (measured 11-05).
+    Skipped with one screen. Four fixture windows open on the main screen (two stages:
+    Fixture 2 sent to a stage of its own). Fixture 3, then Fixture 4, moved to the other
+    screen by Accessibility (`debug-frame`, as the suite moves windows): each becomes that
+    screen's own within about two seconds, as a stage of its own in front there, the stage in
+    front before going to a card parked in that screen's park zone (its own corner, never the
+    main screen's); the main screen keeps its stages. A card click on each screen switches
+    that screen alone. After the quit every window is on screen, on both screens. The lid
+    cannot be scripted: PLAN "Screens" has the steps for the main thread."""
+    say("\n== displays: a strip and stages on every screen ==")
+    stop_app()
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(4)
+    s = start_app(4)
+    if not check(s is not None, "app manages the 4 fixture windows"):
+        return
+    screens = s.get("displays", [])
+    if len(screens) < 2:
+        skip("displays", f"one screen ({len(screens)} reported); two are needed")
+        stop_app()
+        all_onscreen("displays quit")
+        return
+    main, other = screens[0], screens[1]
+    zone = lambda d: {**d["frame"], "visible": d["visible"]}
+    say(f"  main {main['id']} {fmt(main['frame'])} corner {main['corner']}; other {other['id']} {fmt(other['frame'])} corner {other['corner']}")
+    t = by_title(s)
+    ids = {n: t[f"Fixture {n}"]["id"] for n in (1, 2, 3, 4)}
+    check(all(w["display"] == main["id"] for w in s["windows"]), "every fixture window is the main screen's at launch")
+    do("new", ids[2])
+    s = wait_state(lambda x: by_title(x)["Fixture 2"]["home"] != by_title(x)["Fixture 1"]["home"], "Fixture 2 in a stage of its own")
+    if not check(s is not None, "Fixture 2 sent to a stage of its own on the main screen"):
+        stop_app()
+        return
+    stage_main = by_title(s)["Fixture 2"]["home"]
+    ov = other["visible"]
+
+    def screen(x, d):
+        return next(k for k in x["displays"] if k["id"] == d["id"])
+
+    def moved_to_other(n, at, what):
+        ctl("debug-frame", ids[n], ov["x"] + at[0], ov["y"] + at[1], 640, 420)
+        x = wait_state(lambda y: by_title(y)[f"Fixture {n}"]["display"] == other["id"], f"Fixture {n} on the other screen", timeout=8)
+        if not check(x is not None, f"{what}: Fixture {n}, moved by Accessibility, is the other screen's within a few seconds"):
+            return None
+        w = by_title(x)[f"Fixture {n}"]
+        check(w["home"] != stage_main and screen(x, other)["active"] == w["home"], f"{what}: a stage of its own there, in front (stage {w['home']}, the other screen's front {screen(x, other)['active']})")
+        check(not w["parked"], f"{what}: shown there")
+        check(screen(x, main)["active"] == stage_main and not by_title(x)["Fixture 2"]["parked"], f"{what}: the main screen's front stage did not move")
+        return x
+
+    s = moved_to_other(3, (120.0, 100.0), "first move")
+    if s is None:
+        stop_app()
+        return
+    stage3 = by_title(s)["Fixture 3"]["home"]
+    s = moved_to_other(4, (420.0, 220.0), "second move")
+    if s is None:
+        stop_app()
+        return
+    stage4 = by_title(s)["Fixture 4"]["home"]
+    s = wait_state(lambda x: by_title(x)["Fixture 3"]["parked"], "Fixture 3's stage a card") or s
+    check(by_title(s)["Fixture 3"]["parked"] and stage3 in screen(s, other)["strip"], f"the stage in front before (Fixture 3's) went to a card on the other screen (strip {screen(s, other)['strip']})")
+    wins, _ = fixture_windows([FIX_ID])
+    c3 = next((w for w in wins if w["id"] == ids[3]), None)
+    if check(c3 is not None, "the window server lists Fixture 3"):
+        check(is_parked(c3["bounds"], zone(other)), f"Fixture 3 waits in the other screen's park zone (corner {other['corner']}): {fmt(c3['bounds'])}")
+        check(not is_parked(c3["bounds"], zone(main)), "not in the main screen's")
+    check(not by_title(s)["Fixture 1"]["parked"] or not by_title(s)["Fixture 2"]["parked"], "the main screen still shows a stage")
+    # A card click on the other screen switches that screen alone.
+    card = next((c["frame"] for c in screen(s, other)["cards"] if c["number"] == stage3), None)
+    if check(card is not None, f"the other screen's strip draws Fixture 3's card (cards {[c['number'] for c in screen(s, other)['cards']]})"):
+        before_main = screen(s, main)["active"]
+        r = ctl("debug-click", card["x"] + card["w"] / 2, card["y"] + card["h"] / 2)
+        if not blocked(r, "a card click on the other screen"):
+            x = wait_state(lambda y: screen(y, other)["active"] == stage3, "Fixture 3's stage in front on the other screen")
+            if check(x is not None, "a card click on the other screen brings its stage in front there"):
+                s = x
+                check(by_title(s)["Fixture 4"]["parked"] and not by_title(s)["Fixture 3"]["parked"], "Fixture 4 took its slot")
+                check(screen(s, main)["active"] == before_main, "the main screen did not move")
+    # A card click on the main screen switches the main screen alone.
+    other_active = screen(s, other)["active"]
+    main_card = next((c for c in s["strip_cards"] if c["number"] != screen(s, main)["active"]), None)
+    if main_card is None and reveal_strip("displays: the main strip, covered") is not None:
+        s = state()
+        main_card = next((c for c in s["strip_cards"] if c["number"] != screen(s, main)["active"]), None)
+    if check(main_card is not None, f"the main screen's strip draws a card (cards {[c['number'] for c in s['strip_cards']]})"):
+        b = main_card["frame"]
+        r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+        if not blocked(r, "a card click on the main screen"):
+            x = wait_state(lambda y: screen(y, main)["active"] == main_card["number"], "the clicked stage in front on the main screen")
+            if check(x is not None, "a card click on the main screen brings its stage in front there"):
+                s = x
+                check(screen(s, other)["active"] == other_active, "the other screen did not move")
+    for n in (3, 4):
+        check(by_title(s)[f"Fixture {n}"]["display"] == other["id"], f"Fixture {n} is still the other screen's")
+    check(stage4 in screen(s, other)["strip"] or screen(s, other)["active"] == stage4, "Fixture 4's stage is still the other screen's")
+    stop_app()
+    wins, _ = fixture_windows([FIX_ID])
+    stuck = [fmt(w["bounds"]) for w in wins if is_parked(w["bounds"], zone(main)) or is_parked(w["bounds"], zone(other))]
+    check(bool(wins) and not stuck, f"displays quit: every fixture window on screen, on both screens (parked: {stuck})")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -6662,7 +6773,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "hide": phase_hide, "notice": phase_notice,
-             "glass": phase_glass}[p]()
+             "glass": phase_glass, "displays": phase_displays}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

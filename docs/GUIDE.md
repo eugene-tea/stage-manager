@@ -134,6 +134,21 @@ its app would open there: with that app's windows if it has a stage on that Desk
 a stage of its own, shown in front. Move windows of several apps at once and each app gets
 its own stage; the front one is shown and the rest wait in the strip.
 
+### Screens
+
+Every screen has its own strip and stages, as with Apple's. A window you drag to another
+screen starts a stage of its own there, in front; the stage that was in front there goes to
+a card, and the screen you took it from brings its most recent card forward. Clicking a card
+changes only that screen. A new app opens on the screen you are typing on. Close the lid and
+that screen's stages come to the remaining screen: the one in front stays in front, the
+others become cards; open it and the stages macOS moves back are its own again. Each screen
+hides its stages in a corner of its own, one with no screen beyond it. After a restart each
+screen's stages come back on that screen, by the screen itself, not the cable it hangs on.
+
+`[displays] main_only = true` keeps the first version's way: only the main screen (the one
+with the menu bar) is managed, and a window moved to another screen leaves its stage and is
+left alone there.
+
 ### After a restart
 
 When you restart your Mac or log in again, your stages come back as your apps reopen their
@@ -165,7 +180,8 @@ What it cannot do:
   puts their windows there; the ones on another Desktop are listed in the menu.
 - A window it is not sure about (two of one app with the same name, say) stays in view and
   goes where a new window of its app would.
-- On a main screen of another size, windows keep the places their apps give them.
+- On a screen of another size than the one they were saved on, windows keep the places
+  their apps give them.
 
 `[stages] restore_after_restart = false` (or **Bring stages back after a restart** in
 Settings → Stages) turns it off: after a restart every app starts in a stage of its own, as
@@ -210,7 +226,7 @@ looks empty. With Screen Recording allowed, the patch is a picture of the deskto
 any wallpaper, and the icons and widgets in that corner, which you can still click and drag.
 Without it, the patch is drawn from your wallpaper's file. If a second screen sits beyond
 that corner, a free corner is used instead. Each Desktop has its own patch, which slides in
-with it.
+with it. A second screen's corner has no patch yet: the thin edges show there.
 
 ## Settings
 
