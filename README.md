@@ -44,7 +44,7 @@ Advanced shows how.
 
 Turn off Apple's Stage Manager (the app offers to do it), then allow **Accessibility**,
 which is required. **Screen Recording** is optional and puts live pictures of your windows on
-the cards, and keeps the screen corner tidy.
+the cards.
 
 Everything about your windows stays on your Mac. It goes online only to check GitHub for
 updates once a day, and to download one when you install it.
