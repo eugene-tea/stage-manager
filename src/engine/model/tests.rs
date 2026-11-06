@@ -622,6 +622,8 @@ fn switch_never_records_a_parked_frame_as_restore() {
 fn a_window_the_user_pushed_into_the_corner_comes_back_by_it() {
     // S3: in the park zone but not where a park lands, the frame is the user's. It was
     // never recorded, and the next switch brought the window back at its older frame.
+    // Pulled just within reach it would show 80 by 35 pt at the corner, a piece nobody sees
+    // (the 11-06 corner frame): it comes back wholly on screen in that corner.
     let mut e = Env::new();
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     e.add(meta(2, 11, "com.example.b"), RuleAction::New);
@@ -635,7 +637,7 @@ fn a_window_the_user_pushed_into_the_corner_comes_back_by_it() {
     e.switch(2);
     let back = e.d.frames[&w(2)];
     assert!(!parked_at(back), "{back:?}");
-    assert_eq!(back, Rect::new(1440.0 - GRAB_WIDTH, 790.0, 600.0, 400.0), "pulled just within reach, not centered");
+    assert_eq!(back, Rect::new(1440.0 - 600.0, 825.0 - 400.0, 600.0, 400.0), "by the corner, not centered");
 }
 
 #[test]

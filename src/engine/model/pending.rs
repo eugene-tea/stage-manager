@@ -704,7 +704,8 @@ impl Model {
 
     /// Puts window `meta` into `stage` of `space` from its saved entry: a strong or medium
     /// match at its saved frame with its flags (pinned, pre-fit frame), a low one at its live
-    /// frame (a live frame in a park zone always takes the saved one); in the saved place
+    /// frame (a live frame in a park zone, or a piece at the corner, [`super::Display::hides`],
+    /// always takes the saved one, brought on screen); in the saved place
     /// among the stage's restored windows, the stage's key when it was saved as the key (not
     /// over a window of the stage the user has focused, `obs`). A window of an inactive stage
     /// is parked and the stage's card takes its saved strip place, or, for a window appearing
@@ -723,7 +724,7 @@ impl Model {
         actions: &mut Vec<Action>,
     ) -> Placed {
         let display: DisplayId = self.known_display(meta.display);
-        let live_parked = self.display(display).parks(meta.frame);
+        let live_parked = self.display(display).hides(meta.frame);
         let sure = grade.confident();
         // Saved frames only on the screen of the saved size they were saved on; there a live
         // frame in a park zone takes the saved one even from a doubtful match. On another it
