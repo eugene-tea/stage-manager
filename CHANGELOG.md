@@ -60,6 +60,8 @@
 - When the main display changes (the menu bar moved to another screen, or a laptop that was
   the main display closed onto an external screen), hidden windows come back where they
   were on their screen, instead of about a screen away.
+- When saving your stages fails for a moment (a full disk), the save is tried again until
+  it works, instead of waiting for your next change.
 
 ## 1.6.0 — 2026-11-05
 

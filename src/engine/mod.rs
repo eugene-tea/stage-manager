@@ -34,6 +34,7 @@ pub mod reopen_list;
 pub mod rescan;
 pub mod restore;
 pub mod rules;
+pub mod save_clock;
 pub mod settings;
 pub mod show_desktop;
 pub mod slide_hold;
