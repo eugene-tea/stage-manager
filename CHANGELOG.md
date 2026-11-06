@@ -36,6 +36,16 @@
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 - The menu no longer lists windows a restart reopened on another Desktop.
+- A slow logout or restart (an app asking about unsaved changes) is no longer taken for a
+  cancelled one after two minutes: while apps still quit, Stage Manager keeps its windows
+  where they are and stays on the list of apps macOS reopens. After a logout that was
+  cancelled, an app slow to answer gets its windows arranged once it answers, without a
+  click on it first.
+- The helper that brings windows back if Stage Manager crashes is started again if it
+  stops, and a crash is never mistaken for a clean quit. Opening Stage Manager while an
+  earlier copy hangs in its quit gives up after 90 s instead of waiting with nothing
+  running, and launch at login is tried again at the next launch when macOS refused it the
+  first time.
 
 ## 1.6.0 — 2026-11-05
 
