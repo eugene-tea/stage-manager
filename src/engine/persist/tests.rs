@@ -45,6 +45,7 @@ fn state(stages: Vec<(Option<&str>, Vec<SavedWindow>)>, active: Option<usize>) -
         active_index: active,
         strip_slots: Vec::new(),
         last_seen: None,
+        unvisited: false,
     }
 }
 

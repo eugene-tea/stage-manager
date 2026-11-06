@@ -19,6 +19,8 @@
 //!   still opening keeps them until its own minute is up);
 //! - it was pending through a whole window server session already (its app never brought it
 //!   back): [`crate::engine::persist::StateFile::start_new_session`] drops it at the next one.
+//!   A session in which its Desktop never showed does not count (nothing looked for it),
+//!   until that Desktop was last shown [`UNSEEN_KEEP`] before the save.
 //!
 //! **The restore window** ([`Restore::restoring`]) opens at a launch that finds saved stages
 //! and closes at the first user action (a click, a key press, a card click, a Dock click, a
@@ -93,6 +95,12 @@ pub const QUIET: Duration = Duration::from_secs(60);
 /// stages at the next session (round 8H): a logout's apps quit within seconds of the last
 /// save; an app the user quit earlier is not reopened by a login.
 pub const QUIT_KEEP: Duration = Duration::from_secs(120);
+
+/// A saved Desktop not shown for this long before the last save is looked for no more: at
+/// the next session its pending windows are given up as any other's
+/// ([`crate::engine::persist::StateFile::start_new_session`]). Until then a Desktop not
+/// visited keeps its stages through sessions (its apps reopen its windows there, unseen).
+pub const UNSEEN_KEEP: Duration = Duration::from_secs(30 * 86_400);
 
 /// How long the frames of an app's windows are kept after it quit, for a window it opens
 /// again in the park zone ([`crate::engine::model::Model::add_window`]; W2 of the Fable review

@@ -1143,6 +1143,7 @@ fn saved_on(d: &Display, id: u64, current: bool, stages: Vec<crate::engine::pers
         strip_slots: (1..stages.len()).collect(),
         stages,
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -1260,6 +1261,39 @@ fn a_screen_with_one_desktop_whose_space_holds_windows_already_takes_no_saved_on
     let mut m = restarted_on_three(true);
     add_plain(&mut m, reopen(311, 31, "com.example.other", "Elsewhere", LAPTOP, on(&laptop(), (40.0, 30.0))));
     assert_eq!(m.only_desktop_saved_on(LAPTOP), None);
+}
+
+#[test]
+fn a_provisional_desktop_on_the_second_screen_adopts_its_saved_one() {
+    // The Fable review of 11-06, restore 5: Desktop counts unread, the laptop arrived on with
+    // nothing listed makes a provisional Desktop; its windows, confident for saved 17 (the
+    // laptop's), make it that Desktop, as on the main screen, instead of strays.
+    let (s, l) = (studio(), laptop());
+    let five = DisplayId(5);
+    let mut m = restarted_on_three(false);
+    let editor = [
+        reopen(301, 30, EDITOR, "main.rs — proj", five, on(&s, (200.0, 60.0))),
+        reopen(302, 30, EDITOR, "lib.rs — proj", five, on(&s, (240.0, 90.0))),
+    ];
+    m.arrive(five, &editor, &[], &LaunchHints::default());
+    m.arrive(LAPTOP, &[], &[], &LaunchHints::default());
+    let provisional = m.current_space(LAPTOP);
+    assert_eq!(m.provisional_spaces(), [provisional]);
+    add_plain(&mut m, reopen(311, 31, WEB, "Docs — Web", LAPTOP, on(&l, (40.0, 30.0))));
+    add_plain(&mut m, reopen(312, 32, DISK, "Disks", LAPTOP, on(&l, (500.0, 300.0))));
+    assert_eq!(m.current_space(LAPTOP).0, 17, "the laptop's saved Desktop");
+    for id in [311, 312] {
+        let stage = m.stage_of(WindowId(id)).expect("in a stage");
+        assert_eq!(m.stage(stage).map(|st| st.space.0), Some(17), "window {id}");
+        assert!(!m.is_pooled(WindowId(id)), "window {id} is no stray");
+    }
+    // A saved Desktop of the 5K (connected) is never adopted on the laptop.
+    let mut m = restarted_on_three(false);
+    m.arrive(five, &editor, &[], &LaunchHints::default());
+    m.arrive(LAPTOP, &[], &[], &LaunchHints::default());
+    add_plain(&mut m, reopen(321, 34, NOTES, "Groceries", LAPTOP, on(&l, (300.0, 80.0))));
+    add_plain(&mut m, reopen(322, 35, MAILER, "Inbox", LAPTOP, on(&l, (600.0, 200.0))));
+    assert_ne!(m.current_space(LAPTOP).0, 1, "saved 1 waits for the 5K");
 }
 
 fn add_plain(m: &mut Model, meta: WindowMeta) -> Vec<Action> {

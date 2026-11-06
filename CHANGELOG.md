@@ -46,6 +46,8 @@
   earlier copy hangs in its quit gives up after 90 s instead of waiting with nothing
   running, and launch at login is tried again at the next launch when macOS refused it the
   first time.
+- A Desktop you did not visit between two restarts keeps its stages: they no longer
+  disappear at the second restart (up to 30 days since you last visited it).
 
 ## 1.6.0 — 2026-11-05
 

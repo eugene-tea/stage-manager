@@ -718,10 +718,10 @@ impl Model {
     /// window says nothing of another still opening (his word 11-06). The actions.
     pub fn window_retitled(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
-        let low = self.restored.get(&id).is_some_and(|r| !r.grade.confident());
-        if !self.restore.rematching || self.touched.contains(&id) || !(self.rescore.contains(&id) || low) {
+        if !self.may_rematch(id) {
             return actions;
         }
+        let low = self.restored.get(&id).is_some_and(|r| !r.grade.confident());
         let Some(w) = self.windows.get(&id) else {
             self.rescore.remove(&id);
             return actions;
@@ -770,8 +770,25 @@ impl Model {
         actions
     }
 
-    /// The user touched window `id` (focused it by a click or a key press on it, moved or
-    /// resized it, switched to its stage): a re-match never moves it now
+    /// True when a new title may still take window `id` to its saved stage
+    /// ([`Model::window_retitled`]): re-matches run, the user has not touched it, and it went
+    /// by Apple's rule or by a low match.
+    fn may_rematch(&self, id: WindowId) -> bool {
+        self.restore.rematching
+            && !self.touched.contains(&id)
+            && (self.rescore.contains(&id) || self.restored.get(&id).is_some_and(|r| !r.grade.confident()))
+    }
+
+    /// True when a new title may still move a window of app `pid` ([`Model::window_retitled`]):
+    /// a key press in that app then touches its focused window (the Fable review of 11-06,
+    /// restore 2: a window its app focused at the login, typed in, was the late title's to
+    /// park), and the platform asks which one only then.
+    pub fn may_rematch_app(&self, pid: super::Pid) -> bool {
+        self.restore.rematching && self.windows.iter().any(|(id, w)| w.meta.pid == pid && self.may_rematch(*id))
+    }
+
+    /// The user touched window `id` (focused it by a click or a key press on it, typed in it,
+    /// moved or resized it, switched to its stage): a re-match never moves it now
     /// ([`Model::window_retitled`]).
     pub fn touch_window(&mut self, id: WindowId) {
         if self.restore.rematching {

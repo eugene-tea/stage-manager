@@ -4014,6 +4014,7 @@ impl Controller {
                     self.end_restore(ob, "an app switcher key", End::Switcher);
                 } else {
                     self.end_restore(ob, "a key press", End::User);
+                    self.touch_typed_window();
                 }
                 // Typing never cuts a switch's animation short: the keyboard is already the
                 // new stage's (its focus ran before the windows arrived).
@@ -4024,6 +4025,22 @@ impl Controller {
                     tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
                 }
             }
+        }
+    }
+
+    /// A key press (not a switcher's) went to the frontmost app: its focused window is the
+    /// user's, a late title re-matches it no more ([`Model::touch_window`]). Asked of the app
+    /// (bounded) only while a window of it may still be re-matched, so typing costs nothing
+    /// after the re-matches or in an app with none.
+    fn touch_typed_window(&mut self) {
+        let Some(pid) = super::apps::frontmost_pid() else { return };
+        if !self.model.as_ref().is_some_and(|m| m.may_rematch_app(pid)) {
+            return;
+        }
+        let Some(id) = arrival::focused_window_of(pid) else { return };
+        if let Some(m) = self.model.as_mut() {
+            tracing::debug!(id = id.0, pid, "a key press in a window a late title could still move: the user's now");
+            m.touch_window(id);
         }
     }
 

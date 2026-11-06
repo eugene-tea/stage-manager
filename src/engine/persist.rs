@@ -15,7 +15,7 @@
 //! their first visit.
 //!
 //! Fields added after version 2 first shipped (`saved_at`, `display`, a Space's
-//! `last_seen`, a stage's `last_active`, a window's `fp`, `pending` and `quit_at`) are
+//! `last_seen` and `unvisited`, a stage's `last_active`, a window's `fp`, `pending` and `quit_at`) are
 //! optional both ways: older files load without them, and older builds of version 2 read
 //! newer version-2 files, ignoring them. A file of a later version is not read
 //! ([`StateFile::from_json`]): the build starts without saved stages, as from no file.
@@ -40,7 +40,7 @@ use super::model::{
     Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowMeta, WindowRole,
     WindowState,
 };
-use super::restore::{QUIT_KEEP, merge_order};
+use super::restore::{QUIT_KEEP, UNSEEN_KEEP, merge_order};
 use super::rules::Decision;
 use super::settings::AppWindows;
 use super::stage_area::same_frame;
@@ -198,6 +198,12 @@ pub struct SavedSpace {
     /// When the Space was last shown (Unix seconds), as far as saves saw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
+    /// Not shown in the file's window server session: its pending windows were not looked
+    /// for there, so a new session does not give them up ([`StateFile::start_new_session`]).
+    /// Set on every Space at a load in a new session; a Space shown since is saved without
+    /// it. False in files of earlier versions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unvisited: bool,
 }
 
 impl SavedSpace {
@@ -291,16 +297,28 @@ impl StateFile {
     /// app never brought it back) and is given up, as is one pending since a session that
     /// could not be read (`""`: at least that whole session went by); a saved Space left
     /// without a standard window is dropped. Returns how many windows were given up.
+    ///
+    /// A Space not shown in the file's session (`unvisited`) was not looked for there: its
+    /// windows age by its `last_seen` instead, given up as above only once it was last shown
+    /// more than [`UNSEEN_KEEP`] before the file's save (the Fable review of 11-06, restore
+    /// 3: a Desktop not visited in one session lost its stages at the next restart). Every
+    /// Space is unvisited in the new session until it shows.
     pub fn start_new_session(&mut self) -> usize {
         let since = self.session.clone().unwrap_or_default();
+        let saved_at = self.saved_at;
         let mut expired = 0;
-        for stage in self.spaces.iter_mut().flat_map(|s| s.stages.iter_mut()) {
-            let before = stage.windows.len();
-            stage.windows.retain(|w| w.pending.as_ref().is_none_or(|p| !p.since.is_empty() && p.since == since));
-            expired += before - stage.windows.len();
-            for w in &mut stage.windows {
-                w.pending.get_or_insert_with(|| Pending { since: since.clone() });
+        for space in &mut self.spaces {
+            let aged = saved_at.zip(space.last_seen).is_some_and(|(at, seen)| at.saturating_sub(seen) > UNSEEN_KEEP.as_secs());
+            let looked_for = !space.unvisited || aged;
+            for stage in &mut space.stages {
+                let before = stage.windows.len();
+                stage.windows.retain(|w| !looked_for || w.pending.as_ref().is_none_or(|p| !p.since.is_empty() && p.since == since));
+                expired += before - stage.windows.len();
+                for w in &mut stage.windows {
+                    w.pending.get_or_insert_with(|| Pending { since: since.clone() });
+                }
             }
+            space.unvisited = true;
         }
         self.spaces.retain(|s| s.standard_windows() > 0);
         expired
@@ -427,6 +445,7 @@ impl StateFile {
                     active_index: v1.active_index,
                     strip_slots: v1.strip_slots,
                     last_seen: None,
+                    unvisited: false,
                 }))
             }
             Some(v) if v == u64::from(STATE_VERSION) => {
@@ -781,6 +800,7 @@ impl Model {
             active_index,
             strip_slots,
             last_seen: None,
+            unvisited: false,
         }
     }
 
