@@ -2049,11 +2049,13 @@ def strip_panel(wins=None):
     return tall[0] if tall else None
 
 
-def drag_sampled(points, what, wait=5.0):
+def drag_sampled(points, what, wait=5.0, reset=None):
     """A synthetic drag (ctl debug-drag) along `points`, sampling our windows while it runs
     (see `sample_during`). The app refuses a drag, posting nothing, while anything but our
     own or a fixture's window is topmost on the path; a refused drag is tried again until
-    `wait` seconds have passed (a window of the phase before still going away). Returns the
+    `wait` seconds have passed (a window of the phase before still going away). A drag the
+    owner's own mouse or trackpad cut short (`interrupted`) is tried again the same way after
+    `reset()` puts back what it moved; without `reset` it is returned as it is. Returns the
     last reply and the samples of the drag that ran."""
     words = [str(round(c, 1)) for p in points for c in p]
     end = time.time() + wait
@@ -2063,10 +2065,26 @@ def drag_sampled(points, what, wait=5.0):
         seen = sample_during(proc)
         out, _ = proc.communicate(timeout=20)
         refused = "not ours or a fixture's" in out or "no window at" in out
-        if not refused or time.time() >= end:
+        cut = interrupted(out) is not None and reset is not None
+        if not (refused or cut) or time.time() >= end:
             return out, seen
+        if cut:
+            say(f"  the owner's own input cut the drag short ({interrupted(out)}); put back, trying again")
+            reset()
+            time.sleep(1.0)
+            continue
         say(f"  the path is not clear yet ({out.strip()[:120]}{whose(out)}); trying again")
         time.sleep(0.5)
+
+
+def interrupted(reply):
+    """For a synthetic drag the user's own mouse or trackpad ended mid-path (the app stops
+    posting and says so: a hardware release under it ends the window server's drag, and the
+    window stays short of where the drag was going; 11-06, Fixture 5 left at x -39, short of
+    the strip): the app's words; None for any other reply."""
+    err = reply.get("error") if isinstance(reply, dict) else reply
+    err = str(err or "")
+    return err.strip()[:160] if "interrupted by the user's own input" in err else None
 
 
 def whose(reply):
@@ -2101,13 +2119,18 @@ def skip(what, why):
 
 def blocked(reply, what):
     """True, with the skip noted, when `reply` (a synthetic click, hover or drag) was refused
-    over another process's window ([`other_window_note`]): the caller skips `what`, the checks
-    that need that input."""
+    over another process's window ([`other_window_note`]) or a drag was cut short by the
+    owner's own input ([`interrupted`]): the caller skips `what`, the checks that need that
+    input."""
     note = other_window_note(reply)
-    if note is None:
-        return False
-    skip(what, f"another process's window covers the path ({note}); it is left where it is")
-    return True
+    if note is not None:
+        skip(what, f"another process's window covers the path ({note}); it is left where it is")
+        return True
+    cut = interrupted(reply)
+    if cut is not None:
+        skip(what, f"the owner's own mouse or trackpad ended the drag mid-path ({cut})")
+        return True
+    return False
 
 
 def sample_during(proc):
@@ -2297,8 +2320,12 @@ def phase_motion():
     pre = by_title(s)["Fixture 5"]["restore"]
     grab = (pre["x"] + 300, pre["y"] + 12)
     target = (vis["x"] + 60, (first["y"] - 6) if first else vis["y"] + 40)
-    out, seen = drag_sampled([grab, (grab[0] - 60, grab[1]), target], "Fixture 5 onto the strip")
+    f5_id = by_title(s)["Fixture 5"]["id"]
+    out, seen = drag_sampled([grab, (grab[0] - 60, grab[1]), target], "Fixture 5 onto the strip",
+                             reset=lambda: ctl("debug-frame", f5_id, pre["x"], pre["y"], pre["w"], pre["h"]))
     if blocked(out, "the window drop into a slot (the lift, its card in the overlay, its slot, its saved frame)"):
+        if interrupted(out):
+            ctl("debug-frame", f5_id, pre["x"], pre["y"], pre["w"], pre["h"])  # where the cut drag left it: back
         do("new", by_title(state())["Fixture 5"]["id"])  # the stage the next checks start from
     else:
         layers = sorted({p["layer"] for p in (strip_panel(m) for m in seen) if p})
@@ -2355,8 +2382,12 @@ def phase_motion():
         check(r.get("ok"), f"clicked a card ({r.get('error', 'ok')})")
         # The overlay first (it shows for the motion only): with the strip revealed above
         # windows it sits just under the strip (layer 3), not at its own level (8L3: the check
-        # looked for layer 25 only and missed it there).
-        seen = overlay_shown(our_windows(), s["display"]["frame"])
+        # looked for layer 25 only and missed it there). Looked for until it shows, 0.4 s at
+        # most: it comes once the switch's pictures are taken, 83 to 123 ms after the click
+        # (11-06), and one look as the click returned could come first.
+        seen, until = None, time.time() + 0.4
+        while seen is None and time.time() < until:
+            seen = overlay_shown(our_windows(), s["display"]["frame"])
         # The keyboard goes to the new stage at once (Apple activates the app first): its
         # key window is raised in front while it still sits parked behind its snapshot.
         early = []
