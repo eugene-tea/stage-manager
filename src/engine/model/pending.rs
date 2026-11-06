@@ -506,10 +506,13 @@ impl Model {
         // A window that votes for a saved Desktop goes by Apple's rule until that Desktop is
         // taken (adoption as before); only windows that vote for nothing are strays.
         let mut voted = false;
+        // On whichever screen shows it (the Fable review of 11-06, restore 5: the main
+        // screen's only, before), from the saved Desktops that may form there.
+        let shown_on = self.space_display(space);
         if self.provisional.contains(&space)
             && !self.space_has_pending(space)
-            && space == self.current_space(self.main_display().id)
-            && let Some(i) = self.adoption_for(meta)
+            && space == self.current_space(shown_on)
+            && let Some(i) = self.adoption_for(meta, shown_on)
         {
             let id = self.leftovers[i].id;
             // After a restart, with another saved Desktop waiting (the one the login may show),
@@ -574,11 +577,13 @@ impl Model {
     }
 
     /// The saved Desktop (index into the waiting ones) whose window `meta` matches with
-    /// confidence, unambiguously between Desktops.
-    fn adoption_for(&self, meta: &WindowMeta) -> Option<usize> {
+    /// confidence, unambiguously between Desktops, of those that may form on `display`
+    /// ([`Model::saved_fits_display`]: one saved on another screen that is connected waits
+    /// for it).
+    fn adoption_for(&self, meta: &WindowMeta, display: DisplayId) -> Option<usize> {
         let mut owner = Vec::new();
         let mut keys: Vec<Saved> = Vec::new();
-        for (i, l) in self.leftovers.iter().enumerate() {
+        for (i, l) in self.leftovers.iter().enumerate().filter(|(_, l)| self.saved_fits_display(l, display)) {
             for w in l.stages.iter().flat_map(|s| s.windows.iter()).filter(|w| w.role == SavedRole::Standard) {
                 keys.push(w.scorer_key(i as u64));
                 owner.push(i);
