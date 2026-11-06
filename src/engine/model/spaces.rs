@@ -585,6 +585,9 @@ impl Model {
             .iter()
             .position(|l| SpaceId(l.id) == target)
             .map(|i| self.leftovers.remove(i));
+        if let Some(s) = &saved {
+            self.note_shown(s);
+        }
         // Saved on a screen that is not this one (round displays-2): said in the arrival's
         // line and counted for the restore's summary.
         let other_screen = saved.as_ref().is_some_and(|s| self.saved_on_other_screen(s, display));

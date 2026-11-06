@@ -277,6 +277,47 @@ fn a_saved_desktops_windows_of_apps_not_running_at_the_end_are_given_up() {
 }
 
 #[test]
+fn a_quiet_apps_windows_of_a_desktop_not_shown_wait_for_that_desktop_alone() {
+    // R3 of the Codex review: Desktop 1, not visited, waits for mail's inbox; Mail runs (its
+    // archive back on Desktop 2) and opens nothing for a minute. Its next window "Inbox" an
+    // hour later, on Desktop 2, is a new window by Apple's rule, not one of Desktop 1's.
+    let mut m = login_on_desktop_2();
+    let d2 = m.current_space(MAIN);
+    m.end_restore();
+    assert!(m.take_shown_apps().contains(&CAL.to_string()), "Desktop 2 adopted at the login");
+    // Before its minute the pool takes it (a stray of Desktop 1, as ever)...
+    let mut early = m.clone();
+    add(&mut early, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(early.is_pooled(w(56)), "a stray before the minute");
+    // ...and the minute's give-up of the model's own stages alone (as before) leaves it so.
+    let mut expired_only = m.clone();
+    expired_only.expire_pending(&[MAIL.to_string()]);
+    add(&mut expired_only, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(expired_only.is_pooled(w(56)), "the bug: Desktop 1's entry still takes it");
+    // The minute closes Desktop 1's entries of Mail to other Desktops.
+    let (_, dropped, closed) = m.settle_quiet(&[MAIL.to_string(), WEB.to_string()]);
+    assert_eq!((dropped, closed), (0, vec![MAIL.to_string()]), "nothing of the model's stages waits; only Mail waits on Desktop 1");
+    assert_eq!(m.pending_unvisited(), 3, "the entry stays, for Desktop 1");
+    add(&mut m, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(!m.is_pooled(w(56)) && m.restored_grade(w(56)).is_none(), "by Apple's rule");
+    assert_eq!(m.window(w(56)).map(|x| x.space), Some(d2));
+    assert_ne!(kin(&m, 56), Some(Kin::Saved(4, 4)));
+    assert!(m.take_shown_apps().is_empty(), "no saved Desktop shown since");
+    // He goes to Desktop 1: its inbox, shown there, goes to its saved stage all the same.
+    let natives = [win(51, 30, TERM, "build", r(2.0)), win(53, 12, MAIL, "Inbox", r(7.0))];
+    let shown: Vec<WindowId> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &natives, &shown, &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 4);
+    assert!(m.restored_grade(w(53)).is_some_and(Grade::confident), "its saved window");
+    assert_ne!(m.stage_of(w(53)), m.stage_of(w(51)));
+    // Its apps' minutes start again there, for the windows of Desktop 1 still to show.
+    let mut apps = m.take_shown_apps();
+    apps.sort();
+    assert_eq!(apps, [MAIL, MUSIC, TERM].map(String::from).to_vec());
+    assert!(m.take_shown_apps().is_empty());
+}
+
+#[test]
 fn the_desktop_shown_when_saved_brings_its_saved_active_stage_forward_at_the_end() {
     // The login shows Desktop 1 itself. An app with no saved window opens first and takes the
     // empty front; Desktop 1's terminal (in its saved active stage) then adopts it, parked

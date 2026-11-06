@@ -195,9 +195,12 @@ impl Model {
                 spots.push(Spot::Stage(s.id, k));
             }
         }
+        // An app quiet for its minute: its windows of Desktops not shown yet wait for their
+        // Desktop alone (R3 of the Codex review).
+        let open = |w: &SavedWindow| w.role == SavedRole::Standard && !self.restore.pool_closed.contains(&w.bundle_id);
         for (i, l) in self.leftovers.iter().enumerate().filter(|(_, l)| saved_ok(l)) {
             for (j, st) in l.stages.iter().enumerate() {
-                for (k, w) in st.windows.iter().enumerate().filter(|(_, w)| w.role == SavedRole::Standard) {
+                for (k, w) in st.windows.iter().enumerate().filter(|(_, w)| open(w)) {
                     keys.push(w.scorer_key(saved_group(l.id, j)));
                     spots.push(Spot::Saved(i, j, k));
                 }

@@ -6168,12 +6168,19 @@ impl Controller {
     /// Gives up the pending windows of apps running and quiet for
     /// [`crate::engine::restore::QUIET`] (no new window): the windows were closed inside the
     /// app's own session. An app that is not running keeps them (until a later session); one
-    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet.
+    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet. Its
+    /// entries on saved Desktops not visited yet stay for that Desktop, taking no window shown
+    /// elsewhere from then on ([`Model::settle_quiet`]); that Desktop's first show starts its
+    /// minute again.
     fn give_up_pending(&mut self, ob: &mut Observer, now: Instant) {
         // Apps that quit have no clock (a later launch starts one again).
         self.quiet.prune(|b| !ob.pids_with_bundle(b).is_empty());
+        let Some(m) = self.model.as_mut() else { return };
+        for b in m.take_shown_apps() {
+            self.quiet.window(&b, now);
+        }
         let Some(m) = self.model.as_ref() else { return };
-        let bundles = m.pending_bundles();
+        let bundles = m.waiting_bundles();
         if bundles.is_empty() {
             return;
         }
@@ -6193,7 +6200,10 @@ impl Controller {
             return;
         }
         let Some(m) = self.model.as_mut() else { return };
-        let (actions, dropped) = m.expire_pending(&settled);
+        let (actions, dropped, closed) = m.settle_quiet(&settled);
+        if !closed.is_empty() {
+            tracing::info!(apps = ?closed, "restore: apps quiet for a minute; their windows saved on Desktops not shown yet wait for those Desktops only");
+        }
         if dropped > 0 {
             tracing::info!(dropped, apps = ?settled, "restore: pending windows given up (their apps opened no window for a minute)");
             self.execute(ob, actions);

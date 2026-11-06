@@ -17,6 +17,9 @@
 //!   login screen's heels ends the window while macOS is still reopening apps). An app
 //!   running then keeps its entries under the rule above (one launched during the window and
 //!   still opening keeps them until its own minute is up);
+//!   Entries of a saved Desktop not shown yet stay for that Desktop's first show, but from
+//!   then on take no window shown on another Desktop ([`Restore::pool_closed`]); at that
+//!   show the app's minute starts again ([`Restore::shown_apps`]);
 //! - it was pending through a whole window server session already (its app never brought it
 //!   back): [`crate::engine::persist::StateFile::start_new_session`] drops it at the next one.
 //!   A session in which its Desktop never showed does not count (nothing looked for it),
@@ -156,6 +159,16 @@ pub struct Restore {
     /// their frames no longer on that screen now (it moved in the arrangement; R2 of the Codex
     /// review). Their windows keep the frames their apps give them, as on another screen.
     pub frames_off: std::collections::BTreeSet<u64>,
+    /// Apps quiet for [`QUIET`] (their pending windows given up,
+    /// [`crate::engine::model::Model::expire_pending`]): their entries on the saved Desktops
+    /// not visited yet wait for that Desktop's first show alone, and no longer take a window
+    /// shown on another Desktop (the pool; R3 of the Codex review: Finder's new window for
+    /// a saved folder an hour later went into a stage of a Desktop never shown).
+    pub pool_closed: std::collections::BTreeSet<String>,
+    /// Apps with entries on a saved Desktop shown for the first time since the platform last
+    /// asked ([`crate::engine::model::Model::take_shown_apps`]): their quiet minute starts
+    /// again there, for the windows of that Desktop still to show.
+    pub shown_apps: std::collections::BTreeSet<String>,
     /// Why saved frames are not used was logged already, for these (saved Desktop, display)
     /// pairs (once a run each).
     pub frames_noted: std::collections::BTreeSet<(Option<u64>, u32)>,

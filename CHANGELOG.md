@@ -50,6 +50,10 @@
   first time.
 - A Desktop you did not visit between two restarts keeps its stages: they no longer
   disappear at the second restart (up to 30 days since you last visited it).
+- After a restart, a window an app opens once it has settled (Finder's window for a folder
+  an hour later, say) is a new window, as Apple's Stage Manager places it, not a window
+  pulled into a stage of a Desktop you have not visited yet. That Desktop still gets its
+  own windows back when you go there.
 - With two screens, a window dragged onto the second screen's strip becomes a card there,
   a click on a card's app icon on the second screen gathers that app's windows from that
   screen's stages only, and the stage hotkeys always switch the main screen's stages,
