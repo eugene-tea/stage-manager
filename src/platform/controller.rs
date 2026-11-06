@@ -4593,10 +4593,15 @@ impl Controller {
             self.unplaced.remove(&meta.id.0);
         }
         let hints = launch_hints(list);
+        let hold = self.macos_after_display_change();
         let Some(m) = self.model.as_mut() else { return };
+        m.set_hold_arrivals(hold);
         let mut actions = m.arrive(main.id, &live, &absent, &hints);
+        m.set_hold_arrivals(false);
         let after = m.current_space(main.id);
-        let note = m.last_arrival();
+        let note = m.last_arrival().clone();
+        // Listed for a moment as a display changes: offered again once it still shows.
+        self.unplaced.extend(note.held.iter().map(|w| w.0));
         // `new`: windows this run had not seen (all of a saved Desktop's on its first visit,
         // placed into its saved stages: `rebuilt`); `moved`: known windows of another Desktop
         // taken as moved here; `beside`: Desktops still on screen whose windows stay theirs.
@@ -4610,6 +4615,7 @@ impl Controller {
             moved = note.moved,
             carried = note.carried,
             beside = ?note.beside,
+            held = note.held.len(),
             "Space changed"
         );
         self.note_dock_arrival(after, before);
@@ -4675,11 +4681,15 @@ impl Controller {
             for meta in &live {
                 self.unplaced.remove(&meta.id.0);
             }
+            let hold = self.macos_after_display_change();
             let Some(m) = self.model.as_mut() else { return };
             let before = m.current_space(d.id);
+            m.set_hold_arrivals(hold);
             let actions = m.arrive(d.id, &live, &absent, &hints);
+            m.set_hold_arrivals(false);
             let after = m.current_space(d.id);
             let note = m.last_arrival().clone();
+            self.unplaced.extend(note.held.iter().map(|w| w.0));
             if before != after || new > 0 || note.moved > 0 || note.rebuilt.is_some() {
                 tracing::info!(
                     display = d.id.0,
@@ -5285,6 +5295,16 @@ impl Controller {
                     return;
                 }
             }
+        }
+        if self.macos_after_display_change() {
+            // A display change under way, no click or key since: macOS lists windows of
+            // other Desktops for a moment (11-05 20:59:03.9, the lid closed: a window of the
+            // 5K's other Desktop joined its app's stage here and sent the laptop's front to
+            // a card). Placed once the change settles, if it still shows; never a switch now.
+            if self.unplaced.insert(id) {
+                tracing::info!(id, "a window found after a display change (no click or key since): placed once the change settles, if it still shows");
+            }
+            return;
         }
         if self.space_in_doubt(ob, &on_screen(&list), screen.id) {
             // Its notification came before the Space change's: placing it now would put it

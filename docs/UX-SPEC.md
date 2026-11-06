@@ -155,7 +155,9 @@ the hidden windows macOS pushes whole onto the remaining screen at the change go
 corner (round displays-lid-2). The app macOS activates after the change (Mail, 0.4 s
 after the screen went) switches nothing: with no click or key press since, an activation
 or focus in the 10 s after a display change is macOS's, and the closed screen's front stays
-in front. A Desktop the closed screen's front left for the one macOS slid to shows its own
+in front. So is a window found then (macOS lists windows of the remaining screen's other
+Desktop for a moment): it is placed once the change settles, if it still shows, and one
+gone by then leaves no stage or card (round displays-lid-4). A Desktop the closed screen's front left for the one macOS slid to shows its own
 most recent stage again when it comes back, never nothing in front (round displays-lid-3).
 The lid opened: the
 stages whose windows macOS moves back to that screen are its stages again (the one in front

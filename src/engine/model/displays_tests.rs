@@ -817,10 +817,14 @@ fn the_lid_closed_on_the_first_desktop_then_macos_sliding_to_the_second_joins_no
     on_second.extend(LAPTOP_WINDOWS);
     let live = listed(&e, &on_second);
     let absent: Vec<WindowId> = FIRST.map(WindowId).to_vec();
+    // Within the display change's settle (arrivals held): another Desktop takes its windows.
+    e.m.set_hold_arrivals(true);
     let a = e.m.arrive(STUDIO, &live, &absent, &LaunchHints::default());
+    e.m.set_hold_arrivals(false);
     e.run(a.clone());
     assert_eq!(e.space_of(STUDIO), second);
     assert_eq!(e.m.last_arrival().carried, 3, "{:?}", e.m.last_arrival());
+    assert!(e.m.last_arrival().held.is_empty());
     assert_eq!(e.m.active_stage(STUDIO), Some(chrome), "the laptop's front in front there");
     assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if *id == WindowId(31))), "Chrome brought out of the corner: {a:?}");
     assert!(!e.parked_on(31, &studio_d) && e.m.window(WindowId(31)).is_some_and(|w| !w.parked));
@@ -945,6 +949,49 @@ fn the_lid_opened_gives_the_laptop_its_cards_back_from_the_other_desktop() {
     }
     assert!(!e.m.strip_for(STUDIO).iter().any(|c| [chrome, reminders, finder].contains(&c.stage)));
     assert_eq!(e.m.active_stage(STUDIO).and_then(|s| e.m.stage(s)).map(|s| s.space), Some(second), "the 5K keeps its Desktop");
+}
+
+#[test]
+fn a_window_listed_for_a_moment_as_the_lid_closes_leaves_nothing_behind() {
+    // 11-05 20:59:04 (round displays-lid-4): the lid closed, the laptop's front in front on
+    // the 5K's first Desktop; macOS listed a window of the 5K's other Desktop (never seen by
+    // this run) on it for a moment. It became a stage and a card, gone 2 s later when it
+    // left. Held within the settle: no stage, no card, the laptop's front stays in front.
+    let mut e = Env::both();
+    let (first, _, chrome, _, _) = evening_desk(&mut e);
+    e.d.frames.insert(WindowId(31), Rect::new(300.0, 200.0, 800.0, 600.0));
+    let a = e.m.set_displays(vec![studio()]);
+    e.run(a);
+    assert_eq!(e.m.active_stage(STUDIO), Some(chrome));
+    let stages = e.m.stages().len();
+    let slots = e.m.strip_slots(STUDIO);
+    let mut ids: Vec<u32> = FIRST.to_vec();
+    ids.extend(LAPTOP_WINDOWS);
+    let mut live = listed(&e, &ids);
+    let stray = WindowMeta {
+        id: WindowId(90),
+        pid: 70,
+        bundle_id: "com.example.editor".into(),
+        title: "Doc 90".into(),
+        role: WindowRole::Standard,
+        frame: on(&studio(), (250.0, 10.0)),
+        display: STUDIO,
+    };
+    live.push(stray.clone());
+    e.m.set_hold_arrivals(true);
+    let a = e.m.arrive(STUDIO, &live, &[], &LaunchHints::default());
+    e.m.set_hold_arrivals(false);
+    e.run(a);
+    assert_eq!(e.space_of(STUDIO), first, "the same Desktop");
+    assert_eq!(e.m.last_arrival().held, vec![WindowId(90)]);
+    assert!(e.m.window(WindowId(90)).is_none(), "not placed");
+    assert_eq!(e.m.stages().len(), stages, "no stage made for it");
+    assert_eq!(e.m.strip_slots(STUDIO), slots, "no card");
+    assert_eq!(e.m.active_stage(STUDIO), Some(chrome), "the laptop's front stays in front");
+    // Without the hold (no display change), the same listing places it, as ever.
+    let a = e.m.arrive(STUDIO, &live, &[], &LaunchHints::default());
+    e.run(a);
+    assert!(e.m.window(WindowId(90)).is_some() && e.m.last_arrival().held.is_empty());
 }
 
 #[test]

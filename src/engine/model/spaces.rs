@@ -90,6 +90,10 @@ pub struct ArrivalNote {
     pub carried: usize,
     /// Known Spaces seen on screen beside this one whose windows were left where they are.
     pub beside: Vec<u64>,
+    /// Windows first seen on the Desktop still shown while arrivals are held
+    /// ([`Model::set_hold_arrivals`]): not placed; the platform offers them again once they
+    /// still show after the change.
+    pub held: Vec<WindowId>,
 }
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
@@ -345,6 +349,13 @@ impl Model {
 
     // ----- arrival and learning ----------------------------------------------------------
 
+    /// Holds the windows an arrival first sees on the Desktop still shown (`on`: a display
+    /// change under way with no click or key press since): [`Model::arrive`] leaves them out
+    /// and names them in [`ArrivalNote::held`].
+    pub fn set_hold_arrivals(&mut self, on: bool) {
+        self.hold_arrivals = on;
+    }
+
     /// The platform arrived on a Space of `display` (a Space change, launch, or the window
     /// list disagreeing with the Space shown). `live` is every manageable window the window
     /// server lists on screen there now (children too), rules already applied (ignored
@@ -408,6 +419,13 @@ impl Model {
             None if self.space_is_empty(prev) => prev,
             None => self.new_space(display),
         };
+        // A display change under way, no click or key since (`hold_arrivals`): a window first
+        // seen on the Desktop still shown is macOS's listing mid-change (11-05 20:59:04, the
+        // lid closed: a window of the 5K's other Desktop, listed here for a moment, became a
+        // stage and a card until it left 2 s later), not placed. A Desktop that changed takes
+        // its windows as ever (the lid closed onto another Desktop: its own are rebuilt).
+        let held: Vec<WindowId> = if self.hold_arrivals && target == prev { arrivals.iter().map(|m| m.id).collect() } else { Vec::new() };
+        let arrivals: Vec<WindowMeta> = arrivals.into_iter().filter(|m| !held.contains(&m.id)).collect();
         let saved = self
             .leftovers
             .iter()
@@ -532,6 +550,7 @@ impl Model {
             moved,
             carried,
             beside: beside.iter().map(|s| s.0).collect(),
+            held,
         };
         actions.push(Action::StateChanged);
         actions

@@ -413,6 +413,9 @@ pub struct Model {
     /// slid to, [`Model::carry_adopted`]): their most recent card comes forward when they
     /// show again, never an empty front ([`Model::forward_after_emptied`]).
     pub(crate) front_owed: BTreeSet<SpaceId>,
+    /// An arrival leaves out windows first seen on the Desktop still shown
+    /// ([`Model::set_hold_arrivals`]).
+    pub(crate) hold_arrivals: bool,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -482,6 +485,7 @@ impl Model {
             launch_listed: HashSet::new(),
             adopted: BTreeSet::new(),
             front_owed: BTreeSet::new(),
+            hold_arrivals: false,
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

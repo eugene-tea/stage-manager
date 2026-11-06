@@ -188,7 +188,9 @@ Known gaps the owner accepted as rare:
     to"), the laptop's front window shown, not left at the 5K's corner, and the 5K's cards at
     its corner, not pushed whole onto it; no switch from the app macOS activates after the
     close (round displays-lid-3: the log's "an activation macOS made after a display
-    change", never "activated app lives in another stage" before his first click), the 5K
+    change", never "activated app lives in another stage" before his first click; a window
+    listed for a moment then: "a window found after a display change", never "new window"
+    and a switch, and "Space changed" with `held` and no new stage, round displays-lid-4), the 5K
     staying on the Desktop macOS slid to; back on the first Desktop its own front shows; (2)
     open the lid (his third run 11-05 20:26 left the laptop's cards on the 5K's second
     Desktop, fixed in round displays-lid-3): the stages macOS moves back are the
