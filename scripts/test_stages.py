@@ -6805,7 +6805,12 @@ def phase_displays():
         s = x
         rect = patch.get("rect")
         check(on_screen_of(rect, other) and is_parked(rect, zone(other)), f"its rectangle is at the other screen's own corner: {fmt(rect) if rect else rect}")
-        ours = [w for w in our_windows() if contains(w["bounds"], rect, tol=2.0) and contains(rect, w["bounds"], tol=2.0)]
+        # `shown` is the plan the controller sent; the panel orders in once its picture is
+        # rendered (a screen's first, about 170 ms on his laptop), so a listing read at
+        # once raced it (round patch-check: listed 40 to 60 ms before it showed); waited
+        # for, bounded, as the window server lists it.
+        at_rect = lambda: [w for w in our_windows() if contains(w["bounds"], rect, tol=2.0) and contains(rect, w["bounds"], tol=2.0)]
+        ours = (wait_until(at_rect, 3, "one of our windows listed at the other screen's patch") if rect else None) or []
         check(bool(ours), f"one of our windows is listed at it ({len(ours)})")
         main_patch = screen(s, main).get("corner_patch") or {}
         check(not main_patch.get("shown") or on_screen_of(main_patch.get("rect"), main), f"the main screen's patch, if up, stays on the main screen ({main_patch})")
