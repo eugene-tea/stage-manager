@@ -1067,11 +1067,11 @@ fn a_restart_sends_a_window_its_app_reopened_on_the_5k_back_to_the_laptop() {
     assert_eq!(m.window(WindowId(106)).map(|w| (w.meta.display, w.restore, w.parked)), Some((LAPTOP, saved_finder, false)));
     assert!(second.iter().any(|a| matches!(a, Action::Park { id, frame } if *id == WindowId(105) && laptop().parks(*frame))), "Chrome a card at the laptop's corner");
     assert!(!m.awaits_travellers(LAPTOP) && m.take_travellers().is_empty());
-    // Not a stray: on its own Desktop, no notice; the line says it.
+    // Not a stray: on its own Desktop, not named as one; the line says it.
     let line = m.restore_summary(0);
     assert_eq!((line.pooled, line.screen_moves, line.other_screen), (0, 1, 0));
     assert!(line.to_string().ends_with("1 window back to their screen"), "{line}");
-    assert!(m.desktop_notice().is_empty());
+    assert_eq!(m.away_now().count(), 0);
     // The 5K's own stages fit there: their frames are the saved ones, and no line says
     // otherwise for them.
     assert!(m.saved_frames_fit_for(STUDIO, m.stage_of(WindowId(101)).and_then(|s| m.stage(s)).map(|s| s.space.0)));
@@ -1094,7 +1094,7 @@ fn a_window_shown_on_the_5k_later_goes_to_its_stage_waiting_on_the_laptop() {
     assert!(a.contains(&Action::SetFrame { id: WindowId(106), frame: saved_finder }), "moved to its frame on the laptop: {a:?}");
     assert_eq!(m.window(WindowId(106)).map(|w| w.meta.display), Some(LAPTOP));
     assert_eq!(m.restore_summary(0).screen_moves, 1);
-    assert!(!m.is_pooled(WindowId(106)) && m.desktop_notice().is_empty());
+    assert!(!m.is_pooled(WindowId(106)) && m.away_now().count() == 0);
 }
 
 #[test]

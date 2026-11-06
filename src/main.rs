@@ -131,7 +131,7 @@ mod app {
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
     use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
     use stage_manager::ui::shell;
-    use stage_manager::ui::status_menu::{self, MenuAction, MenuState, NoticeLine, StatusMenu};
+    use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
     /// Permission, settings (Apple's Stage Manager coming on included) and display poll
@@ -180,8 +180,6 @@ mod app {
         strip_visible: bool,
         config_error: Option<String>,
         last_mark: Option<String>,
-        /// The desktop notice's entries, as the WM thread last sent them.
-        notice: Vec<NoticeLine>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
         /// Window captures were refused when the menu was last drawn.
@@ -243,7 +241,6 @@ mod app {
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
                 last_mark: self.last_mark.clone(),
-                notice: self.notice.clone(),
             }
         }
 
@@ -338,7 +335,6 @@ mod app {
                     }
                 }
                 UiUpdate::StripVisible(v) => self.strip_visible = v,
-                UiUpdate::DesktopNotice(lines) => self.notice = lines,
                 UiUpdate::CornerPatch(plan) => {
                     if let Some(mtm) = MainThreadMarker::new() {
                         stage_manager::ui::corner_patch::apply(mtm, plan);
@@ -375,12 +371,6 @@ mod app {
                     if let Err(e) = spawned {
                         tracing::warn!("cannot mark a problem: {e}");
                     }
-                }
-                MenuAction::ShowNoticed(id) => {
-                    self.wm.send(WmCommand::Notice(controller::NoticeCommand::Show(id)));
-                }
-                MenuAction::DismissNotice => {
-                    self.wm.send(WmCommand::Notice(controller::NoticeCommand::Dismiss));
                 }
                 MenuAction::Quit => quit(),
             }
@@ -887,7 +877,6 @@ mod app {
             strip_visible: true,
             config_error: None,
             last_mark: None,
-            notice: Vec::new(),
             hotkeys: None,
             thumbnail_interval_ms: None,
             capture_refused: false,

@@ -130,11 +130,8 @@ mod arrival;
 mod corner_still;
 mod dock_order;
 mod hide;
-mod notice;
 mod raise_order;
 mod stale;
-
-pub use notice::NoticeCommand;
 
 /// A focus this soon after a click or key press is the user's: the window is touched
 /// ([`Model::touch_window`]).
@@ -332,9 +329,6 @@ pub enum UiUpdate {
     StripVisible(bool),
     /// The wallpaper corner patch's plan (`[windows] corner_patch`).
     CornerPatch(crate::ui::corner_patch::PatchPlan),
-    /// The windows a restart brought back on another Desktop, as the status menu lists them
-    /// (empty: no list; [`notice`]).
-    DesktopNotice(Vec<crate::ui::status_menu::NoticeLine>),
 }
 
 type UiSink = Box<dyn Fn(UiUpdate) + Send + Sync>;
@@ -1023,8 +1017,6 @@ pub struct Controller {
     /// Each screen's corner patch as planned here ([`PatchTrack`], by the screen's id; round
     /// displays-2).
     patches: BTreeMap<u32, PatchTrack>,
-    /// The desktop notice's lines last sent to the main thread ([`notice`]).
-    notice_sent: Option<Vec<crate::ui::status_menu::NoticeLine>>,
     /// Finder's desktop icons as last read for the patches ([`PatchItems`]; the icons are
     /// read for every screen at once).
     patch_items: PatchItems,
@@ -1281,7 +1273,6 @@ impl Controller {
             fallback_said: HashSet::new(),
             hides: hide::Hides::default(),
             patches: BTreeMap::new(),
-            notice_sent: None,
             patch_items: PatchItems::default(),
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
@@ -6018,7 +6009,6 @@ impl Controller {
         if self.strip_dirty {
             self.present();
         }
-        self.publish_notice(ob);
     }
 
     /// Closes the restore window (the first user action, apps quiet, or its time up; see
@@ -6036,11 +6026,13 @@ impl Controller {
         self.absent_due = Some(clock.give_up_absent_at(now));
         let mut voters = Vec::new();
         let mut line = None;
+        let mut away = String::new();
         if let Some(m) = self.model.as_mut()
             && let Some(actions) = m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
             line = m.restore_line(clock.age(now).as_secs());
+            away = m.away_line(logging::title);
             self.front_after_restore = end.brings_front();
             // Only after a restart: a relaunch in the same session changed no focus.
             self.focus_after_restore = end.by_itself() && m.after_restart();
@@ -6048,7 +6040,7 @@ impl Controller {
         }
         if let Some(line) = line {
             // The windows back on another Desktop follow the counts, titles hashed.
-            tracing::info!("{line}{}", self.notice_log());
+            tracing::info!("{line}{away}");
         }
         // The windows that voted for a saved Desktop, back in their saved stages (round 8I2):
         // run now, before the action that ended the window acts on the model.
@@ -6191,12 +6183,6 @@ impl Controller {
                     Ok(reply) => reply,
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
-            }
-            Command::DebugNotice(id) => {
-                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
-                    return json!({ "ok": false, "error": "debug-notice needs STAGE_MANAGER_TEST=1" });
-                }
-                self.notice_command(ob, id.map_or(NoticeCommand::Dismiss, NoticeCommand::Show))
             }
             Command::DebugClose { id } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
@@ -6476,8 +6462,6 @@ impl Controller {
         });
         state["corner_patch"] = corner_patch;
         state["displays"] = Value::Array(displays_json);
-        // The windows a restart brought back on another Desktop (round desktop-notice).
-        state["restore"]["notice"] = self.notice_json();
         state["strays"] = Value::Array(strays);
         // Windows whose handle died judged closed once, waiting for a second look.
         state["stale_closing"] = json!(self.stale.waiting());

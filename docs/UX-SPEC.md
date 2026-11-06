@@ -384,7 +384,6 @@ until used; the rest are off.
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
-| Windows reopened on another Desktop than their own are listed in the menu (`[stages] restore_notice`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 | Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |
@@ -475,19 +474,9 @@ window, at the settle's end when its app is not running, and at the next session
 something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
 a file in its workspace) is the same name, so the frame the window reopened at counts. No
 apps are relaunched (that is macOS's
-"Reopen windows when logging back in") and no window moves between Desktops: when the
-restore window ends, those windows are listed at the top of the status menu instead (a
-section headed "Reopened on Another Desktop": per window the app and title, under it
-"Belongs on … ; now on …", then Dismiss), with one passive dot on the menu bar icon while
-any is listed. No alert, no notification: apps are still opening at the login, and the menu
-keeps the list until it is done. An entry leaves once its window shows on its saved Desktop,
-closes or leaves its Desktop; a click brings its window forward (its stage with it, on the
-Desktop shown). A Desktop is named by its apps ("the Desktop with Terminal and Mail") or as
-"this Desktop", not by Mission Control's number: no public API says which number the
-Desktop shown has (`com.apple.spaces`' "Current Space" does not follow a switch). Apple's
-Stage Manager has no such list: a deviation that contradicts nothing it does
-(`[stages] restore_notice`, on). When the
-restore window ends (no sooner than a minute after the login), the saved windows of apps
+"Reopen windows when logging back in") and no window moves between Desktops (no public API
+does); nothing lists those windows for the user, who could not act on such a list (his
+word 11-06; 1.6.0's menu list is gone). When the restore window ends (no sooner than a minute after the login), the saved windows of apps
 not running then are given up (one log line names them): an app opened later goes by the
 new-window rules, never back to a stage of the last session. A running app keeps its saved
 windows until it has opened none for a minute. Off, a restart
