@@ -5377,10 +5377,11 @@ impl Controller {
             return;
         }
         safety::set_displays(&displays);
-        let ids = |ds: &[Display]| ds.iter().map(|d| d.id).collect::<Vec<_>>();
-        if ids(&self.displays) != ids(&displays) {
-            // A display came or went: what the checks counted as moves before it is stale,
-            // and the moves that follow are macOS's ([`DISPLAY_SETTLE`]).
+        let placed = |ds: &[Display]| ds.iter().map(|d| (d.id, d.frame)).collect::<Vec<_>>();
+        if crate::engine::displays::displays_changed(&placed(&self.displays), &placed(&displays)) {
+            // A display came, went or moved (never the launch's first reading): what the
+            // checks counted as moves before it is stale, and the moves, activations and
+            // focuses that follow are macOS's ([`DISPLAY_SETTLE`]).
             self.displays_changed_at = Some(Instant::now());
             self.elsewhere.clear();
         }

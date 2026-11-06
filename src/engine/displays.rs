@@ -120,6 +120,15 @@ pub fn display_of(frame: Rect, displays: &[(DisplayId, Rect)]) -> Option<Display
     best.map(|(id, _)| id)
 }
 
+/// True when the displays changed from `before` to `after` (each display's id and frame, in
+/// order): one added, removed or moved. The launch's first reading (`before` empty) is no
+/// change: nothing macOS does then is the screens' doing, and ⌘-Tab and Dock activations
+/// switch as ever (live run 11-05 20:40:57: the first reading counted, and for 10 s after
+/// the launch no activation switched).
+pub fn displays_changed(before: &[(DisplayId, Rect)], after: &[(DisplayId, Rect)]) -> bool {
+    !before.is_empty() && before != after
+}
+
 /// True when an activation or a focus heard now is macOS's after a display change, not the
 /// user's (module docs): the displays changed `since_change` ago, within `settle`, and the
 /// user's last click or key press (`since_press` ago) came before the change. `None`: no
@@ -163,6 +172,18 @@ mod tests {
     /// The owner's 11-03 log: a headless Playwright WebKit window (untitled, `AXUnknown`).
     const HEADLESS: Rect = Rect::new(-10_000.0, -10_180.0, 1440.0, 900.0);
     const RIGHT: Rect = Rect::new(2560.0, 0.0, 1920.0, 1080.0);
+
+    #[test]
+    fn the_launchs_first_reading_of_the_displays_is_no_change() {
+        let studio = (DisplayId(4), MAIN);
+        let laptop = (DisplayId(1), Rect::new(-1800.0, 271.0, 1800.0, 1169.0));
+        assert!(!displays_changed(&[], &[studio, laptop]), "the launch");
+        assert!(!displays_changed(&[studio, laptop], &[studio, laptop]), "the same screens");
+        assert!(displays_changed(&[studio, laptop], &[studio]), "the lid closed");
+        assert!(displays_changed(&[studio], &[studio, laptop]), "the lid opened");
+        let moved = (DisplayId(1), Rect::new(2560.0, 0.0, 1800.0, 1169.0));
+        assert!(displays_changed(&[studio, laptop], &[studio, moved]), "a screen moved");
+    }
 
     /// 11-05 20:25:46: the lid closed at 46.44, Mail activated by macOS at 46.81 with no
     /// press since; the owner's own click at 49.70 and a ⌘-Tab are his.
