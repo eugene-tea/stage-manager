@@ -222,6 +222,7 @@ impl Model {
             pooled: self.pooled_count(),
             other_screen: self.restore.other_screen,
             screen_moves: self.restore.screen_moves,
+            first_after_login: None,
         }
     }
 

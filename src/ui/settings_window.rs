@@ -208,6 +208,7 @@ impl SettingsValues {
             LoginStatus::NeedsApproval => 1,
             LoginStatus::Off => 2,
             LoginStatus::Unavailable(_) => 3,
+            LoginStatus::Late => 4,
         };
         // The Shift row says what Shift does, which the new-apps switch flips.
         (login, self.apple_on, self.config_error.is_some(), self.animations_on, self.new_apps_join_current)
@@ -573,6 +574,10 @@ fn general(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, 
     match v.login {
         LoginStatus::NeedsApproval => {
             login_row = login_row.detail("Allow Stage Manager in System Settings → General → Login Items.");
+            login_row.trailing.push(view(&m.button("Login Items…", tag::LOGIN_ITEMS)));
+        }
+        LoginStatus::Late => {
+            login_row = login_row.detail("Starts after your apps until allowed in Login Items.");
             login_row.trailing.push(view(&m.button("Login Items…", tag::LOGIN_ITEMS)));
         }
         LoginStatus::Unavailable(_) => {
@@ -991,6 +996,7 @@ mod tests {
         assert_eq!(base.shape(), toggled.shape(), "a switch or the slider updates in place");
         for other in [
             SettingsValues { login: LoginStatus::NeedsApproval, ..base.clone() },
+            SettingsValues { login: LoginStatus::Late, ..base.clone() },
             SettingsValues { apple_on: true, ..base.clone() },
             SettingsValues { config_error: Some("bad".into()), ..base.clone() },
             SettingsValues { animations_on: false, ..base.clone() },

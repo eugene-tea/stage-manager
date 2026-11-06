@@ -210,8 +210,18 @@ gives a place for Settings, About, updates and Quit. It can be hidden, and openi
 again then shows Settings. Its glyph is original art, as tall as the SF Symbols beside it at
 the menu bar's default size (12 pt of ink, their median).
 
-**Launch at login.** Apple's is part of macOS. Ours registers as a login item at its first
-launch from Applications, and Settings can turn that off.
+**Launch at login.** Apple's is part of macOS. Ours registers at its first launch from
+Applications, and Settings can turn that off. It registers as a launchd agent (listed in
+Login Items under its name), which starts it as the login session begins, before macOS
+reopens the apps of the last session, so it is there as their windows show (11-06: as a
+login item it opened 23 and 35 s after the login, with most windows already up and piled).
+When macOS refuses the agent, or it waits for approval in Login Items, the plain login item
+stands in, which opens after the reopened apps, and Settings says "Starts after your apps
+until allowed in Login Items." An earlier version's login item moves to the agent once.
+Within 90 s of the login, opening the app again (the login item or macOS reopening it after
+the agent did) shows no Settings. An early launch waits for the screens a moment: the
+displays' first reading (5 s at most) and, within a minute of the login, a screen the
+stages were saved on that is not connected yet (10 s at most).
 
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above everything, while

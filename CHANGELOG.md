@@ -18,6 +18,10 @@
   to the screen its stage was on, in its place there. Two windows of one app (two VS Code
   workspaces, say) come back as the two stages they were, even when an editor shows a file
   in its title now, or gets its title only a moment after it opens.
+- Stage Manager starts as you log in, before macOS reopens your apps, instead of after
+  them: their windows go straight to their stages rather than showing piled up first. It
+  is listed in Login Items as before; if macOS asks you to allow it there, it starts after
+  your apps until you do, and Settings says so.
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 

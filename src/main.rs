@@ -129,7 +129,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, NoticeLine, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -460,6 +460,9 @@ mod app {
         capture::quiesce(CAPTURE_QUIESCE);
         logging::write_counts("quit");
         tracing::info!("bye");
+        // Launch at login turned off while this copy is the launchd agent's job: unregistered
+        // last, since unregistering ends the job (round early-start).
+        login_item::at_exit();
         std::process::exit(code);
     }
 
@@ -753,6 +756,13 @@ mod app {
         logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
+        // How it was started, and how long after the login (round early-start: the launchd
+        // agent starts it as the session begins; a login item only after the reopened apps).
+        tracing::info!(
+            started = login_item::started().name(),
+            login_ago_s = login_item::since_login().map(|d| d.as_secs()),
+            "launched"
+        );
         if let Some(home) = paths::custom_home() {
             tracing::info!("STAGE_MANAGER_HOME={}", home.display());
         }

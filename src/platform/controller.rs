@@ -100,6 +100,7 @@ use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::{display_of, off_every_display, off_screen_not_ours, on_other_display};
+use crate::engine::early_start;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::stale_activation;
@@ -119,7 +120,7 @@ use crate::engine::model::{
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
-use crate::engine::restore::{self, AppQuiet, End, Restore, Settling};
+use crate::engine::restore::{self, AppQuiet, End, Restore, Settling, Summary};
 use crate::engine::rules::{Decision, RuleAction, ShiftEffect};
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
@@ -1036,6 +1037,10 @@ pub struct Controller {
     /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
     /// when observation started; why and since when. Nothing is built or saved meanwhile.
     build_wait: Option<(session::Blind, Instant)>,
+    /// The launch's stages wait for the screens (round early-start,
+    /// [`early_start::screens_wait`]): why; and when the launch first tried to build.
+    screens_wait: Option<early_start::ScreensWait>,
+    build_tried: Option<Instant>,
     /// The screen is locked (or the session is not on the console): no Space is inferred,
     /// no window is counted gone, and `state.json` is not written until it unlocks.
     locked: bool,
@@ -1286,6 +1291,8 @@ impl Controller {
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
             build_wait: None,
+            screens_wait: None,
+            build_tried: None,
             locked: false,
             lock_checked: None,
             ax_silent_since: None,
@@ -4184,6 +4191,12 @@ impl Controller {
         if self.phase.fullscreen() {
             self.unplaced.extend(live.iter().map(|m| m.id.0));
         }
+        // Saved windows on screen at the launch went back at once: the first placed now.
+        if let Some(clock) = self.settling.as_mut()
+            && model.restore_summary(0).windows > 0
+        {
+            clock.placed(Instant::now());
+        }
         self.model = Some(model);
         // Following the Dock, the first strip shows in the Dock's order already.
         self.refresh_dock_order(Instant::now(), ob.last_launch());
@@ -4875,8 +4888,43 @@ impl Controller {
                 if let Some((why, since)) = self.build_wait.take() {
                     tracing::info!(was = why.name(), waited_ms = now.duration_since(since).as_millis() as u64, "the Desktop can be seen: building stages");
                 }
+                self.screens_ready(now)
+            }
+        }
+    }
+
+    /// At launch: true when the screens are there to build on ([`early_start::screens_wait`]):
+    /// the displays read, and, at the session's start, every screen `state.json` saved stages
+    /// on connected, each waited for a moment at most. The tick looks again meanwhile.
+    fn screens_ready(&mut self, now: Instant) -> bool {
+        let tried = *self.build_tried.get_or_insert(now);
+        let read = !self.displays.is_empty();
+        let config = self.store.config();
+        let missing = if read && config.stages.restore_after_restart {
+            let connected: Vec<_> = self.displays.iter().map(|d| d.key).collect();
+            std::fs::read_to_string(paths::state_file())
+                .ok()
+                .and_then(|t| StateFile::from_json(&t).ok())
+                .map_or(0, |s| early_start::missing_screens(&s, &connected))
+        } else {
+            0
+        };
+        let since_login = super::apps::login_started().map(|l| l.elapsed());
+        let wait = early_start::screens_wait(read, missing, since_login, now.duration_since(tried), config.displays.main_only);
+        match (wait, self.screens_wait) {
+            (Some(w), was) => {
+                if was != Some(w) {
+                    tracing::info!(why = w.name(), missing, login_ago_s = since_login.map(|d| d.as_secs()), "the launch waits a moment for the screens before building stages");
+                }
+                self.screens_wait = Some(w);
+                false
+            }
+            (None, Some(was)) => {
+                self.screens_wait = None;
+                tracing::info!(was = was.name(), missing, waited_ms = now.duration_since(tried).as_millis() as u64, "building stages on the screens there are");
                 true
             }
+            (None, None) => true,
         }
     }
 
@@ -5425,7 +5473,7 @@ impl Controller {
             let settling = m.settling();
             if let (Some(clock), true) = (self.settling.as_mut(), back.is_some()) {
                 // The restore is still under way.
-                clock.busy(Instant::now());
+                clock.placed(Instant::now());
             }
             if settling {
                 // While the login settles nothing animates: windows go to their stages quietly.
@@ -5904,8 +5952,9 @@ impl Controller {
             // The button came up without a mouse-up the monitor saw.
             self.focus_after_press_done(ob);
         }
-        if self.model.is_none() && self.build_wait.is_some() && !safety::quit_requested() {
-            // The launch's stages wait for the Desktop to be seen: look again now and then.
+        if self.model.is_none() && (self.build_wait.is_some() || self.screens_wait.is_some()) && !safety::quit_requested() {
+            // The launch's stages wait for the Desktop to be seen, or for the screens: look again
+            // now and then.
             if self.lock_checked.is_none_or(|t| now.duration_since(t) >= LOCK_POLL) {
                 if !self.poll_lock(now, true) {
                     ob.rescan_all();
@@ -6040,7 +6089,7 @@ impl Controller {
             && let Some(actions) = m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
-            line = m.restore_line(clock.age(now).as_secs());
+            line = m.restore_line(clock.age(now).as_secs()).map(|l| Summary { first_after_login: clock.first_placed_after_login(), ..l });
             self.front_after_restore = end.brings_front();
             // Only after a restart: a relaunch in the same session changed no focus.
             self.focus_after_restore = end.by_itself() && m.after_restart();
