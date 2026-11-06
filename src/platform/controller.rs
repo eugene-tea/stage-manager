@@ -1060,6 +1060,10 @@ pub struct Controller {
     /// out): for [`DISPLAY_SETTLE`] after it, windows found on another display are macOS's
     /// doing, not the user's drag ([`Self::follow_display_moves`]).
     displays_changed_at: Option<Instant>,
+    /// The displays that came at that change (the lid opened), kept through a change after
+    /// it that adds none: within [`DISPLAY_SETTLE`] a window the model has parked elsewhere
+    /// that macOS lists on one of them goes back to it ([`Self::reconcile_parked`]).
+    displays_added: Vec<DisplayId>,
     /// When the latest switch we began started (a batch of ours that parks or focuses): an
     /// activation that fired before it never starts one ([`stale_activation::judge`]).
     our_switch: Option<Instant>,
@@ -1290,6 +1294,7 @@ impl Controller {
             space_changes: 0,
             last_switch: None,
             displays_changed_at: None,
+            displays_added: Vec::new(),
             our_switch: None,
             space_checked: Instant::now(),
             foreign: Persisting::default(),
@@ -2315,14 +2320,18 @@ impl Controller {
         // A screen came back (the lid opened): a parked window macOS listed in its park zone
         // is that screen's card, taken by the display reconcile before anything parks it
         // again elsewhere (11-05 20:26:05: the laptop's two cards, counted on the 5K, were
-        // parked again at the 5K's corner and stayed its cards).
+        // parked again at the 5K's corner and stayed its cards); one it listed at a normal
+        // frame on the screen that came back shows there, that screen's front (11-06
+        // 12:00:51: Chrome, a card on the 5K since a switch there, was back at its laptop
+        // frame and parked again at the 5K's corner) ([`Model::returned_display`]).
         let settling_displays = self.displays_settling();
+        let added: &[DisplayId] = if settling_displays { &self.displays_added } else { &[] };
         let mut returned: Vec<(WindowId, DisplayId, Rect)> = Vec::new();
         for (id, pid) in model_parked {
             let listed = list.iter().find(|w| w.id == id && w.layer == 0);
             if settling_displays
                 && let Some(w) = listed
-                && let Some(to) = m.window(WindowId(id)).and_then(|x| m.park_zone_display(w.bounds, x.meta.display))
+                && let Some(to) = m.window(WindowId(id)).and_then(|x| m.returned_display(w.bounds, x.meta.display, added))
             {
                 returned.push((WindowId(id), to, w.bounds));
                 self.strays.remove(&id);
@@ -5596,6 +5605,12 @@ impl Controller {
             // focuses that follow are macOS's ([`DISPLAY_SETTLE`]).
             self.displays_changed_at = Some(heard);
             self.elsewhere.clear();
+            let added: Vec<DisplayId> = displays.iter().filter(|d| !self.displays.iter().any(|o| o.id == d.id)).map(|d| d.id).collect();
+            if added.is_empty() {
+                self.displays_added.retain(|id| displays.iter().any(|d| d.id == *id));
+            } else {
+                self.displays_added = added;
+            }
         }
         self.displays = displays.clone();
         let mut actions = Vec::new();

@@ -10,6 +10,7 @@ use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::testkit::Desk;
 
+mod lid_open;
 mod origins;
 mod switching;
 

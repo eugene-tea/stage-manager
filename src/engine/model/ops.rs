@@ -1806,8 +1806,9 @@ impl Model {
     /// Where the window is listed on the new display says whether it shows (the lid opened,
     /// 11-05 16:27:31: macOS put a window it had on the 5K back on the laptop at the frame
     /// it had there, and a parked one at the laptop's old park corner): listed in that
-    /// display's park zone it is a card still, parked there with its restore frame carried
-    /// over ([`Display::adopt`]); listed outside, it shows at that frame, the user's (its
+    /// display's park zone it is a card, parked there with its restore frame carried over
+    /// ([`Display::adopt`]), whether the model had it parked or shown (a card of that screen
+    /// before the close, shown on the other since); listed outside, it shows at that frame, the user's (its
     /// restore frame), whether the model had it parked or not, and is never moved. Only a
     /// shown window's stage comes in front: a card put back brings nothing forward, and
     /// nothing comes forward when only cards came. A window moved to a display the model
@@ -1850,20 +1851,31 @@ impl Model {
             let display = *self.display(to);
             for &id in &ids {
                 let from = *self.display(self.windows[&id].meta.display);
+                let at_corner = frames.get(&id).is_some_and(|f| display.parks(*f));
                 let mut group = vec![id];
                 group.extend(self.children_of(id));
                 for g in group {
                     if let Some(w) = self.windows.get_mut(&g) {
                         w.meta.display = to;
-                        if w.parked {
+                        // A shown one put back at the corner is a card from now on: its
+                        // restore frame is carried over as a parked one's.
+                        if w.parked || at_corner {
                             w.restore = display.adopt(w.restore, &from);
                         }
                         w.original = w.original.map(|o| display.adopt(o, &from));
                     }
                 }
                 let Some(&f) = frames.get(&id) else { continue };
-                if display.parks(f) {
-                    // A card still (macOS put a parked window back at its old corner).
+                if at_corner {
+                    // A card (macOS put the window back at that display's corner, where it
+                    // was a card before the lid closed): one the model had shown on the other
+                    // screen is a card too (11-06 12:00:52: Deep House, a laptop card shown on
+                    // the 5K by a click there, came back to the laptop's corner and was taken
+                    // as shown, its stage in front, invisible). Its children park with it
+                    // below, its stage stays in the strip.
+                    if let Some(w) = self.windows.get_mut(&id) {
+                        w.parked = true;
+                    }
                     continue;
                 }
                 // Shown there, at that frame: a parked one macOS put back where it was is
@@ -2093,5 +2105,24 @@ impl Model {
     /// ([`Model::windows_moved_to_display`]), never parked again on the other.
     pub fn park_zone_display(&self, frame: Rect, except: DisplayId) -> Option<DisplayId> {
         self.displays.iter().find(|d| d.id != except && d.parks(frame)).map(|d| d.id)
+    }
+
+    /// The display other than `except` (the one the model has a parked window on) that macOS
+    /// put the window back on as a screen came back: the one whose park zone holds `frame`
+    /// ([`Model::park_zone_display`], a card there), else, out of `except`'s own park zone, a
+    /// display of `returned` (those added in the change settling now) that shows most of it
+    /// (shown there at that frame). The lid opened 11-06 12:00:51: Chrome, a card on the 5K
+    /// since a switch there, was listed at its pre-close frame on the laptop and parked again
+    /// at the 5K's corner before the display reconcile saw it; it is the laptop's front
+    /// ([`Model::windows_moved_to_display`]).
+    pub fn returned_display(&self, frame: Rect, except: DisplayId, returned: &[DisplayId]) -> Option<DisplayId> {
+        if let Some(d) = self.park_zone_display(frame, except) {
+            return Some(d);
+        }
+        if returned.is_empty() || self.display(except).parks(frame) {
+            return None;
+        }
+        let rects: Vec<(DisplayId, Rect)> = self.displays.iter().map(|d| (d.id, d.frame)).collect();
+        crate::engine::displays::display_of(frame, &rects).filter(|d| *d != except && returned.contains(d))
     }
 }

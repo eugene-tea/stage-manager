@@ -169,10 +169,14 @@ stages whose windows macOS moves back to that screen are its stages again (the o
 before, a card; a stage moved whole stays one stage); the stage that came over in front
 stays where it is. macOS puts each window back at the frame it had on that screen, a hidden
 one at its old corner: a window put back in the open shows there, at that frame (never
-moved to a frame carried over from the other screen), one put back at the corner is a card
-still, that screen's card again even from another Desktop of the remaining screen, never
-hidden again at the remaining screen's corner (round displays-lid-3), and a card put back
-brings nothing forward; none of it is the user's drag. A stage
+moved to a frame carried over from the other screen), its stage that screen's front, also
+when the user had sent it to a card on the remaining screen meanwhile; one put back at the
+corner is a card, also when the user had brought it in front on the remaining screen, that
+screen's card again even from another Desktop of the remaining screen, never hidden again
+at the remaining screen's corner (round displays-lid-3; the owner's 11-06 run: the two
+stages he had used on the 5K while the lid was closed stayed there), and a card put back
+brings nothing forward; the remaining screen, its front gone back, brings its own most
+recent stage forward; none of it is the user's drag. A stage
 belongs to the screen its windows are on. Decided, not measured:
 a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
 Dock to an app whose stage is on the other screen switches that screen only. Each screen's
