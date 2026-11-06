@@ -10,6 +10,8 @@ use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::testkit::Desk;
 
+mod switching;
+
 const STUDIO: DisplayId = DisplayId(1);
 const LAPTOP: DisplayId = DisplayId(2);
 const STUDIO_KEY: ScreenKey = ScreenKey::new(0x610, 0xae2f, 0x4d6);

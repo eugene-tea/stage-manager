@@ -139,7 +139,9 @@ for that screen (6 on the 5K, 5 on the laptop), each screen with its own front s
 cards, each strip sliding away under its own windows. A window dragged to another screen
 starts a stage of its own there, in front; the stage that was in front there goes to a
 card; the screen it left, its front stage now empty, brings its most recent card forward. A
-card click changes only its own screen. A new app opens on the screen with keyboard focus,
+card click changes only its own screen, and so does a click on a card's app icon: the app's
+windows come from that screen's stages. A window dragged onto either screen's strip becomes
+a stage of its own there. A new app opens on the screen with keyboard focus,
 as its own stage there, by the one-screen rules (macOS picks the screen; the window is
 taken where it shows). A window straddling two screens belongs to the one showing most of
 it (macOS's rule). The lid closed: that screen's front stage comes to the remaining screen
@@ -187,7 +189,9 @@ window cycle.
 
 **Wallpaper click.** The active stage goes into the strip, and a second click brings it
 back. A double click counts as one click, and Finder becoming active after the click never
-switches stages.
+switches stages. The Dock's window spans its whole screen, clear away from its bar: a click
+there is on the wallpaper (or the window) below it, and only one on or near the bar (its
+magnified icons included) is the Dock's.
 
 **Drag and drop.** A card dragged into the main area grows to window size and joins the
 current stage where you drop it. A window dragged onto the strip becomes a stage of its own
@@ -533,8 +537,8 @@ with the windows back on another Desktop (bundle id, hashed title, the Desktops'
   seen live with ours; so are a second screen's own card glass, corner patch and desktop
   still, and a full-screen app on one screen while windows arrive on the other (round
   displays-2, built from the one-screen code, checked by the suite's `displays` phase).
-- Stage hotkeys and `ctl switch N` count the main screen's strip; which screen Apple's
-  hotkeys address is not measured.
+- Stage hotkeys and `ctl switch N` count and switch the main screen's strip, whichever
+  screen has the keyboard; which screen Apple's hotkeys address is not measured.
 - No public API names a Desktop, so Desktops are told apart by their windows. An empty
   Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
   looks new until one of them shows.

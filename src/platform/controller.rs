@@ -1449,6 +1449,7 @@ impl Controller {
             list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
         let settling = self.phase.space_settling(Instant::now());
         let frames = observed_frames(&reads, &listed, settling);
+        ob.note_frames(frames.iter().map(|(id, f)| (id.0, *f)));
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
     }
 
@@ -1595,10 +1596,11 @@ impl Controller {
     /// From the tick: reads the Dock's pid and bar again (Accessibility, the Dock's bounded
     /// timeout) once the last read is [`DOCK_BAR_FRESH`] old, so its size, side, display or
     /// auto-hide changing is caught while nothing else happens; the tap gets it when it
-    /// changed. Not while an overview shows (the shield is off then).
+    /// changed. Not while an overview shows (the shield is off then). Read whatever the
+    /// config: a press's wallpaper and Dock tests see through the Dock's window by it
+    /// ([`Self::dock_bar_now`]).
     fn refresh_dock_bar(&mut self, now: Instant) {
-        let windows = &self.store.config().windows;
-        if !(windows.inert_slivers || windows.corner_patch) || self.overview.showing().is_some() {
+        if self.overview.showing().is_some() {
             return;
         }
         if self.dock_bar.as_ref().is_some_and(|(at, _)| now.duration_since(*at) < DOCK_BAR_FRESH) {
@@ -1613,6 +1615,12 @@ impl Controller {
             tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");
             self.publish_shield();
         }
+    }
+
+    /// The Dock's bar as last read ([`Self::refresh_dock_bar`]; unknown: none), for a
+    /// press's hit tests: no Accessibility call on a press.
+    pub(super) fn dock_bar_now(&self) -> sliver::DockBar {
+        self.dock_bar.as_ref().map(|(_, b)| b.clone()).unwrap_or_default()
     }
 
     /// Finder's desktop icons for the patch at `rect` as known (`None`: not known, the patch
@@ -3738,6 +3746,9 @@ impl Controller {
             return;
         }
         let obs = self.observe_activation(ob, &list, focused.filter(|_| needs_focus));
+        // The window server's frames the switch keeps are tracked too: its outgoing picture
+        // starts where the windows are (an app may move one without a notice).
+        ob.note_frames(obs.frames.iter().map(|(id, f)| (id.0, *f)));
         if self.bring_here_if_shift(ob, pid, &obs, now) {
             self.forget_held(ob);
             return;
@@ -3850,11 +3861,9 @@ impl Controller {
         }
     }
 
-    /// True when window `id` sits in a stage that is not active.
+    /// True when window `id` sits in a stage that is not in front on its screen.
     fn window_elsewhere(&self, id: u32) -> bool {
-        self.model.as_ref().is_some_and(|m| {
-            m.stage_of(WindowId(id)).is_some_and(|s| m.main_active_stage() != Some(s))
-        })
+        self.model.as_ref().is_some_and(|m| m.stage_of(WindowId(id)).is_some_and(|s| !m.stage_in_front(s)))
     }
 
     /// True when app `pid` has a standard window on the current stage (or pinned on this
@@ -3906,7 +3915,7 @@ impl Controller {
         let (Some(press), Some(m)) = (&self.press, &self.model) else { return };
         let Some(w) = m.window(WindowId(id)) else { return };
         let shown = !w.parked
-            && (w.home == Home::Pinned || m.main_active_stage().is_some_and(|a| w.home == Home::Stage(a)));
+            && (w.home == Home::Pinned || m.stage_of(WindowId(id)).is_some_and(|s| m.stage_in_front(s)));
         if !shown || w.meta.role != WindowRole::Standard || !input::left_button_down() {
             return;
         }
@@ -5568,7 +5577,7 @@ impl Controller {
         // receive other apps' clicks, so they never hide the wallpaper.
         let own = std::process::id() as i32;
         let list: Vec<_> = list.iter().filter(|w| w.pid != own).cloned().collect();
-        if !desktop::is_wallpaper_click(&list, p) {
+        if !desktop::is_wallpaper_click(&list, p, &self.dock_bar_now()) {
             return false;
         }
         self.desktop_echo.wallpaper_clicked(Instant::now());
@@ -5835,8 +5844,7 @@ impl Controller {
     fn switch(&mut self, ob: &mut Observer, n: usize, animated: bool) -> Result<usize, String> {
         let obs = self.observe(ob);
         let m = self.model.as_mut().ok_or_else(not_managing)?;
-        let space = m.current_space(m.main_display().id);
-        if m.stage_by_number(space, n).is_none() {
+        if m.stage_by_number(m.hotkey_space(), n).is_none() {
             return Err(format!("there is no stage {n}"));
         }
         let actions = m.switch_to_number(n, &obs);

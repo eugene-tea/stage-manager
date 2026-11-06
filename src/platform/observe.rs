@@ -519,6 +519,22 @@ impl Observer {
         self.read_frame(id).map(|(f, _)| f)
     }
 
+    /// Takes `frames` (window id, frame), an observation's as decided against the window
+    /// server's list, as the tracked frames of the windows it names: a window of an app that
+    /// posts no move notice is then tracked where it is, and a switch's outgoing picture
+    /// starts there, not where it was before the user moved it (the Fable review's switching
+    /// 5). Unknown windows are skipped.
+    pub fn note_frames(&mut self, frames: impl IntoIterator<Item = (u32, Rect)>) {
+        for (id, frame) in frames {
+            if let Some(w) = self.windows.get_mut(&id)
+                && w.frame != frame
+            {
+                tracing::trace!(id, from = %w.frame, to = %frame, "tracked frame taken from the observation");
+                w.frame = frame;
+            }
+        }
+    }
+
     /// [`Self::refresh_frame`], saying whether the frame was read now (`true`) or is the
     /// tracked one because the read failed (a busy app's timeout).
     pub fn read_frame(&mut self, id: u32) -> Option<(Rect, bool)> {

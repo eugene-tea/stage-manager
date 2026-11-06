@@ -390,14 +390,23 @@ impl Model {
         actions
     }
 
-    /// Switches to stage `n` (1-based, creation order) of the current Space; a no-op when
-    /// there is none.
+    /// Switches to stage `n` (1-based, creation order) of the Desktop the main screen shows
+    /// ([`Model::hotkey_space`]); a no-op when there is none.
     pub fn switch_to_number(&mut self, n: usize, obs: &Observation) -> Vec<Action> {
-        let space = self.current_space_for(obs);
+        let space = self.hotkey_space();
         match self.stage_by_number(space, n) {
             Some(s) => self.switch_to(s, obs),
             None => Vec::new(),
         }
+    }
+
+    /// The Desktop whose stages the stage hotkeys and `ctl switch N` count: the main
+    /// screen's, whichever screen has the keyboard (UX-SPEC, Known gaps: which screen Apple's
+    /// hotkeys address is not measured). One answer for the platform's "is there a stage
+    /// `n`" and the switch itself (the Fable review's switching 4: the check read the main
+    /// screen, the switch the focused one).
+    pub fn hotkey_space(&self) -> SpaceId {
+        self.current_space(self.main_display().id)
     }
 
     /// Sends a standard window (a child stands for its parent) and its children to another
@@ -702,17 +711,25 @@ impl Model {
     /// when the app has no window elsewhere.
     pub fn bring_app_here(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
         let one = self.options.settings.app_windows == AppWindows::OneAtATime;
-        self.gather_app(pid, obs, one)
+        let space = self.current_space_for(obs);
+        self.gather_app(pid, space, obs, one)
     }
 
     /// A click on a card's app icon: switch to the card's stage, then bring every window of
     /// app `pid` from the other stages there too (Apple: the icon shows all of the app's
     /// windows, including those in other sets). With nothing elsewhere it is a plain switch.
+    /// The windows come from the card's own Desktop, on whichever screen its strip is (the
+    /// focus, still the stage left's, says nothing of where the card was clicked).
     pub fn show_app_everywhere(&mut self, stage: StageId, pid: Pid, obs: &Observation) -> Vec<Action> {
+        let Some(space) = self.stage(stage).map(|s| s.space) else { return Vec::new() };
         let mut actions = self.switch_to(stage, obs);
+        if !self.stage_in_front(stage) {
+            // Not switched to (a Desktop not shown): nothing gathers on that Desktop either.
+            return actions;
+        }
         actions.retain(|a| *a != Action::StateChanged);
         // The stage just shown has no live frames to save yet.
-        let mut more = self.gather_app(pid, &Observation::default(), false);
+        let mut more = self.gather_app(pid, space, &Observation::default(), false);
         actions.append(&mut more);
         if actions.last() != Some(&Action::StateChanged) {
             actions.push(Action::StateChanged);
@@ -733,12 +750,11 @@ impl Model {
         self.send_window(id, Target::New, obs)
     }
 
-    /// Moves app `pid`'s windows from the current Space's inactive stages into the active one
-    /// (only the most recent one when `one`); see [`Model::bring_app_here`].
-    fn gather_app(&mut self, pid: Pid, obs: &Observation, one: bool) -> Vec<Action> {
+    /// Moves app `pid`'s windows from `space`'s inactive stages into its active one (only the
+    /// most recent one when `one`); see [`Model::bring_app_here`].
+    fn gather_app(&mut self, pid: Pid, space: SpaceId, obs: &Observation, one: bool) -> Vec<Action> {
         let mut actions = Vec::new();
-        let display = self.current_display(obs);
-        let space = self.current_space(display);
+        let display = self.space_display(space);
         let active = self.ensure_active(space);
         let mut sources: Vec<(u64, StageId, Vec<WindowId>)> = self
             .stages

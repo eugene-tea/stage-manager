@@ -20,8 +20,9 @@
 //!   waits to be placed (minimized, on another Desktop);
 //! - it is not hidden already (a hide of the user's stays the user's: never adopted, never
 //!   undone), and it is not the active app (hiding the active app activates another);
-//! - the shown Desktop's active stage has a window: Desktops are recognized by the windows on
-//!   screen, and parked slivers count; with hides, the active stage's windows must carry it;
+//! - the shown Desktop's active stage has a window (the main screen's, and that of every other
+//!   screen showing a window of the app): Desktops are recognized by the windows on screen,
+//!   and parked slivers count; with hides, the active stage's windows must carry it;
 //! - macOS did not just refuse to hide it.
 
 /// What the model says about an app's windows ([`crate::engine::model::Model::app_park`]).
@@ -31,11 +32,12 @@ pub struct AppPark {
     pub windows: usize,
     /// Of those, the ones shown: in an active stage, pinned, or on every Desktop.
     pub shown: usize,
-    /// The windows of the stage an activation of the app would bring on the shown Desktop
-    /// (its most recent inactive stage there with a window of it), with their restore frames:
-    /// kept at their own frames while the app is hidden.
+    /// The windows of the stage an activation of the app would bring on a shown Desktop (its
+    /// most recent inactive stage on any screen's shown Desktop with a window of it), with
+    /// their restore frames: kept at their own frames while the app is hidden.
     pub keep: Vec<(u32, crate::engine::geometry::Rect)>,
-    /// The shown Desktop's active stage has a standard window.
+    /// The main screen's shown Desktop's active stage has a standard window, and so has that
+    /// of every other screen's shown Desktop holding a window of the app.
     pub stage_here: bool,
 }
 

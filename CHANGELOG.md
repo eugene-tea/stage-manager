@@ -36,6 +36,13 @@
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 - The menu no longer lists windows a restart reopened on another Desktop.
+- With two screens, a window dragged onto the second screen's strip becomes a card there,
+  a click on a card's app icon on the second screen gathers that app's windows from that
+  screen's stages only, and the stage hotkeys always switch the main screen's stages,
+  whichever screen has the keyboard.
+- A wallpaper click reveals the desktop on the Dock's screen too: the Dock's invisible
+  screen-wide window no longer counts as a window over the wallpaper, and a click away from
+  the Dock no longer asks the Dock what was clicked.
 
 ## 1.6.0 — 2026-11-05
 
