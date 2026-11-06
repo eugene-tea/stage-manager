@@ -18,6 +18,10 @@
   to the screen its stage was on, in its place there. Two windows of one app (two VS Code
   workspaces, say) come back as the two stages they were, even when an editor shows a file
   in its title now, or gets its title only a moment after it opens.
+- After a restart, a window its app reopens under another name at its saved place (Fork
+  showing another repository) goes back to its own stage instead of joining the app's other
+  window, and "new apps join the current stage" leaves the windows apps reopen at the login
+  to the restore.
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 

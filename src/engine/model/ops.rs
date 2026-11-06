@@ -131,6 +131,12 @@ impl Model {
         self.forget_quit_of(&meta.bundle_id);
         if decision.action == RuleAction::Native {
             if self.place_from_pending(&meta, space, obs, &mut actions) {
+                // Its app is reopening its saved windows: one of them by Apple's rule may be
+                // a saved one under another name ([`Model::rescore_siblings`]).
+                if self.restored.get(&meta.id).is_some_and(|r| r.grade.confident()) {
+                    let more = self.rescore_siblings(meta.pid, meta.id);
+                    actions.extend(more);
+                }
                 self.normalize_slots();
                 actions.push(Action::StateChanged);
                 return actions;

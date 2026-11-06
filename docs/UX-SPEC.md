@@ -473,7 +473,19 @@ window that shows only after the settle still goes to its stage, as above; that 
 bounded per app, not by the two minutes (its entries go a minute after its app's last new
 window, at the settle's end when its app is not running, and at the next session). A title that only puts
 something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
-a file in its workspace) is the same name, so the frame the window reopened at counts. No
+a file in its workspace) is the same name, so the frame the window reopened at counts. While
+the restore window is open (no click or key yet, so every window that shows is one an app
+reopens) a window under another name at the exact saved frame of a saved window of its app
+is that window, when nothing else can be meant and the app is reopening its saved
+windows: the only one of the app waiting at that frame, no other window at it, and another
+window of the app back in its saved stage (a browser's first window, a Start Page where a
+saved page was, is not that page; a window that showed before its sibling is looked at again
+when the sibling comes) (11-06: Fork's two windows, saved as two stages on two
+Desktops, reopened on the one shown, the second showing another repository: it joined the
+first's stage by Apple's rule; now it gets its own stage there). After the restore window
+the frame never outweighs two names: a window the user opens (Finder's ⌘N where a saved
+window was) keeps Apple's rule. `[stages] new_apps_join_current` never applies while the
+restore window is open: an app reopening its windows is not one the user opened. No
 apps are relaunched (that is macOS's
 "Reopen windows when logging back in") and no window moves between Desktops: when the
 restore window ends, those windows are listed at the top of the status menu instead (a
