@@ -408,6 +408,11 @@ pub struct Model {
     /// the next display change: macOS may put them on another Desktop of the main display
     /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
     pub(crate) adopted: BTreeSet<WindowId>,
+    /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
+    /// brought in front on the 5K's first Desktop, carried whole to the second one macOS
+    /// slid to, [`Model::carry_adopted`]): their most recent card comes forward when they
+    /// show again, never an empty front ([`Model::forward_after_emptied`]).
+    pub(crate) front_owed: BTreeSet<SpaceId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -476,6 +481,7 @@ impl Model {
             merged: HashMap::new(),
             launch_listed: HashSet::new(),
             adopted: BTreeSet::new(),
+            front_owed: BTreeSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

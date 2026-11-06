@@ -1641,6 +1641,7 @@ impl Model {
         self.adopt_votes.remove(&shown);
         self.beside.remove(&shown);
         self.spaces.retain(|s| s.id != shown);
+        self.front_owed.remove(&shown);
         self.moved_from.retain(|_, from| *from != shown);
         for q in &mut self.quit {
             if q.space == shown {
@@ -1823,7 +1824,12 @@ impl Model {
             for &id in &ids {
                 let Some(w) = self.windows.get(&id) else { continue };
                 let (from_space, home) = (w.space, w.home);
-                left.insert(from_space);
+                // A window carried here already with its stage's first window (a stage of
+                // two cards) left nothing here: the display it came to is not one it left,
+                // whose empty front would take its card forward.
+                if from_space != target {
+                    left.insert(from_space);
+                }
                 let mut group = vec![id];
                 group.extend(self.children_of(id));
                 match home {
@@ -1941,11 +1947,21 @@ impl Model {
     /// it lost its front stage) brings its most recently used stage with windows forward, as
     /// Apple's does (measured 11-05: Music came in front, and a hidden card took the freed
     /// slot). A Space with no stage with windows keeps an empty front stage (a fresh one
-    /// when it has none: never a parked stage made active without its windows shown).
+    /// when it has none: never a parked stage made active without its windows shown). A
+    /// Space not shown owes its front (`front_owed`): it comes forward by this rule when the
+    /// Space shows again ([`Model::arrive`]; the lid closed, 11-05 20:25:47: the 5K's first
+    /// Desktop lost the laptop's front to the second one and would have shown nothing).
     pub(crate) fn forward_after_emptied(&mut self, space: SpaceId, actions: &mut Vec<Action>) {
-        if !self.has_space(space) || !self.is_shown_space(space) {
+        if !self.has_space(space) {
             return;
         }
+        if !self.is_shown_space(space) {
+            if self.active.get(&space).is_none_or(|a| self.stage_is_empty(*a)) {
+                self.front_owed.insert(space);
+            }
+            return;
+        }
+        self.front_owed.remove(&space);
         let active = match self.active.get(&space).copied() {
             Some(a) => a,
             None => self.fresh_active(space),
@@ -2009,5 +2025,14 @@ impl Model {
     /// platform's recovery scan of windows it observes.
     pub fn frame_is_parked(&self, display: DisplayId, frame: Rect) -> bool {
         self.display(display).parks(frame)
+    }
+
+    /// The display other than `except` whose park zone holds `frame`: where macOS put a
+    /// parked window back when a screen came back (the lid opened, 11-05 20:26:05: the
+    /// laptop's two cards, counted on the 5K, listed at the laptop's bottom-left corner,
+    /// where they were before the close). Such a window is that display's card
+    /// ([`Model::windows_moved_to_display`]), never parked again on the other.
+    pub fn park_zone_display(&self, frame: Rect, except: DisplayId) -> Option<DisplayId> {
+        self.displays.iter().find(|d| d.id != except && d.parks(frame)).map(|d| d.id)
     }
 }

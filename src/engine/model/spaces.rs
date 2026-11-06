@@ -237,6 +237,7 @@ impl Model {
         self.slots.remove(&space);
         self.revealed.remove(&space);
         self.spaces.retain(|s| s.id != space);
+        self.front_owed.remove(&space);
         self.moved_from.retain(|_, from| *from != space);
     }
 
@@ -264,6 +265,9 @@ impl Model {
         }
         if let Some(v) = self.active.remove(&old) {
             self.active.insert(new, v);
+        }
+        if self.front_owed.remove(&old) {
+            self.front_owed.insert(new);
         }
         if let Some(v) = self.slots.remove(&old) {
             self.slots.insert(new, v);
@@ -420,6 +424,12 @@ impl Model {
         // windows seen here for the first time are placed.
         let bare = self.space_is_empty(target) && saved.is_none();
         let beside = self.hold_beside(target, &all);
+        // A Desktop whose front left it while not shown: an empty front for now (never one
+        // of its cards made front with its windows still parked), its card forward below.
+        let owed = self.front_owed.remove(&target);
+        if owed && !self.active.contains_key(&target) {
+            self.fresh_active(target);
+        }
         self.show_space(display, target, prev);
         self.match_screen(target, live, &mut actions);
 
@@ -501,6 +511,10 @@ impl Model {
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
         self.move_in(target, &moving, live, hints, &mut actions);
+        if owed {
+            // Its most recent card comes forward, as when its front left it while shown.
+            self.forward_after_emptied(target, &mut actions);
+        }
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
@@ -535,7 +549,9 @@ impl Model {
     /// parked, whatever the model counted it: the front stage's then comes out of the corner
     /// (11-05 20:01:38: the laptop's front window, Chrome, was at the 5K's corner on its
     /// second Desktop, counted shown; that Desktop showed no front for the 4 s until the
-    /// owner's next click). Returns (the front stage, the cards, how many stages came).
+    /// owner's next click). The Desktop the front stage came from owes its front
+    /// ([`Model::forward_after_emptied`]: its own most recent stage when it shows again).
+    /// Returns (the front stage, the cards, how many stages came).
     fn carry_adopted(
         &mut self,
         target: SpaceId,
@@ -573,6 +589,12 @@ impl Model {
                 {
                     w.parked = true;
                 }
+            }
+            if was_front {
+                // The Desktop it was carried from is left with no front (the 5K's first,
+                // where the adoption had brought it): its most recent card comes forward
+                // there, now or when it shows again; never an empty front (11-05 20:25:47).
+                self.forward_after_emptied(from, actions);
             }
             if was_front && front.is_none() {
                 front = Some(sid);

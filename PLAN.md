@@ -186,11 +186,17 @@ Known gaps the owner accepted as rare:
     another display"; "a snapshot for a display no longer there is not drawn" may show), each card
     one stage's windows, every card click switching (never "card click: nothing to switch
     to"), the laptop's front window shown, not left at the 5K's corner, and the 5K's cards at
-    its corner, not pushed whole onto it; (2) open the lid: the stages macOS moves back are the
+    its corner, not pushed whole onto it; no switch from the app macOS activates after the
+    close (round displays-lid-3: the log's "an activation macOS made after a display
+    change", never "activated app lives in another stage" before his first click), the 5K
+    staying on the Desktop macOS slid to; back on the first Desktop its own front shows; (2)
+    open the lid (his third run 11-05 20:26 left the laptop's cards on the 5K's second
+    Desktop, fixed in round displays-lid-3): the stages macOS moves back are the
     laptop's again (the log's "window macOS put on a display that changed", never "moved to
-    another display"), the shown one in front at the frame macOS gave it (no move after),
-    the hidden one a card at the laptop's corner (`card=true`), nothing of the 5K's moving
-    (`displays[1]`); then a card click on the laptop brings the card back at its old frame
+    another display", and for a card never "a parked window is listed out of the park zone:
+    parked again"), the shown one in front at the frame macOS gave it (no move after),
+    the hidden ones cards at the laptop's corner (`card=true`; `ctl state`: the laptop's
+    `strip` has them), nothing of the 5K's moving (`displays[1]`); then a card click on the laptop brings the card back at its old frame
     there; (3) a restart with both
     screens: each screen's stages on its screen (the log's "Space changed on another
     display" with `rebuilt`; a Desktop saved on a screen not connected: `other_screen`, and

@@ -15,6 +15,12 @@
 //! and a window that shows more of itself on another display ([`on_other_display`]) is not
 //! managed there (it waits, unmanaged, until it is back on the main display).
 //!
+//! **macOS's own after a display change** ([`macos_after_display_change`], round
+//! displays-lid-3): a display that comes or goes makes macOS activate an app and focus its
+//! windows (11-05 20:25:46.8, the lid closed: Mail, 0.4 s after the screen went). With no
+//! click or key press of the user's since the change, such an activation or focus is not
+//! the user's and switches no stage: Apple's keeps the closed screen's front in front.
+//!
 //! **A display's identity** ([`ScreenKey`]): `CGDirectDisplayID` changes when a display is
 //! plugged in again, so stages and `state.json` are keyed by the display's vendor, model and
 //! serial number instead (plus a count for identical displays with no serial), which survive
@@ -32,6 +38,8 @@
 //! window. A managed window its app moves off every display is let go where it is, never
 //! brought back (the controller's off-screen check), except one we parked: a park zone's frame
 //! may lie wholly beyond the edges (`[windows] park_inside` below 0).
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -112,6 +120,14 @@ pub fn display_of(frame: Rect, displays: &[(DisplayId, Rect)]) -> Option<Display
     best.map(|(id, _)| id)
 }
 
+/// True when an activation or a focus heard now is macOS's after a display change, not the
+/// user's (module docs): the displays changed `since_change` ago, within `settle`, and the
+/// user's last click or key press (`since_press` ago) came before the change. `None`: no
+/// change seen since the launch.
+pub fn macos_after_display_change(since_change: Option<Duration>, since_press: Duration, settle: Duration) -> bool {
+    since_change.is_some_and(|c| c < settle && since_press >= c)
+}
+
 /// True when `frame` shows more of itself on one of `others` than on `main` (ties go to the
 /// main display).
 pub fn on_other_display(frame: Rect, main: Rect, others: &[Rect]) -> bool {
@@ -147,6 +163,18 @@ mod tests {
     /// The owner's 11-03 log: a headless Playwright WebKit window (untitled, `AXUnknown`).
     const HEADLESS: Rect = Rect::new(-10_000.0, -10_180.0, 1440.0, 900.0);
     const RIGHT: Rect = Rect::new(2560.0, 0.0, 1920.0, 1080.0);
+
+    /// 11-05 20:25:46: the lid closed at 46.44, Mail activated by macOS at 46.81 with no
+    /// press since; the owner's own click at 49.70 and a ⌘-Tab are his.
+    #[test]
+    fn an_activation_after_a_display_change_with_no_press_since_is_macos() {
+        let settle = Duration::from_secs(10);
+        let ms = Duration::from_millis;
+        assert!(macos_after_display_change(Some(ms(370)), ms(20_000), settle), "Mail at 46.81: macOS's");
+        assert!(!macos_after_display_change(Some(ms(3_260)), ms(5), settle), "a click after the change: his");
+        assert!(!macos_after_display_change(Some(ms(11_000)), ms(20_000), settle), "past the settle: as ever");
+        assert!(!macos_after_display_change(None, ms(20_000), settle), "no display change since the launch");
+    }
 
     #[test]
     fn a_window_off_every_display_is_not_the_users() {

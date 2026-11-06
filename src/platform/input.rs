@@ -190,6 +190,14 @@ pub fn since_last_click() -> Duration {
         .unwrap_or(Duration::MAX)
 }
 
+/// Since the user last pressed a mouse button or a key in this login session (any thread):
+/// a pointer move or a scroll does not count.
+pub fn since_last_press() -> Duration {
+    let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType::KeyDown);
+    let key = Duration::try_from_secs_f64(key).unwrap_or(Duration::MAX);
+    since_last_click().min(key)
+}
+
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)

@@ -856,6 +856,95 @@ fn the_lid_closed_on_the_first_desktop_then_macos_sliding_to_the_second_joins_no
     assert!(cards.iter().all(|s| e.m.stage(*s).is_some_and(|st| st.space == first)), "{cards:?}");
     assert!(!cards.contains(&finder) && !cards.contains(&reminders) && !cards.contains(&chrome));
     assert_eq!(groups(&e.m), before, "nothing joins");
+    // Its own front back in front, shown: never a Desktop with nothing in front (11-05
+    // 20:25:47, round displays-lid-3: the laptop's front, brought in front here, had gone to
+    // the second Desktop and left this one with none).
+    assert_eq!(e.m.active_stage(STUDIO), Some(first_front), "the first Desktop's own front comes back");
+    assert!(e.m.window(WindowId(1)).is_some_and(|w| !w.parked) && !e.parked_on(1, &studio_d), "and shows");
+    assert!(!cards.contains(&first_front));
+}
+
+/// The lid closed on the 5K's first Desktop and macOS slid to its second with the laptop's
+/// windows there ([`evening_desk`]): returns the second Desktop, Chrome's stage (the
+/// laptop's front, in front there), Reminders' and Finder's (cards there).
+fn closed_on_the_second(e: &mut Env) -> (SpaceId, StageId, StageId, StageId) {
+    let (_, second, chrome, reminders, finder) = evening_desk(e);
+    e.d.frames.insert(WindowId(31), Rect::new(300.0, 200.0, 800.0, 600.0));
+    let a = e.m.set_displays(vec![studio()]);
+    e.run(a);
+    for id in FIRST {
+        e.d.frames.remove(&WindowId(id));
+    }
+    e.d.frames.extend(SECOND_FRAMES.with(|f| f.borrow().clone()));
+    let mut on_second: Vec<u32> = SECOND.to_vec();
+    on_second.extend(LAPTOP_WINDOWS);
+    let live = listed(e, &on_second);
+    let a = e.m.arrive(STUDIO, &live, &FIRST.map(WindowId), &LaunchHints::default());
+    e.run(a);
+    assert_eq!(e.space_of(STUDIO), second);
+    assert_eq!(e.m.active_stage(STUDIO), Some(chrome));
+    (second, chrome, reminders, finder)
+}
+
+#[test]
+fn the_lid_opened_gives_the_laptop_its_cards_back_from_the_other_desktop() {
+    // 11-05 20:26:04 (round displays-lid-3): the lid opened with the laptop's stages on the
+    // 5K's second Desktop (Chrome in front, Reminders and Finder cards). macOS put the two
+    // cards back at the laptop's bottom-left park corner, where they were before the close,
+    // and Chrome on the laptop's screen. The cards were parked again at the 5K's corner and
+    // stayed its cards; the laptop showed Chrome with an empty strip. Apple's: the laptop's
+    // strip has its two cards again, the 5K's Desktop none of them.
+    let mut e = Env::both();
+    let (second, chrome, reminders, finder) = closed_on_the_second(&mut e);
+    let studio_d = studio();
+    let back = Display { id: DisplayId(9), ..laptop() };
+    let a = e.m.set_displays(vec![studio(), back]);
+    e.run(a);
+    // macOS lists the cards in the laptop's park zone: the model has them on the 5K, so the
+    // 5K's park zone check alone would call them out of the zone and park them again there.
+    let cards = [32u32, 33, 34];
+    let mut moves: Vec<(WindowId, DisplayId, Rect)> = Vec::new();
+    for id in cards {
+        let w = e.m.window(WindowId(id)).expect("managed");
+        assert!(w.parked && w.meta.display == STUDIO, "w{id} a card on the 5K");
+        let f = park_frame_at(e.d.frames[&WindowId(id)].size(), back.frame, back.corner);
+        assert!(!studio_d.parks(f), "out of the 5K's park zone");
+        assert_eq!(e.m.park_zone_display(f, STUDIO), Some(DisplayId(9)), "w{id} in the laptop's: the laptop's card");
+        e.d.frames.insert(WindowId(id), f);
+        moves.push((WindowId(id), DisplayId(9), f));
+    }
+    // The cards come first (the tick's park zone check hands them to the display reconcile),
+    // then Chrome, shown on the laptop.
+    let z: Vec<WindowId> = e.d.z.clone();
+    let (a, _) = e.m.windows_moved_to_display(&moves, &z);
+    e.run(a.clone());
+    for x in &a {
+        if let Action::Park { id, frame } | Action::SetFrame { id, frame } = x {
+            assert!(!studio_d.parks(*frame), "nothing parked again at the 5K's corner: {x:?} in {a:?}");
+            assert!(!cards.contains(&id.0) || back.parks(*frame), "a card stays at the laptop's corner: {x:?} in {a:?}");
+        }
+    }
+    let chrome_frame = on(&back, (100.0, 100.0));
+    e.d.frames.insert(WindowId(31), chrome_frame);
+    e.d.raise(WindowId(31));
+    let (a, _) = e.m.windows_moved_to_display(&[(WindowId(31), DisplayId(9), chrome_frame)], &e.d.z.clone());
+    e.run(a);
+    assert_eq!(e.m.active_stage(DisplayId(9)), Some(chrome), "Chrome in front on the laptop");
+    let mut slots = e.m.strip_slots(DisplayId(9));
+    slots.sort();
+    let mut want = vec![reminders, finder];
+    want.sort();
+    assert_eq!(slots, want, "the laptop's strip has its two cards");
+    for id in cards {
+        assert!(e.parked_on(id, &back) && !e.parked_on(id, &studio_d), "w{id} at the laptop's corner");
+        assert_eq!(e.m.window(WindowId(id)).map(|w| (w.parked, w.meta.display)), Some((true, DisplayId(9))));
+    }
+    for s in [chrome, reminders, finder] {
+        assert_eq!(e.m.stage(s).map(|s| s.display), Some(DisplayId(9)), "the laptop's stages again");
+        assert!(!e.m.stages_in(second).any(|x| x.id == s), "none of them on the 5K's second Desktop");
+    }
+    assert!(!e.m.strip_for(STUDIO).iter().any(|c| [chrome, reminders, finder].contains(&c.stage)));
+    assert_eq!(e.m.active_stage(STUDIO).and_then(|s| e.m.stage(s)).map(|s| s.space), Some(second), "the 5K keeps its Desktop");
 }
 
 #[test]

@@ -2290,8 +2290,22 @@ impl Controller {
         let mut focused: Option<Option<u32>> = None;
         let mut displays: Option<Vec<Rect>> = None;
         let mut verdicts: Vec<(u32, Verdict, Rect)> = Vec::new();
+        // A screen came back (the lid opened): a parked window macOS listed in its park zone
+        // is that screen's card, taken by the display reconcile before anything parks it
+        // again elsewhere (11-05 20:26:05: the laptop's two cards, counted on the 5K, were
+        // parked again at the 5K's corner and stayed its cards).
+        let settling_displays = self.displays_settling();
+        let mut returned: Vec<(WindowId, DisplayId, Rect)> = Vec::new();
         for (id, pid) in model_parked {
             let listed = list.iter().find(|w| w.id == id && w.layer == 0);
+            if settling_displays
+                && let Some(w) = listed
+                && let Some(to) = m.window(WindowId(id)).and_then(|x| m.park_zone_display(w.bounds, x.meta.display))
+            {
+                returned.push((WindowId(id), to, w.bounds));
+                self.strays.remove(&id);
+                continue;
+            }
             let seen = match listed {
                 None => Seen::NotListed,
                 Some(w) if zone_of(id).is_some_and(|d| d.parks(w.bounds)) => Seen::InZone,
@@ -2333,6 +2347,10 @@ impl Controller {
             if !matches!(verdict, Verdict::Wait | Verdict::Settled) {
                 verdicts.push((id, verdict, bounds));
             }
+        }
+        if !returned.is_empty() {
+            let z: Vec<WindowId> = list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect();
+            self.take_display_moves(ob, &returned, &z);
         }
         for (id, verdict, bounds) in verdicts {
             let listed = format!("{:.0},{:.0} {:.0}x{:.0}", bounds.x, bounds.y, bounds.w, bounds.h);
@@ -3455,6 +3473,10 @@ impl Controller {
                         return;
                     }
                 }
+                if self.macos_after_display_change() {
+                    tracing::debug!(id, "a focus macOS made after a display change (no click or key since): no switch");
+                    return;
+                }
                 // Not our echo: the user's (or an app's own), remembered for the reconciler.
                 self.user_focus.insert(id, now);
                 let bundle = ob.window(id).and_then(|w| ob.bundle_id(w.pid));
@@ -3601,6 +3623,13 @@ impl Controller {
                         stale_activation::Stale::NotFrontmost { .. } => None,
                     };
                     tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
+                    return;
+                }
+                if self.macos_after_display_change() {
+                    // The lid closed or opened: macOS activates an app of its choosing (11-05
+                    // 20:25:46.8, Mail, whose switch sent the laptop's front to a card and
+                    // slid the 5K back to the Desktop it had left).
+                    tracing::info!(pid, "an activation macOS made after a display change (no click or key since): no switch");
                     return;
                 }
                 if self.model.as_ref().is_some_and(Model::settling) {
@@ -5071,7 +5100,10 @@ impl Controller {
             if ws.parked && m.display(ws.meta.display).parks(w.bounds) {
                 continue;
             }
-            let Some(d) = display_of(w.bounds, &rects) else { continue };
+            // A parked one in another screen's park zone is that screen's (macOS put it
+            // back at its old corner), however little of it shows there.
+            let zone = if ws.parked { m.park_zone_display(w.bounds, ws.meta.display) } else { None };
+            let Some(d) = zone.or_else(|| display_of(w.bounds, &rects)) else { continue };
             if d != ws.meta.display {
                 away.push((w.id, d, w.bounds));
             }
@@ -5091,13 +5123,34 @@ impl Controller {
         for (id, _, _) in &moves {
             self.elsewhere.remove(&id.0);
         }
+        let z: Vec<WindowId> = list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect();
+        self.take_display_moves(ob, &moves, &z);
+    }
+
+    /// True for [`DISPLAY_SETTLE`] after a display came or went: what moves now is macOS's.
+    fn displays_settling(&self) -> bool {
+        self.displays_changed_at.is_some_and(|t| Instant::now().duration_since(t) < DISPLAY_SETTLE)
+    }
+
+    /// True when an activation or focus heard now is macOS's after a display change: within
+    /// [`DISPLAY_SETTLE`] of it with no click or key press since
+    /// ([`crate::engine::displays::macos_after_display_change`]).
+    fn macos_after_display_change(&self) -> bool {
+        let since = self.displays_changed_at.map(|t| Instant::now().duration_since(t));
+        crate::engine::displays::macos_after_display_change(since, input::since_last_press(), DISPLAY_SETTLE)
+    }
+
+    /// Windows listed on another display than the model has them on, each with that display
+    /// and its listed frame, go there ([`Model::windows_moved_to_display`]); `z` is the
+    /// window list's front-to-back order. Logged as macOS's within [`DISPLAY_SETTLE`] of a
+    /// display change, else as the user's drag.
+    fn take_display_moves(&mut self, ob: &Observer, moves: &[(WindowId, DisplayId, Rect)], z: &[WindowId]) {
         // What a card press read no longer holds.
         self.pressed_obs = None;
-        let z: Vec<WindowId> = list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect();
-        let by_macos = self.displays_changed_at.is_some_and(|t| Instant::now().duration_since(t) < DISPLAY_SETTLE);
+        let by_macos = self.displays_settling();
         let Some(m) = self.model.as_mut() else { return };
         let parked_before: Vec<bool> = moves.iter().map(|(id, _, _)| m.window(*id).is_some_and(|w| w.parked)).collect();
-        let (actions, forgotten) = m.windows_moved_to_display(&moves, &z);
+        let (actions, forgotten) = m.windows_moved_to_display(moves, z);
         for ((id, d, at), was_parked) in moves.iter().zip(parked_before) {
             let card = m.window(*id).is_some_and(|w| w.parked);
             if by_macos {

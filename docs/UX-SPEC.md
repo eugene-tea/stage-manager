@@ -152,13 +152,20 @@ second Desktop, not shown since the launch): the same rule holds there, the clos
 stages whole, that Desktop's own front a card (round displays-lid). Nothing joins: the
 closed screen's strip goes with it, each card is one stage, its front window shows, and
 the hidden windows macOS pushes whole onto the remaining screen at the change go back to its
-corner (round displays-lid-2). The lid opened: the
+corner (round displays-lid-2). The app macOS activates after the change (Mail, 0.4 s
+after the screen went) switches nothing: with no click or key press since, an activation
+or focus in the 10 s after a display change is macOS's, and the closed screen's front stays
+in front. A Desktop the closed screen's front left for the one macOS slid to shows its own
+most recent stage again when it comes back, never nothing in front (round displays-lid-3).
+The lid opened: the
 stages whose windows macOS moves back to that screen are its stages again (the one in front
 before, a card; a stage moved whole stays one stage); the stage that came over in front
 stays where it is. macOS puts each window back at the frame it had on that screen, a hidden
 one at its old corner: a window put back in the open shows there, at that frame (never
 moved to a frame carried over from the other screen), one put back at the corner is a card
-still, and a card put back brings nothing forward; none of it is the user's drag. A stage
+still, that screen's card again even from another Desktop of the remaining screen, never
+hidden again at the remaining screen's corner (round displays-lid-3), and a card put back
+brings nothing forward; none of it is the user's drag. A stage
 belongs to the screen its windows are on. Decided, not measured:
 a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
 Dock to an app whose stage is on the other screen switches that screen only. Each screen's
