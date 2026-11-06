@@ -261,6 +261,10 @@ Known gaps the owner accepted as rare:
   `LSUIElement` key at the relaunch; whether the persistent-apps file lists Stage Manager
   (read in place only). A logout cancelled in its dialog: "policy=Accessory", the icon gone.
   `[app] login_start = "background_item"` moves back to the agent (the early-start checks).
+- **Flaky live check (displays):** "one of our windows is listed at it" for the other screen's
+  corner patch failed once (11-06 07:55, listed 0) and passed on the rerun (listed 1): the
+  window server's listing races the patch's ordering in. Wait for it in the check, or find
+  what orders it in late.
 - **Real-restart check (8G)**, with the owner, from the day's log:
   - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
     coming …", "asked to quit by the system", "quitting after the logout's head start".
