@@ -496,6 +496,56 @@ fn the_lid_closed_with_macos_showing_another_desktop_keeps_the_laptops_stages_wh
 }
 
 #[test]
+fn the_lid_closed_onto_a_desktop_not_shown_since_a_relaunch_rebuilds_its_saved_stages() {
+    // 11-06 12:00:37: relaunched at 11:34 on the 5K's second Desktop (the same session),
+    // every app quiet for its minute since (R3 closed the first Desktop's entries to other
+    // Desktops); the lid closed 26 minutes later and macOS slid the 5K to its first Desktop,
+    // within the display change's settle. Its saved stages come back as saved (a mail stage
+    // of two windows, a notes stage), the laptop's two stages carried whole beside them.
+    let mut other = Env::both();
+    other.open(9, 40, &studio(), (300.0, 300.0), RuleAction::Current);
+    other.open(10, 40, &studio(), (500.0, 300.0), RuleAction::Current);
+    other.open(11, 41, &studio(), (700.0, 300.0), RuleAction::New);
+    assert_eq!(other.stage_of(9), other.stage_of(10));
+    let saved = other
+        .m
+        .to_state()
+        .spaces
+        .into_iter()
+        .find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == STUDIO_KEY.text()))
+        .expect("saved");
+    let first: Vec<WindowMeta> = [9, 10, 11].iter().map(|id| other.m.window(WindowId(*id)).expect("open").meta.clone()).collect();
+    let mut e = Env::both();
+    let [_, _, _, chrome, finder] = measured_desk(&mut e);
+    e.m.restore_spaces(vec![saved.clone()]);
+    e.m.end_restore();
+    let quiet = e.m.waiting_bundles();
+    let (_, dropped, closed) = e.m.settle_quiet(&quiet);
+    assert_eq!((dropped, closed.len()), (0, 2), "both apps of the saved Desktop closed to others: {closed:?}");
+    e.m.end_rematch();
+    let a = e.m.set_displays(vec![studio()]);
+    e.run(a);
+    let mut live = first.clone();
+    for id in [6u32, 5] {
+        let w = e.m.window(WindowId(id)).expect("known");
+        live.push(WindowMeta { frame: e.d.frames[&WindowId(id)], ..w.meta.clone() });
+    }
+    let absent: Vec<WindowId> = [1, 3, 4].map(WindowId).to_vec();
+    e.m.set_hold_arrivals(true);
+    let a = e.m.arrive(STUDIO, &live, &absent, &LaunchHints::default());
+    e.m.set_hold_arrivals(false);
+    e.run(a);
+    let note = e.m.last_arrival();
+    assert_eq!((note.rebuilt, note.restored, note.carried), (Some(saved.id), 3, 2), "{note:?}");
+    assert!(note.held.is_empty());
+    assert_eq!(e.stage_of(9), e.stage_of(10), "the mail stage of two, as saved");
+    assert_ne!(e.stage_of(9), e.stage_of(11));
+    assert_eq!((e.stage_of(6), e.stage_of(5)), (finder, chrome), "the laptop's stages whole");
+    let here = e.space_of(STUDIO);
+    assert_eq!(e.m.stages_in(here).count(), 4, "two saved, two carried");
+}
+
+#[test]
 fn a_screen_plugged_in_again_under_a_new_id_is_the_same_screen() {
     let mut e = Env::both();
     let [code, _, _, chrome, finder] = measured_desk(&mut e);

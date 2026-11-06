@@ -317,6 +317,108 @@ fn a_quiet_apps_windows_of_a_desktop_not_shown_wait_for_that_desktop_alone() {
     assert!(m.take_shown_apps().is_empty());
 }
 
+/// Desktops 1 and 2 saved in session "A" with their windows' ids (100 on): a relaunch in the
+/// same session finds each window by its id.
+fn with_ids() -> (SavedSpace, SavedSpace) {
+    let mut d1 = desktop_1();
+    let mut d2 = desktop_2();
+    for (i, x) in d1.stages.iter_mut().chain(d2.stages.iter_mut()).flat_map(|s| s.windows.iter_mut()).enumerate() {
+        x.window = Some(100 + i as u32);
+    }
+    (d1, d2)
+}
+
+/// Desktop 1's windows as macOS lists them at its first show (ids 100 to 107), some titles
+/// changed since the save.
+fn desktop_1_live() -> Vec<WindowMeta> {
+    vec![
+        win(100, 20, IDE, "other.rs — proj", r(0.0)),
+        win(101, 20, IDE, "lib.rs — proj", r(1.0)),
+        win(102, 30, TERM, "build — 2", r(2.0)),
+        win(103, 21, TEAMCHAT, "General (3)", r(3.0)),
+        win(104, 31, MUSIC, "Library", r(4.0)),
+        win(105, 22, GIT, "proj", r(5.0)),
+        win(106, 22, GIT, "site", r(6.0)),
+        win(107, 12, MAIL, "Inbox", r(7.0)),
+    ]
+}
+
+/// Desktop 1 rebuilt as saved: the IDE's two windows with the terminal (in front), the git
+/// windows together, each window its saved entry's (by its id).
+fn assert_desktop_1_rebuilt(m: &Model) {
+    assert_eq!(m.current_space(MAIN).0, 4);
+    assert_eq!((m.last_arrival().rebuilt, m.last_arrival().restored), (Some(4), 8), "{:?}", m.last_arrival());
+    for id in 100..=107 {
+        assert!(m.restored_grade(w(id)).is_some_and(Grade::confident), "window {id} its saved entry's: {:?}", m.restored_grade(w(id)));
+        assert_eq!(m.window(w(id)).map(|x| x.space.0), Some(4));
+    }
+    assert_eq!(kin(m, 100), Some(Kin::Saved(4, 0)));
+    assert_eq!(m.stage_of(w(100)), m.stage_of(w(101)), "the IDE's two windows together");
+    assert_eq!(m.stage_of(w(100)), m.stage_of(w(102)), "with the terminal");
+    assert_eq!(m.stage_of(w(105)), m.stage_of(w(106)), "the git windows together");
+    assert_eq!(m.stages_in(SpaceId(4)).count(), 5, "the five saved stages, no stage per window");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(100)), "the saved front in front");
+    assert_eq!(m.pending_unvisited(), 0);
+}
+
+/// A relaunch in session "A" on Desktop 2 (its windows by their ids), the restore window
+/// over, every app quiet for its minute (R3: Desktop 1's entries closed to other Desktops),
+/// the re-match by titles over: an hour later Desktop 1 has not been shown yet.
+fn relaunched_on_desktop_2_an_hour_ago() -> Model {
+    let (d1, d2) = with_ids();
+    let mut m = launched(vec![d1, d2], Restore::same_session("A"));
+    let live = [win(108, 12, MAIL, "Archive", r(8.0)), win(109, 11, TERM, "server", r(9.0)), win(110, 10, CAL, "Week", r(10.0)), win(111, 13, WEB, "Docs — Web", r(11.0))];
+    m.arrive(MAIN, &live, &[], &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 8);
+    m.end_restore();
+    m.take_shown_apps();
+    let quiet: Vec<String> = m.waiting_bundles();
+    let (_, dropped, closed) = m.settle_quiet(&quiet);
+    assert_eq!(dropped, 0);
+    assert_eq!(closed.len(), 6, "every app of Desktop 1 closed to other Desktops: {closed:?}");
+    m.end_rematch();
+    assert_eq!(m.pending_unvisited(), 8, "Desktop 1 keeps every saved window");
+    m
+}
+
+#[test]
+fn a_desktop_first_shown_an_hour_after_a_relaunch_gets_its_saved_stages_back() {
+    // The 11-06 regression report: relaunched on Desktop 2 at 11:34 (the same login
+    // session), Desktop 1 first shown at 12:00 by a slide. Its saved stages come back
+    // however long after the launch, the quiet minute's R3 closing notwithstanding.
+    let mut m = relaunched_on_desktop_2_an_hour_ago();
+    let d2: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 8).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &desktop_1_live(), &d2, &LaunchHints::default());
+    assert_desktop_1_rebuilt(&m);
+    assert!(m.last_arrival().held.is_empty());
+    let mut apps = m.take_shown_apps();
+    apps.sort();
+    assert_eq!(apps.len(), 6, "their minutes start again: {apps:?}");
+    // R3 holds all the same: a new mail window on Desktop 2 later is a new window.
+    let mut m = relaunched_on_desktop_2_an_hour_ago();
+    add(&mut m, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(!m.is_pooled(w(56)) && m.restored_grade(w(56)).is_none(), "by Apple's rule");
+    assert_eq!(m.window(w(56)).map(|x| x.space.0), Some(8));
+    assert_eq!(m.pending_unvisited(), 8);
+    let d2: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 8).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &desktop_1_live(), &d2, &LaunchHints::default());
+    assert_desktop_1_rebuilt(&m);
+}
+
+#[test]
+fn a_desktop_first_shown_during_a_display_changes_settle_gets_its_saved_stages_back() {
+    // The lid closed at 12:00:37 and macOS slid to Desktop 1 within the display change's
+    // settle (arrivals of the Desktop still shown held): a Desktop that changed takes its
+    // windows, its saved stages rebuilt.
+    let mut m = relaunched_on_desktop_2_an_hour_ago();
+    let d2: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 8).map(|x| x.meta.id).collect();
+    m.set_hold_arrivals(true);
+    m.arrive(MAIN, &desktop_1_live(), &d2, &LaunchHints::default());
+    m.set_hold_arrivals(false);
+    assert!(m.last_arrival().held.is_empty(), "{:?}", m.last_arrival());
+    assert_desktop_1_rebuilt(&m);
+}
+
 #[test]
 fn the_desktop_shown_when_saved_brings_its_saved_active_stage_forward_at_the_end() {
     // The login shows Desktop 1 itself. An app with no saved window opens first and takes the

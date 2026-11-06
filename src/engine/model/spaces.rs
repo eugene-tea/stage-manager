@@ -86,6 +86,9 @@ pub const BESIDE_ARRIVALS: u32 = 2;
 pub struct ArrivalNote {
     /// The saved Space (`state.json`) rebuilt on this visit, if any.
     pub rebuilt: Option<u64>,
+    /// Windows shown here that went back into the rebuilt saved Space's stages (a match of
+    /// their saved entries; the rest went by the new-window rules or the pool).
+    pub restored: usize,
     /// The saved Space rebuilt was saved on another screen than this one (that screen not
     /// connected, [`Model::saved_fits_display`]; round displays-2).
     pub other_screen: bool,
@@ -611,6 +614,7 @@ impl Model {
         let mut moving = self.collect_moves(target, &known, &beside, &mut actions);
         let carried = if bare { self.carry_stages(target, &mut moving, &mut actions) } else { 0 };
         let mut arrivals = arrivals;
+        let mut restored = 0;
         if saved.is_none() && self.space_has_pending(target) {
             // A Space with stages still waiting: its new windows go to them first.
             let standard: Vec<WindowMeta> = arrivals.iter().filter(|m| m.role == WindowRole::Standard).cloned().collect();
@@ -624,6 +628,7 @@ impl Model {
             if let Some(s) = &saved {
                 // Its stages whose windows all came back on another Desktop are not built.
                 self.skip_pooled_out(s.id, &mut assignment);
+                restored = assignment.stages.iter().map(|st| st.windows.len()).sum();
             }
             // After a restart, windows this Desktop's saved stages do not take are looked for
             // among every other Desktop's waiting windows (one pool, `pool.rs`).
@@ -732,6 +737,7 @@ impl Model {
         self.normalize_slots();
         self.last_arrival = ArrivalNote {
             rebuilt: saved.map(|s| s.id),
+            restored,
             other_screen,
             moved,
             carried,

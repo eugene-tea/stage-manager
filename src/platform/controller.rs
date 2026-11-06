@@ -4730,7 +4730,8 @@ impl Controller {
         // Listed for a moment as a display changes: offered again once it still shows.
         self.unplaced.extend(note.held.iter().map(|w| w.0));
         // `new`: windows this run had not seen (all of a saved Desktop's on its first visit,
-        // placed into its saved stages: `rebuilt`); `moved`: known windows of another Desktop
+        // placed into its saved stages: `rebuilt`, `restored` of them by their saved entries;
+        // each rebuilt stage is a "new stage" line); `moved`: known windows of another Desktop
         // taken as moved here; `beside`: Desktops still on screen whose windows stay theirs.
         tracing::info!(
             from = before.0,
@@ -4738,6 +4739,7 @@ impl Controller {
             on_screen = live.len(),
             new = arrivals.len(),
             rebuilt = ?note.rebuilt,
+            restored = note.restored,
             other_screen = note.other_screen,
             moved = note.moved,
             carried = note.carried,
@@ -4825,6 +4827,7 @@ impl Controller {
                     on_screen = live.len(),
                     new,
                     rebuilt = ?note.rebuilt,
+                    restored = note.restored,
                     other_screen = note.other_screen,
                     moved = note.moved,
                     carried = note.carried,
@@ -6710,6 +6713,7 @@ impl Controller {
             "locked": self.locked,
             "last_arrival": {
                 "rebuilt": m.last_arrival().rebuilt,
+                "restored": m.last_arrival().restored,
                 "moved": m.last_arrival().moved,
                 "carried": m.last_arrival().carried,
                 "beside": m.last_arrival().beside,
