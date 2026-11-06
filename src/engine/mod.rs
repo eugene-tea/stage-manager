@@ -20,6 +20,7 @@ pub mod hide;
 pub mod leftovers;
 pub mod model;
 pub mod not_ours;
+pub mod observe_retry;
 pub mod overview;
 pub mod park;
 pub mod park_reconcile;

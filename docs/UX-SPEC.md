@@ -462,7 +462,12 @@ nothing and animate nothing, and cards come in quietly in their saved order; the
 left in front shows with its key window focused, unless a window shown there already has
 the keyboard. While that stage is still empty (its app slow to open), a window opening a
 stage of its own takes the front instead of a card beside an empty screen; the saved stage
-then waits, and its windows get a card when they come. At a logout, restart or shutdown
+then waits, and its windows get a card when they come. Apps that do not answer
+Accessibility yet (busy reopening at the login) are asked on threads of their own, every
+150 ms while the login settles and every second after, for a minute at most: a window goes
+to its stage about as soon as its app answers, and one slow app holds up no other app's
+windows. Before its app answers a window shows where macOS reopened it (moving a window
+needs its app's answer). At a logout, restart or shutdown
 every window comes back at the first sign of it macOS gives (any of `loginwindow`'s logout
 notices, `willPowerOff` the last), so apps save their windows where they are as far as the
 timing allows (best effort: macOS may ask apps to quit first); from then on nothing is

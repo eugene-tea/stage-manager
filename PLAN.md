@@ -278,6 +278,11 @@ Known gaps the owner accepted as rare:
   - The order of "logout signal" lines vs the first "app terminated", then trim `SIGNALS`;
     "N at the corner"; `from_other=true` lines and "K from other Desktops".
   - A slow app (Xcode, Electron) in the saved front stage.
+  - Round login-observe (11-06 09:30: windows showed 2-4 s before going to their stages): no
+    "queued_ms" over ~100 at the login; each "observing app" line's `since_ms` (from listed
+    at our start, launched or activated) and `misses`, and each "window placed: ms since it
+    was found" line's `ms` (a few ms, not seconds); "apps asked at once at observation's
+    start" took ≤ 300 ms.
 - **Log caps** (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against real days
   (`stage-manager log summary`); the suite's estimate is ~1 MB a normal day, 2–3 MB heavy.
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the

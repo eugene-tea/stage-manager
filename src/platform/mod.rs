@@ -31,6 +31,7 @@ pub mod logging;
 pub mod login_item;
 pub mod native_settings;
 pub mod observe;
+pub mod observe_probe;
 pub mod park_probe;
 pub mod paths;
 pub mod pixels;

@@ -48,6 +48,7 @@ use super::ctl::Command;
 use super::input::InputEvent;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
+use super::observe_probe;
 use super::{enhanced_ui, safety};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
@@ -131,6 +132,9 @@ pub enum WmCommand {
     /// A logout signal (its name, what it says, when the main thread got it): the first starts
     /// the head start ([`logout_plan`], no quit), a cancel resumes ([`Logout::signal`]).
     LogoutSignal(String, Signal, Instant),
+    /// An app that did not answer Accessibility answers now, or was given up
+    /// ([`super::observe_probe`]).
+    Probe(observe_probe::Note),
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -174,13 +178,16 @@ impl WmHandle {
     pub fn spawn() -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel::<WmCommand>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<RemoteRunLoop>(1);
+        let probe_tx = tx.clone();
         std::thread::Builder::new().name("wm".into()).spawn(move || {
             let Some(run_loop) = CFRunLoop::current() else {
                 tracing::error!("WM thread has no run loop");
                 return;
             };
             let _ = ready_tx.send(RemoteRunLoop(run_loop.clone()));
-            run(rx, &run_loop);
+            // The probes of apps that do not answer yet post their notes to this thread.
+            let own = WmHandle { tx: probe_tx, run_loop: Arc::new(RemoteRunLoop(run_loop.clone())) };
+            run(rx, &run_loop, own);
         })?;
         let run_loop = ready_rx
             .recv_timeout(Duration::from_secs(5))
@@ -333,7 +340,8 @@ unsafe extern "C-unwind" fn ax_callback(
 }
 
 impl WmState {
-    /// Hands the observer's events to the controller.
+    /// Hands the observer's events to the controller; then the retry cadence of apps that do
+    /// not answer yet follows the restore window (fast while it is open).
     fn pump(&mut self) {
         loop {
             let events = self.observer.take_events();
@@ -342,6 +350,7 @@ impl WmState {
             }
             self.controller.on_events(&mut self.observer, events);
         }
+        self.observer.set_fast_retry(self.controller.restore_window_open());
     }
 
     fn handle(&mut self, cmd: WmCommand) {
@@ -381,6 +390,7 @@ impl WmState {
             }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
             WmCommand::App(event) => self.observer.on_app_event(event, ax_callback),
+            WmCommand::Probe(note) => self.observer.on_probe(note, ax_callback),
             WmCommand::Accessibility(trusted) => {
                 if trusted && !self.scanned {
                     self.scanned = true;
@@ -811,7 +821,7 @@ fn drop_saved_stages() {
     }
 }
 
-fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
+fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     match AxElement::system_wide().set_messaging_timeout(AX_TIMEOUT_SECONDS) {
         Ok(()) => tracing::debug!("AX messaging timeout set to {AX_TIMEOUT_SECONDS} s"),
         Err(e) => tracing::warn!("could not set the AX messaging timeout: {e}"),
@@ -822,8 +832,12 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         list.sort();
         tracing::info!("management restricted to {}", list.join(", "));
     }
+    let mut observer = Observer::new(std::process::id() as i32, only);
+    observer.set_probe_notify(Arc::new(move |note| {
+        own.send(WmCommand::Probe(note));
+    }));
     let state = WmState {
-        observer: Observer::new(std::process::id() as i32, only),
+        observer,
         controller: Controller::new(),
         scanned: false,
         ticks: 0,

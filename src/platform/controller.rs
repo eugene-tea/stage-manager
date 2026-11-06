@@ -5411,7 +5411,8 @@ impl Controller {
             }
             return;
         }
-        if self.unplaced.remove(&id) {
+        let waited = self.unplaced.remove(&id);
+        if waited {
             // It waited off screen: one read then as a dialog is read again (a window minimized
             // then or now is standard: taken for a child, it would follow Apple's rule for a
             // child, never its saved stage).
@@ -5479,6 +5480,10 @@ impl Controller {
             } else {
                 self.execute_animated(ob, actions);
             }
+        }
+        // The measure of round login-observe: from found (tracked) to placed.
+        if let Some(w) = ob.window(id) {
+            tracing::debug!(id, pid = w.pid, ms = w.found_at.elapsed().as_millis() as u64, waited_off_screen = waited, "window placed: ms since it was found");
         }
     }
 
@@ -6078,6 +6083,12 @@ impl Controller {
         if self.strip_dirty {
             self.present();
         }
+    }
+
+    /// True while the restore window is open (the login settles): apps that do not answer
+    /// Accessibility yet are asked often then ([`crate::engine::observe_retry`]).
+    pub fn restore_window_open(&self) -> bool {
+        self.settling.is_some()
     }
 
     /// Closes the restore window (the first user action, apps quiet, or its time up; see
