@@ -69,6 +69,11 @@
 //! **Frames** come back from `state.json` only on the screen a Desktop was saved on, at the
 //! saved size ([`Restore::screens`]; a file naming no screen: the main display of the saved
 //! size, [`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//! Saved frames are in the arrangement's global coordinates of the save: a screen whose
+//! origin moved since (Displays settings, another screen main) has its Desktops' saved frames
+//! moved by the same offset ([`crate::engine::model::Model::settle_saved_origins`]); a file
+//! that does not keep the origin has them used only while they all still lie on that screen
+//! ([`Restore::frames_off`]).
 //!
 //! **Off** (`[stages] restore_after_restart = false`): after a restart nothing waits
 //! ([`Restore::off_after_restart`]): saved windows not on screen are dropped as 1.2.0 did.
@@ -147,6 +152,10 @@ pub struct Restore {
     /// rounded), where the file says ([`crate::engine::persist::SavedScreen`]): its saved
     /// frames are used only on that screen at that size.
     pub screens: BTreeMap<u64, (String, i64, i64)>,
+    /// Saved Desktops whose frames apply nowhere: saved before files kept the screen's origin,
+    /// their frames no longer on that screen now (it moved in the arrangement; R2 of the Codex
+    /// review). Their windows keep the frames their apps give them, as on another screen.
+    pub frames_off: std::collections::BTreeSet<u64>,
     /// Why saved frames are not used was logged already, for these (saved Desktop, display)
     /// pairs (once a run each).
     pub frames_noted: std::collections::BTreeSet<(Option<u64>, u32)>,
@@ -216,6 +225,9 @@ impl Restore {
     /// and `w`×`h` points: the Desktop was saved on that screen at that size; a Desktop saved
     /// with no screen goes by [`Restore::frames_fit`] on the main display (`main`) alone.
     pub fn frames_fit_on(&self, saved: u64, key: &str, w: f64, h: f64, main: bool) -> bool {
+        if self.frames_off.contains(&saved) {
+            return false;
+        }
         match self.screens.get(&saved) {
             Some((k, sw, sh)) => k == key && (*sw, *sh) == (w.round() as i64, h.round() as i64),
             None => main && self.frames_fit(w, h),

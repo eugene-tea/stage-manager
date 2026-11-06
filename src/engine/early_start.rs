@@ -89,7 +89,7 @@ mod tests {
     fn space(id: u64, key: ScreenKey, stages: usize) -> SavedSpace {
         SavedSpace {
             id,
-            screen: Some(SavedScreen { key: key.text(), w: 1800.0, h: 1169.0 }),
+            screen: Some(SavedScreen { key: key.text(), w: 1800.0, h: 1169.0, ..SavedScreen::default() }),
             stages: vec![SavedStage::default(); stages],
             ..SavedSpace::default()
         }

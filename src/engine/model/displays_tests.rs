@@ -10,6 +10,7 @@ use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::testkit::Desk;
 
+mod origins;
 mod switching;
 
 const STUDIO: DisplayId = DisplayId(1);
@@ -1244,7 +1245,7 @@ fn saved_stage(windows: Vec<crate::engine::persist::SavedWindow>, last_active: u
 fn saved_on(d: &Display, id: u64, current: bool, stages: Vec<crate::engine::persist::SavedStage>) -> crate::engine::persist::SavedSpace {
     crate::engine::persist::SavedSpace {
         id,
-        screen: Some(crate::engine::persist::SavedScreen { key: d.key.text(), w: d.frame.w, h: d.frame.h }),
+        screen: Some(crate::engine::persist::SavedScreen { key: d.key.text(), w: d.frame.w, h: d.frame.h, x: Some(d.frame.x), y: Some(d.frame.y) }),
         current,
         active_index: Some(0),
         strip_slots: (1..stages.len()).collect(),

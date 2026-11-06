@@ -160,9 +160,11 @@ pub struct SavedStage {
     pub last_active: Option<u64>,
 }
 
-/// The screen a Space was saved on: its identity ([`ScreenKey::text`]) and size in points.
-/// A restart puts the Space's stages back on the screen with that identity, when connected
-/// ([`Model::saved_fits_display`]), with their saved frames on one of the same size.
+/// The screen a Space was saved on: its identity ([`ScreenKey::text`]), size in points and
+/// top-left corner in global coordinates. A restart puts the Space's stages back on the
+/// screen with that identity, when connected ([`Model::saved_fits_display`]), with their
+/// saved frames on one of the same size, moved along when the screen's origin moved (the
+/// arrangement changed, another screen became main: [`Model::settle_saved_origins`]).
 ///
 /// [`ScreenKey::text`]: crate::engine::displays::ScreenKey::text
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -173,6 +175,21 @@ pub struct SavedScreen {
     pub w: f64,
     /// Height in points.
     pub h: f64,
+    /// The screen's left edge in global coordinates when saved: the saved frames of its
+    /// Space are in that arrangement's coordinates. Absent in files written before 11-06
+    /// (R2 of the Codex review).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Its top edge, as `x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+}
+
+impl SavedScreen {
+    /// The screen's top-left corner when saved, when the file says (both finite).
+    pub fn origin(&self) -> Option<(f64, f64)> {
+        self.x.zip(self.y).filter(|(x, y)| x.is_finite() && y.is_finite())
+    }
 }
 
 /// One saved Space: its stages, active stage and strip, like a whole Stage Manager.
@@ -794,7 +811,13 @@ impl Model {
         let screen = self.display(self.space_display(space));
         SavedSpace {
             id: space.0,
-            screen: screen.key.known().then(|| SavedScreen { key: screen.key.text(), w: screen.frame.w, h: screen.frame.h }),
+            screen: screen.key.known().then(|| SavedScreen {
+                key: screen.key.text(),
+                w: screen.frame.w,
+                h: screen.frame.h,
+                x: Some(screen.frame.x),
+                y: Some(screen.frame.y),
+            }),
             current: self.current.values().any(|&c| c == space),
             stages,
             active_index,
