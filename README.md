@@ -17,7 +17,7 @@ Out of the box it looks and works like Apple's Stage Manager, never against it. 
 that fit Apple's way are on; the rest are a switch away in Settings.
 
 - **Survives a restart.** Your stages, their order and the stage in front come back after a
-  reboot.
+  reboot, as fully as macOS allows ([the gaps](docs/GUIDE.md#after-a-restart)).
 - **Merge with a drop.** Drop one card on another to make one stage. Drag a window to the
   strip to split it off.
 - **A strip that stays put.** Each stage keeps its place, or follows your Dock's order.
