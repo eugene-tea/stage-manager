@@ -2,7 +2,9 @@
 <!--
   The info page, served by GitHub Pages at https://eugene-tea.github.io/stage-manager/
   (Pages source: the /docs folder of the master branch; see docs/RELEASING.md).
-  Static: no scripts, no trackers, no external requests. Light and dark follow the system.
+  Static: no trackers, no external requests. Light and dark follow the system.
+  One small script below picks a look by the address (?look=0|a|b|c, default a) while one is
+  chosen; the chosen look then becomes the plain stylesheet and the script goes.
 -->
 <html lang="en">
 <head>
@@ -11,6 +13,13 @@
 <title>Stage Manager</title>
 <meta name="description" content="Stage Manager for macOS: looks and works like Apple’s, then more. Your stages survive a restart. Free and open source.">
 <meta name="color-scheme" content="light dark">
+<script>
+  // The look switch, for choosing: ?look=0 (today's page with the gold button), a, b or c.
+  (function () {
+    var look = new URLSearchParams(location.search).get("look");
+    document.documentElement.setAttribute("data-look", /^[0abc]$/.test(look || "") ? look : "a");
+  })();
+</script>
 <link rel="icon" type="image/png" href="assets/app-icon.png">
 <link rel="apple-touch-icon" href="assets/app-icon.png">
 <!-- Link previews. The card is docs/assets/social-card.png (make social-art). -->
@@ -38,6 +47,28 @@
     --accent-hover: #0077ed;
     --on-accent: #ffffff;
     --code: rgba(0, 0, 0, 0.05);
+    /* Apple's system yellow: a fill only, its label near-black in both modes. */
+    --gold: #ffcc00;
+    --gold-hover: #f5c000;
+    --on-gold: #1d1d1f;
+    --gold-glow: 0 1px 2px rgba(160, 110, 0, 0.18), 0 6px 18px rgba(255, 176, 0, 0.32);
+    /* The looks' warm accents: links and icon ink a gold-brown that passes 4.5:1 on every
+       background here, the icon tiles a gold wash. */
+    --link: #8a5f00;
+    --secondary-look: #66666b;
+    --gold-tint: rgba(255, 204, 0, 0.18);
+    --gold-ink: #8a5f00;
+    --gold-line: rgba(220, 160, 0, 0.75);
+    --wash: rgba(255, 204, 0, 0.16);
+    --wash-2: rgba(255, 149, 0, 0.07);
+    --wash-cool: rgba(0, 113, 227, 0.06);
+    --card-shadow: 0 1px 1px rgba(0, 0, 0, 0.03), 0 3px 8px rgba(0, 0, 0, 0.04), 0 14px 36px rgba(0, 0, 0, 0.06);
+    --card-lift: 0 2px 4px rgba(0, 0, 0, 0.04), 0 10px 20px rgba(0, 0, 0, 0.06), 0 24px 48px rgba(0, 0, 0, 0.08);
+    --page-tint: #f5f5f2;
+    --hero-tint: #fcf7e6;
+    --panel: #ffffff;
+    --inset: #f6f6f3;
+    --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.05), 0 32px 64px rgba(0, 0, 0, 0.06);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -51,6 +82,25 @@
       --accent-hover: #47a6ff;
       --on-accent: #ffffff;
       --code: rgba(255, 255, 255, 0.08);
+      --gold: #ffd60a;
+      --gold-hover: #ffe03d;
+      --on-gold: #1d1d1f;
+      --gold-glow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 22px rgba(255, 214, 10, 0.22);
+      --link: #f2c94c;
+      --secondary-look: #b0b0b5;
+      --gold-tint: rgba(255, 214, 10, 0.13);
+      --gold-ink: #ffd60a;
+      --gold-line: rgba(255, 214, 10, 0.5);
+      --wash: rgba(255, 214, 10, 0.09);
+      --wash-2: rgba(255, 159, 10, 0.05);
+      --wash-cool: rgba(41, 151, 255, 0.06);
+      --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 40px rgba(0, 0, 0, 0.6);
+      --card-lift: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 4px 10px rgba(0, 0, 0, 0.55), 0 24px 52px rgba(0, 0, 0, 0.7);
+      --page-tint: #0b0b0c;
+      --hero-tint: #17140a;
+      --panel: #161618;
+      --inset: #202023;
+      --panel-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 24px 60px rgba(0, 0, 0, 0.7);
     }
   }
   * { box-sizing: border-box; }
@@ -68,10 +118,10 @@
   .hero img { width: 168px; height: 168px; display: block; margin: 0 auto 18px; }
   h1 { font-size: 56px; line-height: 1.07; font-weight: 600; letter-spacing: -0.005em; margin: 0 0 32px; }
   .download {
-    display: inline-block; background: var(--accent); color: var(--on-accent); font-size: 17px; font-weight: 500;
+    display: inline-block; background: var(--gold); color: var(--on-gold); font-size: 17px; font-weight: 500;
     padding: 12px 24px; border-radius: 980px; min-width: 200px;
   }
-  .download:hover { background: var(--accent-hover); text-decoration: none; }
+  .download:hover { background: var(--gold-hover); text-decoration: none; }
   .meta { color: var(--secondary); font-size: 14px; margin-top: 14px; }
   .brew { margin-top: 10px; font-size: 14px; color: var(--secondary); }
   .shot { max-width: 1180px; margin: 0 auto; padding: 0 22px 72px; }
@@ -116,6 +166,95 @@
     h1 { font-size: 40px; }
     h2 { font-size: 30px; }
     section { padding: 48px 0; }
+  }
+  /* ---- The looks (?look=a|b|c). Each block is scoped to its look; the chosen one becomes the
+     plain stylesheet. ?look=0 is the page above alone. ---- */
+
+  /* Shared by a, b and c: one warm accent. The button glows; links and icons go gold-brown
+     (gold itself only as a fill: the icons sit on a gold-washed tile). */
+  html:is([data-look="a"], [data-look="b"], [data-look="c"]) { --secondary: var(--secondary-look); }
+  html:is([data-look="a"], [data-look="b"], [data-look="c"]) a { color: var(--link); }
+  html:is([data-look="a"], [data-look="b"], [data-look="c"]) .brew code { color: var(--text); }
+  html:is([data-look="a"], [data-look="b"], [data-look="c"]) .download { color: var(--on-gold); box-shadow: var(--gold-glow); }
+  html:is([data-look="a"], [data-look="b"], [data-look="c"]) .card svg {
+    width: 44px; height: 44px; padding: 8px; border-radius: 12px;
+    background: var(--gold-tint); color: var(--gold-ink);
+  }
+
+  /* a, Glow: a warm wash behind the hero, bands that fade in and out, layered card shadows,
+     about half again the whitespace. */
+  html[data-look="a"] body {
+    background: radial-gradient(62% 520px at 50% 150px, var(--wash), transparent) no-repeat, var(--bg);
+  }
+  html[data-look="a"] header.hero { padding: 104px 0 92px; }
+  html[data-look="a"] .shot { padding-bottom: 108px; }
+  html[data-look="a"] section { padding: 96px 0; }
+  html[data-look="a"] section.alt {
+    background: linear-gradient(to bottom, transparent, var(--bg-alt) 128px, var(--bg-alt) calc(100% - 128px), transparent);
+  }
+  html[data-look="a"] .lede { margin-bottom: 52px; }
+  html[data-look="a"] .grid { gap: 24px; }
+  html[data-look="a"] .card { border-color: transparent; border-radius: 20px; box-shadow: var(--card-shadow), 0 0 0 1px var(--edge); }
+  html[data-look="a"] footer { border-top: none; padding-top: 48px; }
+
+  /* b, Depth: the sections as rounded panels floating on a faintly tinted page, the hero on a
+     gentle warm tint from the top. */
+  html[data-look="b"] body {
+    background: linear-gradient(to bottom, var(--hero-tint), var(--page-tint) 720px) no-repeat, var(--page-tint);
+  }
+  html[data-look="b"] header.hero { padding: 96px 0 84px; }
+  html[data-look="b"] .shot { padding-bottom: 80px; }
+  html[data-look="b"] section, html[data-look="b"] section.alt {
+    background: var(--panel); max-width: 1132px; width: calc(100% - 48px); margin: 0 auto 32px;
+    border-radius: 32px; box-shadow: var(--panel-shadow); padding: 84px 0;
+  }
+  html[data-look="b"] .card { background: var(--inset); border-color: transparent; }
+  html[data-look="b"] footer { border-top: none; padding-top: 28px; }
+
+  /* c, Sheen: a soft mesh of warm light in the hero, hairline gold rules between the sections,
+     cards that lift a little under the pointer. */
+  html[data-look="c"] body {
+    background:
+      radial-gradient(38% 360px at 28% 90px, var(--wash), transparent) no-repeat,
+      radial-gradient(34% 320px at 74% 30px, var(--wash-cool), transparent) no-repeat,
+      radial-gradient(52% 420px at 56% 380px, var(--wash-2), transparent) no-repeat,
+      var(--bg);
+  }
+  html[data-look="c"] header.hero { padding: 96px 0 84px; }
+  html[data-look="c"] .shot { padding-bottom: 88px; }
+  html[data-look="c"] section, html[data-look="c"] section.alt { background: none; position: relative; padding: 84px 0; }
+  html[data-look="c"] footer { border-top: none; position: relative; }
+  html[data-look="c"] section::before, html[data-look="c"] footer::before {
+    content: ""; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+    width: min(720px, calc(100% - 32px)); height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold-line), transparent);
+  }
+  html[data-look="c"] .card {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    transition: transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.3s ease;
+  }
+  html[data-look="c"] .card:hover { transform: translateY(-4px); box-shadow: var(--card-lift); }
+  @media (prefers-reduced-motion: reduce) {
+    html[data-look="c"] .card { transition: none; }
+    html[data-look="c"] .card:hover { transform: none; }
+  }
+
+  @media (max-width: 640px) {
+    html[data-look="a"] header.hero { padding: 64px 0 60px; }
+    html[data-look="a"] .shot { padding-bottom: 72px; }
+    html[data-look="a"] section { padding: 72px 0; }
+    html[data-look="a"] section.alt {
+      background: linear-gradient(to bottom, transparent, var(--bg-alt) 80px, var(--bg-alt) calc(100% - 80px), transparent);
+    }
+    html[data-look="a"] body { background: radial-gradient(90% 380px at 50% 110px, var(--wash), transparent) no-repeat, var(--bg); }
+    html[data-look="b"] header.hero, html[data-look="c"] header.hero { padding: 60px 0 52px; }
+    html[data-look="b"] .shot { padding-bottom: 40px; }
+    html[data-look="b"] section, html[data-look="b"] section.alt {
+      width: calc(100% - 32px); margin-bottom: 16px; border-radius: 24px; padding: 56px 0;
+    }
+    html[data-look="b"] section .wrap { padding: 0 18px; }
+    html[data-look="c"] .shot { padding-bottom: 56px; }
+    html[data-look="c"] section, html[data-look="c"] section.alt { padding: 60px 0; }
   }
 </style>
 </head>
