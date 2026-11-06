@@ -2989,6 +2989,7 @@ impl Strip {
     /// the cards hover from here and the pane catches clicks again once it is on one.
     fn pointer_moved(&mut self, p: Point) {
         let g = self.geometry.global;
+        self.visibility.set_screen_left(self.geometry.screen.origin.x);
         // Hidden at the edge, nothing polled: a move to the edge or the tab starts the rest.
         if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
             self.update_visibility();
@@ -3152,6 +3153,7 @@ impl Strip {
         let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global);
         let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, covered);
         self.visibility.set_tab(self.pane.tab.shown.then(|| self.geometry.tab()));
+        self.visibility.set_screen_left(self.geometry.screen.origin.x);
         let window_drag = self.snapshot.window_drag.is_some();
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);

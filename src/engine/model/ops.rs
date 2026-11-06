@@ -390,23 +390,36 @@ impl Model {
         actions
     }
 
-    /// Switches to stage `n` (1-based, creation order) of the Desktop the main screen shows
-    /// ([`Model::hotkey_space`]); a no-op when there is none.
-    pub fn switch_to_number(&mut self, n: usize, obs: &Observation) -> Vec<Action> {
-        let space = self.hotkey_space();
+    /// Switches to stage `n` (1-based, creation order) of the Desktop the screen with the
+    /// keyboard shows (`keyboard`, [`Model::keyboard_display`]; [`Model::hotkey_space`]); a
+    /// no-op when there is none.
+    pub fn switch_to_number(&mut self, n: usize, keyboard: DisplayId, obs: &Observation) -> Vec<Action> {
+        let space = self.hotkey_space(keyboard);
         match self.stage_by_number(space, n) {
             Some(s) => self.switch_to(s, obs),
             None => Vec::new(),
         }
     }
 
-    /// The Desktop whose stages the stage hotkeys and `ctl switch N` count: the main
-    /// screen's, whichever screen has the keyboard (UX-SPEC, Known gaps: which screen Apple's
-    /// hotkeys address is not measured). One answer for the platform's "is there a stage
-    /// `n`" and the switch itself (the Fable review's switching 4: the check read the main
-    /// screen, the switch the focused one).
-    pub fn hotkey_space(&self) -> SpaceId {
-        self.current_space(self.main_display().id)
+    /// The screen the keyboard is on, for the stage hotkeys and `ctl switch N` (his word,
+    /// 11-06): the focused window's, as the model has it when it manages the window, else
+    /// `shown_on` (the screen most of the focused window shows on, as the platform reads it:
+    /// an unmanaged or full-screen window), else the main screen (no focused window).
+    pub fn keyboard_display(&self, focused: Option<WindowId>, shown_on: Option<DisplayId>) -> DisplayId {
+        focused
+            .and_then(|id| self.windows.get(&id))
+            .map(|w| w.meta.display)
+            .or(shown_on)
+            .map_or(self.displays[0].id, |d| self.known_display(d))
+    }
+
+    /// The Desktop whose stages the stage hotkeys and `ctl switch N` count: the one the
+    /// keyboard's screen shows (`keyboard`, [`Model::keyboard_display`]). One answer for the
+    /// platform's "is there a stage `n`" and the switch itself (the Fable review's switching
+    /// 4: the check read the main screen, the switch the focused one; the Codex review's W3:
+    /// the main screen's count refused a stage only the other screen has).
+    pub fn hotkey_space(&self, keyboard: DisplayId) -> SpaceId {
+        self.current_space(self.known_display(keyboard))
     }
 
     /// Sends a standard window (a child stands for its parent) and its children to another

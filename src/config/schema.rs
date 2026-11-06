@@ -357,8 +357,11 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     // [displays]
-    k("displays", "main_only", Kind::Bool, "false",
-        "Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages."),
+    KeyDef {
+        applies: Applies::Restart,
+        ..k("displays", "main_only", Kind::Bool, "false",
+            "Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it.")
+    },
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
         "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),
@@ -546,6 +549,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-28.toml"),
     include_str!("legacy/default-29.toml"),
     include_str!("legacy/default-30.toml"),
+    include_str!("legacy/default-31.toml"),
 ];
 
 #[cfg(test)]
@@ -578,6 +582,16 @@ mod tests {
         assert!(e.contains(REFERENCE_URL), "explain points at the full reference");
         assert!(explain("windows.nope").is_none());
         assert!(explain("nonsense").is_none());
+        assert!(e.contains("applies: within a second of saving"));
+    }
+
+    /// The Codex review's S3: a reloaded `[displays] main_only` never reached the model,
+    /// though the key read as live; it is read at launch, and says so.
+    #[test]
+    fn main_only_applies_at_the_next_launch() {
+        assert_eq!(find("displays.main_only").map(|d| d.applies), Some(Applies::Restart));
+        let e = explain("displays.main_only").expect("known");
+        assert!(e.contains("applies: at the next launch") && e.contains("Read at launch"));
     }
 
     #[test]

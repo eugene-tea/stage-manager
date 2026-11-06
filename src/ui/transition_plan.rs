@@ -484,7 +484,7 @@ mod tests {
             // A hotkey: stage 5.
             let (before, leaving) = (e.slots(), e.active());
             let obs = e.obs();
-            let a = e.m.switch_to_number(5, &obs);
+            let a = e.m.switch_to_number(5, e.m.main_display().id, &obs);
             let t = e.apply(a).expect("a transition");
             assert_eq!(e.active(), e.stage_of(5));
             check(&e, &t, &before, leaving, "hotkey");
