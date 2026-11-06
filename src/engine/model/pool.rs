@@ -57,7 +57,7 @@ use crate::engine::geometry::Rect;
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
 use crate::engine::stage_area::same_frame;
-use crate::engine::window_match::{Grade, LowRule, Saved, assign};
+use crate::engine::window_match::{Grade, Live, LowRule, MEDIUM, Saved, assign, at_saved_frame};
 
 /// The saved stage a model stage stands for: built from it (an adoption, an arrival on a
 /// saved Desktop) or made as its part on another Desktop.
@@ -228,7 +228,48 @@ impl Model {
         let rest: Vec<usize> = all.into_iter().filter(|i| !sure.contains(i)).collect();
         let pool: Vec<_> = run(Scope::Pool, &rest, LowRule::default()).into_iter().filter(|c| c.2.confident()).collect();
         let pooled: HashSet<usize> = pool.iter().map(|c| c.0).collect();
-        own.into_iter().filter(|c| !pooled.contains(&c.0)).chain(pool).collect()
+        let mut out: Vec<_> = own.into_iter().filter(|c| !pooled.contains(&c.0)).chain(pool).collect();
+        if self.restore.restoring {
+            self.renamed_picks(space, metas, &lives, &mut out);
+        }
+        out
+    }
+
+    /// **Renamed at its saved frame** (the 11-06 restart: Fork's second window, saved as its
+    /// own stage on the other Desktop, reopened at its saved frame under another name, went
+    /// by Apple's rule into the stage of the app's first window). While the restore window is
+    /// open after a restart (no click or key yet: every window showing is one an app
+    /// reopens), a window of `metas` no saved window takes with confidence, at the exact
+    /// saved frame of one waiting entry of its app (on any Desktop), is that window, a medium
+    /// match, when nothing else can be meant and its app is reopening its saved windows:
+    /// that entry is the app's only one waiting at that frame, no other window of `metas` is
+    /// at it, no other pick has it, and another window of the app came back to its saved
+    /// stage with confidence (live, or picked in `out`). A browser's first window, a "Start
+    /// Page" where the saved page's window was, is not the saved page (H2): no window of the
+    /// browser came back yet. A low pick of the window (into the stage shown) gives way.
+    /// Outside the restore window the frame never outweighs two names (a window the user
+    /// opens, Finder's ⌘N where a saved window was, keeps Apple's rule). A window that went
+    /// by Apple's rule before its sibling came back is looked at again then
+    /// ([`Model::rescore_siblings`]).
+    fn renamed_picks(&self, space: SpaceId, metas: &[WindowMeta], lives: &[Live<'_>], out: &mut Vec<(usize, Spot, Grade, u32)>) {
+        let sure: HashSet<usize> = out.iter().filter(|c| c.2.confident()).map(|c| c.0).collect();
+        let (spots, keys) = self.waiting(space, Scope::OwnAndPool);
+        for i in (0..metas.len()).filter(|i| !sure.contains(i)) {
+            let at: Vec<usize> = (0..keys.len()).filter(|&k| at_saved_frame(&keys[k], &lives[i])).collect();
+            let [k] = at[..] else { continue };
+            let crowded = (0..metas.len()).any(|j| j != i && at_saved_frame(&keys[k], &lives[j]));
+            let taken = out.iter().any(|c| c.0 != i && c.1 == spots[k]);
+            let pid = metas[i].pid;
+            let reopening = self.windows.iter().any(|(id, w)| {
+                w.meta.pid == pid && *id != metas[i].id && self.restored.get(id).is_some_and(|r| r.grade.confident())
+            }) || out.iter().any(|c| c.0 != i && metas[c.0].pid == pid && c.2.confident());
+            if crowded || taken || !reopening {
+                continue;
+            }
+            tracing::debug!(id = metas[i].id.0, bundle = %metas[i].bundle_id, "restore: a window at a saved window's frame under another name, the only one: that window");
+            out.retain(|c| c.0 != i);
+            out.push((i, spots[k], Grade::Medium, MEDIUM));
+        }
     }
 
     /// Matches `metas` (standard windows new on `space`) against the waiting entries `scope`
@@ -644,6 +685,25 @@ impl Model {
             }
         }
         self.drop_empty_leftovers();
+    }
+
+    /// Window `placed` of app `pid` came back to its saved stage with confidence while the
+    /// restore window is open: its app is reopening its saved windows, so one of its windows
+    /// that went by Apple's rule before (untouched, [`Model::window_retitled`]'s windows) may
+    /// be a saved one reopened under another name at its saved frame ([`Model::picks`]):
+    /// each is scored again, as on a new title. The actions.
+    pub(crate) fn rescore_siblings(&mut self, pid: super::Pid, placed: WindowId) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if !self.restore.restoring {
+            return actions;
+        }
+        let mut ids: Vec<WindowId> =
+            self.rescore.iter().copied().filter(|&id| id != placed && self.windows.get(&id).is_some_and(|w| w.meta.pid == pid)).collect();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            actions.extend(self.window_retitled(id).into_iter().filter(|a| *a != Action::StateChanged));
+        }
+        actions
     }
 
     /// Window `id`'s title changed. One placed by Apple's rule (it matched no saved window

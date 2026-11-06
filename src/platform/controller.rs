@@ -5388,7 +5388,11 @@ impl Controller {
             // Shift and `[stages] new_apps_join_current` (`Decision::for_new_window`).
             let new_app = self.model.as_ref().is_some_and(|m| m.app_is_new(meta.pid));
             let config = self.store.config();
-            let join_current = config.stages.new_apps_join_current;
+            // While the restore window is open an app's window is one it reopens, not one
+            // the user opened: the saved stages and Apple's rule place it, never the key
+            // (the model ignores it then too, `Model::add_window`).
+            let restoring = self.model.as_ref().is_some_and(Model::restoring);
+            let join_current = config.stages.new_apps_join_current && !restoring;
             let sugar = &config.sugar;
             let mut shift = false;
             if sugar.shift_brings_here && decision.action.shift_counts() {

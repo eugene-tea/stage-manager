@@ -896,3 +896,134 @@ fn a_late_title_after_the_two_minutes_moves_nothing() {
     assert!(m.window_retitled(w(42)).is_empty());
     assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
 }
+
+/// The 11-06 restart, Fork's two windows (made-up titles): the git client's "proj" saved as a
+/// stage of its own on Desktop 2 (saved 8), its "site" as a stage of its own on Desktop 1
+/// (saved 4, shown when saved). The login shows Desktop 2, and the app (non-native) reopens
+/// both windows there, at their saved frames.
+fn git_on_two_desktops() -> Vec<SavedSpace> {
+    let one = SavedSpace {
+        screen: None,
+        id: 4,
+        current: true,
+        stages: vec![stage(vec![sw(MAIL, "Inbox", r(7.0), 0)], 50), stage(vec![sw(GIT, "site", r(6.0), 0)], 45)],
+        active_index: Some(0),
+        strip_slots: vec![1],
+        last_seen: None,
+    };
+    let two = SavedSpace {
+        screen: None,
+        id: 8,
+        current: false,
+        stages: vec![
+            stage(vec![sw(MAIL, "Archive", r(8.0), 0)], 40),
+            stage(vec![sw(TERM, "server", r(9.0), 0)], 30),
+            stage(vec![sw(GIT, "proj", r(5.0), 0)], 35),
+        ],
+        active_index: Some(0),
+        strip_slots: vec![2, 1],
+        last_seen: None,
+    };
+    vec![one, two]
+}
+
+/// The login on Desktop 2: its two natives adopt it.
+fn login_for_git() -> Model {
+    let mut m = launched(git_on_two_desktops(), Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 12, MAIL, "Archive", r(8.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    assert_eq!(m.current_space(MAIN).0, 8);
+    m
+}
+
+/// A git window as the controller decides it with `[stages] new_apps_join_current` on while
+/// the restore window is open (the key does not apply then; the model ignores it either way).
+fn add_git(m: &mut Model, id: u32, title: &str, frame: Rect) -> Vec<Action> {
+    let joins = Decision { new_app_joins_current: true, ..Decision::default() };
+    m.add_window(win(id, 30, GIT, title, frame), &joins, &Observation::default())
+}
+
+#[test]
+fn an_app_reopening_two_windows_saved_as_two_stages_on_two_desktops_makes_two_stages() {
+    let mut m = login_for_git();
+    let (front, apple) = (m.main_active_stage(), m.restore_summary(0).by_apple);
+    add_git(&mut m, 61, "proj", r(5.0));
+    add_git(&mut m, 62, "site", r(6.0));
+    assert_ne!(m.stage_of(w(61)), m.stage_of(w(62)), "two stages, as saved");
+    assert_eq!(kin(&m, 61), Some(Kin::Saved(8, 2)), "its own Desktop's saved stage");
+    assert_eq!(kin(&m, 62), Some(Kin::Saved(4, 1)), "the other Desktop's, made here");
+    assert!(m.is_pooled(w(62)) && !m.is_pooled(w(61)));
+    assert_eq!(m.main_active_stage(), front, "nothing switched");
+    assert_eq!(m.restore_summary(0).by_apple, apple, "none of them by Apple's rule");
+}
+
+#[test]
+fn a_window_reopened_under_another_name_at_its_saved_frame_goes_to_its_own_stage() {
+    // Fork's second window came back with another title (the repository it shows): two
+    // names, so the frame counted as the size only, a low match, and Apple's rule joined it
+    // to the first window's stage. While the restore window is open it is the only window of
+    // the app at the only saved frame of the app's still waiting there: that window.
+    let mut m = login_for_git();
+    let apple = m.restore_summary(0).by_apple;
+    add_git(&mut m, 61, "proj", r(5.0));
+    let a = add_git(&mut m, 62, "notes", r(6.0));
+    let site = m.stage_of(w(62)).expect("placed");
+    assert_ne!(Some(site), m.stage_of(w(61)), "two stages");
+    assert_eq!(m.stage(site).map(|s| s.windows.clone()), Some(vec![w(62)]));
+    assert_eq!(kin(&m, 62), Some(Kin::Saved(4, 1)));
+    assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
+    assert_eq!(m.restore_summary(0).by_apple, apple);
+    assert!(parks(&a, 62) || m.main_active_stage() == Some(site), "a card or the empty front: {a:?}");
+    let stages = m.stages_in(m.current_space(MAIN)).count();
+    // The other order: the renamed window first (no window of its app back yet: Apple's
+    // rule, a stage of its own), then the one with its name, which shows its app is
+    // reopening its saved windows: the first is looked at again and goes to its saved stage.
+    let mut m = login_for_git();
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.restored_grade(w(62)), None);
+    add_git(&mut m, 61, "proj", r(5.0));
+    assert_ne!(m.stage_of(w(61)), m.stage_of(w(62)));
+    assert_eq!((kin(&m, 61), kin(&m, 62)), (Some(Kin::Saved(8, 2)), Some(Kin::Saved(4, 1))));
+    assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
+    assert_eq!(m.restore_summary(0).by_apple, apple);
+    assert_eq!(m.stages_in(m.current_space(MAIN)).count(), stages, "the stage Apple's rule made is gone");
+}
+
+#[test]
+fn a_renamed_window_at_a_saved_frame_keeps_apples_rule_when_more_could_be_meant() {
+    // After the restore window (a click or key: the user may have opened it, Finder's ⌘N
+    // where a saved window was), the frame never outweighs two names.
+    let mut m = login_for_git();
+    add_git(&mut m, 61, "proj", r(5.0));
+    m.end_restore();
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)), "Apple's rule");
+    // Two saved windows of the app at that frame: either could be meant.
+    let mut spaces = git_on_two_desktops();
+    spaces[0].stages.push(stage(vec![sw(GIT, "blog", r(6.0), 0)], 20));
+    let mut m = launched(spaces, Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 12, MAIL, "Archive", r(8.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    add_git(&mut m, 61, "proj", r(5.0));
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)), "Apple's rule");
+    assert_eq!(m.restored_grade(w(62)), None);
+}
+
+#[test]
+fn a_renamed_window_saved_with_its_sibling_goes_back_to_their_stage() {
+    // The two windows saved in one stage: the renamed one goes there too.
+    let mut spaces = git_on_two_desktops();
+    spaces[0].stages.remove(1);
+    spaces[1].stages[2].windows.push(sw(GIT, "site", r(6.0), 1));
+    let mut m = launched(spaces, Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 12, MAIL, "Archive", r(8.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    add_git(&mut m, 61, "proj", r(5.0));
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)));
+    assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
+}

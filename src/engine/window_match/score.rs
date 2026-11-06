@@ -17,6 +17,10 @@
 //! (Workspace)", an editor that put the file it shows in front of its workspace's name) are
 //! not different: there the frame counts (the 11-06 restart).
 //!
+//! The model's restore after a restart makes one exception while its restore window is open
+//! ([`at_saved_frame`]: the only window of the app at the only saved frame of the app's
+//! waiting there, `Model::picks`); the scorer itself never counts that frame.
+//!
 //! A window with no title yet at the saved frame is a medium match at most
 //! ([`points::FRAME_UNTITLED`]): the frame alone, with no name to back it.
 //!
@@ -159,6 +163,21 @@ pub struct Pick {
 pub struct LowRule {
     /// The group shown now: a low match into it is taken; `None` takes none.
     pub shown: Option<u64>,
+}
+
+/// True when `live` is of `saved`'s app and shows at one of its saved frames (within
+/// [`FRAME_TOLERANCE`]), its live frame usable, whatever the titles say: the evidence of a
+/// window reopened under another name at its saved frame. The scorer never counts it then
+/// ([`score`]: the frame never outweighs two different names); the model's restore after a
+/// restart weighs it alone, when nothing else can be meant (`Model::picks`).
+pub fn at_saved_frame(saved: &Saved, live: &Live) -> bool {
+    let near = |a: f64, b: f64| (a - b).abs() <= FRAME_TOLERANCE;
+    let l = live.frame;
+    !saved.bundle.is_empty()
+        && saved.bundle == live.bundle
+        && live.frame_usable
+        && !l.is_degenerate()
+        && saved.frames.iter().flatten().filter(|f| !f.is_degenerate()).any(|f| near(f.x, l.x) && near(f.y, l.y) && near(f.w, l.w) && near(f.h, l.h))
 }
 
 /// The score of `saved` for `live`; `None` for another app.

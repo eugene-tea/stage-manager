@@ -216,7 +216,12 @@ Known gaps the owner accepted as rare:
     Apple's rule" for it), and one titled late goes to its stage when its title comes ("matches its
     saved one by its new title"), even after his first click, unless he touched that window,
     and never past two minutes after the login ("no longer matched again by a new title"); Fork and Chrome stay
-    as saved (they did, 11-06); (4) ⌘-Tab to an app whose stage is
+    as saved (they did, 11-06 04:23; at 06:29 Fork's second window, saved as its own stage
+    on the other Desktop, reopened at its frame under another repository's name and joined
+    the first's stage by Apple's rule: fixed in round restart-two-windows, run it again:
+    the log's "a window at a saved window's frame under another name, the only one" and
+    "grade=\"medium\"" for it, two Fork stages in `ctl state`, no "asked to join the current
+    stage" line while the restore window is open); (4) ⌘-Tab to an app whose stage is
     on the other screen: that screen switches, the other does not, and the Desktop there is
     arranged ahead of its slide (the log's "arranged ahead" for a window on `displays[1]`);
     (5) round displays-2, on the laptop's screen: its cards' glass takes its own wallpaper
