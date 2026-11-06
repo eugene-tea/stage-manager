@@ -810,6 +810,11 @@ mod app {
 
         let wm_events = wm.clone();
         let to_wm = move |event| {
+            // A logout slowed by apps saving stays under way while apps still quit (the 1.7
+            // review): the reopen list's clock here, the head start's on the WM thread.
+            if matches!(event, apps::AppEvent::Terminated(_)) {
+                shell::app_quit(Instant::now());
+            }
             wm_events.send(WmCommand::App(event));
         };
         // A live check's late notices (round stale-activations; the fixtures' runs only).

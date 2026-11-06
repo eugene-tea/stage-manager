@@ -389,7 +389,13 @@ impl WmState {
                 return;
             }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
-            WmCommand::App(event) => self.observer.on_app_event(event, ax_callback),
+            WmCommand::App(event) => {
+                // An app quitting during a logout's hold: the logout is still under way.
+                if matches!(event, AppEvent::Terminated(_)) {
+                    self.logout.app_quit(Instant::now());
+                }
+                self.observer.on_app_event(event, ax_callback)
+            }
             WmCommand::Probe(note) => self.observer.on_probe(note, ax_callback),
             WmCommand::Accessibility(trusted) => {
                 if trusted && !self.scanned {

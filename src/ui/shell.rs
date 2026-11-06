@@ -551,6 +551,12 @@ pub fn logout_signal(signal: Signal, at: Instant) {
     });
 }
 
+/// An app quit (any, on the main thread as its notice arrives): during a logout that listed
+/// the app, the logout is still under way ([`ReopenSwitch::app_quit`]).
+pub fn app_quit(at: Instant) {
+    with(|s| s.reopen.app_quit(at));
+}
+
 pub fn show_settings() {
     let Some((mtm, values, pane)) = with(|s| {
         let pane = s.state.settings_pane.as_deref().and_then(Pane::from_id).unwrap_or_default();

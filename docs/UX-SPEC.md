@@ -220,7 +220,8 @@ with most windows already up and piled. The list holds the regular (Dock) apps r
 the logout; ours is an accessory app. So at the logout's first signal it turns regular
 (`[app] reopen_with_apps`, on by default with launch at login on: its icon shows in the
 Dock for a moment, no window, nothing activated) and macOS reopens it with the other apps;
-a cancelled logout turns it back (a cancel signal, or no quit within two minutes). It
+a cancelled logout turns it back (a cancel signal, or no quit within two minutes of the
+logout's latest sign or of the latest app that quit meanwhile). It
 launches as an accessory app as ever, and no window of its own is restorable, so nothing
 of it reopens but the app. The login item's copy then hands off without a word.
 `[app] login_start = "background_item"` keeps the launchd agent
@@ -472,7 +473,9 @@ every window comes back at the first sign of it macOS gives (any of `loginwindow
 notices, `willPowerOff` the last), so apps save their windows where they are as far as the
 timing allows (best effort: macOS may ask apps to quit first); from then on nothing is
 arranged (no switch, no card added or removed) and the app itself quits when macOS asks it
-to; a cancelled logout brings the stages back at once. An app that quits keeps its windows'
+to; a cancelled logout brings the stages back at once (one macOS says nothing of: two minutes
+after its latest sign, or after the latest app that quit meanwhile, so a slow restart, an app
+asking about unsaved changes, is not taken for one). An app that quits keeps its windows'
 places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
 before macOS announced the logout still come back after the restart; a window reopened
 squeezed into the park corner goes to its saved frame when it is matched, and is left where

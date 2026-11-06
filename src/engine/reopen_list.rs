@@ -11,8 +11,8 @@
 //!
 //! So at the logout's first signal the app turns regular (a Dock icon for a moment, no
 //! window, not activated), and macOS lists it with the apps it reopens. A cancelled logout
-//! turns it back: a cancel signal, or no quit within [`LOGOUT_WAIT`] of the latest signal
-//! (the head start's own rule, [`crate::engine::stand_down::Logout::cancelled`]). The app
+//! turns it back: a cancel signal, or no quit within [`LOGOUT_WAIT`] of the latest signal or
+//! app quit (the head start's own rule, [`crate::engine::stand_down::Logout::cancelled`]). The app
 //! launches as an accessory app as ever (`LSUIElement` stays).
 //!
 //! [`ReopenSwitch`] is the pure rule; the shell carries out its [`Policy`].
@@ -67,8 +67,16 @@ impl ReopenSwitch {
         }
     }
 
-    /// At `now`: no quit came within [`LOGOUT_WAIT`] of the latest signal, so the logout was
-    /// cancelled without a word: back to accessory (once).
+    /// An app quit at `at`: while regular for a logout, the logout is still under way and the
+    /// wait counts from it (as [`crate::engine::stand_down::Logout::app_quit`]).
+    pub fn app_quit(&mut self, at: Instant) {
+        if let Some(since) = self.regular_since.as_mut().filter(|s| at > **s) {
+            *since = at;
+        }
+    }
+
+    /// At `now`: no quit came within [`LOGOUT_WAIT`] of the latest signal or app quit, so the
+    /// logout was cancelled without a word: back to accessory (once).
     pub fn tick(&mut self, now: Instant) -> Option<Policy> {
         let since = self.regular_since?;
         (now.saturating_duration_since(since) >= LOGOUT_WAIT).then(|| {
@@ -118,6 +126,20 @@ mod tests {
         assert_eq!(s.tick(t + Duration::from_secs(600)), None, "once");
         // And the next logout turns it regular again.
         assert_eq!(s.signal(Signal::Coming, t + Duration::from_secs(700), || true), Some(Policy::Regular));
+    }
+
+    /// The 1.7 review: a slow restart (apps saving, one asking about unsaved changes) keeps the
+    /// app on the reopen list while apps still quit.
+    #[test]
+    fn apps_quitting_keep_the_logout_under_way() {
+        let t = Instant::now();
+        let mut s = ReopenSwitch::default();
+        s.app_quit(t);
+        assert!(!s.regular(), "no logout: an app quit is nothing");
+        s.signal(Signal::Coming, t, || true);
+        s.app_quit(t + Duration::from_secs(100));
+        assert_eq!(s.tick(t + LOGOUT_WAIT), None, "an app quit 100 s in: still under way");
+        assert_eq!(s.tick(t + Duration::from_secs(100) + LOGOUT_WAIT), Some(Policy::Accessory));
     }
 
     #[test]
