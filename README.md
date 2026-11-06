@@ -13,8 +13,8 @@ or <code>brew install eugene-tea/tap/stage-manager</code></p>
 
 ## Like Apple's. Then more.
 
-Out of the box it looks and works like Apple's Stage Manager, never against it. Improvements
-that fit Apple's way are on; the rest are a switch away in Settings.
+It looks and works like Apple's Stage Manager. A few extras come switched on, and Settings
+has more.
 
 - **Survives a restart.** Your stages, their order and the stage in front come back after a
   reboot, as fully as macOS allows ([the gaps](docs/GUIDE.md#after-a-restart)).
@@ -24,12 +24,14 @@ that fit Apple's way are on; the rest are a switch away in Settings.
   Windows can keep clear of the strip.
 - **New apps join you.** Open an app straight into the stage you are in. Hold Shift to give
   it a stage of its own.
-- **Shortcuts if you want them.** ⌃⌥1–9 to switch stages or send a window. Nothing needs one.
-- **Never loses a window.** Quit, crash or update: every hidden window comes back.
+- **Shortcuts if you want them.** ⌃⌥1–9 switches stages or sends a window to one.
+  Everything works without them too.
+- **Your windows come back.** When Stage Manager quits, updates or crashes, every hidden
+  window returns to the screen.
 
 ## More in the config file
 
-Everything else lives in one plain file. Ask an AI assistant to change it; Settings →
+Everything else is in one plain text file. An AI assistant can edit it for you, and Settings →
 Advanced shows how.
 
 - **Rules for new windows:** by app and title, a named stage, every stage, centred or cascaded.
@@ -41,11 +43,11 @@ Advanced shows how.
 ## First launch
 
 Turn off Apple's Stage Manager (the app offers to do it), then allow **Accessibility**,
-which is required. **Screen Recording** is optional and puts live window pictures on the cards
-and keeps the corner clean on any wallpaper.
+which is required. **Screen Recording** is optional and puts live pictures of your windows on
+the cards, and keeps the screen corner tidy.
 
-Nothing about your windows leaves your Mac. The only network use is a daily update check
-on GitHub, and downloading an update from there when it installs one.
+Everything about your windows stays on your Mac. It goes online only to check GitHub for
+updates once a day, and to download one when you install it.
 
 ## Learn more
 
