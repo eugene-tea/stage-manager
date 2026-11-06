@@ -121,9 +121,25 @@ impl ScanDisplays {
     }
 
     /// The visible frame a window at `frame` belongs to: the secondary display whose park
-    /// zone holds it, else the main display's.
+    /// zone holds it; else the main display's when the main display's own zone does; else
+    /// the managed display holding the most of it (a restore frame on the second screen
+    /// goes back there, not centered on the main one: the Fable review of 11-06, restore 1);
+    /// else the main display's.
     pub fn visible_for(&self, frame: Rect) -> Rect {
-        self.zone_of(frame).map_or(self.visible, |z| z.visible)
+        if let Some(z) = self.zone_of(frame) {
+            return z.visible;
+        }
+        if self.corners.iter().any(|c| is_parked_in_at_with(frame, self.main, self.visible, *c, Slivers::Count)) {
+            return self.visible;
+        }
+        let seen = |d: &Rect| frame.intersect(d).map_or(0.0, |r| r.area());
+        let on_main = seen(&self.main);
+        self.zones
+            .iter()
+            .map(|z| (seen(&z.frame), z))
+            .filter(|(a, _)| *a > on_main)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(self.visible, |(_, z)| z.visible)
     }
 }
 
@@ -272,7 +288,7 @@ pub fn plan_with(
             && same_frame(w.frame, s.frame)
         {
             // Still exactly where we fitted it: back to its pre-fit frame.
-            let back = if displays.parks(o) { clamp_to_visible(o, displays.visible) } else { o };
+            let back = if displays.parks(o) { clamp_to_visible(o, displays.visible_for(o)) } else { o };
             out.push((i, back, FrameSource::Saved));
         }
     }
@@ -374,7 +390,8 @@ pub struct Listed {
 
 /// A restore frame clamped onto the visible display and never in a park zone.
 pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
-    // On the display whose park zone holds it (a secondary one's, else the main).
+    // On its own display ([`ScanDisplays::visible_for`]: the one whose park zone holds it,
+    // else the one holding most of it, else the main).
     let visible = displays.visible_for(frame);
     let mut f = clamp_to_visible(frame, visible);
     if displays.parks(f) {
@@ -387,7 +404,7 @@ pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
 mod tests {
     use super::*;
     use crate::engine::geometry::Size;
-    use crate::engine::park::{MACOS_KEEPS_TITLE, is_parked, park_frame};
+    use crate::engine::park::{MACOS_KEEPS_TITLE, is_parked, park_frame, park_frame_at};
     use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
@@ -685,6 +702,29 @@ mod tests {
         assert_eq!(ParkedFile::from_json(before).ok().map(|f| f.corners), Some(vec![]));
         assert!(serde_json::to_string(&f).unwrap_or_default().contains(r#""corners":["bottom-left"]"#));
         assert!(ParkedFile::from_json(b"{").is_err());
+    }
+
+    /// The Fable review of 11-06, restore 1: after a crash, a window parked on the second
+    /// screen goes back to its frame there, not centered on the main screen.
+    #[test]
+    fn a_restore_frame_on_the_second_screen_stays_there() {
+        let laptop = ParkZone { frame: Rect::new(-1512.0, 0.0, 1512.0, 982.0), visible: Rect::new(-1512.0, 37.0, 1512.0, 945.0), corners: vec![Corner::BottomLeft] };
+        let d = ScanDisplays::new(MAIN, VISIBLE, vec![laptop.frame], [Corner::BottomRight]).with_zones(vec![laptop.clone()]);
+        let there = Rect::new(-1400.0, 100.0, 800.0, 600.0);
+        assert_eq!(d.visible_for(there), laptop.visible);
+        assert_eq!(safe_restore(there, &d), there);
+        // Parked at the laptop's corner, registered for its frame there: back to it.
+        let parked_there = park_frame_at(Size::new(800.0, 600.0), laptop.frame, Corner::BottomLeft);
+        let ws = [LiveWindow { id: Some(7), ..live("com.example.a", "Notes", parked_there) }];
+        let registered = BTreeMap::from([(7, there)]);
+        assert_eq!(plan_with(&ws, &registered, None, &d), vec![(0, there, FrameSource::Registered)]);
+        // A frame on the main screen, or in its park zone, keeps to the main screen.
+        let main = Rect::new(200.0, 100.0, 800.0, 600.0);
+        assert_eq!(d.visible_for(main), VISIBLE);
+        assert_eq!(d.visible_for(parked(800.0, 600.0)), VISIBLE);
+        // Straddling the seam: the screen holding the most of it.
+        assert_eq!(d.visible_for(Rect::new(-700.0, 100.0, 800.0, 600.0)), laptop.visible);
+        assert_eq!(d.visible_for(Rect::new(-100.0, 100.0, 800.0, 600.0)), VISIBLE);
     }
 
     #[test]
