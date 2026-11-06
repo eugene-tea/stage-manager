@@ -46,6 +46,7 @@ use super::controller::Controller;
 use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
+use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
 use super::observe_probe;
@@ -103,8 +104,8 @@ pub enum WmCommand {
     Apps(Vec<AppInfo>),
     /// A workspace event.
     App(AppEvent),
-    /// Accessibility trust changed: start or stop observation. The first grant runs the
-    /// recovery scan before observation starts.
+    /// Accessibility trust changed: start or stop observation. The first grant starts the
+    /// recovery scan: each app is observed once its windows are back ([`launch_scan`]).
     Accessibility(bool),
     /// Fresh `com.apple.WindowManager` values.
     NativeSettings(RawSettings),
@@ -136,6 +137,8 @@ pub enum WmCommand {
     /// An app that did not answer Accessibility answers now, or was given up
     /// ([`super::observe_probe`]).
     Probe(observe_probe::Note),
+    /// The launch's recovery scan read an app after observation's start ([`launch_scan`]).
+    LaunchScan(launch_scan::Done<launch_scan::Read>),
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -258,6 +261,10 @@ struct WmState {
     logout: Logout,
     /// The windows taken from an old guardian (round 8N), watched until each is back.
     taken: TakenWatch,
+    /// The launch's recovery scan while apps are still read ([`launch_scan`]).
+    launch_scan: Option<launch_scan::Run>,
+    /// This thread's own handle: the launch scan's late reads come back through it.
+    own: WmHandle,
 }
 
 thread_local! {
@@ -398,24 +405,11 @@ impl WmState {
                 self.observer.on_app_event(event, ax_callback)
             }
             WmCommand::Probe(note) => self.observer.on_probe(note, ax_callback),
+            WmCommand::LaunchScan(done) => self.launch_scanned(done),
             WmCommand::Accessibility(trusted) => {
                 if trusted && !self.scanned {
                     self.scanned = true;
-                    // A crashed copy's parked file has the exact frames of the windows it parked
-                    // (S4): the scan uses them first, as its guardian does.
-                    let scope = safety::ScanScope { registered: safety::crashed_registered(), ..safety::ScanScope::default() };
-                    let (r, unanswered) = safety::recovery_scan_with("launch", &scope);
-                    if r.restored > 0 {
-                        tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
-                    }
-                    if !unanswered.is_empty() {
-                        tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
-                        // Their episodes start here: the rescans log only their ends (8M).
-                        for &pid in &unanswered {
-                            self.rescan_unanswered.missed(pid, Instant::now());
-                        }
-                        self.rescan.unanswered(unanswered, Why::Launch, Instant::now());
-                    }
+                    self.start_launch_scan();
                 }
                 self.trusted = trusted;
                 if (self.stand_down.admits(Work::Observe) && self.logout.admits(Work::Observe)) || !trusted {
@@ -513,6 +507,84 @@ impl WmState {
         }
         if !safety::quit_requested() {
             self.pump();
+        }
+    }
+
+    /// The launch's recovery scan (S4; the 1.7 review, L1): every app with a window is read on
+    /// a thread of its own, for [`launch_scan::SCAN_WAIT`] at most; those read by then have
+    /// their windows a crashed copy left in the park zone brought back now, and are observed
+    /// at observation's start. Each one read later is held from observation until then
+    /// ([`Observer::hold_for_scan`]): one slow app holds up no other.
+    fn start_launch_scan(&mut self) {
+        let apps = safety::scan_targets();
+        let pids: Vec<i32> = apps.iter().map(|(pid, _)| *pid).collect();
+        self.launch_scan = Some(launch_scan::Run::new(pids.iter().copied()));
+        self.observer.hold_for_scan(pids);
+        let own = self.own.clone();
+        let (done, not_started) = launch_scan::read_all(apps, launch_scan::read, launch_scan::SCAN_WAIT, move |d| {
+            own.send(WmCommand::LaunchScan(d));
+        });
+        for d in done {
+            self.launch_scanned(d);
+        }
+        // An app whose thread did not start is read here, as every app used to be.
+        for (pid, bundle) in not_started {
+            let t0 = Instant::now();
+            let value = Some(launch_scan::read(pid, bundle.as_deref()));
+            self.launch_scanned(launch_scan::Done { pid, bundle, value, took: t0.elapsed() });
+        }
+        match &self.launch_scan {
+            // No app to read.
+            Some(run) if run.finished() => self.end_launch_scan(),
+            Some(run) => tracing::info!(waiting = run.waiting(), "launch scan: apps not read yet are observed once they are"),
+            None => {}
+        }
+    }
+
+    /// The launch scan read one app: its windows in the park zone come back now; then it is
+    /// observed (if observation wants it), or asked again on the schedule and scanned again
+    /// for a while when it did not answer. The last app read ends the scan with its summary.
+    fn launch_scanned(&mut self, done: launch_scan::Done<launch_scan::Read>) {
+        let pid = done.pid;
+        let Some(run) = self.launch_scan.as_mut() else {
+            self.observer.scan_done(pid, false, ax_callback);
+            return;
+        };
+        let answered = run.apply(done);
+        let finished = run.finished();
+        if !answered {
+            let now = Instant::now();
+            // Its episode starts here: the rescans log only its end (8M).
+            self.rescan_unanswered.missed(pid, now);
+            self.rescan.unanswered([pid], Why::Launch, now);
+        }
+        self.observer.scan_done(pid, answered, ax_callback);
+        if finished {
+            self.end_launch_scan();
+        }
+    }
+
+    /// Every app was read: the scan's summary.
+    fn end_launch_scan(&mut self) {
+        let Some(run) = self.launch_scan.take() else { return };
+        let (r, unanswered) = run.finish();
+        if r.restored > 0 {
+            tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
+        }
+        if !unanswered.is_empty() {
+            tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
+        }
+    }
+
+    /// An app whose launch-scan read takes [`launch_scan::HOLD_MAX`] is observed without it
+    /// (its windows still come back when the read ends).
+    fn release_overdue_scans(&mut self) {
+        if self.launch_scan.is_none() {
+            return;
+        }
+        for pid in self.observer.scan_overdue(Instant::now(), launch_scan::HOLD_MAX) {
+            tracing::warn!(pid, "launch scan: the app's read takes long; it is observed without waiting for it");
+            self.observer.scan_done(pid, false, ax_callback);
         }
     }
 
@@ -711,6 +783,7 @@ impl WmState {
         // failed each tick, the apps with tracked windows about once a second.
         self.observer.reap_gone(full);
         if full {
+            self.release_overdue_scans();
             self.observer.retry_pending(ax_callback);
             // Windows closed while their app did not answer (8M): no destroyed notice came.
             self.observer.sweep_closed();
@@ -840,8 +913,9 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
         tracing::info!("management restricted to {}", list.join(", "));
     }
     let mut observer = Observer::new(std::process::id() as i32, only);
+    let probes = own.clone();
     observer.set_probe_notify(Arc::new(move |note| {
-        own.send(WmCommand::Probe(note));
+        probes.send(WmCommand::Probe(note));
     }));
     let state = WmState {
         observer,
@@ -858,6 +932,8 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
         display_sweep: None,
         logout: Logout::default(),
         taken: TakenWatch::default(),
+        launch_scan: None,
+        own,
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));

@@ -101,7 +101,9 @@ A parked window that never returns is the worst bug. Defence in depth:
 6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
    a park zone goes back to the frame a crashed copy registered (its parked file, by id),
    else its saved frame (only on a main display of the saved size), else centered; silent apps are retried for 30 s, in
-   slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
+   slices of two apps a pass so a busy app never holds the WM thread. At launch each app is
+   read on a thread of its own (the WM thread waits 0.3 s at most) and observed only once its
+   windows are back, so a busy app holds up no other (1.7 review, L1). A sliver (≤ 8 × 256 pt
    past the right or bottom edge) counts as parked only for windows we manage or registered,
    or apps with a window in `state.json`.
 7. **Restore frames are kept within reach** (`Display::reach`): never in a park zone, the title

@@ -27,6 +27,7 @@ pub mod hidden_tabs;
 pub mod hotkeys;
 pub mod input;
 pub mod instance;
+pub mod launch_scan;
 pub mod logging;
 pub mod login_item;
 pub mod native_settings;

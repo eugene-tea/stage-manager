@@ -3,9 +3,9 @@
 ## Unreleased
 
 - After a restart, windows go to their stages as soon as their apps answer, not seconds
-  later: apps still busy reopening at the login are asked on threads of their own, often,
-  so one that does not answer yet no longer holds up the others' windows or anything else
-  the app does.
+  later: apps still busy reopening at the login are asked, and checked for windows a crash
+  left hidden, on threads of their own, so one that does not answer yet no longer holds up
+  the others' windows or anything else the app does.
 - Every screen has its own strip and stages, as Apple's Stage Manager does: a window
   dragged to another screen starts a stage of its own there once you let it go, a card
   click changes only its screen, each screen hides its stages in a corner of its own, and

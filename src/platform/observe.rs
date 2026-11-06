@@ -45,7 +45,9 @@
 //! ([`super::observe_probe`]), every 150 ms while the login settles, every second after; its
 //! answer ([`Observer::on_probe`]) observes it then. At the start every app is asked at once,
 //! in parallel and for a bounded time ([`START_WAIT`]); those that answer are observed before
-//! [`WinEvent::Started`], as before. Each app observed logs, at debug, the ms since it was
+//! [`WinEvent::Started`], as before. An app the launch's recovery scan has not read yet
+//! ([`super::launch_scan`]) waits for it: observed, or asked, once its scan is done
+//! ([`Observer::scan_done`]). Each app observed logs, at debug, the ms since it was
 //! first known (listed at our start, launched, or activated) and how many windows the window
 //! server listed for it then; each window placed logs the ms since it was found
 //! ([`TrackedWindow::found_at`]).
@@ -253,6 +255,11 @@ pub struct Observer {
     pending: HashMap<i32, Retry>,
     /// The threads asking the pending apps.
     probes: Probes,
+    /// Apps the launch's recovery scan has not read yet, since when ([`Self::hold_for_scan`]):
+    /// neither observed nor asked until it has.
+    scan_held: HashMap<i32, Instant>,
+    /// Held apps observation wanted meanwhile: observed or asked once their scan is done.
+    scan_wanted: HashSet<i32>,
     /// When each running app was first known, and how: the measure logged when it is observed.
     known: HashMap<i32, (Instant, &'static str)>,
     /// Apps with a window the window server did not list yet (just created): rescanned on
@@ -313,6 +320,8 @@ impl Observer {
             windows: BTreeMap::new(),
             pending: HashMap::new(),
             probes: Probes::new(observe_probe::ask_ax),
+            scan_held: HashMap::new(),
+            scan_wanted: HashSet::new(),
             known: HashMap::new(),
             recheck: HashMap::new(),
             events: Vec::new(),
@@ -627,13 +636,17 @@ impl Observer {
         let z = windows::z_order(&list);
         let cg: HashMap<u32, CgWindow> = list.into_iter().map(|w| (w.id, w)).collect();
         let mut found = Vec::new();
-        let pids: Vec<i32> = self.apps.values().filter(|a| self.allowed(a)).map(|a| a.pid).collect();
+        let (held, pids): (Vec<i32>, Vec<i32>) =
+            self.apps.values().filter(|a| self.allowed(a)).map(|a| a.pid).partition(|p| self.scan_held.contains_key(p));
+        // An app the launch's recovery scan has not read yet is observed once it has.
+        let held_n = held.len();
+        self.scan_wanted.extend(held);
         // Every app asked at once, for a bounded time: one that does not answer yet costs the
         // start nothing more and is asked on its own thread (round login-observe).
         let asked = Instant::now();
         let answered = observe_probe::ask_once(&pids, self.probes.ask(), START_WAIT);
         let waiting = pids.len() - answered.len();
-        tracing::debug!(apps = pids.len(), answered = answered.len(), waiting, took_ms = asked.elapsed().as_millis() as u64, "apps asked at once at observation's start");
+        tracing::debug!(apps = pids.len(), answered = answered.len(), waiting, held = held_n, took_ms = asked.elapsed().as_millis() as u64, "apps asked at once at observation's start");
         for pid in pids {
             if answered.contains(&pid) {
                 found.extend(self.observe_app_or_queue(pid, &cg, callback));
@@ -663,6 +676,8 @@ impl Observer {
         self.windows.clear();
         self.pending.clear();
         self.probes.stop_all();
+        // Still held (a scan still reads them), but no longer wanted: a new start wants them.
+        self.scan_wanted.clear();
         self.recheck.clear();
         self.gone.borrow_mut().clear();
         if was {
@@ -682,6 +697,50 @@ impl Observer {
         for pid in pids {
             self.queue(pid, "listed", false);
         }
+    }
+
+    /// Apps `pids` are read by the launch's recovery scan ([`super::launch_scan`]): none is
+    /// observed or asked until [`Self::scan_done`] says its windows are back.
+    pub fn hold_for_scan(&mut self, pids: impl IntoIterator<Item = i32>) {
+        let now = Instant::now();
+        for pid in pids {
+            self.scan_held.entry(pid).or_insert(now);
+        }
+    }
+
+    /// True (and wanted once its scan is done) while app `pid` waits for the launch scan.
+    fn held_for_scan(&mut self, pid: i32) -> bool {
+        if !self.scan_held.contains_key(&pid) {
+            return false;
+        }
+        self.scan_wanted.insert(pid);
+        true
+    }
+
+    /// The launch scan read app `pid` (`answered`: it answered; else it did not, or the read
+    /// was given up): wanted meanwhile, it is observed now, or asked off the WM thread on the
+    /// schedule when it did not answer. Logs, at debug, how long the scan held it.
+    pub fn scan_done(&mut self, pid: i32, answered: bool, callback: Callback) {
+        let Some(since) = self.scan_held.remove(&pid) else { return };
+        let wanted = self.scan_wanted.remove(&pid) && self.observing;
+        tracing::debug!(pid, bundle = self.bundle_of(pid), answered, wanted, held_ms = since.elapsed().as_millis() as u64, "launch scan done for the app");
+        if !wanted {
+            return;
+        }
+        if answered {
+            let cg = cg_lookup();
+            for id in self.observe_app_or_queue(pid, &cg, callback) {
+                self.found(id, "window found");
+            }
+        } else {
+            self.queue(pid, "did not answer the launch scan", true);
+        }
+    }
+
+    /// The apps held for the launch scan since before `now - max` (a read that takes that
+    /// long: its app is observed without it; its windows still come back when it ends).
+    pub fn scan_overdue(&self, now: Instant, max: Duration) -> Vec<i32> {
+        self.scan_held.iter().filter(|(_, since)| now.duration_since(**since) >= max).map(|(pid, _)| *pid).collect()
     }
 
     /// Where the probes' notes go (the WM thread's inbox); until set, apps that do not answer
@@ -713,6 +772,9 @@ impl Observer {
     /// has just `missed` an ask, on the schedule ([`crate::engine::observe_retry`]); nothing
     /// on the WM thread waits for it.
     fn queue(&mut self, pid: i32, why: &str, missed: bool) {
+        if self.held_for_scan(pid) {
+            return;
+        }
         let now = Instant::now();
         let fast = self.probes.fast();
         let retry = self.pending.entry(pid).or_insert_with(|| Retry::new(now));
@@ -796,7 +858,7 @@ impl Observer {
     /// Observes `pid`; on failure it is asked again off the WM thread. Returns newly tracked
     /// window ids. Logs, once observed, the ms since the app was first known.
     fn observe_app_or_queue(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>, callback: Callback) -> Vec<u32> {
-        if self.observed.contains_key(&pid) {
+        if self.observed.contains_key(&pid) || self.held_for_scan(pid) {
             return Vec::new();
         }
         match self.observe_app(pid, cg, callback) {
@@ -859,6 +921,7 @@ impl Observer {
 
     fn unobserve_app(&mut self, pid: i32) {
         self.pending.remove(&pid);
+        self.scan_wanted.remove(&pid);
         self.probes.stop(pid);
         self.recheck.remove(&pid);
         if self.observed.remove(&pid).is_some() {
@@ -1715,6 +1778,53 @@ mod tests {
         assert!(ob.pending.contains_key(&STUCK), "still waited for");
         assert!(ob.probes.running(STUCK), "the fresh probe still asks");
         ob.stop();
+    }
+
+    /// L1: an app the launch's recovery scan has not read yet is neither asked nor observed
+    /// (a window a crash left parked comes back first); one read is asked at once, whatever
+    /// the apps still read; one that did not answer the scan is asked on the schedule.
+    #[test]
+    fn an_app_waits_for_its_own_launch_scan_only() {
+        let (mut ob, notes) = probing();
+        const LATER: i32 = 5003;
+        ob.hold_for_scan([STUCK, READY, LATER]);
+        ob.on_app_event(AppEvent::Launched(app(READY, Some("com.example.ready"))), no_callback);
+        ob.on_app_event(AppEvent::Activated(app(STUCK, Some("com.example.stuck")), Instant::now()), no_callback);
+        ob.on_app_event(AppEvent::Launched(app(LATER, Some("com.example.later"))), no_callback);
+        assert!(ob.pending.is_empty() && !ob.probes.running(READY) && !ob.probes.running(STUCK), "held: nothing asked");
+        assert!(!ob.observes(READY) && !ob.observes(STUCK));
+        // The ready app's scan is done while the stuck one's still reads: asked now.
+        let t0 = Instant::now();
+        ob.scan_done(READY, false, no_callback);
+        assert!(ob.probes.running(READY) && !ob.probes.running(STUCK));
+        let note = notes.recv_timeout(Duration::from_millis(400)).expect("the ready app's answer");
+        assert!(matches!(note, Note::Answered { pid: READY, .. }), "{note:?}");
+        assert!(t0.elapsed() < Duration::from_millis(400));
+        // A held app that quit is no longer wanted when its scan is done.
+        ob.on_app_event(AppEvent::Terminated(app(LATER, Some("com.example.later"))), no_callback);
+        ob.scan_done(LATER, false, no_callback);
+        assert!(!ob.pending.contains_key(&LATER) && !ob.probes.running(LATER));
+        // Overdue: a read holding its app too long is let go.
+        let later = Instant::now() + Duration::from_secs(11);
+        assert_eq!(ob.scan_overdue(later, Duration::from_secs(10)), vec![STUCK]);
+        ob.scan_done(STUCK, false, no_callback);
+        assert!(ob.pending.contains_key(&STUCK), "asked on the schedule");
+        assert!(ob.scan_overdue(later, Duration::from_secs(10)).is_empty());
+        ob.stop();
+    }
+
+    /// A start of observation leaves the held apps to their scans; a stop forgets them as
+    /// wanted, and a scan done while stopped observes nothing.
+    #[test]
+    fn a_held_app_waits_through_a_stop() {
+        let (mut ob, _notes) = probing();
+        ob.hold_for_scan([STUCK]);
+        ob.on_app_event(AppEvent::Activated(app(STUCK, Some("com.example.stuck")), Instant::now()), no_callback);
+        assert!(ob.scan_wanted.contains(&STUCK));
+        ob.stop();
+        assert!(ob.scan_wanted.is_empty() && ob.scan_held.contains_key(&STUCK));
+        ob.scan_done(STUCK, false, no_callback);
+        assert!(ob.pending.is_empty() && !ob.probes.running(STUCK) && ob.scan_held.is_empty());
     }
 
     #[test]

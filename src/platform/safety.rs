@@ -1055,65 +1055,25 @@ pub fn recovery_scan(reason: &str) -> Report {
 pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
     // Each app's enhanced UI off once for all its windows here, not once per window.
     let _quiet = enhanced_ui::Batch::open();
-    let only = observe::only_from_env();
-    let own = std::process::id() as i32;
-    let mut pids: Vec<i32> = windows::list_windows().iter().filter(|w| w.layer == 0).map(|w| w.pid).collect();
-    pids.sort_unstable();
-    pids.dedup();
+    let mut pids = scan_targets();
     if let Some(wanted) = &scope.pids {
-        pids.retain(|p| wanted.contains(p));
+        pids.retain(|(p, _)| wanted.contains(p));
     }
     let state = read_state("recovery scan");
     let displays = scan_displays();
-    let mut live = Vec::new();
-    let mut elements = Vec::new();
+    let mut read = Vec::new();
     let mut unanswered = Vec::new();
-    let mut registered = BTreeMap::new();
-    for pid in pids {
-        let bundle = bundle_id_of(pid);
-        if !observe::app_allowed(only.as_ref(), own, pid, bundle.as_deref()) {
-            continue;
-        }
-        let list = match AxElement::application(pid).windows() {
-            Ok(list) => list,
+    for (pid, bundle) in pids {
+        match read_app_windows(pid, bundle.as_deref(), &scope.skip) {
+            Ok(list) => read.extend(list),
             Err(e) => {
-                if e != AxError::NO_VALUE {
-                    tracing::debug!(reason, pid, bundle, "recovery scan: the app does not answer: {e}");
-                    unanswered.push(pid);
-                }
-                continue;
-            }
-        };
-        for w in list {
-            if w.role().ok().as_deref() != Some(names::ROLE_WINDOW) {
-                continue;
-            }
-            let id = w.window_id().ok();
-            if id.is_some_and(|id| scope.skip.contains(&id)) {
-                continue;
-            }
-            let Ok(frame) = w.frame() else { continue };
-            // A window id names one window in this session; its process makes sure.
-            if let Some(r) = id.and_then(|id| scope.registered.get(&id)).filter(|r| r.pid == pid) {
-                registered.insert(r.id, r.restore);
-            }
-            live.push(LiveWindow { id, bundle_id: bundle.clone().unwrap_or_default(), title: w.title().unwrap_or_default(), frame });
-            elements.push(w);
-        }
-    }
-    let mut report = Report { checked: live.len(), ..Report::default() };
-    for (i, frame, source) in recovery::plan_with(&live, &registered, state.as_ref(), &displays) {
-        match elements[i].set_frame(frame) {
-            Ok(()) => {
-                report.restored += 1;
-                tracing::warn!(reason, id = live[i].id, bundle = live[i].bundle_id, from = %live[i].frame, to = %frame, source = source.name(), "recovery: window brought back");
-            }
-            Err(e) => {
-                report.failed += 1;
-                tracing::error!(reason, bundle = live[i].bundle_id, "recovery: cannot move window: {e}");
+                tracing::debug!(reason, pid, bundle, "recovery scan: the app does not answer: {e}");
+                unanswered.push(pid);
             }
         }
     }
+    let mut report = Report::default();
+    bring_back_scanned(reason, read, &scope.registered, state.as_ref(), &displays, &mut report);
     if report.restored > 0 {
         counters::bump(Count::Recovery);
     }
@@ -1125,6 +1085,90 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
         tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, unanswered = ?unanswered, "recovery scan (some apps did not answer)");
     }
     (report, unanswered)
+}
+
+/// The apps a recovery scan looks at, with their bundle ids: every app with a window on layer
+/// zero, `STAGE_MANAGER_ONLY` honored, our own process and the system's excluded apps skipped.
+pub(crate) fn scan_targets() -> Vec<(i32, Option<String>)> {
+    let only = observe::only_from_env();
+    let own = std::process::id() as i32;
+    let mut pids: Vec<i32> = windows::list_windows().iter().filter(|w| w.layer == 0).map(|w| w.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids.into_iter()
+        .map(|pid| (pid, bundle_id_of(pid)))
+        .filter(|(pid, bundle)| observe::app_allowed(only.as_ref(), own, *pid, bundle.as_deref()))
+        .collect()
+}
+
+/// A window a recovery scan read: what the plan needs, its element, and its app.
+pub struct ScannedWindow {
+    /// Its app's process.
+    pub pid: i32,
+    /// Its id, bundle, title and frame.
+    pub live: LiveWindow,
+    /// The element a move goes through.
+    pub element: AxElement,
+}
+
+/// App `pid`'s windows (bundle `bundle`) as a recovery scan reads them, those of `skip` left
+/// out: an error when the app does not answer (`AXWindows` with no value: no window). Only
+/// reads; safe off the WM thread (the launch's scan reads each app on a thread of its own).
+pub(crate) fn read_app_windows(pid: i32, bundle: Option<&str>, skip: &BTreeSet<u32>) -> Result<Vec<ScannedWindow>, AxError> {
+    let list = match AxElement::application(pid).windows() {
+        Ok(list) => list,
+        Err(e) if e == AxError::NO_VALUE => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut read = Vec::new();
+    for w in list {
+        if w.role().ok().as_deref() != Some(names::ROLE_WINDOW) {
+            continue;
+        }
+        let id = w.window_id().ok();
+        if id.is_some_and(|id| skip.contains(&id)) {
+            continue;
+        }
+        let Ok(frame) = w.frame() else { continue };
+        let live = LiveWindow { id, bundle_id: bundle.unwrap_or_default().to_string(), title: w.title().unwrap_or_default(), frame };
+        read.push(ScannedWindow { pid, live, element: w });
+    }
+    Ok(read)
+}
+
+/// Brings back each window of `read` stranded in the park zone ([`recovery::plan_with`]): to
+/// the frame a crashed copy registered for it (`crashed`, used only for a window of the very
+/// process that registered it), else its `state` frame, else centered; counted in `report`.
+/// On the WM thread (it moves windows); the caller holds an [`enhanced_ui::Batch`] and
+/// counts the recovery ([`Count::Recovery`]).
+pub(crate) fn bring_back_scanned(
+    reason: &str,
+    read: Vec<ScannedWindow>,
+    crashed: &BTreeMap<u32, Registered>,
+    state: Option<&StateFile>,
+    displays: &ScanDisplays,
+    report: &mut Report,
+) {
+    // A window id names one window in this session; its process makes sure.
+    let registered: BTreeMap<u32, Rect> = read
+        .iter()
+        .filter_map(|w| w.live.id.and_then(|id| crashed.get(&id)).filter(|r| r.pid == w.pid))
+        .map(|r| (r.id, r.restore))
+        .collect();
+    let (live, elements): (Vec<LiveWindow>, Vec<AxElement>) = read.into_iter().map(|w| (w.live, w.element)).unzip();
+    report.checked += live.len();
+    for (i, frame, source) in recovery::plan_with(&live, &registered, state, displays) {
+        match elements[i].set_frame(frame) {
+            Ok(()) => {
+                report.restored += 1;
+                tracing::warn!(reason, id = live[i].id, bundle = live[i].bundle_id, from = %live[i].frame, to = %frame, source = source.name(), "recovery: window brought back");
+            }
+            Err(e) => {
+                report.failed += 1;
+                tracing::error!(reason, bundle = live[i].bundle_id, "recovery: cannot move window: {e}");
+            }
+        }
+    }
 }
 
 /// The windows earlier copies of the app registered and left behind (their parked files, an
@@ -1163,7 +1207,7 @@ pub fn saved_window_ids() -> BTreeSet<u32> {
 /// window server session ([`StateFile::for_session`]: after a reboot or a new login an id
 /// names another window), so the scans match by id first only when the id still means
 /// the same window.
-fn read_state(what: &str) -> Option<StateFile> {
+pub(crate) fn read_state(what: &str) -> Option<StateFile> {
     let text = std::fs::read_to_string(paths::state_file()).ok()?;
     match StateFile::from_json(&text) {
         Ok(s) => Some(s.for_session(super::session::window_session()).0),
