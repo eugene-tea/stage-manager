@@ -2,9 +2,7 @@
 <!--
   The info page, served by GitHub Pages at https://eugene-tea.github.io/stage-manager/
   (Pages source: the /docs folder of the master branch; see docs/RELEASING.md).
-  Static: no trackers, no external requests. Light and dark follow the system.
-  One small script below picks a look by the address (?look=0|a|b|c, default a; &strength=1|2, default 2) while one is
-  chosen; the chosen look then becomes the plain stylesheet and the script goes.
+  Static: no scripts, no trackers, no external requests. Light and dark follow the system.
 -->
 <html lang="en">
 <head>
@@ -13,15 +11,6 @@
 <title>Stage Manager</title>
 <meta name="description" content="Stage Manager for macOS: looks and works like Apple’s, then more. Your stages survive a restart. Free and open source.">
 <meta name="color-scheme" content="light dark">
-<script>
-  // The look switch, for choosing: ?look=0 (today's page with the gold button), a, b or c,
-  // and &strength=1 (quiet) or 2 (pronounced, the default; look a only).
-  (function () {
-    var q = new URLSearchParams(location.search), look = q.get("look"), strength = q.get("strength");
-    document.documentElement.setAttribute("data-look", /^[0abc]$/.test(look || "") ? look : "a");
-    document.documentElement.setAttribute("data-strength", /^[12]$/.test(strength || "") ? strength : "2");
-  })();
-</script>
 <link rel="icon" type="image/png" href="assets/app-icon.png">
 <link rel="apple-touch-icon" href="assets/app-icon.png">
 <!-- Link previews. The card is docs/assets/social-card.png (make social-art). -->
@@ -43,34 +32,28 @@
     --bg-alt: #f2f2f5;
     --card: #ffffff;
     --text: #1d1d1f;
-    --secondary: #6e6e73;
+    --secondary: #5c5c61;
     --edge: rgba(0, 0, 0, 0.08);
-    --accent: #0071e3;
-    --accent-hover: #0077ed;
-    --on-accent: #ffffff;
     --code: rgba(0, 0, 0, 0.05);
     /* Apple's system yellow: a fill only, its label near-black in both modes. */
     --gold: #ffcc00;
     --gold-hover: #f5c000;
     --on-gold: #1d1d1f;
-    --gold-glow: 0 1px 2px rgba(160, 110, 0, 0.18), 0 6px 18px rgba(255, 176, 0, 0.32);
-    /* The looks' warm accents: links and icon ink a gold-brown that passes 4.5:1 on every
-       background here, the icon tiles a gold wash. */
+    --gold-glow: 0 1px 2px rgba(160, 110, 0, 0.22), 0 3px 8px rgba(255, 184, 0, 0.30), 0 10px 28px rgba(255, 170, 0, 0.42);
+    /* Links and icon ink a gold-brown that passes 4.5:1 on every background here; the icons
+       sit on a gold-washed tile. */
     --link: #8a5f00;
-    --secondary-look: #66666b;
     --gold-tint: rgba(255, 204, 0, 0.18);
     --gold-ink: #8a5f00;
-    --gold-line: rgba(220, 160, 0, 0.75);
-    --wash: rgba(255, 204, 0, 0.16);
-    --wash-2: rgba(255, 149, 0, 0.07);
-    --wash-cool: rgba(0, 113, 227, 0.06);
-    --card-shadow: 0 1px 1px rgba(0, 0, 0, 0.03), 0 3px 8px rgba(0, 0, 0, 0.04), 0 14px 36px rgba(0, 0, 0, 0.06);
-    --card-lift: 0 2px 4px rgba(0, 0, 0, 0.04), 0 10px 20px rgba(0, 0, 0, 0.06), 0 24px 48px rgba(0, 0, 0, 0.08);
-    --page-tint: #f5f5f2;
-    --hero-tint: #fcf7e6;
-    --panel: #ffffff;
-    --inset: #f6f6f3;
-    --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.05), 0 32px 64px rgba(0, 0, 0, 0.06);
+    /* The hero's washes, the card band, the card shadows. */
+    --wash: rgba(255, 204, 0, 0.36);
+    --wash-2: rgba(255, 149, 0, 0.15);
+    --wash-cool: rgba(0, 113, 227, 0.10);
+    --band: #f0efea;
+    --band-warm: rgba(255, 196, 0, 0.10);
+    --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 16px rgba(0, 0, 0, 0.07), 0 26px 56px rgba(40, 30, 0, 0.12);
+    /* A faint grain over the page background dithers the long gradients against banding. */
+    --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .5 .05 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -78,55 +61,53 @@
       --bg-alt: #101012;
       --card: #1c1c1e;
       --text: #f5f5f7;
-      --secondary: #a1a1a6;
+      --secondary: #b0b0b5;
       --edge: rgba(255, 255, 255, 0.12);
-      --accent: #2997ff;
-      --accent-hover: #47a6ff;
-      --on-accent: #ffffff;
       --code: rgba(255, 255, 255, 0.08);
       --gold: #ffd60a;
       --gold-hover: #ffe03d;
       --on-gold: #1d1d1f;
-      --gold-glow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 22px rgba(255, 214, 10, 0.22);
+      --gold-glow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(255, 214, 10, 0.22), 0 10px 34px rgba(255, 214, 10, 0.30);
       --link: #f2c94c;
-      --secondary-look: #b0b0b5;
       --gold-tint: rgba(255, 214, 10, 0.13);
       --gold-ink: #ffd60a;
-      --gold-line: rgba(255, 214, 10, 0.5);
-      --wash: rgba(255, 214, 10, 0.09);
-      --wash-2: rgba(255, 159, 10, 0.05);
-      --wash-cool: rgba(41, 151, 255, 0.06);
-      --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 40px rgba(0, 0, 0, 0.6);
-      --card-lift: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 4px 10px rgba(0, 0, 0, 0.55), 0 24px 52px rgba(0, 0, 0, 0.7);
-      --page-tint: #0b0b0c;
-      --hero-tint: #17140a;
-      --panel: #161618;
-      --inset: #202023;
-      --panel-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 24px 60px rgba(0, 0, 0, 0.7);
+      --wash: rgba(255, 214, 10, 0.30);
+      --wash-2: rgba(255, 159, 10, 0.16);
+      --wash-cool: rgba(41, 151, 255, 0.22);
+      --band: #1a1a1d;
+      --band-warm: rgba(255, 214, 10, 0.09);
+      --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 4px 10px rgba(0, 0, 0, 0.6), 0 26px 60px rgba(0, 0, 0, 0.8);
     }
   }
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
+    margin: 0; color: var(--text);
+    background:
+      var(--grain),
+      radial-gradient(76% 780px at 50% 160px, var(--wash), color-mix(in srgb, var(--wash) 40%, transparent) 45%, transparent 76%) no-repeat,
+      radial-gradient(44% 580px at 90% 380px, var(--wash-cool), transparent 72%) no-repeat,
+      radial-gradient(40% 540px at 8% 440px, var(--wash-2), transparent 72%) no-repeat,
+      var(--bg);
     font: 17px/1.47 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased; letter-spacing: -0.022em;
   }
-  a { color: var(--accent); text-decoration: none; }
+  a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .wrap { max-width: 980px; margin: 0 auto; padding: 0 22px; }
 
-  header.hero { text-align: center; padding: 72px 0 64px; }
+  header.hero { text-align: center; padding: 104px 0 92px; }
   .hero img { width: 168px; height: 168px; display: block; margin: 0 auto 18px; }
   h1 { font-size: 56px; line-height: 1.07; font-weight: 600; letter-spacing: -0.005em; margin: 0 0 32px; }
   .download {
     display: inline-block; background: var(--gold); color: var(--on-gold); font-size: 17px; font-weight: 500;
-    padding: 12px 24px; border-radius: 980px; min-width: 200px;
+    padding: 12px 24px; border-radius: 980px; min-width: 200px; box-shadow: var(--gold-glow);
   }
   .download:hover { background: var(--gold-hover); text-decoration: none; }
   .meta { color: var(--secondary); font-size: 14px; margin-top: 14px; }
   .brew { margin-top: 10px; font-size: 14px; color: var(--secondary); }
-  .shot { max-width: 1180px; margin: 0 auto; padding: 0 22px 72px; }
+  .brew code { color: var(--text); }
+  .shot { max-width: 1180px; margin: 0 auto; padding: 0 22px 108px; }
   .shot video { display: block; width: 100%; height: auto; aspect-ratio: 2420 / 1240; border-radius: 14px;
                 box-shadow: 0 24px 60px rgba(0, 0, 0, 0.18), 0 0 0 1px var(--edge); background: var(--bg-alt); }
   .steps { list-style: none; padding: 0; margin: 0 auto; max-width: 760px; }
@@ -138,180 +119,55 @@
   .steps .tag { margin: 0 0 0 8px; display: inline; }
   code { overflow-wrap: anywhere; font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--code); padding: 3px 7px; border-radius: 6px; letter-spacing: 0; }
 
-  section { padding: 64px 0; }
-  section.alt { background: var(--bg-alt); }
+  section { padding: 96px 0; }
+  /* The card band: a warm-grey field, warm at its centre, fading in and out. */
+  section.alt {
+    background:
+      radial-gradient(70% 55% at 50% 50%, var(--band-warm), transparent) no-repeat,
+      linear-gradient(to bottom, transparent, var(--band) 180px, var(--band) calc(100% - 180px), transparent);
+  }
   h2 { font-size: 40px; line-height: 1.1; font-weight: 600; text-align: center; margin: 0 0 12px; letter-spacing: 0; }
-  .lede { text-align: center; color: var(--secondary); font-size: 19px; max-width: 640px; margin: 0 auto 40px; }
+  .lede { text-align: center; color: var(--secondary); font-size: 19px; max-width: 640px; margin: 0 auto 52px; }
 
-  .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .grid { display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
   .grid.two { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
-  .card { background: var(--card); border: 1px solid var(--edge); border-radius: 18px; padding: 26px 26px 24px; }
+  .card { background: var(--card); border-radius: 20px; padding: 26px 26px 24px; box-shadow: var(--card-shadow), 0 0 0 1px var(--edge); }
   .card h3 { font-size: 21px; line-height: 1.2; font-weight: 600; margin: 12px 0 6px; letter-spacing: 0.011em; }
   .card p { margin: 0; color: var(--secondary); font-size: 16px; }
   .tag { margin-top: 14px; font-size: 12px; font-weight: 600; color: var(--secondary);
          text-transform: uppercase; letter-spacing: 0.06em; }
   .tag + h3 { margin-top: 2px; }
-  .card svg { width: 34px; height: 34px; color: var(--accent); display: block; }
+  .card svg { width: 44px; height: 44px; padding: 8px; border-radius: 12px; display: block;
+              background: var(--gold-tint); color: var(--gold-ink); }
   .privacy { text-align: center; color: var(--secondary); max-width: 640px; margin: 32px auto 0; font-size: 16px; }
 
-  footer { padding: 36px 0 48px; color: var(--secondary); font-size: 13px; text-align: center; border-top: 1px solid var(--edge); }
+  footer { padding: 48px 0; color: var(--secondary); font-size: 13px; text-align: center; }
   footer nav { margin-bottom: 12px; font-size: 15px; }
   footer nav a { margin: 0 12px; }
+  /* Centred lines (and the card titles) wrap into even lines, never a lone word. */
+  h1, h2, h3, .lede, .meta, .privacy, footer p { text-wrap: balance; }
 
   @media (max-width: 640px) {
     .grid.two { grid-template-columns: 1fr; }
-    .shot { padding-bottom: 48px; }
+    .shot { padding-bottom: 72px; }
     .steps li { display: block; text-align: center; }
-    .steps b, .steps li > span { display: block; text-align: center; }
-    header.hero { padding: 48px 0 44px; }
+    .steps b, .steps li > span { display: block; text-align: center; text-wrap: balance; }
+    header.hero { padding: 64px 0 60px; }
     .hero img { width: 128px; height: 128px; }
     h1 { font-size: 40px; }
     h2 { font-size: 30px; }
-    section { padding: 48px 0; }
-  }
-  /* ---- The looks (?look=a|b|c). Each block is scoped to its look; the chosen one becomes the
-     plain stylesheet. ?look=0 is the page above alone. ---- */
-
-  /* Shared by a, b and c: one warm accent. The button glows; links and icons go gold-brown
-     (gold itself only as a fill: the icons sit on a gold-washed tile). */
-  html:is([data-look="a"], [data-look="b"], [data-look="c"]) { --secondary: var(--secondary-look); }
-  html:is([data-look="a"], [data-look="b"], [data-look="c"]) a { color: var(--link); }
-  html:is([data-look="a"], [data-look="b"], [data-look="c"]) .brew code { color: var(--text); }
-  html:is([data-look="a"], [data-look="b"], [data-look="c"]) .download { color: var(--on-gold); box-shadow: var(--gold-glow); }
-  html:is([data-look="a"], [data-look="b"], [data-look="c"]) .card svg {
-    width: 44px; height: 44px; padding: 8px; border-radius: 12px;
-    background: var(--gold-tint); color: var(--gold-ink);
-  }
-
-  /* a, Glow: a warm wash behind the hero, bands that fade in and out, layered card shadows,
-     about half again the whitespace. */
-  html[data-look="a"] body {
-    background: radial-gradient(62% 520px at 50% 150px, var(--wash), transparent) no-repeat, var(--bg);
-  }
-  html[data-look="a"] header.hero { padding: 104px 0 92px; }
-  html[data-look="a"] .shot { padding-bottom: 108px; }
-  html[data-look="a"] section { padding: 96px 0; }
-  html[data-look="a"] section.alt {
-    background: linear-gradient(to bottom, transparent, var(--bg-alt) 128px, var(--bg-alt) calc(100% - 128px), transparent);
-  }
-  html[data-look="a"] .lede { margin-bottom: 52px; }
-  html[data-look="a"] .grid { gap: 24px; }
-  html[data-look="a"] .card { border-color: transparent; border-radius: 20px; box-shadow: var(--card-shadow), 0 0 0 1px var(--edge); }
-  html[data-look="a"] footer { border-top: none; padding-top: 48px; }
-
-  /* b, Depth: the sections as rounded panels floating on a faintly tinted page, the hero on a
-     gentle warm tint from the top. */
-  html[data-look="b"] body {
-    background: linear-gradient(to bottom, var(--hero-tint), var(--page-tint) 720px) no-repeat, var(--page-tint);
-  }
-  html[data-look="b"] header.hero { padding: 96px 0 84px; }
-  html[data-look="b"] .shot { padding-bottom: 80px; }
-  html[data-look="b"] section, html[data-look="b"] section.alt {
-    background: var(--panel); max-width: 1132px; width: calc(100% - 48px); margin: 0 auto 32px;
-    border-radius: 32px; box-shadow: var(--panel-shadow); padding: 84px 0;
-  }
-  html[data-look="b"] .card { background: var(--inset); border-color: transparent; }
-  html[data-look="b"] footer { border-top: none; padding-top: 28px; }
-
-  /* c, Sheen: a soft mesh of warm light in the hero, hairline gold rules between the sections,
-     cards that lift a little under the pointer. */
-  html[data-look="c"] body {
-    background:
-      radial-gradient(38% 360px at 28% 90px, var(--wash), transparent) no-repeat,
-      radial-gradient(34% 320px at 74% 30px, var(--wash-cool), transparent) no-repeat,
-      radial-gradient(52% 420px at 56% 380px, var(--wash-2), transparent) no-repeat,
-      var(--bg);
-  }
-  html[data-look="c"] header.hero { padding: 96px 0 84px; }
-  html[data-look="c"] .shot { padding-bottom: 88px; }
-  html[data-look="c"] section, html[data-look="c"] section.alt { background: none; position: relative; padding: 84px 0; }
-  html[data-look="c"] footer { border-top: none; position: relative; }
-  html[data-look="c"] section::before, html[data-look="c"] footer::before {
-    content: ""; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
-    width: min(720px, calc(100% - 32px)); height: 1px;
-    background: linear-gradient(90deg, transparent, var(--gold-line), transparent);
-  }
-  html[data-look="c"] .card {
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-    transition: transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.3s ease;
-  }
-  html[data-look="c"] .card:hover { transform: translateY(-4px); box-shadow: var(--card-lift); }
-  @media (prefers-reduced-motion: reduce) {
-    html[data-look="c"] .card { transition: none; }
-    html[data-look="c"] .card:hover { transform: none; }
-  }
-
-  @media (max-width: 640px) {
-    html[data-look="a"] header.hero { padding: 64px 0 60px; }
-    html[data-look="a"] .shot { padding-bottom: 72px; }
-    html[data-look="a"] section { padding: 72px 0; }
-    html[data-look="a"] section.alt {
-      background: linear-gradient(to bottom, transparent, var(--bg-alt) 80px, var(--bg-alt) calc(100% - 80px), transparent);
+    section { padding: 72px 0; }
+    section.alt {
+      background:
+        radial-gradient(90% 50% at 50% 50%, var(--band-warm), transparent) no-repeat,
+        linear-gradient(to bottom, transparent, var(--band) 100px, var(--band) calc(100% - 100px), transparent);
     }
-    html[data-look="a"] body { background: radial-gradient(90% 380px at 50% 110px, var(--wash), transparent) no-repeat, var(--bg); }
-    html[data-look="b"] header.hero, html[data-look="c"] header.hero { padding: 60px 0 52px; }
-    html[data-look="b"] .shot { padding-bottom: 40px; }
-    html[data-look="b"] section, html[data-look="b"] section.alt {
-      width: calc(100% - 32px); margin-bottom: 16px; border-radius: 24px; padding: 56px 0;
-    }
-    html[data-look="b"] section .wrap { padding: 0 18px; }
-    html[data-look="c"] .shot { padding-bottom: 56px; }
-    html[data-look="c"] section, html[data-look="c"] section.alt { padding: 60px 0; }
-  }
-  /* ---- Look a at strength 2 (the default; &strength=1 is the quieter first take): richer,
-     larger washes with a cooler second hue, a card band that reads as designed, deeper
-     shadows. A faint grain over the page background dithers the long gradients. ---- */
-  html[data-strength="2"][data-look="a"] {
-    --secondary-look: #5c5c61;
-    --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .5 .05 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    --wash: rgba(255, 204, 0, 0.36);
-    --wash-2: rgba(255, 149, 0, 0.15);
-    --wash-cool: rgba(0, 113, 227, 0.10);
-    --band: #f0efea;
-    --band-warm: rgba(255, 196, 0, 0.10);
-    --gold-glow: 0 1px 2px rgba(160, 110, 0, 0.22), 0 3px 8px rgba(255, 184, 0, 0.30), 0 10px 28px rgba(255, 170, 0, 0.42);
-    --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 16px rgba(0, 0, 0, 0.07), 0 26px 56px rgba(40, 30, 0, 0.12);
-  }
-  @media (prefers-color-scheme: dark) {
-    html[data-strength="2"][data-look="a"] {
-      --secondary-look: #b0b0b5;
-      --wash: rgba(255, 214, 10, 0.30);
-      --wash-2: rgba(255, 159, 10, 0.16);
-      --wash-cool: rgba(41, 151, 255, 0.22);
-      --band: #1a1a1d;
-      --band-warm: rgba(255, 214, 10, 0.09);
-      --gold-glow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(255, 214, 10, 0.22), 0 10px 34px rgba(255, 214, 10, 0.30);
-      --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 4px 10px rgba(0, 0, 0, 0.6), 0 26px 60px rgba(0, 0, 0, 0.8);
-    }
-  }
-
-  /* a at 2: a broad warm glow with a cool counter-light, the card band a warm-grey field. */
-  html[data-strength="2"][data-look="a"] body {
-    background:
-      var(--grain),
-      radial-gradient(76% 780px at 50% 160px, var(--wash), color-mix(in srgb, var(--wash) 40%, transparent) 45%, transparent 76%) no-repeat,
-      radial-gradient(44% 580px at 90% 380px, var(--wash-cool), transparent 72%) no-repeat,
-      radial-gradient(40% 540px at 8% 440px, var(--wash-2), transparent 72%) no-repeat,
-      var(--bg);
-  }
-  html[data-strength="2"][data-look="a"] section.alt {
-    background:
-      radial-gradient(70% 55% at 50% 50%, var(--band-warm), transparent) no-repeat,
-      linear-gradient(to bottom, transparent, var(--band) 180px, var(--band) calc(100% - 180px), transparent);
-  }
-
-  @media (max-width: 640px) {
-    html[data-strength="2"][data-look="a"] body {
+    body {
       background:
         var(--grain),
         radial-gradient(130% 560px at 50% 120px, var(--wash), color-mix(in srgb, var(--wash) 40%, transparent) 45%, transparent 76%) no-repeat,
         radial-gradient(80% 420px at 100% 420px, var(--wash-cool), transparent 72%) no-repeat,
         var(--bg);
-    }
-    html[data-strength="2"][data-look="a"] section.alt {
-      background:
-        radial-gradient(90% 50% at 50% 50%, var(--band-warm), transparent) no-repeat,
-        linear-gradient(to bottom, transparent, var(--band) 100px, var(--band) calc(100% - 100px), transparent);
     }
   }
 </style>
@@ -325,7 +181,7 @@
   </picture>
   <h1>Stage Manager</h1>
   <a class="download" href="https://github.com/eugene-tea/stage-manager/releases/latest/download/Stage-Manager.dmg">Download</a>
-  <div class="meta">Free and open source · Signed and notarized · Apple silicon · macOS 14 Sonoma or later</div>
+  <div class="meta">Free and open source&nbsp;· Signed and notarized&nbsp;· Apple silicon&nbsp;· macOS&nbsp;14&nbsp;Sonoma or later</div>
   <div class="brew">or with Homebrew: <code>brew install eugene-tea/tap/stage-manager</code></div>
 </header>
 
@@ -379,7 +235,7 @@
 <section>
   <div class="wrap">
     <h2>More in the config file</h2>
-    <p class="lede">Everything else lives in one plain file. Ask an AI assistant to change it; Settings → Advanced shows how.</p>
+    <p class="lede">Everything else lives in one plain&nbsp;file. Ask an AI assistant to change it;<br>Settings&nbsp;→&nbsp;Advanced shows how.</p>
     <ul class="steps">
       <li><b>Rules for new windows</b><span>By app and title: a named stage, every stage, centred or cascaded.</span></li>
       <li><b>Named stages</b><span>Names and numbers on the cards.</span></li>
@@ -410,7 +266,7 @@
       <a href="https://github.com/eugene-tea/stage-manager">Source</a>
       <a href="https://github.com/eugene-tea/stage-manager/releases">Releases</a>
     </nav>
-    <p>By <a href="https://github.com/eugene-tea">Eugene T</a>. Stage Manager is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. Apple, Mac and macOS are trademarks of Apple Inc.</p>
+    <p>By <a href="https://github.com/eugene-tea">Eugene T</a>. Stage Manager is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. Apple, Mac and macOS are trademarks of Apple&nbsp;Inc.</p>
   </div>
 </footer>
 
