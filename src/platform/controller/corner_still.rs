@@ -92,7 +92,7 @@ impl Controller {
         let on_desktop = in_corner || {
             let own = std::process::id() as i32;
             let list: Vec<_> = windows::list_windows().into_iter().filter(|w| w.pid != own).collect();
-            desktop::is_wallpaper_click(&list, at)
+            desktop::is_wallpaper_click(&list, at, &self.dock_bar_now())
         };
         if on_desktop {
             desktop_shot::touched(screen, now);

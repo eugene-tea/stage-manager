@@ -20,6 +20,7 @@ use crate::engine::displays::{ScreenKey, number_duplicates};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
 use crate::engine::park::{CornerChoice, choose_corner};
+use crate::engine::sliver::DockBar;
 
 /// Converts an AppKit rectangle (bottom-left origin of the primary screen, `y` up) into
 /// global top-left coordinates, given the primary screen's height.
@@ -125,9 +126,11 @@ fn bounds_of(id: u32) -> Rect {
 
 /// True when a click at `p` (top-left coordinates) lands on no window: the window list is
 /// front to back; windows below layer 0 are desktop elements and are not in it. Fully
-/// transparent windows do not count.
-pub fn is_wallpaper_click(list: &[CgWindow], p: Point) -> bool {
-    !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p))
+/// transparent windows do not count, nor the Dock's window away from its bar (`dock`): it
+/// spans its whole display, clear and click-through there ([`DockBar`]; the Fable review's
+/// switching 3: no click on the Dock's screen was a wallpaper click).
+pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
+    !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !dock.seen_through(w.pid, w.layer, w.bounds, p))
 }
 
 #[cfg(test)]
@@ -154,11 +157,26 @@ mod tests {
         let app = Rect::new(100.0, 100.0, 500.0, 400.0);
         let dock = Rect::new(0.0, 850.0, 1440.0, 50.0);
         let list = [w(20, dock, true), w(0, app, true), w(0, Rect::new(0.0, 0.0, 1440.0, 900.0), false)];
-        assert!(!is_wallpaper_click(&list, Point::new(200.0, 200.0)), "an app window");
-        assert!(!is_wallpaper_click(&list, Point::new(200.0, 870.0)), "the Dock");
-        assert!(is_wallpaper_click(&list, Point::new(900.0, 600.0)), "nothing there");
+        assert!(!is_wallpaper_click(&list, Point::new(200.0, 200.0), &DockBar::default()), "an app window");
+        assert!(!is_wallpaper_click(&list, Point::new(200.0, 870.0), &DockBar::default()), "the Dock");
+        assert!(is_wallpaper_click(&list, Point::new(900.0, 600.0), &DockBar::default()), "nothing there");
         let mut clear = w(30, Rect::new(0.0, 0.0, 1440.0, 900.0), true);
         clear.alpha = 0.0;
-        assert!(is_wallpaper_click(&[clear], Point::new(900.0, 600.0)), "transparent overlay");
+        assert!(is_wallpaper_click(&[clear], Point::new(900.0, 600.0), &DockBar::default()), "transparent overlay");
+    }
+
+    #[test]
+    fn the_docks_display_sized_window_counts_only_on_its_bar() {
+        // The Dock's window spans its display (seen 11-05 at 2560x1440 with auto-hide on).
+        let dock = CgWindow { pid: 7, ..w(crate::platform::dock::DOCK_LAYER, Rect::new(0.0, 0.0, 2560.0, 1440.0), true) };
+        let list = [dock];
+        let bar = DockBar { pid: Some(7), bars: vec![Rect::new(700.0, 1370.0, 1100.0, 66.0)] };
+        assert!(is_wallpaper_click(&list, Point::new(1200.0, 600.0), &bar), "away from the bar: the wallpaper");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 1400.0), &bar), "on the bar");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 1360.0), &bar), "on the bar's edge");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 600.0), &DockBar { pid: Some(7), bars: Vec::new() }), "the bar unknown: the Dock's");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 600.0), &DockBar { pid: Some(8), ..bar.clone() }), "another app's window");
+        let elsewhere = DockBar { pid: Some(7), bars: vec![Rect::new(-1500.0, 1100.0, 900.0, 60.0)] };
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 600.0), &elsewhere), "the bar read on another screen: the Dock's");
     }
 }
