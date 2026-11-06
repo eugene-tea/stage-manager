@@ -528,6 +528,10 @@ impl Model {
             if self.restore.restoring {
                 // Windows no saved one claims go by Apple's rule (counted for the restore's line).
                 self.note_by_apple(unmatched.iter().filter(|m| !pooled.contains(&m.id)));
+            } else {
+                for m in unmatched.iter().filter(|m| !pooled.contains(&m.id)) {
+                    self.note_rescore(m);
+                }
             }
             let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) =
                 arrivals.iter().filter(|m| !travelled.contains(&m.id)).cloned().partition(|m| pooled.contains(&m.id));

@@ -420,10 +420,13 @@ pub struct Model {
     /// screen's Desktop not formed yet; `pool.rs`, [`Model::screen_claims`]), at their saved
     /// frame there: that screen's arrival takes them with its own ([`Model::arrive`]).
     pub(crate) travellers: Vec<WindowMeta>,
-    /// Standard windows placed by Apple's rule while the restore window was open (they
-    /// matched no saved window then): scored again when their title changes
-    /// ([`Model::window_retitled`]).
-    pub(crate) by_apple_windows: HashSet<WindowId>,
+    /// Standard windows placed by Apple's rule while restore re-matches run
+    /// ([`crate::engine::restore::Restore::rematching`]; they matched no saved window then):
+    /// scored again when their title changes ([`Model::window_retitled`]).
+    pub(crate) rescore: HashSet<WindowId>,
+    /// Windows the user touched (focused by a click or key, moved or resized, their stage
+    /// switched to): never moved by a re-match ([`Model::touch_window`]).
+    pub(crate) touched: HashSet<WindowId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -495,7 +498,8 @@ impl Model {
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
             travellers: Vec::new(),
-            by_apple_windows: HashSet::new(),
+            rescore: HashSet::new(),
+            touched: HashSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

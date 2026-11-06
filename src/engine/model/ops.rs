@@ -141,6 +141,9 @@ impl Model {
         if decision.action == RuleAction::Native && self.restore.restoring {
             // Matched no saved window: Apple's rule (counted for the restore's line).
             self.note_by_apple([&meta]);
+        } else if decision.action == RuleAction::Native {
+            // After the restore window, its title may still name a saved one.
+            self.note_rescore(&meta);
         }
         // Adoption may have renamed the Space.
         let space = self.current_space(display);

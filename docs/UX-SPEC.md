@@ -461,10 +461,17 @@ stage, in front or a card as saved (11-06: the laptop's front window, reopened b
 on the 5K; Apple's keeps no stages over a restart, so this decides nothing of Apple's); a
 stage saved on a Desktop of that screen not shown now is made again where the window
 shows, as above, and a window reopened on its own screen stays where its app put it. A
-window that went by Apple's rule while the login settles (no saved window matched it, an
-Electron app's window still titled with its app's name, say) is looked at again when its
-title changes then, and goes to its saved stage on a confident match (a card when that
-stage is not in front); after the settle it stays where it is. A title that only puts
+window that went by Apple's rule (no saved window matched it: an Electron app's window
+still titled with its app's name, say) or by a doubtful match is looked at again when its
+title changes, and goes to its saved stage on a confident match, a card when that stage is
+not in front, nothing switching. This holds per window, until two minutes after the login
+(after the launch, for Stage Manager started later): a click on one window, which ends the
+settle, leaves the others to it, since apps are still opening then. A window the user has
+touched stays where it is: one focused by a click or a key press on it, moved or resized,
+or whose stage was switched to (a card click, a Dock click, ⌘-Tab, a shortcut). A saved
+window that shows only after the settle still goes to its stage, as above; that wait is
+bounded per app, not by the two minutes (its entries go a minute after its app's last new
+window, at the settle's end when its app is not running, and at the next session). A title that only puts
 something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
 a file in its workspace) is the same name, so the frame the window reopened at counts. No
 apps are relaunched (that is macOS's

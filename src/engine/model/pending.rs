@@ -790,14 +790,21 @@ impl Model {
     pub(crate) fn note_by_apple<'a>(&mut self, metas: impl IntoIterator<Item = &'a WindowMeta>) {
         for m in metas {
             self.restore.by_apple += 1;
-            if m.role == WindowRole::Standard {
-                self.by_apple_windows.insert(m.id);
-            }
+            self.note_rescore(m);
             let d = self.display(self.known_display(m.display));
             if !d.parks(m.frame) && clamped_at_corner(m.frame, d.visible, d.corner) {
                 self.restore.corner += 1;
                 tracing::info!(id = m.id.0, bundle = %m.bundle_id, "restore: a window matching no saved one came back clamped against the park corner; left where it is");
             }
+        }
+    }
+
+    /// Window `m` went by Apple's rule, no saved window matching it: while re-matches run
+    /// ([`crate::engine::restore::Restore::rematching`]) its title changing scores it again
+    /// ([`Model::window_retitled`]).
+    pub(crate) fn note_rescore(&mut self, m: &WindowMeta) {
+        if self.restore.rematching && m.role == WindowRole::Standard {
+            self.rescore.insert(m.id);
         }
     }
 

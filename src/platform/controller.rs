@@ -136,6 +136,13 @@ mod stale;
 
 pub use notice::NoticeCommand;
 
+/// A focus this soon after a click or key press is the user's: the window is touched
+/// ([`Model::touch_window`]).
+const USER_FOCUS: Duration = Duration::from_millis(1000);
+/// A stage switch this soon after a click or key press is the user's: its windows are
+/// touched ([`Model::touch_stage`]).
+const USER_SWITCH: Duration = Duration::from_millis(1500);
+
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
 const PRESSED_OBS_MAX: Duration = Duration::from_secs(1);
@@ -1170,6 +1177,10 @@ pub struct Controller {
     /// [`crate::engine::restore::WINDOW`] after the stages were built from `state.json`); `None` once closed
     /// or when there is none.
     settling: Option<Settling>,
+    /// When a window's new title stops taking it to its saved stage
+    /// ([`Settling::rematch_until`], [`Model::end_rematch`]): the restore window may end
+    /// sooner (a first click), this does not.
+    rematch_until: Option<Instant>,
     /// When the waiting entries of apps not running are given up, once the restore window
     /// ended ([`Settling::give_up_absent_at`], [`Controller::give_up_absent`]).
     absent_due: Option<Instant>,
@@ -1322,6 +1333,7 @@ impl Controller {
             quiet_checked: Instant::now(),
             seen_times: HashMap::new(),
             settling: None,
+            rematch_until: None,
             absent_due: None,
             front_after_restore: false,
             focus_after_restore: false,
@@ -3135,6 +3147,15 @@ impl Controller {
     /// Space the strip shows (a switch, whatever caused it, since that Space's last
     /// snapshot) and stages made.
     fn note_changes(&mut self, space: SpaceId) {
+        let mut user_switched = None;
+        self.note_changes_of(space, &mut user_switched);
+        if let (Some(to), Some(m)) = (user_switched, self.model.as_mut()) {
+            m.touch_stage(to);
+        }
+    }
+
+    /// [`Self::note_changes`]; a switch that followed a click or key press goes to `user_switched`.
+    fn note_changes_of(&mut self, space: SpaceId, user_switched: &mut Option<StageId>) {
         let Some(m) = &self.model else { return };
         let active = m.active_stage_in(space);
         if let Some(&before) = self.seen_active.get(&space.0)
@@ -3144,6 +3165,11 @@ impl Controller {
             counters::bump(Count::Switch);
             let from = before.and_then(|b| m.stage_number(StageId(b)));
             tracing::info!(from, to = m.stage_number(to), stage = to.0, "stage switch");
+            if input::since_last_press() < USER_SWITCH {
+                // The user's switch (a card or Dock click, ⌘-Tab, a shortcut): its windows
+                // are touched; a late title re-matches them no more.
+                *user_switched = Some(to);
+            }
         }
         let known: HashSet<u64> = m.spaces().iter().map(|s| s.id.0).collect();
         self.seen_active.retain(|s, _| known.contains(s));
@@ -3430,6 +3456,13 @@ impl Controller {
                 self.maybe_start_drag(ob, id, now);
                 let frame = ob.window(id).map(|w| w.frame);
                 let ours = self.echoes.is_window_echo(id, now);
+                if !ours
+                    && input::left_button_down()
+                    && let Some(m) = self.model.as_mut()
+                {
+                    // Moved or resized by the user: a late title re-matches it no more.
+                    m.touch_window(WindowId(id));
+                }
                 if !ours && input::left_button_down() && self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked) {
                     // Dragged while parked (its sliver grabbed without a focus, ⌘ held): the
                     // user's; the tick adopts it where they leave it rather than parking it
@@ -3471,6 +3504,13 @@ impl Controller {
                 if self.echoes.is_window_echo(id, now) && !self.focus_beats_echo(ob, id, now) {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
+                }
+                if input::since_last_press() < USER_FOCUS
+                    && let Some(m) = self.model.as_mut()
+                {
+                    // Focused by a click or a key press on it: a late title re-matches it no
+                    // more (a focus an app makes by itself at login leaves it).
+                    m.touch_window(WindowId(id));
                 }
                 if let Some(pid) = ob.window(id).map(|w| w.pid) {
                     let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
@@ -4105,6 +4145,7 @@ impl Controller {
                 tracing::info!(after_restart = restore.new_session, login_ago_s = login.map(|l| l.elapsed().as_secs()), "restore: the restore window opens");
                 Settling::new(Instant::now(), login)
             });
+            self.rematch_until = self.settling.as_ref().map(Settling::rematch_until);
             model.set_restore(restore);
             model.restore_spaces(state.spaces);
         }
@@ -5911,6 +5952,12 @@ impl Controller {
             self.slide_hold_step(ob);
             if self.absent_due.is_some_and(|t| now >= t) {
                 self.give_up_absent(ob);
+            }
+            if self.rematch_until.is_some_and(|t| now >= t) {
+                self.rematch_until = None;
+                if let Some(m) = self.model.as_mut() {
+                    m.end_rematch();
+                }
             }
             if now.duration_since(self.quiet_checked) >= Duration::from_secs(1) {
                 self.quiet_checked = now;

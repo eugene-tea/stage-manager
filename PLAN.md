@@ -213,8 +213,9 @@ Known gaps the owner accepted as rare:
     saved as two stages (VS Code's two workspaces, each its own stage on its own Desktop of
     the 5K, 77 and 78 then) come back as two stages, the one whose title gained the file in
     front of its workspace's name matched by its frame (a "strong" match, never "2 by
-    Apple's rule" for it), and one titled late, while the login settles, goes to its stage
-    when its title comes ("matches its saved one by its new title"); Fork and Chrome stay
+    Apple's rule" for it), and one titled late goes to its stage when its title comes ("matches its
+    saved one by its new title"), even after his first click, unless he touched that window,
+    and never past two minutes after the login ("no longer matched again by a new title"); Fork and Chrome stay
     as saved (they did, 11-06); (4) ⌘-Tab to an app whose stage is
     on the other screen: that screen switches, the other does not, and the Desktop there is
     arranged ahead of its slide (the log's "arranged ahead" for a window on `displays[1]`);

@@ -103,6 +103,12 @@ pub const QUIT_FRAMES_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
 /// The restore window's longest life after the launch (the design's cap).
 pub const WINDOW: Duration = Duration::from_secs(5 * 60);
 
+/// How long after the login (or the launch, for a launch a while after it:
+/// [`Settling::rematch_until`]) a window whose title changes may still go to its saved stage
+/// ([`crate::engine::model::Model::window_retitled`]; his word 11-06: apps reopen with us, he
+/// may click before an editor's late title comes).
+pub const REMATCH: Duration = Duration::from_secs(2 * 60);
+
 /// Settling ends once apps have been this quiet (no launch, no window back from a saved
 /// entry)...
 pub const SETTLE_QUIET: Duration = Duration::from_secs(20);
@@ -139,6 +145,11 @@ pub struct Restore {
     /// Windows placed by Apple's rule while the restore window was open (they matched no
     /// saved window), for the restore's line.
     pub by_apple: usize,
+    /// A window placed by Apple's rule (or by a low match) that the user has not touched is
+    /// still scored again when its title changes: from the launch until [`REMATCH`] after
+    /// the login, whatever the restore window does ([`Settling::rematch_until`]; the platform
+    /// clears it, [`crate::engine::model::Model::end_rematch`]).
+    pub rematching: bool,
     /// Of those, the ones macOS reopened clamped against the park corner (an app that saved
     /// its frame while parked; round 8H): left where they are, counted for the line.
     pub corner: usize,
@@ -161,12 +172,12 @@ pub struct Restore {
 impl Restore {
     /// A launch in another window server session than the file's, now `session`.
     pub fn after_restart(session: &str) -> Self {
-        Self { session: session.to_string(), restoring: true, new_session: true, ..Self::default() }
+        Self { session: session.to_string(), restoring: true, new_session: true, rematching: true, ..Self::default() }
     }
 
     /// A launch in the file's own session (or one that cannot be told apart), now `session`.
     pub fn same_session(session: &str) -> Self {
-        Self { session: session.to_string(), restoring: true, new_session: false, ..Self::default() }
+        Self { session: session.to_string(), restoring: true, new_session: false, rematching: true, ..Self::default() }
     }
 
     /// A launch after a restart with `[stages] restore_after_restart = false`: no restore
@@ -248,6 +259,14 @@ impl Settling {
     pub fn new(launch: Instant, login: Option<Instant>) -> Self {
         let login = login.filter(|l| *l <= launch).unwrap_or(launch);
         Self { started: launch, login, busy: launch }
+    }
+
+    /// Until when a window's new title may still take it to its saved stage ([`REMATCH`]):
+    /// after the login, for a launch within [`SETTLE_AFTER_LOGIN`] of it (Stage Manager
+    /// opening with the apps macOS reopens); else after the launch (a relaunch later on).
+    pub fn rematch_until(&self) -> Instant {
+        let base = if self.started.saturating_duration_since(self.login) <= SETTLE_AFTER_LOGIN { self.login } else { self.started };
+        base + REMATCH
     }
 
     /// An app launched, or a window went back to its saved stage, at `at`.
@@ -595,6 +614,20 @@ mod tests {
         assert!(!End::User.by_itself() && !End::Switcher.by_itself(), "the user's focus is never taken");
         assert!(End::User.brings_front() && End::Quiet.brings_front() && End::TimeUp.brings_front());
         assert!(!End::Switcher.brings_front(), "an app switch brings its own stage");
+    }
+
+    #[test]
+    fn rematches_run_two_minutes_from_the_login_or_from_a_later_launch() {
+        let login = Instant::now();
+        // Opened with the apps macOS reopens: from the login.
+        let at_login = Settling::new(login + Duration::from_secs(23), Some(login));
+        assert_eq!(at_login.rematch_until(), login + REMATCH);
+        // A relaunch long after the login: from the launch.
+        let later = login + Duration::from_secs(3600);
+        assert_eq!(Settling::new(later, Some(login)).rematch_until(), later + REMATCH);
+        // No login known: from the launch.
+        assert_eq!(Settling::new(later, None).rematch_until(), later + REMATCH);
+        assert!(Restore::after_restart("s").rematching && !Restore::off_after_restart("s").rematching);
     }
 
     #[test]

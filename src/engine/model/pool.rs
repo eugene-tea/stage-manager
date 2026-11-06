@@ -646,25 +646,28 @@ impl Model {
         self.drop_empty_leftovers();
     }
 
-    /// Window `id`'s title changed. One placed by Apple's rule while the restore window is
-    /// open (it matched no saved window when it showed: an Electron app's window titled late,
-    /// its app's name or nothing before its own) is scored again with its new title, against
+    /// Window `id`'s title changed. One placed by Apple's rule (it matched no saved window
+    /// when it showed: an Electron app's window titled late, its app's name or nothing
+    /// before its own) or by a low match, that the user has not touched ([`Model::touch_window`]),
+    /// is scored again with its new title while re-matches run (from the launch until
+    /// [`crate::engine::restore::REMATCH`] after the login, [`Model::end_rematch`]), against
     /// its own Desktop's waiting windows and, after a restart, every other's: a confident
-    /// match takes it out of the stage Apple's rule gave it and into its saved stage, as if it
-    /// had shown so (parked there when that stage is inactive: the restore window is still
-    /// open; no switch). Else, or once the restore window is over, nothing changes (a window
-    /// the user has seen in its stage stays there). The actions.
+    /// match takes it out of the stage it is in and into its saved stage, as if it had shown
+    /// so (parked there when that stage is not in front; no switch). Per window, not the
+    /// restore window: Stage Manager opens with the apps macOS reopens, and a click on one
+    /// window says nothing of another still opening (his word 11-06). The actions.
     pub fn window_retitled(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
-        if !self.restore.restoring || !self.by_apple_windows.contains(&id) {
+        let low = self.restored.get(&id).is_some_and(|r| !r.grade.confident());
+        if !self.restore.rematching || self.touched.contains(&id) || !(self.rescore.contains(&id) || low) {
             return actions;
         }
         let Some(w) = self.windows.get(&id) else {
-            self.by_apple_windows.remove(&id);
+            self.rescore.remove(&id);
             return actions;
         };
         let Home::Stage(from) = w.home else { return actions };
-        if w.meta.role != WindowRole::Standard || self.restored.contains_key(&id) || !self.children_of(id).is_empty() {
+        if w.meta.role != WindowRole::Standard || (self.restored.contains_key(&id) && !low) || !self.children_of(id).is_empty() {
             return actions;
         }
         let space = w.space;
@@ -679,9 +682,10 @@ impl Model {
         }
         let Some((meta, original)) = self.lift(id) else { return actions };
         let placed = self.match_waiting(space, std::slice::from_ref(&meta), LowRule::default(), None, scope, &mut actions);
-        self.by_apple_windows.remove(&id);
         // Counted again below if it goes by Apple's rule once more.
-        self.restore.by_apple = self.restore.by_apple.saturating_sub(1);
+        if self.rescore.remove(&id) && self.restore.restoring {
+            self.restore.by_apple = self.restore.by_apple.saturating_sub(1);
+        }
         if placed.is_empty() {
             // Never left unmanaged: it comes back as any new window.
             let more = self.add_window(meta.clone(), &crate::engine::rules::Decision::default(), &Observation::default());
@@ -704,6 +708,39 @@ impl Model {
         self.normalize_slots();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// The user touched window `id` (focused it by a click or a key press on it, moved or
+    /// resized it, switched to its stage): a re-match never moves it now
+    /// ([`Model::window_retitled`]).
+    pub fn touch_window(&mut self, id: WindowId) {
+        if self.restore.rematching {
+            self.touched.insert(id);
+        }
+    }
+
+    /// The user switched to stage `stage` (a card click, a Dock click, ⌘-Tab, a shortcut): its
+    /// windows are touched ([`Model::touch_window`]).
+    pub fn touch_stage(&mut self, stage: StageId) {
+        let ids = self.stage(stage).map(|s| s.windows.clone()).unwrap_or_default();
+        for id in ids {
+            self.touch_window(id);
+        }
+    }
+
+    /// Re-matches on a title change are over ([`crate::engine::restore::REMATCH`] after the
+    /// login): what they remembered goes.
+    pub fn end_rematch(&mut self) {
+        if std::mem::replace(&mut self.restore.rematching, false) {
+            tracing::info!(waiting = self.rescore.len(), "restore: windows are no longer matched again by a new title (two minutes after the login)");
+        }
+        self.rescore.clear();
+        self.touched.clear();
+    }
+
+    /// True while a window's new title may still take it to its saved stage.
+    pub fn rematching(&self) -> bool {
+        self.restore.rematching
     }
 
     /// Makes `stage`, where voter `v` of `space` is alone (no name, no saved origin, nothing

@@ -847,14 +847,51 @@ fn an_editor_titled_late_goes_to_its_own_stage_when_its_title_comes() {
     assert!(m.window_retitled(w(42)).is_empty());
 }
 
-#[test]
-fn a_late_title_after_the_restore_window_moves_nothing() {
-    // The user has seen the window in its stage: it stays there.
+/// The second workspace's window joined the first's stage by Apple's rule, titled late.
+fn joined_by_a_late_title() -> Model {
     let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
     let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
     let early = win(42, 20, IDE, "Example IDE", Rect::new(300.0, 200.0, 700.0, 500.0));
-    m.arrive(MAIN, &[alpha, early], &[], &LaunchHints::default());
+    m.arrive(MAIN, &[alpha, early, win(43, 21, TERM, "build", r(2.0))], &[], &LaunchHints::default());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+    m
+}
+
+#[test]
+fn a_click_on_another_window_early_leaves_a_late_title_its_rematch() {
+    // He clicks the terminal before the editor's title comes: the restore window ends, and
+    // the editor's window, untouched, still goes to its stage when its title comes.
+    let mut m = joined_by_a_late_title();
+    m.touch_window(w(43));
     m.end_restore();
+    assert!(!m.restoring() && m.rematching());
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    let a = m.window_retitled(w(42));
+    assert_ne!(m.stage_of(w(42)), m.stage_of(w(41)), "its own stage");
+    assert!(parks(&a, 42), "a card: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(41)), "nothing switched");
+}
+
+#[test]
+fn a_window_the_user_touched_stays_where_it_is_when_its_title_comes() {
+    // Focused by his click (or moved, or its stage switched to): his.
+    let mut m = joined_by_a_late_title();
+    m.touch_window(w(42));
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+    // So is one whose stage he switched to.
+    let mut m = joined_by_a_late_title();
+    let shared = m.stage_of(w(42)).expect("in a stage");
+    m.touch_stage(shared);
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+}
+
+#[test]
+fn a_late_title_after_the_two_minutes_moves_nothing() {
+    let mut m = joined_by_a_late_title();
+    m.end_rematch();
     assert!(m.window_title_changed(w(42), "beta (Workspace)"));
     assert!(m.window_retitled(w(42)).is_empty());
     assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
