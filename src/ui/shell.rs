@@ -225,6 +225,13 @@ fn login_way(app: &config::AppConfig) -> Service {
     }
 }
 
+/// The first launch's registration of launch at login (`on`: `[app] launch_at_login`):
+/// whether it is done, so later launches leave it to the user's choice. One that failed is
+/// not (the 1.7 review: it was marked done and never tried again).
+fn first_login_set_up(on: bool, register: impl FnOnce() -> Result<(), String>) -> bool {
+    !on || register().is_ok()
+}
+
 /// The way an install's launch at login was last set to (`AppState::login_start`); before
 /// round reopen-list, the agent once round early-start moved it, else the login item.
 fn login_way_done(state: &AppState) -> Service {
@@ -264,6 +271,7 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
             // reaches it as a reopen, which nobody asked for (rounds early-start, reopen-list).
             let since_login = login_item::since_login();
             if instance::reopen_shows_settings(since_login) {
+                tracing::info!("opened again while running: showing Settings");
                 show_settings();
             } else {
                 tracing::info!(login_ago_s = since_login.map(|d| d.as_secs()), "opened again moments after the login (the login item or macOS reopening it): no Settings");
@@ -324,14 +332,12 @@ impl Shell {
         let way = login_way(&self.config.app);
         if !self.state.login_item_set_up {
             match login_item::refusal() {
-                None => {
-                    if self.config.app.launch_at_login {
-                        let _ = login_item::set(true, way);
-                    }
+                None if first_login_set_up(self.config.app.launch_at_login, || login_item::set(true, way)) => {
                     self.state.login_item_set_up = true;
                     self.state.login_start = Some(way.key().into());
                     self.save_state();
                 }
+                None => tracing::warn!("launch at login: the first registration failed; tried again at the next launch"),
                 Some(why) => tracing::debug!("login item not set up: {why}"),
             }
         } else if login_way_done(&self.state) != way {
@@ -1066,6 +1072,15 @@ pub fn turn_off_wait() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 1.7 review: a failed first registration is not marked done, so the next launch
+    /// tries it again; launch at login off is done without asking macOS.
+    #[test]
+    fn a_failed_first_registration_is_tried_again() {
+        assert!(first_login_set_up(true, || Ok(())));
+        assert!(!first_login_set_up(true, || Err("macOS said no".into())));
+        assert!(first_login_set_up(false, || panic!("not asked")));
+    }
 
     #[test]
     fn the_agent_prompt_points_at_the_notes_and_the_file() {
