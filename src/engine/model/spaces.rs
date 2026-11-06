@@ -470,7 +470,7 @@ impl Model {
         // this Desktop and showed it (not the one they were adopted into): whole, by the
         // lid's rule, once this Desktop's own stages stand.
         let (adopted_front, adopted_cards, carried_adopted) =
-            if bare { (None, Vec::new(), 0) } else { self.carry_adopted(target, &mut moving, &mut actions) };
+            if bare { (None, Vec::new(), 0) } else { self.carry_adopted(target, live, &mut moving, &mut actions) };
         let carried = carried + carried_adopted;
         let capacity = self.capacity_of(target);
         for s in adopted_cards {
@@ -531,9 +531,18 @@ impl Model {
     /// their apps' stages here: the stage that was in front is returned for the front (the
     /// caller brings it forward once this Desktop's own stages stand), the others become
     /// cards here, their windows parked at this display's corner (where the adoption parked
-    /// them). Their windows leave `moving`. Returns (the front stage, the cards, how many
-    /// stages came).
-    fn carry_adopted(&mut self, target: SpaceId, moving: &mut Vec<WindowId>, actions: &mut Vec<Action>) -> (Option<StageId>, Vec<StageId>, usize) {
+    /// them). Their windows leave `moving`. One `live` lists in this display's park zone is
+    /// parked, whatever the model counted it: the front stage's then comes out of the corner
+    /// (11-05 20:01:38: the laptop's front window, Chrome, was at the 5K's corner on its
+    /// second Desktop, counted shown; that Desktop showed no front for the 4 s until the
+    /// owner's next click). Returns (the front stage, the cards, how many stages came).
+    fn carry_adopted(
+        &mut self,
+        target: SpaceId,
+        live: &[WindowMeta],
+        moving: &mut Vec<WindowId>,
+        actions: &mut Vec<Action>,
+    ) -> (Option<StageId>, Vec<StageId>, usize) {
         if self.adopted.is_empty() {
             return (None, Vec::new(), 0);
         }
@@ -555,6 +564,16 @@ impl Model {
             }
             self.carry_stage_to(sid, target, display);
             moving.retain(|w| !members.contains(w));
+            let zone = *self.display(display);
+            let mut cornered = members.clone();
+            cornered.extend(self.children_in(Home::Stage(sid)));
+            for id in cornered {
+                if live.iter().any(|m| m.id == id && zone.parks(m.frame))
+                    && let Some(w) = self.windows.get_mut(&id)
+                {
+                    w.parked = true;
+                }
+            }
             if was_front && front.is_none() {
                 front = Some(sid);
                 continue;

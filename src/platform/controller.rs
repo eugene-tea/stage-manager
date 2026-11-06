@@ -114,7 +114,8 @@ use crate::engine::phase::{self, Hold};
 use crate::engine::show_desktop::{self, CloseWatch, Cover, CoverLook, PanelPlace, PushedCover, RevealFacts};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
-    Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
+    Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, SwitchRefused, Target, WindowId, WindowMeta, WindowRole,
+    WindowState,
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
@@ -5588,10 +5589,15 @@ impl Controller {
             _ => self.observe(ob),
         };
         let Some(m) = self.model.as_mut() else { return };
+        // A card click the engine does not take (its stage on a Desktop not shown: a card
+        // drawn where the engine lists none, round displays-lid-2) says why, and the strips
+        // show the engine's cards again: a click never does nothing silently.
+        let mut refused = None;
         let actions = match event {
             StripEvent::CardClicked { stage, shift } => {
                 counters::bump(Count::CardClick);
                 tracing::info!(stage, number = m.stage_number(StageId(stage)), shift, "card clicked");
+                refused = m.switch_refused(StageId(stage)).filter(|r| *r != SwitchRefused::InFront).map(|r| (stage, r));
                 if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
             }
             StripEvent::CardDropped { stage, x, y } => {
@@ -5619,7 +5625,10 @@ impl Controller {
         };
         let changed = actions.contains(&Action::StateChanged);
         self.execute_animated(ob, actions);
-        if local_edit && !changed {
+        if let Some((stage, why)) = refused.filter(|_| !changed) {
+            tracing::info!(stage, why = why.text(), "card click: nothing to switch to; the strips show the engine's cards again");
+            self.present();
+        } else if local_edit && !changed {
             tracing::debug!("the engine did not take the strip's edit; the strip shows the engine's cards again");
             self.present();
         }

@@ -13,6 +13,28 @@ use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
 
+/// Why a switch to a stage does nothing ([`Model::switch_refused`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchRefused {
+    /// No such stage (it went: its windows closed, or it merged).
+    Gone,
+    /// Its stage is on a Desktop no screen shows now.
+    OtherDesktop,
+    /// It is the stage in front already.
+    InFront,
+}
+
+impl SwitchRefused {
+    /// The reason, for the log.
+    pub fn text(self) -> &'static str {
+        match self {
+            SwitchRefused::Gone => "the stage is gone",
+            SwitchRefused::OtherDesktop => "its stage is on a Desktop not shown",
+            SwitchRefused::InFront => "its stage is in front already",
+        }
+    }
+}
+
 impl Model {
     /// A window appeared on the Space its display shows now (the platform offers a window
     /// only once it is on screen). `decision` comes from the rules; it is ignored for children, which
@@ -305,6 +327,19 @@ impl Model {
             return Vec::new();
         }
         self.switch_in(space, current, target, Some(obs))
+    }
+
+    /// Why a switch to `target` ([`Model::switch_to`], a card click) does nothing, or `None`
+    /// when it switches. A card click never changes the Desktop, so a stage on a Desktop not
+    /// shown is never switched to: the strip of the Desktop shown never lists one (round
+    /// displays-lid-2: a strip left over from the laptop, drawn over the 5K's, showed a
+    /// card of a stage macOS had put on the 5K's other Desktop; four clicks did nothing).
+    pub fn switch_refused(&self, target: StageId) -> Option<SwitchRefused> {
+        let Some(space) = self.stage(target).map(|s| s.space) else { return Some(SwitchRefused::Gone) };
+        if !self.is_shown_space(space) {
+            return Some(SwitchRefused::OtherDesktop);
+        }
+        (self.active.get(&space) == Some(&target)).then_some(SwitchRefused::InFront)
     }
 
     /// The body of a switch on `space` from its active stage `current` to `target`: `obs`
@@ -1495,6 +1530,7 @@ impl Model {
             .map(|d| d.id)
             .collect();
         let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
+        let removed = !gone.is_empty();
         self.displays = displays;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
         self.capacity.retain(|d, _| live.contains(d));
@@ -1537,10 +1573,14 @@ impl Model {
                 w.restore = restore;
             }
         }
+        // A display removed: macOS puts the windows hanging off the screens left fully on
+        // them (11-05 20:01:38, the lid closed: six of the 5K's cards were listed whole at
+        // its bottom-right corner, a pile of windows over its front stage), so every parked
+        // window of a Desktop shown is parked again, as on a display that moved.
         let repark: Vec<WindowId> = self
             .windows
             .values()
-            .filter(|w| w.parked && moved_frames.contains(&w.meta.display) && self.is_shown_space(w.space))
+            .filter(|w| w.parked && (removed || moved_frames.contains(&w.meta.display)) && self.is_shown_space(w.space))
             .map(|w| w.meta.id)
             .filter(|id| !parked_again.contains(id))
             .collect();

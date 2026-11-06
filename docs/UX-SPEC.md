@@ -149,7 +149,10 @@ too, after the remaining screen's own (past the capacity, hidden); its hidden wi
 at the remaining screen's corner. macOS may put the closed screen's windows on another of
 the remaining screen's Desktops and slide to it (the owner's 11-05: the 5K went to its
 second Desktop, not shown since the launch): the same rule holds there, the closed screen's
-stages whole, that Desktop's own front a card (round displays-lid). The lid opened: the
+stages whole, that Desktop's own front a card (round displays-lid). Nothing joins: the
+closed screen's strip goes with it, each card is one stage, its front window shows, and
+the hidden windows macOS pushes whole onto the remaining screen at the change go back to its
+corner (round displays-lid-2). The lid opened: the
 stages whose windows macOS moves back to that screen are its stages again (the one in front
 before, a card; a stage moved whole stays one stage); the stage that came over in front
 stays where it is. macOS puts each window back at the frame it had on that screen, a hidden

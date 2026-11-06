@@ -59,6 +59,7 @@ pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use pending::{PendingNote, Restored};
 pub use pool::NumberRef;
 pub(crate) use pool::Kin;
+pub use ops::SwitchRefused;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
 pub use strip::{ActiveCard, DockApp, StripCard, StripOptions, StripOrder};

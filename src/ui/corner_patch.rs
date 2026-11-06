@@ -482,6 +482,11 @@ thread_local! {
     /// Per screen, the latest plan that found the patches busy, applied [`BUSY_RETRY`] later
     /// unless a newer one is applied first.
     static WAITING: std::cell::RefCell<BTreeMap<u32, PatchPlan>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+    /// Every screen connected, as last reported ([`display_changed`]; `None` before the
+    /// first report): a plan for any other makes no patch (round displays-lid-2: the
+    /// window-manager thread plans for a screen until it hears it went, as it sent the
+    /// strip a snapshot that made the laptop's strip again over the 5K's).
+    static CONNECTED: std::cell::RefCell<Option<Vec<u32>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// How long a call that found the patch busy (a call into AppKit that ran the main queue)
@@ -498,6 +503,10 @@ fn again_shortly(f: impl FnOnce() + Send + 'static) {
 /// [`BUSY_RETRY`] later. Plans come in order, so the latest wins: one waiting for the same
 /// screen is dropped when a newer one is applied.
 pub fn apply(mtm: MainThreadMarker, plan: PatchPlan) {
+    if CONNECTED.with(|c| c.borrow().as_ref().is_some_and(|ids| !ids.contains(&plan.screen))) {
+        tracing::debug!(screen = plan.screen, "corner patch: a plan for a screen no longer there is not applied");
+        return;
+    }
     PATCH.with(|p| {
         let Ok(mut p) = p.try_borrow_mut() else {
             if WAITING.with(|w| w.borrow_mut().insert(plan.screen, plan)).is_none() {
@@ -713,6 +722,7 @@ pub fn cover_image(screen: u32, rect: Rect) -> Option<(CFRetained<CGImage>, f64)
 pub fn display_changed(mtm: MainThreadMarker, kept: &[u32]) {
     crate::platform::desktop_shot::forget();
     let kept = kept.to_vec();
+    CONNECTED.with(|c| *c.borrow_mut() = Some(kept.clone()));
     let done = PATCH.with(|p| match p.try_borrow_mut() {
         Ok(mut p) => {
             let before = p.len();

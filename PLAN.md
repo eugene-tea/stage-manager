@@ -180,7 +180,13 @@ Known gaps the owner accepted as rare:
     one display, `displays[0].strip`); if macOS slides the 5K to another Desktop with the
     laptop's windows (11-05: its second Desktop, the log's "Space changed" with `rebuilt`
     and `carried=2`), the same there: the laptop's front in front, its card a card of its
-    own, not joined to its app's card; (2) open the lid: the stages macOS moves back are the
+    own, not joined to its app's card; while it is closed (his second run 11-05 20:01, fixed
+    in round displays-lid-2), on both Desktops: one strip on the 5K, never a second one over
+    it (after the log's "the strips of displays no longer there closed", never "a strip for
+    another display"; "a snapshot for a display no longer there is not drawn" may show), each card
+    one stage's windows, every card click switching (never "card click: nothing to switch
+    to"), the laptop's front window shown, not left at the 5K's corner, and the 5K's cards at
+    its corner, not pushed whole onto it; (2) open the lid: the stages macOS moves back are the
     laptop's again (the log's "window macOS put on a display that changed", never "moved to
     another display"), the shown one in front at the frame macOS gave it (no move after),
     the hidden one a card at the laptop's corner (`card=true`), nothing of the 5K's moving

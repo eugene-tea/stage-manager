@@ -174,6 +174,22 @@ thread_local! {
     static WAITING_OTHERS: RefCell<VecDeque<StripSnapshot>> = const { RefCell::new(VecDeque::new()) };
     /// The thumbnail interval the strips are made with ([`install`]).
     static THUMB_INTERVAL: Cell<u64> = const { Cell::new(1000) };
+    /// Every display connected, as last reported ([`displays_changed`]; `None` before the
+    /// first report): a snapshot for any other is not drawn ([`draws_strip_for`]).
+    static CONNECTED: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+}
+
+/// True when a snapshot for `display` may be drawn: the main strip's, or a display among
+/// `connected` (every display connected, as last reported; `None` before the first report).
+///
+/// The lid closed, 11-05 20:01:38: the strips of the displays gone closed, then a snapshot the
+/// window-manager thread sent for the laptop before it heard of the change made that strip
+/// again. Its screen gone, it took the main screen's geometry, its pane lay over the 5K's
+/// strip on that Desktop, and its two cards over the 5K's own: the laptop's two-app card over
+/// the 5K's three-app one, seen as one card of five apps, and a click on it reached a stage
+/// on another Desktop, which did nothing.
+fn draws_strip_for(connected: Option<&[u32]>, display: u32) -> bool {
+    display == strip_model::MAIN_STRIP || connected.is_none_or(|ids| ids.contains(&display))
 }
 
 /// The main display's id as last reported ([`displays_changed`]): its snapshots name it,
@@ -284,6 +300,13 @@ fn present_waiting_others() {
         let Ok(mut others) = o.try_borrow_mut() else { return false };
         while let Some(snapshot) = WAITING_OTHERS.with(|q| q.borrow_mut().pop_front()) {
             let screen = snapshot.display;
+            let connected = CONNECTED.with(|c| draws_strip_for(c.borrow().as_deref(), screen));
+            if !connected {
+                // Sent before the display went: no strip for a screen not there.
+                others.remove(&screen);
+                tracing::debug!(screen, "strip: a snapshot for a display no longer there is not drawn");
+                continue;
+            }
             let strip = others.entry(screen).or_insert_with(|| {
                 let interval = THUMB_INTERVAL.with(Cell::get);
                 tracing::info!(screen, "strip: a strip for another display");
@@ -303,6 +326,7 @@ fn present_waiting_others() {
 pub fn displays_changed(ids: &[u32]) {
     let Some(&main) = ids.first() else { return };
     MAIN_DISPLAY.store(main, Ordering::Relaxed);
+    CONNECTED.with(|c| *c.borrow_mut() = Some(ids.to_vec()));
     let gone = OTHERS.with(|o| match o.try_borrow_mut() {
         Ok(mut others) => {
             let before = others.len();
@@ -3279,6 +3303,18 @@ mod tests {
 
     thread_local! {
         static SCREENS: RefCell<BTreeMap<u32, Vec<&'static str>>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    /// Round displays-lid-2: a snapshot for a screen no longer connected (sent before the
+    /// window-manager thread heard the lid close) makes no strip; the main strip's always draws.
+    #[test]
+    fn a_snapshot_for_a_screen_gone_makes_no_strip() {
+        let (studio, laptop) = (4, 1);
+        assert!(draws_strip_for(None, laptop), "before the first report every strip draws");
+        assert!(draws_strip_for(Some(&[studio, laptop]), laptop));
+        assert!(!draws_strip_for(Some(&[studio]), laptop), "the lid closed: no strip for the laptop");
+        assert!(draws_strip_for(Some(&[studio]), strip_model::MAIN_STRIP));
+        assert!(draws_strip_for(Some(&[studio, laptop]), laptop), "the lid opened: the laptop's strip again");
     }
 
     /// Round displays-live-1: an event keyed by another screen's strip reaches that strip
