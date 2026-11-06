@@ -7,11 +7,11 @@
   so one that does not answer yet no longer holds up the others' windows or anything else
   the app does.
 - Every screen has its own strip and stages, as Apple's Stage Manager does: a window
-  dragged to another screen starts a stage of its own there, a card click changes only its
-  screen, each screen hides its stages in a corner of its own, and closing or opening the
-  lid moves stages between screens the way Apple's does. After a restart each screen's
-  stages come back on that screen. `[displays] main_only` keeps the old way: the main
-  screen only.
+  dragged to another screen starts a stage of its own there once you let it go, a card
+  click changes only its screen, each screen hides its stages in a corner of its own, and
+  closing or opening the lid moves stages between screens the way Apple's does. After a
+  restart each screen's stages come back on that screen. `[displays] main_only` keeps the
+  old way: the main screen only.
 - A second screen looks and behaves as the main one: its cards let its own wallpaper
   through, the corner where its hidden windows wait is covered by a patch of its own
   desktop, windows stay clear of its own strip, a Dock click or ⌘-Tab to a Desktop there
@@ -55,6 +55,9 @@
 - A wallpaper click reveals the desktop on the Dock's screen too: the Dock's invisible
   screen-wide window no longer counts as a window over the wallpaper, and a click away from
   the Dock no longer asks the Dock what was clicked.
+- When the main display changes (the menu bar moved to another screen, or a laptop that was
+  the main display closed onto an external screen), hidden windows come back where they
+  were on their screen, instead of about a screen away.
 
 ## 1.6.0 — 2026-11-05
 

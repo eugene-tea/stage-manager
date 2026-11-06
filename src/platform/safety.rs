@@ -451,21 +451,10 @@ fn registry_forget(ids: &[u32]) {
 /// Remembers every managed display's park zone (the main one first: its visible frame and
 /// corner, [`set_main_display`]; the others as zones of their own) for the park test and
 /// clamping in scans, and writes them to the parked file for the guardian. A display's
-/// corners add up over the run, as the main display's do.
+/// corners add up over the run, as the main display's do ([`next_zones`]).
 pub fn set_displays(displays: &[Display]) {
     let Some(main) = displays.first() else { return };
-    let mut zones = zones_used();
-    for d in &displays[1..] {
-        match zones.iter_mut().find(|z| z.frame == d.frame) {
-            Some(z) => {
-                z.visible = d.visible;
-                if !z.corners.contains(&d.corner) {
-                    z.corners.push(d.corner);
-                }
-            }
-            None => zones.push(ParkZone { frame: d.frame, visible: d.visible, corners: vec![d.corner] }),
-        }
-    }
+    let zones = next_zones(&zones_used(), &displays[1..]);
     let changed = ZONES.lock().is_ok_and(|mut z| {
         let changed = *z != zones;
         *z = zones;
@@ -476,6 +465,25 @@ pub fn set_displays(displays: &[Display]) {
         let listed = registered(&lock_registry());
         write_parked_file(&listed);
     }
+}
+
+/// The park zones of `others` (every display but the main one), each with the corners its
+/// zone had while the display kept its frame (they add up over the run: a window of another
+/// Desktop may still sit at an earlier one) plus its corner now. A display removed or moved
+/// leaves no zone behind: macOS moves its windows (onto the remaining screen, or along with
+/// it), and a zone at its old frame could take a window on a screen there now for a parked
+/// one (the review's two-screens 7).
+fn next_zones(old: &[ParkZone], others: &[Display]) -> Vec<ParkZone> {
+    others
+        .iter()
+        .map(|d| {
+            let mut corners = old.iter().find(|z| z.frame == d.frame).map(|z| z.corners.clone()).unwrap_or_default();
+            if !corners.contains(&d.corner) {
+                corners.push(d.corner);
+            }
+            ParkZone { frame: d.frame, visible: d.visible, corners }
+        })
+        .collect()
 }
 
 /// Takes the other displays' park zones without writing a parked file (the guardian, from
@@ -1338,6 +1346,25 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_display_removed_or_moved_leaves_no_park_zone_behind() {
+        use crate::engine::displays::ScreenKey;
+        use crate::engine::model::DisplayId;
+        let display = |frame: Rect, corner: Corner| Display { id: DisplayId(2), key: ScreenKey::NONE, frame, visible: frame, corner };
+        let laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
+        let zones = next_zones(&[], &[display(laptop, Corner::BottomLeft)]);
+        assert_eq!(zones.len(), 1);
+        // The same frame, another corner chosen (a third screen beyond): both count.
+        let zones = next_zones(&zones, &[display(laptop, Corner::TopLeft)]);
+        assert_eq!(zones[0].corners, vec![Corner::BottomLeft, Corner::TopLeft]);
+        // The laptop main now (its frame moved): one zone, at its frame now, its corner now.
+        let moved = Rect::new(2560.0, 0.0, 1800.0, 1169.0);
+        let zones = next_zones(&zones, &[display(moved, Corner::BottomRight)]);
+        assert_eq!(zones, vec![ParkZone { frame: moved, visible: moved, corners: vec![Corner::BottomRight] }]);
+        // The lid closed: none.
+        assert!(next_zones(&zones, &[]).is_empty());
+    }
 
     /// Review S10: a panic while the parked file's lock is held does not stop later writes.
     #[test]

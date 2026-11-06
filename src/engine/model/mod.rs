@@ -404,8 +404,9 @@ pub struct Model {
     /// along, so they never bring their stage forward ([`Model::set_launch_listed`]).
     pub(crate) launch_listed: HashSet<WindowId>,
     /// Standard windows of the Desktop a removed display showed, moved onto the main
-    /// display's Desktop (`adopt_display`), until the next arrival on the main display or
-    /// the next display change: macOS may put them on another Desktop of the main display
+    /// display's Desktop (`adopt_display`), until an arrival on the main display carries
+    /// them or shows another Desktop without them (a notice of their own Desktop keeps them),
+    /// or the next display change: macOS may put them on another Desktop of the main display
     /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
     pub(crate) adopted: BTreeSet<WindowId>,
     /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
