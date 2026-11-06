@@ -740,9 +740,14 @@ impl Observer {
     }
 
     /// A probe's note ([`super::observe_probe`]): an app that answers now is observed (its
-    /// windows found), one given up or gone is no longer waited for.
+    /// windows found), one given up or gone is no longer waited for. A note of a probe stopped
+    /// before it came is dropped: the app's running probe, if any, goes on.
     pub fn on_probe(&mut self, note: Note, callback: Callback) {
         let pid = note.pid();
+        if !self.probes.current(&note) {
+            tracing::debug!(pid, ?note, "a stopped probe's note: dropped");
+            return;
+        }
         self.probes.stop(pid);
         if !self.observing || !self.pending.contains_key(&pid) || self.observed.contains_key(&pid) {
             self.pending.remove(&pid);
@@ -1650,21 +1655,50 @@ mod tests {
         ob.stop();
     }
 
+    /// The number of the probe asking `pid` now.
+    fn probe_of(ob: &Observer, pid: i32) -> u64 {
+        ob.probes.probe_of(pid).expect("a probe asks it")
+    }
+
     #[test]
     fn a_probes_note_for_an_app_no_longer_waited_for_is_dropped() {
         let (mut ob, _notes) = probing();
         let now = Instant::now();
         // Given up: forgotten, an activation tries it again.
-        ob.pending.insert(STUCK, Retry::new(now));
-        ob.on_probe(Note::GaveUp { pid: STUCK, retry: Retry::new(now) }, no_callback);
-        assert!(!ob.pending.contains_key(&STUCK));
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        let probe = probe_of(&ob, STUCK);
+        ob.on_probe(Note::GaveUp { pid: STUCK, probe, retry: Retry::new(now) }, no_callback);
+        assert!(!ob.pending.contains_key(&STUCK) && !ob.probes.running(STUCK));
         // A note for an app that quit meanwhile (not waited for): nothing observed.
-        ob.on_probe(Note::Answered { pid: READY, retry: Retry::new(now) }, no_callback);
+        ob.on_probe(Note::Answered { pid: READY, probe: 1, retry: Retry::new(now) }, no_callback);
         assert!(!ob.observes(READY) && ob.take_events().is_empty());
         // Its process gone: no longer waited for, and a suspect for the next reap.
         ob.pending.insert(READY, Retry::new(now));
-        ob.on_probe(Note::Gone { pid: READY }, no_callback);
+        ob.probes.start(READY, Retry::new(now), now + Duration::from_secs(60));
+        let probe = probe_of(&ob, READY);
+        ob.on_probe(Note::Gone { pid: READY, probe }, no_callback);
         assert!(!ob.pending.contains_key(&READY));
+        ob.stop();
+    }
+
+    /// The 1.7 review: a probe stopped with observation (a logout's head start) may still send
+    /// its note (it was mid-ask); after a cancelled logout observation starts again and a new
+    /// probe asks the same app. The old probe's GaveUp stopped the new one and gave the app up:
+    /// never observed until activated. Now it is dropped and the new probe goes on.
+    #[test]
+    fn an_old_probes_give_up_leaves_the_fresh_probe_asking() {
+        let (mut ob, _notes) = probing();
+        let now = Instant::now();
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        let old = probe_of(&ob, STUCK);
+        ob.stop();
+        ob.observing = true;
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        assert!(ob.probes.running(STUCK));
+        ob.on_probe(Note::GaveUp { pid: STUCK, probe: old, retry: Retry::new(now) }, no_callback);
+        assert!(ob.pending.contains_key(&STUCK), "still waited for");
+        assert!(ob.probes.running(STUCK), "the fresh probe still asks");
+        ob.stop();
     }
 
     #[test]

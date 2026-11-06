@@ -52,22 +52,31 @@ pub fn ask_ax(pid: i32) -> Answer {
     }
 }
 
-/// What a probe tells the WM thread, once, when it stops.
+/// What a probe tells the WM thread, once, when it stops. `probe` names the probe that sent
+/// it ([`Probes::current`]): a note of a probe stopped before it came (observation stopped and
+/// started again, a cancelled logout) is not the running probe's word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Note {
     /// App `pid` answers now: observe it. `retry` is its schedule so far.
-    Answered { pid: i32, retry: Retry },
+    Answered { pid: i32, probe: u64, retry: Retry },
     /// App `pid` did not answer for [`crate::engine::observe_retry::GIVE_UP_AFTER`].
-    GaveUp { pid: i32, retry: Retry },
+    GaveUp { pid: i32, probe: u64, retry: Retry },
     /// App `pid`'s process is gone.
-    Gone { pid: i32 },
+    Gone { pid: i32, probe: u64 },
 }
 
 impl Note {
     /// The app the note is about.
     pub fn pid(&self) -> i32 {
         match *self {
-            Note::Answered { pid, .. } | Note::GaveUp { pid, .. } | Note::Gone { pid } => pid,
+            Note::Answered { pid, .. } | Note::GaveUp { pid, .. } | Note::Gone { pid, .. } => pid,
+        }
+    }
+
+    /// The probe that sent it.
+    pub fn probe(&self) -> u64 {
+        match *self {
+            Note::Answered { probe, .. } | Note::GaveUp { probe, .. } | Note::Gone { probe, .. } => probe,
         }
     }
 }
@@ -81,15 +90,17 @@ pub struct Probes {
     /// The fast cadence (the login settles), shared with every probe.
     fast: Arc<AtomicBool>,
     notify: Option<Notify>,
-    /// Each running probe's stop flag.
-    running: HashMap<i32, Arc<AtomicBool>>,
+    /// Each running probe's number and stop flag.
+    running: HashMap<i32, (u64, Arc<AtomicBool>)>,
+    /// The last probe's number: each probe started gets the next.
+    last: u64,
 }
 
 impl Probes {
     /// Probes asking `ask`; the fast cadence on until told otherwise (observation starts as
     /// the login settles, the restore window opening a moment after).
     pub fn new(ask: Ask) -> Self {
-        Self { ask, fast: Arc::new(AtomicBool::new(true)), notify: None, running: HashMap::new() }
+        Self { ask, fast: Arc::new(AtomicBool::new(true)), notify: None, running: HashMap::new(), last: 0 }
     }
 
     /// Where notes go; until set, probes are not started (the caller retries on its own).
@@ -117,6 +128,19 @@ impl Probes {
         self.running.contains_key(&pid)
     }
 
+    /// Whether `note` comes from the probe running for its app: false for one stopped before
+    /// its note came (the 1.7 review: an old probe's GaveUp, after observation started again,
+    /// stopped the fresh probe and gave the app up until it was activated).
+    pub fn current(&self, note: &Note) -> bool {
+        self.running.get(&note.pid()).is_some_and(|(probe, _)| *probe == note.probe())
+    }
+
+    /// Test only: the number of the probe asking `pid`.
+    #[cfg(test)]
+    pub fn probe_of(&self, pid: i32) -> Option<u64> {
+        self.running.get(&pid).map(|(probe, _)| *probe)
+    }
+
     /// Starts a probe of app `pid` keeping `retry`, first asking at `due`. False when none
     /// could start (no notify set, or the thread did not spawn); true when one runs (a
     /// probe already running keeps its own schedule).
@@ -126,19 +150,21 @@ impl Probes {
         }
         let Some(notify) = self.notify.clone() else { return false };
         let stop = Arc::new(AtomicBool::new(false));
+        let id = self.last + 1;
         let (ask, fast, flag) = (self.ask, self.fast.clone(), stop.clone());
         let spawned = std::thread::Builder::new().name("observe-probe".into()).spawn(move || {
-            let note = super::safety::guarded("an observe probe", || probe(pid, retry, due, ask, &fast, &flag));
+            let note = super::safety::guarded("an observe probe", || probe(pid, id, retry, due, ask, &fast, &flag));
             match note {
                 Some(Some(note)) => notify(note),
                 Some(None) => {}
                 // A panic: given up, so the WM thread forgets it (an activation tries again).
-                None => notify(Note::GaveUp { pid, retry }),
+                None => notify(Note::GaveUp { pid, probe: id, retry }),
             }
         });
         match spawned {
             Ok(_) => {
-                self.running.insert(pid, stop);
+                self.last = id;
+                self.running.insert(pid, (id, stop));
                 true
             }
             Err(e) => {
@@ -150,14 +176,14 @@ impl Probes {
 
     /// The probe of `pid` stopped (its note came) or must stop (its app quit, or was observed).
     pub fn stop(&mut self, pid: i32) {
-        if let Some(flag) = self.running.remove(&pid) {
+        if let Some((_, flag)) = self.running.remove(&pid) {
             flag.store(true, Ordering::Relaxed);
         }
     }
 
     /// Every probe stops (observation stopped).
     pub fn stop_all(&mut self) {
-        for (_, flag) in self.running.drain() {
+        for (_, (_, flag)) in self.running.drain() {
             flag.store(true, Ordering::Relaxed);
         }
     }
@@ -166,9 +192,10 @@ impl Probes {
 /// The longest a probe sleeps between looks at its stop flag.
 const NAP: Duration = Duration::from_millis(50);
 
-/// One probe's life: asks `pid` at `due`, then on `retry`'s schedule, until it answers, its
-/// process goes, the schedule gives up, or `stop` is set (no note then).
-fn probe(pid: i32, mut retry: Retry, mut due: Instant, ask: Ask, fast: &AtomicBool, stop: &AtomicBool) -> Option<Note> {
+/// One probe's life (probe number `id`): asks `pid` at `due`, then on `retry`'s schedule,
+/// until it answers, its process goes, the schedule gives up, or `stop` is set (no note then,
+/// also when it is set during an ask).
+fn probe(pid: i32, id: u64, mut retry: Retry, mut due: Instant, ask: Ask, fast: &AtomicBool, stop: &AtomicBool) -> Option<Note> {
     loop {
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -180,12 +207,16 @@ fn probe(pid: i32, mut retry: Retry, mut due: Instant, ask: Ask, fast: &AtomicBo
             }
             std::thread::sleep((due - now).min(NAP));
         }
-        match ask(pid) {
-            Answer::Answers => return Some(Note::Answered { pid, retry }),
-            Answer::Gone => return Some(Note::Gone { pid }),
+        let answer = ask(pid);
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        match answer {
+            Answer::Answers => return Some(Note::Answered { pid, probe: id, retry }),
+            Answer::Gone => return Some(Note::Gone { pid, probe: id }),
             Answer::NotYet => match retry.missed(Instant::now(), fast.load(Ordering::Relaxed)) {
                 Next::At(at) => due = at,
-                Next::GiveUp => return Some(Note::GaveUp { pid, retry }),
+                Next::GiveUp => return Some(Note::GaveUp { pid, probe: id, retry }),
             },
         }
     }
@@ -289,7 +320,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         let (note, at) = answered;
-        assert!(matches!(note, Note::Answered { pid: LATE, retry } if retry.misses() == 2));
+        assert!(matches!(note, Note::Answered { pid: LATE, retry, .. } if retry.misses() == 2));
         // Two misses at the fast cadence: about 2 × 150 ms, never behind the stuck app's
         // 250 ms waits (it would be 750 ms and more if they took turns).
         let took = at.duration_since(t0);
@@ -303,6 +334,27 @@ mod tests {
             notes.lock().unwrap_or_else(|e| e.into_inner()).iter().all(|(n, _)| n.pid() != STUCK),
             "a stopped probe sends nothing"
         );
+    }
+
+    /// The 1.7 review: a probe stopped before its note came (observation stopped and started
+    /// again) is not the running probe; a new probe of the same app is.
+    #[test]
+    fn only_the_running_probes_note_is_current() {
+        let (notify, _notes) = collecting();
+        let mut probes = Probes::new(fake);
+        probes.set_notify(notify);
+        let t0 = Instant::now();
+        assert!(probes.start(STUCK, Retry::new(t0), t0));
+        let old = probes.running[&STUCK].0;
+        let old_note = Note::GaveUp { pid: STUCK, probe: old, retry: Retry::new(t0) };
+        assert!(probes.current(&old_note));
+        probes.stop_all();
+        assert!(!probes.current(&old_note), "stopped: no probe runs");
+        assert!(probes.start(STUCK, Retry::new(t0), t0));
+        assert!(!probes.current(&old_note), "the old probe's note is not the new one's");
+        let new = probes.running[&STUCK].0;
+        assert!(probes.current(&Note::GaveUp { pid: STUCK, probe: new, retry: Retry::new(t0) }));
+        probes.stop_all();
     }
 
     #[test]
