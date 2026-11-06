@@ -137,7 +137,8 @@ owner's Mac: a 5K Studio Display main, the MacBook's screen to its left, "Displa
 separate Spaces" on): a strip on the left edge of each screen, its cards sized and counted
 for that screen (6 on the 5K, 5 on the laptop), each screen with its own front stage and
 cards, each strip sliding away under its own windows. A window dragged to another screen
-starts a stage of its own there, in front; the stage that was in front there goes to a
+starts a stage of its own there, in front, once it is let go (nothing changes under the
+hand, however slow the drag across the seam); the stage that was in front there goes to a
 card; the screen it left, its front stage now empty, brings its most recent card forward. A
 card click changes only its own screen. A new app opens on the screen with keyboard focus,
 as its own stage there, by the one-screen rules (macOS picks the screen; the window is
@@ -149,12 +150,14 @@ too, after the remaining screen's own (past the capacity, hidden); its hidden wi
 at the remaining screen's corner. macOS may put the closed screen's windows on another of
 the remaining screen's Desktops and slide to it (the owner's 11-05: the 5K went to its
 second Desktop, not shown since the launch): the same rule holds there, the closed screen's
-stages whole, that Desktop's own front a card (round displays-lid). Nothing joins: the
+stages whole, that Desktop's own front a card (round displays-lid), also when macOS
+announces the Desktop still shown before it slides. Nothing joins: the
 closed screen's strip goes with it, each card is one stage, its front window shows, and
 the hidden windows macOS pushes whole onto the remaining screen at the change go back to its
 corner (round displays-lid-2). The app macOS activates after the change (Mail, 0.4 s
 after the screen went) switches nothing: with no click or key press since, an activation
-or focus in the 10 s after a display change is macOS's, and the closed screen's front stays
+or focus in the 10 s after a display change (heard as macOS announces it, not at the next
+second's look) is macOS's, and the closed screen's front stays
 in front. So is a window found then (macOS lists windows of the remaining screen's other
 Desktop for a moment): it is placed once the change settles, if it still shows, and one
 gone by then leaves no stage or card (round displays-lid-4). A Desktop the closed screen's front left for the one macOS slid to shows its own
@@ -177,7 +180,10 @@ picture for the cards' glass, each screen's hidden corner has a patch of its own
 that screen's desktop where Screen Recording is allowed, else its own wallpaper's file),
 `[windows] fit` keeps a window clear of its own screen's strip, a ⌘-Tab or Dock click to a
 Desktop on either screen arranges that Desktop ahead of its slide, and a full-screen app or
-Mission Control on one screen stops nothing on the other (round displays-2). `[displays]
+Mission Control on one screen stops nothing on the other (round displays-2). The main
+screen changing (the menu bar moved to the other screen, or the lid closed with the laptop
+main) moves no stage: macOS moves every window with its screen, and each hidden window
+comes back where it was on its screen. `[displays]
 main_only` (off) is the first version's behaviour: only the main screen, a window moved off
 it left alone.
 

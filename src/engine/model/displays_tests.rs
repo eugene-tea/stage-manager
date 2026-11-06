@@ -508,6 +508,74 @@ fn a_screen_plugged_in_again_under_a_new_id_is_the_same_screen() {
     assert_eq!(e.m.active_stage(STUDIO), Some(code));
 }
 
+/// The menu bar moved to the laptop (Displays: the laptop made the main display): global
+/// coordinates start at its top-left now, so both screens' frames move by (1800, -271), and
+/// macOS moves every window along with its screen. Returns (the laptop, the Studio).
+fn main_moved_to_laptop() -> (Display, Display) {
+    let (lf, lv) = (Rect::new(0.0, 0.0, 1800.0, 1169.0), Rect::new(0.0, 39.0, 1800.0, 1130.0));
+    let (sf, sv) = (Rect::new(1800.0, -271.0, 2560.0, 1440.0), Rect::new(1800.0, -246.0, 2560.0, 1415.0));
+    let laptop = Display { id: LAPTOP, key: LAPTOP_KEY, frame: lf, visible: lv, corner: choose_corner(lf, lv, &[sf]).corner };
+    let studio = Display { id: STUDIO, key: STUDIO_KEY, frame: sf, visible: sv, corner: choose_corner(sf, sv, &[lf]).corner };
+    (laptop, studio)
+}
+
+#[test]
+fn the_main_display_changing_moves_every_cards_frames_with_its_screen() {
+    // The review's two-screens 1: the restore and pre-fit frames of parked windows stayed in
+    // the old coordinates, so a card came back about a screen off (on the laptop).
+    let mut e = Env::both();
+    let [_, music, _, chrome, _] = measured_desk(&mut e);
+    let fitted = Rect::new(150.0, 125.0, 900.0, 600.0);
+    e.m.windows.get_mut(&WindowId(3)).expect("Music").original = Some(fitted);
+    let before: Vec<Rect> = [3, 4, 5].iter().map(|id| e.m.window(WindowId(*id)).expect("managed").restore).collect();
+    let (dx, dy) = (1800.0, -271.0);
+    for f in e.d.frames.values_mut() {
+        *f = f.translate(dx, dy);
+    }
+    let (new_laptop, new_studio) = main_moved_to_laptop();
+    let a = e.m.set_displays(vec![new_laptop, new_studio]);
+    e.run(a);
+    for (id, was) in [3, 4, 5].iter().zip(&before) {
+        let w = e.m.window(WindowId(*id)).expect("managed");
+        assert_eq!(w.restore, was.translate(dx, dy), "w{id} comes back where it was on its screen");
+        assert!(w.parked);
+    }
+    assert_eq!(e.m.window(WindowId(3)).and_then(|w| w.original), Some(fitted.translate(dx, dy)), "its pre-fit frame too");
+    assert!(e.parked_on(3, &new_studio) && e.parked_on(5, &new_laptop), "parked at each screen's corner");
+    let a = e.switch(music);
+    let shown = a.iter().find_map(|x| match x {
+        Action::SetFrame { id, frame } if *id == WindowId(3) => Some(*frame),
+        _ => None,
+    });
+    assert_eq!(shown, Some(before[0].translate(dx, dy)), "Music shows on the Studio, not the laptop");
+    let a = e.switch(chrome);
+    assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, frame } if *id == WindowId(5) && *frame == before[2].translate(dx, dy))));
+}
+
+#[test]
+fn the_lid_closed_with_the_laptop_main_moves_the_studios_cards_with_it() {
+    // The MacBook the main display, the Studio beside it: the lid closed makes the Studio
+    // main, its top-left the origin now. Its own cards move by its origin's change; the
+    // laptop's are carried onto it as before.
+    let (laptop_main, studio_beside) = main_moved_to_laptop();
+    let mut e = Env { m: Model::new(vec![laptop_main, studio_beside], ModelOptions::default()), d: Desk::default() };
+    e.open(1, 10, &studio_beside, (200.0, 100.0), RuleAction::Current);
+    e.open(3, 12, &studio_beside, (900.0, 300.0), RuleAction::New);
+    let front = e.stage_of(1);
+    e.switch(front);
+    e.open(5, 20, &laptop_main, (100.0, 100.0), RuleAction::Current);
+    let music = e.m.window(WindowId(3)).expect("Music").restore;
+    assert!(e.m.window(WindowId(3)).is_some_and(|w| w.parked));
+    for f in e.d.frames.values_mut() {
+        *f = f.translate(-1800.0, 271.0);
+    }
+    let a = e.m.set_displays(vec![studio()]);
+    e.run(a);
+    assert_eq!(e.m.window(WindowId(3)).map(|w| w.restore), Some(music.translate(-1800.0, 271.0)), "Music where it was on the Studio");
+    let chrome = e.m.window(WindowId(5)).map(|w| w.restore).expect("Chrome");
+    assert!(studio().visible.contains_rect(&chrome), "{chrome:?} carried onto the Studio");
+}
+
 #[test]
 fn main_only_keeps_the_main_screen_alone_and_lets_a_moved_window_go() {
     let options = ModelOptions { main_only: true, ..ModelOptions::default() };
@@ -888,6 +956,43 @@ fn closed_on_the_second(e: &mut Env) -> (SpaceId, StageId, StageId, StageId) {
     assert_eq!(e.space_of(STUDIO), second);
     assert_eq!(e.m.active_stage(STUDIO), Some(chrome));
     (second, chrome, reminders, finder)
+}
+
+#[test]
+fn a_notice_of_the_same_desktop_before_macos_slides_keeps_the_laptops_stages_whole() {
+    // The review's two-screens 5: macOS's Space notice for the Desktop still shown, heard
+    // between the lid's change and its slide to the second Desktop, forgot which windows
+    // came from the laptop; the slide's arrival then joined them into their apps' stages.
+    let mut e = Env::both();
+    let (first, second, chrome, reminders, finder) = evening_desk(&mut e);
+    let before = groups(&e.m);
+    e.d.frames.insert(WindowId(31), Rect::new(300.0, 200.0, 800.0, 600.0));
+    let a = e.m.set_displays(vec![studio()]);
+    e.run(a);
+    let mut on_first: Vec<u32> = FIRST.to_vec();
+    on_first.extend(LAPTOP_WINDOWS);
+    let live = listed(&e, &on_first);
+    let a = e.m.arrive(STUDIO, &live, &[], &LaunchHints::default());
+    e.run(a);
+    assert_eq!(e.space_of(STUDIO), first, "the same Desktop");
+    for id in FIRST {
+        e.d.frames.remove(&WindowId(id));
+    }
+    e.d.frames.extend(SECOND_FRAMES.with(|f| f.borrow().clone()));
+    let mut on_second: Vec<u32> = SECOND.to_vec();
+    on_second.extend(LAPTOP_WINDOWS);
+    let live = listed(&e, &on_second);
+    let a = e.m.arrive(STUDIO, &live, &FIRST.map(WindowId), &LaunchHints::default());
+    e.run(a);
+    assert_eq!(e.space_of(STUDIO), second);
+    assert_eq!(e.m.last_arrival().carried, 3, "{:?}", e.m.last_arrival());
+    assert_eq!(e.m.active_stage(STUDIO), Some(chrome), "the laptop's front in front there");
+    assert_eq!(groups(&e.m), before, "nothing joins");
+    for s in [chrome, reminders, finder] {
+        assert_eq!(e.m.stage(s).map(|s| s.space), Some(second));
+    }
+    // Carried: forgotten now, so going back to the first Desktop carries nothing back.
+    assert!(e.m.adopted.is_empty());
 }
 
 #[test]

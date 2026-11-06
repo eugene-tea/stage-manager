@@ -188,6 +188,7 @@ mod app {
         displays: Vec<Display>,
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
+        _screens: WorkspaceObservers,
         _appearance: WorkspaceObservers,
         _power_off: apps::LogoutObservers,
         input: Option<InputMonitor>,
@@ -291,7 +292,8 @@ mod app {
         }
 
         /// Every display (the main one first), sent when any changes: added, removed, moved,
-        /// resized, or its park corner moved (round displays).
+        /// resized, or its park corner moved (round displays). Read at every poll and at once
+        /// on AppKit's screen-parameters notice ([`apps::observe_screen_parameters`]).
         fn send_display_if_changed(&mut self) {
             let Some(mtm) = MainThreadMarker::new() else { return };
             let displays = desktop::displays(mtm);
@@ -314,7 +316,7 @@ mod app {
             self.displays = displays.clone();
             let ids: Vec<u32> = displays.iter().map(|d| d.id.0).collect();
             strip::displays_changed(&ids);
-            self.wm.send(WmCommand::Displays(displays));
+            self.wm.send(WmCommand::Displays(displays, Instant::now()));
             stage_manager::ui::corner_patch::display_changed(mtm, &ids);
         }
 
@@ -833,6 +835,12 @@ mod app {
             }
             wm_spaces.send(WmCommand::SpaceChanged);
         });
+        // A display change heard as AppKit has it, not up to a second later at the poll: its
+        // settle starts before macOS's activation that follows it (Mail, 0.4 s after the lid).
+        let screens = apps::observe_screen_parameters(|| {
+            tracing::debug!("screen parameters changed: the displays are read now");
+            with_app(App::send_display_if_changed);
+        });
         let appearance = apps::observe_appearance(|| {
             // Windows that follow the system's appearance change with it: read again.
             stage_manager::platform::window_look::appearance_changed();
@@ -897,6 +905,7 @@ mod app {
             displays: Vec::new(),
             _workspace: workspace,
             _spaces: spaces,
+            _screens: screens,
             _appearance: appearance,
             _power_off: power_off,
             input: input_monitor,

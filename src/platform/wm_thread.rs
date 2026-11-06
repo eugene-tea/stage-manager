@@ -108,8 +108,9 @@ pub enum WmCommand {
     Accessibility(bool),
     /// Fresh `com.apple.WindowManager` values.
     NativeSettings(RawSettings),
-    /// The main display (first) and its visible frame, top-left coordinates.
-    Displays(Vec<Display>),
+    /// Every display (the main one first), top-left coordinates, and when the main thread
+    /// heard the change (AppKit's screen-parameters notice, or the poll).
+    Displays(Vec<Display>, Instant),
     /// Global input in another app (left mouse down/up, key down); for a mouse-up over the
     /// visible strip, the slot a window dropped there goes to.
     Input(InputEvent, Option<StripDrop>),
@@ -441,13 +442,13 @@ impl WmState {
                 tracing::debug!("Apple's Stage Manager is on: input ignored");
             }
             WmCommand::SpaceChanged if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
-            WmCommand::Displays(displays) => {
+            WmCommand::Displays(displays, heard) => {
                 let moved = self.displays.as_ref().and_then(|d| d.first()).map(|d| d.frame) != displays.first().map(|d| d.frame);
                 if moved && self.displays.is_some() {
                     self.display_sweep = Some(Instant::now() + DISPLAY_SWEEP_AFTER);
                 }
                 self.displays = Some(displays.clone());
-                self.controller.set_displays(&mut self.observer, displays);
+                self.controller.set_displays(&mut self.observer, displays, heard);
             }
             // Without Accessibility no window can move: a stage change now would leave the
             // model out of step with the screen (its parked windows unregistered), so the
@@ -541,7 +542,7 @@ impl WmState {
                 Task::NewController => self.controller = Controller::new(),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.controller.set_displays(&mut self.observer, d);
+                        self.controller.set_displays(&mut self.observer, d, Instant::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -612,7 +613,7 @@ impl WmState {
                 Task::NewController => self.controller = Controller::new(),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.controller.set_displays(&mut self.observer, d);
+                        self.controller.set_displays(&mut self.observer, d, Instant::now());
                     }
                 }
                 Task::ReplaySettings => {

@@ -632,7 +632,13 @@ impl Model {
             self.bring_front(target, f, &mut more);
             actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown.contains(id))));
         }
-        if display == self.main_display().id {
+        // The removed display's windows are waited for until macOS shows them elsewhere:
+        // carried here, or this is another Desktop than theirs (they stayed where they were
+        // adopted). A notice of the Desktop they are on (macOS's, before its slide) keeps
+        // them, so the slide's arrival carries them whole (the review's two-screens 5).
+        if display == self.main_display().id
+            && (carried_adopted > 0 || !self.adopted.iter().any(|id| self.windows.get(id).is_some_and(|w| w.space == target)))
+        {
             self.adopted.clear();
         }
         // Windows carried with their stages are not counted as moved one by one.

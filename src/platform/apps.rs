@@ -1,6 +1,7 @@
 //! Running applications from `NSWorkspace`: a snapshot of regular apps and the launch /
 //! terminate / activate / hide / unhide notifications, observed on the main thread and handed
 //! on as plain Rust values; the active Space changing (`activeSpaceDidChangeNotification`);
+//! the screens changing (`didChangeScreenParametersNotification`);
 //! and hiding or unhiding an app by its pid (`NSRunningApplication`, public API, any thread),
 //! for `[windows] hide_parked_apps`; a logout, restart or shutdown coming or cancelled
 //! ([`observe_logout`]: `loginwindow`'s distributed notifications and notify(3) names, and
@@ -17,7 +18,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+    NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
     NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidHideApplicationNotification,
     NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
     NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillPowerOffNotification,
@@ -147,6 +148,28 @@ pub fn observe_space_changes(sink: impl Fn() + 'static) -> WorkspaceObservers {
     let token = unsafe {
         center.addObserverForName_object_queue_usingBlock(
             Some(NSWorkspaceActiveSpaceDidChangeNotification),
+            None,
+            Some(&main_queue),
+            &block,
+        )
+    };
+    WorkspaceObservers { center, tokens: vec![token] }
+}
+
+/// Observes `NSApplicationDidChangeScreenParametersNotification` on the main queue: a
+/// display came or went, moved, changed its resolution, or the menu bar or the Dock moved to
+/// another screen. Calls `sink` each time, as AppKit has the new screens (the review's
+/// two-screens 2: heard only by the once-a-second poll before, a change could be up to a
+/// second old when its settle began, and macOS's activation after it switch stages).
+pub fn observe_screen_parameters(sink: impl Fn() + 'static) -> WorkspaceObservers {
+    let center = NSNotificationCenter::defaultCenter();
+    let main_queue = NSOperationQueue::mainQueue();
+    let block = RcBlock::new(move |_note: NonNull<NSNotification>| sink());
+    // SAFETY: the notification name is a valid framework static; the block runs on the
+    // main queue only, where `sink` lives.
+    let token = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(NSApplicationDidChangeScreenParametersNotification),
             None,
             Some(&main_queue),
             &block,

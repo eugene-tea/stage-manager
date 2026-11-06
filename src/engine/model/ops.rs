@@ -1494,8 +1494,10 @@ impl Model {
     /// (resolution, scaling, a Dock moved) re-parks the parked windows of a Space shown on it
     /// at its corner (V1-A) and keeps every restore frame out of its park zone; parked
     /// windows of Spaces not shown are parked again when their Space shows
-    /// ([`Model::arrive`]). With `[displays] main_only` only the first display is kept. An
-    /// empty list is ignored.
+    /// ([`Model::arrive`]). A display whose origin moved (the main display changed) moves its
+    /// parked windows' restore and pre-fit frames by the same offset, as macOS moves the
+    /// windows. With `[displays] main_only` only the first display is kept. An empty list is
+    /// ignored.
     ///
     /// [`ScreenKey`]: crate::engine::displays::ScreenKey
     pub fn set_displays(&mut self, displays: Vec<Display>) -> Vec<Action> {
@@ -1538,6 +1540,23 @@ impl Model {
             .filter(|d| before.iter().any(|o| o.id == d.id && (o.frame != d.frame || o.visible != d.visible || o.corner != d.corner)))
             .map(|d| d.id)
             .collect();
+        // A display whose origin moved (the menu bar went to another screen: global
+        // coordinates start at the main display's top-left; the arrangement changed) has
+        // its windows moved along by macOS, on every Desktop. A parked window's frames are
+        // not read while it is parked, so its restore and pre-fit frames move by the same
+        // offset here, before a removed display's windows are carried onto it (theirs are
+        // in the new coordinates already). A shown window's are read again as it is seen.
+        for d in &displays {
+            let Some(o) = before.iter().find(|o| o.id == d.id) else { continue };
+            let (dx, dy) = (d.frame.x - o.frame.x, d.frame.y - o.frame.y);
+            if dx == 0.0 && dy == 0.0 {
+                continue;
+            }
+            for w in self.windows.values_mut().filter(|w| w.parked && w.meta.display == d.id) {
+                w.restore = w.restore.translate(dx, dy);
+                w.original = w.original.map(|f| f.translate(dx, dy));
+            }
+        }
         let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
         let removed = !gone.is_empty();
         self.displays = displays;

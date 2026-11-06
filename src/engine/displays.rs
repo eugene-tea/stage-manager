@@ -137,6 +137,15 @@ pub fn macos_after_display_change(since_change: Option<Duration>, since_press: D
     since_change.is_some_and(|c| c < settle && since_press >= c)
 }
 
+/// True when windows found on another display than the model's, in enough checks in a row,
+/// move there now: never while the left mouse button is down (a window dragged slowly across
+/// the seam changes stage when it is let go, not under the hand; the review's two-screens 3),
+/// except within the settle of a display change, when the moves are macOS's
+/// ([`displays_changed`]) and a press held then is no drag of a window.
+pub fn display_moves_now(button_down: bool, settling: bool) -> bool {
+    !button_down || settling
+}
+
 /// True when `frame` shows more of itself on one of `others` than on `main` (ties go to the
 /// main display).
 pub fn on_other_display(frame: Rect, main: Rect, others: &[Rect]) -> bool {
@@ -156,13 +165,15 @@ pub fn off_every_display(frame: Rect, displays: &[Rect]) -> bool {
 /// True when a window the window server lists at `frame` is off every display and so not the
 /// user's (module docs): never taken in, and let go when managed. `displays` is every active
 /// display, the main one first; `managed`: the model manages the window, whose frame in a
-/// park zone of the main display is ours (a parked window, wholly beyond the edges with a
+/// park zone of any display is ours (a parked window, wholly beyond the edges with a
 /// negative `park_inside`), never judged here. Only where the window is counts: an untitled
 /// `AXUnknown` window on a display is managed as before (a child, by Apple's rule); one that
-/// comes onto a display by itself is taken in then, as a new window.
+/// comes onto a display by itself is taken in then, as a new window. A park zone of any
+/// display counts: every screen parks its hidden stages at a corner of its own (round
+/// displays), so a window parked beyond a screen above the main one is ours as much as one
+/// beyond the main screen's corner.
 pub fn off_screen_not_ours(frame: Rect, displays: &[Rect], managed: bool) -> bool {
-    let Some(main) = displays.first() else { return false };
-    off_every_display(frame, displays) && !(managed && is_parked_anywhere(frame, *main))
+    off_every_display(frame, displays) && !(managed && displays.iter().any(|d| is_parked_anywhere(frame, *d)))
 }
 
 #[cfg(test)]
@@ -187,6 +198,13 @@ mod tests {
 
     /// 11-05 20:25:46: the lid closed at 46.44, Mail activated by macOS at 46.81 with no
     /// press since; the owner's own click at 49.70 and a ⌘-Tab are his.
+    #[test]
+    fn a_window_dragged_across_the_seam_moves_when_it_is_let_go() {
+        assert!(!display_moves_now(true, false), "the button still down: the drag goes on");
+        assert!(display_moves_now(false, false), "let go: it moves");
+        assert!(display_moves_now(true, true), "macOS's moves after a display change");
+    }
+
     #[test]
     fn an_activation_after_a_display_change_with_no_press_since_is_macos() {
         let settle = Duration::from_secs(10);
@@ -235,6 +253,20 @@ mod tests {
         let seen = [HEADLESS, Rect::new(-10_000.0, -10_180.0, 1440.0, 900.0), Rect::new(100.0, 100.0, 1440.0, 900.0)];
         let taken: Vec<bool> = seen.iter().map(|f| !off_screen_not_ours(*f, &[MAIN], false)).collect();
         assert_eq!(taken, vec![false, false, true]);
+    }
+
+    #[test]
+    fn a_window_we_parked_beyond_the_second_screens_corner_stays_ours() {
+        // The review's two-screens 4: `park_inside` below 0, a screen above the main one
+        // parking at its top-right corner: wholly beyond its edges, off every display, and in
+        // no park zone of the main screen's.
+        let above = Rect::new(0.0, -1080.0, 1920.0, 1080.0);
+        let parked = Rect::new(1921.0, -1080.0, 800.0, 600.0);
+        assert!(off_every_display(parked, &[MAIN, above]));
+        assert!(!is_parked_anywhere(parked, MAIN));
+        assert!(!off_screen_not_ours(parked, &[MAIN, above], true), "ours: never let go hidden");
+        assert!(off_screen_not_ours(parked, &[MAIN, above], false), "never managed: not taken in");
+        assert!(off_screen_not_ours(HEADLESS, &[MAIN, above], true), "a headless window still is not ours");
     }
 
     #[test]

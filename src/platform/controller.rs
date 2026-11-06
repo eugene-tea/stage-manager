@@ -99,7 +99,7 @@ use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply
 use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
-use crate::engine::displays::{display_of, off_every_display, off_screen_not_ours, on_other_display};
+use crate::engine::displays::{display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display};
 use crate::engine::early_start;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
@@ -5186,7 +5186,9 @@ impl Controller {
     /// moving windows back to a screen that came back), move there
     /// ([`Model::windows_moved_to_display`]: a stage of its own there, in front; one macOS
     /// lists in that display's park zone a card there, still). A parked window in its own
-    /// display's park zone never counts, whatever shows of it on a screen beyond. Within
+    /// display's park zone never counts, whatever shows of it on a screen beyond. Nothing
+    /// moves while the left button is down ([`display_moves_now`]): a slow drag across the
+    /// seam changes stage when the window is let go. Within
     /// [`DISPLAY_SETTLE`] of a display change the moves are macOS's, not the user's drag, and
     /// the log says so. The default (round displays); with `[displays] main_only`
     /// [`Self::leave_other_displays`] runs instead.
@@ -5224,7 +5226,9 @@ impl Controller {
                 moves.push((WindowId(id), d, bounds));
             }
         }
-        if moves.is_empty() {
+        // A drag across the seam goes on: decided at the first check after the button comes
+        // up (its count kept), where the window is let go.
+        if moves.is_empty() || !display_moves_now(input::left_button_down(), self.displays_settling()) {
             return;
         }
         for (id, _, _) in &moves {
@@ -5503,8 +5507,10 @@ impl Controller {
 
     /// The displays changed (or were first reported): every screen, the main one first
     /// (round displays; the main one alone with `[displays] main_only`). Every screen's park
-    /// zone reaches the safety paths, and each screen's strip gets its own capacity.
-    pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>) {
+    /// zone reaches the safety paths, and each screen's strip gets its own capacity. `heard`:
+    /// when the main thread heard the change, where its settle begins ([`DISPLAY_SETTLE`]),
+    /// however long this thread took to come to it.
+    pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>, heard: Instant) {
         self.flush_pending(ob);
         let mut displays = displays;
         let config = self.store.config().clone();
@@ -5520,17 +5526,19 @@ impl Controller {
             // A display came, went or moved (never the launch's first reading): what the
             // checks counted as moves before it is stale, and the moves, activations and
             // focuses that follow are macOS's ([`DISPLAY_SETTLE`]).
-            self.displays_changed_at = Some(Instant::now());
+            self.displays_changed_at = Some(heard);
             self.elsewhere.clear();
         }
         self.displays = displays.clone();
         let mut actions = Vec::new();
         if let Some(m) = self.model.as_mut() {
-            actions = m.set_displays(displays);
-            Self::read_desktop_counts(m);
-            for d in m.displays().to_vec() {
+            // Each strip's capacity first: a removed display's stages are counted against
+            // the remaining one's capacity as it is now (its Dock, its size), not as it was.
+            for d in displays.iter().filter(|d| d.visible.is_finite()) {
                 m.set_display_capacity(d.id, strip_capacity(d.visible, &config));
             }
+            actions = m.set_displays(displays);
+            Self::read_desktop_counts(m);
         }
         if self.model.is_some() {
             self.sync_fit();
