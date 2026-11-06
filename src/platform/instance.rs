@@ -13,12 +13,13 @@
 //! - a copy answers `ping`: hand off (it shows its Settings, unless it started moments ago:
 //!   two launches at login, [`HANDOFF_QUIET`]; or the login is less than [`LOGIN_QUIET`] old;
 //!   or this copy is launchd's, [`super::login_item::Started::Agent`]) and leave;
-//! - a copy answers that it is quitting (bringing its windows back): wait for as long as it
-//!   takes, then manage (a relaunch during a quit must not leave nothing running);
+//! - a copy answers that it is quitting (bringing its windows back): wait until it is gone,
+//!   then manage (a relaunch during a quit must not leave nothing running), for at most
+//!   [`QUIT_WAIT`]: a quit that hangs past it is left alone, as a hung copy is;
 //! - the lock is held by a process that does not answer: wait while it lives if it answered
-//!   before (a copy quitting removes its socket last, right before it exits); one that never
-//!   answered at all (starting and not bound yet, or hung) is waited for [`LOCK_WAIT`], then
-//!   left alone;
+//!   before (a copy quitting removes its socket last, right before it exits), for at most
+//!   [`QUIT_WAIT`] too; one that never answered at all (starting and not bound yet, or hung)
+//!   is waited for [`LOCK_WAIT`], then left alone;
 //! - otherwise (the lock is ours, or no lock can be had at all and nothing answers): manage.
 //!
 //! An error reply to `ping` is not an answer.
@@ -36,6 +37,12 @@ use super::{ctl, paths};
 
 /// How long a launch waits for a copy holding the lock that never answered (starting, hung).
 pub const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a launch waits for a copy that said it is quitting (the 1.7 review: one that hung
+/// after saying so kept a relaunch waiting forever, nothing managing and nothing said). A quit
+/// takes at most about 45 s (the WM thread's unpark, 30 s at most, the leftovers check, the
+/// signal watcher's fallback after that); past twice that the copy is taken as hung.
+pub const QUIT_WAIT: Duration = Duration::from_secs(90);
 
 /// How often the lock is tried again while waiting.
 const LOCK_RETRY: Duration = Duration::from_millis(100);
@@ -133,18 +140,21 @@ pub enum Launch {
     HandOff,
     /// Another copy is quitting, or holds the lock without answering: try again shortly.
     Wait,
-    /// Another copy held the lock without ever answering for all of [`LOCK_WAIT`]: leave.
+    /// Another copy held the lock without ever answering for all of [`LOCK_WAIT`], or was
+    /// quitting for all of [`QUIT_WAIT`]: leave.
     Leave,
 }
 
 /// The launch decision (module docs): `lock` as tried, what `ping` found, what is known of
-/// the lock's holder, and whether [`LOCK_WAIT`] is over.
-pub fn decide(lock: Lock, peer: Peer, holder: Holder, waited_out: bool) -> Launch {
+/// the lock's holder, and how long this launch has `waited` ([`LOCK_WAIT`], [`QUIT_WAIT`]).
+pub fn decide(lock: Lock, peer: Peer, holder: Holder, waited: Duration) -> Launch {
+    // A copy quitting: it says so, or it said so and still holds the lock (its socket gone).
+    let quit_wait = if waited >= QUIT_WAIT { Launch::Leave } else { Launch::Wait };
     match (lock, peer) {
         (_, Peer::Answers) => Launch::HandOff,
-        (_, Peer::Quitting) => Launch::Wait,
-        (Lock::Busy, Peer::Silent) if holder.answered && holder.alive => Launch::Wait,
-        (Lock::Busy, Peer::Silent) if waited_out => Launch::Leave,
+        (_, Peer::Quitting) => quit_wait,
+        (Lock::Busy, Peer::Silent) if holder.answered && holder.alive => quit_wait,
+        (Lock::Busy, Peer::Silent) if waited >= LOCK_WAIT => Launch::Leave,
         (Lock::Busy, Peer::Silent) => Launch::Wait,
         (Lock::Held | Lock::Unavailable, Peer::Silent) => Launch::Manage,
     }
@@ -250,7 +260,7 @@ pub fn claim() -> Launch {
             Lock::Busy => Holder { answered, alive: holder_pid().or(ping_pid).is_some_and(alive) },
             Lock::Held | Lock::Unavailable => Holder::default(),
         };
-        let launch = decide(lock, pong.peer, holder, start.elapsed() >= LOCK_WAIT);
+        let launch = decide(lock, pong.peer, holder, start.elapsed());
         match launch {
             Launch::Manage => {
                 if let Some(mut f) = file {
@@ -291,6 +301,14 @@ pub fn claim() -> Launch {
                 }
                 std::thread::sleep(LOCK_RETRY);
             }
+            Launch::Leave if answered => {
+                tracing::error!(
+                    lock = %lock_path().display(),
+                    waited_s = start.elapsed().as_secs(),
+                    "another Stage Manager said it was quitting and is still not gone; not starting a second one (quit it in Activity Monitor, then open Stage Manager again)"
+                );
+                return launch;
+            }
             Launch::Leave => {
                 tracing::error!(
                     lock = %lock_path().display(),
@@ -310,19 +328,21 @@ mod tests {
     const SILENT_LIVE: Holder = Holder { answered: false, alive: true };
     const GONE: Holder = Holder { answered: true, alive: false };
 
+    const NOW: Duration = Duration::ZERO;
+
     #[test]
     fn one_copy_manages() {
-        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), false), Launch::Manage, "the lock is ours, nothing answers");
-        assert_eq!(decide(Lock::Unavailable, Peer::Silent, Holder::default(), false), Launch::Manage, "no lock to be had: the socket decides");
+        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), NOW), Launch::Manage, "the lock is ours, nothing answers");
+        assert_eq!(decide(Lock::Unavailable, Peer::Silent, Holder::default(), NOW), Launch::Manage, "no lock to be had: the socket decides");
     }
 
     #[test]
     fn a_copy_that_answers_gets_the_hand_off_lock_or_not() {
         for lock in [Lock::Held, Lock::Busy, Lock::Unavailable] {
-            assert_eq!(decide(lock, Peer::Answers, Holder::default(), false), Launch::HandOff, "{lock:?}");
+            assert_eq!(decide(lock, Peer::Answers, Holder::default(), NOW), Launch::HandOff, "{lock:?}");
         }
         // An earlier version takes no lock: ours, but it answers.
-        assert_eq!(decide(Lock::Held, Peer::Answers, Holder::default(), true), Launch::HandOff);
+        assert_eq!(decide(Lock::Held, Peer::Answers, Holder::default(), QUIT_WAIT), Launch::HandOff);
     }
 
     /// The review of 8A, M1: a relaunch while a copy quits waits for it (its quit can take
@@ -331,12 +351,26 @@ mod tests {
     #[test]
     fn a_quitting_copy_is_waited_for_then_this_one_manages() {
         for lock in [Lock::Held, Lock::Busy, Lock::Unavailable] {
-            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), true), Launch::Wait, "{lock:?}, past the bound");
+            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), LOCK_WAIT), Launch::Wait, "{lock:?}, past the lock's bound");
         }
         // It removed its socket and still holds the lock: waited for while it lives.
-        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, true), Launch::Wait);
+        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, LOCK_WAIT), Launch::Wait);
         // Gone: the lock is free.
-        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), true), Launch::Manage);
+        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), QUIT_WAIT), Launch::Manage);
+    }
+
+    /// The 1.7 review: a copy that said "quitting" and then hung kept a relaunch waiting
+    /// forever. Waited for [`QUIT_WAIT`], then left alone, as a hung copy is.
+    #[test]
+    fn a_quit_that_hangs_is_waited_for_a_bounded_time() {
+        let before = QUIT_WAIT - Duration::from_millis(1);
+        for lock in [Lock::Held, Lock::Busy, Lock::Unavailable] {
+            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), before), Launch::Wait, "{lock:?}");
+            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), QUIT_WAIT), Launch::Leave, "{lock:?}");
+        }
+        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, before), Launch::Wait, "its socket gone, still alive");
+        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, QUIT_WAIT), Launch::Leave);
+        assert_eq!(decide(Lock::Held, Peer::Silent, LIVE, QUIT_WAIT), Launch::Manage, "it is gone: the lock is ours");
     }
 
     /// Fable M1: a running copy slow to answer (stopped under a debugger, beach-balling, its
@@ -344,9 +378,9 @@ mod tests {
     /// waited for only [`LOCK_WAIT`].
     #[test]
     fn a_silent_lock_holder_is_waited_for_then_left_alone() {
-        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, false), Launch::Wait);
-        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, true), Launch::Leave, "never answered: bounded");
-        assert_eq!(decide(Lock::Busy, Peer::Silent, GONE, true), Launch::Leave, "its pid is gone, the lock still busy");
+        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, NOW), Launch::Wait);
+        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, LOCK_WAIT), Launch::Leave, "never answered: bounded");
+        assert_eq!(decide(Lock::Busy, Peer::Silent, GONE, LOCK_WAIT), Launch::Leave, "its pid is gone, the lock still busy");
     }
 
     #[test]
