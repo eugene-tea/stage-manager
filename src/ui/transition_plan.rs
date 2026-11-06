@@ -10,11 +10,16 @@
 //! starts). In place (`[strip] order = "in_place"`) the stage left shrinks into its own
 //! place, and with `active = "close"` the cards between the two places glide on the strip's
 //! spring ([`glides`]). The slots count the active stage's empty slot (`active = "gap"`).
+//!
+//! The slots are those of the strip on the screen the moving windows are on
+//! ([`display_of`]): a switch on a second screen is aimed at that screen's cards (round
+//! displays-lid: before, every switch read the main screen's strip, and a card click on the
+//! laptop found its windows in no engine slot).
 
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Action, Home, Model, StripCard, WindowId};
+use crate::engine::model::{Action, DisplayId, Home, Model, StripCard, WindowId};
 use crate::ui::strip_model::{CardWindow, MovingWindow, Transition};
 
 /// The strip's cards as slots: (stage, its windows), top to bottom.
@@ -22,15 +27,32 @@ pub type Slots = Vec<(u64, Vec<u32>)>;
 
 /// The cards of the main display's strip, as [`Slots`].
 pub fn slots_of(m: &Model) -> Slots {
-    m.strip().iter().map(card_slot).collect()
+    slots_on(m, m.main_display().id)
+}
+
+/// The cards of `display`'s strip, as [`Slots`].
+pub fn slots_on(m: &Model, display: DisplayId) -> Slots {
+    m.strip_for(display).iter().map(card_slot).collect()
 }
 
 fn card_slot(c: &StripCard) -> (u64, Vec<u32>) {
     (c.stage.0, c.windows.iter().map(|w| w.0).collect())
 }
 
+/// The display a batch's windows move on: that of the first window `actions` park or bring
+/// back which the model knows, else the main one.
+pub fn display_of(m: &Model, actions: &[Action]) -> DisplayId {
+    actions
+        .iter()
+        .find_map(|a| match *a {
+            Action::Park { id, .. } | Action::SetFrame { id, .. } => m.window(id).map(|w| w.meta.display),
+            _ => None,
+        })
+        .unwrap_or(m.main_display().id)
+}
+
 /// The slot of the card showing window `id` (else the card of `stage`), and that card's stage.
-pub fn slot_of(slots: &Slots, id: u32, stage: Option<u64>) -> Option<(usize, u64)> {
+pub fn slot_of(slots: &[(u64, Vec<u32>)], id: u32, stage: Option<u64>) -> Option<(usize, u64)> {
     slots
         .iter()
         .position(|(_, ws)| ws.contains(&id))
@@ -45,8 +67,8 @@ pub struct Before {
     pub parked: HashSet<u32>,
     /// Every window's stage.
     pub homes: HashMap<u32, u64>,
-    /// The strip's cards.
-    pub slots: Slots,
+    /// Every display's strip's cards.
+    pub slots: HashMap<DisplayId, Slots>,
 }
 
 impl Before {
@@ -61,16 +83,24 @@ impl Before {
                     Home::Pinned => None,
                 })
                 .collect(),
-            slots: slots_of(m),
+            slots: m.displays().iter().map(|d| (d.id, slots_on(m, d.id))).collect(),
         }
+    }
+
+    /// The cards `display`'s strip had (none noted: no cards).
+    pub fn slots_on(&self, display: DisplayId) -> &[(u64, Vec<u32>)] {
+        self.slots.get(&display).map_or(&[], Vec::as_slice)
     }
 }
 
 /// The transition `id` for `actions` (already applied to `m`), if they park shown windows or
 /// bring parked ones back. `live` gives a window's frame on screen now (falls back to the
-/// model's). Outgoing windows are listed back to front (parks come front to back).
+/// model's). Outgoing windows are listed back to front (parks come front to back). The slots
+/// are the strip's on the screen the windows are on ([`display_of`]).
 pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -> Option<Rect>, id: u64) -> Option<Transition> {
-    let after = slots_of(m);
+    let display = display_of(m, actions);
+    let after = slots_on(m, display);
+    let before_slots = before.slots_on(display);
     let mut outgoing = Vec::new();
     let mut incoming: Vec<MovingWindow> = Vec::new();
     for a in actions {
@@ -89,7 +119,7 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
             Action::SetFrame { id: w, frame } if before.parked.contains(&w.0) => {
                 let Some(state) = m.window(w) else { continue };
                 let stage = before.homes.get(&w.0).copied();
-                let card = slot_of(&before.slots, w.0, stage);
+                let card = slot_of(before_slots, w.0, stage);
                 incoming.retain(|x| x.window.id != w.0);
                 incoming.push(MovingWindow {
                     window: CardWindow { id: w.0, pid: state.meta.pid, frame },
@@ -124,13 +154,13 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
 }
 
 /// The stage ids of `slots`, top to bottom (for the logs).
-pub fn order(slots: &Slots) -> Vec<u64> {
+pub fn order(slots: &[(u64, Vec<u32>)]) -> Vec<u64> {
     slots.iter().map(|s| s.0).collect()
 }
 
 /// The cards in both `before` and `after` whose slot changed: (stage, slot before, slot
 /// after). The strip glides them on its spring (`[motion] spring_*`).
-pub fn glides(before: &Slots, after: &Slots) -> Vec<(u64, usize, usize)> {
+pub fn glides(before: &[(u64, Vec<u32>)], after: &[(u64, Vec<u32>)]) -> Vec<(u64, usize, usize)> {
     after
         .iter()
         .enumerate()
@@ -148,7 +178,9 @@ mod tests {
     //! other card keeps its slot).
 
     use super::*;
-    use crate::engine::model::{ActiveCard, ModelOptions, Observation, StageId, StripOrder, WindowId};
+    use crate::engine::displays::ScreenKey;
+    use crate::engine::model::{ActiveCard, Display, ModelOptions, Observation, StageId, StripOrder, WindowId};
+    use crate::engine::park::Corner;
     use crate::engine::rules::{Decision, Placement, RuleAction};
     use crate::engine::testkit::{Desk, meta, model_with, w};
 
@@ -463,5 +495,69 @@ mod tests {
             let t = e.apply(a).expect("a transition");
             check(&e, &t, &before, leaving, "reveal");
         }
+    }
+
+    /// The owner's two screens: the 5K main, the laptop to its left.
+    fn two_screens() -> (Display, Display) {
+        let studio = Display {
+            id: DisplayId(1),
+            key: ScreenKey::NONE,
+            frame: Rect::new(0.0, 0.0, 2560.0, 1440.0),
+            visible: Rect::new(0.0, 25.0, 2560.0, 1415.0),
+            corner: Corner::BottomRight,
+        };
+        let laptop = Display {
+            id: DisplayId(2),
+            key: ScreenKey::NONE,
+            frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0),
+            visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0),
+            corner: Corner::BottomLeft,
+        };
+        (studio, laptop)
+    }
+
+    /// Opens window `id` of `pid` on `d`, by `action`.
+    fn add_on(e: &mut Env, id: u32, pid: i32, d: &Display, action: RuleAction) {
+        let mut mt = meta(id, pid, &format!("com.example.app{pid}"));
+        mt.frame = Rect::new(d.visible.x + 100.0 * f64::from(id), d.visible.y + 50.0, 600.0, 400.0);
+        mt.display = d.id;
+        e.d.open(&mt);
+        let obs = e.d.obs();
+        let a = e.m.add_window(mt, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &obs);
+        e.apply(a);
+    }
+
+    #[test]
+    fn a_switch_on_another_screen_reads_that_screens_slots() {
+        // 11-05 16:26, the owner's laptop: every card click there logged its windows in no
+        // engine slot (the plan read the 5K's strip). The slots are the laptop's own.
+        let (studio, laptop) = two_screens();
+        let mut e = Env { m: Model::new(vec![studio, laptop], ModelOptions::default()), d: Desk::default(), before: Before::default() };
+        // The 5K: three stages; the laptop: Chrome a card, Finder in front.
+        add_on(&mut e, 1, 101, &studio, RuleAction::Current);
+        add_on(&mut e, 2, 102, &studio, RuleAction::New);
+        add_on(&mut e, 3, 103, &studio, RuleAction::New);
+        add_on(&mut e, 5, 105, &laptop, RuleAction::Current);
+        add_on(&mut e, 6, 106, &laptop, RuleAction::New);
+        let (chrome, finder) = (e.stage_of(5), e.stage_of(6));
+        assert_eq!(e.m.active_stage(DisplayId(2)), Some(StageId(finder)));
+        assert_eq!(order(&slots_on(&e.m, DisplayId(2))), vec![chrome]);
+        let t = e.click(chrome).expect("a transition");
+        assert_eq!(order(&slots_on(&e.m, DisplayId(2))), vec![finder], "Apple's swap on the laptop's strip");
+        let moving = |g: &[MovingWindow]| g.iter().map(|g| (g.window.id, g.stage, g.slot)).collect::<Vec<_>>();
+        assert_eq!(moving(&t.outgoing), vec![(6, Some(finder), Some(0))], "Finder shrinks into the slot its card takes on the laptop's strip");
+        assert_eq!(moving(&t.incoming), vec![(5, Some(chrome), Some(0))], "Chrome grows from the slot its card had there");
+        // Read on the 5K's strip, neither window has a card.
+        let main = slots_of(&e.m);
+        assert!(slot_of(&main, 6, Some(finder)).is_none() && slot_of(&main, 5, Some(chrome)).is_none());
+        assert_eq!(display_of(&e.m, &[Action::Park { id: w(6), frame: Rect::default() }]), DisplayId(2));
+        assert_eq!(display_of(&e.m, &[Action::StateChanged]), DisplayId(1), "no window: the main screen");
+        // A switch on the 5K still reads the 5K's slots.
+        let before = e.order();
+        let target = e.stage_of(2);
+        let slot = before.iter().position(|s| *s == target).expect("a card");
+        let t = e.click(target).expect("a transition");
+        assert_aims(&e, &t, &before, "the 5K");
+        assert!(t.incoming.iter().all(|g| g.slot == Some(slot)));
     }
 }

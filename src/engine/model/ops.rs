@@ -1465,6 +1465,8 @@ impl Model {
         if self.options.main_only {
             displays.truncate(1);
         }
+        // Windows adopted at an earlier change are not that any more (the lid opened).
+        self.adopted.clear();
         let mut before = std::mem::take(&mut self.displays);
         // The same display under a new id: by its identity, else the main display when
         // neither id survives.
@@ -1559,6 +1561,10 @@ impl Model {
     /// on the main display gives way instead of taking a card. Its other Desktops stay
     /// Desktops, of the main display now, recognized by their windows when they show. Every
     /// restore frame of its windows is carried onto the main display ([`Display::adopt`]).
+    /// The windows of the Desktop it showed are noted as adopted (`adopted`): macOS may put
+    /// them on another Desktop of the main display and show that one (11-05 16:27: the 5K
+    /// slid to its second Desktop), where their stages come whole, by the same rule
+    /// ([`Model::carry_adopted`]).
     fn adopt_display(&mut self, gone: Display, actions: &mut Vec<Action>) {
         let main = *self.main_display();
         let main_space = self.current_space(main.id);
@@ -1581,6 +1587,12 @@ impl Model {
             }
         }
         let Some(shown) = shown.filter(|s| *s != main_space) else { return };
+        self.adopted = self
+            .windows
+            .values()
+            .filter(|w| w.space == shown && w.meta.role == WindowRole::Standard)
+            .map(|w| w.meta.id)
+            .collect();
         let front = self.active.remove(&shown);
         let mut order = self.slots.remove(&shown).unwrap_or_default();
         self.revealed.remove(&shown);
@@ -1647,7 +1659,7 @@ impl Model {
     /// with nothing pending gives way and goes (a display with nothing on it yet, as a carried
     /// Desktop's placeholder does); else the usual switch, the front stage going to a card.
     /// Parked windows of `stage` come back ([`Model::restore_window`]).
-    fn bring_front(&mut self, space: SpaceId, stage: StageId, actions: &mut Vec<Action>) {
+    pub(crate) fn bring_front(&mut self, space: SpaceId, stage: StageId, actions: &mut Vec<Action>) {
         let active = self.ensure_active(space);
         let placeholder = active != stage
             && self.stage_is_empty(active)
@@ -1691,13 +1703,19 @@ impl Model {
     /// - The display it left, its front stage now empty, brings its most recent card
     ///   forward ([`Model::forward_after_emptied`]).
     ///
-    /// A shown window's frame on the new display is the user's (its restore frame); a parked
-    /// one keeps its restore frame, carried over ([`Display::adopt`]). A window moved to a
-    /// display the model does not know (`[displays] main_only`) is not its own any more: it
-    /// leaves its stage as a window that left its Space does ([`Model::window_left_space`]).
-    /// Children follow their parents and are never moved on their own. Returns the actions
-    /// and every window the model forgot (the platform takes one in again once it shows on
-    /// a display it manages).
+    /// Where the window is listed on the new display says whether it shows (the lid opened,
+    /// 11-05 16:27:31: macOS put a window it had on the 5K back on the laptop at the frame
+    /// it had there, and a parked one at the laptop's old park corner): listed in that
+    /// display's park zone it is a card still, parked there with its restore frame carried
+    /// over ([`Display::adopt`]); listed outside, it shows at that frame, the user's (its
+    /// restore frame), whether the model had it parked or not, and is never moved. Only a
+    /// shown window's stage comes in front: a card put back brings nothing forward, and
+    /// nothing comes forward when only cards came. A window moved to a display the model
+    /// does not know (`[displays] main_only`) is not its own any more: it leaves its stage
+    /// as a window that left its Space does ([`Model::window_left_space`]). Children follow
+    /// their parents and are never moved on their own. Returns the actions and every window
+    /// the model forgot (the platform takes one in again once it shows on a display it
+    /// manages).
     pub fn windows_moved_to_display(&mut self, moves: &[(WindowId, DisplayId, Rect)], z_order: &[WindowId]) -> (Vec<Action>, Vec<WindowId>) {
         let mut actions = Vec::new();
         let mut forgotten = Vec::new();
@@ -1743,11 +1761,17 @@ impl Model {
                         w.original = w.original.map(|o| display.adopt(o, &from));
                     }
                 }
-                if let Some(&f) = frames.get(&id)
-                    && self.windows.get(&id).is_some_and(|w| !w.parked)
-                {
-                    self.record_frame(id, f);
+                let Some(&f) = frames.get(&id) else { continue };
+                if display.parks(f) {
+                    // A card still (macOS put a parked window back at its old corner).
+                    continue;
                 }
+                // Shown there, at that frame: a parked one macOS put back where it was is
+                // not parked any more (no action: it is where the user sees it).
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.parked = false;
+                }
+                self.record_frame(id, f);
             }
             let whole: Vec<StageId> = self
                 .stages
@@ -1797,23 +1821,31 @@ impl Model {
                     }
                 }
             }
-            let Some(&(_, last)) = went.last() else { continue };
+            if went.is_empty() {
+                continue;
+            }
+            // The frontmost moved window that shows: its stage comes in front. A card put
+            // back at the corner brings nothing forward, whatever its place in the order.
+            let is_shown = |id: &WindowId| self.windows.get(id).is_some_and(|w| !w.parked);
             let front = z_order
                 .iter()
-                .find_map(|z| went.iter().find(|(id, _)| id == z))
-                .map_or(last, |(_, d)| *d);
+                .find_map(|z| went.iter().find(|(id, _)| id == z && is_shown(id)))
+                .or_else(|| went.iter().rev().find(|(id, _)| is_shown(id)))
+                .map(|(_, d)| *d);
             // A window shown where the user put it is not moved: only parked ones come back.
             let shown: Vec<WindowId> = ids
                 .iter()
                 .flat_map(|id| std::iter::once(*id).chain(self.children_of(*id)))
                 .filter(|id| self.windows.get(id).is_some_and(|w| !w.parked))
                 .collect();
-            let mut more = Vec::new();
-            self.bring_front(target, front, &mut more);
-            actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown.contains(id))));
+            if let Some(front) = front {
+                let mut more = Vec::new();
+                self.bring_front(target, front, &mut more);
+                actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown.contains(id))));
+            }
             let mut waiting: Vec<StageId> = Vec::new();
             for &(id, dest) in &went {
-                if dest == front {
+                if Some(dest) == front {
                     continue;
                 }
                 // Parked at this display's corner now, one parked before too (macOS moved it
@@ -1843,7 +1875,7 @@ impl Model {
     /// Carries `stage` whole to `target` (a Space of `display`): members, children, key
     /// window, name; its card leaves its old Space's strip, and the old Space loses it as its
     /// front stage if it was ([`Model::forward_after_emptied`] then brings a card forward).
-    fn carry_stage_to(&mut self, stage: StageId, target: SpaceId, display: DisplayId) {
+    pub(crate) fn carry_stage_to(&mut self, stage: StageId, target: SpaceId, display: DisplayId) {
         let Some(from) = self.stage(stage).map(|s| s.space) else { return };
         if let Some(sl) = self.slots.get_mut(&from) {
             sl.retain(|&x| x != stage);

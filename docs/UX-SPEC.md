@@ -145,10 +145,18 @@ taken where it shows). A window straddling two screens belongs to the one showin
 it (macOS's rule). The lid closed: that screen's front stage comes to the remaining screen
 as its front stage (its windows where macOS puts them, at their size), the remaining
 screen's front goes to a card, and the removed screen's other stages become cards there
-too, after the remaining screen's own (past the capacity, hidden). The lid opened: the
+too, after the remaining screen's own (past the capacity, hidden); its hidden windows wait
+at the remaining screen's corner. macOS may put the closed screen's windows on another of
+the remaining screen's Desktops and slide to it (the owner's 11-05: the 5K went to its
+second Desktop, not shown since the launch): the same rule holds there, the closed screen's
+stages whole, that Desktop's own front a card (round displays-lid). The lid opened: the
 stages whose windows macOS moves back to that screen are its stages again (the one in front
 before, a card; a stage moved whole stays one stage); the stage that came over in front
-stays where it is. A stage belongs to the screen its windows are on. Decided, not measured:
+stays where it is. macOS puts each window back at the frame it had on that screen, a hidden
+one at its old corner: a window put back in the open shows there, at that frame (never
+moved to a frame carried over from the other screen), one put back at the corner is a card
+still, and a card put back brings nothing forward; none of it is the user's drag. A stage
+belongs to the screen its windows are on. Decided, not measured:
 a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
 Dock to an app whose stage is on the other screen switches that screen only. Each screen's
 hidden stages wait in a corner of that screen with no screen beyond it (the laptop's

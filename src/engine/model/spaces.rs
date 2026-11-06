@@ -466,6 +466,38 @@ impl Model {
                 }
             }
         }
+        // The stages a removed display's Desktop brought, when macOS put their windows on
+        // this Desktop and showed it (not the one they were adopted into): whole, by the
+        // lid's rule, once this Desktop's own stages stand.
+        let (adopted_front, adopted_cards, carried_adopted) =
+            if bare { (None, Vec::new(), 0) } else { self.carry_adopted(target, &mut moving, &mut actions) };
+        let carried = carried + carried_adopted;
+        let capacity = self.capacity_of(target);
+        for s in adopted_cards {
+            // After this Desktop's own cards; past the capacity, hidden (as at the adoption).
+            self.touch(s);
+            let slots = self.slots.entry(target).or_default();
+            if slots.len() < capacity && !slots.contains(&s) {
+                slots.push(s);
+            }
+        }
+        if let Some(f) = adopted_front {
+            // Its windows show where macOS put them: no frame of theirs is set.
+            let shown: Vec<WindowId> = self
+                .stage(f)
+                .map(|s| s.windows.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|id| std::iter::once(id).chain(self.children_of(id)))
+                .filter(|id| self.windows.get(id).is_some_and(|w| !w.parked))
+                .collect();
+            let mut more = Vec::new();
+            self.bring_front(target, f, &mut more);
+            actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown.contains(id))));
+        }
+        if display == self.main_display().id {
+            self.adopted.clear();
+        }
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
         self.move_in(target, &moving, live, hints, &mut actions);
@@ -489,6 +521,54 @@ impl Model {
         };
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Stages of the Desktop a removed display showed (`adopted`, [`Model::adopt_display`])
+    /// whose every standard window is in `moving` (on screen at `target`, a Desktop other
+    /// than the one they were adopted into): macOS put the removed screen's windows on this
+    /// Desktop and showed it (11-05 16:27: the 5K slid to its second Desktop, with the
+    /// laptop's two windows on it). They come whole, by the lid's rule, not one by one into
+    /// their apps' stages here: the stage that was in front is returned for the front (the
+    /// caller brings it forward once this Desktop's own stages stand), the others become
+    /// cards here, their windows parked at this display's corner (where the adoption parked
+    /// them). Their windows leave `moving`. Returns (the front stage, the cards, how many
+    /// stages came).
+    fn carry_adopted(&mut self, target: SpaceId, moving: &mut Vec<WindowId>, actions: &mut Vec<Action>) -> (Option<StageId>, Vec<StageId>, usize) {
+        if self.adopted.is_empty() {
+            return (None, Vec::new(), 0);
+        }
+        let display = self.space_display(target);
+        let whole: Vec<StageId> = self
+            .stages
+            .iter()
+            .filter(|s| s.space != target && !s.windows.is_empty() && s.windows.iter().all(|w| moving.contains(w) && self.adopted.contains(w)))
+            .map(|s| s.id)
+            .collect();
+        let mut front = None;
+        let mut cards = Vec::new();
+        for &sid in &whole {
+            let Some(from) = self.stage(sid).map(|s| s.space) else { continue };
+            let was_front = self.active.get(&from) == Some(&sid);
+            let members: Vec<WindowId> = self.stage(sid).map(|s| s.windows.clone()).unwrap_or_default();
+            for &m in &members {
+                self.moved_from.insert(m, from);
+            }
+            self.carry_stage_to(sid, target, display);
+            moving.retain(|w| !members.contains(w));
+            if was_front && front.is_none() {
+                front = Some(sid);
+                continue;
+            }
+            let mut ids = members;
+            ids.extend(self.children_in(Home::Stage(sid)));
+            for id in ids {
+                if self.windows.get(&id).is_some_and(|w| !w.parked) {
+                    self.park_window(id, actions);
+                }
+            }
+            cards.push(sid);
+        }
+        (front, cards, whole.len())
     }
 
     /// Known Spaces other than `target` with a positive score in `all` (more of their windows

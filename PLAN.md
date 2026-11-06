@@ -171,12 +171,21 @@ Known gaps the owner accepted as rare:
   as measured 11-05; a saved Desktop of a screen not connected forms where its windows are,
   the 10-23 login):
   - **Live with the owner:** the `displays` phase of the suite (fixtures on both screens;
-    its first run), then the lid, by hand: (1) on the laptop a stage in front and two cards,
-    on the 5K a stage in front and a card; close the lid: the laptop's front stage comes to
-    the 5K in front, the 5K's front to a card, the laptop's cards after the 5K's own, every
-    window on screen (`ctl state`: one display, `displays[0].strip`); (2) open the lid: the
-    stages macOS moves back are the laptop's again, the one in front before as its front
-    (`displays[1]`), the one that came over stays on the 5K; (3) a restart with both
+    its first run), then the lid, by hand (his first run 11-05 16:27, fixed in round
+    displays-lid; run it again): (0) two card clicks on the laptop: no "not in the engine's
+    slot" warning, the log's "transition: strip order" with `display=1` and the laptop's
+    stages; (1) on the laptop a stage in front and two cards, on the 5K a stage in front and
+    a card; close the lid: the laptop's front stage comes to the 5K in front, the 5K's front
+    to a card, the laptop's cards after the 5K's own, every window on screen (`ctl state`:
+    one display, `displays[0].strip`); if macOS slides the 5K to another Desktop with the
+    laptop's windows (11-05: its second Desktop, the log's "Space changed" with `rebuilt`
+    and `carried=2`), the same there: the laptop's front in front, its card a card of its
+    own, not joined to its app's card; (2) open the lid: the stages macOS moves back are the
+    laptop's again (the log's "window macOS put on a display that changed", never "moved to
+    another display"), the shown one in front at the frame macOS gave it (no move after),
+    the hidden one a card at the laptop's corner (`card=true`), nothing of the 5K's moving
+    (`displays[1]`); then a card click on the laptop brings the card back at its old frame
+    there; (3) a restart with both
     screens: each screen's stages on its screen (the log's "Space changed on another
     display" with `rebuilt`; a Desktop saved on a screen not connected: `other_screen`, and
     the restore line's "N Desktops on another screen"); (4) ⌘-Tab to an app whose stage is

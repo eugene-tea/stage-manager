@@ -402,6 +402,11 @@ pub struct Model {
     /// did not list then (their app did not answer at launch): found later, they were there all
     /// along, so they never bring their stage forward ([`Model::set_launch_listed`]).
     pub(crate) launch_listed: HashSet<WindowId>,
+    /// Standard windows of the Desktop a removed display showed, moved onto the main
+    /// display's Desktop (`adopt_display`), until the next arrival on the main display or
+    /// the next display change: macOS may put them on another Desktop of the main display
+    /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
+    pub(crate) adopted: BTreeSet<WindowId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -469,6 +474,7 @@ impl Model {
             pooled_out: HashSet::new(),
             merged: HashMap::new(),
             launch_listed: HashSet::new(),
+            adopted: BTreeSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

@@ -277,6 +277,14 @@ const SPACE_POLL: Duration = Duration::from_secs(1);
 /// A window counts as moved to or gone from the shown Space after this many checks in a row.
 const SPACE_CHECKS: u32 = 2;
 
+/// For this long after the set of displays changed, a managed window found on another
+/// display than the model has it on is macOS's doing (the lid opened: a screen that came
+/// back gets the windows it had, at the frames they had there, a parked one at its old
+/// corner; 11-05 16:27:31, two seconds after the screen), never the user's drag. The engine
+/// takes both by where the window is listed ([`Model::windows_moved_to_display`]); the log
+/// says which.
+const DISPLAY_SETTLE: Duration = Duration::from_secs(10);
+
 /// The window list right after a Space change notice may show two Desktops at once (the one
 /// sliding out and the one sliding in, [`Model::shows_two_desktops`]): read again for at most
 /// this long after the notice before the Desktop is recognized from it.
@@ -1047,6 +1055,10 @@ pub struct Controller {
     /// When the last animated switch was sent (the desktop's still rests after a while with
     /// no input and no switch, [`desktop_shot::rest`]).
     last_switch: Option<Instant>,
+    /// When the set of displays last changed (a lid closed or opened, a screen plugged in or
+    /// out): for [`DISPLAY_SETTLE`] after it, windows found on another display are macOS's
+    /// doing, not the user's drag ([`Self::follow_display_moves`]).
+    displays_changed_at: Option<Instant>,
     /// When the latest switch we began started (a batch of ours that parks or focuses): an
     /// activation that fired before it never starts one ([`stale_activation::judge`]).
     our_switch: Option<Instant>,
@@ -1271,6 +1283,7 @@ impl Controller {
             phase: phase::Tracker::default(),
             space_changes: 0,
             last_switch: None,
+            displays_changed_at: None,
             our_switch: None,
             space_checked: Instant::now(),
             foreign: Persisting::default(),
@@ -2649,10 +2662,12 @@ impl Controller {
         for g in &t.incoming {
             tracing::debug!(id = t.id, window = g.window.id, stage = ?g.stage, from_slot = ?g.slot, to = %g.window.frame, "transition: incoming");
         }
+        let plays_on = transition_plan::display_of(m, actions);
         tracing::debug!(
             id = t.id,
-            before = ?transition_plan::order(&self.before.slots),
-            after = ?transition_plan::order(&transition_plan::slots_of(m)),
+            display = plays_on.0,
+            before = ?transition_plan::order(self.before.slots_on(plays_on)),
+            after = ?transition_plan::order(&transition_plan::slots_on(m, plays_on)),
             "transition: strip order"
         );
         Some(t)
@@ -5032,9 +5047,11 @@ impl Controller {
     /// Managed standard windows that show mostly on another display than the one the model
     /// has them on ([`display_of`]), in two checks in a row (a drag across the seam; macOS
     /// moving windows back to a screen that came back), move there
-    /// ([`Model::windows_moved_to_display`]: a stage of its own there, in front). A parked
-    /// window in its own display's park zone never counts, whatever shows of it on a screen
-    /// beyond. The default (round displays); with `[displays] main_only`
+    /// ([`Model::windows_moved_to_display`]: a stage of its own there, in front; one macOS
+    /// lists in that display's park zone a card there, still). A parked window in its own
+    /// display's park zone never counts, whatever shows of it on a screen beyond. Within
+    /// [`DISPLAY_SETTLE`] of a display change the moves are macOS's, not the user's drag, and
+    /// the log says so. The default (round displays); with `[displays] main_only`
     /// [`Self::leave_other_displays`] runs instead.
     fn follow_display_moves(&mut self, ob: &Observer, list: &[windows::CgWindow]) {
         let Some(m) = self.model.as_ref() else { return };
@@ -5076,10 +5093,24 @@ impl Controller {
         // What a card press read no longer holds.
         self.pressed_obs = None;
         let z: Vec<WindowId> = list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect();
+        let by_macos = self.displays_changed_at.is_some_and(|t| Instant::now().duration_since(t) < DISPLAY_SETTLE);
         let Some(m) = self.model.as_mut() else { return };
+        let parked_before: Vec<bool> = moves.iter().map(|(id, _, _)| m.window(*id).is_some_and(|w| w.parked)).collect();
         let (actions, forgotten) = m.windows_moved_to_display(&moves, &z);
-        for (id, d, at) in &moves {
-            tracing::info!(id = id.0, display = d.0, %at, "window moved to another display: a stage of its own there, in front (Apple's rule)");
+        for ((id, d, at), was_parked) in moves.iter().zip(parked_before) {
+            let card = m.window(*id).is_some_and(|w| w.parked);
+            if by_macos {
+                tracing::info!(
+                    id = id.0,
+                    display = d.0,
+                    %at,
+                    was_parked,
+                    card,
+                    "window macOS put on a display that changed (not the user's drag): its stage is that display's again; shown where macOS put it, or a card still (the lid's rule)"
+                );
+            } else {
+                tracing::info!(id = id.0, display = d.0, %at, card, "window moved to another display: a stage of its own there, in front (Apple's rule)");
+            }
         }
         self.execute(ob, actions);
         self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
@@ -5292,6 +5323,13 @@ impl Controller {
             return;
         }
         safety::set_displays(&displays);
+        let ids = |ds: &[Display]| ds.iter().map(|d| d.id).collect::<Vec<_>>();
+        if ids(&self.displays) != ids(&displays) {
+            // A display came or went: what the checks counted as moves before it is stale,
+            // and the moves that follow are macOS's ([`DISPLAY_SETTLE`]).
+            self.displays_changed_at = Some(Instant::now());
+            self.elsewhere.clear();
+        }
         self.displays = displays.clone();
         let mut actions = Vec::new();
         if let Some(m) = self.model.as_mut() {
