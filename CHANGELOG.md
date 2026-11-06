@@ -36,6 +36,8 @@
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 - The menu no longer lists windows a restart reopened on another Desktop.
+- A Desktop you did not visit between two restarts keeps its stages: they no longer
+  disappear at the second restart (up to 30 days since you last visited it).
 
 ## 1.6.0 — 2026-11-05
 

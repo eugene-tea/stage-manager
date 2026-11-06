@@ -56,6 +56,7 @@ fn desktop_1() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![1, 3, 2, 4],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -75,6 +76,7 @@ fn desktop_2() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![2, 1, 3],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -756,6 +758,7 @@ fn two_workspaces() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![1],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -887,6 +890,7 @@ fn git_on_two_desktops() -> Vec<SavedSpace> {
         active_index: Some(0),
         strip_slots: vec![1],
         last_seen: None,
+        unvisited: false,
     };
     let two = SavedSpace {
         screen: None,
@@ -900,6 +904,7 @@ fn git_on_two_desktops() -> Vec<SavedSpace> {
         active_index: Some(0),
         strip_slots: vec![2, 1],
         last_seen: None,
+        unvisited: false,
     };
     vec![one, two]
 }

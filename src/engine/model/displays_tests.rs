@@ -1143,6 +1143,7 @@ fn saved_on(d: &Display, id: u64, current: bool, stages: Vec<crate::engine::pers
         strip_slots: (1..stages.len()).collect(),
         stages,
         last_seen: None,
+        unvisited: false,
     }
 }
 

@@ -48,6 +48,7 @@ fn desktop_5() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![2, 1],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -130,6 +131,7 @@ fn a_declared_stage_keeps_its_card_while_its_windows_wait() {
         active_index: Some(1),
         strip_slots: vec![2, 0],
         last_seen: None,
+        unvisited: false,
     };
     let options = ModelOptions { named_stages: vec!["Chat".into()], ..Default::default() };
     let mut m = restoring_with(options, vec![saved]);
@@ -717,6 +719,44 @@ fn an_adoption_keeps_the_strip_shown() {
 }
 
 #[test]
+fn a_desktop_not_visited_in_a_session_keeps_its_stages_at_the_next() {
+    // The Fable review of 11-06, restore 3: saved in session A with Desktops 5 (shown) and 6;
+    // session B shows only Desktop 5 (Desktop 6's apps reopen its window there, unseen); at
+    // session C, Desktop 6's stage still waits, while Desktop 5's windows that never came
+    // back in B (looked for there all session) are given up.
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(Some("Talk"), vec![sw(CHAT, "Lounge", F_TEAM, 0)])];
+    d6.active_index = Some(0);
+    d6.strip_slots = vec![];
+    let mut m = restoring(vec![desktop_5(), d6]);
+    m.arrive(MAIN, &[win(21, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 5);
+    let save = |m: &Model, seen: u64| {
+        let mut file = StateFile { session: Some("B".into()), ..m.to_state() };
+        file.stamp(10_000_000, &mut std::collections::HashMap::from([(6, seen)]));
+        file
+    };
+    let mut file = save(&m, 10_000_000 - 3_600);
+    assert_eq!(file.start_new_session(), 3, "Desktop 5's Notes.txt, Team and Recipes");
+    let six = file.spaces.iter().find(|s| s.id == 6).expect("Desktop 6 still waits");
+    assert_eq!(six.stages[0].name.as_deref(), Some("Talk"));
+    assert_eq!(six.standard_windows(), 1);
+    // Not shown for longer than UNSEEN_KEEP before the save: looked for no more.
+    let mut file = save(&m, 10_000_000 - crate::engine::restore::UNSEEN_KEEP.as_secs() - 1);
+    file.start_new_session();
+    assert!(file.spaces.iter().all(|s| s.id != 6), "aged out");
+    // A file of an earlier version (no flag): as before, a whole session counts.
+    let mut file = save(&m, 10_000_000 - 3_600);
+    for s in &mut file.spaces {
+        s.unvisited = false;
+    }
+    file.start_new_session();
+    assert!(file.spaces.iter().all(|s| s.id != 6));
+}
+
+#[test]
 fn a_window_pending_since_an_unknown_session_is_given_up_at_the_next_known_one() {
     // A session that could not be read stamps `since: ""`; the next readable new session
     // gives such windows up instead of keeping them forever.
@@ -1093,6 +1133,7 @@ fn mail_desktop() -> (Model, StageId) {
         active_index: Some(1),
         strip_slots: vec![2, 0],
         last_seen: None,
+        unvisited: false,
     };
     let options = ModelOptions { named_stages: vec!["Mail".into()], ..Default::default() };
     let mut m = restoring_with(options, vec![saved]);
@@ -1340,6 +1381,7 @@ fn desktop_7() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![2, 1],
         last_seen: None,
+        unvisited: false,
     }
 }
 

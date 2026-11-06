@@ -497,11 +497,13 @@ title changes, and goes to its saved stage on a confident match, a card when tha
 not in front, nothing switching. This holds per window, until two minutes after the login
 (after the launch, for Stage Manager started later): a click on one window, which ends the
 settle, leaves the others to it, since apps are still opening then. A window the user has
-touched stays where it is: one focused by a click or a key press on it, moved or resized,
-or whose stage was switched to (a card click, a Dock click, ⌘-Tab, a shortcut). A saved
+touched stays where it is: one focused by a click or a key press on it, typed in, moved or
+resized, or whose stage was switched to (a card click, a Dock click, ⌘-Tab, a shortcut). A saved
 window that shows only after the settle still goes to its stage, as above; that wait is
 bounded per app, not by the two minutes (its entries go a minute after its app's last new
-window, at the settle's end when its app is not running, and at the next session). A title that only puts
+window, at the settle's end when its app is not running, and at the next session; a session
+in which its Desktop never showed does not count, up to 30 days since that Desktop last
+showed). A title that only puts
 something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
 a file in its workspace) is the same name, so the frame the window reopened at counts. While
 the restore window is open (no click or key yet, so every window that shows is one an app
