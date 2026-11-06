@@ -58,8 +58,10 @@ case "${1:-}" in
     # The icon (scripts/icon.sh): Assets.car holds the Liquid Glass icon macOS 26 draws
     # (CFBundleIconName); AppIcon.icns is the fallback older systems read (CFBundleIconFile).
     cp resources/Assets.car resources/AppIcon.icns "$APP/Contents/Resources/"
-    # Launch at login as a launchd agent (src/platform/login_item.rs): the plist
-    # SMAppService registers, sealed by the bundle's signature.
+    # Launch at login as a launchd agent (src/platform/login_item.rs), when
+    # `[app] login_start = "background_item"`: the plist SMAppService registers, sealed by the
+    # bundle's signature. Kept with the login item as the default: an agent registered by
+    # 1.6.x starts the app from it at the first login after the update, which moves it back.
     mkdir -p "$APP/Contents/Library/LaunchAgents"
     cp packaging/dev.eugene.stagemanager.agent.plist "$APP/Contents/Library/LaunchAgents/"
     plutil -lint -s "$APP/Contents/Library/LaunchAgents/dev.eugene.stagemanager.agent.plist"

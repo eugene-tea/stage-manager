@@ -49,9 +49,10 @@ const PING_TIMEOUT: Duration = Duration::from_secs(2);
 /// the user asking for the window.
 pub const HANDOFF_QUIET: Duration = Duration::from_secs(10);
 
-/// Within this long of the login a hand-off or a reopen shows no Settings (round early-start):
-/// the launchd agent starts Stage Manager as the session begins, and the login item or macOS
-/// reopening the app may open it again 20-40 s later, a launch nobody asked for by hand.
+/// Within this long of the login a hand-off or a reopen shows no Settings (rounds early-start,
+/// reopen-list): macOS reopens Stage Manager about 3 s after the login (or the launchd agent
+/// starts it), and the login item opens it again 10-30 s later, once the reopened apps have
+/// checked in: a launch nobody asked for by hand.
 pub const LOGIN_QUIET: Duration = Duration::from_secs(90);
 
 /// The lock held for the life of the process.
@@ -159,8 +160,8 @@ pub fn shows_settings(uptime: Option<Duration>, since_login: Option<Duration>, b
 }
 
 /// Whether opening the app again while it runs (a reopen) shows its Settings: not while the
-/// login is less than [`LOGIN_QUIET`] old (the login item, or macOS reopening the app, after
-/// the agent started it). Unknown login: shown.
+/// login is less than [`LOGIN_QUIET`] old (the login item after macOS reopened the app, or
+/// after the agent started it). Unknown login: shown.
 pub fn reopen_shows_settings(since_login: Option<Duration>) -> bool {
     since_login.is_none_or(|d| d >= LOGIN_QUIET)
 }
@@ -371,13 +372,14 @@ mod tests {
         assert!(shows_settings(None, None, false), "no login time known");
     }
 
-    /// Round early-start: the agent starts the app 2 s after the login; the login item or
-    /// macOS's reopen comes 25 s later, past [`HANDOFF_QUIET`] of its uptime: no Settings.
-    /// Nor from launchd's own copy at the agent's registration, whenever it comes.
+    /// Rounds early-start, reopen-list: macOS reopens the app (or the agent starts it) 3 s
+    /// after the login; the login item comes 25 s later, past [`HANDOFF_QUIET`] of its
+    /// uptime: no Settings. Nor from launchd's own copy at the agent's registration,
+    /// whenever it comes.
     #[test]
     fn a_second_launch_at_login_or_launchds_own_shows_no_settings() {
         let s = Duration::from_secs;
-        assert!(!shows_settings(Some(s(25)), Some(s(27)), false), "the login item after the agent");
+        assert!(!shows_settings(Some(s(25)), Some(s(27)), false), "the login item after the reopened copy");
         assert!(shows_settings(Some(s(25)), Some(LOGIN_QUIET), false), "past the login's quiet: the user's");
         assert!(!shows_settings(Some(s(3600)), Some(s(7200)), true), "launchd's copy at the registration");
         assert!(!reopen_shows_settings(Some(s(30))), "a reopen at login");

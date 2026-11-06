@@ -1,23 +1,29 @@
-//! Launch at login (round early-start): a launchd agent, so Stage Manager starts as the login
-//! session begins, before loginwindow reopens the apps of the last session, not after them.
+//! Launch at login: the app as a login item (`SMAppService.mainApp`, the default), or a
+//! launchd agent (round early-start, kept for `[app] login_start = "background_item"`).
 //!
+//! - **The login item** (round reopen-list, the default): macOS opens it once the apps it
+//!   reopens at the login have started (12-27 s after the login on his Mac, 11-06). Stage
+//!   Manager comes earlier with those apps (`[app] reopen_with_apps`,
+//!   [`crate::engine::reopen_list`]), the login item's copy then handing off quietly.
 //! - **The agent:** `SMAppService.agentServiceWithPlistName` with [`AGENT_PLIST`], which
 //!   `scripts/bundle.sh` puts in the bundle's `Contents/Library/LaunchAgents` (sealed by its
-//!   signature): `BundleProgram` the app's own executable, `RunAtLoad`, no `KeepAlive` (the
-//!   guardian covers a crash; a relaunch could come while the screen is locked), listed in
-//!   System Settings → General → Login Items under the app's name.
-//! - **The fallback:** `SMAppService.mainApp`, the app as a login item, which macOS opens only
-//!   after the reopened apps (23 and 35 s after the login on his Mac, 11-06): used when macOS
-//!   refuses the agent or it awaits the user's approval (logged, and Settings says so,
-//!   [`LoginStatus::Late`]).
-//! - **One switch:** on registers the agent and unregisters `mainApp`; off unregisters both
-//!   ([`next_step`], the pure rule; [`set`] runs it). An install that had `mainApp` on is moved
-//!   over once ([`move_to_agent`]); later launches only drop a `mainApp` left beside an
-//!   enabled agent ([`tidy`]), so nothing starts twice and a choice made in System Settings
-//!   stands.
+//!   signature): `BundleProgram` the app's own executable, `RunAtLoad`, no `KeepAlive`. On
+//!   his Mac (three restarts, 11-06) launchd held it, "on-demand-only", until loginwindow's
+//!   reopened apps had checked in, and it started with the login items: it gained nothing.
+//!   The plist stays in the bundle either way: an agent registered by 1.6.x is launched from
+//!   it at the first login after the update, and moved to the login item by that copy.
+//!   With the agent chosen, `mainApp` stands in when macOS refuses the agent or it awaits the
+//!   user's approval (logged, and Settings says so, [`LoginStatus::Late`]).
+//! - **One switch, one way:** on registers the chosen service ([`Service`]) and unregisters
+//!   the other; off unregisters both ([`next_step`], the pure rule; [`set`] runs it). When
+//!   the chosen way changes (an update, or the key), an install that had the other one on is
+//!   moved over once ([`move_due`], [`move_to`]); later launches only drop the other one left
+//!   beside the chosen one ([`tidy`]), so nothing starts twice and a choice made in System
+//!   Settings stands.
 //! - **Unregistering the agent kills its running job** (Apple's header for
-//!   `unregisterAndReturnError`). While this process is that job ([`Started::Agent`]), turning
-//!   the switch off waits until the quit ([`at_exit`]), so the switch never quits the app.
+//!   `unregisterAndReturnError`). While this process is that job ([`Started::Agent`]: the
+//!   first login after the update, say), unregistering it waits until the quit
+//!   ([`at_exit`]), so neither the switch nor the move quits the app.
 //!
 //! Only an installed copy ever registers: the bundle must sit in `/Applications` or
 //! `~/Applications` (not translocated, not a build under `target/`, not the dev copy in
@@ -100,7 +106,7 @@ pub enum Started {
     /// By launchd, as the agent's job: at the session's start (or at its registration).
     Agent,
     /// Through LaunchServices within [`AT_LOGIN`] of the login: the login item, or macOS
-    /// reopening the app (the two cannot be told apart).
+    /// reopening the app (told apart once AppKit has the open event, [`opened_as`]).
     AtLogin,
     /// Anything else: Finder, Spotlight, `open`, a terminal, an update's relaunch.
     ByHand,
@@ -111,7 +117,7 @@ impl Started {
     pub fn name(self) -> &'static str {
         match self {
             Self::Agent => "launchd agent",
-            Self::AtLogin => "login item",
+            Self::AtLogin => "at login",
             Self::ByHand => "by hand",
         }
     }
@@ -144,14 +150,28 @@ pub fn since_login() -> Option<Duration> {
     super::apps::login_started().map(|l| l.elapsed())
 }
 
+/// The launch's name once AppKit has its open event (round reopen-list): `login_item_event`,
+/// the open event's `keyAELaunchedAsLogInItem` (`None`: no open event, launchd's start);
+/// `listed`, this copy joined macOS's reopen list at the logout before this login. A launch
+/// at login marked as a login item is the login item's; one that is not, after a logout that
+/// listed the app, is macOS reopening it; otherwise "at login" (either). Whether macOS marks
+/// its own reopen as a login item too is not known yet: the line logs both facts.
+pub fn opened_as(started: Started, login_item_event: Option<bool>, listed: bool) -> &'static str {
+    match started {
+        Started::AtLogin if login_item_event == Some(true) => "login item",
+        Started::AtLogin if listed => "reopened by macOS",
+        other => other.name(),
+    }
+}
+
 // ----- the rule ---------------------------------------------------------------------------
 
-/// One of the two ways to launch at login.
+/// One of the two ways to launch at login (`[app] login_start`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Service {
-    /// The launchd agent ([`AGENT_PLIST`]).
+    /// The launchd agent ([`AGENT_PLIST`]): `"background_item"`.
     Agent,
-    /// `SMAppService.mainApp`: the app as a login item.
+    /// `SMAppService.mainApp`, the app as a login item: `"login_item"`, the default.
     MainApp,
 }
 
@@ -161,6 +181,27 @@ impl Service {
             Self::Agent => "launchd agent",
             Self::MainApp => "login item",
         }
+    }
+
+    /// The other way.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Agent => Self::MainApp,
+            Self::MainApp => Self::Agent,
+        }
+    }
+
+    /// The `[app] login_start` value naming it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Agent => "background_item",
+            Self::MainApp => "login_item",
+        }
+    }
+
+    /// The service a `[app] login_start` value names (the login item for any other).
+    pub fn from_key(key: &str) -> Self {
+        if key == Self::Agent.key() { Self::Agent } else { Self::MainApp }
     }
 }
 
@@ -200,17 +241,28 @@ pub enum Op {
     Unregister(Service),
 }
 
-/// The next step for the switch `on`, given each service's state, or `None` when there:
-/// on, the agent enabled and `mainApp` not registered (or, the agent `refused`, `mainApp`
-/// registered); off, neither registered. An agent awaiting approval counts as refused
-/// (registering it again only fails), and `mainApp` stands in for it, its approval still
-/// pending in Login Items. Never both enabled: both would start the app at each login.
-pub fn next_step(on: bool, agent: Svc, main: Svc, refused: bool) -> Option<Op> {
+/// The next step for the switch `on` with the way `way`, given each service's state, or
+/// `None` when there. Off: neither registered. On with the login item: `mainApp`
+/// registered, the agent not. On with the agent: the agent enabled and `mainApp` not
+/// registered, or, the agent `refused`, `mainApp` registered; an agent awaiting approval
+/// counts as refused (registering it again only fails), and `mainApp` stands in for it, its
+/// approval still pending in Login Items. Never both enabled: both would start the app at
+/// each login.
+pub fn next_step(on: bool, way: Service, agent: Svc, main: Svc, refused: bool) -> Option<Op> {
     if !on {
         return if agent.registered() {
             Some(Op::Unregister(Service::Agent))
         } else if main.registered() {
             Some(Op::Unregister(Service::MainApp))
+        } else {
+            None
+        };
+    }
+    if way == Service::MainApp {
+        return if !main.registered() {
+            Some(Op::Register(Service::MainApp))
+        } else if agent.registered() {
+            Some(Op::Unregister(Service::Agent))
         } else {
             None
         };
@@ -224,14 +276,28 @@ pub fn next_step(on: bool, agent: Svc, main: Svc, refused: bool) -> Option<Op> {
     Some(Op::Register(Service::Agent))
 }
 
-/// Whether the one-time move of an earlier version's login item to the agent is due: the
-/// login item is on and the agent not yet. A login item turned off in Login Items (awaiting
-/// approval) or never registered is the user's choice and stays.
-pub fn move_due(agent: Svc, main: Svc) -> bool {
-    main == Svc::Enabled && agent != Svc::Enabled
+/// Whether the move to the way `way` is due (once, after the way changed): the other
+/// service is on and `way`'s is not. One turned off in Login Items (awaiting approval) or
+/// never registered is the user's choice and stays.
+pub fn move_due(way: Service, agent: Svc, main: Svc) -> bool {
+    let (mine, other) = match way {
+        Service::Agent => (agent, main),
+        Service::MainApp => (main, agent),
+    };
+    other == Svc::Enabled && mine != Svc::Enabled
 }
 
-/// The state Settings shows for the two services' states.
+/// Whether the other service left beside `way`'s goes at a launch ([`tidy`]): `way`'s is
+/// enabled and the other still registered.
+pub fn tidy_due(way: Service, agent: Svc, main: Svc) -> bool {
+    match way {
+        Service::Agent => agent == Svc::Enabled && main.registered(),
+        Service::MainApp => main == Svc::Enabled && agent.registered(),
+    }
+}
+
+/// The state Settings shows for the two services' states (the agent's counted as not
+/// registered when its unregistering waits for the quit).
 pub fn status_from(agent: Svc, main: Svc) -> LoginStatus {
     match (agent, main) {
         (Svc::Enabled, _) => LoginStatus::On,
@@ -259,17 +325,17 @@ pub struct Outcome {
     pub deferred: bool,
 }
 
-/// Brings the services to the switch `on` ([`next_step`], at most a few steps), on `sys`.
-/// `agent_job`: this process is the agent's running job, which unregistering it would kill:
-/// that step is left for the quit ([`Outcome::deferred`]).
-pub fn run(on: bool, sys: &mut impl Services, agent_job: bool) -> Result<Outcome, String> {
+/// Brings the services to the switch `on` with the way `way` ([`next_step`], at most a few
+/// steps), on `sys`. `agent_job`: this process is the agent's running job, which
+/// unregistering it would kill: that step is left for the quit ([`Outcome::deferred`]).
+pub fn run(on: bool, way: Service, sys: &mut impl Services, agent_job: bool) -> Result<Outcome, String> {
     let mut out = Outcome::default();
     let mut refused: Option<String> = None;
     for _ in 0..6 {
         let agent = if out.deferred { Svc::NotRegistered } else { sys.status(Service::Agent) };
         let main = sys.status(Service::MainApp);
-        let Some(op) = next_step(on, agent, main, refused.is_some()) else {
-            if on && agent != Svc::Enabled {
+        let Some(op) = next_step(on, way, agent, main, refused.is_some()) else {
+            if on && way == Service::Agent && agent != Svc::Enabled {
                 out.fell_back = Some(refused.unwrap_or_else(|| "it awaits approval in Login Items".into()));
             }
             return Ok(out);
@@ -302,10 +368,10 @@ pub fn run(on: bool, sys: &mut impl Services, agent_job: bool) -> Result<Outcome
 /// The login item's state as System Settings has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginStatus {
-    /// Registered and allowed (the agent; or the login item, the agent refused outright).
+    /// Registered and allowed (the login item; or the agent, when chosen).
     On,
-    /// The login item is on while the agent awaits the user's approval in Login Items:
-    /// Stage Manager starts after the apps macOS reopens until it is allowed.
+    /// The agent chosen, the login item is on while the agent awaits the user's approval in
+    /// Login Items: Stage Manager starts after the apps macOS reopens until it is allowed.
     Late,
     /// Registered, but the user must allow it in Login Items.
     NeedsApproval,
@@ -319,6 +385,11 @@ impl LoginStatus {
     /// Whether the Settings switch shows on.
     pub fn shows_on(self) -> bool {
         matches!(self, Self::On | Self::Late | Self::NeedsApproval)
+    }
+
+    /// Whether macOS starts the app at the next login (registered and allowed).
+    pub fn starts_at_login(self) -> bool {
+        matches!(self, Self::On | Self::Late)
     }
 }
 
@@ -375,69 +446,88 @@ pub fn status() -> LoginStatus {
     status_from(agent, System.status(Service::MainApp))
 }
 
-/// Sets the switch: `on` registers the agent (the login item instead when macOS refuses it)
-/// and unregisters the login item; off unregisters both. Refused for copies [`gate`] rules
-/// out; an error says why.
-pub fn set(on: bool) -> Result<(), String> {
+/// Sets the switch: `on` registers `way`'s service (the login item instead when macOS
+/// refuses the agent) and unregisters the other; off unregisters both. Refused for copies
+/// [`gate`] rules out; an error says why.
+pub fn set(on: bool, way: Service) -> Result<(), String> {
     if let Some(why) = refusal() {
         return Err(format!("login item left alone: {why}"));
     }
-    if on {
-        UNREGISTER_AT_EXIT.store(false, Ordering::SeqCst);
-    }
     let agent_job = started() == Started::Agent;
-    match run(on, &mut System, agent_job) {
+    match run(on, way, &mut System, agent_job) {
         Ok(out) => {
             if let Some(why) = &out.fell_back {
                 tracing::warn!("launch at login: the launchd agent is not in use ({why}); a login item instead, which starts after the apps macOS reopens");
             }
+            UNREGISTER_AT_EXIT.store(out.deferred, Ordering::SeqCst);
             if out.deferred {
-                UNREGISTER_AT_EXIT.store(true, Ordering::SeqCst);
-                tracing::info!("launch at login: off; the launchd agent is unregistered at the quit (this copy is its job, which unregistering ends)");
+                tracing::info!("launch at login: the launchd agent is unregistered at the quit (this copy is its job, which unregistering ends)");
             }
-            tracing::info!(on, status = ?status(), "launch at login set");
+            tracing::info!(on, way = way.name(), status = ?status(), "launch at login set");
             Ok(())
         }
         Err(e) => {
-            tracing::warn!(on, "launch at login: {e}");
+            tracing::warn!(on, way = way.name(), "launch at login: {e}");
             Err(e)
         }
     }
 }
 
-/// An earlier version's login item, still on, moved to the agent: once per install (the
-/// caller remembers it). Returns whether this copy may register at all (so the caller does
-/// not mark the move done for a copy that may not).
-pub fn move_to_agent() -> bool {
+/// The way changed (an update, or `[app] login_start`): the other service, still on, moved
+/// to `way`'s, once (the caller remembers the way moved to). Returns whether this copy may
+/// register at all (so the caller does not mark the move done for a copy that may not).
+pub fn move_to(way: Service) -> bool {
     if refusal().is_some() {
         return false;
     }
     let (agent, main) = (System.status(Service::Agent), System.status(Service::MainApp));
-    if move_due(agent, main) {
-        tracing::info!("launch at login: the login item moves to a launchd agent, which starts with the session");
-        let _ = set(true);
+    if move_due(way, agent, main) {
+        tracing::info!(from = way.other().name(), to = way.name(), "launch at login: moving to the way [app] login_start names");
+        let _ = set(true, way);
     }
     true
 }
 
-/// At a launch: a login item left registered beside an enabled agent (the user allowed the
-/// agent in Login Items after the fallback) is unregistered, so nothing starts twice.
-pub fn tidy() {
+/// At a launch: the other service left registered beside `way`'s enabled one (the user
+/// allowed the agent in Login Items after the fallback, say) is unregistered, so nothing
+/// starts twice; the agent at the quit while this copy is its job.
+pub fn tidy(way: Service) {
     if refusal().is_some() {
         return;
     }
-    if System.status(Service::Agent) == Svc::Enabled && System.status(Service::MainApp).registered() {
-        tracing::info!("launch at login: the launchd agent is allowed now; the login item that stood in for it goes");
-        let _ = System.unregister(Service::MainApp);
+    if tidy_due(way, System.status(Service::Agent), System.status(Service::MainApp)) {
+        tracing::info!(kept = way.name(), dropped = way.other().name(), "launch at login: the other way registered beside it goes");
+        if way.other() == Service::Agent && started() == Started::Agent {
+            UNREGISTER_AT_EXIT.store(true, Ordering::SeqCst);
+        } else {
+            let _ = System.unregister(way.other());
+        }
     }
 }
 
-/// At the quit: the agent's unregistering left for it ([`set`] while this copy is the
-/// agent's job). Call last: it ends this process's job.
+/// At the quit: the agent's unregistering left for it ([`set`], [`tidy`] while this copy is
+/// the agent's job). Call last: it ends this process's job.
 pub fn at_exit() {
     if UNREGISTER_AT_EXIT.swap(false, Ordering::SeqCst) && refusal().is_none() {
         let _ = System.unregister(Service::Agent);
     }
+}
+
+/// Whether AppKit's open event marked this launch as a login item's
+/// (`keyAELaunchedAsLogInItem` in the `oapp` event's `keyAEPropData`); `None` when there is
+/// no open event (launchd's start). Call while the open event is AppKit's current Apple
+/// event: in `applicationDidFinishLaunching:`.
+pub fn open_event_login_item() -> Option<bool> {
+    use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager};
+    /// `keyAEPropData` ('prdt') and `keyAELaunchedAsLogInItem` ('lgit'), AERegistry.h.
+    const PROP_DATA: u32 = u32::from_be_bytes(*b"prdt");
+    const LOGIN_ITEM: u32 = u32::from_be_bytes(*b"lgit");
+    let event = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent()?;
+    // SAFETY: `-[NSAppleEventDescriptor paramDescriptorForKeyword:]` takes an AEKeyword (a
+    // FourCharCode, u32) and returns a descriptor or nil (objc2 binds it only with
+    // CoreServices' types).
+    let prop: Option<Retained<NSAppleEventDescriptor>> = unsafe { objc2::msg_send![&*event, paramDescriptorForKeyword: PROP_DATA] };
+    Some(prop.is_some_and(|p| p.enumCodeValue() == LOGIN_ITEM))
 }
 
 /// Opens System Settings → General → Login Items.
@@ -482,9 +572,11 @@ mod tests {
     fn this_test_binary_may_never_touch_login_items() {
         assert!(refusal().is_some(), "cargo test runs a bare binary");
         assert!(matches!(status(), LoginStatus::Unavailable(_)));
-        assert!(set(true).is_err() && set(false).is_err());
-        assert!(!move_to_agent(), "no move from a test");
-        tidy();
+        assert!(set(true, Service::MainApp).is_err() && set(false, Service::MainApp).is_err());
+        assert!(set(true, Service::Agent).is_err());
+        assert!(!move_to(Service::MainApp) && !move_to(Service::Agent), "no move from a test");
+        tidy(Service::MainApp);
+        tidy(Service::Agent);
         UNREGISTER_AT_EXIT.store(true, Ordering::SeqCst);
         at_exit();
         assert!(!UNREGISTER_AT_EXIT.load(Ordering::SeqCst));
@@ -502,6 +594,7 @@ mod tests {
         assert_eq!(started_from(Some(AGENT_LABEL), Some(s(2))), Started::Agent);
         assert_eq!(started_from(Some(AGENT_LABEL), None), Started::Agent, "launchd's word, whatever the clock");
         assert_eq!(started_from(Some("application.dev.eugene.stagemanager.1.2"), Some(s(30))), Started::AtLogin);
+        assert_eq!(Started::AtLogin.name(), "at login", "the login item or macOS reopening it: told apart later");
         assert_eq!(started_from(None, Some(AT_LOGIN)), Started::AtLogin);
         assert_eq!(started_from(Some("application.dev.eugene.stagemanager.1.2"), Some(s(600))), Started::ByHand);
         assert_eq!(started_from(Some("0"), None), Started::ByHand, "a terminal, no login time");
@@ -560,27 +653,27 @@ mod tests {
     #[test]
     fn a_registered_login_item_moves_to_the_agent() {
         let mut sys = Fake::new(Svc::NotRegistered, Svc::Enabled);
-        assert!(move_due(sys.agent, sys.main));
-        let out = run(true, &mut sys, false).expect("runs");
+        assert!(move_due(Agent, sys.agent, sys.main));
+        let out = run(true, Agent, &mut sys, false).expect("runs");
         assert_eq!((sys.agent, sys.main), (Svc::Enabled, Svc::NotRegistered), "the agent alone");
         assert_eq!(sys.calls, vec![Op::Register(Agent), Op::Unregister(MainApp)], "registered first, then the login item goes");
         assert_eq!(out, Outcome::default());
         assert_eq!(status_from(sys.agent, sys.main), LoginStatus::On);
-        assert!(!move_due(sys.agent, sys.main), "once");
+        assert!(!move_due(Agent, sys.agent, sys.main), "once");
     }
 
     #[test]
     fn a_login_item_turned_off_in_system_settings_is_not_moved() {
-        assert!(!move_due(Svc::NotRegistered, Svc::NeedsApproval));
-        assert!(!move_due(Svc::NotRegistered, Svc::NotRegistered));
-        assert!(!move_due(Svc::Enabled, Svc::Enabled), "the agent is on already: tidy drops the login item");
+        assert!(!move_due(Agent, Svc::NotRegistered, Svc::NeedsApproval));
+        assert!(!move_due(Agent, Svc::NotRegistered, Svc::NotRegistered));
+        assert!(!move_due(Agent, Svc::Enabled, Svc::Enabled), "the agent is on already: tidy drops the login item");
     }
 
     #[test]
     fn a_refused_agent_falls_back_to_the_login_item() {
         let mut sys = Fake::new(Svc::NotRegistered, Svc::NotRegistered);
         sys.refuse_agent = true;
-        let out = run(true, &mut sys, false).expect("runs");
+        let out = run(true, Agent, &mut sys, false).expect("runs");
         assert_eq!((sys.agent, sys.main), (Svc::NotRegistered, Svc::Enabled));
         assert_eq!(out.fell_back.as_deref(), Some("Operation not permitted"), "logged with macOS's reason");
         assert_eq!(status_from(sys.agent, sys.main), LoginStatus::On, "refused outright: nothing for the user to allow");
@@ -588,7 +681,7 @@ mod tests {
         // Refused while moving over: the login item stays as it was.
         let mut sys = Fake::new(Svc::NotRegistered, Svc::Enabled);
         sys.refuse_agent = true;
-        run(true, &mut sys, false).expect("runs");
+        run(true, Agent, &mut sys, false).expect("runs");
         assert_eq!((sys.agent, sys.main), (Svc::NotRegistered, Svc::Enabled));
         assert_eq!(sys.calls, vec![Op::Register(Agent)], "the login item never unregistered");
     }
@@ -597,36 +690,38 @@ mod tests {
     fn an_agent_awaiting_approval_falls_back_and_settings_says_so() {
         let mut sys = Fake::new(Svc::NotRegistered, Svc::NotRegistered);
         sys.agent_needs_approval = true;
-        let out = run(true, &mut sys, false).expect("runs");
+        let out = run(true, Agent, &mut sys, false).expect("runs");
         assert_eq!((sys.agent, sys.main), (Svc::NeedsApproval, Svc::Enabled), "the agent waits for its approval; the login item starts the app meanwhile");
         assert!(out.fell_back.is_some());
         assert_eq!(status_from(sys.agent, sys.main), LoginStatus::Late);
         // Turned off in Login Items earlier: not registered again, the login item stands in.
         let mut sys = Fake::new(Svc::NeedsApproval, Svc::NotRegistered);
-        run(true, &mut sys, false).expect("runs");
+        run(true, Agent, &mut sys, false).expect("runs");
         assert_eq!(sys.calls, vec![Op::Register(MainApp)]);
         // Allowed later: the next turn on (or tidy at a launch) drops the login item.
-        assert_eq!(next_step(true, Svc::Enabled, Svc::Enabled, false), Some(Op::Unregister(MainApp)));
+        assert_eq!(next_step(true, Agent, Svc::Enabled, Svc::Enabled, false), Some(Op::Unregister(MainApp)));
     }
 
     #[test]
     fn off_is_neither() {
         for (agent, main) in [(Svc::Enabled, Svc::NotRegistered), (Svc::NeedsApproval, Svc::Enabled), (Svc::Enabled, Svc::Enabled), (Svc::NotRegistered, Svc::NeedsApproval)] {
-            let mut sys = Fake::new(agent, main);
-            let out = run(false, &mut sys, false).expect("runs");
-            assert!(!sys.agent.registered() && !sys.main.registered(), "{agent:?} {main:?}");
-            assert_eq!(status_from(sys.agent, sys.main), LoginStatus::Off);
-            assert!(!out.deferred);
+            for way in [Agent, MainApp] {
+                let mut sys = Fake::new(agent, main);
+                let out = run(false, way, &mut sys, false).expect("runs");
+                assert!(!sys.agent.registered() && !sys.main.registered(), "{agent:?} {main:?} {way:?}");
+                assert_eq!(status_from(sys.agent, sys.main), LoginStatus::Off);
+                assert!(!out.deferred);
+            }
         }
         let mut sys = Fake::new(Svc::NotRegistered, Svc::NotRegistered);
-        run(false, &mut sys, false).expect("nothing to do is no failure");
+        run(false, Agent, &mut sys, false).expect("nothing to do is no failure");
         assert!(sys.calls.is_empty());
     }
 
     #[test]
     fn off_from_the_agents_own_job_waits_for_the_quit() {
         let mut sys = Fake::new(Svc::Enabled, Svc::Enabled);
-        let out = run(false, &mut sys, true).expect("runs");
+        let out = run(false, Agent, &mut sys, true).expect("runs");
         assert!(out.deferred, "unregistering would end this process");
         assert_eq!((sys.agent, sys.main), (Svc::Enabled, Svc::NotRegistered), "the login item goes now, the agent at the quit");
         assert_eq!(sys.calls, vec![Op::Unregister(MainApp)]);
@@ -635,18 +730,87 @@ mod tests {
     #[test]
     fn on_again_is_a_no_op_and_never_both_are_enabled() {
         let mut sys = Fake::new(Svc::Enabled, Svc::NotRegistered);
-        run(true, &mut sys, false).expect("runs");
+        run(true, Agent, &mut sys, false).expect("runs");
         assert!(sys.calls.is_empty());
         for agent in [Svc::Enabled, Svc::NeedsApproval, Svc::NotRegistered, Svc::NotFound] {
             for main in [Svc::Enabled, Svc::NeedsApproval, Svc::NotRegistered, Svc::NotFound] {
                 for refuse in [false, true] {
-                    let mut sys = Fake::new(agent, main);
-                    sys.refuse_agent = refuse;
-                    run(true, &mut sys, false).expect("settles");
-                    assert!(!(sys.agent == Svc::Enabled && sys.main.registered()), "{agent:?} {main:?} refuse={refuse}");
-                    assert!(sys.agent == Svc::Enabled || sys.main.registered(), "on means one of them: {agent:?} {main:?} refuse={refuse}");
+                    for way in [Agent, MainApp] {
+                        let mut sys = Fake::new(agent, main);
+                        sys.refuse_agent = refuse;
+                        run(true, way, &mut sys, false).expect("settles");
+                        assert!(!(sys.agent == Svc::Enabled && sys.main.registered()), "{agent:?} {main:?} refuse={refuse} {way:?}");
+                        assert!(sys.agent == Svc::Enabled || sys.main.registered(), "on means one of them: {agent:?} {main:?} refuse={refuse} {way:?}");
+                        if way == MainApp {
+                            assert!(sys.main.registered() && !sys.agent.registered(), "the login item alone: {agent:?} {main:?} refuse={refuse}");
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// Round reopen-list: 1.6.x's agent moves back to the login item (the default way now),
+    /// registered first, then the agent goes; nothing starts twice.
+    #[test]
+    fn an_agent_moves_back_to_the_login_item() {
+        let mut sys = Fake::new(Svc::Enabled, Svc::NotRegistered);
+        assert!(move_due(MainApp, sys.agent, sys.main));
+        let out = run(true, MainApp, &mut sys, false).expect("runs");
+        assert_eq!((sys.agent, sys.main), (Svc::NotRegistered, Svc::Enabled), "the login item alone");
+        assert_eq!(sys.calls, vec![Op::Register(MainApp), Op::Unregister(Agent)], "registered first, then the agent goes");
+        assert_eq!(out, Outcome::default());
+        assert_eq!(status_from(sys.agent, sys.main), LoginStatus::On);
+        assert!(!move_due(MainApp, sys.agent, sys.main), "once");
+        // The fallback's pair (agent awaiting approval, login item on): the agent goes at a launch.
+        assert!(!move_due(MainApp, Svc::NeedsApproval, Svc::Enabled));
+        assert!(tidy_due(MainApp, Svc::NeedsApproval, Svc::Enabled));
+        let mut sys = Fake::new(Svc::NeedsApproval, Svc::Enabled);
+        run(true, MainApp, &mut sys, false).expect("runs");
+        assert_eq!(sys.calls, vec![Op::Unregister(Agent)]);
+        // An agent turned off in Login Items is the user's off: not moved.
+        assert!(!move_due(MainApp, Svc::NeedsApproval, Svc::NotRegistered));
+        assert!(!tidy_due(MainApp, Svc::NeedsApproval, Svc::NotRegistered));
+    }
+
+    /// The first login after the update: this copy is the agent's job, so the agent's
+    /// unregistering waits for the quit; the login item is on at once.
+    #[test]
+    fn the_move_back_from_the_agents_own_job_waits_for_the_quit() {
+        let mut sys = Fake::new(Svc::Enabled, Svc::NotRegistered);
+        let out = run(true, MainApp, &mut sys, true).expect("runs");
+        assert!(out.deferred, "unregistering would end this process");
+        assert_eq!((sys.agent, sys.main), (Svc::Enabled, Svc::Enabled), "both until the quit");
+        assert_eq!(sys.calls, vec![Op::Register(MainApp)]);
+        assert_eq!(status_from(Svc::NotRegistered, sys.main), LoginStatus::On, "as Settings counts it");
+    }
+
+    /// The key back to "background_item": the login item moves to the agent again.
+    #[test]
+    fn the_key_picks_the_way_both_directions() {
+        assert_eq!(Service::from_key("login_item"), MainApp);
+        assert_eq!(Service::from_key("background_item"), Agent);
+        assert_eq!(Service::from_key("anything"), MainApp, "the default");
+        for way in [Agent, MainApp] {
+            assert_eq!(Service::from_key(way.key()), way);
+            assert_eq!(way.other().other(), way);
+            let (agent, main) = if way == Agent { (Svc::NotRegistered, Svc::Enabled) } else { (Svc::Enabled, Svc::NotRegistered) };
+            let mut sys = Fake::new(agent, main);
+            assert!(move_due(way, sys.agent, sys.main), "{way:?}");
+            run(true, way, &mut sys, false).expect("runs");
+            let mine = if way == Agent { sys.agent } else { sys.main };
+            let other = if way == Agent { sys.main } else { sys.agent };
+            assert_eq!((mine, other), (Svc::Enabled, Svc::NotRegistered), "{way:?}");
+            assert!(!move_due(way, sys.agent, sys.main) && !tidy_due(way, sys.agent, sys.main), "{way:?}: settled");
+        }
+    }
+
+    #[test]
+    fn a_launch_at_login_is_named_once_its_open_event_says_more() {
+        assert_eq!(opened_as(Started::AtLogin, Some(true), true), "login item", "the event's word first");
+        assert_eq!(opened_as(Started::AtLogin, Some(false), true), "reopened by macOS");
+        assert_eq!(opened_as(Started::AtLogin, Some(false), false), "at login");
+        assert_eq!(opened_as(Started::Agent, None, true), "launchd agent");
+        assert_eq!(opened_as(Started::ByHand, Some(false), true), "by hand", "listed long ago: a launch by hand");
     }
 }

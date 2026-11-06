@@ -1,5 +1,7 @@
 //! The app delegate and the (hidden) main menu.
 //!
+//! - **Launched:** `applicationDidFinishLaunching:` reads AppKit's open event (whether it
+//!   marks a login item's launch) for the launch's line (round reopen-list).
 //! - **Reopen:** opening Stage Manager again while it runs (Finder, Spotlight, Launchpad,
 //!   `open`) reaches `applicationShouldHandleReopen:hasVisibleWindows:`: the app shows its
 //!   Settings window, the way back when the menu bar icon is hidden.
@@ -22,13 +24,16 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEventModifierFlags, NSMenu, NSMenuItem};
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString};
 
 use super::status_menu::{self, MenuAction};
 
 /// What the system asks of the app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppEvent {
+    /// AppKit finished launching; whether its open event marked a login item's launch
+    /// (`None`: no open event).
+    Launched(Option<bool>),
     /// The app was opened again while running.
     Reopen,
 }
@@ -65,6 +70,12 @@ define_class!(
 
     // SAFETY: the methods below match NSApplicationDelegate's signatures.
     unsafe impl NSApplicationDelegate for AppDelegate {
+        #[unsafe(method(applicationDidFinishLaunching:))]
+        fn did_finish_launching(&self, _note: &NSNotification) {
+            // The open event is AppKit's current Apple event only now.
+            send(AppEvent::Launched(crate::platform::login_item::open_event_login_item()));
+        }
+
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
             tracing::info!("opened again while running: showing Settings");

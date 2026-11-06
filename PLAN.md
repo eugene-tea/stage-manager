@@ -243,23 +243,24 @@ Known gaps the owner accepted as rare:
     showed at its place before its snapshot reached it; the log identical to a good run); a
     relaunch cured it. Catch it with a screen recording if it comes back; check what the
     overlay and the strip panels hold from a launch while the screens settle.
-- **Early start (round early-start), at his next restart** (installed copy; nothing live
-  before): the first launch after the install moves the login item to the launchd agent
-  ("the login item moves to a launchd agent"; then "registered" for the agent, "unregistered"
-  for the login item, and a second copy's "already running … leaving without showing its
-  Settings" with `by_launchd=true`, launchd's own start at the registration; Login Items
-  lists Stage Manager once). After the restart: "launched" with `started="launchd agent"`
-  and a small `login_ago_s` (2-5 s hoped for, against 23 and 35 s 11-06); Accessibility and
-  Screen Recording as before ("permissions at launch" both true); the menu bar icon; no
-  second copy (a later "already running" line has `by_launchd=false` and shows no
-  Settings, "opened again moments after the login" for a reopen); if the 5K comes late,
-  "the launch waits a moment for the screens"; the restore line's "the first N s after the
-  login"; windows to their stages as they show, not piled. Then Settings → Launch at login
-  off and on (off from the agent's copy: "unregistered at the quit", the app keeps running;
-  Quit: the agent gone from Login Items). Not verified without a restart: the agent copy
-  checking in with LaunchServices (a Finder open reaching it as a reopen, not a second
-  process), launchd's `AbandonProcessGroup` keeping the guardian after a crash, an update's
-  relaunch with the agent registered.
+- **Reopen list (round reopen-list), at his next restarts** (installed copy; nothing live
+  before). First login after the install: 1.6.x's agent starts the app ("launched" with
+  `started="launchd agent"`), which moves to the login item ("moving to the way [app]
+  login_start names", "registered" for the login item, "unregistered at the quit" for the
+  agent: this copy is its job); Login Items lists Stage Manager once after the next quit. At
+  the logout: "logout signal" then "reopen list: activation policy" `policy=Regular
+  done=true` within a few ms of the first signal; the Dock icon shows until the quit. After
+  the login: "Stage Manager starting" about 3 s after the login (macOS's `TALLaunchStart`),
+  "launched: as macOS opened it" with `started="reopened by macOS"`, `listed_at_logout=true`
+  and `login_item_event` (whether macOS marks its own reopen as a login item: unknown, the
+  line says); no Dock icon, no Settings or other window; then the login item's copy, 10-30 s
+  later, "already running … leaving without showing its Settings" (or "opened again moments
+  after the login … no Settings" when macOS hands it over as a reopen). Not known before a
+  restart: whether `loginwindow` reads the activation policy when the logout begins (our
+  switch comes 1.3-1.7 s before `logoutContinued` and 9-18 s before the quit) or the
+  `LSUIElement` key at the relaunch; whether the persistent-apps file lists Stage Manager
+  (read in place only). A logout cancelled in its dialog: "policy=Accessory", the icon gone.
+  `[app] login_start = "background_item"` moves back to the agent (the early-start checks).
 - **Real-restart check (8G)**, with the owner, from the day's log:
   - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
     coming …", "asked to quit by the system", "quitting after the logout's head start".

@@ -193,6 +193,10 @@ pub const KEYS: &[KeyDef] = &[
     // [app]
     k("app", "launch_at_login", Kind::Bool, "true",
         "Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers."),
+    k("app", "login_start", Kind::Choice(&["login_item", "background_item"]), "\"login_item\"",
+        "How launch at login starts it: \"login_item\" (listed under Open at Login) or \"background_item\" (a launchd agent, listed under Allow in the Background). Both start after the apps macOS reopens at login; a change moves the registration over."),
+    k("app", "reopen_with_apps", Kind::Bool, "true",
+        "Start with the apps macOS reopens at login: Stage Manager shows in the Dock for a moment as you log out. Needs launch at login on; \"Reopen windows when logging back in\" decides, as for every app."),
     k("app", "show_menu_bar_icon", Kind::Bool, "true",
         "Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings."),
     k("app", "check_for_updates", Kind::Bool, "true",
@@ -541,6 +545,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-27.toml"),
     include_str!("legacy/default-28.toml"),
     include_str!("legacy/default-29.toml"),
+    include_str!("legacy/default-30.toml"),
 ];
 
 #[cfg(test)]

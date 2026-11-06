@@ -29,6 +29,7 @@ pub mod phase;
 pub mod placement;
 pub mod raise_order;
 pub mod recovery;
+pub mod reopen_list;
 pub mod rescan;
 pub mod restore;
 pub mod rules;

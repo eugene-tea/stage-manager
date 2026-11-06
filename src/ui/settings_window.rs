@@ -782,6 +782,9 @@ pub fn create(mtm: MainThreadMarker, values: SettingsValues, pane: Pane) -> Reta
     // SAFETY: the window is owned by OPEN until closed; AppKit must not release it on close.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTabbingMode(objc2_app_kit::NSWindowTabbingMode::Disallowed);
+    // Titled windows are restorable by default: Settings never reopens by itself when macOS
+    // reopens the app at login (round reopen-list).
+    window.setRestorable(false);
     let delegate = ToolbarDelegate::new(mtm, target.clone());
     let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &NSString::from_str("StageManagerSettings"));
     toolbar.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));

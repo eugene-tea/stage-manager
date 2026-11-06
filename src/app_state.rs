@@ -1,7 +1,7 @@
 //! What the app remembers about itself between launches (not configuration): whether the
-//! welcome was shown, whether the login item was set up once (and moved to the launchd agent
-//! once), the last update check, a
-//! skipped version and the Settings pane shown last. `app-state.json` beside `config.toml`
+//! welcome was shown, whether the login item was set up once (and the way it was last set to),
+//! a logout that listed the app with those macOS reopens, the last update check, a skipped
+//! version and the Settings pane shown last. `app-state.json` beside `config.toml`
 //! (so `STAGE_MANAGER_HOME` moves it too). A missing or unreadable file is a first launch.
 
 use std::path::Path;
@@ -17,9 +17,17 @@ pub struct AppState {
     /// The default login item was registered (or deliberately not) on an installed copy's
     /// first launch; from then on only the user's choice changes it.
     pub login_item_set_up: bool,
-    /// An earlier version's login item (`SMAppService.mainApp`) was moved to the launchd agent
-    /// once ([`crate::platform::login_item::move_to_agent`]; round early-start).
+    /// Round early-start moved the login item to the launchd agent: read when
+    /// [`AppState::login_start`] is not there yet (an install that ran that build).
     pub login_agent_moved: bool,
+    /// The way launch at login was last set to (`[app] login_start`'s value): a different
+    /// way in the config moves the registration once
+    /// ([`crate::platform::login_item::move_to`]; round reopen-list).
+    pub login_start: Option<String>,
+    /// The logout at which the app turned regular to be reopened by macOS at the next login
+    /// (Unix seconds; round reopen-list): the next launch reads it to tell macOS's reopen,
+    /// and clears it.
+    pub reopen_listed: Option<u64>,
     /// The last automatic or manual update check that reached GitHub (Unix seconds).
     pub last_update_check: Option<u64>,
     /// "Skip This Version": automatic checks stay quiet about this version and older.
@@ -71,6 +79,8 @@ mod tests {
             welcomed: true,
             login_item_set_up: true,
             login_agent_moved: true,
+            login_start: Some("login_item".into()),
+            reopen_listed: Some(7),
             last_update_check: Some(42),
             skipped_version: Some("1.2.0".into()),
             settings_pane: Some("stages".into()),

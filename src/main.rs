@@ -450,8 +450,8 @@ mod app {
         capture::quiesce(CAPTURE_QUIESCE);
         logging::write_counts("quit");
         tracing::info!("bye");
-        // Launch at login turned off while this copy is the launchd agent's job: unregistered
-        // last, since unregistering ends the job (round early-start).
+        // The launchd agent's unregistering left for the quit while this copy is its job (launch
+        // at login turned off, or moved to the login item): last, since it ends the job.
         login_item::at_exit();
         std::process::exit(code);
     }
@@ -746,8 +746,8 @@ mod app {
         logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
-        // How it was started, and how long after the login (round early-start: the launchd
-        // agent starts it as the session begins; a login item only after the reopened apps).
+        // How it was started, and how long after the login (rounds early-start, reopen-list:
+        // the open event, once AppKit has it, tells a login item from macOS's reopen).
         tracing::info!(
             started = login_item::started().name(),
             login_ago_s = login_item::since_login().map(|d| d.as_secs()),
@@ -851,9 +851,13 @@ mod app {
         // cancel signal resumes at once, and a logout cancelled without one ends the hold two
         // minutes after its latest signal (a fresh start). Each signal is timed here, as it
         // arrives.
+        // The same signal then turns the app regular, on this thread, so macOS lists it with
+        // the apps it reopens at login (round reopen-list, `[app] reopen_with_apps`).
         let wm_power = wm.clone();
         let power_off = apps::observe_logout(mtm, move |name, signal| {
-            wm_power.logout_signal(name, signal, Instant::now());
+            let at = Instant::now();
+            wm_power.logout_signal(name, signal, at);
+            shell::logout_signal(signal, at);
         });
 
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.

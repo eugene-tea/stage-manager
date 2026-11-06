@@ -78,6 +78,8 @@ pub fn build(mtm: MainThreadMarker, spec: AlertSpec, on_button: impl Fn(usize) +
     }
     alert.layout();
     let window = alert.window();
+    // Never brought back by macOS's reopen at login (round reopen-list).
+    window.setRestorable(false);
     SHOWN.with(|s| s.borrow_mut().push(Shown { id, alert, _target: target, key }));
     window
 }

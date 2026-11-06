@@ -483,11 +483,25 @@ fn log_config(v: &Values) -> LogConfig {
     }
 }
 
+/// `[app] login_start`: how launch at login registers (round reopen-list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoginStart {
+    /// `SMAppService.mainApp`: a login item, opened after the apps macOS reopens.
+    #[default]
+    LoginItem,
+    /// A launchd agent (round early-start), listed under "Allow in the Background".
+    BackgroundItem,
+}
+
 /// `[app]`: the app itself (Settings writes these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppConfig {
     /// Open at login (an installed copy registers a login item).
     pub launch_at_login: bool,
+    /// How launch at login registers.
+    pub login_start: LoginStart,
+    /// Turn regular at a logout so macOS reopens the app with the others at login.
+    pub reopen_with_apps: bool,
     /// The menu bar icon shows.
     pub show_menu_bar_icon: bool,
     /// Check for a newer release at most once a day.
@@ -833,6 +847,11 @@ impl Config {
         let config = Config {
             app: AppConfig {
                 launch_at_login: v.flag("app.launch_at_login"),
+                login_start: match v.text("app.login_start") {
+                    "background_item" => LoginStart::BackgroundItem,
+                    _ => LoginStart::LoginItem,
+                },
+                reopen_with_apps: v.flag("app.reopen_with_apps"),
                 show_menu_bar_icon: v.flag("app.show_menu_bar_icon"),
                 check_for_updates: v.flag("app.check_for_updates"),
                 install_updates: v.flag("app.install_updates"),
@@ -1282,7 +1301,14 @@ mod tests {
         let c = Config::default();
         assert_eq!(
             c.app,
-            AppConfig { launch_at_login: true, show_menu_bar_icon: true, check_for_updates: true, install_updates: false },
+            AppConfig {
+                launch_at_login: true,
+                login_start: LoginStart::LoginItem,
+                reopen_with_apps: true,
+                show_menu_bar_icon: true,
+                check_for_updates: true,
+                install_updates: false
+            },
             "the menu bar icon and launch at login are on (the owner's word, 10-13; Apple's Stage Manager has neither)"
         );
         assert_eq!(c.windows.fit, FitMode::Off, "windows keep their exact frames");

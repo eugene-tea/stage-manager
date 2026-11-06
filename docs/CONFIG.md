@@ -42,6 +42,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | Key | Default | Values | What it does |
 |---|---|---|---|
 | `app.launch_at_login` | `true` | true or false | Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers. |
+| `app.login_start` | `"login_item"` | "login_item", "background_item" | How launch at login starts it: "login_item" (listed under Open at Login) or "background_item" (a launchd agent, listed under Allow in the Background). Both start after the apps macOS reopens at login; a change moves the registration over. |
+| `app.reopen_with_apps` | `true` | true or false | Start with the apps macOS reopens at login: Stage Manager shows in the Dock for a moment as you log out. Needs launch at login on; "Reopen windows when logging back in" decides, as for every app. |
 | `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings. |
 | `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
 | `app.install_updates` | `false` | true or false | Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first. |

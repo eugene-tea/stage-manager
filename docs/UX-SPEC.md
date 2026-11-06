@@ -211,15 +211,24 @@ again then shows Settings. Its glyph is original art, as tall as the SF Symbols 
 the menu bar's default size (12 pt of ink, their median).
 
 **Launch at login.** Apple's is part of macOS. Ours registers at its first launch from
-Applications, and Settings can turn that off. It registers as a launchd agent (listed in
-Login Items under its name), which starts it as the login session begins, before macOS
-reopens the apps of the last session, so it is there as their windows show (11-06: as a
-login item it opened 23 and 35 s after the login, with most windows already up and piled).
-When macOS refuses the agent, or it waits for approval in Login Items, the plain login item
-stands in, which opens after the reopened apps, and Settings says "Starts after your apps
-until allowed in Login Items." An earlier version's login item moves to the agent once.
-Within 90 s of the login, opening the app again (the login item or macOS reopening it after
-the agent did) shows no Settings. An early launch waits for the screens a moment: the
+Applications, and Settings can turn that off. It registers as a login item
+(`SMAppService.mainApp`). At login `loginwindow` first relaunches the apps of its reopen
+list (about 3 s after the login) and holds the login items, and launchd agents with them,
+until every one has checked in (12, 27 and 17 s on his Mac, 11-06): as a login item, or as
+the launchd agent round early-start tried, Stage Manager opened 23-35 s after the login,
+with most windows already up and piled. The list holds the regular (Dock) apps running at
+the logout; ours is an accessory app. So at the logout's first signal it turns regular
+(`[app] reopen_with_apps`, on by default with launch at login on: its icon shows in the
+Dock for a moment, no window, nothing activated) and macOS reopens it with the other apps;
+a cancelled logout turns it back (a cancel signal, or no quit within two minutes). It
+launches as an accessory app as ever, and no window of its own is restorable, so nothing
+of it reopens but the app. The login item's copy then hands off without a word.
+`[app] login_start = "background_item"` keeps the launchd agent
+instead (listed under Allow in the Background; when macOS refuses it or it awaits approval,
+the login item stands in and Settings says "Starts after your apps until allowed in Login
+Items."); a change of the key moves the registration once, and 1.6.x's agent moves back to
+the login item. Within 90 s of the login, opening the app again (the login item after the
+reopened copy) shows no Settings. An early launch waits for the screens a moment: the
 displays' first reading (5 s at most) and, within a minute of the login, a screen the
 stages were saved on that is not connected yet (10 s at most).
 

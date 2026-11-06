@@ -220,6 +220,9 @@ fn make_window(mtm: MainThreadMarker, size: NSSize) -> Retained<NSWindow> {
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     window.setTitlebarAppearsTransparent(true);
     window.setMovableByWindowBackground(true);
+    // Titled windows are restorable by default: never brought back by macOS's reopen at
+    // login (round reopen-list).
+    window.setRestorable(false);
     window
 }
 

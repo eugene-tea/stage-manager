@@ -57,7 +57,11 @@ If you close the welcome window early, the menu bar icon's menu keeps reminding 
 missing, with an **Allow…** item for each.
 
 Stage Manager also adds itself to your login items the first time it runs from
-Applications, so it starts when you log in. You can turn that off in Settings.
+Applications, so it starts when you log in. You can turn that off in Settings. When you
+restart or log out with "Reopen windows when logging back in" on, macOS reopens it with your
+other apps, earlier than login items open, so their windows go straight to their stages;
+for that its icon shows in the Dock for a moment as you log out (`[app] reopen_with_apps`
+turns this off).
 
 ## How it works
 

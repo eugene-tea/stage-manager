@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Launch at login as a launchd agent (round early-start): SMAppService.agentServiceWithPlistName
-  registers this file from the bundle's Contents/Library/LaunchAgents (scripts/bundle.sh puts it
-  there; the signature seals it). launchd starts the app as the login session begins, before
-  loginwindow reopens the apps of the last session; a login item (SMAppService.mainApp) opens
-  only after them. src/platform/login_item.rs names this label (AGENT_LABEL).
+  Launch at login as a launchd agent (round early-start), used with
+  `[app] login_start = "background_item"`; the default is the login item (SMAppService.mainApp,
+  round reopen-list). SMAppService.agentServiceWithPlistName registers this file from the
+  bundle's Contents/Library/LaunchAgents (scripts/bundle.sh puts it there; the signature seals
+  it). On his Mac (11-06) launchd held the job until loginwindow's reopened apps had checked in,
+  so it started with the login items, no earlier. It stays in the bundle so an agent registered
+  by 1.6.x still starts the app at the first login after the update, which moves it back to the
+  login item. src/platform/login_item.rs names this label (AGENT_LABEL).
 
   - RunAtLoad: start at the session's start (and once at registration; that copy hands off to
     the running one and leaves quietly).
