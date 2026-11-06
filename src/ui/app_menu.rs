@@ -78,7 +78,7 @@ define_class!(
 
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
-            tracing::info!("opened again while running: showing Settings");
+            // The shell says whether Settings shows (not moments after the login).
             send(AppEvent::Reopen);
             false
         }
