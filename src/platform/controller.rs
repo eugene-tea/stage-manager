@@ -1374,10 +1374,18 @@ impl Controller {
             return m.displays().to_vec();
         }
         let mut displays = if self.displays.is_empty() { fallback_displays() } else { self.displays.clone() };
-        if self.store.config().displays.main_only {
+        if self.main_only() {
             displays.truncate(1);
         }
         displays
+    }
+
+    /// `[displays] main_only` as the stages were built with it: read at launch (the model
+    /// keeps it), the config's own value only until the model is built. A changed value
+    /// applies at the next launch; the platform's reads follow the model's, so a reload never
+    /// leaves the two disagreeing about which screens are managed (the Codex review's S3).
+    fn main_only(&self) -> bool {
+        self.model.as_ref().map_or(self.store.config().displays.main_only, |m| m.options().main_only)
     }
 
     /// The managed display that shows most of `frame` ([`display_of`], macOS's rule for a
@@ -2736,7 +2744,8 @@ impl Controller {
         // first and at once.
         let animated = {
             let anim = &self.store.config().style.animation;
-            anim.animates() && self.strip_visible && !self.phase.fullscreen()
+            let plays_on = self.model.as_ref().map_or_else(|| self.main_display_id(), |m| transition_plan::display_of(m, &actions));
+            anim.animates() && self.strip_visible && !self.fullscreen_on(plays_on)
         };
         let activated: HashSet<u32> = run.now.union(&run.fallback).copied().collect();
         let landing = self.landing_arrivals(ob, &hidden, animated, &activated);
@@ -2923,7 +2932,7 @@ impl Controller {
             on: config.windows.corner_patch,
             screen: display.id.0,
             overview: self.overview.showing_or_expected(now) || self.phase.changing(),
-            fullscreen: self.phase.fullscreen(),
+            fullscreen: self.fullscreen_on(display.id),
             slivers,
             raised,
             display: display.frame,
@@ -4262,6 +4271,28 @@ impl Controller {
         self.phase.fullscreen() || self.phase.changing() || self.locked
     }
 
+    /// Whether `display` shows a full-screen app's Space: the main screen's is the phase's,
+    /// another's its own watch's ([`Self::other_screen_seen`]).
+    fn fullscreen_on(&self, display: DisplayId) -> bool {
+        fullscreen_there(display, self.main_display_id(), self.phase.fullscreen(), |d| self.other_screen_fullscreen(d.0))
+    }
+
+    /// [`Self::frozen`] for input addressed to `display`'s stages (a card of its strip, a
+    /// shortcut with the keyboard on it, a click on its wallpaper): a full-screen app's Space
+    /// on another screen stops nothing here (the Codex review's S1; UX-SPEC Screens). A Space
+    /// change settling and the lock hold every screen.
+    fn frozen_on(&self, display: DisplayId) -> bool {
+        self.fullscreen_on(display) || self.phase.changing() || self.locked
+    }
+
+    /// The screen the keyboard is on ([`Model::keyboard_display`]): the focused window's, by
+    /// the model when it manages it, else the managed screen most of it shows on in `list`;
+    /// the main one with no focused window.
+    fn keyboard_display(&self, focused: Option<WindowId>, list: &[windows::CgWindow]) -> DisplayId {
+        let shown_on = focused.and_then(|f| list.iter().find(|w| w.id == f.0)).map(|w| self.display_at(w.bounds));
+        self.model.as_ref().map_or_else(|| self.main_display_id(), |m| m.keyboard_display(focused, shown_on))
+    }
+
     /// Why stage commands are refused now, if they are ([`Self::frozen`]).
     fn frozen_reason(&self) -> Option<&'static str> {
         if self.locked {
@@ -5063,7 +5094,7 @@ impl Controller {
         for id in showing {
             self.on_found(ob, id);
         }
-        if self.store.config().displays.main_only {
+        if self.main_only() {
             self.leave_other_displays(ob, &shown, &shown_main);
         } else {
             self.follow_display_moves(ob, &list);
@@ -5540,7 +5571,7 @@ impl Controller {
         self.flush_pending(ob);
         let mut displays = displays;
         let config = self.store.config().clone();
-        if config.displays.main_only {
+        if self.main_only() {
             displays.truncate(1);
         }
         if displays.is_empty() {
@@ -5593,11 +5624,15 @@ impl Controller {
     /// whoever reveals: Finder's activation and focus that follow are its echo
     /// ([`DesktopEcho`]) either way.
     pub fn mouse_down(&mut self, ob: &mut Observer, list: &[windows::CgWindow], p: Point, clicks: i64) -> bool {
-        if self.model.is_none() || self.frozen() {
+        if self.model.is_none() {
             return false;
         }
-        // The screen clicked: its own Desktop is revealed (round displays).
+        // The screen clicked: its own Desktop is revealed (round displays), unless a
+        // full-screen app's Space shows there (another screen's stops nothing here).
         let Some(screen) = self.managed_displays().into_iter().find(|d| d.frame.contains(p)) else { return false };
+        if self.frozen_on(screen.id) {
+            return false;
+        }
         // Our own windows (the strip below windows, the motion overlay above them) never
         // receive other apps' clicks, so they never hide the wallpaper.
         let own = std::process::id() as i32;
@@ -5677,7 +5712,7 @@ impl Controller {
         tracing::info!(?command, "hotkey");
         let command = self.end_restore_for_hotkey(ob, command);
         self.flush_pending(ob);
-        if self.frozen() && command != HotkeyCommand::ToggleStrip {
+        if command != HotkeyCommand::ToggleStrip && self.hotkey_frozen() {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
             return;
@@ -5695,6 +5730,19 @@ impl Controller {
         };
     }
 
+    /// [`Self::frozen_on`] the screen with the keyboard (the focused window's, asked only
+    /// while a screen shows a full-screen app's Space).
+    fn hotkey_frozen(&self) -> bool {
+        if self.locked || self.phase.changing() {
+            return true;
+        }
+        if !self.phase.fullscreen() && !self.screens.values().any(|w| w.fullscreen) {
+            return false;
+        }
+        let list = windows::list_windows();
+        self.frozen_on(self.keyboard_display(focused_window().map(WindowId), &list))
+    }
+
     /// Ends the restore window for a hotkey; a stage number keeps meaning the stage the user
     /// saw under it when the window's end moves a voter (its stage may go: the number then
     /// names the stage its window went to; the review of 8I2).
@@ -5707,14 +5755,17 @@ impl Controller {
             }
         };
         let held = if self.settling.is_some() && self.model.is_some() {
-            let obs = self.observe(ob);
+            let list = windows::list_windows();
+            let obs = self.observe_with(ob, &list);
+            let keyboard = self.keyboard_display(obs.focused, &list);
             self.model.as_ref().map(|m| {
-                // The Space each command acts on: the current one, or the focused window's.
+                // The Space each command acts on: the keyboard's screen's, or the focused
+                // window's.
                 let space = match command {
                     HotkeyCommand::SendTo(_) => obs.focused.and_then(|f| m.space_of(f)),
                     _ => None,
                 }
-                .unwrap_or_else(|| m.current_space_for(&obs));
+                .unwrap_or_else(|| m.hotkey_space(keyboard));
                 (space, m.number_ref(space, n))
             })
         } else {
@@ -5772,7 +5823,8 @@ impl Controller {
             // Read the windows now, while the button is down (~100 ms before the release),
             // so the click's motion starts without waiting on AX. Not while a transition's
             // windows are still on their way (their frames are not the ones to save).
-            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen() && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
+            let display = self.strip_event_display(&event);
+            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen_on(display) && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
             tracing::trace!(stage, read = self.pressed_obs.is_some(), "card pressed");
             return;
         }
@@ -5789,7 +5841,7 @@ impl Controller {
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
         let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
-        if self.frozen() {
+        if self.frozen_on(self.strip_event_display(&event)) {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
             if local_edit {
@@ -5861,18 +5913,37 @@ impl Controller {
         }
     }
 
+    /// The screen whose stages a strip event addresses: its stage's (the main one when the
+    /// model has no such stage).
+    fn strip_event_display(&self, event: &StripEvent) -> DisplayId {
+        let stage = match *event {
+            StripEvent::CardClicked { stage, .. }
+            | StripEvent::CardPressed { stage }
+            | StripEvent::CardDropped { stage, .. }
+            | StripEvent::IconClicked { stage, .. }
+            | StripEvent::CardMoved { stage, .. }
+            | StripEvent::CardMerged { stage, .. } => Some(stage),
+            StripEvent::Unveil { .. } => None,
+        };
+        stage
+            .and_then(|s| self.model.as_ref()?.stage(StageId(s)).map(|s| s.display))
+            .unwrap_or_else(|| self.main_display_id())
+    }
+
     /// Runs a batch animated (user input) or at once (scripted ctl commands).
     fn run_batch(&mut self, ob: &Observer, actions: Vec<Action>, animated: bool) -> usize {
         if animated { self.execute_animated(ob, actions) } else { self.execute(ob, actions) }
     }
 
     fn switch(&mut self, ob: &mut Observer, n: usize, animated: bool) -> Result<usize, String> {
-        let obs = self.observe(ob);
+        let list = windows::list_windows();
+        let obs = self.observe_with(ob, &list);
+        let keyboard = self.keyboard_display(obs.focused, &list);
         let m = self.model.as_mut().ok_or_else(not_managing)?;
-        if m.stage_by_number(m.hotkey_space(), n).is_none() {
+        if m.stage_by_number(m.hotkey_space(keyboard), n).is_none() {
             return Err(format!("there is no stage {n}"));
         }
-        let actions = m.switch_to_number(n, &obs);
+        let actions = m.switch_to_number(n, keyboard, &obs);
         let count = actions.len();
         self.run_batch(ob, actions, animated);
         Ok(count)
@@ -5957,6 +6028,12 @@ impl Controller {
                     self.style = Arc::new(style);
                 }
                 self.echoes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
+                if self.model.is_some() && config.displays.main_only != self.main_only() {
+                    tracing::warn!(
+                        main_only = config.displays.main_only,
+                        "config: [displays] main_only changed; it applies at the next launch (quit and open Stage Manager again)"
+                    );
+                }
                 self.sync_fit();
                 self.publish_shield();
                 if let Some(m) = self.model.as_mut() {
@@ -6668,6 +6745,13 @@ fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::
     pane.window != 0 && pane.space == space && list.iter().any(|w| w.id == pane.window && w.onscreen)
 }
 
+/// Whether `display` shows a full-screen app's Space: the main screen's answer is the
+/// phase's (`main_fullscreen`), another screen's its own (`other`), so a full-screen app on
+/// one screen never freezes the other's input (the Codex review's S1).
+fn fullscreen_there(display: DisplayId, main: DisplayId, main_fullscreen: bool, other: impl Fn(DisplayId) -> bool) -> bool {
+    if display == main { main_fullscreen } else { other(display) }
+}
+
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
 }
@@ -6935,6 +7019,18 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Codex review's S1: a full-screen app on the main screen froze every strip's
+    /// input; each screen now answers for itself.
+    #[test]
+    fn a_full_screen_app_freezes_only_its_own_screens_input() {
+        let (main, laptop, third) = (DisplayId(1), DisplayId(2), DisplayId(3));
+        let others = |d: DisplayId| d == third;
+        assert!(fullscreen_there(main, main, true, others), "the main screen's full-screen Space");
+        assert!(!fullscreen_there(laptop, main, true, others), "the laptop's Desktop goes on");
+        assert!(!fullscreen_there(main, main, false, others), "the third screen's stops nothing on the main one");
+        assert!(fullscreen_there(third, main, false, others));
+    }
 
     /// The review's U1: with the strip hidden no switch animates, so the strip is asked to
     /// keep no full-size snapshot (nothing is captured); shown, every window is kept ready.

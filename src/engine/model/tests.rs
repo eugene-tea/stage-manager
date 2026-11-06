@@ -55,7 +55,8 @@ impl Env {
 
     fn switch(&mut self, n: usize) -> Vec<Action> {
         let obs = self.d.obs();
-        let a = self.m.switch_to_number(n, &obs);
+        let keyboard = self.m.keyboard_display(obs.focused, None);
+        let a = self.m.switch_to_number(n, keyboard, &obs);
         self.run(a)
     }
 
@@ -1060,7 +1061,7 @@ fn activating_the_other_app_of_a_shared_stage_brings_its_window_in_front() {
     assert_eq!(e.d.focused, Some(w(1)));
     // Back and forth: the next activation of B gives B the key again.
     let obs = e.d.obs();
-    let a = e.m.switch_to_number(2, &obs);
+    let a = e.m.switch_to_number(2, e.m.main_display().id, &obs);
     e.run(a);
     let obs = Observation { focused: None, ..e.d.obs() };
     let a = e.m.app_activated(11, &obs);

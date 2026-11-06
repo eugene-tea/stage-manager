@@ -48,19 +48,40 @@ fn an_icon_click_on_a_laptop_card_gathers_the_apps_windows_of_the_laptop_only() 
 }
 
 #[test]
-fn a_stage_hotkey_switches_the_main_screens_stage_whichever_screen_has_the_focus() {
-    // Switching 4: the platform checks the main screen's stage n; the switch is the same one.
+fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
+    // The Codex review's W3, his word 11-06: the shortcuts and `ctl switch N` count the strip
+    // of the screen the keyboard is on (the focused window's), for the check and the switch.
+    // The Studio has three stages, the laptop four: 4 is the laptop's alone.
     let mut e = Env::both();
     let [code, music, _, _, finder] = measured_desk(&mut e);
+    e.open(9, 22, &laptop(), (300.0, 150.0), RuleAction::New);
+    e.open(10, 23, &laptop(), (350.0, 180.0), RuleAction::New);
+    let fourth = e.stage_of(10);
+    e.switch(finder);
     e.d.focused = Some(WindowId(6));
-    assert_eq!(e.m.hotkey_space(), e.space_of(STUDIO));
-    assert_eq!(e.m.stage_by_number(e.m.hotkey_space(), 2), Some(music));
+    let keyboard = e.m.keyboard_display(e.d.focused, None);
+    assert_eq!(keyboard, LAPTOP, "Finder's window is on the laptop");
+    assert_eq!(e.m.hotkey_space(keyboard), e.space_of(LAPTOP));
+    assert_eq!(e.m.stage_by_number(e.m.hotkey_space(keyboard), 4), Some(fourth), "the check finds the laptop's stage 4");
+    assert_eq!(e.m.stage_by_number(e.m.hotkey_space(STUDIO), 4), None, "the Studio has no stage 4");
     let obs = e.d.obs();
-    let a = e.m.switch_to_number(2, &obs);
+    let a = e.m.switch_to_number(4, keyboard, &obs);
+    e.run(a);
+    assert_eq!(e.m.active_stage(LAPTOP), Some(fourth), "the laptop's stage 4");
+    assert_eq!(e.m.active_stage(STUDIO), Some(code), "the Studio did not move");
+    // The keyboard on the Studio: its stage 2.
+    e.d.focused = Some(WindowId(1));
+    let keyboard = e.m.keyboard_display(e.d.focused, None);
+    assert_eq!(keyboard, STUDIO);
+    let obs = e.d.obs();
+    let a = e.m.switch_to_number(2, keyboard, &obs);
     e.run(a);
     assert_eq!(e.m.active_stage(STUDIO), Some(music), "the Studio's stage 2");
-    assert_eq!(e.m.active_stage(LAPTOP), Some(finder), "the laptop, where the focus is, did not move");
-    assert!(e.parked_on(1, &studio()), "Code to a card: {code:?}");
+    assert_eq!(e.m.active_stage(LAPTOP), Some(fourth), "the laptop did not move");
+    // A focused window the model does not manage counts where it shows; none, the main screen.
+    assert_eq!(e.m.keyboard_display(Some(WindowId(99)), Some(LAPTOP)), LAPTOP);
+    assert_eq!(e.m.keyboard_display(None, None), STUDIO);
+    assert_eq!(e.m.keyboard_display(None, Some(DisplayId(77))), STUDIO, "a screen the model does not know: the main one");
 }
 
 #[test]

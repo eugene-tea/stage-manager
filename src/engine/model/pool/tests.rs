@@ -575,7 +575,8 @@ fn the_number_key_that_ends_the_restore_window_keeps_its_stage() {
     m.end_restore().expect("it was open (the key)");
     assert_eq!(m.number_now(here, r), n);
     assert_eq!(m.stage_number(after), Some(n + 1));
-    m.switch_to_number(m.number_now(here, r), &Observation::default());
+    let main = m.main_display().id;
+    m.switch_to_number(m.number_now(here, r), main, &Observation::default());
     assert!(m.is_active(y) && m.window(w(81)).is_some_and(|x| !x.parked));
     // The next number still makes a stage.
     let next = m.number_ref(here, m.stages_in(here).count() + 1);

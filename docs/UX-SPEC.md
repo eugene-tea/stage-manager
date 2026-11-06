@@ -187,7 +187,10 @@ screen changing (the menu bar moved to the other screen, or the lid closed with 
 main) moves no stage: macOS moves every window with its screen, and each hidden window
 comes back where it was on its screen. `[displays]
 main_only` (off) is the first version's behaviour: only the main screen, a window moved off
-it left alone.
+it left alone; it is read at launch (turned on mid-session it would have to bring back
+every hidden window of the other screens, on Desktops not shown too; a quit does that
+safely). Each screen's left-edge reveal is its own: a pointer on a
+screen to the left of a strip never reveals or holds that strip.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. The strip never appears in ⌘-Tab or the ⌘\`
@@ -548,8 +551,9 @@ with the windows back on another Desktop (bundle id, hashed title, the Desktops'
   seen live with ours; so are a second screen's own card glass, corner patch and desktop
   still, and a full-screen app on one screen while windows arrive on the other (round
   displays-2, built from the one-screen code, checked by the suite's `displays` phase).
-- Stage hotkeys and `ctl switch N` count and switch the main screen's strip, whichever
-  screen has the keyboard; which screen Apple's hotkeys address is not measured.
+- Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
+  on (the focused window's; the main screen's with no focused window; his call 11-06);
+  which screen Apple's hotkeys address is not measured.
 - No public API names a Desktop, so Desktops are told apart by their windows. An empty
   Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
   looks new until one of them shows.

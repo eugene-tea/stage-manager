@@ -2,7 +2,7 @@
 
 Every option lives in `~/.config/stage-manager/config.toml`. The file lists every key below,
 commented out with its default; remove the `#` to change one. Saved changes apply within a
-second; a mistake, or a file that can't be read, keeps the last working settings. Settings already in System Settings →
+second (a key marked "Read at launch" at the next launch); a mistake, or a file that can't be read, keeps the last working settings. Settings already in System Settings →
 Desktop & Dock (show recent apps, show an app's windows all at once or one at a time, click
 wallpaper to reveal desktop) are read from there and are not repeated here. The
 [user guide](GUIDE.md#the-config-file) shows how to edit the file, with examples.
@@ -151,7 +151,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. |
 | `windows.corner_patch_reach` | `"auto"` | "auto" or a number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow: "auto" is a parked (inactive) window's shadow, side by side; a number is used on every side. |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
-| `displays.main_only` | `false` | true or false | Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. |
+| `displays.main_only` | `false` | true or false | Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it. |
 | `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
 | `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |

@@ -50,8 +50,13 @@
   disappear at the second restart (up to 30 days since you last visited it).
 - With two screens, a window dragged onto the second screen's strip becomes a card there,
   a click on a card's app icon on the second screen gathers that app's windows from that
-  screen's stages only, and the stage hotkeys always switch the main screen's stages,
-  whichever screen has the keyboard.
+  screen's stages only, and the stage shortcuts (and `ctl switch`) count and switch the
+  stages of the screen you are typing on.
+- With two screens, a full-screen app on one no longer stops the other: its cards, Shift-
+  clicks, wallpaper clicks and the stage shortcuts typed there work as usual. A pointer on a
+  screen to the left of a hidden strip no longer reveals that strip or keeps it open.
+- `[displays] main_only` takes effect at the next launch, and says so: changing it while
+  Stage Manager runs used to leave the two screens half managed.
 - A wallpaper click reveals the desktop on the Dock's screen too: the Dock's invisible
   screen-wide window no longer counts as a window over the wallpaper, and a click away from
   the Dock no longer asks the Dock what was clicked.

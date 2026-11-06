@@ -151,7 +151,7 @@ screen's stages come back on that screen, by the screen itself, not the cable it
 
 `[displays] main_only = true` keeps the first version's way: only the main screen (the one
 with the menu bar) is managed, and a window moved to another screen leaves its stage and is
-left alone there.
+left alone there. It is read at launch: quit and open Stage Manager again after changing it.
 
 ### After a restart
 
