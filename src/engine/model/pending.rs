@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Kin, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
 use crate::engine::park::clamp_to_visible;
-use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
+use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedSpace, SavedWindow, live_key, rematch_on};
 use crate::engine::restore::{Restore, Summary, clamped_at_corner, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
@@ -340,6 +340,43 @@ impl Model {
             .collect()
     }
 
+    /// An app quiet for [`crate::engine::restore::QUIET`] (running, no new window): its pending
+    /// windows in the model's stages are given up ([`Model::expire_pending`]), and its entries
+    /// on the saved Desktops not visited yet wait for that Desktop's first show alone, no
+    /// longer taking a window shown on another ([`crate::engine::restore::Restore::pool_closed`]).
+    /// Returns the actions, how many were given up, and the apps whose saved Desktops'
+    /// entries close now.
+    pub fn settle_quiet(&mut self, bundles: &[String]) -> (Vec<Action>, usize, Vec<String>) {
+        let (actions, dropped) = self.expire_pending(bundles);
+        let waits: HashSet<&str> = self
+            .leftovers
+            .iter()
+            .flat_map(|l| l.stages.iter().flat_map(|s| s.windows.iter()))
+            .filter(|w| w.role == SavedRole::Standard)
+            .map(|w| w.bundle_id.as_str())
+            .collect();
+        let mut closed = Vec::new();
+        for b in bundles.iter().filter(|b| waits.contains(b.as_str())) {
+            if self.restore.pool_closed.insert(b.clone()) {
+                closed.push(b.clone());
+            }
+        }
+        (actions, dropped, closed)
+    }
+
+    /// The apps with entries on saved Desktops shown for the first time since the last call
+    /// ([`crate::engine::restore::Restore::shown_apps`]): their quiet minute starts again.
+    pub fn take_shown_apps(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.restore.shown_apps).into_iter().collect()
+    }
+
+    /// Notes the apps of saved Desktop `saved`, shown for the first time now
+    /// ([`Model::take_shown_apps`]).
+    pub(crate) fn note_shown(&mut self, saved: &SavedSpace) {
+        let apps = saved.stages.iter().flat_map(|s| s.windows.iter()).filter(|w| w.role == SavedRole::Standard).map(|w| w.bundle_id.clone());
+        self.restore.shown_apps.extend(apps);
+    }
+
     /// Gives up the pending windows of apps `bundles` (running and quiet for
     /// [`crate::engine::restore::QUIET`]): stages left with nothing go away unless active or
     /// declared. Returns the actions and how many were given up.
@@ -602,6 +639,7 @@ impl Model {
     /// own stays where it is).
     fn adopt(&mut self, space: SpaceId, index: usize, voters: &[WindowId]) -> Vec<Action> {
         let saved = self.leftovers.remove(index);
+        self.note_shown(&saved);
         let target = SpaceId(saved.id);
         self.provisional.remove(&space);
         self.relabel_space(space, target);

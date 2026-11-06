@@ -519,7 +519,11 @@ window that shows only after the settle still goes to its stage, as above; that 
 bounded per app, not by the two minutes (its entries go a minute after its app's last new
 window, at the settle's end when its app is not running, and at the next session; a session
 in which its Desktop never showed does not count, up to 30 days since that Desktop last
-showed). A title that only puts
+showed). An entry of a Desktop not shown yet stays through that minute for the Desktop's
+first show, its app's minute starting again there, but from then on a window shown on
+another Desktop is a new window by Apple's rule, never a stage of that Desktop's. Saved
+frames come back on the screen they were saved on, at the same place on it when the screens
+were rearranged in between. A title that only puts
 something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
 a file in its workspace) is the same name, so the frame the window reopened at counts. While
 the restore window is open (no click or key yet, so every window that shows is one an app

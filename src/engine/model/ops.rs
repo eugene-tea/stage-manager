@@ -1585,6 +1585,7 @@ impl Model {
                 w.restore = w.restore.translate(dx, dy);
                 w.original = w.original.map(|f| f.translate(dx, dy));
             }
+            self.move_pending_frames(d.id, dx, dy);
         }
         let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
         let removed = !gone.is_empty();
@@ -1645,6 +1646,7 @@ impl Model {
             self.park_window(id, &mut actions);
         }
         self.normalize_slots();
+        self.settle_saved_origins();
         actions.push(Action::StateChanged);
         actions
     }

@@ -330,6 +330,74 @@ impl Model {
             .filter(|l| l.current)
             .max_by_key(|l| l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(main) && main.known())
             .and_then(|l| l.active_index.map(|i| (l.id, i)));
+        self.settle_saved_origins();
+    }
+
+    /// Brings the saved frames of the saved Desktops not visited yet into the arrangement of
+    /// now: a Desktop saved on a screen connected now whose origin moved since (Displays
+    /// settings rearranged while the app was not running, another screen made main) has its
+    /// windows' saved and pre-fit frames moved by the same offset, and takes the new origin,
+    /// as macOS moves a screen's windows along (R2 of the Codex review: a laptop Desktop
+    /// saved at x −1440 put its windows back at −1440 with the laptop now on the right). A
+    /// Desktop saved before files kept the origin keeps its frames while each of them still
+    /// lies on that screen (the origin taken as unchanged), else uses none
+    /// ([`crate::engine::restore::Restore::frames_off`]). One on a screen not connected
+    /// waits for it. Run at the load and at every change of the displays.
+    pub fn settle_saved_origins(&mut self) {
+        let displays = &self.displays;
+        let off = &mut self.restore.frames_off;
+        for l in &mut self.leftovers {
+            if off.contains(&l.id) {
+                continue;
+            }
+            let Some(sc) = l.screen.as_mut() else { continue };
+            let Some(d) = ScreenKey::parse(&sc.key).filter(|k| k.known()).and_then(|k| displays.iter().find(|d| d.is_keyed(k))) else {
+                continue;
+            };
+            let windows = l.stages.iter_mut().flat_map(|st| st.windows.iter_mut());
+            match sc.origin() {
+                Some((x, y)) => {
+                    let (dx, dy) = (d.frame.x - x, d.frame.y - y);
+                    if dx == 0.0 && dy == 0.0 {
+                        continue;
+                    }
+                    for w in windows {
+                        w.frame = w.frame.translate(dx, dy);
+                        w.original = w.original.map(|f| f.translate(dx, dy));
+                    }
+                    tracing::info!(desktop = l.id, dx, dy, "restore: a saved Desktop's screen moved in the arrangement; its saved frames move along");
+                }
+                None => {
+                    let mut windows = windows;
+                    let on = windows.all(|w| w.frame.is_degenerate() || d.frame.contains(w.frame.center()));
+                    if !on {
+                        off.insert(l.id);
+                        tracing::info!(desktop = l.id, "restore: a saved Desktop's frames (saved with no screen origin) are off its screen now; its windows keep the frames their apps give them");
+                        continue;
+                    }
+                }
+            }
+            sc.x = Some(d.frame.x);
+            sc.y = Some(d.frame.y);
+        }
+    }
+
+    /// Moves by (`dx`, `dy`) the saved frames waiting in the model's stages on display
+    /// `display` (pending windows), as macOS moves that screen's windows when its origin
+    /// moves ([`Model::set_displays`]).
+    pub(crate) fn move_pending_frames(&mut self, display: DisplayId, dx: f64, dy: f64) {
+        let on: Vec<StageId> = self
+            .stages
+            .iter()
+            .filter(|st| self.spaces.iter().any(|s| s.id == st.space && s.display == display))
+            .map(|st| st.id)
+            .collect();
+        for (_, list) in self.pending.iter_mut().filter(|(s, _)| on.contains(s)) {
+            for w in list {
+                w.frame = w.frame.translate(dx, dy);
+                w.original = w.original.map(|f| f.translate(dx, dy));
+            }
+        }
     }
 
     /// True when saved Desktop `saved` may form on `display`: it was saved on that screen,
@@ -517,6 +585,9 @@ impl Model {
             .iter()
             .position(|l| SpaceId(l.id) == target)
             .map(|i| self.leftovers.remove(i));
+        if let Some(s) = &saved {
+            self.note_shown(s);
+        }
         // Saved on a screen that is not this one (round displays-2): said in the arrival's
         // line and counted for the restore's summary.
         let other_screen = saved.as_ref().is_some_and(|s| self.saved_on_other_screen(s, display));

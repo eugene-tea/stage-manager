@@ -17,6 +17,9 @@
 //!   login screen's heels ends the window while macOS is still reopening apps). An app
 //!   running then keeps its entries under the rule above (one launched during the window and
 //!   still opening keeps them until its own minute is up);
+//!   Entries of a saved Desktop not shown yet stay for that Desktop's first show, but from
+//!   then on take no window shown on another Desktop ([`Restore::pool_closed`]); at that
+//!   show the app's minute starts again ([`Restore::shown_apps`]);
 //! - it was pending through a whole window server session already (its app never brought it
 //!   back): [`crate::engine::persist::StateFile::start_new_session`] drops it at the next one.
 //!   A session in which its Desktop never showed does not count (nothing looked for it),
@@ -69,6 +72,11 @@
 //! **Frames** come back from `state.json` only on the screen a Desktop was saved on, at the
 //! saved size ([`Restore::screens`]; a file naming no screen: the main display of the saved
 //! size, [`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//! Saved frames are in the arrangement's global coordinates of the save: a screen whose
+//! origin moved since (Displays settings, another screen main) has its Desktops' saved frames
+//! moved by the same offset ([`crate::engine::model::Model::settle_saved_origins`]); a file
+//! that does not keep the origin has them used only while they all still lie on that screen
+//! ([`Restore::frames_off`]).
 //!
 //! **Off** (`[stages] restore_after_restart = false`): after a restart nothing waits
 //! ([`Restore::off_after_restart`]): saved windows not on screen are dropped as 1.2.0 did.
@@ -147,6 +155,20 @@ pub struct Restore {
     /// rounded), where the file says ([`crate::engine::persist::SavedScreen`]): its saved
     /// frames are used only on that screen at that size.
     pub screens: BTreeMap<u64, (String, i64, i64)>,
+    /// Saved Desktops whose frames apply nowhere: saved before files kept the screen's origin,
+    /// their frames no longer on that screen now (it moved in the arrangement; R2 of the Codex
+    /// review). Their windows keep the frames their apps give them, as on another screen.
+    pub frames_off: std::collections::BTreeSet<u64>,
+    /// Apps quiet for [`QUIET`] (their pending windows given up,
+    /// [`crate::engine::model::Model::expire_pending`]): their entries on the saved Desktops
+    /// not visited yet wait for that Desktop's first show alone, and no longer take a window
+    /// shown on another Desktop (the pool; R3 of the Codex review: Finder's new window for
+    /// a saved folder an hour later went into a stage of a Desktop never shown).
+    pub pool_closed: std::collections::BTreeSet<String>,
+    /// Apps with entries on a saved Desktop shown for the first time since the platform last
+    /// asked ([`crate::engine::model::Model::take_shown_apps`]): their quiet minute starts
+    /// again there, for the windows of that Desktop still to show.
+    pub shown_apps: std::collections::BTreeSet<String>,
     /// Why saved frames are not used was logged already, for these (saved Desktop, display)
     /// pairs (once a run each).
     pub frames_noted: std::collections::BTreeSet<(Option<u64>, u32)>,
@@ -216,6 +238,9 @@ impl Restore {
     /// and `w`×`h` points: the Desktop was saved on that screen at that size; a Desktop saved
     /// with no screen goes by [`Restore::frames_fit`] on the main display (`main`) alone.
     pub fn frames_fit_on(&self, saved: u64, key: &str, w: f64, h: f64, main: bool) -> bool {
+        if self.frames_off.contains(&saved) {
+            return false;
+        }
         match self.screens.get(&saved) {
             Some((k, sw, sh)) => k == key && (*sw, *sh) == (w.round() as i64, h.round() as i64),
             None => main && self.frames_fit(w, h),

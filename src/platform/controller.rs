@@ -122,6 +122,7 @@ use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_wid
 use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::restore::{self, AppQuiet, End, Restore, Settling, Summary};
 use crate::engine::rules::{Decision, RuleAction, ShiftEffect};
+use crate::engine::save_clock::SaveClock;
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, LateNote, StripDrop, StripEvent, StripSnapshot, Transition};
@@ -149,9 +150,6 @@ const PRESSED_OBS_MAX: Duration = Duration::from_secs(1);
 /// by default (`[windows] focus_echo_ms`).
 pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
 
-/// Quiet time before `state.json` is written after a change.
-const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
-
 /// How long before its app's quit notice a destroyed window still counts as quit with it (an
 /// app closes its windows as it quits, a moment before macOS says it terminated; round 8H).
 const CLOSING_KEEP: Duration = Duration::from_secs(10);
@@ -160,9 +158,6 @@ const CLOSING_KEEP: Duration = Duration::from_secs(10);
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
-
-/// A busy stream of changes is still saved at least this often.
-const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
 
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
@@ -982,7 +977,8 @@ pub struct Controller {
     displays: Vec<Display>,
     strip_visible: bool,
     echoes: Echoes,
-    dirty: Option<(Instant, Instant)>,
+    /// When `state.json` is written next ([`SaveClock`]: dirty until a save succeeds).
+    save: SaveClock,
     strip_dirty: bool,
     /// Saved entries of windows just destroyed, read before the model forgot them: those of an
     /// app that quits within [`CLOSING_KEEP`] are kept for `state.json` (round 8H,
@@ -1261,7 +1257,7 @@ impl Controller {
             displays: Vec::new(),
             strip_visible: true,
             echoes,
-            dirty: None,
+            save: SaveClock::default(),
             strip_dirty: false,
             closing: Vec::new(),
             triggers: Triggers::default(),
@@ -3135,8 +3131,7 @@ impl Controller {
     }
 
     fn mark_dirty(&mut self) {
-        let now = Instant::now();
-        self.dirty = Some((self.dirty.map_or(now, |d| d.0), now));
+        self.save.mark(Instant::now());
     }
 
     // ----- strip -------------------------------------------------------------------------
@@ -3317,10 +3312,13 @@ impl Controller {
 
     /// Writes `state.json` now (atomically and durably, [`super::durable`], readable by the user
     /// only in a private folder, [`crate::private_files`]). A state that cannot be encoded (a
-    /// frame that is not finite) is not written: the file on disk stays.
+    /// frame that is not finite) is not written: the file on disk stays. The state is clean
+    /// only once the file is replaced; a failure is tried again later ([`SaveClock::failed`]).
     pub fn save_now(&mut self) {
-        self.dirty = None;
-        let Some(m) = self.model.as_mut() else { return };
+        let Some(m) = self.model.as_mut() else {
+            self.save.saved();
+            return;
+        };
         let path = paths::state_file();
         let now = unix_now();
         // Windows of apps that quit too long ago are not reopened by a login.
@@ -3332,15 +3330,25 @@ impl Controller {
         let text = match file.to_json() {
             Ok(text) => text,
             Err(e) => {
-                tracing::error!("{e}; the saved stages on disk are kept");
+                let wait = self.save.failed(Instant::now());
+                tracing::error!(failures = self.save.failures(), retry_s = wait.as_secs(), "{e}; the saved stages on disk are kept");
                 return;
             }
         };
         let result = crate::private_files::ensure_dir(&paths::config_dir())
             .and_then(|_| super::durable::replace(&path, text.as_bytes(), super::durable::Flush::Full));
         match result {
-            Ok(()) => tracing::debug!("state saved to {}", path.display()),
-            Err(e) => tracing::warn!("cannot save {}: {e}", path.display()),
+            Ok(()) => {
+                if self.save.failures() > 0 {
+                    tracing::info!(failures = self.save.failures(), "state saved to {} again", path.display());
+                }
+                self.save.saved();
+                tracing::debug!("state saved to {}", path.display());
+            }
+            Err(e) => {
+                let wait = self.save.failed(Instant::now());
+                tracing::warn!(failures = self.save.failures(), retry_s = wait.as_secs(), "cannot save {}: {e}; tried again later", path.display());
+            }
         }
     }
 
@@ -6100,10 +6108,7 @@ impl Controller {
             None
         };
         super::capture::set_away(away);
-        if let Some((first, last)) = self.dirty
-            && (now.duration_since(last) >= SAVE_DEBOUNCE || now.duration_since(first) >= SAVE_MAX_DELAY)
-            && !self.locked
-        {
+        if self.save.due(now) && !self.locked {
             // Held while the screen is locked: nothing seen then is written over the file.
             self.save_now();
         }
@@ -6240,12 +6245,19 @@ impl Controller {
     /// Gives up the pending windows of apps running and quiet for
     /// [`crate::engine::restore::QUIET`] (no new window): the windows were closed inside the
     /// app's own session. An app that is not running keeps them (until a later session); one
-    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet.
+    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet. Its
+    /// entries on saved Desktops not visited yet stay for that Desktop, taking no window shown
+    /// elsewhere from then on ([`Model::settle_quiet`]); that Desktop's first show starts its
+    /// minute again.
     fn give_up_pending(&mut self, ob: &mut Observer, now: Instant) {
         // Apps that quit have no clock (a later launch starts one again).
         self.quiet.prune(|b| !ob.pids_with_bundle(b).is_empty());
+        let Some(m) = self.model.as_mut() else { return };
+        for b in m.take_shown_apps() {
+            self.quiet.window(&b, now);
+        }
         let Some(m) = self.model.as_ref() else { return };
-        let bundles = m.pending_bundles();
+        let bundles = m.waiting_bundles();
         if bundles.is_empty() {
             return;
         }
@@ -6265,7 +6277,10 @@ impl Controller {
             return;
         }
         let Some(m) = self.model.as_mut() else { return };
-        let (actions, dropped) = m.expire_pending(&settled);
+        let (actions, dropped, closed) = m.settle_quiet(&settled);
+        if !closed.is_empty() {
+            tracing::info!(apps = ?closed, "restore: apps quiet for a minute; their windows saved on Desktops not shown yet wait for those Desktops only");
+        }
         if dropped > 0 {
             tracing::info!(dropped, apps = ?settled, "restore: pending windows given up (their apps opened no window for a minute)");
             self.execute(ob, actions);

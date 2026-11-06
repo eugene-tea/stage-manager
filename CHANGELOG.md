@@ -10,7 +10,9 @@
   dragged to another screen starts a stage of its own there once you let it go, a card
   click changes only its screen, each screen hides its stages in a corner of its own, and
   closing or opening the lid moves stages between screens the way Apple's does. After a
-  restart each screen's stages come back on that screen. `[displays] main_only` keeps the
+  restart each screen's stages come back on that screen, their windows in their places on
+  it, also when the screens were rearranged in Displays settings in between.
+  `[displays] main_only` keeps the
   old way: the main screen only.
 - A second screen looks and behaves as the main one: its cards let its own wallpaper
   through, the corner where its hidden windows wait is covered by a patch of its own
@@ -48,6 +50,10 @@
   first time.
 - A Desktop you did not visit between two restarts keeps its stages: they no longer
   disappear at the second restart (up to 30 days since you last visited it).
+- After a restart, a window an app opens once it has settled (Finder's window for a folder
+  an hour later, say) is a new window, as Apple's Stage Manager places it, not a window
+  pulled into a stage of a Desktop you have not visited yet. That Desktop still gets its
+  own windows back when you go there.
 - With two screens, a window dragged onto the second screen's strip becomes a card there,
   a click on a card's app icon on the second screen gathers that app's windows from that
   screen's stages only, and the stage shortcuts (and `ctl switch`) count and switch the
@@ -63,6 +69,8 @@
 - When the main display changes (the menu bar moved to another screen, or a laptop that was
   the main display closed onto an external screen), hidden windows come back where they
   were on their screen, instead of about a screen away.
+- When saving your stages fails for a moment (a full disk), the save is tried again until
+  it works, instead of waiting for your next change.
 
 ## 1.6.0 — 2026-11-05
 
