@@ -846,6 +846,26 @@ fn a_window_the_user_touched_stays_where_it_is_when_its_title_comes() {
 }
 
 #[test]
+fn a_key_press_in_a_window_a_late_title_could_move_makes_it_the_users() {
+    // The Fable review of 11-06, restore 2: the IDE focused its late-titled window itself at
+    // the login (no press, no touch), and he types in it. The platform asks the app's focused
+    // window at a key press only while one of its windows may still be re-matched; touched,
+    // its title no longer moves it.
+    let mut m = joined_by_a_late_title();
+    assert!(m.may_rematch_app(20), "the IDE's window went by Apple's rule");
+    assert!(!m.may_rematch_app(21), "the terminal's matched");
+    m.touch_window(w(42));
+    assert!(!m.may_rematch_app(20), "typed in: nothing left to ask");
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+    // After the two minutes no key press asks.
+    let mut m = joined_by_a_late_title();
+    m.end_rematch();
+    assert!(!m.may_rematch_app(20));
+}
+
+#[test]
 fn a_late_title_after_the_two_minutes_moves_nothing() {
     let mut m = joined_by_a_late_title();
     m.end_rematch();
