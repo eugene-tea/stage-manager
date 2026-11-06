@@ -968,6 +968,14 @@ impl Model {
 
         self.place_unmatched(space, &metas, assignment, &placed, hints);
 
+        // A front nobody can see (every window listed as a piece at its screen's corner) is
+        // a card, the front an empty stage: it is parked below, its card enters the strip.
+        let hidden_front = if frames == LaunchFrames::Live { self.front_out_of_sight(space) } else { None };
+        if let Some(f) = hidden_front {
+            tracing::info!(stage = f.0, "launch: the front's windows show only a piece at the screen's corner; a card, the front empty");
+            self.fresh_active(space);
+        }
+
         // Every window of every stage clear of the strip, so restored frames already are.
         let ids: Vec<WindowId> = live.iter().map(|m| m.id).collect();
         let mut fitted: Vec<WindowId> = ids.into_iter().filter(|&id| self.fit_window(id)).collect();
@@ -1034,6 +1042,9 @@ impl Model {
         let cards = slots.iter().any(|&s| self.stage(s).is_some_and(|st| !st.windows.is_empty()));
         if (!slots.is_empty() && cards) || !self.slots.contains_key(&space) {
             self.slots.insert(space, slots);
+        }
+        if let Some(f) = hidden_front {
+            self.strip_enter(space, f);
         }
         self.note_front_waits(space);
         self.normalize_slots();
@@ -1179,8 +1190,26 @@ impl Model {
         }
     }
 
+    /// The active stage of `space` when every standard window of it is listed as a piece at
+    /// its display's park corner ([`super::model::Display::corner_piece`]; none in the park
+    /// zone itself, which [`Model::unstick`] brings back): a front nobody can see (11-06
+    /// 14:13: an older version had shown a window 80 by 32 pt of it at the laptop's corner,
+    /// and saved it so).
+    fn front_out_of_sight(&self, space: SpaceId) -> Option<StageId> {
+        let active = self.active_stage_in(space)?;
+        let windows = &self.stage(active)?.windows;
+        let hidden = |id: &WindowId| {
+            self.windows.get(id).is_some_and(|w| {
+                let d = self.display(w.meta.display);
+                !w.parked && d.corner_piece(w.meta.frame) && !d.parks(w.meta.frame)
+            })
+        };
+        (!windows.is_empty() && windows.iter().all(hidden)).then_some(active)
+    }
+
     /// Restores members of an active stage whose live frame is in a park zone (left there by a
-    /// crash), since they would otherwise stay hidden while counted as visible.
+    /// crash) or shows only a piece at the corner ([`super::model::Display::hides`]), since
+    /// they would otherwise stay hidden while counted as visible.
     fn unstick(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let mut ids = s.windows.clone();
@@ -1189,7 +1218,7 @@ impl Model {
             let stuck = self
                 .windows
                 .get(&id)
-                .is_some_and(|w| self.display(w.meta.display).parks(w.meta.frame));
+                .is_some_and(|w| self.display(w.meta.display).hides(w.meta.frame));
             if stuck {
                 self.restore_window(id, actions);
             }
@@ -1204,7 +1233,7 @@ impl Model {
         restore_frames: bool,
     ) {
         let display = self.known_display(meta.display);
-        let live_parked = self.display(display).parks(meta.frame);
+        let live_parked = self.display(display).hides(meta.frame);
         let base = if (restore_frames && saved.grade.confident()) || live_parked || meta.frame.is_degenerate() {
             saved.frame
         } else {

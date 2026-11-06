@@ -71,6 +71,8 @@
   were on their screen, instead of about a screen away.
 - When saving your stages fails for a moment (a full disk), the save is tried again until
   it works, instead of waiting for your next change.
+- A window an earlier version left with only a sliver showing at a screen's corner comes
+  back as a card, and a window brought back there comes wholly on screen in that corner.
 
 ## 1.6.0 — 2026-11-05
 

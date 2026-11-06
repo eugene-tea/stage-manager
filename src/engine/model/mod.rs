@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked, reach_in};
+use super::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, park_frame_asked, reach_in};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -140,13 +140,36 @@ impl Display {
         is_parked_in_at(frame, self.frame, self.visible, self.corner)
     }
 
+    /// True when `frame` shows only a piece at this display's own park corner
+    /// ([`is_corner_piece_in`]): out of the park zone ([`Display::parks`]) but where a window
+    /// is out of sight all the same. Never a shown frame: [`Display::reach`] brings it on
+    /// screen, and a window listed there at a launch or a restore is a card
+    /// ([`Display::hides`]).
+    pub fn corner_piece(&self, frame: Rect) -> bool {
+        is_corner_piece_in(frame, self.frame, self.visible, self.corner)
+    }
+
+    /// True when a window at `frame` is out of sight at this display's park corner: in its
+    /// park zone ([`Display::parks`]) or a piece at it ([`Display::corner_piece`]).
+    pub fn hides(&self, frame: Rect) -> bool {
+        self.parks(frame) || self.corner_piece(frame)
+    }
+
     /// `frame` brought within reach on this display ([`reach_in`]): moved only as far as its
     /// title bar needs to be grabbed, never resized, and out of this display's own park zone
     /// (its corner, [`Display::parks`]). Where every restore of the model lands: a frame on
     /// the user's screen that another corner's zone test would catch (a window hung off the
-    /// left edge in the upper half) is the user's, and stays (S2).
+    /// left edge in the upper half) is the user's, and stays (S2). One that would still show
+    /// only a piece at the corner ([`Display::corner_piece`]: a grab's width of title bar
+    /// there is no window anyone sees) comes on screen, as far as it fits
+    /// ([`onto_visible`]), never resized.
     pub fn reach(&self, frame: Rect) -> Rect {
-        reach_in(frame, self.visible, self.frame, |f| self.parks(f))
+        let out = reach_in(frame, self.visible, self.frame, |f| self.parks(f));
+        if !self.corner_piece(out) {
+            return out;
+        }
+        let room = if self.visible.is_degenerate() { self.frame } else { self.visible };
+        reach_in(onto_visible(out, room), self.visible, self.frame, |f| self.hides(f))
     }
 
     /// `frame`, a window's frame on display `from`, carried onto this display: at the same
@@ -950,12 +973,15 @@ impl Model {
         true
     }
 
-    /// A restore frame that is safe to record for a new window: `frame`, or a centered one if
-    /// `frame` is unusable.
+    /// A restore frame that is safe to record for a new window: `frame`, a centered one if
+    /// `frame` is unusable, brought on screen if it shows only a piece at the display's
+    /// corner ([`Display::corner_piece`]).
     pub(crate) fn safe_restore(&self, frame: Rect, display: DisplayId) -> Rect {
         let d = self.display(display);
         if frame.is_degenerate() || d.parks(frame) {
             clamp_to_visible(frame, d.visible)
+        } else if d.corner_piece(frame) {
+            d.reach(frame)
         } else {
             frame
         }

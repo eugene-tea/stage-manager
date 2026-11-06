@@ -382,6 +382,48 @@ pub fn is_parked_anywhere(frame: Rect, display: Rect) -> bool {
 /// `PARK_MARGIN` showing as parked).
 pub const GRAB_WIDTH: f64 = PARK_MARGIN + 16.0;
 
+/// How wide what shows of a window at a park corner may be and still be a corner piece
+/// ([`is_corner_piece_in`]): half again the grab [`reach_in`] leaves ([`GRAB_WIDTH`]), so a
+/// window pulled just within reach at the corner is one, and one the user tucked there
+/// showing more (W5: 140 pt) is not ...
+pub const CORNER_PIECE_WIDTH: f64 = 1.5 * GRAB_WIDTH;
+
+/// ... and how tall: twice the title strip macOS keeps on screen ([`MACOS_KEEPS_TITLE`]).
+pub const CORNER_PIECE_HEIGHT: f64 = 2.0 * MACOS_KEEPS_TITLE;
+
+/// True when `frame` shows only a piece at `corner` of a display whose full frame is
+/// `display` and whose visible frame is `visible` (either counts, as for the park zone,
+/// [`is_parked_in_at`]): it reaches past the corner's side, and all that shows of it lies
+/// within [`CORNER_PIECE_WIDTH`] of that side and [`CORNER_PIECE_HEIGHT`] of the corner's
+/// edge (the bottom, or the top for a top corner). Where a parked window's sliver would be,
+/// give or take: nobody sees a window there, though its title bar may be "within reach" by
+/// [`reach_in`]'s measure (11-06 14:13: a window an older version showed 80 by 32 pt of at
+/// the laptop's bottom-left corner was the screen's front, and nobody could see it). A frame
+/// hung off a side elsewhere shows more than that, or away from the corner: the user's (S2).
+pub fn is_corner_piece_in(frame: Rect, display: Rect, visible: Rect, corner: Corner) -> bool {
+    if !frame.is_finite() || frame.is_degenerate() {
+        return false;
+    }
+    corner_piece(frame, display, corner) || (!visible.is_degenerate() && corner_piece(frame, visible, corner))
+}
+
+/// [`is_corner_piece_in`] against one frame of the display (`area`).
+fn corner_piece(frame: Rect, area: Rect, corner: Corner) -> bool {
+    let Some(seen) = frame.intersect(&area).filter(|r| r.w > 0.0 && r.h > 0.0) else { return false };
+    let past_side = if corner.right() { frame.max_x() > area.max_x() } else { frame.x < area.x };
+    let near_side = if corner.right() { seen.x >= area.max_x() - CORNER_PIECE_WIDTH } else { seen.max_x() <= area.x + CORNER_PIECE_WIDTH };
+    let near_edge = if corner.bottom() { seen.y >= area.max_y() - CORNER_PIECE_HEIGHT } else { seen.max_y() <= area.y + CORNER_PIECE_HEIGHT };
+    past_side && near_side && near_edge
+}
+
+/// `frame` moved onto `visible` as far as it fits, never resized: wholly inside on each
+/// axis where it is no larger than `visible`, else at `visible`'s left or top edge (the
+/// title bar below the menu bar). Where a corner piece comes back ([`is_corner_piece_in`]).
+pub fn onto_visible(frame: Rect, visible: Rect) -> Rect {
+    let fit = |v: f64, size: f64, lo: f64, room: f64| if size <= room { v.clamp(lo, lo + room - size) } else { lo };
+    Rect::new(fit(frame.x, frame.w, visible.x, visible.w), fit(frame.y, frame.h, visible.y, visible.h), frame.w, frame.h)
+}
+
 /// A restore frame within reach on `visible` (the display minus menu bar and Dock), for a
 /// frame with no better source: a frame in the park zone of any corner of `visible` is
 /// centered, everything else goes by [`reach_in`] with that same all-corners test.
@@ -897,6 +939,51 @@ mod tests {
         let out = reach_in(corner, VISIBLE, DISPLAY, |r| is_parked_in(r, DISPLAY, VISIBLE));
         assert_eq!(out, Rect::new(1440.0 - GRAB_WIDTH, 825.0 - TITLE_BAR_HEIGHT, 400.0, 300.0));
         assert!(!is_parked_in(out, DISPLAY, VISIBLE));
+    }
+
+    #[test]
+    fn a_piece_at_the_corner_is_told_from_a_window_hung_off_an_edge() {
+        // His laptop (11-06): -1800,271 1800x1169, parking bottom-left; 80 by 32 pt of a
+        // 1065x915 window at its bottom-left corner.
+        let laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
+        let laptop_visible = Rect::new(-1800.0, 310.0, 1800.0, 1130.0);
+        let piece = Rect::new(-2785.0, 1408.0, 1065.0, 915.0);
+        assert!(!is_parked_in_at(piece, laptop, laptop_visible, Corner::BottomLeft), "the park test misses it");
+        assert!(is_corner_piece_in(piece, laptop, laptop_visible, Corner::BottomLeft));
+        assert!(!is_corner_piece_in(piece, laptop, laptop_visible, Corner::BottomRight), "the display's own corner only");
+        // Mirrored at a bottom-right corner, and above a bottom Dock (the visible frame's
+        // corner: macOS keeps the title above the Dock).
+        let right = Rect::new(1440.0 - GRAB_WIDTH, 900.0 - MACOS_KEEPS_TITLE, 600.0, 400.0);
+        assert!(is_corner_piece_in(right, DISPLAY, VISIBLE, Corner::BottomRight));
+        let above_dock = Rect::new(1440.0 - GRAB_WIDTH, 825.0 - MACOS_KEEPS_TITLE, 600.0, 400.0);
+        assert!(!is_parked_in(above_dock, DISPLAY, VISIBLE) && is_corner_piece_in(above_dock, DISPLAY, VISIBLE, Corner::BottomRight));
+        // Not a piece: more showing (W5's tuck, 140 pt wide), away from the bottom (S2), not
+        // reaching past the side (a small window wholly on screen), or degenerate.
+        for f in [
+            Rect::new(1300.0, 732.0, 600.0, 400.0),
+            Rect::new(1300.0, 900.0 - 100.0, 600.0, 400.0),
+            Rect::new(1440.0 - GRAB_WIDTH, 300.0, 600.0, 400.0),
+            Rect::new(1400.0, 850.0, 30.0, 30.0),
+            Rect::new(1400.0, 850.0, 0.0, 400.0),
+            Rect::new(f64::NAN, 850.0, 600.0, 400.0),
+        ] {
+            assert!(!is_corner_piece_in(f, DISPLAY, VISIBLE, Corner::BottomRight), "{f:?}");
+        }
+        // A top corner: a short window's piece under the menu bar, off the side.
+        let top = Rect::new(1440.0 - GRAB_WIDTH, 25.0, 600.0, 30.0);
+        assert!(is_corner_piece_in(top, DISPLAY, VISIBLE, Corner::TopRight));
+        assert!(!is_corner_piece_in(Rect::new(1440.0 - GRAB_WIDTH, 25.0, 600.0, 400.0), DISPLAY, VISIBLE, Corner::TopRight));
+    }
+
+    #[test]
+    fn onto_visible_moves_only_as_far_as_the_window_fits() {
+        let f = Rect::new(1360.0, 797.0, 600.0, 400.0);
+        assert_eq!(onto_visible(f, VISIBLE), Rect::new(840.0, 425.0, 600.0, 400.0));
+        let inside = Rect::new(100.0, 100.0, 600.0, 400.0);
+        assert_eq!(onto_visible(inside, VISIBLE), inside);
+        // Larger than the screen: at its left and top edges, never resized.
+        let big = Rect::new(-500.0, 600.0, 2000.0, 1000.0);
+        assert_eq!(onto_visible(big, VISIBLE), Rect::new(0.0, 25.0, 2000.0, 1000.0));
     }
 
     #[test]

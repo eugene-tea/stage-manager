@@ -171,7 +171,7 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 - `stage-manager strip-demo` runs the strip alone, fed from the live window list, and never
   moves a window. Its variables (`STAGE_MANAGER_DEMO_*`, and an offscreen render with
   `--features debug-render`) are described in `src/ui/strip_demo.rs`.
-- `stage-manager probe-windows <bundle-id>…`, `probe-screen` and `probe-patch` print the
+- `stage-manager probe-windows <bundle-id>…` (or `--all`), `probe-screen` and `probe-patch` print the
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
 - `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past

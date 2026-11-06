@@ -176,7 +176,15 @@ screen's card again even from another Desktop of the remaining screen, never hid
 at the remaining screen's corner (round displays-lid-3; the owner's 11-06 run: the two
 stages he had used on the 5K while the lid was closed stayed there), and a card put back
 brings nothing forward; the remaining screen, its front gone back, brings its own most
-recent stage forward; none of it is the user's drag. A stage
+recent stage forward; none of it is the user's drag. A window showing only a piece at its
+screen's own hidden corner (where a hidden window's sliver would be, give or take: what shows
+reaches past the corner's side and lies within 120 pt of it and 64 pt of the corner's edge)
+is never a shown window: brought back, it comes wholly on screen in that corner, at its
+size; found there at a launch, or put back there as the lid opens, it is a card, its stage
+not in front (the owner's 11-06 14:13 launch: an earlier version had left the laptop's front
+window 80 by 32 pt on the laptop at its corner, the laptop's front, nobody seeing it, and no
+card); the front an empty one. A window hung off an edge elsewhere stays where the user put
+it. Apple never leaves a window there. A stage
 belongs to the screen its windows are on. Decided, not measured:
 a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
 Dock to an app whose stage is on the other screen switches that screen only. Each screen's
@@ -495,7 +503,8 @@ after its latest sign, or after the latest app that quit meanwhile, so a slow re
 asking about unsaved changes, is not taken for one). An app that quits keeps its windows'
 places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
 before macOS announced the logout still come back after the restart; a window reopened
-squeezed into the park corner goes to its saved frame when it is matched, and is left where
+squeezed into the park corner, or showing only a piece at it, goes to its saved frame
+(brought on screen) when it is matched, and is left where
 it is (and counted) when it is not. A window an app reopens on another Desktop than the one
 it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
 again on the Desktop where it shows. A window reopened on another screen than its saved

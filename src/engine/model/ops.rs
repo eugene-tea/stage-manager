@@ -1806,7 +1806,8 @@ impl Model {
     /// Where the window is listed on the new display says whether it shows (the lid opened,
     /// 11-05 16:27:31: macOS put a window it had on the 5K back on the laptop at the frame
     /// it had there, and a parked one at the laptop's old park corner): listed in that
-    /// display's park zone it is a card, parked there with its restore frame carried over
+    /// display's park zone, or as a piece at its corner ([`Display::hides`]), it is a card,
+    /// parked there with its restore frame carried over
     /// ([`Display::adopt`]), whether the model had it parked or shown (a card of that screen
     /// before the close, shown on the other since); listed outside, it shows at that frame, the user's (its
     /// restore frame), whether the model had it parked or not, and is never moved. Only a
@@ -1851,7 +1852,7 @@ impl Model {
             let display = *self.display(to);
             for &id in &ids {
                 let from = *self.display(self.windows[&id].meta.display);
-                let at_corner = frames.get(&id).is_some_and(|f| display.parks(*f));
+                let at_corner = frames.get(&id).is_some_and(|f| display.hides(*f));
                 let mut group = vec![id];
                 group.extend(self.children_of(id));
                 for g in group {

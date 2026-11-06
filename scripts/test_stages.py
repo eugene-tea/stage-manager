@@ -2036,6 +2036,27 @@ def our_windows(pid=None):
     return [w for w in wins if w["pid"] == pid and w["onscreen"]]
 
 
+def others_at(rect):
+    """Shown windows of another app than the fixtures' and ours that reach `rect`, as the
+    window server lists them (`probe-windows --all`: ids, pids and bounds, never a title).
+    With the owner's Stage Manager quit for a run his windows stay where they are, and one
+    reaching a park corner keeps that corner's patch down (`a shown window reaches the
+    corner`): a check of the patch there skips, never fails."""
+    r = run([BIN, "probe-windows", "--all"], timeout=10)
+    try:
+        wins = json.loads(r.stdout)["windows"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return []
+    mine = {app_pid()}
+    for b in ALL_IDS:
+        try:
+            mine |= set(probe(b).get("pids", []))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return [w for w in wins if w["layer"] == 0 and w["onscreen"] and w.get("alpha", 1) > 0
+            and w["pid"] not in mine and intersect(w["bounds"], rect)]
+
+
 def overlay_shown(wins, display):
     """The motion overlay among our windows `wins` (display-sized, on screen): its layer, at
     its own level (25) or just under the strip lifted above windows (3); None when not shown."""
@@ -6711,7 +6732,8 @@ def phase_displays():
     cards' pictures (`displays[i].pictures` names the windows its strip holds a thumbnail
     of); while a window is parked on the other screen its own corner patch is up
     (`displays[i].corner_patch.shown`, its rectangle on that screen, one of our windows
-    listed at it), and the main screen's patch is where it was; `ctl state` names each
+    listed at it; skipped when another app's window reaches that rectangle, which keeps the
+    patch down), and the main screen's patch is where it was; `ctl state` names each
     screen's strip panel (`displays[i].strip_panel`, its frame on that screen)."""
     say("\n== displays: a strip and stages on every screen ==")
     stop_app()
@@ -6800,8 +6822,14 @@ def phase_displays():
                    "a thumbnail on the other screen's strip", timeout=12)
     check(x is not None, f"the other screen's strip draws its cards' pictures (thumbnails of {sorted(screen(x or s, other).get('pictures', []))})")
     x = wait_state(lambda y: (screen(y, other).get("corner_patch") or {}).get("shown"), "the other screen's corner patch", timeout=12)
-    patch = (screen(x or s, other).get("corner_patch") or {})
-    if check(x is not None, f"the other screen's own corner patch is up while a window is parked there ({patch}, still {(screen(x or s, other).get('desktop_still') or {}).get('patch')})"):
+    patch = (screen(x or state(), other).get("corner_patch") or {})
+    # Another app's window at that corner (the owner's, with his Stage Manager quit) keeps
+    # the patch down by design: skipped, as the other phases do (11-06: his window there).
+    foreign = others_at(patch["rect"]) if x is None and patch.get("rect") else []
+    if foreign:
+        skip("the other screen's own corner patch",
+             f"another app's window reaches its corner ({len(foreign)} at {[fmt(w['bounds']) for w in foreign]}; patch {fmt(patch['rect'])}, {patch.get('hidden_why')}); it is left where it is")
+    elif check(x is not None, f"the other screen's own corner patch is up while a window is parked there ({patch}, still {(screen(x or s, other).get('desktop_still') or {}).get('patch')})"):
         s = x
         rect = patch.get("rect")
         check(on_screen_of(rect, other) and is_parked(rect, zone(other)), f"its rectangle is at the other screen's own corner: {fmt(rect) if rect else rect}")

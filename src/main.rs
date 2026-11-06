@@ -19,7 +19,8 @@
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts;
 //!   `probe-windows --every MS --for MS <bundle-id>...` samples them that often for that
 //!   long (each sample with its wall-clock time), one JSON line at the end: the Spaces
-//!   check's look at a Desktop slide.
+//!   check's look at a Desktop slide. `--all` in place of the bundle ids: every app's
+//!   windows (never a title), the checks that skip where another app's window is.
 //! - `stage-manager probe-screen` prints the on-screen windows that cover the main display
 //!   (a full-screen app's Space), one JSON line, for test scripts.
 //! - `stage-manager probe-patch [--out FILE.png] [--rect X,Y,W,H] [--reach PT] [--placement P]` renders what
@@ -89,7 +90,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
             );
             ExitCode::from(2)
         }
@@ -941,12 +942,13 @@ mod app {
         ExitCode::SUCCESS
     }
 
-    /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows.
-    /// Sampling (`--every MS --for MS`), `--focus` adds to each sample the window the keyboard
-    /// goes to (the frontmost app's focused window, through Accessibility) and when it was read.
+    /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows
+    /// (`--all`: every app's). Sampling (`--every MS --for MS`), `--focus` adds to each
+    /// sample the window the keyboard goes to (the frontmost app's focused window, through
+    /// Accessibility) and when it was read.
     pub fn probe_windows(args: &[String]) -> ExitCode {
         let usage = || {
-            eprintln!("usage: stage-manager probe-windows [--every MS --for MS [--focus]] <bundle-id>...");
+            eprintln!("usage: stage-manager probe-windows [--every MS --for MS [--focus]] <bundle-id>... | --all");
             ExitCode::from(2)
         };
         let (sampling, args) = match args {
@@ -965,6 +967,7 @@ mod app {
         if args.is_empty() {
             return usage();
         }
+        let all = args.len() == 1 && args[0] == "--all";
         let pids: Vec<i32> = args
             .iter()
             .flat_map(|bundle| NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle)))
@@ -974,7 +977,7 @@ mod app {
             let list = windows::list_windows();
             let z = windows::z_order(&list);
             list.iter()
-                .filter(|w| pids.contains(&w.pid))
+                .filter(|w| all || pids.contains(&w.pid))
                 .map(|w| {
                     json!({
                         "id": w.id,
