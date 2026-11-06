@@ -420,6 +420,11 @@ pub struct Model {
     /// screen's Desktop not formed yet; `pool.rs`, [`Model::screen_claims`]), at their saved
     /// frame there: that screen's arrival takes them with its own ([`Model::arrive`]).
     pub(crate) travellers: Vec<WindowMeta>,
+    /// How many Desktops macOS keeps for each screen, by the screen's identity, as the
+    /// platform read them (`com.apple.spaces`, read only; [`Model::set_desktop_counts`]):
+    /// a screen with one Desktop is the one its single saved Desktop was on, whatever the
+    /// windows listed on it ([`Model::arrive`]). Empty when unknown.
+    pub(crate) desktop_counts: HashMap<ScreenKey, u32>,
     /// Standard windows placed by Apple's rule while restore re-matches run
     /// ([`crate::engine::restore::Restore::rematching`]; they matched no saved window then):
     /// scored again when their title changes ([`Model::window_retitled`]).
@@ -498,6 +503,7 @@ impl Model {
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
             travellers: Vec::new(),
+            desktop_counts: HashMap::new(),
             rescore: HashSet::new(),
             touched: HashSet::new(),
             followed: HashMap::new(),

@@ -18,6 +18,9 @@
   to the screen its stage was on, in its place there. Two windows of one app (two VS Code
   workspaces, say) come back as the two stages they were, even when an editor shows a file
   in its title now, or gets its title only a moment after it opens.
+- After a restart, a screen with one Desktop (a laptop's, say) gets its stages back even when
+  its apps open their windows only after Stage Manager has started: they no longer count as
+  from another Desktop, and its front window, reopened on the other screen, goes back to it.
 - After a restart, a window its app reopens under another name at its saved place (Fork
   showing another repository) goes back to its own stage instead of joining the app's other
   window, and "new apps join the current stage" leaves the windows apps reopen at the login

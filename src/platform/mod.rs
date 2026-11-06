@@ -15,6 +15,7 @@ pub mod code_sign;
 pub mod controller;
 pub mod ctl;
 pub mod desktop;
+pub mod desktop_counts;
 pub mod desktop_items;
 pub mod desktop_shot;
 pub mod dock;

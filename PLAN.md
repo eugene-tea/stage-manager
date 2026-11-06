@@ -220,7 +220,13 @@ Known gaps the owner accepted as rare:
     the first's stage by Apple's rule: fixed in round restart-two-windows, run it again:
     the log's "a window at a saved window's frame under another name, the only one" and
     "grade=\"medium\"" for it, two Fork stages in `ctl state`, no "asked to join the current
-    stage" line while the restore window is open); (4) ⌘-Tab to an app whose stage is
+    stage" line while the restore window is open); his 08:26 restart (fixed in round
+    desktop-ids, run it again): the apps listed no window when Stage Manager started, and the
+    laptop's Desktop came back as a new number (19, saved 17) with its windows "from other
+    Desktops" and Deep House, its front, left on the 5K; now the log's "Desktops per screen,
+    as macOS keeps them" names the laptop with 1, `ctl state` shows the laptop's `space` 17
+    again, no "(saved 17, now …)" in the restore line, and "goes back to that screen" for a
+    laptop window reopened on the 5K; (4) ⌘-Tab to an app whose stage is
     on the other screen: that screen switches, the other does not, and the Desktop there is
     arranged ahead of its slide (the log's "arranged ahead" for a window on `displays[1]`);
     (5) round displays-2, on the laptop's screen: its cards' glass takes its own wallpaper

@@ -479,6 +479,13 @@ stage, in front or a card as saved (11-06: the laptop's front window, reopened b
 on the 5K; Apple's keeps no stages over a restart, so this decides nothing of Apple's); a
 stage saved on a Desktop of that screen not shown now is made again where the window
 shows, as above, and a window reopened on its own screen stays where its app put it. A
+Desktop is found again by its windows; a screen macOS keeps one Desktop for (read from
+`com.apple.spaces`, never written) is the Desktop saved on that screen even before any of
+its windows show, so they go back to their stages there as their apps reopen them, and one
+reopened on the other screen comes back to it (11-06 08:27: the apps listed no window yet
+when Stage Manager started; the laptop's windows counted as from another Desktop and its
+front stayed on the 5K). A screen with several Desktops, or two Desktops saved for a
+screen that keeps one now, is left to the windows. A
 window that went by Apple's rule (no saved window matched it: an Electron app's window
 still titled with its app's name, say) or by a doubtful match is looked at again when its
 title changes, and goes to its saved stage on a confident match, a card when that stage is

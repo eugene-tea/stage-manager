@@ -1110,3 +1110,158 @@ fn a_window_reopened_on_its_own_screen_stays_where_its_app_put_it() {
     assert_eq!(m.window(WindowId(106)).map(|w| (w.meta.display, w.restore)), Some((LAPTOP, elsewhere)));
     assert_eq!(m.restore_summary(0).screen_moves, 0);
 }
+
+// ----- Desktop ids across a restart (round desktop-ids) ----------------------------------
+//
+// The model's Desktop ids are its own: a saved Desktop keeps its id only when it is found
+// again. 11-06 08:27 his apps had listed no window yet at the launch: the laptop arrived on
+// nothing, stayed the model's first Space (renumbered past the saved ids: 19), and saved 17's
+// windows came in as strays "from other Desktops"; the laptop's front, reopened on the 5K,
+// stayed there. macOS keeps one Desktop for the laptop: that one is the laptop's saved one.
+
+const WEB: &str = "com.example.web";
+const DISK: &str = "com.example.disk";
+const PLAYER: &str = "com.example.player";
+const EDITOR: &str = "com.example.editor";
+const NOTES: &str = "com.example.notes";
+const MAILER: &str = "com.example.mailer";
+
+fn saved_win(bundle: &str, title: &str, frame: Rect, z: usize) -> crate::engine::persist::SavedWindow {
+    crate::engine::persist::SavedWindow { bundle_id: bundle.into(), title: title.into(), frame, z, key: z == 0, ..Default::default() }
+}
+
+fn saved_stage(windows: Vec<crate::engine::persist::SavedWindow>, last_active: u64) -> crate::engine::persist::SavedStage {
+    crate::engine::persist::SavedStage { name: None, windows, last_active: Some(last_active) }
+}
+
+fn saved_on(d: &Display, id: u64, current: bool, stages: Vec<crate::engine::persist::SavedStage>) -> crate::engine::persist::SavedSpace {
+    crate::engine::persist::SavedSpace {
+        id,
+        screen: Some(crate::engine::persist::SavedScreen { key: d.key.text(), w: d.frame.w, h: d.frame.h }),
+        current,
+        active_index: Some(0),
+        strip_slots: (1..stages.len()).collect(),
+        stages,
+        last_seen: None,
+    }
+}
+
+/// His desk before the 08:26 restart: the laptop's one Desktop (17: the player in front, the
+/// web browser and the disk tool cards), the 5K's two (1: notes in front, mail a card; 2,
+/// shown: the editor's two windows).
+fn three_desktops() -> Vec<crate::engine::persist::SavedSpace> {
+    let l = laptop();
+    let s = studio();
+    vec![
+        saved_on(&s, 1, false, vec![saved_stage(vec![saved_win(NOTES, "Groceries", on(&s, (300.0, 80.0)), 0)], 50), saved_stage(vec![saved_win(MAILER, "Inbox", on(&s, (600.0, 200.0)), 0)], 40)]),
+        saved_on(&s, 2, true, vec![saved_stage(vec![saved_win(EDITOR, "main.rs — proj", on(&s, (200.0, 60.0)), 0), saved_win(EDITOR, "lib.rs — proj", on(&s, (240.0, 90.0)), 1)], 90)]),
+        saved_on(
+            &l,
+            17,
+            true,
+            vec![
+                saved_stage(vec![saved_win(PLAYER, "Player", on(&l, (300.0, 150.0)), 0)], 80),
+                saved_stage(vec![saved_win(WEB, "Docs — Web", on(&l, (40.0, 30.0)), 0)], 70),
+                saved_stage(vec![saved_win(DISK, "Disks", on(&l, (500.0, 300.0)), 0)], 60),
+            ],
+        ),
+    ]
+}
+
+/// A launch in session "B" of [`three_desktops`] saved in session "A", the screens' ids
+/// changed (the 5K 4 → 5), macOS keeping two Desktops for the 5K and one for the laptop.
+fn restarted_on_three(counts: bool) -> Model {
+    use crate::engine::persist::StateFile;
+    use crate::engine::restore::Restore;
+    let mut file = StateFile { session: Some("A".into()), ..StateFile::single(crate::engine::persist::SavedSpace::default()) };
+    file.spaces = three_desktops();
+    file.start_new_session();
+    let (file, _) = file.for_session(Some("B"));
+    let mut m = Model::new(vec![Display { id: DisplayId(5), ..studio() }, laptop()], ModelOptions::default());
+    m.set_restore(Restore::after_restart("B"));
+    if counts {
+        m.set_desktop_counts([(STUDIO_KEY, 2), (LAPTOP_KEY, 1)]);
+    }
+    m.restore_spaces(file.spaces);
+    m
+}
+
+fn reopen(id: u32, pid: Pid, bundle: &str, title: &str, display: DisplayId, frame: Rect) -> WindowMeta {
+    WindowMeta { id: WindowId(id), pid, bundle_id: bundle.into(), title: title.into(), role: WindowRole::Standard, frame, display }
+}
+
+#[test]
+fn a_screen_with_one_desktop_is_its_saved_desktop_though_it_lists_nothing_at_the_launch() {
+    let (s, l) = (studio(), laptop());
+    let five = DisplayId(5);
+    let mut m = restarted_on_three(true);
+    assert!(m.forms_saved_desktop(LAPTOP), "the launch arrives on the laptop with nothing listed");
+    assert!(!m.forms_saved_desktop(five), "the 5K keeps two Desktops: its windows decide");
+    // The launch: the editor's windows on the 5K; nothing on the laptop yet.
+    let editor = [
+        reopen(301, 30, EDITOR, "main.rs — proj", five, on(&s, (200.0, 60.0))),
+        reopen(302, 30, EDITOR, "lib.rs — proj", five, on(&s, (240.0, 90.0))),
+    ];
+    m.arrive(five, &editor, &[], &LaunchHints::default());
+    assert_eq!(m.current_space(five).0, 2);
+    m.arrive(LAPTOP, &[], &[], &LaunchHints::default());
+    assert_eq!(m.last_arrival().rebuilt, Some(17), "the laptop's one Desktop is saved 17");
+    assert_eq!(m.current_space(LAPTOP).0, 17, "not a new number");
+    assert!(!m.forms_saved_desktop(LAPTOP));
+    // The apps answer: the web browser and the disk tool on the laptop, the player reopened
+    // on the 5K at its own size.
+    add_plain(&mut m, reopen(311, 31, WEB, "Docs — Web", LAPTOP, on(&l, (40.0, 30.0))));
+    add_plain(&mut m, reopen(312, 32, DISK, "Disks", LAPTOP, on(&l, (500.0, 300.0))));
+    let saved_player = on(&l, (300.0, 150.0));
+    let a = add_plain(&mut m, reopen(313, 33, PLAYER, "Player", five, Rect::new(637.0, 394.0, saved_player.w, saved_player.h)));
+    for id in [311, 312, 313] {
+        let stage = m.stage_of(WindowId(id)).expect("in a stage");
+        assert_eq!(m.stage(stage).map(|st| (st.space.0, st.display)), Some((17, LAPTOP)), "window {id} on the laptop's Desktop");
+        assert!(!m.is_pooled(WindowId(id)), "window {id} is no stray");
+    }
+    assert!(a.contains(&Action::SetFrame { id: WindowId(313), frame: saved_player }), "the player goes back to the laptop: {a:?}");
+    assert_eq!(m.active_stage(LAPTOP), m.stage_of(WindowId(313)), "in front, as saved");
+    // The 5K's other Desktop's windows come back on it when it shows.
+    m.arrive(five, &[reopen(321, 34, NOTES, "Groceries", five, on(&s, (300.0, 80.0))), reopen(322, 35, MAILER, "Inbox", five, on(&s, (600.0, 200.0)))], &[WindowId(301), WindowId(302)], &LaunchHints::default());
+    assert_eq!(m.current_space(five).0, 1);
+    let line = m.restore_summary(0);
+    assert_eq!((line.pooled, line.screen_moves, line.other_screen), (0, 1, 0), "{line}");
+    assert!(!line.to_string().contains("on another Desktop"), "{line}");
+    assert!(m.away_now().next().is_none());
+}
+
+#[test]
+fn without_the_desktop_counts_an_empty_laptop_stays_as_before() {
+    // The settings unreadable: nothing changes (the laptop skipped at the launch, its saved
+    // Desktop's windows strays where they show).
+    let m = restarted_on_three(false);
+    assert!(!m.forms_saved_desktop(LAPTOP));
+    assert_eq!(m.desktops_on(LAPTOP), None);
+}
+
+#[test]
+fn a_screen_with_one_desktop_and_two_saved_for_it_lets_its_windows_decide() {
+    // He removed a Desktop of the laptop since the save: which one stays is not known.
+    let mut spaces = three_desktops();
+    let l = laptop();
+    spaces.push(saved_on(&l, 18, false, vec![saved_stage(vec![saved_win(WEB, "Other — Web", on(&l, (60.0, 40.0)), 0)], 10)]));
+    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    m.set_restore(crate::engine::restore::Restore::after_restart("B"));
+    m.set_desktop_counts([(STUDIO_KEY, 2), (LAPTOP_KEY, 1)]);
+    m.restore_spaces(spaces);
+    assert!(!m.forms_saved_desktop(LAPTOP));
+    m.arrive(LAPTOP, &[], &[], &LaunchHints::default());
+    assert_eq!(m.last_arrival().rebuilt, None);
+}
+
+#[test]
+fn a_screen_with_one_desktop_whose_space_holds_windows_already_takes_no_saved_one() {
+    // The laptop's Space made earlier holds a window: it is the laptop's one Desktop.
+    let mut m = restarted_on_three(true);
+    add_plain(&mut m, reopen(311, 31, "com.example.other", "Elsewhere", LAPTOP, on(&laptop(), (40.0, 30.0))));
+    assert_eq!(m.only_desktop_saved_on(LAPTOP), None);
+}
+
+fn add_plain(m: &mut Model, meta: WindowMeta) -> Vec<Action> {
+    m.add_window(meta, &Decision::default(), &Observation::default())
+}

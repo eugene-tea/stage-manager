@@ -51,6 +51,11 @@
 //! provisional until windows that match a saved Desktop's with confidence make it that
 //! Desktop (adoption, `pending.rs`); all session, saved Spaces are recognized at an arrival
 //! by confident matches (exact title, frame, fingerprint) rather than exact titles alone.
+//! A Desktop's number is the model's own and lasts only when the Desktop is found again; a
+//! screen macOS keeps one Desktop for (`com.apple.spaces`, read only) is the one Desktop saved
+//! on that screen at its arrival, whatever it lists ([`Model::only_desktop_saved_on`]), and
+//! the launch arrives on it even with nothing listed (round desktop-ids, the 11-06 08:27
+//! restart).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -339,6 +344,48 @@ impl Model {
         }
     }
 
+    /// Takes how many Desktops macOS keeps for each screen (by its identity; the platform
+    /// reads `com.apple.spaces`, read only). Call it before the first arrival. A screen not
+    /// named is unknown, and its Desktops are recognized by their windows alone.
+    pub fn set_desktop_counts(&mut self, counts: impl IntoIterator<Item = (ScreenKey, u32)>) {
+        self.desktop_counts = counts.into_iter().filter(|(k, _)| k.known()).collect();
+    }
+
+    /// How many Desktops macOS keeps for `display` ([`Model::set_desktop_counts`]), when known.
+    pub fn desktops_on(&self, display: DisplayId) -> Option<u32> {
+        let key = self.display(display).key;
+        key.known().then(|| self.desktop_counts.get(&key).copied()).flatten()
+    }
+
+    /// The saved Desktop that is `display`'s only Desktop: macOS keeps one Desktop for that
+    /// screen ([`Model::desktops_on`]), exactly one saved Desktop waiting names that screen,
+    /// and no Space of the screen holds a window yet. A Desktop's number is the model's own
+    /// (never Apple's): it lasts over a restart only when the Desktop is found again, and the
+    /// screen's identity with its one Desktop is what lasts when its windows are not listed
+    /// yet. `None` otherwise (two saved for that screen, a screen with more Desktops: their
+    /// windows decide, as before).
+    pub(crate) fn only_desktop_saved_on(&self, display: DisplayId) -> Option<SpaceId> {
+        let display = self.known_display(display);
+        if self.desktops_on(display) != Some(1) {
+            return None;
+        }
+        if self.spaces.iter().any(|s| s.display == display && !self.space_is_empty(s.id)) {
+            return None;
+        }
+        let key = self.display(display).key;
+        let mut keyed = self.leftovers.iter().filter(|l| l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(key));
+        let one = keyed.next()?;
+        keyed.next().is_none().then_some(SpaceId(one.id))
+    }
+
+    /// True when `display`, not arrived on yet, forms its one saved Desktop at its arrival
+    /// whatever it lists ([`Model::only_desktop_saved_on`]): the launch arrives on it even
+    /// with nothing listed there, so its saved stages wait on it from the start (its windows
+    /// go to them as they show, and one its app reopened on another screen comes back to it).
+    pub fn forms_saved_desktop(&self, display: DisplayId) -> bool {
+        !self.display_arrived(display) && self.only_desktop_saved_on(display).is_some()
+    }
+
     /// True when saved Desktop `saved` names a screen with an identity and it is not
     /// `display`'s: it forms here only because its own screen is not connected
     /// ([`Model::saved_fits_display`]).
@@ -435,10 +482,15 @@ impl Model {
         // At launch with no exact match (titles change), the Space shown when saved, when
         // the apps on screen say so too (V3: quit on Desktop 2, relaunched on Desktop 1).
         let launch = self.spaces.iter().all(|s| s.last_seen == 0);
+        // With nothing that scores, a screen with one Desktop is the one Desktop saved on it,
+        // whatever it lists (the 11-06 08:27 restart: the laptop listed no window at the
+        // launch and stayed the model's first Space, renumbered 19; saved 17's windows came
+        // in as strays from another Desktop).
         let winner = scores
             .iter()
             .max_by_key(|(id, (n, known, seen))| (*n, *known, *seen, std::cmp::Reverse(**id)))
             .map(|(id, _)| *id)
+            .or_else(|| self.only_desktop_saved_on(display))
             .or_else(|| launch.then(|| self.launch_fallback(display, &arrivals)).flatten());
         let target = match winner {
             Some(id) if self.has_space(id) => id,

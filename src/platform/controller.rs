@@ -4106,6 +4106,7 @@ impl Controller {
         if !self.can_build(ob, &list) {
             return;
         }
+        Self::read_desktop_counts(&mut model);
         // Windows on a display not managed are left alone; they wait until they show on one
         // (and so do windows off every display: none is managed yet).
         let frames: Vec<Rect> = model.displays().iter().map(|d| d.frame).collect();
@@ -4160,8 +4161,10 @@ impl Controller {
             for d in model.displays().to_vec() {
                 let here: Vec<WindowMeta> = live.iter().filter(|m| m.display == d.id).cloned().collect();
                 // A screen with windows sent to it by the first arrival (back to their saved
-                // stage's screen, `engine::model::pool`) arrives even with nothing else.
-                if d.id != main.id && here.is_empty() && !model.awaits_travellers(d.id) {
+                // stage's screen, `engine::model::pool`) arrives even with nothing else, and so
+                // does one whose only Desktop is its one saved Desktop (its windows not listed
+                // yet: they go to their stages there as they show).
+                if d.id != main.id && here.is_empty() && !model.awaits_travellers(d.id) && !model.forms_saved_desktop(d.id) {
                     continue;
                 }
                 let more = model.arrive(d.id, &here, &[], &hints);
@@ -5481,6 +5484,18 @@ impl Controller {
 
     // ----- commands ----------------------------------------------------------------------
 
+    /// Gives the model how many Desktops macOS keeps for each screen (`com.apple.spaces`,
+    /// read only; [`super::desktop_counts`]), logged when it differs from what it had.
+    fn read_desktop_counts(model: &mut Model) {
+        let counts = super::desktop_counts::desktop_counts(model.displays());
+        let changed = model.displays().iter().any(|d| counts.iter().find(|c| c.0 == d.key).map(|c| c.1) != model.desktops_on(d.id));
+        if changed {
+            let named: Vec<String> = counts.iter().map(|(k, n)| format!("{}={n}", k.text())).collect();
+            tracing::info!(screens = %named.join(" "), "Desktops per screen, as macOS keeps them (com.apple.spaces, read only)");
+        }
+        model.set_desktop_counts(counts);
+    }
+
     /// The displays changed (or were first reported): every screen, the main one first
     /// (round displays; the main one alone with `[displays] main_only`). Every screen's park
     /// zone reaches the safety paths, and each screen's strip gets its own capacity.
@@ -5507,6 +5522,7 @@ impl Controller {
         let mut actions = Vec::new();
         if let Some(m) = self.model.as_mut() {
             actions = m.set_displays(displays);
+            Self::read_desktop_counts(m);
             for d in m.displays().to_vec() {
                 m.set_display_capacity(d.id, strip_capacity(d.visible, &config));
             }
