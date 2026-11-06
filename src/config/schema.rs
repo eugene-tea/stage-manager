@@ -372,8 +372,6 @@ pub const KEYS: &[KeyDef] = &[
         "Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty."),
     k("stages", "restore_after_restart", Kind::Bool, "true",
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
-    k("stages", "restore_notice", Kind::Bool, "true",
-        "After a restart, list in the menu bar menu the windows macOS reopened on another Desktop than the one they were on (a mark on the icon while any is listed), to drag them back in Mission Control; an entry leaves once its window shows on its own Desktop. macOS gives apps no way to move a window to another Desktop."),
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
     // [defaults]
@@ -404,6 +402,11 @@ pub const RETIRED: &[(&str, &str, &str)] = &[
         "it is ignored; the corner patch draws the wallpaper from its file, with no live capture",
     ),
 ];
+
+/// Keys of features taken out: an old file that still sets one loads as if it did not, with
+/// no warning (the user has nothing to change; a debug line notes it). `[stages]
+/// restore_notice`: the menu's list of windows a restart reopened on another Desktop (1.6.0).
+pub const DROPPED: &[(&str, &str)] = &[("stages", "restore_notice")];
 
 /// A key by `section.key` path.
 pub fn find(path: &str) -> Option<&'static KeyDef> {
@@ -537,6 +540,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-26.toml"),
     include_str!("legacy/default-27.toml"),
     include_str!("legacy/default-28.toml"),
+    include_str!("legacy/default-29.toml"),
 ];
 
 #[cfg(test)]

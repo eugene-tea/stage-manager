@@ -478,7 +478,7 @@ pub fn menu(action: MenuAction) {
         MenuAction::Settings => show_settings(),
         MenuAction::Allow(a) => allow(a),
         MenuAction::TurnOffAppleStageManager => turn_off_apple(),
-        MenuAction::MarkProblem | MenuAction::ShowNoticed(_) | MenuAction::DismissNotice | MenuAction::Quit => {}
+        MenuAction::MarkProblem | MenuAction::Quit => {}
     }
 }
 

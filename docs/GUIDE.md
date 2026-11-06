@@ -162,22 +162,14 @@ back too: an app that quits keeps its windows' places in your saved stages for t
 Some apps (Electron ones, VS Code or Slack say) reopen their windows on whichever Desktop
 shows at login rather than their own; their stages are made again there.
 
-Once things settle, those windows are listed at the top of the menu bar menu, under
-**Reopened on Another Desktop**, and the menu bar icon shows a small dot. Each entry names
-the app and window, the Desktop it belongs on and the one it is on now. Click an entry to
-bring that window forward, then drag it to its own Desktop in Mission Control. An entry
-leaves the list by itself once its window shows on its own Desktop; **Dismiss** clears the
-whole list. macOS does not tell apps which number Mission Control gives a Desktop, so the
-list names a Desktop by the apps on it ("the Desktop with Terminal and Mail") or as "this
-Desktop". `[stages] restore_notice = false` turns the list off.
-
 What it cannot do:
 
 - It does not open apps. macOS does that when "Reopen windows when logging back in" is on
   in the Log Out or Restart dialog. An app macOS did not reopen loses its saved windows
   once things settle: opened later, it goes where any app you open goes.
 - It cannot move a window to another Desktop. A Desktop's stages come back as far as macOS
-  puts their windows there; the ones on another Desktop are listed in the menu.
+  puts their windows there; a window reopened on another Desktop keeps a stage of its own
+  there, and dragging it to its own Desktop in Mission Control takes its stage with it.
 - A window it is not sure about (two of one app with the same name, say) stays in view and
   goes where a new window of its app would.
 - On a screen of another size than the one they were saved on, windows keep the places

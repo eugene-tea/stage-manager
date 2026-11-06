@@ -17,9 +17,7 @@
 //! gaps 1 to 1.5 pt, so every edge stays on a whole pixel at 2x).
 //!
 //! [`shapes`] is the pure geometry (tested), parameterised by a [`Style`] so previews can
-//! compare variants; [`status_image`] draws [`Style::DEFAULT`]. [`marked_shapes`] adds one
-//! passive mark, a filled dot in the window's lower right (the desktop notice, round
-//! desktop-notice: windows a restart brought back on another Desktop are listed in the menu).
+//! compare variants; [`status_image`] draws [`Style::DEFAULT`].
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -123,20 +121,6 @@ pub fn shapes(style: Style) -> Vec<Shape> {
     ]
 }
 
-/// The mark's diameter (points): a title bar dot's 1.5 grown so it reads as a sign, not a
-/// detail, at 1x.
-pub const MARK_DIAMETER: f64 = 3.5;
-
-/// [`shapes`] with the mark: a filled dot in the window's lower right, a point in from the
-/// stroke's inner edges.
-pub fn marked_shapes(style: Style) -> Vec<Shape> {
-    let (fx, fy, fw, fh) = FRAME;
-    let r = MARK_DIAMETER / 2.0;
-    let mut all = shapes(style);
-    all.push(Shape::Dot { cx: fx + fw - STROKE - 1.0 - r, cy: fy + fh - STROKE - 1.0 - r, diameter: MARK_DIAMETER });
-    all
-}
-
 /// A closed path through `corners` with each corner rounded by `radius`.
 fn rounded_polygon(corners: &[(f64, f64)], radius: f64) -> Retained<NSBezierPath> {
     let path = NSBezierPath::bezierPath();
@@ -157,22 +141,12 @@ pub fn status_image() -> Retained<NSImage> {
     image(Style::DEFAULT)
 }
 
-/// The status item's image with the mark ([`marked_shapes`]).
-pub fn status_image_marked() -> Retained<NSImage> {
-    image_of(marked_shapes(Style::DEFAULT))
-}
-
 /// [`shapes`] as a resolution-independent template image (drawn at whatever scale the menu
 /// bar needs). Main thread, as every AppKit drawing.
 pub fn image(style: Style) -> Retained<NSImage> {
-    image_of(shapes(style))
-}
-
-/// `all` as a template image, as [`image`] draws.
-fn image_of(all: Vec<Shape>) -> Retained<NSImage> {
     let draw = RcBlock::new(move |_rect: NSRect| -> Bool {
         NSColor::blackColor().set();
-        for &shape in &all {
+        for shape in shapes(style) {
             match shape {
                 Shape::Card { x, y, width, height, radius, far_scale } => {
                     rounded_polygon(&Shape::card_corners(x, y, width, height, far_scale), radius).fill();
@@ -302,21 +276,8 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_sits_in_the_windows_lower_right_clear_of_the_stroke_and_the_dots() {
-        let plain = shapes(Style::DEFAULT);
-        let all = marked_shapes(Style::DEFAULT);
-        assert_eq!(&all[..plain.len()], &plain[..], "the glyph unchanged under the mark");
-        let mark = outer(&all[plain.len()]);
-        let (l, t, r, b) = frame(&all);
-        assert!(mark.2 <= r - STROKE - 1.0 && mark.3 <= b - STROKE - 1.0, "a point in from the stroke: {mark:?}");
-        assert!(mark.0 >= l + (r - l) / 2.0 && mark.1 >= t + (b - t) / 2.0, "in the lower right");
-        let dots: Vec<_> = plain.iter().filter(|s| matches!(s, Shape::Dot { .. })).map(outer).collect();
-        assert!(dots.iter().all(|d| d.3 < mark.1), "below the title bar's dots");
-    }
-
-    #[test]
     fn straight_edges_and_dots_land_on_whole_pixels_at_2x() {
-        for s in marked_shapes(Style::DEFAULT) {
+        for s in shapes(Style::DEFAULT) {
             let (l, t, r, b) = outer(&s);
             for edge in [l, t, r, b] {
                 assert_eq!((edge * 2.0).fract(), 0.0, "{s:?} edge {edge}");

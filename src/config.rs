@@ -8,7 +8,8 @@
 //! are read from `com.apple.WindowManager` (see [`crate::engine::settings`]) and never
 //! repeated here.
 //!
-//! Unknown keys and out-of-range numbers produce warnings (numbers are clamped); a value of
+//! Unknown keys and out-of-range numbers produce warnings (numbers are clamped), except the
+//! keys of features taken out ([`schema::DROPPED`]), ignored with a debug line; a value of
 //! the wrong type is an error, and a bad file keeps the previous config: at a reload the one
 //! in force, at launch the last good copy ([`last_good`]).
 
@@ -26,7 +27,7 @@ use crate::engine::rules::{Decision, Placement, Rule, RuleAction, RuleSet};
 use crate::engine::settings::NativeSettings;
 
 pub use hotkey::{Hotkey, HotkeyCommand, HotkeyConfig, Key, Mods, NumberedHotkey};
-use schema::{KEYS, Kind, RETIRED, RULE_KEYS, SECTIONS};
+use schema::{DROPPED, KEYS, Kind, RETIRED, RULE_KEYS, SECTIONS};
 
 /// The file written on first run: every key commented out with its default.
 pub fn default_file() -> String {
@@ -397,10 +398,6 @@ pub struct StagesConfig {
     /// for their apps to reopen them (on by default); off is 1.2.0's behaviour. Read at
     /// launch.
     pub restore_after_restart: bool,
-    /// After a restart, the windows macOS reopened on another Desktop than their own are
-    /// listed in the status menu, with a mark on its icon (on by default: it serves the
-    /// restore; round desktop-notice).
-    pub restore_notice: bool,
     /// A newly opened app's first windows join the active stage instead of a stage of their
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
@@ -409,7 +406,7 @@ pub struct StagesConfig {
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, restore_notice: true, new_apps_join_current: false }
+        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
     }
 }
 
@@ -755,6 +752,10 @@ impl Config {
                     legacy_show_active = on;
                     continue;
                 }
+                if DROPPED.iter().any(|(s, k)| s == section && k == key) {
+                    tracing::debug!("config: [{section}] {key} is no longer read (its feature was taken out); ignored");
+                    continue;
+                }
                 if let Some((_, _, why)) = RETIRED.iter().find(|(s, k, _)| s == section && k == key) {
                     warnings.push(format!("[{section}] {key}: {why}"));
                     continue;
@@ -985,7 +986,6 @@ impl Config {
             stages: StagesConfig {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
-                restore_notice: v.flag("stages.restore_notice"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
             },
             sugar: SugarConfig {
@@ -1298,7 +1298,6 @@ mod tests {
         assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
-        assert!(c.stages.restore_notice, "windows back on another Desktop are listed (it serves the restore: his word, 11-03)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
         assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
@@ -1522,6 +1521,16 @@ swipe = true
         assert!(p.warnings.iter().any(|w| w.contains("position")));
         assert!(p.warnings.iter().any(|w| w.contains("[gestures]")));
         assert!(p.warnings.iter().any(|w| w.contains("fit_windows") && w.contains("[windows] fit")));
+    }
+
+    #[test]
+    fn a_key_of_a_feature_taken_out_loads_without_a_word() {
+        for text in ["[stages]\nrestore_notice = true\n", "[stages]\nrestore_notice = false\nrestore_after_restart = false\n"] {
+            let p = parse(text);
+            assert!(p.warnings.is_empty(), "{text}: {:?}", p.warnings);
+            assert_eq!(p.config.stages.names, Config::default().stages.names);
+        }
+        assert!(!parse("[stages]\nrestore_notice = false\nrestore_after_restart = false\n").config.stages.restore_after_restart, "the rest still read");
     }
 
     #[test]

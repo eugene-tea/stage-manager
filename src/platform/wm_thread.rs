@@ -120,8 +120,6 @@ pub enum WmCommand {
     SpaceChanged,
     /// Show or hide the strip.
     ToggleStrip,
-    /// The desktop notice's menu: a listed window brought forward, or the list dismissed.
-    Notice(super::controller::NoticeCommand),
     /// Re-read config.toml.
     ReloadConfig,
     /// A ctl command for the engine; the reply is one JSON value.
@@ -348,7 +346,7 @@ impl WmState {
 
     fn handle(&mut self, cmd: WmCommand) {
         match cmd {
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip | WmCommand::Notice(_)
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.logout.admits(Work::Input) =>
             {
                 tracing::debug!("a logout is coming: input ignored");
@@ -427,7 +425,7 @@ impl WmState {
                     }
                 }
             }
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip | WmCommand::Notice(_)
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.stand_down.admits(Work::Input) =>
             {
                 tracing::debug!("Apple's Stage Manager is on: input ignored");
@@ -458,9 +456,6 @@ impl WmState {
                 self.controller.on_space_changed(&mut self.observer);
             }
             WmCommand::ToggleStrip => self.controller.toggle_strip(),
-            WmCommand::Notice(cmd) => {
-                self.controller.notice_command(&mut self.observer, cmd);
-            }
             WmCommand::ReloadConfig => self.controller.reload_config(&mut self.observer),
             WmCommand::Ctl(cmd, reply) => {
                 let value = self.controller.ctl(&mut self.observer, cmd);

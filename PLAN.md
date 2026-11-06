@@ -161,9 +161,8 @@ Known gaps the owner accepted as rare:
 - **One pool after a restart (8I):** Electron apps reopen on the Desktop shown at login; a
   window matching another Desktop's saved entry with confidence recreates its stage as a part
   where it shows. Left: two Desktops' same-named stages both feed the one stage of that name
-  (`find_named`). Those windows are listed in the status menu once the restore window ends
-  (desktop-notice, `[stages] restore_notice`, on), a dot on the icon; an entry leaves once its
-  window shows on its saved Desktop.
+  (`find_named`). The restore's line names those windows; nothing tells the user (1.6.0's
+  menu list taken out 11-06: he cannot act on it, macOS moves no window between Desktops).
 
 ## Open
 
@@ -244,12 +243,6 @@ Known gaps the owner accepted as rare:
     showed at its place before its snapshot reached it; the log identical to a good run); a
     relaunch cured it. Catch it with a screen recording if it comes back; check what the
     overlay and the strip panels hold from a launch while the screens settle.
-- **Desktop numbers in the desktop notice:** the list names a Desktop by its apps or "this
-  Desktop", not "Desktop 2": no public API says which Mission Control number the Desktop shown
-  has (`com.apple.spaces`' "Current Space" stayed put through a dozen switches, 11-03). A way
-  in: the order of Desktops from the slide's direction at each switch, with the count from
-  `com.apple.spaces`; `DesktopRef::number` is ready for it. The menu itself and its icon mark
-  are unverified on screen (no restart yet).
 - **Early start (round early-start), at his next restart** (installed copy; nothing live
   before): the first launch after the install moves the login item to the launchd agent
   ("the login item moves to a launchd agent"; then "registered" for the agent, "unregistered"

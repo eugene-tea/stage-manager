@@ -32,8 +32,8 @@
 //! against them first ([`Model::add_window`]; `pending.rs`, [`crate::engine::restore`]).
 
 mod ahead;
+mod away;
 mod hide;
-mod notice;
 mod ops;
 mod pending;
 mod pool;
@@ -390,7 +390,7 @@ pub struct Model {
     /// they stand for.
     pub(crate) pooled: HashMap<WindowId, pool::Kin>,
     /// Windows the pool placed from another Desktop's saved entry, with that saved Desktop,
-    /// in the order they came back, until they leave the list (`notice.rs`).
+    /// in the order they came back, for the restore's line (`away.rs`).
     pub(crate) away: Vec<(WindowId, u64)>,
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
