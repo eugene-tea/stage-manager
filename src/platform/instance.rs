@@ -11,7 +11,8 @@
 //! launch too. What a launch does is decided by [`decide`]:
 //!
 //! - a copy answers `ping`: hand off (it shows its Settings, unless it started moments ago:
-//!   two launches at login, [`HANDOFF_QUIET`]) and leave;
+//!   two launches at login, [`HANDOFF_QUIET`]; or the login is less than [`LOGIN_QUIET`] old;
+//!   or this copy is launchd's, [`super::login_item::Started::Agent`]) and leave;
 //! - a copy answers that it is quitting (bringing its windows back): wait for as long as it
 //!   takes, then manage (a relaunch during a quit must not leave nothing running);
 //! - the lock is held by a process that does not answer: wait while it lives if it answered
@@ -47,6 +48,11 @@ const PING_TIMEOUT: Duration = Duration::from_secs(2);
 /// hand-off: two launches at login (the login item and another launcher) race, and neither is
 /// the user asking for the window.
 pub const HANDOFF_QUIET: Duration = Duration::from_secs(10);
+
+/// Within this long of the login a hand-off or a reopen shows no Settings (round early-start):
+/// the launchd agent starts Stage Manager as the session begins, and the login item or macOS
+/// reopening the app may open it again 20-40 s later, a launch nobody asked for by hand.
+pub const LOGIN_QUIET: Duration = Duration::from_secs(90);
 
 /// The lock held for the life of the process.
 static LOCK: OnceLock<File> = OnceLock::new();
@@ -144,9 +150,19 @@ pub fn decide(lock: Lock, peer: Peer, holder: Holder, waited_out: bool) -> Launc
 }
 
 /// Whether a hand-off asks the running copy to show its Settings: not when it started less
-/// than [`HANDOFF_QUIET`] ago (an earlier version, which does not say, is asked).
-pub fn shows_settings(uptime: Option<Duration>) -> bool {
-    uptime.is_none_or(|u| u >= HANDOFF_QUIET)
+/// than [`HANDOFF_QUIET`] ago (an earlier version, which does not say, is asked), nor while
+/// the login is less than [`LOGIN_QUIET`] old ([`reopen_shows_settings`]), nor from a copy
+/// launchd started (`by_launchd`: the agent at the session's start or at its registration,
+/// never the user).
+pub fn shows_settings(uptime: Option<Duration>, since_login: Option<Duration>, by_launchd: bool) -> bool {
+    !by_launchd && uptime.is_none_or(|u| u >= HANDOFF_QUIET) && reopen_shows_settings(since_login)
+}
+
+/// Whether opening the app again while it runs (a reopen) shows its Settings: not while the
+/// login is less than [`LOGIN_QUIET`] old (the login item, or macOS reopening the app, after
+/// the agent started it). Unknown login: shown.
+pub fn reopen_shows_settings(since_login: Option<Duration>) -> bool {
+    since_login.is_none_or(|d| d >= LOGIN_QUIET)
 }
 
 fn try_lock() -> (Lock, Option<File>) {
@@ -249,13 +265,17 @@ pub fn claim() -> Launch {
                 // Opened again (`open -n`, a terminal): the running one shows its Settings, the
                 // way back when the menu bar icon is hidden. (A Finder or Spotlight launch
                 // never gets here: macOS hands it to the running app as a reopen.)
-                if shows_settings(pong.uptime) {
+                let by_launchd = super::login_item::started() == super::login_item::Started::Agent;
+                let since_login = super::login_item::since_login();
+                if shows_settings(pong.uptime, since_login, by_launchd) {
                     let shown = ctl::request_at(&place, "settings", PING_TIMEOUT).is_ok();
                     tracing::info!(shown, "Stage Manager is already running; asked it to show Settings");
                 } else {
                     tracing::info!(
                         uptime_ms = pong.uptime.map(|u| u.as_millis() as u64),
-                        "Stage Manager is already running and started moments ago (two launches at login); leaving without showing its Settings"
+                        login_ago_s = since_login.map(|d| d.as_secs()),
+                        by_launchd,
+                        "Stage Manager is already running (a second launch at login, or launchd's at the agent's registration); leaving without showing its Settings"
                     );
                 }
                 return launch;
@@ -343,10 +363,25 @@ mod tests {
     /// The review of 8A, L2: two launches at login do not open the Settings.
     #[test]
     fn a_copy_started_moments_ago_shows_no_settings_on_a_hand_off() {
-        assert!(!shows_settings(Some(Duration::from_secs(3))));
-        assert!(shows_settings(Some(HANDOFF_QUIET)));
-        assert!(shows_settings(Some(Duration::from_secs(3600))));
-        assert!(shows_settings(None), "an earlier version does not say");
+        let late = Some(Duration::from_secs(3600));
+        assert!(!shows_settings(Some(Duration::from_secs(3)), late, false));
+        assert!(shows_settings(Some(HANDOFF_QUIET), late, false));
+        assert!(shows_settings(Some(Duration::from_secs(3600)), late, false));
+        assert!(shows_settings(None, late, false), "an earlier version does not say");
+        assert!(shows_settings(None, None, false), "no login time known");
+    }
+
+    /// Round early-start: the agent starts the app 2 s after the login; the login item or
+    /// macOS's reopen comes 25 s later, past [`HANDOFF_QUIET`] of its uptime: no Settings.
+    /// Nor from launchd's own copy at the agent's registration, whenever it comes.
+    #[test]
+    fn a_second_launch_at_login_or_launchds_own_shows_no_settings() {
+        let s = Duration::from_secs;
+        assert!(!shows_settings(Some(s(25)), Some(s(27)), false), "the login item after the agent");
+        assert!(shows_settings(Some(s(25)), Some(LOGIN_QUIET), false), "past the login's quiet: the user's");
+        assert!(!shows_settings(Some(s(3600)), Some(s(7200)), true), "launchd's copy at the registration");
+        assert!(!reopen_shows_settings(Some(s(30))), "a reopen at login");
+        assert!(reopen_shows_settings(Some(s(600))) && reopen_shows_settings(None));
     }
 
     #[test]

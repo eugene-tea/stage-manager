@@ -252,13 +252,30 @@ pub struct Settling {
     login: Instant,
     /// The last app launch or window back from a saved entry (the launch at first).
     busy: Instant,
+    /// The login's time was known (else `login` is the launch).
+    login_known: bool,
+    /// The first window back from a saved entry ([`Settling::placed`]).
+    first_placed: Option<Instant>,
 }
 
 impl Settling {
     /// Opens at `launch`; `login`: when the login session began, if known.
     pub fn new(launch: Instant, login: Option<Instant>) -> Self {
-        let login = login.filter(|l| *l <= launch).unwrap_or(launch);
-        Self { started: launch, login, busy: launch }
+        let known = login.filter(|l| *l <= launch);
+        Self { started: launch, login: known.unwrap_or(launch), busy: launch, login_known: known.is_some(), first_placed: None }
+    }
+
+    /// A window went back to its saved stage at `at` (busy too, [`Settling::busy`]).
+    pub fn placed(&mut self, at: Instant) {
+        self.busy(at);
+        self.first_placed = Some(self.first_placed.map_or(at, |t| t.min(at)));
+    }
+
+    /// Seconds from the login to the first window placed back, when both are known (round
+    /// early-start: the restore's line says how soon after the login windows came back).
+    pub fn first_placed_after_login(&self) -> Option<u64> {
+        let first = self.first_placed?;
+        self.login_known.then(|| first.saturating_duration_since(self.login).as_secs())
     }
 
     /// Until when a window's new title may still take it to its saved stage ([`REMATCH`]):
@@ -315,7 +332,7 @@ pub fn still_opening<'a>(
 
 /// The restore summed up in one line, no titles (the log at its end, `log summary`):
 /// "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 0 at
-/// the corner; 3 from other Desktops".
+/// the corner; 3 from other Desktops; the first 6 s after the login".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
     /// Windows back from a saved entry.
@@ -343,6 +360,9 @@ pub struct Summary {
     /// back to it (that screen connected; round displays-restart). Named on the line only
     /// when there were any.
     pub screen_moves: usize,
+    /// Seconds from the login to the first window back from a saved entry
+    /// ([`Settling::first_placed_after_login`]; round early-start). Named when known.
+    pub first_after_login: Option<u64>,
 }
 
 /// True when `frame` is clamped against the park corner `corner` of the visible frame
@@ -386,6 +406,9 @@ impl fmt::Display for Summary {
         }
         if self.screen_moves > 0 {
             write!(f, "; {} back to their screen", n(self.screen_moves, "window"))?;
+        }
+        if let Some(s) = self.first_after_login {
+            write!(f, "; the first {s} s after the login")?;
         }
         Ok(())
     }
@@ -642,12 +665,12 @@ mod tests {
 
     #[test]
     fn the_summary_line_has_counts_and_no_titles() {
-        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3, other_screen: 0, screen_moves: 0 };
+        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3, other_screen: 0, screen_moves: 0, first_after_login: None };
         assert_eq!(
             s.to_string(),
             "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 1 at the corner; 3 from other Desktops"
         );
-        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0, other_screen: 0, screen_moves: 0 };
+        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0, other_screen: 0, screen_moves: 0, first_after_login: None };
         assert_eq!(
             one.to_string(),
             "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule; 0 at the corner; 0 from other Desktops"
@@ -659,6 +682,34 @@ mod tests {
         // Windows back to the screen their stage was saved on (round displays-restart).
         let back = Summary { screen_moves: 2, ..s };
         assert!(back.to_string().ends_with("; 3 from other Desktops; 2 windows back to their screen"), "{back}");
+        // How soon after the login the first window came back (round early-start).
+        let early = Summary { first_after_login: Some(6), ..back };
+        assert!(early.to_string().ends_with("; 2 windows back to their screen; the first 6 s after the login"), "{early}");
+    }
+
+    /// Round early-start: the agent starts the app 2 s after the login, before the apps
+    /// macOS reopens. The restore window's clocks still count from the login: quiet ends no
+    /// sooner than a minute after it, rematches run two minutes from it, the cap five minutes
+    /// from the launch; and the line says when the first window came back.
+    #[test]
+    fn an_early_launch_keeps_the_logins_clocks_and_times_its_first_window() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut c = Settling::new(s(2), Some(t0));
+        assert_eq!(c.first_placed_after_login(), None, "nothing placed yet");
+        // Apps launch from 20 s on (busy), their windows come back from 28 s.
+        c.busy(s(20));
+        c.placed(s(31));
+        c.placed(s(28));
+        c.placed(s(44));
+        assert_eq!(c.first_placed_after_login(), Some(28), "the earliest, whatever the order heard");
+        assert_eq!(c.due(s(63)), None, "busy until 44 s");
+        assert_eq!(c.due(s(64)), Some(End::Quiet));
+        assert_eq!(c.rematch_until(), t0 + REMATCH, "from the login");
+        assert_eq!(Settling::new(s(2), Some(t0)).due(s(59)), None, "never before the login's minute");
+        let mut c = Settling::new(s(2), None);
+        c.placed(s(10));
+        assert_eq!(c.first_placed_after_login(), None, "the login unknown: not said");
     }
 
     #[test]

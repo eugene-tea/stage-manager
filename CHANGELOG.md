@@ -22,6 +22,10 @@
   showing another repository) goes back to its own stage instead of joining the app's other
   window, and "new apps join the current stage" leaves the windows apps reopen at the login
   to the restore.
+- Stage Manager starts as you log in, before macOS reopens your apps, instead of after
+  them: their windows go straight to their stages rather than showing piled up first. It
+  is listed in Login Items as before; if macOS asks you to allow it there, it starts after
+  your apps until you do, and Settings says so.
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 

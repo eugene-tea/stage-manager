@@ -116,7 +116,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone |
 | `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: manage only these apps |
 | `STAGE_MANAGER_NO_PROMPT` | no welcome window, permission prompts or automatic update checks |
-| `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item |
+| `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item or the launchd agent |
 | `STAGE_MANAGER_NO_CAPTURE` | window captures off, whatever the config says |
 | `STAGE_MANAGER_TEST` | enables the test-only `ctl debug-*` commands |
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |

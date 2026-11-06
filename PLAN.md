@@ -250,6 +250,23 @@ Known gaps the owner accepted as rare:
   in: the order of Desktops from the slide's direction at each switch, with the count from
   `com.apple.spaces`; `DesktopRef::number` is ready for it. The menu itself and its icon mark
   are unverified on screen (no restart yet).
+- **Early start (round early-start), at his next restart** (installed copy; nothing live
+  before): the first launch after the install moves the login item to the launchd agent
+  ("the login item moves to a launchd agent"; then "registered" for the agent, "unregistered"
+  for the login item, and a second copy's "already running … leaving without showing its
+  Settings" with `by_launchd=true`, launchd's own start at the registration; Login Items
+  lists Stage Manager once). After the restart: "launched" with `started="launchd agent"`
+  and a small `login_ago_s` (2-5 s hoped for, against 23 and 35 s 11-06); Accessibility and
+  Screen Recording as before ("permissions at launch" both true); the menu bar icon; no
+  second copy (a later "already running" line has `by_launchd=false` and shows no
+  Settings, "opened again moments after the login" for a reopen); if the 5K comes late,
+  "the launch waits a moment for the screens"; the restore line's "the first N s after the
+  login"; windows to their stages as they show, not piled. Then Settings → Launch at login
+  off and on (off from the agent's copy: "unregistered at the quit", the app keeps running;
+  Quit: the agent gone from Login Items). Not verified without a restart: the agent copy
+  checking in with LaunchServices (a Finder open reaching it as a reopen, not a second
+  process), launchd's `AbandonProcessGroup` keeping the guardian after a crash, an update's
+  relaunch with the agent registered.
 - **Real-restart check (8G)**, with the owner, from the day's log:
   - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
     coming …", "asked to quit by the system", "quitting after the logout's head start".

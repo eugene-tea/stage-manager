@@ -41,7 +41,7 @@ use crate::platform::native_settings::{self, RawSettings};
 use crate::platform::permissions::{self, Approval, PermissionState};
 use crate::platform::wm_thread::{WmCommand, WmHandle};
 use crate::platform::updater::{self, PrepareError, Prepared};
-use crate::platform::{capture, paths, session, update_check};
+use crate::platform::{capture, instance, paths, session, update_check};
 use crate::self_update::{self, Moment, Refusal};
 use crate::updates::{self, Outcome, Release};
 
@@ -217,7 +217,16 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
     let config = config::last_good::read_in_force(&paths::config_file());
     let state = AppState::load(&paths::app_state_file());
     app_menu::install(mtm, |event| match event {
-        AppEvent::Reopen => show_settings(),
+        AppEvent::Reopen => {
+            // At login the agent started this copy; the login item or macOS reopening the app
+            // then reaches it as a reopen, which nobody asked for (round early-start).
+            let since_login = login_item::since_login();
+            if instance::reopen_shows_settings(since_login) {
+                show_settings();
+            } else {
+                tracing::info!(login_ago_s = since_login.map(|d| d.as_secs()), "opened again moments after the login (the login item or macOS reopening it): no Settings");
+            }
+        }
     });
     let shell = Shell {
         mtm,
@@ -276,10 +285,19 @@ impl Shell {
                         let _ = login_item::set(true);
                     }
                     self.state.login_item_set_up = true;
+                    self.state.login_agent_moved = true;
                     self.save_state();
                 }
                 Some(why) => tracing::debug!("login item not set up: {why}"),
             }
+        } else if !self.state.login_agent_moved {
+            // An earlier version's login item, on: the launchd agent instead, once.
+            if login_item::move_to_agent() {
+                self.state.login_agent_moved = true;
+                self.save_state();
+            }
+        } else {
+            login_item::tidy();
         }
         let first_check = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
         let tick = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
