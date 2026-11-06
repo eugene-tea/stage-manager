@@ -1016,3 +1016,97 @@ fn a_card_click_on_a_stage_of_another_desktop_says_why_and_does_nothing() {
     let card = e.m.strip_slots(STUDIO)[0];
     assert_eq!(e.m.switch_refused(card), None, "a card on the Desktop shown switches");
 }
+
+/// The measured desk saved in session "A", then a launch in session "B" (a restart) with
+/// both screens on, the restore window open. Returns the model, the saved windows (their old
+/// ids) and the laptop's saved Desktop.
+fn restarted_with_both() -> (Model, Vec<WindowMeta>, u64) {
+    use crate::engine::restore::Restore;
+    let (mut state, live) = saved_desk();
+    state.session = Some("A".into());
+    state.start_new_session();
+    let (state, _) = state.for_session(Some("B"));
+    let laptop_saved = state.spaces.iter().find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == LAPTOP_KEY.text())).expect("saved").id;
+    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    m.set_restore(Restore::after_restart("B"));
+    m.restore_spaces(state.spaces);
+    (m, live, laptop_saved)
+}
+
+/// Saved window `old` reopened under id `old + 100`, on `display` at `frame` (its saved
+/// title).
+fn reopened(live: &[WindowMeta], old: u32, display: DisplayId, frame: Option<Rect>) -> WindowMeta {
+    let saved = live.iter().find(|w| w.id == WindowId(old)).expect("saved").clone();
+    WindowMeta { id: WindowId(old + 100), display, frame: frame.unwrap_or(saved.frame), ..saved }
+}
+
+#[test]
+fn a_restart_sends_a_window_its_app_reopened_on_the_5k_back_to_the_laptop() {
+    // 11-06 04:25: the laptop's front window (Finder here; Deep House there) reopened by its
+    // app on the 5K at its own size, the laptop's card (Chrome) back on the laptop.
+    let (mut m, live, laptop_saved) = restarted_with_both();
+    let saved_finder = live.iter().find(|w| w.id == WindowId(6)).map(|w| w.frame).expect("saved");
+    let on_5k = Rect::new(1023.0, 228.0, saved_finder.w, saved_finder.h);
+    let mut here: Vec<WindowMeta> = [1, 3, 4].iter().map(|&id| reopened(&live, id, STUDIO, None)).collect();
+    here.push(reopened(&live, 6, STUDIO, Some(on_5k)));
+    let first = m.arrive(STUDIO, &here, &[], &LaunchHints::default());
+    assert!(
+        first.contains(&Action::SetFrame { id: WindowId(106), frame: saved_finder }),
+        "sent to its saved frame on the laptop: {first:?}"
+    );
+    assert!(m.window(WindowId(106)).is_none(), "not placed on the 5K");
+    assert!(m.stages_in(m.current_space(STUDIO)).all(|s| !s.windows.contains(&WindowId(106))));
+    assert!(m.awaits_travellers(LAPTOP) && !m.awaits_travellers(STUDIO));
+    // The laptop's arrival: Chrome where macOS put it, Finder with it.
+    let chrome = reopened(&live, 5, LAPTOP, None);
+    let second = m.arrive(LAPTOP, &[chrome], &[], &LaunchHints::default());
+    assert_eq!(m.last_arrival().rebuilt, Some(laptop_saved), "the laptop's saved Desktop forms on the laptop");
+    let finder = m.stage_of(WindowId(106)).expect("in a stage");
+    assert_eq!(m.stage(finder).map(|s| s.space.0), Some(laptop_saved));
+    assert_eq!(m.active_stage(LAPTOP), Some(finder), "in front, as saved");
+    assert_eq!(m.window(WindowId(106)).map(|w| (w.meta.display, w.restore, w.parked)), Some((LAPTOP, saved_finder, false)));
+    assert!(second.iter().any(|a| matches!(a, Action::Park { id, frame } if *id == WindowId(105) && laptop().parks(*frame))), "Chrome a card at the laptop's corner");
+    assert!(!m.awaits_travellers(LAPTOP) && m.take_travellers().is_empty());
+    // Not a stray: on its own Desktop, no notice; the line says it.
+    let line = m.restore_summary(0);
+    assert_eq!((line.pooled, line.screen_moves, line.other_screen), (0, 1, 0));
+    assert!(line.to_string().ends_with("1 window back to their screen"), "{line}");
+    assert!(m.desktop_notice().is_empty());
+    // The 5K's own stages fit there: their frames are the saved ones, and no line says
+    // otherwise for them.
+    assert!(m.saved_frames_fit_for(STUDIO, m.stage_of(WindowId(101)).and_then(|s| m.stage(s)).map(|s| s.space.0)));
+}
+
+#[test]
+fn a_window_shown_on_the_5k_later_goes_to_its_stage_waiting_on_the_laptop() {
+    // The laptop formed with Chrome; Finder's app opens it on the 5K a moment later.
+    let (mut m, live, laptop_saved) = restarted_with_both();
+    let saved_finder = live.iter().find(|w| w.id == WindowId(6)).map(|w| w.frame).expect("saved");
+    let here: Vec<WindowMeta> = [1, 3, 4].iter().map(|&id| reopened(&live, id, STUDIO, None)).collect();
+    m.arrive(STUDIO, &here, &[], &LaunchHints::default());
+    m.arrive(LAPTOP, &[reopened(&live, 5, LAPTOP, None)], &[], &LaunchHints::default());
+    assert_eq!(m.current_space(LAPTOP).0, laptop_saved);
+    let finder = reopened(&live, 6, STUDIO, Some(Rect::new(1023.0, 228.0, saved_finder.w, saved_finder.h)));
+    let a = m.add_window(finder, &Decision::default(), &Observation::default());
+    let stage = m.stage_of(WindowId(106)).expect("placed");
+    assert_eq!(m.stage(stage).map(|s| (s.space.0, s.display)), Some((laptop_saved, LAPTOP)));
+    assert_eq!(m.active_stage(LAPTOP), Some(stage));
+    assert!(a.contains(&Action::SetFrame { id: WindowId(106), frame: saved_finder }), "moved to its frame on the laptop: {a:?}");
+    assert_eq!(m.window(WindowId(106)).map(|w| w.meta.display), Some(LAPTOP));
+    assert_eq!(m.restore_summary(0).screen_moves, 1);
+    assert!(!m.is_pooled(WindowId(106)) && m.desktop_notice().is_empty());
+}
+
+#[test]
+fn a_window_reopened_on_its_own_screen_stays_where_its_app_put_it() {
+    // Finder reopened on the laptop at another frame: on its screen, nothing to send back.
+    let (mut m, live, _) = restarted_with_both();
+    let here: Vec<WindowMeta> = [1, 3, 4].iter().map(|&id| reopened(&live, id, STUDIO, None)).collect();
+    let moved = m.arrive(STUDIO, &here, &[], &LaunchHints::default());
+    assert!(!m.awaits_travellers(LAPTOP));
+    assert!(!moved.iter().any(|a| matches!(a, Action::SetFrame { id, .. } if id.0 > 100 && m.window(*id).is_none())));
+    let elsewhere = on(&laptop(), (500.0, 300.0));
+    m.arrive(LAPTOP, &[reopened(&live, 5, LAPTOP, None), reopened(&live, 6, LAPTOP, Some(elsewhere))], &[], &LaunchHints::default());
+    assert_eq!(m.window(WindowId(106)).map(|w| (w.meta.display, w.restore)), Some((LAPTOP, elsewhere)));
+    assert_eq!(m.restore_summary(0).screen_moves, 0);
+}

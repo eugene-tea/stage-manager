@@ -3453,7 +3453,13 @@ impl Controller {
                 if let (Some(m), Some(title)) = (self.model.as_mut(), title)
                     && m.window_title_changed(WindowId(id), &title)
                 {
+                    // A window titled late (an Electron app's) may be a saved one after all.
+                    let actions = m.window_retitled(WindowId(id));
                     self.mark_dirty();
+                    if !actions.is_empty() {
+                        self.execute(ob, actions);
+                        self.present();
+                    }
                 }
             }
             WinEvent::Focused(id) => {
@@ -4114,11 +4120,19 @@ impl Controller {
             let mut all = Vec::new();
             for d in model.displays().to_vec() {
                 let here: Vec<WindowMeta> = live.iter().filter(|m| m.display == d.id).cloned().collect();
-                if d.id != main.id && here.is_empty() {
+                // A screen with windows sent to it by the first arrival (back to their saved
+                // stage's screen, `engine::model::pool`) arrives even with nothing else.
+                if d.id != main.id && here.is_empty() && !model.awaits_travellers(d.id) {
                     continue;
                 }
                 let more = model.arrive(d.id, &here, &[], &hints);
                 all.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+            }
+            // None is left (every screen arrived on); never one unmanaged for good if it is.
+            let left = model.take_travellers();
+            if !left.is_empty() {
+                tracing::warn!(windows = left.len(), "restore: windows sent to another screen whose Desktop did not form; placed when found");
+                self.unplaced.extend(left.iter().map(|m| m.id.0));
             }
             all.push(Action::StateChanged);
             all

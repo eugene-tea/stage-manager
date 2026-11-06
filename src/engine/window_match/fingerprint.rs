@@ -49,10 +49,30 @@ pub const TITLE_RULES: &[(TitleRule, &str)] = &[
     (TitleRule::Counter, " copy"),
 ];
 
+fn rules(kind: TitleRule) -> impl Iterator<Item = &'static str> {
+    TITLE_RULES.iter().filter(move |(k, _)| *k == kind).map(|(_, p)| *p)
+}
+
 /// The fingerprint of `title` (see the module docs).
 pub fn fingerprint(title: &str) -> String {
+    let mut t = trimmed(title);
+    let cut = rules(TitleRule::Split).filter_map(|p| t.find(p)).filter(|&i| i > 0).min();
+    if let Some(i) = cut {
+        t.truncate(i);
+    }
+    for p in rules(TitleRule::Counter) {
+        if let Some(rest) = strip_counter(&t, p) {
+            t = rest;
+            break;
+        }
+    }
+    t.trim().to_string()
+}
+
+/// `title` with whitespace collapsed, case folded and the leading marks and trailing words
+/// dropped ([`TitleRule::Prefix`], [`TitleRule::Suffix`]): the fingerprint before its split.
+fn trimmed(title: &str) -> String {
     let mut t = title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-    let rules = |kind: TitleRule| TITLE_RULES.iter().filter(move |(k, _)| *k == kind).map(|(_, p)| *p);
     loop {
         let before = t.len();
         for p in rules(TitleRule::Prefix) {
@@ -69,17 +89,34 @@ pub fn fingerprint(title: &str) -> String {
             break;
         }
     }
-    let cut = rules(TitleRule::Split).filter_map(|p| t.find(p)).filter(|&i| i > 0).min();
-    if let Some(i) = cut {
-        t.truncate(i);
-    }
-    for p in rules(TitleRule::Counter) {
-        if let Some(rest) = strip_counter(&t, p) {
-            t = rest;
-            break;
-        }
-    }
     t.trim().to_string()
+}
+
+/// The segments of `t` (already [`trimmed`]) between its separators ([`TitleRule::Split`]),
+/// each trimmed, empty ones left out.
+fn segments(t: &str) -> Vec<&str> {
+    let mut parts = vec![t];
+    for p in rules(TitleRule::Split) {
+        parts = parts.into_iter().flat_map(|x| x.split(p)).collect();
+    }
+    parts.into_iter().map(str::trim).filter(|x| !x.is_empty()).collect()
+}
+
+/// True when one of titles `a` and `b` is, whole, one of the other's segments (the 11-06
+/// restart: an editor saved as "proj (Workspace)" with no file open reopened as "main.rs —
+/// proj (Workspace)", the file it shows put in front; the fingerprint, the first segment,
+/// then names them apart). Whitespace, case and the marks and words apps add are ignored
+/// ([`TitleRule::Prefix`], [`TitleRule::Suffix`]); the shorter title must be one segment
+/// itself and the longer more than one. Not a fingerprint match (it adds no points): it
+/// only says the two names are not apart, so a frame the window reopened at counts
+/// ([`super::score`]).
+pub fn named_within(a: &str, b: &str) -> bool {
+    let (a, b) = (trimmed(a), trimmed(b));
+    let within = |short: &str, long: &str| {
+        let parts = segments(long);
+        parts.len() > 1 && segments(short).len() == 1 && parts.contains(&short)
+    };
+    !a.is_empty() && !b.is_empty() && (within(&a, &b) || within(&b, &a))
 }
 
 /// True when fingerprints `a` and `b` name the same window: both non-empty and equal, or one
@@ -180,6 +217,22 @@ mod tests {
         assert_eq!(fingerprint("Budget.numbers"), fingerprint("Budget.numbers — Edited"));
         assert_eq!(fingerprint("Inbox — 3 unread"), fingerprint("Inbox — 12 unread"));
         assert_ne!(fingerprint("Budget"), fingerprint("Forecast"));
+    }
+
+    #[test]
+    fn a_title_whole_within_the_others_segments_is_named_within() {
+        // An editor's workspace with a file shown in front of it, either way round.
+        assert!(named_within("proj (Workspace)", "main.rs — proj (Workspace)"));
+        assert!(named_within("● main.rs — proj (Workspace)", "proj (workspace)"));
+        assert!(named_within("Inbox", "Inbox — 3 unread"));
+        // Two pages of one site, two files of one project: no title is the other's segment.
+        assert!(!named_within("Page A — Site", "Page B — Site"));
+        assert!(!named_within("main.rs — proj", "lib.rs — proj"));
+        // A part of a segment, the same title, or empty: not this rule.
+        assert!(!named_within("proj", "main.rs — proj (Workspace)"));
+        assert!(!named_within("Downloads", "Downloads"), "equal titles are the title signal");
+        assert!(!named_within("", "main.rs — proj"));
+        assert!(!named_within("Start Page", "Downloads"));
     }
 
     #[test]

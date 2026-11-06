@@ -783,3 +783,79 @@ fn a_listed_window_comes_forward_with_its_stage() {
     assert_eq!(m.show_noticed(w(43), &Observation::default()), vec![Action::Focus { id: w(43) }], "in front: the keyboard");
     assert!(m.show_noticed(w(83), &Observation::default()).is_empty(), "not listed: nothing");
 }
+
+/// One Desktop (saved 4, shown when saved): the IDE's two workspaces as two stages, "alpha"
+/// in front with a terminal, "beta" a card; the IDE's titles are its workspaces' names with
+/// no file open (the 11-06 restart: two VS Code windows, two stages).
+fn two_workspaces() -> SavedSpace {
+    SavedSpace {
+        screen: None,
+        id: 4,
+        current: true,
+        stages: vec![
+            stage(vec![sw(IDE, "alpha (Workspace)", r(0.0), 0), sw(TERM, "build", r(2.0), 1)], 90),
+            stage(vec![sw(IDE, "beta (Workspace)", r(1.0), 0)], 80),
+        ],
+        active_index: Some(0),
+        strip_slots: vec![1],
+        last_seen: None,
+    }
+}
+
+#[test]
+fn an_editor_reopened_with_a_file_in_front_of_its_workspace_goes_to_its_own_stage() {
+    // The title gained the file shown, in front of the workspace's name: the fingerprint
+    // (its first segment) differs, the frame is the saved one; strong, not Apple's rule into
+    // the IDE's other stage.
+    let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
+    let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
+    let beta = win(42, 20, IDE, "main.rs — beta (Workspace)", r(1.0));
+    m.arrive(MAIN, &[alpha, beta, win(43, 21, TERM, "build", r(2.0))], &[], &LaunchHints::default());
+    assert_ne!(m.stage_of(w(41)), m.stage_of(w(42)), "two stages, as saved");
+    assert_eq!(m.restored_grade(w(42)), Some(Grade::Strong));
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(43)));
+    assert_eq!(m.restore_summary(0).by_apple, 0);
+}
+
+#[test]
+fn an_editor_titled_late_goes_to_its_own_stage_when_its_title_comes() {
+    // The second window shows first under its app's name (an Electron window's title before
+    // its workspace loads): no saved window takes it, and Apple's rule joins it to the IDE's
+    // stage. Its title comes during the restore window: back in its saved stage, a card.
+    let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
+    let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
+    let early = win(42, 20, IDE, "Example IDE", Rect::new(300.0, 200.0, 700.0, 500.0));
+    m.arrive(MAIN, &[alpha, early, win(43, 21, TERM, "build", r(2.0))], &[], &LaunchHints::default());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)), "joined by Apple's rule, the late title's doing");
+    assert_eq!(m.restore_summary(0).by_apple, 1);
+    // A title that still says nothing: no change.
+    assert!(m.window_title_changed(w(42), "Example IDE — Welcome"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    let a = m.window_retitled(w(42));
+    let beta = m.stage_of(w(42)).expect("placed");
+    assert_ne!(Some(beta), m.stage_of(w(41)), "two stages again");
+    assert_eq!(m.stage(beta).map(|s| s.windows.clone()), Some(vec![w(42)]));
+    assert!(parks(&a, 42), "a card, parked: its stage is not in front: {a:?}");
+    assert_eq!(m.window(w(42)).map(|x| x.restore), Some(r(1.0)), "its saved frame");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(41)), "nothing switched");
+    assert!(m.strip_slots(MAIN).contains(&beta));
+    let line = m.restore_summary(0);
+    assert_eq!((line.by_apple, line.windows), (0, 3));
+    // Once placed, a later title changes nothing.
+    assert!(m.window_title_changed(w(42), "lib.rs — beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+}
+
+#[test]
+fn a_late_title_after_the_restore_window_moves_nothing() {
+    // The user has seen the window in its stage: it stays there.
+    let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
+    let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
+    let early = win(42, 20, IDE, "Example IDE", Rect::new(300.0, 200.0, 700.0, 500.0));
+    m.arrive(MAIN, &[alpha, early], &[], &LaunchHints::default());
+    m.end_restore();
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+}

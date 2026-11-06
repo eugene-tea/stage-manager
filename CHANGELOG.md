@@ -14,6 +14,10 @@
   arranges it before it slides in, and a full-screen app on one screen no longer holds up
   windows opening on the other. After a restart the log says when a Desktop came back on
   another screen than it was saved on.
+- After a restart with two screens, a window its app reopens on the other screen goes back
+  to the screen its stage was on, in its place there. Two windows of one app (two VS Code
+  workspaces, say) come back as the two stages they were, even when an editor shows a file
+  in its title now, or gets its title only a moment after it opens.
 - The strip stays up under a window that covers its cards, as Apple's does, and slides away
   only once the window comes within 50 pt of the screen's left edge.
 

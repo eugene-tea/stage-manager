@@ -202,7 +202,20 @@ Known gaps the owner accepted as rare:
     there; (3) a restart with both
     screens: each screen's stages on its screen (the log's "Space changed on another
     display" with `rebuilt`; a Desktop saved on a screen not connected: `other_screen`, and
-    the restore line's "N Desktops on another screen"); (4) ⌘-Tab to an app whose stage is
+    the restore line's "N Desktops on another screen"); his first, 11-06 04:23 (fixed in
+    round displays-restart; run it again): a window its app reopened on the 5K whose stage
+    was saved on the laptop goes back to the laptop, at its saved frame, its stage in front
+    or a card as saved (the log's "a window shown on another screen than its saved stage's
+    goes back to that screen", the restore line's "N windows back to their screen", never
+    "on another Desktop: … (saved 17, now 2)" for the laptop's Desktop; `ctl state`: its
+    `display` the laptop's, in `displays[1].active_stage` or `strip`); the "stage saved on
+    another screen" line now names its saved Desktop and display; two windows of one app
+    saved as two stages (VS Code's two workspaces, each its own stage on its own Desktop of
+    the 5K, 77 and 78 then) come back as two stages, the one whose title gained the file in
+    front of its workspace's name matched by its frame (a "strong" match, never "2 by
+    Apple's rule" for it), and one titled late, while the login settles, goes to its stage
+    when its title comes ("matches its saved one by its new title"); Fork and Chrome stay
+    as saved (they did, 11-06); (4) ⌘-Tab to an app whose stage is
     on the other screen: that screen switches, the other does not, and the Desktop there is
     arranged ahead of its slide (the log's "arranged ahead" for a window on `displays[1]`);
     (5) round displays-2, on the laptop's screen: its cards' glass takes its own wallpaper

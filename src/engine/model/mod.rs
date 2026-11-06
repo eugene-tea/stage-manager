@@ -416,6 +416,14 @@ pub struct Model {
     /// An arrival leaves out windows first seen on the Desktop still shown
     /// ([`Model::set_hold_arrivals`]).
     pub(crate) hold_arrivals: bool,
+    /// Windows the launch's first arrival moved to the screen their saved stage is on (that
+    /// screen's Desktop not formed yet; `pool.rs`, [`Model::screen_claims`]), at their saved
+    /// frame there: that screen's arrival takes them with its own ([`Model::arrive`]).
+    pub(crate) travellers: Vec<WindowMeta>,
+    /// Standard windows placed by Apple's rule while the restore window was open (they
+    /// matched no saved window then): scored again when their title changes
+    /// ([`Model::window_retitled`]).
+    pub(crate) by_apple_windows: HashSet<WindowId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -486,6 +494,8 @@ impl Model {
             adopted: BTreeSet::new(),
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
+            travellers: Vec::new(),
+            by_apple_windows: HashSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),

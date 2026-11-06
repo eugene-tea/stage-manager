@@ -455,7 +455,19 @@ before macOS announced the logout still come back after the restart; a window re
 squeezed into the park corner goes to its saved frame when it is matched, and is left where
 it is (and counted) when it is not. A window an app reopens on another Desktop than the one
 it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
-again on the Desktop where it shows. No apps are relaunched (that is macOS's
+again on the Desktop where it shows. A window reopened on another screen than its saved
+stage's, that screen connected, goes back to that screen, at its saved frame there, in its
+stage, in front or a card as saved (11-06: the laptop's front window, reopened by its app
+on the 5K; Apple's keeps no stages over a restart, so this decides nothing of Apple's); a
+stage saved on a Desktop of that screen not shown now is made again where the window
+shows, as above, and a window reopened on its own screen stays where its app put it. A
+window that went by Apple's rule while the login settles (no saved window matched it, an
+Electron app's window still titled with its app's name, say) is looked at again when its
+title changes then, and goes to its saved stage on a confident match (a card when that
+stage is not in front); after the settle it stays where it is. A title that only puts
+something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
+a file in its workspace) is the same name, so the frame the window reopened at counts. No
+apps are relaunched (that is macOS's
 "Reopen windows when logging back in") and no window moves between Desktops: when the
 restore window ends, those windows are listed at the top of the status menu instead (a
 section headed "Reopened on Another Desktop": per window the app and title, under it

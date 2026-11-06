@@ -60,10 +60,13 @@
 //!
 //! **One pool** (round 8I): after a restart a window that shows on another Desktop than the one
 //! it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
-//! again where it shows (`model/pool.rs`); "K from other Desktops" in the line.
+//! again where it shows (`model/pool.rs`); "K from other Desktops" in the line. One that shows
+//! on another screen than its saved stage's, that screen connected, goes back to that screen
+//! ("N windows back to their screen", [`Restore::screen_moves`]).
 //!
-//! **Frames** come back from `state.json` only on a main display of the saved size
-//! ([`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//! **Frames** come back from `state.json` only on the screen a Desktop was saved on, at the
+//! saved size ([`Restore::screens`]; a file naming no screen: the main display of the saved
+//! size, [`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
 //!
 //! **Off** (`[stages] restore_after_restart = false`): after a restart nothing waits
 //! ([`Restore::off_after_restart`]): saved windows not on screen are dropped as 1.2.0 did.
@@ -130,8 +133,9 @@ pub struct Restore {
     /// rounded), where the file says ([`crate::engine::persist::SavedScreen`]): its saved
     /// frames are used only on that screen at that size.
     pub screens: BTreeMap<u64, (String, i64, i64)>,
-    /// Why saved frames are not used was logged already (once a run).
-    pub frames_noted: bool,
+    /// Why saved frames are not used was logged already, for these (saved Desktop, display)
+    /// pairs (once a run each).
+    pub frames_noted: std::collections::BTreeSet<(Option<u64>, u32)>,
     /// Windows placed by Apple's rule while the restore window was open (they matched no
     /// saved window), for the restore's line.
     pub by_apple: usize,
@@ -141,6 +145,9 @@ pub struct Restore {
     /// Saved Desktops rebuilt on another screen than they were saved on (that screen not
     /// connected; round displays-2), for the line.
     pub other_screen: usize,
+    /// Windows that showed on another screen than their saved stage's, that screen connected,
+    /// and went back to it (round displays-restart), for the line.
+    pub screen_moves: usize,
     /// Saved active stages that kept their place while empty, their windows still to come:
     /// emptied for good (given up), they still give way to a stage with windows
     /// ([`crate::engine::model::Model::front_after_restore`]).
@@ -313,6 +320,10 @@ pub struct Summary {
     /// screen not connected: the 10-23 login on the laptop alone; round displays-2). Named
     /// on the line only when there were any.
     pub other_screen: usize,
+    /// Windows that showed on another screen than the one their stage was saved on and went
+    /// back to it (that screen connected; round displays-restart). Named on the line only
+    /// when there were any.
+    pub screen_moves: usize,
 }
 
 /// True when `frame` is clamped against the park corner `corner` of the visible frame
@@ -353,6 +364,9 @@ impl fmt::Display for Summary {
         )?;
         if self.other_screen > 0 {
             write!(f, "; {} on another screen", n(self.other_screen, "Desktop"))?;
+        }
+        if self.screen_moves > 0 {
+            write!(f, "; {} back to their screen", n(self.screen_moves, "window"))?;
         }
         Ok(())
     }
@@ -595,12 +609,12 @@ mod tests {
 
     #[test]
     fn the_summary_line_has_counts_and_no_titles() {
-        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3, other_screen: 0 };
+        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3, other_screen: 0, screen_moves: 0 };
         assert_eq!(
             s.to_string(),
             "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 1 at the corner; 3 from other Desktops"
         );
-        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0, other_screen: 0 };
+        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0, other_screen: 0, screen_moves: 0 };
         assert_eq!(
             one.to_string(),
             "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule; 0 at the corner; 0 from other Desktops"
@@ -609,6 +623,9 @@ mod tests {
         // said at the end, only when it happened.
         let moved = Summary { other_screen: 1, ..s };
         assert!(moved.to_string().ends_with("; 3 from other Desktops; 1 Desktop on another screen"), "{moved}");
+        // Windows back to the screen their stage was saved on (round displays-restart).
+        let back = Summary { screen_moves: 2, ..s };
+        assert!(back.to_string().ends_with("; 3 from other Desktops; 2 windows back to their screen"), "{back}");
     }
 
     #[test]

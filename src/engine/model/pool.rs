@@ -26,6 +26,17 @@
 //!   all is dropped (one with windows still waiting keeps them, under the usual give-up
 //!   rules).
 //!
+//! **Back to its screen** (the 11-06 restart with both screens on): a window matched to a
+//! stage saved on another screen that is connected goes back to that screen, at its saved
+//! frame there, in its stage, front or card as saved, instead of a part where it showed
+//! (macOS, or the app, may reopen a window on the main screen whatever screen it was on).
+//! The stage is the one on that screen's Desktop shown now ([`Dest::Screen`]), or, at the
+//! launch, the saved Desktop of that screen when it has not formed yet: the window then waits
+//! for that screen's own arrival, moved there already ([`Model::screen_claims`],
+//! [`Model::travellers`]). A stage saved on a Desktop of that screen not shown now stays a
+//! part where the window showed, as any stray. A window shown on its own screen (on another
+//! Desktop of it) stays where its app put it, as before.
+//!
 //! A window that votes for a saved Desktop on a Desktop made from an empty screen goes by
 //! Apple's rule until that Desktop is taken, as before (its vote, not the pool, decides). In
 //! the strip the adopted Desktop's saved slots come first, then the parts in their saved relative order
@@ -40,7 +51,8 @@ use std::cmp::Reverse;
 use std::collections::HashSet;
 
 use super::pending::Placed;
-use super::{Action, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use super::{Action, DisplayId, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::displays::ScreenKey;
 use crate::engine::geometry::Rect;
 use crate::engine::park::clamp_to_visible;
 use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
@@ -132,6 +144,9 @@ struct Origin {
 enum Dest {
     /// A stage of the Desktop it showed on, waiting for it.
     Own(StageId),
+    /// A stage waiting for it on the Desktop another screen shows (its saved screen): the
+    /// window goes back to that screen.
+    Screen(StageId),
     /// The part of another Desktop's stage on the Desktop it showed on.
     Part(Origin),
 }
@@ -238,9 +253,10 @@ impl Model {
         let mut placed = HashSet::new();
         for (i, dest, entry, grade, points) in taken {
             let meta = &metas[i];
-            let from_other = matches!(dest, Dest::Part(_));
+            let from_other = matches!(dest, Dest::Part(_) | Dest::Screen(_));
             let went = match dest {
                 Dest::Own(stage) => self.insert_from_pending(meta, space, stage, &entry, grade, obs, actions),
+                Dest::Screen(stage) => self.place_on_its_screen(meta, stage, &entry, grade, obs, actions),
                 Dest::Part(origin) => self.place_in_part(meta, space, origin, entry, grade, obs, actions),
             };
             let (parked, switched) = (went == Placed::Parked, went == Placed::Switched);
@@ -299,7 +315,13 @@ impl Model {
             if !own && !grade.confident() {
                 continue;
             }
-            let dest = if own { Dest::Own(s) } else { Dest::Part(self.origin_of_stage(s)) };
+            let dest = if own {
+                Dest::Own(s)
+            } else if self.waits_on_other_screen(s, space) {
+                Dest::Screen(s)
+            } else {
+                Dest::Part(self.origin_of_stage(s))
+            };
             let Some(list) = self.pending.get_mut(&s) else { continue };
             if k >= list.len() {
                 continue;
@@ -413,6 +435,81 @@ impl Model {
         self.pooled.insert(meta.id, origin.root);
         self.note_away(meta.id, origin.desktop);
         went
+    }
+
+    /// True when stage `stage` (waiting for a window that showed on Desktop `space`) is on the
+    /// Desktop another connected screen shows now, and the frames saved with it apply there:
+    /// the window goes back to that screen ([`Dest::Screen`]).
+    fn waits_on_other_screen(&self, stage: StageId, space: SpaceId) -> bool {
+        let Some(to) = self.stage(stage).map(|s| s.space) else { return false };
+        let (here, there) = (self.space_display(space), self.space_display(to));
+        let saved = match self.kin.get(&stage) {
+            Some(Kin::Saved(id, _)) => Some(*id),
+            _ => Some(to.0),
+        };
+        here != there
+            && self.displays.iter().any(|d| d.id == there)
+            && self.current.get(&there) == Some(&to)
+            && self.frames_fit(there, saved)
+    }
+
+    /// Puts window `meta` (shown on another screen) into `stage` on its own screen, from its
+    /// entry `entry`, as any window back from a saved entry ([`Model::insert_from_pending`]):
+    /// at its saved frame there, shown when the stage is in front (moved), else parked at
+    /// that screen's corner (its card).
+    fn place_on_its_screen(
+        &mut self,
+        meta: &WindowMeta,
+        stage: StageId,
+        entry: &SavedWindow,
+        grade: Grade,
+        obs: Option<&Observation>,
+        actions: &mut Vec<Action>,
+    ) -> Placed {
+        let Some(to) = self.stage(stage).map(|s| s.space) else { return Placed::Parked };
+        let mut moved = meta.clone();
+        moved.display = self.space_display(to);
+        let went = self.insert_from_pending(&moved, to, stage, entry, grade, obs, actions);
+        self.restore.screen_moves += 1;
+        tracing::info!(
+            id = meta.id.0,
+            bundle = %meta.bundle_id,
+            from = meta.display.0,
+            to = moved.display.0,
+            stage = stage.0,
+            "restore: a window shown on another screen than its saved stage's goes back to that screen"
+        );
+        went
+    }
+
+    /// At the launch (the first arrival): the windows of `metas` (new on `display`'s Desktop
+    /// `space`, matching nothing of their own Desktop) that a saved Desktop not visited claims
+    /// with confidence ([`Scope::Pool`]) when that Desktop was saved on another connected
+    /// screen that has not formed its Desktop yet and its frames apply there: each one moved
+    /// to that screen (its display, its saved frame), to be placed at that screen's arrival
+    /// ([`Model::travellers`]). Nothing changes.
+    pub(crate) fn screen_claims(&self, display: DisplayId, space: SpaceId, metas: &[WindowMeta]) -> Vec<WindowMeta> {
+        if !self.pooling() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (i, spot, grade, _) in self.picks(space, metas, LowRule::default(), Scope::Pool) {
+            let Spot::Saved(l, j, k) = spot else { continue };
+            let Some(saved) = self.leftovers.get(l) else { continue };
+            let Some(there) = saved.screen.as_ref().and_then(|sc| ScreenKey::parse(&sc.key)).filter(|key| key.known()).and_then(|key| self.display_keyed(key)).map(|d| d.id)
+            else {
+                continue;
+            };
+            let Some(entry) = saved.stages.get(j).and_then(|st| st.windows.get(k)) else { continue };
+            if !grade.confident() || there == display || self.display_arrived(there) || !self.frames_fit(there, Some(saved.id)) {
+                continue;
+            }
+            let mut moved = metas[i].clone();
+            moved.display = there;
+            moved.frame = self.safe_restore(entry.frame, there);
+            out.push(moved);
+        }
+        out
     }
 
     /// The stage of `space` that takes a window of `origin` (see the module docs).
@@ -547,6 +644,66 @@ impl Model {
             }
         }
         self.drop_empty_leftovers();
+    }
+
+    /// Window `id`'s title changed. One placed by Apple's rule while the restore window is
+    /// open (it matched no saved window when it showed: an Electron app's window titled late,
+    /// its app's name or nothing before its own) is scored again with its new title, against
+    /// its own Desktop's waiting windows and, after a restart, every other's: a confident
+    /// match takes it out of the stage Apple's rule gave it and into its saved stage, as if it
+    /// had shown so (parked there when that stage is inactive: the restore window is still
+    /// open; no switch). Else, or once the restore window is over, nothing changes (a window
+    /// the user has seen in its stage stays there). The actions.
+    pub fn window_retitled(&mut self, id: WindowId) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if !self.restore.restoring || !self.by_apple_windows.contains(&id) {
+            return actions;
+        }
+        let Some(w) = self.windows.get(&id) else {
+            self.by_apple_windows.remove(&id);
+            return actions;
+        };
+        let Home::Stage(from) = w.home else { return actions };
+        if w.meta.role != WindowRole::Standard || self.restored.contains_key(&id) || !self.children_of(id).is_empty() {
+            return actions;
+        }
+        let space = w.space;
+        let mut meta = w.meta.clone();
+        let was_parked = w.parked;
+        if was_parked {
+            meta.frame = clamp_to_visible(w.restore, self.display(meta.display).visible);
+        }
+        let scope = if self.pooling() { Scope::OwnAndPool } else { Scope::Own };
+        if !self.picks(space, std::slice::from_ref(&meta), LowRule::default(), scope).iter().any(|c| c.2.confident()) {
+            return actions;
+        }
+        let Some((meta, original)) = self.lift(id) else { return actions };
+        let placed = self.match_waiting(space, std::slice::from_ref(&meta), LowRule::default(), None, scope, &mut actions);
+        self.by_apple_windows.remove(&id);
+        // Counted again below if it goes by Apple's rule once more.
+        self.restore.by_apple = self.restore.by_apple.saturating_sub(1);
+        if placed.is_empty() {
+            // Never left unmanaged: it comes back as any new window.
+            let more = self.add_window(meta.clone(), &crate::engine::rules::Decision::default(), &Observation::default());
+            actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+        } else {
+            tracing::info!(id = id.0, bundle = %meta.bundle_id, stage = ?self.stage_of(id).map(|s| s.0), "restore: a window by Apple's rule matches its saved one by its new title; back in its saved stage");
+        }
+        if let Some(w) = self.windows.get_mut(&id)
+            && w.original.is_none()
+            && same_frame(w.restore, meta.frame)
+        {
+            w.original = original;
+        }
+        let shown = self.windows.get(&id).is_some_and(|w| !w.parked);
+        let moved = actions.iter().any(|a| matches!(a, Action::SetFrame { id: x, .. } if *x == id));
+        if was_parked && shown && !moved {
+            self.restore_window(id, &mut actions);
+        }
+        self.drop_if_dead(from, &mut actions);
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
     }
 
     /// Makes `stage`, where voter `v` of `space` is alone (no name, no saved origin, nothing

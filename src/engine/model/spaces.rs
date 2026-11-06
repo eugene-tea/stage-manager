@@ -52,7 +52,7 @@
 //! Desktop (adoption, `pending.rs`); all session, saved Spaces are recognized at an arrival
 //! by confident matches (exact title, frame, fingerprint) rather than exact titles alone.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -347,6 +347,28 @@ impl Model {
         key.known() && !self.display(display).is_keyed(key)
     }
 
+    /// True when `display` has had an arrival (its Desktop recognized): the Space it shows
+    /// was seen. False at the launch for a screen not looked at yet.
+    pub(crate) fn display_arrived(&self, display: DisplayId) -> bool {
+        let space = self.current_space(display);
+        self.spaces.iter().any(|s| s.id == space && s.last_seen > 0)
+    }
+
+    /// True when windows wait for `display`'s first arrival, moved there by the launch's
+    /// first one ([`Model::screen_claims`]): the platform arrives on it even when it lists
+    /// nothing else.
+    pub fn awaits_travellers(&self, display: DisplayId) -> bool {
+        let display = self.known_display(display);
+        self.travellers.iter().any(|t| t.display == display)
+    }
+
+    /// The windows still waiting for an arrival of their screen ([`Model::awaits_travellers`])
+    /// once the launch's arrivals are done: none, unless a screen was not arrived on. The
+    /// platform takes them as windows not placed yet (found again when they show).
+    pub fn take_travellers(&mut self) -> Vec<WindowMeta> {
+        std::mem::take(&mut self.travellers)
+    }
+
     // ----- arrival and learning ----------------------------------------------------------
 
     /// Holds the windows an arrival first sees on the Desktop still shown (`on`: a display
@@ -373,6 +395,18 @@ impl Model {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let display = self.known_display(display);
+        // Windows the launch's first arrival sent here, to their saved stage's screen
+        // (`pool.rs`): this screen's windows, at their saved frames.
+        let joined: Vec<WindowMeta>;
+        let live = if self.awaits_travellers(display) {
+            let (here, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = std::mem::take(&mut self.travellers).into_iter().partition(|t| t.display == display);
+            self.travellers = rest;
+            let ids: HashSet<WindowId> = here.iter().map(|t| t.id).collect();
+            joined = live.iter().filter(|m| !ids.contains(&m.id)).cloned().chain(here).collect();
+            &joined[..]
+        } else {
+            live
+        };
         let prev = self.current_space(display);
         let known: Vec<WindowId> = live
             .iter()
@@ -473,11 +507,30 @@ impl Model {
             let unmatched: Vec<WindowMeta> = arrivals.iter().filter(|m| assignment.unmatched.contains(&m.id)).cloned().collect();
             let pooled = self.pool_claims(target, &unmatched);
             assignment.unmatched.retain(|id| !pooled.contains(id));
+            // At the launch, a window claimed by a saved Desktop of another connected screen
+            // not formed yet goes there now, at its saved frame; that screen's arrival takes
+            // it (the 11-06 restart: Deep House, the laptop's front, reopened on the 5K).
+            let travel = if launch { self.screen_claims(display, target, &unmatched) } else { Vec::new() };
+            let here = display.0;
+            for t in &travel {
+                self.restore.screen_moves += 1;
+                tracing::info!(
+                    id = t.id.0,
+                    bundle = %t.bundle_id,
+                    from = here,
+                    to = t.display.0,
+                    "restore: a window shown on another screen than its saved stage's goes back to that screen"
+                );
+                actions.push(Action::SetFrame { id: t.id, frame: t.frame });
+            }
+            let travelled: HashSet<WindowId> = travel.iter().map(|t| t.id).collect();
+            self.travellers.extend(travel);
             if self.restore.restoring {
                 // Windows no saved one claims go by Apple's rule (counted for the restore's line).
                 self.note_by_apple(unmatched.iter().filter(|m| !pooled.contains(&m.id)));
             }
-            let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = arrivals.iter().cloned().partition(|m| pooled.contains(&m.id));
+            let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) =
+                arrivals.iter().filter(|m| !travelled.contains(&m.id)).cloned().partition(|m| pooled.contains(&m.id));
             let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id), target);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
             if !claimed.is_empty() {

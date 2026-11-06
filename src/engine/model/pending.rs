@@ -221,6 +221,7 @@ impl Model {
             corner: self.restore.corner,
             pooled: self.pooled_count(),
             other_screen: self.restore.other_screen,
+            screen_moves: self.restore.screen_moves,
         }
     }
 
@@ -234,29 +235,43 @@ impl Model {
     /// True when the frames saved with Desktop `saved` (none: the file's main display) apply
     /// on `display`: that Desktop was saved on a screen of this identity and size
     /// ([`crate::engine::restore::Restore::frames_fit_on`]); with no screen saved, on the
-    /// main display at the size the file names. Logged once a run when they do not.
+    /// main display at the size the file names. Logged once a run for each saved Desktop and
+    /// display when they do not ([`Model::frames_fit`] says it quietly).
     pub(crate) fn saved_frames_fit_for(&mut self, display: DisplayId, saved: Option<u64>) -> bool {
+        let fits = self.frames_fit(display, saved);
         let d = *self.display(display);
-        let main = d.id == self.main_display().id;
-        let fits = match saved {
-            Some(id) => self.restore.frames_fit_on(id, &d.key.text(), d.frame.w, d.frame.h, main),
-            None => main && self.restore.frames_fit(d.frame.w, d.frame.h),
-        };
-        if !fits && !std::mem::replace(&mut self.restore.frames_noted, true) {
-            let (w, h) = saved
-                .and_then(|id| self.restore.screens.get(&id).map(|(_, w, h)| (*w as f64, *h as f64)))
+        if !fits && self.restore.frames_noted.insert((saved, d.id.0)) {
+            let screen = saved.and_then(|id| self.restore.screens.get(&id).cloned());
+            let (w, h) = screen
+                .as_ref()
+                .map(|(_, w, h)| (*w as f64, *h as f64))
                 .or_else(|| self.restore.saved_display.map(|(w, h)| (w as f64, h as f64)))
                 .unwrap_or_default();
+            // One saved Desktop's stages on one display (11-06: the line read as the whole
+            // restore's, while it named a laptop stage's window shown on the 5K).
             tracing::info!(
+                desktop = ?saved,
+                saved_key = screen.as_ref().map_or("", |s| s.0.as_str()),
                 saved_w = w,
                 saved_h = h,
+                display = d.id.0,
+                key = %d.key.text(),
                 now_w = d.frame.w,
                 now_h = d.frame.h,
-                display = d.id.0,
-                "restore: the display is not the one (or the size) the stages were saved on; windows keep the frames their apps give them"
+                "restore: a stage saved on another screen (or size) than this window's; its windows here keep the frames their apps give them"
             );
         }
         fits
+    }
+
+    /// [`Model::saved_frames_fit_for`] with nothing logged.
+    pub(crate) fn frames_fit(&self, display: DisplayId, saved: Option<u64>) -> bool {
+        let d = self.display(display);
+        let main = d.id == self.main_display().id;
+        match saved {
+            Some(id) => self.restore.frames_fit_on(id, &d.key.text(), d.frame.w, d.frame.h, main),
+            None => main && self.restore.frames_fit(d.frame.w, d.frame.h),
+        }
     }
 
     /// True when stage `stage` holds pending windows.
@@ -775,6 +790,9 @@ impl Model {
     pub(crate) fn note_by_apple<'a>(&mut self, metas: impl IntoIterator<Item = &'a WindowMeta>) {
         for m in metas {
             self.restore.by_apple += 1;
+            if m.role == WindowRole::Standard {
+                self.by_apple_windows.insert(m.id);
+            }
             let d = self.display(self.known_display(m.display));
             if !d.parks(m.frame) && clamped_at_corner(m.frame, d.visible, d.corner) {
                 self.restore.corner += 1;
