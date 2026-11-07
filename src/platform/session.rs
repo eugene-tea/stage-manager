@@ -18,6 +18,7 @@
 //! starts a restore. Tests simulate a new session with `STAGE_MANAGER_SESSION=<text>`,
 //! honoured only with `STAGE_MANAGER_TEST` set.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -108,14 +109,32 @@ pub fn wait_step(blind: Option<Blind>, waiting: Option<(Blind, Instant)>, now: I
 /// [`blindness`] or [`arrival_silent`], `ax` counting those `tracked` says Accessibility
 /// lists.
 pub fn counts(list: &[CgWindow], include: impl Fn(&CgWindow) -> bool, tracked: impl Fn(u32) -> bool) -> (usize, usize) {
-    let real: Vec<&CgWindow> = list
-        .iter()
-        .filter(|w| w.onscreen && w.layer == 0 && w.alpha > 0.0)
-        .filter(|w| w.bounds.w >= REAL_WINDOW_MIN && w.bounds.h >= REAL_WINDOW_MIN)
-        .filter(|w| include(w))
-        .collect();
+    let real: Vec<&CgWindow> = real_windows(list, include).collect();
     let ax = real.iter().filter(|w| tracked(w.id)).count();
     (real.len(), ax)
+}
+
+/// The real windows on screen in `list` that `include` takes: layer 0, visible, at least
+/// [`REAL_WINDOW_MIN`] each side (no helper window).
+pub fn real_windows<'a>(list: &'a [CgWindow], include: impl Fn(&CgWindow) -> bool + 'a) -> impl Iterator<Item = &'a CgWindow> + 'a {
+    list.iter()
+        .filter(|w| w.onscreen && w.layer == 0 && w.alpha > 0.0)
+        .filter(|w| w.bounds.w >= REAL_WINDOW_MIN && w.bounds.h >= REAL_WINDOW_MIN)
+        .filter(move |w| include(w))
+}
+
+/// Accessibility lists no window for the session ([`crate::engine::ax_blind`]): set by the WM
+/// thread, read by the menu on the main thread ([`accessibility_blind`]).
+static AX_BLIND: AtomicBool = AtomicBool::new(false);
+
+/// The WM thread's verdict: Accessibility is blind (`true`) or sees again.
+pub fn set_accessibility_blind(blind: bool) {
+    AX_BLIND.store(blind, Ordering::Relaxed);
+}
+
+/// True while Accessibility lists no window for the session: the menu says so.
+pub fn accessibility_blind() -> bool {
+    AX_BLIND.load(Ordering::Relaxed)
 }
 
 /// True while the screen is locked or this login session is not the one on the console.

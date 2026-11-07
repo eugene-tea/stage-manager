@@ -938,6 +938,28 @@ fn a_1_2_0_file_loads_and_1_2_0_reads_this_builds_file() {
     assert_eq!(read.spaces[0].stages[0].windows.len(), 1, "a pending window is an ordinary saved window to 1.2.0");
 }
 
+/// Round ax-blind: a session in which Accessibility listed no window looked for nothing. The
+/// Desktop shown then keeps its waiting windows through the next login (the logout that fixes
+/// it), and they go as before after a session that could see.
+#[test]
+fn a_session_blind_to_windows_gives_up_nothing_at_the_next() {
+    let mut w = saved("com.example.ed", "Plan", 0);
+    w.pending = Some(Pending { since: "A".into() });
+    let shown = SavedSpace { current: true, ..state(vec![(None, vec![w])], Some(0)) };
+    // Saved in session B with the Desktop shown, Accessibility blind: not looked for.
+    let mut blind = StateFile { session: Some("B".into()), ..StateFile::single(shown.clone()) };
+    blind.stamp(1_000, &mut HashMap::new());
+    blind.not_looked_for();
+    let mut next = StateFile::from_json(&blind.to_json().expect("encodes")).expect("parses");
+    assert_eq!(next.start_new_session(), 0, "nothing given up at the login after");
+    assert_eq!(next.spaces[0].standard_windows(), 1);
+    // Saved in session B with the Desktop shown and seen: given up at the next login, as before.
+    let mut seen = StateFile { session: Some("B".into()), ..StateFile::single(shown) };
+    seen.stamp(1_000, &mut HashMap::new());
+    let mut next = StateFile::from_json(&seen.to_json().expect("encodes")).expect("parses");
+    assert_eq!(next.start_new_session(), 1, "pending through a whole session that looked");
+}
+
 #[test]
 fn stamps_say_when_each_desktop_was_last_shown() {
     let shown = SavedSpace { current: true, ..state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0)) };

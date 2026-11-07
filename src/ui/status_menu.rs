@@ -130,6 +130,9 @@ pub struct MenuState {
     pub capture_on: bool,
     /// macOS refused window captures; "Allow Screen Recording…" shows and retries them.
     pub capture_refused: bool,
+    /// Accessibility lists no window for the session ([`crate::engine::ax_blind`]): the
+    /// menu's top line says so.
+    pub accessibility_blind: bool,
     /// Apple's Stage Manager is on (`GloballyEnabled = 1`).
     pub apple_stage_manager_on: bool,
     /// config.toml failed to load (the last good config stays in force).
@@ -143,6 +146,8 @@ pub struct MenuState {
 /// One entry of the menu, in Apple's menu-bar-app order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
+    /// "macOS isn't reporting windows…" (disabled), while Accessibility lists none.
+    AxBlind,
     /// "Stage Manager needs … access" (disabled), while it is missing.
     Needs(Approval),
     /// "Allow ……", while it is missing.
@@ -165,6 +170,10 @@ pub enum Item {
 /// verbose) and Quit, with separators between the groups.
 pub fn items(state: &MenuState) -> Vec<Item> {
     let mut out = Vec::new();
+    // Not while Apple's Stage Manager is on: ours stands down, and Apple's sees the windows.
+    if state.accessibility_blind && !state.apple_stage_manager_on {
+        out.push(Item::AxBlind);
+    }
     for a in permissions::missing(&state.permissions, state.capture_on, state.capture_refused) {
         out.extend([Item::Needs(a), Item::Allow(a)]);
     }
@@ -187,7 +196,7 @@ pub fn items(state: &MenuState) -> Vec<Item> {
 
 /// Every entry that may show, in menu order.
 fn all_items() -> Vec<Item> {
-    let mut all = Vec::new();
+    let mut all = vec![Item::AxBlind];
     for a in Approval::ALL {
         all.extend([Item::Needs(a), Item::Allow(a)]);
     }
@@ -206,6 +215,10 @@ fn all_items() -> Vec<Item> {
     ]);
     all
 }
+
+/// The menu's top line while Accessibility lists no window for the session (draft wording,
+/// the owner's read before a release).
+pub const AX_BLIND_LINE: &str = "macOS isn't reporting windows. Log out or restart to fix it; your stages are saved.";
 
 /// The menu item while Apple's Stage Manager is on.
 pub const APPLE_ITEM: &str = "Turn Off Apple's Stage Manager";
@@ -270,6 +283,7 @@ fn entry(mtm: MainThreadMarker, which: Item, target: &MenuTarget) -> Retained<NS
         }
         Item::AppleWarning => item(mtm, APPLE_ITEM, Some(sel!(turnOffAppleStageManager:)), "", target),
         Item::ConfigError => disabled(""),
+        Item::AxBlind => disabled(AX_BLIND_LINE),
         Item::About => item(mtm, "About Stage Manager", Some(sel!(about:)), "", target),
         Item::CheckForUpdates => item(mtm, "Check for Updates…", Some(sel!(checkForUpdates:)), "", target),
         Item::Settings => item(mtm, "Settings…", Some(sel!(settings:)), ",", target),
@@ -380,12 +394,28 @@ mod tests {
     }
 
     #[test]
+    fn a_blind_accessibility_is_the_top_line_while_it_lasts() {
+        use Item::*;
+        let blind = MenuState { accessibility_blind: true, config_error: Some("bad".into()), ..state(false, true) };
+        let a = Approval::Accessibility;
+        assert_eq!(&items(&blind)[..5], &[AxBlind, Needs(a), Allow(a), ConfigError, Separator(0)]);
+        assert_eq!(&items(&MenuState { accessibility_blind: true, ..state(true, true) })[..3], &[AxBlind, Separator(0), About]);
+        assert_eq!(items(&state(true, true))[0], About, "gone once windows are listed");
+        let apple = MenuState { accessibility_blind: true, apple_stage_manager_on: true, ..state(true, true) };
+        assert_eq!(items(&apple)[0], AppleWarning, "Apple's Stage Manager on: ours stands down, Apple's sees");
+        assert!(AX_BLIND_LINE.chars().count() <= 90, "as short as the config line");
+    }
+
+    #[test]
     fn every_shown_item_exists_in_menu_order() {
         let all = all_items();
-        let s = MenuState { apple_stage_manager_on: true, mark_shown: true, ..state(false, false) };
-        let shown = items(&s);
-        let positions: Vec<usize> = shown.iter().map(|i| all.iter().position(|a| a == i).expect("built")).collect();
-        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
+        let blind = MenuState { accessibility_blind: true, config_error: Some("bad".into()), mark_shown: true, ..state(false, false) };
+        let apple = MenuState { apple_stage_manager_on: true, mark_shown: true, ..state(false, false) };
+        for s in [blind, apple] {
+            let shown = items(&s);
+            let positions: Vec<usize> = shown.iter().map(|i| all.iter().position(|a| a == i).expect("built")).collect();
+            assert!(positions.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
+        }
     }
 
     #[test]

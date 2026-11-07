@@ -469,6 +469,14 @@ impl AppQuiet {
         self.last.insert(bundle.to_string(), now);
     }
 
+    /// Every clock starts again at `now`: while Accessibility lists no window
+    /// ([`crate::engine::ax_blind`]) no app can show one, so no app's minute runs.
+    pub fn restart_all(&mut self, now: Instant) {
+        for t in self.last.values_mut() {
+            *t = now;
+        }
+    }
+
     /// App `bundle` is not running: a later launch starts its clock again.
     pub fn stopped(&mut self, bundle: &str) {
         self.last.remove(bundle);
@@ -552,6 +560,22 @@ mod tests {
         q.window("com.example.b", t0 + Duration::from_secs(200));
         assert!(q.settled(t0 + Duration::from_secs(259)).is_empty());
         assert_eq!(q.settled(t0 + Duration::from_secs(260)), ["com.example.b"]);
+    }
+
+    #[test]
+    fn no_apps_minute_runs_while_accessibility_lists_nothing() {
+        // 11-06 15:41:08: the two windows waiting on the Desktop shown were given up a minute
+        // after the stages were built from nothing, Accessibility blind all along.
+        let t0 = Instant::now();
+        let mut q = AppQuiet::default();
+        q.window("com.example.a", t0);
+        for s in 1..=600 {
+            q.restart_all(t0 + Duration::from_secs(s));
+            assert!(q.settled(t0 + Duration::from_secs(s)).is_empty());
+        }
+        let seen = t0 + Duration::from_secs(600);
+        assert!(q.settled(seen + QUIET - Duration::from_secs(1)).is_empty(), "a minute from when windows can be seen");
+        assert_eq!(q.settled(seen + QUIET), ["com.example.a"]);
     }
 
     #[test]

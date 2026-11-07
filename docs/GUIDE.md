@@ -345,7 +345,10 @@ You can then turn Apple's Stage Manager back on from Control Center.
 
 **Nothing happens.** Look at the menu bar icon's menu. Stage Manager says there if it needs
 Accessibility, or if Apple's Stage Manager is on. While Apple's is on, Stage Manager steps
-aside and leaves your windows alone.
+aside and leaves your windows alone. Rarely, after macOS recovers from a hang, it stops
+telling apps like Stage Manager about any window until you log out; the menu then says
+"macOS isn't reporting windows". Your stages are kept, and come back by themselves if macOS
+starts reporting windows again.
 
 **Cards show plain shapes instead of window pictures.** Screen Recording is off or macOS
 refused it. Choose **Allow Screen Recording…** from the menu.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- When macOS stops reporting windows to apps (it can happen after it recovers from a hang,
+  until you log out), the menu says so instead of Stage Manager just seeming broken. Your
+  saved stages are kept meanwhile, a click no longer throws them away, and if macOS starts
+  reporting windows again they come back by themselves.
 - After a restart, windows go to their stages as soon as their apps answer, not seconds
   later: apps still busy reopening at the login are asked, and checked for windows a crash
   left hidden, on threads of their own, so one that does not answer yet no longer holds up
