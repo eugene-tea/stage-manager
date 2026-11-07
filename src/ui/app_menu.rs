@@ -10,12 +10,17 @@
 //!   start, `willPowerOffNotification`, the windows are back already: it only exits). A
 //!   logout is never cancelled: when the Quit cannot run at once (the app's state is busy, or
 //!   a quit is already under way) the answer is "later", the Quit is tried again every
-//!   200 ms, and after 5 s the registry unparks and macOS is told to go on.
+//!   200 ms, and after 5 s the registry unparks and macOS is told to go on. Its quit event's
+//!   reason (`keyAEQuitReason`: logout, restart, shutdown) is logged and kept
+//!   ([`system_quit_reason`]); the user's own Quit (the menus' item, ⌘Q) is kept apart
+//!   ([`user_quit`]): a cancelled logout opens the app again after the one, never the other
+//!   (round logout-cancel-relaunch).
 //! - **Main menu:** an accessory app shows no menu bar, but its main menu's key equivalents
 //!   still work while one of its windows is key: ⌘, (Settings), ⌘Q (Quit, the safe one),
 //!   ⌘W and ⌘M, and the edit keys for text.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -43,6 +48,41 @@ type Handler = Box<dyn Fn(AppEvent)>;
 thread_local! {
     static HANDLER: RefCell<Option<Handler>> = const { RefCell::new(None) };
     static KEEP: RefCell<Option<Retained<AppDelegate>>> = const { RefCell::new(None) };
+}
+
+/// The system quit event's `keyAEQuitReason` (a FourCharCode; 0: none, or no system quit).
+static QUIT_REASON: AtomicU32 = AtomicU32::new(0);
+
+/// Set when the user chose Quit (a menu's item, ⌘Q).
+static USER_QUIT: AtomicBool = AtomicBool::new(false);
+
+/// The system quit event's reason (`keyAEQuitReason`), when one came with a reason.
+pub fn system_quit_reason() -> Option<u32> {
+    Some(QUIT_REASON.load(Ordering::SeqCst)).filter(|r| *r != 0)
+}
+
+/// Whether the user chose Quit (a menu's item, ⌘Q), not the system.
+pub fn user_quit() -> bool {
+    USER_QUIT.load(Ordering::SeqCst)
+}
+
+/// The user chose Quit (a menu's item, ⌘Q).
+pub fn note_user_quit() {
+    USER_QUIT.store(true, Ordering::SeqCst);
+}
+
+/// The current Apple event's `keyAEQuitReason` attribute (AERegistry.h, `why?`), 0 when there
+/// is none. Call inside `applicationShouldTerminate:`, while the quit event is current.
+fn quit_reason() -> u32 {
+    use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager};
+    /// `keyAEQuitReason`, AERegistry.h.
+    const QUIT_REASON_KEY: u32 = u32::from_be_bytes(*b"why?");
+    let Some(event) = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent() else { return 0 };
+    // SAFETY: `-[NSAppleEventDescriptor attributeDescriptorForKeyword:]` takes an AEKeyword (a
+    // FourCharCode, u32) and returns a descriptor or nil (objc2 binds it only with
+    // CoreServices' types).
+    let why: Option<Retained<NSAppleEventDescriptor>> = unsafe { msg_send![&*event, attributeDescriptorForKeyword: QUIT_REASON_KEY] };
+    why.map_or(0, |w| w.typeCodeValue())
 }
 
 fn send(event: AppEvent) {
@@ -85,7 +125,9 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
-            tracing::info!("asked to quit by the system");
+            let reason = quit_reason();
+            QUIT_REASON.store(reason, Ordering::SeqCst);
+            tracing::info!(reason = %crate::engine::logout_watch::four_cc(reason), "asked to quit by the system");
             // The app's Quit unparks every window and exits; it returns only when it could
             // not run now (or one is under way): answer later and keep trying.
             status_menu::dispatch(MenuAction::Quit);
@@ -109,6 +151,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
+            note_user_quit();
             status_menu::dispatch(MenuAction::Quit);
         }
     }

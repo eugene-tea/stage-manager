@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A logout or restart that is cancelled after macOS has already quit Stage Manager (another
+  app asking about an unsaved document, and you click Cancel) no longer leaves every window
+  in one pile with no stages: Stage Manager opens again by itself and brings back the stages
+  it saved at the logout. A logout that goes on opens nothing, and macOS never waits for it.
 - When macOS stops reporting windows to apps (it can happen after it recovers from a hang,
   until you log out), the menu says so instead of Stage Manager just seeming broken. Your
   saved stages are kept meanwhile, a click no longer throws them away, and if macOS starts

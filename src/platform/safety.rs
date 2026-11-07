@@ -997,11 +997,12 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
 }
 
 /// Writes this process's clean-exit marker (every window is back onscreen) and removes its
-/// parked file.
-pub fn mark_clean_exit() {
+/// parked file. `text`: what the guardian reads in it
+/// ([`crate::engine::logout_watch::quit_marker`]: a quit at a logout, or any other).
+pub fn mark_clean_exit(text: &str) {
     let _ = std::fs::remove_file(paths::parked_file(std::process::id()));
     let path = paths::clean_exit_marker(std::process::id());
-    if let Err(e) = std::fs::write(&path, b"clean\n") {
+    if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
         tracing::warn!("cannot write {}: {e}", path.display());
     }
 }

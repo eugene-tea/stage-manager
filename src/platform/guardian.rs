@@ -1,6 +1,8 @@
 //! The guardian process (`stage-manager --guardian <pid>`), safety layer 5: spawned at
 //! launch in its own session, it waits for the app to exit (kqueue `NOTE_EXIT`). After a
-//! clean exit (the app's clean-exit marker) it has nothing to do. Otherwise:
+//! clean exit (the app's clean-exit marker) it has nothing to do, unless the app quit for a
+//! logout: it then waits a while for the logout's cancel, which opens the app again
+//! ([`super::logout_watch`], round logout-cancel-relaunch). Otherwise:
 //!
 //! 1. It reads the windows the app had registered (the parked file the registry keeps,
 //!    [`paths::parked_file`]) and runs the recovery scan.
@@ -53,6 +55,7 @@ use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, windows};
 use crate::engine::guard_watch::{Event, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
+use crate::engine::logout_watch;
 use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use crate::logbook::UNCLEAN_EXIT;
 use crate::logbook::counters::{self, Count};
@@ -234,9 +237,15 @@ pub fn run(args: &[String]) -> ExitCode {
     wait_for_exit(parent);
     let marker = paths::clean_exit_marker(parent as u32);
     let parked_file = paths::parked_file(parent as u32);
-    if marker.exists() {
+    if let Ok(text) = std::fs::read_to_string(&marker) {
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(&parked_file);
+        // A quit at a logout: a cancel opens the app again (round logout-cancel-relaunch).
+        if logout_watch::quit_for_logout(&text) {
+            install_stop_handlers();
+            super::logout_watch::run(parent as u32, &stop_signal);
+            return ExitCode::SUCCESS;
+        }
         tracing::debug!(parent, "guardian: clean exit; nothing to do");
         return ExitCode::SUCCESS;
     }
@@ -765,8 +774,13 @@ extern "C" fn on_stop(sig: libc::c_int) {
     STOP_SIGNAL.store(sig, Ordering::SeqCst);
 }
 
-/// SIGTERM, SIGINT and SIGHUP stop the watch after one last scan (logged), instead of
-/// killing the guardian silently.
+/// The stop signal received, if any (SIGTERM, SIGINT, SIGHUP).
+fn stop_signal() -> Option<i32> {
+    Some(STOP_SIGNAL.load(Ordering::SeqCst)).filter(|s| *s != 0)
+}
+
+/// SIGTERM, SIGINT and SIGHUP stop the watch after one last scan (logged), or the wait after
+/// a quit at a logout (the session ends), instead of killing the guardian silently.
 fn install_stop_handlers() {
     let handler: extern "C" fn(libc::c_int) = on_stop;
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
