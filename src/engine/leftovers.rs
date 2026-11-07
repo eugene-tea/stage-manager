@@ -374,7 +374,7 @@ mod tests {
         Remembered { registry: Some(r), ..Remembered::default() }
     }
 
-    /// S1 (the Fable review of 10-29): at quit the unpark restored Mail to its frame and
+    /// S1 (the review of 10-29): at quit the unpark restored Mail to its frame and
     /// dropped its registry entry; Mail carried the move out late, so the check found it in
     /// the zone. It goes back to the frame the unpark gave it, not to an older `state.json`
     /// frame (read before the save) nor the center; a failed restore's registry frame and a

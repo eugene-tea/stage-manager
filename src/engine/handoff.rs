@@ -25,7 +25,7 @@
 //! and cannot be reached at a quit is passed on to the app's guardian as before (a warning,
 //! never the error of a window the app parked itself).
 //!
-//! An offer is believed only as far as its sender is trusted ([`vet`], the Codex review of
+//! An offer is believed only as far as its sender is trusted ([`vet`], the review of
 //! 10-21, R4). One signed like this app is taken as offered. One from another process of the
 //! user (an old guardian whose binary an update replaced, or any program) only ever hands
 //! over a parked window: each must be listed by the window server under the offered pid, of
@@ -417,7 +417,7 @@ mod tests {
         Listed { id, pid, bounds, onscreen, allowed }
     }
 
-    /// The Codex review of 10-21, R4 (its demo, fixed): a program of the user not signed like
+    /// The review of 10-21, R4 (its demo, fixed): a program of the user not signed like
     /// this app offers an ordinary on-screen window of an excluded app as fitted, with another
     /// frame and a corner of its own. Nothing of it is taken, so nothing moves it; the same
     /// window parked, from the same sender, is taken (the cross-version handoff after an

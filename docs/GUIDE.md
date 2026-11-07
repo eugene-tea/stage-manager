@@ -271,7 +271,7 @@ If you make a mistake, or the file can't be read, Stage Manager keeps your last 
 settings and shows the error in its menu and in Settings.
 
 **The easy way: ask an AI assistant.** In Settings → Advanced, click **Copy Instructions for
-Agents** and paste them into Claude Code, Codex or a similar tool, followed by what you want.
+Agents** and paste them into an AI coding assistant, followed by what you want.
 The assistant reads [the notes for AI agents](AGENTS.md) and makes the change for you.
 
 A few useful examples:

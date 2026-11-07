@@ -5835,7 +5835,7 @@ def check_patch_rect(parked_ids, what):
 
 
 def phase_park():
-    """Round park-reconcile (the Fable review's L1/K2/S5: a parked window the window server
+    """Round park-reconcile (the review's L1/K2/S5: a parked window the window server
     listed out of the park zone was only logged until the next Desktop change): the fixture
     moves its own parked window to the middle of the screen (SIGALRM, an app re-centring its
     window while parked); within about a second the app parks it again, its restore frame

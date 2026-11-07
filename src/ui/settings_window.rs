@@ -690,7 +690,7 @@ fn advanced(f: &mut Form, m: &Maker, v: &SettingsValues) -> Retained<NSButton> {
     let copy = m.button("Copy Instructions for Agents", tag::COPY);
     rows.push(
         Row::new("Ask an AI agent", Some(view(&copy)))
-            .detail("The easiest way to change anything else is to ask an AI agent (Claude Code, Codex, …) to do it."),
+            .detail("The easiest way to change anything else is to ask an AI assistant to do it."),
     );
     f.group(rows);
     f.footnote("Changes apply at once and are saved in the config file, keeping its comments.");

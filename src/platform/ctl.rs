@@ -563,7 +563,7 @@ static CONNECTIONS: Slots = Slots::new(MAX_CONNECTIONS);
 /// Serves the bound socket ([`bind`]) on a background thread.
 pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
     std::thread::Builder::new().name("ctl".into()).spawn(move || {
-        // A panic in the accept loop or a connection must not take the app down (Fable M2):
+        // A panic in the accept loop or a connection must not take the app down (review M2):
         // a connection that panics is dropped, the socket keeps serving.
         let accept = || {
             for stream in listener.incoming() {
@@ -890,7 +890,7 @@ mod tests {
             assert!(Peer::Ours.may(&cmd), "{cmd:?}");
         }
         // A handoff from a program not signed like us is believed only for parked windows
-        // (the Codex review of 10-21, R4; `handoff::vet`).
+        // (the review of 10-21, R4; `handoff::vet`).
         assert_eq!(Peer::Ours.trust(), Trust::Signed);
         assert_eq!(Peer::SameUser.trust(), Trust::Unsigned);
     }

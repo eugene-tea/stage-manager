@@ -367,7 +367,7 @@ mod app {
                     // Off the main thread: the dumps come from the WM thread.
                     let wm = self.wm.clone();
                     let spawned = std::thread::Builder::new().name("mark".into()).spawn(move || {
-                        // A panic writing the mark must not take the app down (Fable M2).
+                        // A panic writing the mark must not take the app down (review M2).
                         let Some(reply) = safety::guarded("a problem mark", || mark_problem(&wm, "")) else { return };
                         let at = reply["at"].as_str().map(str::to_string);
                         DispatchQueue::main().exec_async(move || {
@@ -784,7 +784,7 @@ mod app {
         };
 
         // One copy at a time, claimed before the WM thread, the guardian or any observer
-        // starts (Fable M1, Grok High 1): the lock, a copy answering, then the socket bound.
+        // starts (review M1 and High 1): the lock, a copy answering, then the socket bound.
         match instance::claim() {
             Launch::Manage => {}
             Launch::HandOff | Launch::Wait => return ExitCode::SUCCESS,

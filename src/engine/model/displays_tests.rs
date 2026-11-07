@@ -1425,7 +1425,7 @@ fn a_screen_with_one_desktop_whose_space_holds_windows_already_takes_no_saved_on
 
 #[test]
 fn a_provisional_desktop_on_the_second_screen_adopts_its_saved_one() {
-    // The Fable review of 11-06, restore 5: Desktop counts unread, the laptop arrived on with
+    // The review of 11-06, restore 5: Desktop counts unread, the laptop arrived on with
     // nothing listed makes a provisional Desktop; its windows, confident for saved 17 (the
     // laptop's), make it that Desktop, as on the main screen, instead of strays.
     let (s, l) = (studio(), laptop());

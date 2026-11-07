@@ -72,7 +72,7 @@ pub struct DockPress<T> {
 /// layer [`DOCK_LAYER`]): not its wallpaper, nor Mission Control, Launchpad or a folder's
 /// popup, which the Dock draws at other layers. The Dock's window spans its display, clear
 /// away from the bar: there it is seen through (`bar`, [`DockBar::seen_through`]), so a press
-/// in the middle of the screen asks the Dock nothing (the Fable review's switching 3).
+/// in the middle of the screen asks the Dock nothing (the review's switching 3).
 pub fn dock_under(list: &[CgWindow], p: Point, dock: i32, bar: &DockBar) -> bool {
     list.iter()
         .find(|w| w.onscreen && w.alpha > 0.0 && w.bounds.contains(p) && !bar.seen_through(w.pid, w.layer, w.bounds, p))

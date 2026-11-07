@@ -720,7 +720,7 @@ fn an_adoption_keeps_the_strip_shown() {
 
 #[test]
 fn a_desktop_not_visited_in_a_session_keeps_its_stages_at_the_next() {
-    // The Fable review of 11-06, restore 3: saved in session A with Desktops 5 (shown) and 6;
+    // The review of 11-06, restore 3: saved in session A with Desktops 5 (shown) and 6;
     // session B shows only Desktop 5 (Desktop 6's apps reopen its window there, unseen); at
     // session C, Desktop 6's stage still waits, while Desktop 5's windows that never came
     // back in B (looked for there all session) are given up.
@@ -1359,7 +1359,7 @@ fn new_apps_join_current_waits_for_the_restore_window_to_close() {
     assert_eq!(m.stage_of(w(62)), front);
 }
 
-/// The Codex review of 10-21, R5: Desktop 7 as saved, the editor's stage active, Mail, and
+/// The review of 10-21, R5: Desktop 7 as saved, the editor's stage active, Mail, and
 /// the browser's three windows.
 fn desktop_7() -> SavedSpace {
     SavedSpace {

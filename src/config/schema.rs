@@ -590,7 +590,7 @@ mod tests {
         assert!(e.contains("applies: within a second of saving"));
     }
 
-    /// The Codex review's S3: a reloaded `[displays] main_only` never reached the model,
+    /// The review's S3: a reloaded `[displays] main_only` never reached the model,
     /// though the key read as live; it is read at launch, and says so.
     #[test]
     fn main_only_applies_at_the_next_launch() {

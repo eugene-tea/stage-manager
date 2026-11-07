@@ -111,7 +111,7 @@ pub struct Visibility {
     /// The edge tab's area (global), when it shows: resting on it counts as the edge.
     tab: Option<Rect>,
     /// The left edge of the strip's screen (global x): the edge zone starts there, so a
-    /// pointer on a screen further left is never at this strip's edge (the Codex review's
+    /// pointer on a screen further left is never at this strip's edge (the review's
     /// S2). `None` until the strip says (unbounded).
     screen_left: Option<f64>,
     /// Delays and the edge zone.
@@ -341,7 +341,7 @@ mod tests {
         assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2610)).shown);
     }
 
-    /// The Codex review's S2: the laptop left of the main screen (global x below 0); a
+    /// The review's S2: the laptop left of the main screen (global x below 0); a
     /// pointer on it was at the main strip's edge, revealed it and held it open.
     #[test]
     fn a_pointer_on_a_screen_to_the_left_is_not_at_the_strips_edge() {

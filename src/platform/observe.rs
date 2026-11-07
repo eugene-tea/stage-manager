@@ -531,7 +531,7 @@ impl Observer {
     /// Takes `frames` (window id, frame), an observation's as decided against the window
     /// server's list, as the tracked frames of the windows it names: a window of an app that
     /// posts no move notice is then tracked where it is, and a switch's outgoing picture
-    /// starts there, not where it was before the user moved it (the Fable review's switching
+    /// starts there, not where it was before the user moved it (the review's switching
     /// 5). Unknown windows are skipped.
     pub fn note_frames(&mut self, frames: impl IntoIterator<Item = (u32, Rect)>) {
         for (id, frame) in frames {

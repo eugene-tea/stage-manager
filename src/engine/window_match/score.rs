@@ -225,7 +225,7 @@ pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
 /// tested for ambiguity; then the low picks `low` allows (into the group shown). See the
 /// module docs.
 ///
-/// The candidates are indexed by live window and saved group (the Codex review of 10-21,
+/// The candidates are indexed by live window and saved group (the review of 10-21,
 /// R6): a pick's runner-up is the best unused candidate at the head of each other group's
 /// list for that live window, not a scan of every pair, so a large ambiguous restore (many
 /// windows of one app with the same title and frame) stays cheap.
@@ -564,7 +564,7 @@ mod tests {
         }
     }
 
-    /// The Codex review of 10-21, R6: the indexed matcher gives exactly the full scan's
+    /// The review of 10-21, R6: the indexed matcher gives exactly the full scan's
     /// picks (saved window, grade, points; ambiguity and every tie-break) over thousands of
     /// small random cases built to collide: few apps, titles, frames and groups, ids reused,
     /// frames within the tolerance, unusable live frames, any group shown.

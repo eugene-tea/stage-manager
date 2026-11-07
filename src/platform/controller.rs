@@ -558,7 +558,7 @@ fn reveal_cap(display: Rect, corner: Corner, still: Option<Rect>) -> Rect {
 /// (`model`), and the windows whose restore failed while they are still listed in the park
 /// zone (`unrestored`: id, in the zone at the last check). The model says shown the moment a
 /// restore is asked; until the retry lands the sliver is there, and a press on it reached
-/// the window at the park frame (the Fable review's W4).
+/// the window at the park frame (the review's W4).
 fn shield_parked(model: impl IntoIterator<Item = u32>, unrestored: impl IntoIterator<Item = (u32, bool)>) -> HashSet<u32> {
     let mut parked: HashSet<u32> = model.into_iter().collect();
     parked.extend(unrestored.into_iter().filter(|(_, in_zone)| *in_zone).map(|(id, _)| id));
@@ -794,7 +794,7 @@ struct Unrestored {
     why: LetGo,
     /// Listed in the park zone at its last check (true until checked: its restore failed,
     /// so it is where it was): the sliver tap and the corner patch still count it parked
-    /// while so (the Fable review's W4: the model says shown the moment the restore is
+    /// while so (the review's W4: the model says shown the moment the restore is
     /// asked, and a press on its sliver reached the window for the retry second).
     in_zone: bool,
 }
@@ -909,7 +909,7 @@ enum UnrestoredStep {
 ///
 /// A window of a `busy` app (one that did not answer lately, [`BusyApps`]) that would be
 /// moved again waits instead: a hung app's windows cost the WM thread one timeout per
-/// [`BUSY_BACKOFF`], not half a second per window every second (the Fable review's K1).
+/// [`BUSY_BACKOFF`], not half a second per window every second (the review's K1).
 fn unrestored_step(model_parked: Option<bool>, listed: Option<(bool, bool)>, hidden_tab: bool, busy: bool) -> UnrestoredStep {
     match (model_parked, listed) {
         (Some(true), _) | (_, None) => UnrestoredStep::Done,
@@ -935,7 +935,7 @@ fn unparked_frames(actions: &[Action]) -> BTreeMap<u32, Rect> {
 
 /// [`unrestored_step`], or with `force` (quit) a retry at once for every window still listed
 /// in the park zone, on any Desktop, whatever its app said before. Never for one listed out of
-/// the zone (S8 of the Fable review of 10-29: the forced retry set the failed restore's old
+/// the zone (S8 of the review of 10-29: the forced retry set the failed restore's old
 /// frame on a window shown at a frame of its own on another Desktop).
 fn unrestored_step_at(force: bool, model_parked: Option<bool>, listed: Option<(bool, bool)>, hidden_tab: bool, busy: bool) -> UnrestoredStep {
     if force && !hidden_tab && model_parked != Some(true) && listed.is_some_and(|(_, zone)| zone) {
@@ -962,7 +962,7 @@ const MACOS_REVEAL_SETTLE: Duration = Duration::from_secs(3);
 const UNRESTORED_RETRY: Duration = Duration::from_secs(1);
 
 /// How long after a focus or an activation the corner patch is planned on the fast tick
-/// ([`Controller::replan_patch`], the Fable review's L2).
+/// ([`Controller::replan_patch`], the review's L2).
 const PATCH_REPLAN: Duration = Duration::from_millis(500);
 
 /// The engine plus everything around it on the WM thread.
@@ -1110,7 +1110,7 @@ pub struct Controller {
     defer_present: bool,
     /// Managed windows of the shown Space missing from the screen: checks in a row.
     absent: HashMap<u32, u32>,
-    /// Apps that did not answer an off-screen check in time, left alone a moment (Fable H1,
+    /// Apps that did not answer an off-screen check in time, left alone a moment (review H1,
     /// [`crate::engine::busy_apps`]). A cell: the checks run from `&self` paths too.
     busy_apps: std::cell::RefCell<BusyApps>,
     /// Managed windows showing mostly on another display than the main one: checks in a
@@ -1388,7 +1388,7 @@ impl Controller {
     /// `[displays] main_only` as the stages were built with it: read at launch (the model
     /// keeps it), the config's own value only until the model is built. A changed value
     /// applies at the next launch; the platform's reads follow the model's, so a reload never
-    /// leaves the two disagreeing about which screens are managed (the Codex review's S3).
+    /// leaves the two disagreeing about which screens are managed (the review's S3).
     fn main_only(&self) -> bool {
         self.model.as_ref().map_or(self.store.config().displays.main_only, |m| m.options().main_only)
     }
@@ -2230,7 +2230,7 @@ impl Controller {
     }
 
     /// A `Park` that failed (a busy app, one mid-launch) must not leave the model saying
-    /// parked with nothing to make it so (the Fable review's K2): the window is a stray,
+    /// parked with nothing to make it so (the review's K2): the window is a stray,
     /// parked again by the tick with a backoff ([`Self::reconcile_parked`]). One the
     /// reconciler is already on keeps its count (its try was this one).
     fn park_failed(&mut self, id: u32, now: Instant) {
@@ -2243,7 +2243,7 @@ impl Controller {
 
     /// Every tick: a window the model has parked on the shown Desktop that the window server
     /// lists outside the park zone, or whose park failed, is parked again or adopted as shown
-    /// ([`crate::engine::park_reconcile`]; the Fable review's L1, K2, S5: until now only a
+    /// ([`crate::engine::park_reconcile`]; the review's L1, K2, S5: until now only a
     /// Space arrival's `match_screen` reconciled the two, and such a window sat mid-screen,
     /// counted parked, with no card, until the next Desktop change). A window the user
     /// focused since its park ([`Self::user_focus`]), or moved while parked, joins the active
@@ -2417,7 +2417,7 @@ impl Controller {
     }
 
     /// Plans the corner patch again now, and on the fast tick for [`PATCH_REPLAN`] (the
-    /// Fable review's L2): macOS raises an activated app's windows, its parked ones too,
+    /// Review review's L2): macOS raises an activated app's windows, its parked ones too,
     /// above the patch; until the next 250 ms tick ordered it again the slivers showed on
     /// every ⌘-Tab, Dock click or focus of an app with parked windows on this Desktop.
     fn replan_patch(&mut self, now: Instant) {
@@ -2452,7 +2452,7 @@ impl Controller {
         show_desktop::fast_look(self.overview.show_desktop_up(now) || holding, patch_on)
     }
 
-    /// The corner patch as it runs, for `ctl state` (the Fable review's L3): `mode` is
+    /// The corner patch as it runs, for `ctl state` (the review's L3): `mode` is
     /// `ordered` (macOS keeps it just above the parked windows), `fallback` (it refused:
     /// the patch shows only where no shown window reaches), `unknown` (not checked yet) or
     /// `off`; `refused_against` the parked window macOS would not keep it above.
@@ -4307,7 +4307,7 @@ impl Controller {
 
     /// [`Self::frozen`] for input addressed to `display`'s stages (a card of its strip, a
     /// shortcut with the keyboard on it, a click on its wallpaper): a full-screen app's Space
-    /// on another screen stops nothing here (the Codex review's S1; UX-SPEC Screens). A Space
+    /// on another screen stops nothing here (the review's S1; UX-SPEC Screens). A Space
     /// change settling and the lock hold every screen.
     fn frozen_on(&self, display: DisplayId) -> bool {
         self.fullscreen_on(display) || self.phase.changing() || self.locked
@@ -4564,7 +4564,7 @@ impl Controller {
     /// Those of `windows` (id, pid) off screen for a reason: their app hidden (ours or the
     /// user's), minimized, in full screen, or their app too busy to tell. The app's hidden
     /// state is asked once per app, and an app that did not answer in time is not asked
-    /// again for a moment ([`OffScreen`], Fable H1): a hung app no longer costs a timeout per
+    /// again for a moment ([`OffScreen`], review H1): a hung app no longer costs a timeout per
     /// window every second on the WM thread.
     fn off_screen_for_a_reason(&self, ob: &Observer, windows: &[(u32, i32)]) -> Vec<u32> {
         let now = Instant::now();
@@ -6027,7 +6027,7 @@ impl Controller {
     /// Brings every parked window back onscreen (quit, safety). Returns how many AX calls
     /// failed; the registry is empty afterwards when none did. The frames it restored stay
     /// known to the leftovers check that follows ([`Self::safety_ours`]), and the stages are
-    /// saved before that check reads `state.json` (the Fable review of 10-29, S1).
+    /// saved before that check reads `state.json` (the review of 10-29, S1).
     pub fn unpark_all(&mut self, ob: &Observer) -> usize {
         self.flush_pending(ob);
         // Windows whose restore failed earlier: the model counts them shown, so its unpark
@@ -6810,7 +6810,7 @@ fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::
 
 /// Whether `display` shows a full-screen app's Space: the main screen's answer is the
 /// phase's (`main_fullscreen`), another screen's its own (`other`), so a full-screen app on
-/// one screen never freezes the other's input (the Codex review's S1).
+/// one screen never freezes the other's input (the review's S1).
 fn fullscreen_there(display: DisplayId, main: DisplayId, main_fullscreen: bool, other: impl Fn(DisplayId) -> bool) -> bool {
     if display == main { main_fullscreen } else { other(display) }
 }
@@ -7083,7 +7083,7 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 mod tests {
     use super::*;
 
-    /// The Codex review's S1: a full-screen app on the main screen froze every strip's
+    /// The review's S1: a full-screen app on the main screen froze every strip's
     /// input; each screen now answers for itself.
     #[test]
     fn a_full_screen_app_freezes_only_its_own_screens_input() {
@@ -7172,7 +7172,7 @@ mod tests {
         assert_eq!(unrestored_step(Some(true), Some((true, true)), false, false), Done);
     }
 
-    /// S8 (the Fable review of 10-29): quit's forced retry tries every window still listed in
+    /// S8 (the review of 10-29): quit's forced retry tries every window still listed in
     /// the park zone at once, on screen or not; one listed out of the zone (shown at a frame
     /// of its own on another Desktop, or back on this one) is never set to its old frame.
     #[test]

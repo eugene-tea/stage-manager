@@ -1,4 +1,4 @@
-//! One Stage Manager at a time (the review of 1.1.0, Fable M1 and Grok High 1): two managers
+//! One Stage Manager at a time (the review of 1.1.0, M1 and High 1): two managers
 //! would build models from the same windows and park each other's shown stage.
 //!
 //! The claim is made at launch, before the WM thread, the guardian or any observer starts
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(decide(Lock::Held, Peer::Silent, LIVE, QUIT_WAIT), Launch::Manage, "it is gone: the lock is ours");
     }
 
-    /// Fable M1: a running copy slow to answer (stopped under a debugger, beach-balling, its
+    /// Review M1: a running copy slow to answer (stopped under a debugger, beach-balling, its
     /// abort handler stuck) never gets a second manager beside it; one that never answered is
     /// waited for only [`LOCK_WAIT`].
     #[test]

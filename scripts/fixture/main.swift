@@ -102,7 +102,7 @@
 // message meanwhile (Home on 10-21, round 8M).
 // SIGALRM moves every visible standard window parked in the screen's bottom-right corner to
 // the middle of the screen by itself, without activating (an app that re-centres its own
-// window, or restores its saved bounds, while parked: round park-reconcile, the Fable
+// window, or restores its saved bounds, while parked: round park-reconcile, the
 // review's L1).
 import AppKit
 

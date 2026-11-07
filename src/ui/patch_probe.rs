@@ -38,7 +38,7 @@ use crate::platform::wallpaper::{self, Job, Reader};
 use crate::platform::{desktop, desktop_items, windows};
 
 /// The corner patch as the running app runs it (`ctl state`'s `corner_patch`: its `mode`,
-/// `ordered` or `fallback`, the Fable review's L3), or why not known: no app runs at this
+/// `ordered` or `fallback`, the review's L3), or why not known: no app runs at this
 /// home, or it does not answer.
 fn running_app_patch() -> serde_json::Value {
     match crate::platform::ctl::request("state", std::time::Duration::from_secs(2)) {

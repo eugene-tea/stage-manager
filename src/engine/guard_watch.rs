@@ -17,7 +17,7 @@
 //! or the session is not the console's: fast user switching, the login window, a sleeping
 //! display) is **blind**: it is no observation, so nothing is let go and every streak starts
 //! again after it. `GONE_AFTER` counts only passes that listed something. A blind pass also
-//! forgets how each waiting window looked (the Codex review of 10-21, R3): nothing is
+//! forgets how each waiting window looked (the review of 10-21, R3): nothing is
 //! [`Watch::shown`], so nothing is reached, until a pass that sees again (registered frames
 //! and ownership stay).
 //!
@@ -512,7 +512,7 @@ impl Watch {
 }
 
 impl Watch {
-    /// Stage Manager runs again (Grok M3, 1.1.0): the windows it reports `adopted` (in its
+    /// Stage Manager runs again (review M3, 1.1.0): the windows it reports `adopted` (in its
     /// model: it brings them back, or parks them in their stage, itself) are let go, and so
     /// is every waiting window found in the park zone that the crashed app never registered
     /// (the new app judges those). The crashed app's registered windows the new app has not
@@ -869,7 +869,7 @@ mod tests {
         assert!(matches!(pass(&mut w, t0, 23_500, &without), Some(Release::Gone { .. })));
     }
 
-    /// The Codex review of 10-21, R3: a window seen parked on screen is not reachable on the
+    /// The review of 10-21, R3: a window seen parked on screen is not reachable on the
     /// strength of that look once a pass is blind (nothing listed, or nothing on screen); it
     /// is again after a pass that sees it, and it keeps its registered frame throughout.
     #[test]
@@ -936,7 +936,7 @@ mod tests {
         assert!(matches!(pass(&mut w, t0, 3500, &on_desktop_2(RESTORE)), Some(Release::SeenBack { .. })));
     }
 
-    /// S7 (the Fable review of 10-29): the parked file says where the window was fitted. At
+    /// S7 (the review of 10-29): the parked file says where the window was fitted. At
     /// that frame the guardian still puts back its pre-fit one; read anywhere else, the user
     /// moved it after the crash, and it is back where they put it, not moved again.
     #[test]
@@ -965,7 +965,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Registered>(&old).ok().map(|x| x.fitted_at), Some(None));
     }
 
-    /// The Codex review of 10-21, R4: a window taken unvouched (from a sender not signed like
+    /// The review of 10-21, R4: a window taken unvouched (from a sender not signed like
     /// this app) is reached only while listed on screen in the park zone. On screen anywhere
     /// else it is never reached (seen back there, it is let go unmoved), and even an offer
     /// that said fitted never makes it one.
@@ -987,7 +987,7 @@ mod tests {
         assert!(matches!(pass(&mut w, t0, 4000, &on_desktop_2(ordinary)), Some(Release::SeenBack { .. })), "let go unmoved");
     }
 
-    /// Grok M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app
+    /// Review M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app
     /// that answers `ping` but has not adopted the crashed app's window (it is on a Desktop
     /// not shown, or the new app has not scanned yet) leaves it waiting; once adopted, it is
     /// let go. Windows found in the park zone are the new app's to judge, and none joins.

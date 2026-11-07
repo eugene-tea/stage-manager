@@ -1,6 +1,6 @@
 //! When `state.json` is written: a change marks the state dirty, and it is saved once changes
 //! have been quiet for [`SAVE_DEBOUNCE`] (a busy stream at least every [`SAVE_MAX_DELAY`]).
-//! The state stays dirty until a save has replaced the file durably (R4 of the Codex review
+//! The state stays dirty until a save has replaced the file durably (R4 of the review
 //! before 1.7: a save that failed, a full disk or a replacement refused, cleared the mark
 //! first, so nothing retried it until the next change, and a crash then lost the stages the
 //! user had arranged). A failed save is tried again after [`SAVE_RETRY_FIRST`], doubling to

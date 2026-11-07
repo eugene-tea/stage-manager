@@ -127,7 +127,7 @@ fn bounds_of(id: u32) -> Rect {
 /// True when a click at `p` (top-left coordinates) lands on no window: the window list is
 /// front to back; windows below layer 0 are desktop elements and are not in it. Fully
 /// transparent windows do not count, nor the Dock's window away from its bar (`dock`): it
-/// spans its whole display, clear and click-through there ([`DockBar`]; the Fable review's
+/// spans its whole display, clear and click-through there ([`DockBar`]; the review's
 /// switching 3: no click on the Dock's screen was a wallpaper click).
 pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
     !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !dock.seen_through(w.pid, w.layer, w.bounds, p))

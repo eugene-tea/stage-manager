@@ -13,7 +13,7 @@ impl Model {
     /// whichever screen shows it) with the app's windows in it and their restore frames, and
     /// whether the active stage of every Desktop the hide changes has a standard window: the
     /// main screen's, and each other screen's holding a window of the app (a hide takes its
-    /// slivers off every screen; the Fable review's switching 6 judged the main one alone).
+    /// slivers off every screen; the review's switching 6 judged the main one alone).
     pub fn app_park(&self, pid: Pid) -> AppPark {
         let main = self.current_space(self.displays[0].id);
         let mine = || self.windows.values().filter(move |w| w.meta.pid == pid);

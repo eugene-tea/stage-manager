@@ -1,7 +1,7 @@
 //! Replacing a file so that a crash, a kernel panic or a power cut leaves either the old
 //! contents or the new ones, never an empty or half-written file: the bytes go to a temporary
 //! file beside it, which is flushed to disk before it is renamed over the old one, and the
-//! directory is flushed after the rename (the review of 1.1.0, Grok M1).
+//! directory is flushed after the rename (the review of 1.1.0, M1).
 
 use std::fs::File;
 use std::io::Write;

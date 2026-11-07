@@ -1,4 +1,4 @@
-//! Switching and the strip on two screens (the Fable review before 1.7, "Switching and the
+//! Switching and the strip on two screens (the review before 1.7, "Switching and the
 //! strip"): what the engine answers for a window, an icon click, a hotkey and a hide when the
 //! focus or the stage is on the screen that is not the main one. Made-up titles only.
 
@@ -49,7 +49,7 @@ fn an_icon_click_on_a_laptop_card_gathers_the_apps_windows_of_the_laptop_only() 
 
 #[test]
 fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
-    // The Codex review's W3, his word 11-06: the shortcuts and `ctl switch N` count the strip
+    // The review's W3, his word 11-06: the shortcuts and `ctl switch N` count the strip
     // of the screen the keyboard is on (the focused window's), for the check and the switch.
     // The Studio has three stages, the laptop four: 4 is the laptop's alone.
     let mut e = Env::both();

@@ -504,7 +504,7 @@ impl Model {
     /// focused there keeps the stage's key; after the restore window a match into an inactive
     /// stage switches to it). Actions go to `actions` (adoption's too, when the window itself
     /// then goes by Apple's rule). True when the window was placed.
-    /// A merge of stage `source` into `into` (the Codex review of 10-21, R5), before its live
+    /// A merge of stage `source` into `into` (the review of 10-21, R5), before its live
     /// windows move: `source`'s pending windows move too, in their saved order, in front of
     /// `into`'s (`in_front`: a merge into the active stage, whose moved windows go in front)
     /// or behind them, so a window that comes back later lands in `into` at its place in the
@@ -568,7 +568,7 @@ impl Model {
         // A window that votes for a saved Desktop goes by Apple's rule until that Desktop is
         // taken (adoption as before); only windows that vote for nothing are strays.
         let mut voted = false;
-        // On whichever screen shows it (the Fable review of 11-06, restore 5: the main
+        // On whichever screen shows it (the review of 11-06, restore 5: the main
         // screen's only, before), from the saved Desktops that may form there.
         let shown_on = self.space_display(space);
         if self.provisional.contains(&space)
@@ -753,7 +753,7 @@ impl Model {
         let sure = grade.confident();
         // Saved frames only on the screen of the saved size they were saved on; there a live
         // frame in a park zone takes the saved one even from a doubtful match. On another it
-        // is centered at its own size, as the recovery scan does (S6 of the Fable review of
+        // is centered at its own size, as the recovery scan does (S6 of the review of
         // 10-29): a frame from another display, clamped onto this one, is no frame the user
         // gave it.
         let saved_desktop = match self.kin.get(&stage) {

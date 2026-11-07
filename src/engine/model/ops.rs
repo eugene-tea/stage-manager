@@ -263,7 +263,7 @@ impl Model {
     /// The window itself is not restored even when parked: it no longer exists, and a frame
     /// sent to it would only fail and be retried as a window left in the corner. A window that
     /// still exists and leaves the model goes through [`Model::window_left_space`], which
-    /// brings it back first (the module's invariant; Fable E9).
+    /// brings it back first (the module's invariant; review E9).
     pub fn remove_window(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(w) = self.windows.get(&id) else {
@@ -415,8 +415,8 @@ impl Model {
 
     /// The Desktop whose stages the stage hotkeys and `ctl switch N` count: the one the
     /// keyboard's screen shows (`keyboard`, [`Model::keyboard_display`]). One answer for the
-    /// platform's "is there a stage `n`" and the switch itself (the Fable review's switching
-    /// 4: the check read the main screen, the switch the focused one; the Codex review's W3:
+    /// platform's "is there a stage `n`" and the switch itself (the review's switching
+    /// 4: the check read the main screen, the switch the focused one; the review's W3:
     /// the main screen's count refused a stage only the other screen has).
     pub fn hotkey_space(&self, keyboard: DisplayId) -> SpaceId {
         self.current_space(self.known_display(keyboard))
@@ -1326,7 +1326,7 @@ impl Model {
         if self.settling() {
             // No stage switch while the login settles (as for any focus), but the window the
             // user dragged out of the corner must not sit shown while counted parked until
-            // `match_screen` parks it again (the Fable review's E7): it joins the active
+            // `match_screen` parks it again (the review's E7): it joins the active
             // stage where it was dropped.
             return self.adopt_shown(id, frame, obs);
         }
@@ -1346,7 +1346,7 @@ impl Model {
     /// A parked window the screen shows out of the park zone where the user wants it (the
     /// focused window, one they moved; a drop while the login settles) joins the active stage
     /// of its Space as shown, at `frame` (its restore frame from now on), with no move and no
-    /// raise: it is there already, in front of the user (the Fable review's L1: the model's
+    /// raise: it is there already, in front of the user (the review's L1: the model's
     /// parked flag and the screen agree). Its children come back beside it. Its stage, left
     /// empty, goes unless declared. The key window when it is the focused one. Nothing for a
     /// window not parked, pinned, or on a Space not shown.

@@ -1,5 +1,5 @@
 //! Which saved window a live window is, decided one way for every safety path (the review of
-//! 1.1.0, Grok High 2 and architecture 4): the recovery scan, quit's leftovers and the
+//! 1.1.0, High 2 and architecture 4): the recovery scan, quit's leftovers and the
 //! guardian's scan all go through [`match_windows`].
 //!
 //! In order, each saved window used once:
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn a_window_on_screen_keeps_its_own_saved_entry() {
-        // Grok High 2: the on-screen window (by id) holds its entry; the stranded sibling whose
+        // Review High 2: the on-screen window (by id) holds its entry; the stranded sibling whose
         // title changed then has the one candidate left, its own.
         let saved = [key(Some(1), "com.example.a", "Shown"), key(None, "com.example.a", "Was parked")];
         let live = [key(Some(1), "com.example.a", "Shown, renamed"), key(Some(2), "com.example.a", "Renamed")];

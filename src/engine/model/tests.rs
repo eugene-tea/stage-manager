@@ -141,7 +141,7 @@ fn no_displays_falls_back_without_panicking() {
     assert!(m.main_active_stage().is_some());
 }
 
-/// Grok M1 (1.1.0): a garbled frame (NaN, infinity) never enters the model, so the next save
+/// Review M1 (1.1.0): a garbled frame (NaN, infinity) never enters the model, so the next save
 /// can always be written.
 #[test]
 fn frames_that_are_not_finite_never_enter_the_model() {
@@ -1150,7 +1150,7 @@ fn a_parked_window_dragged_out_by_its_sliver_stays_where_it_was_dropped() {
     assert!(!e.d.parked(w(1)));
 }
 
-/// The Fable review's E7: while the login settles (no stage switch for a focus), a parked
+/// The review's E7: while the login settles (no stage switch for a focus), a parked
 /// window dragged out of the corner joined nothing and stayed counted parked, so the next
 /// `match_screen` parked it again. Now it joins the active stage where it was dropped.
 #[test]
@@ -1177,7 +1177,7 @@ fn a_parked_window_dropped_while_the_login_settles_joins_the_active_stage() {
     assert_eq!(e.m.strip().len(), 1, "the old stage keeps its card");
 }
 
-/// The Fable review's L1: a parked window the window server lists mid-screen that the user
+/// The review's L1: a parked window the window server lists mid-screen that the user
 /// focused or moved is adopted as shown in the active stage, where it is; its children come
 /// back beside it, and its stage, emptied, goes.
 #[test]

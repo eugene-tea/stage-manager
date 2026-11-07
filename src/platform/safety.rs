@@ -651,7 +651,7 @@ fn stranded_ids(registered: &BTreeSet<u32>) -> Vec<u32> {
 /// windows the model manages, and the windows `state.json` names (this session's ids). The
 /// park test counts a sliver only for these ([`Known`]); an app's other windows are any
 /// app's, so a user's window of that app pushed off the corner is left where it is at a quit,
-/// a stand-down or a logout (S9 of the Fable review of 10-29). A leftovers check that could not bring every
+/// a stand-down or a logout (S9 of the review of 10-29). A leftovers check that could not bring every
 /// window back hands what it knew to the next try ([`Self::kept_for_retry`]): a stand-down
 /// drops `state.json` and the model before it looks again (the review of 6X2, 2).
 #[derive(Debug, Clone, Default)]
@@ -880,7 +880,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
-/// SIGABRT (a double panic, a C abort): async-signal-safe only (Fable M3, Grok High 3). It
+/// SIGABRT (a double panic, a C abort): async-signal-safe only (review M3 and High 3). It
 /// never locks, allocates, logs or calls Accessibility, which could deadlock on a lock the
 /// aborting thread holds and keep a dying process alive (answering `ping`, blocking every
 /// relaunch, the guardian never woken). It wakes the signal watcher through the self-pipe,
@@ -1438,7 +1438,7 @@ mod tests {
         assert!(!GUARDED.with(Cell::get), "flag reset after a panic");
     }
 
-    /// Fable M2: a helper thread's body runs guarded, so its panic is caught on that thread
+    /// Review M2: a helper thread's body runs guarded, so its panic is caught on that thread
     /// (the panic hook neither unparks nor exits) and the feature degrades instead.
     #[test]
     fn a_guarded_thread_survives_its_panic() {
@@ -1461,7 +1461,7 @@ mod tests {
         assert!(waits_for_watcher(7));
     }
 
-    /// Fable M3: the abort handler's wait is bounded, whether the watcher answers or not.
+    /// Review M3: the abort handler's wait is bounded, whether the watcher answers or not.
     #[test]
     fn the_abort_wait_is_bounded() {
         let slept = std::cell::Cell::new(Duration::ZERO);
@@ -1508,7 +1508,7 @@ mod tests {
         assert_eq!(ours.candidate(1), Candidate::Real);
     }
 
-    /// S1 (the Fable review of 10-29): the frames an unpark restored reach the leftovers
+    /// S1 (the review of 10-29): the frames an unpark restored reach the leftovers
     /// check, and a stand-down's reach the quit's retry after it; a later unpark's frame wins.
     #[test]
     fn the_unparks_frames_reach_the_leftovers_check() {
@@ -1519,7 +1519,7 @@ mod tests {
         assert_eq!(kept.unparked, BTreeMap::from([(1, a), (2, b)]));
     }
 
-    /// S9 (the Fable review of 10-29): at a quit, a stand-down or a logout a sliver counts as
+    /// S9 (the review of 10-29): at a quit, a stand-down or a logout a sliver counts as
     /// parked only for a window known by its id (registered, the model's, named by this
     /// session's `state.json`), no longer for any window of an app with one saved: the
     /// user's other window of that app, pushed off the corner, stays where they put it.

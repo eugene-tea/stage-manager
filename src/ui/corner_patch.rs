@@ -1254,7 +1254,7 @@ fn start_render(screen: u32, job: Job, screen_frame: Rect, rect: Rect, region: R
     let key = job.key();
     let spawned = std::thread::Builder::new().name("corner-patch-render".into()).spawn(move || {
         let started = Instant::now();
-        // A panic in the decoder (an odd HEIC, say) must not take the app down (Fable M2):
+        // A panic in the decoder (an odd HEIC, say) must not take the app down (review M2):
         // it reads as a failed render, so the patch stays off until the picture changes.
         let result = crate::platform::safety::guarded("the corner patch's render", || picture_for(&job, screen_frame, rect))
             .unwrap_or_else(|| Err("the render panicked".to_string()));
