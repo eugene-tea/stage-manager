@@ -2045,7 +2045,7 @@ impl Controller {
     }
 
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
-    /// config, and its park request with config.
+    /// config, and its park request and `[restore] saved_size` with config.
     fn sync_fit(&mut self) {
         let (strip_visible, settings) = (self.strip_visible, self.settings);
         let config = self.store.config();
@@ -2058,6 +2058,7 @@ impl Controller {
                 m.set_display_fit(d.id, fit_options(d.visible, strip_visible, &settings, config));
             }
             m.set_park_request(ParkRequest { inside: config.windows.park_inside, drop: config.windows.park_drop });
+            m.set_saved_size(config.restore.saved_size);
         }
     }
 

@@ -179,6 +179,12 @@ What it cannot do:
 - On a screen of another size than the one they were saved on, windows keep the places
   their apps give them.
 
+Most windows come back where their apps put them. One an app reopens at under half its
+saved size (VS Code sometimes does) gets its saved size and place back the first time it
+shows, in front or when you click its card, once its name says it is that window; one you
+move or resize first keeps yours. `[restore] saved_size = false` keeps the size the app
+gives it.
+
 `[stages] restore_after_restart = false` (or **Bring stages back after a restart** in
 Settings → Stages) turns it off: after a restart every app starts in a stage of its own, as
 with Apple's.

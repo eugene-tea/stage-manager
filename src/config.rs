@@ -410,6 +410,21 @@ impl Default for StagesConfig {
     }
 }
 
+/// The `[restore]` section: how stages coming back after a restart treat window frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreConfig {
+    /// A window its app reopens much smaller than saved (under half the area, matched by its
+    /// title) gets its saved frame back when first shown (on by default; off: every window
+    /// keeps the frame its app gives it).
+    pub saved_size: bool,
+}
+
+impl Default for RestoreConfig {
+    fn default() -> Self {
+        Self { saved_size: true }
+    }
+}
+
 /// `[log] level`: how much the daily log keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogLevel {
@@ -535,6 +550,8 @@ pub struct Config {
     pub hotkeys: HotkeyConfig,
     /// Named stages.
     pub stages: StagesConfig,
+    /// Frames of windows coming back after a restart.
+    pub restore: RestoreConfig,
     /// Modifier sugar.
     pub sugar: SugarConfig,
     /// The daily log.
@@ -1007,6 +1024,7 @@ impl Config {
                 restore_after_restart: v.flag("stages.restore_after_restart"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
             },
+            restore: RestoreConfig { saved_size: v.flag("restore.saved_size") },
             sugar: SugarConfig {
                 shift_brings_here: v.flag("sugar.shift_brings_here"),
                 launch_window_ms: v.uint("sugar.launch_window_ms"),
@@ -1040,6 +1058,7 @@ impl Config {
             fit: crate::engine::stage_area::FitOptions::default(),
             park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
             main_only: self.displays.main_only,
+            keep_app_frames: !self.restore.saved_size,
         }
     }
 }
@@ -1272,6 +1291,15 @@ mod tests {
         let p = parse("[stages]\nrestore_after_restart = false\n");
         assert!(!p.config.stages.restore_after_restart && p.warnings.is_empty(), "{:?}", p.warnings);
         assert!(parse("[stages]\nnames = [\"Mail\"]\n").config.stages.restore_after_restart);
+    }
+
+    #[test]
+    fn restore_saved_size_is_on_by_default_and_can_be_turned_off() {
+        let c = Config::default();
+        assert!(c.restore.saved_size && !c.model_options(NativeSettings::default(), 5).keep_app_frames);
+        let p = parse("[restore]\nsaved_size = false\n");
+        assert!(!p.config.restore.saved_size && p.warnings.is_empty(), "{:?}", p.warnings);
+        assert!(p.config.model_options(NativeSettings::default(), 5).keep_app_frames, "the frames apps give, as Apple's");
     }
 
     #[test]

@@ -38,6 +38,7 @@ mod ops;
 mod pending;
 mod pool;
 mod quit;
+mod saved_size;
 mod spaces;
 mod strip;
 #[cfg(test)]
@@ -321,6 +322,9 @@ pub struct ModelOptions {
     /// display alone, and a window moved to another is not its own any more
     /// ([`Model::windows_moved_to_display`]).
     pub main_only: bool,
+    /// Windows keep the frames their apps give them at a restore even when much smaller than
+    /// saved (`[restore] saved_size = false`, Apple's plain behaviour; `saved_size.rs`).
+    pub keep_app_frames: bool,
 }
 
 /// State of a desktop reveal, so a second reveal brings the stage back.
@@ -468,6 +472,8 @@ pub struct Model {
     pub(crate) quit_frames: Vec<quit::QuitFrame>,
     /// The restore's session and mode.
     pub(crate) restore: super::restore::Restore,
+    /// Windows owed their saved frame when first shown (`saved_size.rs`).
+    pub(crate) owed: HashMap<WindowId, saved_size::Owed>,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
     /// The Dock's application items in order, as the platform last read them ("Follow the
@@ -534,6 +540,7 @@ impl Model {
             quit: Vec::new(),
             quit_frames: Vec::new(),
             restore: super::restore::Restore::default(),
+            owed: HashMap::new(),
             last_pending: None,
             dock: Vec::new(),
             clock: 0,
@@ -920,6 +927,7 @@ impl Model {
         }
         if usable {
             if by_user {
+                self.forgive_saved_size(id);
                 self.move_restore(id, frame);
             } else if let Some(w) = self.windows.get_mut(&id) {
                 w.restore = frame;
@@ -1043,6 +1051,8 @@ impl Model {
     /// Brings one window to its restore frame, fitted into the stage area first, within reach
     /// ([`Display::reach`]: exactly its own frame unless its title bar could not be grabbed).
     pub(crate) fn restore_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
+        // A window its app reopened much smaller than saved: its saved frame, once.
+        self.pay_saved_size(id);
         self.fit_window(id);
         let Some(w) = self.windows.get(&id) else {
             return;
