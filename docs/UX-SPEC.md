@@ -562,6 +562,30 @@ starts every app in a stage of its own, as Apple's does. One log line sums it up
 with the windows back on another Desktop (bundle id, hashed title, the Desktops' ids;
 `stage-manager log summary` repeats the counts).
 
+**When macOS's Accessibility sees no window** (his Mac, 11-06: WindowServer hung on wake,
+macOS logged him out, and after the login Accessibility listed no window of any app while
+every app answered and the window server showed them; only another logout fixes it). Apple's
+Stage Manager lives in WindowServer and never meets this; ours can do nothing then. The
+line (`engine/ax_blind.rs`): Accessibility trusted, at least 3 real windows of regular apps
+on screen, of at least 2 apps that answer, none listed, for 30 s; not within 30 s of the
+login, not while the screen is locked, Mission Control or a full-screen Space shows. One app
+quiet is not it. Once it holds, the menu's top line says *"macOS isn't reporting windows.
+Log out or restart to fix it; your stages are saved."* (no notification, no dialog; not
+while Apple's Stage Manager is on), `ctl state` has `accessibility_blind` and
+`accessibility_blind_since`, and one log line marks its start and one its end. It ends the
+moment any window is listed. Meanwhile every app is read again every 2 s, nothing waiting
+is given up (no app's quiet minute runs, apps not running wait too), and a save marks every
+Desktop not looked for, so the next login gives up none of their windows for this session.
+While Accessibility lists nothing (from the first look, no hold), and while the window
+server shows windows of regular apps before Accessibility has listed any in this run (an
+empty screen is not that), a click or a key press does not end the restore window; its own
+ends wait while it lists nothing (11-06 15:40:07: a click 0.2 s after the restore window opened ended it on nothing, and
+the two windows waiting on the Desktop shown were given up a minute later). Windows listed
+again in the same run bring the restore back as at a launch: the restore window opens again
+(its clocks from then), every saved window still waiting, of the Desktops shown or not, goes
+back to its stage by app, title and frame as it is found, parked when its stage is not in
+front, and the windows on screen all along bring no stage forward even after it.
+
 ## Known gaps
 
 - The lid closed and opened (above) is what Apple's does, built and unit tested, not yet

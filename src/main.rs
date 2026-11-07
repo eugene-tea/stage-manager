@@ -130,7 +130,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -185,6 +185,8 @@ mod app {
         thumbnail_interval_ms: Option<u64>,
         /// Window captures were refused when the menu was last drawn.
         capture_refused: bool,
+        /// Accessibility listed no window when the menu was last drawn (round ax-blind).
+        ax_blind: bool,
         /// Every display as last sent to the WM thread, the main one first.
         displays: Vec<Display>,
         _workspace: WorkspaceObservers,
@@ -239,6 +241,7 @@ mod app {
                 permissions: self.permissions,
                 capture_on: shell::capture_on(),
                 capture_refused: self.capture_refused,
+                accessibility_blind: self.ax_blind,
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
@@ -276,6 +279,11 @@ mod app {
             let refused = capture::refused();
             if refused != self.capture_refused {
                 self.capture_refused = refused;
+                self.refresh_menu();
+            }
+            let blind = session::accessibility_blind();
+            if blind != self.ax_blind {
+                self.ax_blind = blind;
                 self.refresh_menu();
             }
             if let Some(settings) = native_settings::refresh() {
@@ -908,6 +916,7 @@ mod app {
             hotkeys: None,
             thumbnail_interval_ms: None,
             capture_refused: false,
+            ax_blind: false,
             displays: Vec::new(),
             _workspace: workspace,
             _spaces: spaces,

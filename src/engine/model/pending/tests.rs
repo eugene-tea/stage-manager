@@ -1495,3 +1495,134 @@ fn a_stray_of_a_merged_part_joins_the_merge() {
     assert!(m.is_pooled(w(42)));
     assert_eq!(m.stage_of(w(42)), Some(chat), "the merge stands for its saved stage's other windows");
 }
+
+// ----- Accessibility blind (round ax-blind, his Mac 11-06) ---------------------------------
+
+/// Desktop 6, not shown when saved: the browser's and Chat's other windows.
+fn desktop_6() -> SavedSpace {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    d6.strip_slots = vec![1];
+    d6
+}
+
+/// His screen after the logout of 11-06: 15 windows of 14 apps on screen, every app
+/// answering, Accessibility listing none.
+fn blind_screen() -> crate::engine::ax_blind::Facts {
+    crate::engine::ax_blind::Facts {
+        trusted: true,
+        since_login: Some(std::time::Duration::from_secs(2200)),
+        shown: 15,
+        regular: 15,
+        answering: 14,
+        ..Default::default()
+    }
+}
+
+/// 15:40:07: the stages built from nothing after the launch's 10 s wait, the restore window
+/// open, a click 0.2 s later. It ended the restore window on nothing, and a minute later the
+/// two windows waiting on the Desktop shown were given up (their apps "quiet"). Now the click
+/// leaves it open while Accessibility has listed no window in this run, no app's minute runs
+/// while it lists none, and every saved window waits, on the Desktop shown and the other.
+#[test]
+fn a_click_while_accessibility_lists_nothing_keeps_every_saved_window_waiting() {
+    use crate::engine::ax_blind::Watch;
+    use crate::engine::restore::{AppQuiet, QUIET};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut m = restoring(vec![desktop_5(), desktop_6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let waiting = m.pending_count() + m.pending_unvisited();
+    assert_eq!(waiting, 6);
+    let mut watch = Watch::default();
+    watch.feed(&blind_screen(), t0);
+    // The click, as the platform takes it: the watch first.
+    assert!(!watch.user_ends_restore(), "nothing listed in this run");
+    if watch.user_ends_restore() {
+        m.end_restore();
+    }
+    assert!(m.restoring(), "the restore window stays open");
+    // Ten minutes blind, looked at once a second: the clocks of the apps with saved windows
+    // never run, nothing is given up.
+    let mut quiet = AppQuiet::default();
+    for b in m.waiting_bundles() {
+        quiet.window(&b, t0);
+    }
+    for s in 1..=600 {
+        let now = t0 + Duration::from_secs(s);
+        watch.feed(&blind_screen(), now);
+        assert!(watch.sees_nothing());
+        quiet.restart_all(now);
+        let settled = quiet.settled(now);
+        assert!(settled.is_empty(), "{s} s: {settled:?}");
+    }
+    assert!(watch.blind());
+    assert_eq!(m.pending_count() + m.pending_unvisited(), waiting, "every saved window waits");
+    // A minute after windows are listed again, an app that opened none is quiet as before.
+    let seen = t0 + Duration::from_secs(600);
+    assert_eq!(quiet.settled(seen + QUIET).len(), 3);
+}
+
+/// Windows listed again after blindness, in the same run: the restore runs as at a launch.
+/// The restore window had ended (by itself, or a click before this round), so a window going
+/// back to an inactive stage would have brought it forward; open again, it is parked there,
+/// the saved Desktop is adopted, every saved stage comes back and nothing switches.
+#[test]
+fn windows_listed_again_after_blindness_go_back_to_their_saved_stages() {
+    use crate::engine::ax_blind::{Change, Facts, Watch};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut m = restoring(vec![desktop_5(), desktop_6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m.end_restore();
+    assert!(!m.restoring());
+    let mut watch = Watch::default();
+    for s in 0..=30 {
+        watch.feed(&blind_screen(), t0 + Duration::from_secs(s));
+    }
+    assert!(watch.blind());
+    // The rescan finds the windows macOS showed all along.
+    let back = watch.feed(&Facts { listed: 5, ..blind_screen() }, t0 + Duration::from_secs(400));
+    assert_eq!(back, Some(Change::Ended { lasted: Duration::from_secs(400), recovered: true }));
+    assert!(m.reopen_restore([w(21), w(22), w(23), w(24), w(41)]));
+    assert!(m.restoring() && m.settling() && m.rematching());
+    // The editor's windows: Desktop 5 (shown when saved, Desktop 6 waiting) takes two.
+    add_focused(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    add_focused(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
+    assert_eq!(m.current_space(MAIN).0, 5, "adopted");
+    assert_eq!(names(&m), [None, Some("Chat".into()), None], "the saved stages, with their names");
+    assert_eq!(m.stage_of(w(23)), m.stage_of(w(24)));
+    let front = m.main_active_stage();
+    assert_eq!(front, m.stage_of(w(23)), "the saved active stage");
+    // Chat and the browser go back to their inactive stages: parked, no switch.
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert!(parks(&a, 21) && !switches(&a), "{a:?}");
+    let a = add_focused(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    assert!(parks(&a, 22) && !switches(&a), "{a:?}");
+    assert_eq!((number_of(&m, 21), number_of(&m, 22)), (Some(2), Some(3)));
+    assert_eq!(m.main_active_stage(), front, "the stage shown stays");
+    assert_eq!(m.strip().iter().map(|c| c.number).collect::<Vec<_>>(), [3, 2], "the saved strip order");
+    assert_eq!(m.pending_count(), 0);
+    assert_eq!(m.pending_unvisited(), 2, "Desktop 6 still waits for its visit");
+    // Found after this restore window too, a window on screen all along switches nothing.
+    m.end_restore();
+    let a = add_focused(&mut m, win(41, 30, CHAT, "Another chat", DEFAULT));
+    assert!(!switches(&a), "{a:?}");
+}
+
+#[test]
+fn nothing_waiting_opens_no_restore_window_again() {
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m.end_restore();
+    // [stages] restore_after_restart off after a restart: nothing was kept to restore.
+    let mut off = model_with(ModelOptions::default());
+    off.set_restore(Restore::off_after_restart("B"));
+    assert!(!off.reopen_restore([]) && !off.restoring());
+    // Every saved window given up: a plain session goes on.
+    m.give_up_absent(|_| false);
+    assert_eq!(m.pending_count() + m.pending_unvisited(), 0);
+    assert!(!m.reopen_restore([]) && !m.restoring());
+}

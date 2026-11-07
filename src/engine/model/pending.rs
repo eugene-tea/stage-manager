@@ -125,6 +125,31 @@ impl Model {
         was.then_some(actions)
     }
 
+    /// Accessibility lists windows again after listing none ([`crate::engine::ax_blind`]; the
+    /// same run): the restore runs as at a launch, the restore window open again (windows
+    /// going back to inactive stages are parked there, nothing switches, a provisional
+    /// Desktop takes votes again) and windows matched again by a new title. Every saved entry
+    /// still waiting, of the Desktops shown or not, is matched by app, title and frame as the
+    /// windows are found; a saved active stage still empty holds its place. Windows the
+    /// window server showed on screen meanwhile (`shown`) were there all along: found after
+    /// this window too, they bring no stage forward ([`Model::set_launch_listed`]). True when
+    /// the restore window is open now; false with nothing waiting, or with `[stages]
+    /// restore_after_restart` off after a restart.
+    pub fn reopen_restore(&mut self, shown: impl IntoIterator<Item = WindowId>) -> bool {
+        self.launch_listed.extend(shown);
+        let waiting = self.pending_count() + self.pending_unvisited() > 0;
+        if self.restore.drop_missing || !(waiting || self.restore.restoring) {
+            return false;
+        }
+        self.restore.restoring = true;
+        self.restore.rematching = true;
+        let shown: Vec<SpaceId> = self.current.values().copied().collect();
+        for space in shown {
+            self.note_front_waits(space);
+        }
+        true
+    }
+
     /// At the restore window's end (and after a give-up once it is over): a Space shown whose
     /// active stage is still empty, its saved windows still to come or given up, while other
     /// stages there have windows, brings one of those forward (never an empty front stage

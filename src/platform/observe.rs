@@ -586,6 +586,18 @@ impl Observer {
         self.observed.contains_key(&pid)
     }
 
+    /// True when app `pid` is a running regular app that would be observed (allowed, not
+    /// ours), answering yet or not.
+    pub fn wants(&self, pid: i32) -> bool {
+        self.apps.get(&pid).is_some_and(|a| self.allowed(a))
+    }
+
+    /// True when app `pid` answers Accessibility: observed, and its window list read with no
+    /// error (an app whose `AXWindows` failed is read again on the retry passes).
+    pub fn answers(&self, pid: i32) -> bool {
+        self.observed.contains_key(&pid) && !self.recheck.contains_key(&pid)
+    }
+
     /// The `STAGE_MANAGER_ONLY` filter in force.
     pub fn only(&self) -> Option<&HashSet<String>> {
         self.only.as_ref()

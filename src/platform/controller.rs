@@ -129,6 +129,7 @@ use crate::ui::strip_model::{self, CardSnapshot, CardWindow, LateNote, StripDrop
 use crate::ui::{motion_math, transition_plan};
 
 mod arrival;
+mod ax_blind;
 mod corner_still;
 mod dock_order;
 mod hide;
@@ -1165,6 +1166,8 @@ pub struct Controller {
     /// When each app with pending windows was last busy: a quiet one's pending windows are
     /// given up ([`crate::engine::restore`]).
     quiet: AppQuiet,
+    /// Accessibility blind for the session ([`ax_blind`]).
+    ax: ax_blind::AxWatch,
     /// When pending windows were last checked for giving up.
     quiet_checked: Instant,
     /// Each saved Space's last time shown (Unix seconds), from the loaded file and the saves
@@ -1330,6 +1333,7 @@ impl Controller {
             macos_reveal_at: None,
             quiet: AppQuiet::default(),
             quiet_checked: Instant::now(),
+            ax: ax_blind::AxWatch::default(),
             seen_times: HashMap::new(),
             settling: None,
             rematch_until: None,
@@ -3336,6 +3340,10 @@ impl Controller {
         // The window ids in it hold for this window server session only.
         file.session = session::window_session().map(str::to_string);
         file.stamp(now, &mut self.seen_times);
+        if !self.ax_looked() {
+            // Accessibility listed no window: nothing was looked for in this session.
+            file.not_looked_for();
+        }
         let text = match file.to_json() {
             Ok(text) => text,
             Err(e) => {
@@ -3714,9 +3722,11 @@ impl Controller {
                     if input::left_button_down() {
                         // A Dock click whose press the input monitor has not told us about yet.
                         self.end_restore(ob, "a click (or a Dock click)", End::User);
-                    } else {
-                        // A launch-time activation at login is the app's, not the user's: no
-                        // switch, nothing held for later.
+                    }
+                    if self.model.as_ref().is_some_and(Model::settling) {
+                        // A launch-time activation at login is the app's, not the user's (or a
+                        // click the restore window outlives while Accessibility lists no
+                        // window): no switch, nothing held for later.
                         tracing::debug!(pid, "an activation while the login settles: no switch");
                         return;
                     }
@@ -5409,6 +5419,7 @@ impl Controller {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
+        self.ax_window_found(ob, Instant::now());
         let displays = desktop::cg_display_bounds();
         if let Some(w) = windows::describe(&[id]).into_iter().find(|w| w.onscreen && w.layer == 0)
             && off_screen_not_ours(w.bounds, &displays, false)
@@ -6117,6 +6128,7 @@ impl Controller {
         if self.model.is_some() {
             self.poll_lock(now, false);
         }
+        self.watch_accessibility(ob, now);
         // No capture round while nobody can see the screen (8M: rounds failing for minutes).
         let away = if self.locked {
             Some(capture_pace::Away::Locked)
@@ -6148,7 +6160,7 @@ impl Controller {
             }
             self.expire_ahead(ob, now);
             self.slide_hold_step(ob);
-            if self.absent_due.is_some_and(|t| now >= t) {
+            if self.absent_due.is_some_and(|t| now >= t) && !self.ax_sees_nothing() {
                 self.give_up_absent(ob);
             }
             if self.rematch_until.is_some_and(|t| now >= t) {
@@ -6164,6 +6176,7 @@ impl Controller {
             // An app with saved windows running with no window yet is still opening (Xcode, an
             // Electron app: 30-90 s): the login is not quiet (the review of 8F, M2).
             let opening = self.settling.is_some() && self.pending_apps_opening(ob);
+            let unseen = self.ax_sees_nothing();
             if let Some(clock) = self.settling.as_mut() {
                 if let Some(t) = ob.last_launch() {
                     clock.busy(t);
@@ -6173,7 +6186,8 @@ impl Controller {
                 }
                 // Not while the screen is locked (a login that locks at once): nothing is done
                 // for a screen nobody sees; the end comes after the unlock.
-                if let Some(end) = clock.due(now).filter(|_| !self.locked) {
+                // Nor while Accessibility lists no window ([`ax_blind`]): nothing is seen.
+                if let Some(end) = clock.due(now).filter(|_| !self.locked && !unseen) {
                     let why = if end == End::TimeUp { "its five minutes are up" } else { "apps went quiet" };
                     self.end_restore(ob, why, end);
                 }
@@ -6231,7 +6245,14 @@ impl Controller {
     /// after an app switcher key, whose own switch wins), and when it ended by itself the
     /// saved key window takes the keyboard (`focus_after_restore`). After a restart the
     /// restore's line is logged (`log summary` repeats it).
+    ///
+    /// A user's end waits while Accessibility has listed no window in this run, or lists
+    /// none now ([`ax_blind`]): it would end the restore on nothing.
     fn end_restore(&mut self, ob: &Observer, why: &str, end: End) {
+        if self.settling.is_some() && !end.by_itself() && !self.user_may_end_restore(ob) {
+            tracing::debug!(why, "restore: the restore window stays open: Accessibility lists no window");
+            return;
+        }
         let Some(clock) = self.settling.take() else { return };
         let now = Instant::now();
         // The entries of apps not running then: given up at the next tick (or the login's
@@ -6288,6 +6309,11 @@ impl Controller {
                 // launching, or windowless) is never quiet.
                 self.quiet.running(b, app_has_window(m, &waiting, b), now);
             }
+        }
+        if self.ax_sees_nothing() {
+            // Accessibility lists no window: no app can show one, so no app's minute runs.
+            self.quiet.restart_all(now);
+            return;
         }
         let settled: Vec<String> =
             self.quiet.settled(now).into_iter().filter(|b| bundles.contains(b) && !waiting.contains(b)).collect();
@@ -6684,6 +6710,8 @@ impl Controller {
             "windows": windows,
         });
         state["corner_patch"] = corner_patch;
+        // Accessibility lists no window for the session (round ax-blind), since (Unix s).
+        (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);
         state["strays"] = Value::Array(strays);
         // Windows whose handle died judged closed once, waiting for a second look.

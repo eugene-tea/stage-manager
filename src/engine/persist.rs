@@ -341,6 +341,17 @@ impl StateFile {
         expired
     }
 
+    /// A save while nothing could be looked for (Accessibility listing no window,
+    /// [`crate::engine::ax_blind`]): every Space is saved `unvisited`, so the next session gives
+    /// up none of its waiting windows for this one (its Desktop showed, but no window could be
+    /// seen; 11-06: the two waiting on the Desktop shown would have gone at the logout that
+    /// fixes it). They age by `last_seen` as a Desktop not shown does.
+    pub fn not_looked_for(&mut self) {
+        for space in &mut self.spaces {
+            space.unvisited = true;
+        }
+    }
+
     /// The entries of windows whose app quit (`quit_at`), as a load must take them before
     /// anything else reads the file: at a load in a new session (`new_session`, the restore
     /// on) those that quit within [`QUIT_KEEP`] before `saved_at` become ordinary saved windows
