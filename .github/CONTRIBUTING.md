@@ -1,6 +1,7 @@
 # Contributing
 
-Pull requests are welcome. A few things keep them easy to take.
+Pull requests are welcome; open them against `dev`, the default branch (`master` holds
+releases only, see [AGENTS.md](../AGENTS.md)). A few things keep them easy to take.
 
 **Apple's way stays the default.** With an empty config file, Stage Manager looks and
 behaves like Apple's. A new behaviour is an option, off by default (or, if it changes
