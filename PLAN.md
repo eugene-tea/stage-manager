@@ -168,6 +168,14 @@ Known gaps the owner accepted as rare:
 
 ## Open
 
+- **What heals macOS's Accessibility blindness** (round ax-blind, 11-06): after a WindowServer
+  watchdog kill at an unlock (15:02), Accessibility listed no window for any app, System Events
+  too (15:39–15:46 checked). By 16:15 it listed them again; between, our app quit (16:08) and the
+  screen locked and unlocked (~16:09–16:15), nobody checking in between. Next time: quit Stage
+  Manager and check System Events first, then lock and unlock. If the quit heals it, the menu
+  line says "Quit and reopen Stage Manager" instead of "Log out", and there is a bug of ours to
+  find.
+
 - **Screens, after round displays** (built: a strip and stages per screen, Apple's rules
   as measured 11-05; a saved Desktop of a screen not connected forms where its windows are,
   the 10-23 login):
