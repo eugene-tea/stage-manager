@@ -85,7 +85,9 @@ quiet for 20 s, the saved key window then focused, the restore's line logged and
 `log summary`; one un-minimized after it brings its stage forward; an app with no saved window goes by Apple's rule; the app that never reopens keeps
 its stage through a relaunch in the same session and loses it in the next session; then a
 logout simulated with the test's own note (STAGE_MANAGER_LOGOUT_NOTE, never Apple's): the head
-start at its first signal, repeats ignored, a cancel resuming at once, the apps quitting while
+start at its first signal (the copy turned regular, a Dock icon, by STAGE_MANAGER_TEST_REOPEN_LIST),
+repeats ignored, a cancel resuming at once (the copy an accessory app again, lsappinfo's
+UIElement), the apps quitting while
 it holds with the file kept, and the next session bringing each window back into its stage at
 its saved frame (one reopened clamped against the park corner, one at the park spot); and the
 same with no early signal, from the entries kept with `quit_at`. Hands off the Mac during this
@@ -5498,6 +5500,16 @@ def signal_line(note, then, first=None):
                      log_text())
 
 
+def app_type(pid):
+    """macOS's type of the app with `pid` as `lsappinfo` lists it ("Foreground": a Dock icon;
+    "UIElement": an accessory app), or None."""
+    if not pid:
+        return None
+    out = subprocess.run(["lsappinfo", "info", "-only", "ApplicationType", str(pid)], capture_output=True, text=True).stdout
+    m = re.search(r'type="([A-Za-z]+)"', out) or re.search(r'"ApplicationType"\s*=\s*"([A-Za-z]+)"', out)
+    return m.group(1) if m else None
+
+
 def quit_entries(f):
     """(title, quit_at) of every saved window in a state.json."""
     return [(w["title"], w.get("quit_at"))
@@ -5529,6 +5541,9 @@ def restore_after_logout(run_id):
     note = f"dev.eugene.stagemanager.test.logout.{run_id}"
     env = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"logout {k} {run_id}", "STAGE_MANAGER_LOGOUT_NOTE": note}
            for k in "DEFG"}
+    # Session D's copy joins the reopen list at the simulated logout (a test run only): its
+    # Dock icon comes at the head start and goes at the cancel (fix-cancel-dock-icon).
+    env["D"]["STAGE_MANAGER_TEST_REOPEN_LIST"] = "1"
     stop_app()
     stop_all_fixtures()
     write_config(None)
@@ -5556,6 +5571,9 @@ def restore_after_logout(run_id):
           "its first signal starts the head start (the log: its name, 0 ms since the first)")
     time.sleep(1.5)
     all_onscreen("the logout's head start")
+    check(re.search(r'reopen list: activation policy policy=Regular done=true', log_text()) is not None,
+          "the head start turns the app regular (the reopen list, joined in this test run)")
+    check(app_type(app_pid()) == "Foreground", f"macOS lists a regular app: a Dock icon (lsappinfo: {app_type(app_pid())})")
     held = read_state_file()
     check(held is not None and held.get("session") == env["D"]["STAGE_MANAGER_SESSION"] and len(quit_entries(held)) == 4
           and all(q is None for _, q in quit_entries(held)), "the stages are saved at the head start, every window in them")
@@ -5571,6 +5589,10 @@ def restore_after_logout(run_id):
         time.sleep(1.0)
         check(layout_of(state())[1] == want_active, "the same stage in front")
         consistent("after the cancel")
+    back = wait_until(lambda: re.search(r'reopen list: activation policy policy=Accessory done=(true|false) tries=(\d+)', log_text()), 12, "the switch back")
+    check(back is not None and back.group(1) == "true",
+          f"the cancel turns the app back to accessory, read after the switch ({back.group(0) if back else 'no line'})")
+    check(app_type(app_pid()) == "UIElement", f"after the cancel macOS lists an accessory app: no Dock icon (lsappinfo: {app_type(app_pid())})")
 
     say("-- the logout again; the apps quit while it holds")
     check(post_note(note), "the logout note is posted again")

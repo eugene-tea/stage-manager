@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSPasteboard, NSPasteboardTypeString, NSWorkspace};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSPasteboard, NSPasteboardTypeString, NSRunningApplication, NSWorkspace};
 use objc2_core_graphics::{CGDisplayIsAsleep, CGEventSource, CGEventSourceStateID, CGEventType, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, NSURL};
 
@@ -36,7 +36,7 @@ use super::about;
 use crate::app_state::{AppState, now_secs};
 use crate::config::schema::REFERENCE_URL;
 use crate::config::{self, Config, FitMode, LoginStart, edit};
-use crate::engine::reopen_list::{self, Policy, ReopenSwitch};
+use crate::engine::reopen_list::{self, BackStep, Policy, ReopenSwitch};
 use crate::engine::stand_down::Signal;
 use crate::platform::login_item::{self, Service};
 use crate::platform::native_settings::{self, RawSettings};
@@ -103,6 +103,9 @@ struct Shell {
     install: Install,
     /// The activation policy through a logout (round reopen-list).
     reopen: ReopenSwitch,
+    /// Counts the activation policy's switches: a pending retry of the switch back to
+    /// accessory runs only while no newer switch came ([`Shell::back_to_accessory`]).
+    policy_serial: u64,
     _timers: Vec<Retained<NSTimer>>,
 }
 
@@ -242,9 +245,30 @@ fn login_way_done(state: &AppState) -> Service {
     }
 }
 
-/// A test run (`STAGE_MANAGER_TEST` or `STAGE_MANAGER_HOME`): the policy never changes.
+/// A test run (`STAGE_MANAGER_TEST` or `STAGE_MANAGER_HOME`): the policy never changes,
+/// unless the live suite asks ([`test_joins_reopen_list`]).
 fn test_run() -> bool {
     std::env::var_os("STAGE_MANAGER_TEST").is_some() || paths::custom_home().is_some()
+}
+
+/// The live suite's own copy joins the reopen list at its simulated logout:
+/// `STAGE_MANAGER_TEST_REOPEN_LIST`, honoured only with `STAGE_MANAGER_TEST`.
+fn test_joins_reopen_list() -> bool {
+    std::env::var_os("STAGE_MANAGER_TEST").is_some() && std::env::var_os("STAGE_MANAGER_TEST_REOPEN_LIST").is_some()
+}
+
+/// One try of the switch back to accessory (`resync`: regular first, [`BackStep::Resync`]);
+/// returns AppKit's reading and macOS's (the running app's, as the Dock has it). Nothing is
+/// activated and no window shown.
+fn try_accessory(mtm: MainThreadMarker, resync: bool) -> (bool, bool) {
+    let app = NSApplication::sharedApplication(mtm);
+    if resync {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    }
+    // The answer is no measure: a switch to the policy AppKit reads answers NO (the probe).
+    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let accessory = NSApplicationActivationPolicy::Accessory;
+    (app.activationPolicy() == accessory, NSRunningApplication::currentApplication().activationPolicy() == accessory)
 }
 
 /// Whether the launch is macOS's reopen after a logout that listed the app: `listed_at`
@@ -292,6 +316,7 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
         update_serial: 0,
         install: Install::Idle,
         reopen: ReopenSwitch::default(),
+        policy_serial: 0,
         _timers: Vec::new(),
     };
     SHELL.with(|s| *s.borrow_mut() = Some(shell));
@@ -386,17 +411,50 @@ impl Shell {
 
     /// Sets the app's activation policy for the reopen list (round reopen-list): no window
     /// shown, nothing activated. Regular marks the logout in `app-state.json`, so the next
-    /// launch can tell macOS's reopen; accessory clears it.
-    fn set_policy(&mut self, policy: Policy, why: &str) {
-        let app = NSApplication::sharedApplication(self.mtm);
-        let (to, mark) = match policy {
-            Policy::Regular => (NSApplicationActivationPolicy::Regular, Some(now_secs())),
-            Policy::Accessory => (NSApplicationActivationPolicy::Accessory, None),
+    /// launch can tell macOS's reopen; accessory clears it. Done is the policy read after
+    /// the switch, not AppKit's answer; the switch back is tried again until it holds
+    /// ([`reopen_list::back_step`]), and a newer switch ends those tries.
+    fn set_policy(&mut self, policy: Policy, why: &'static str) {
+        self.policy_serial += 1;
+        match policy {
+            Policy::Regular => {
+                let app = NSApplication::sharedApplication(self.mtm);
+                let answered = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+                let done = app.activationPolicy() == NSApplicationActivationPolicy::Regular;
+                tracing::info!(policy = ?policy, done, answered, why, "reopen list: activation policy");
+                self.state.reopen_listed = done.then(now_secs);
+                self.save_state();
+            }
+            Policy::Accessory => {
+                self.state.reopen_listed = None;
+                self.save_state();
+                self.back_to_accessory(self.policy_serial, 1, false, why);
+            }
+        }
+    }
+
+    /// Try number `tries` of the switch back to accessory, while no newer switch came
+    /// (`serial`); the outcome is logged once, when it holds or no try is left.
+    fn back_to_accessory(&mut self, serial: u64, tries: usize, resync: bool, why: &'static str) {
+        if serial != self.policy_serial {
+            tracing::debug!(tries, "reopen list: the switch back to accessory is over: a newer switch came");
+            return;
+        }
+        let (appkit, listed) = try_accessory(self.mtm, resync);
+        let (wait, resync) = match reopen_list::back_step(tries, appkit, listed) {
+            step @ (BackStep::Done | BackStep::GaveUp) => {
+                let done = step == BackStep::Done;
+                tracing::info!(policy = ?Policy::Accessory, done, tries, appkit_accessory = appkit, listed_accessory = listed, why, "reopen list: activation policy");
+                return;
+            }
+            BackStep::Again(wait) => (wait, false),
+            BackStep::Resync(wait) => (wait, true),
         };
-        let done = app.setActivationPolicy(to);
-        tracing::info!(policy = ?policy, done, why, "reopen list: activation policy");
-        self.state.reopen_listed = mark.filter(|_| done);
-        self.save_state();
+        tracing::debug!(tries, appkit_accessory = appkit, listed_accessory = listed, wait_ms = wait.as_millis() as u64, resync, "reopen list: the switch back to accessory did not hold; trying again");
+        let when = dispatch2::DispatchTime::try_from(wait).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = dispatch2::DispatchQueue::main().after(when, move || {
+            with(|s| s.back_to_accessory(serial, tries + 1, resync, why));
+        });
     }
 
     fn welcome_rows(&self, apple_row: bool) -> Vec<welcome::WelcomeRow> {
@@ -543,7 +601,7 @@ pub fn logout_signal(signal: Signal, at: Instant) {
         let key = s.config.app.reopen_with_apps;
         let policy = s.reopen.signal(signal, at, || {
             let login = login_item::status();
-            let ok = reopen_list::allowed(key, login.starts_at_login(), test_run());
+            let ok = reopen_list::allowed(key, login.starts_at_login(), test_run(), test_joins_reopen_list());
             if !ok {
                 tracing::info!(reopen_with_apps = key, login = ?login, test = test_run(), "reopen list: not joined at this logout");
             }
