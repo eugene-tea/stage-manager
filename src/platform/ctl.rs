@@ -18,8 +18,7 @@
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
 //! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
-//! for dead until it is looked up afresh (round stale-handles), `debug-notice show ID|dismiss` clicks
-//! the desktop notice's menu entry for a window or its Dismiss, `debug-expose
+//! for dead until it is looked up afresh (round stale-handles), `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
 //! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
 //! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
@@ -197,9 +196,6 @@ pub enum Command {
         /// The app's bundle id.
         bundle: String,
     },
-    /// The desktop notice's menu actions, as a click on them does: bring listed window `Some(id)`
-    /// forward, or dismiss the list (`None`) (needs `STAGE_MANAGER_TEST=1`).
-    DebugNotice(Option<u32>),
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -363,11 +359,6 @@ impl Command {
                 .collect::<Result<Vec<u32>, String>>()
                 .map(Self::Adopted),
             [handoff::COMMAND, rest @ ..] => Offer::parse(rest).map(Self::TakeWatch),
-            ["debug-notice", "dismiss"] => Ok(Self::DebugNotice(None)),
-            ["debug-notice", "show", id] => {
-                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
-                Ok(Self::DebugNotice(Some(id)))
-            }
             ["debug-close", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
@@ -863,9 +854,6 @@ mod tests {
         assert!(Command::parse("debug-close").is_err());
         assert_eq!(Command::parse("debug-stale-handle 42"), Ok(Command::DebugStaleHandle { id: 42 }));
         assert!(Command::parse("debug-stale-handle").is_err());
-        assert_eq!(Command::parse("debug-notice show 42"), Ok(Command::DebugNotice(Some(42))));
-        assert_eq!(Command::parse("debug-notice dismiss"), Ok(Command::DebugNotice(None)));
-        assert!(Command::parse("debug-notice show").is_err());
         assert!(Command::parse("debug-fullscreen 42 toggle").is_err());
         assert!(Command::parse("debug-fullscreen x on").is_err());
         assert!(Command::parse("debug-fullscreen 42").is_err());

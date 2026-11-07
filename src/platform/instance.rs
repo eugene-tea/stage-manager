@@ -11,13 +11,15 @@
 //! launch too. What a launch does is decided by [`decide`]:
 //!
 //! - a copy answers `ping`: hand off (it shows its Settings, unless it started moments ago:
-//!   two launches at login, [`HANDOFF_QUIET`]) and leave;
-//! - a copy answers that it is quitting (bringing its windows back): wait for as long as it
-//!   takes, then manage (a relaunch during a quit must not leave nothing running);
+//!   two launches at login, [`HANDOFF_QUIET`]; or the login is less than [`LOGIN_QUIET`] old;
+//!   or this copy is launchd's, [`super::login_item::Started::Agent`]) and leave;
+//! - a copy answers that it is quitting (bringing its windows back): wait until it is gone,
+//!   then manage (a relaunch during a quit must not leave nothing running), for at most
+//!   [`QUIT_WAIT`]: a quit that hangs past it is left alone, as a hung copy is;
 //! - the lock is held by a process that does not answer: wait while it lives if it answered
-//!   before (a copy quitting removes its socket last, right before it exits); one that never
-//!   answered at all (starting and not bound yet, or hung) is waited for [`LOCK_WAIT`], then
-//!   left alone;
+//!   before (a copy quitting removes its socket last, right before it exits), for at most
+//!   [`QUIT_WAIT`] too; one that never answered at all (starting and not bound yet, or hung)
+//!   is waited for [`LOCK_WAIT`], then left alone;
 //! - otherwise (the lock is ours, or no lock can be had at all and nothing answers): manage.
 //!
 //! An error reply to `ping` is not an answer.
@@ -36,6 +38,12 @@ use super::{ctl, paths};
 /// How long a launch waits for a copy holding the lock that never answered (starting, hung).
 pub const LOCK_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a launch waits for a copy that said it is quitting (the 1.7 review: one that hung
+/// after saying so kept a relaunch waiting forever, nothing managing and nothing said). A quit
+/// takes at most about 45 s (the WM thread's unpark, 30 s at most, the leftovers check, the
+/// signal watcher's fallback after that); past twice that the copy is taken as hung.
+pub const QUIT_WAIT: Duration = Duration::from_secs(90);
+
 /// How often the lock is tried again while waiting.
 const LOCK_RETRY: Duration = Duration::from_millis(100);
 
@@ -47,6 +55,12 @@ const PING_TIMEOUT: Duration = Duration::from_secs(2);
 /// hand-off: two launches at login (the login item and another launcher) race, and neither is
 /// the user asking for the window.
 pub const HANDOFF_QUIET: Duration = Duration::from_secs(10);
+
+/// Within this long of the login a hand-off or a reopen shows no Settings (rounds early-start,
+/// reopen-list): macOS reopens Stage Manager about 3 s after the login (or the launchd agent
+/// starts it), and the login item opens it again 10-30 s later, once the reopened apps have
+/// checked in: a launch nobody asked for by hand.
+pub const LOGIN_QUIET: Duration = Duration::from_secs(90);
 
 /// The lock held for the life of the process.
 static LOCK: OnceLock<File> = OnceLock::new();
@@ -126,27 +140,40 @@ pub enum Launch {
     HandOff,
     /// Another copy is quitting, or holds the lock without answering: try again shortly.
     Wait,
-    /// Another copy held the lock without ever answering for all of [`LOCK_WAIT`]: leave.
+    /// Another copy held the lock without ever answering for all of [`LOCK_WAIT`], or was
+    /// quitting for all of [`QUIT_WAIT`]: leave.
     Leave,
 }
 
 /// The launch decision (module docs): `lock` as tried, what `ping` found, what is known of
-/// the lock's holder, and whether [`LOCK_WAIT`] is over.
-pub fn decide(lock: Lock, peer: Peer, holder: Holder, waited_out: bool) -> Launch {
+/// the lock's holder, and how long this launch has `waited` ([`LOCK_WAIT`], [`QUIT_WAIT`]).
+pub fn decide(lock: Lock, peer: Peer, holder: Holder, waited: Duration) -> Launch {
+    // A copy quitting: it says so, or it said so and still holds the lock (its socket gone).
+    let quit_wait = if waited >= QUIT_WAIT { Launch::Leave } else { Launch::Wait };
     match (lock, peer) {
         (_, Peer::Answers) => Launch::HandOff,
-        (_, Peer::Quitting) => Launch::Wait,
-        (Lock::Busy, Peer::Silent) if holder.answered && holder.alive => Launch::Wait,
-        (Lock::Busy, Peer::Silent) if waited_out => Launch::Leave,
+        (_, Peer::Quitting) => quit_wait,
+        (Lock::Busy, Peer::Silent) if holder.answered && holder.alive => quit_wait,
+        (Lock::Busy, Peer::Silent) if waited >= LOCK_WAIT => Launch::Leave,
         (Lock::Busy, Peer::Silent) => Launch::Wait,
         (Lock::Held | Lock::Unavailable, Peer::Silent) => Launch::Manage,
     }
 }
 
 /// Whether a hand-off asks the running copy to show its Settings: not when it started less
-/// than [`HANDOFF_QUIET`] ago (an earlier version, which does not say, is asked).
-pub fn shows_settings(uptime: Option<Duration>) -> bool {
-    uptime.is_none_or(|u| u >= HANDOFF_QUIET)
+/// than [`HANDOFF_QUIET`] ago (an earlier version, which does not say, is asked), nor while
+/// the login is less than [`LOGIN_QUIET`] old ([`reopen_shows_settings`]), nor from a copy
+/// launchd started (`by_launchd`: the agent at the session's start or at its registration,
+/// never the user).
+pub fn shows_settings(uptime: Option<Duration>, since_login: Option<Duration>, by_launchd: bool) -> bool {
+    !by_launchd && uptime.is_none_or(|u| u >= HANDOFF_QUIET) && reopen_shows_settings(since_login)
+}
+
+/// Whether opening the app again while it runs (a reopen) shows its Settings: not while the
+/// login is less than [`LOGIN_QUIET`] old (the login item after macOS reopened the app, or
+/// after the agent started it). Unknown login: shown.
+pub fn reopen_shows_settings(since_login: Option<Duration>) -> bool {
+    since_login.is_none_or(|d| d >= LOGIN_QUIET)
 }
 
 fn try_lock() -> (Lock, Option<File>) {
@@ -216,6 +243,15 @@ fn ping() -> (Pong, PathBuf) {
     (Pong::SILENT, places.swap_remove(0))
 }
 
+/// Whether a Stage Manager runs now: one answers `ping` (quitting or not), or another
+/// process holds the lock. For a process that never manages (the guardian): a lock it gets is
+/// let go at once.
+pub fn running() -> bool {
+    let (lock, file) = try_lock();
+    drop(file);
+    lock == Lock::Busy || ping().0.peer != Peer::Silent
+}
+
 /// Claims the single instance (module docs). `Manage` with the lock kept for the process's
 /// life; `HandOff` after asking the running copy to show its Settings; `Leave` when a copy
 /// holds the lock and never answered. Runs before anything is managed.
@@ -233,7 +269,7 @@ pub fn claim() -> Launch {
             Lock::Busy => Holder { answered, alive: holder_pid().or(ping_pid).is_some_and(alive) },
             Lock::Held | Lock::Unavailable => Holder::default(),
         };
-        let launch = decide(lock, pong.peer, holder, start.elapsed() >= LOCK_WAIT);
+        let launch = decide(lock, pong.peer, holder, start.elapsed());
         match launch {
             Launch::Manage => {
                 if let Some(mut f) = file {
@@ -249,13 +285,17 @@ pub fn claim() -> Launch {
                 // Opened again (`open -n`, a terminal): the running one shows its Settings, the
                 // way back when the menu bar icon is hidden. (A Finder or Spotlight launch
                 // never gets here: macOS hands it to the running app as a reopen.)
-                if shows_settings(pong.uptime) {
+                let by_launchd = super::login_item::started() == super::login_item::Started::Agent;
+                let since_login = super::login_item::since_login();
+                if shows_settings(pong.uptime, since_login, by_launchd) {
                     let shown = ctl::request_at(&place, "settings", PING_TIMEOUT).is_ok();
                     tracing::info!(shown, "Stage Manager is already running; asked it to show Settings");
                 } else {
                     tracing::info!(
                         uptime_ms = pong.uptime.map(|u| u.as_millis() as u64),
-                        "Stage Manager is already running and started moments ago (two launches at login); leaving without showing its Settings"
+                        login_ago_s = since_login.map(|d| d.as_secs()),
+                        by_launchd,
+                        "Stage Manager is already running (a second launch at login, or launchd's at the agent's registration); leaving without showing its Settings"
                     );
                 }
                 return launch;
@@ -269,6 +309,14 @@ pub fn claim() -> Launch {
                     said = Some(pong.peer);
                 }
                 std::thread::sleep(LOCK_RETRY);
+            }
+            Launch::Leave if answered => {
+                tracing::error!(
+                    lock = %lock_path().display(),
+                    waited_s = start.elapsed().as_secs(),
+                    "another Stage Manager said it was quitting and is still not gone; not starting a second one (quit it in Activity Monitor, then open Stage Manager again)"
+                );
+                return launch;
             }
             Launch::Leave => {
                 tracing::error!(
@@ -289,19 +337,21 @@ mod tests {
     const SILENT_LIVE: Holder = Holder { answered: false, alive: true };
     const GONE: Holder = Holder { answered: true, alive: false };
 
+    const NOW: Duration = Duration::ZERO;
+
     #[test]
     fn one_copy_manages() {
-        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), false), Launch::Manage, "the lock is ours, nothing answers");
-        assert_eq!(decide(Lock::Unavailable, Peer::Silent, Holder::default(), false), Launch::Manage, "no lock to be had: the socket decides");
+        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), NOW), Launch::Manage, "the lock is ours, nothing answers");
+        assert_eq!(decide(Lock::Unavailable, Peer::Silent, Holder::default(), NOW), Launch::Manage, "no lock to be had: the socket decides");
     }
 
     #[test]
     fn a_copy_that_answers_gets_the_hand_off_lock_or_not() {
         for lock in [Lock::Held, Lock::Busy, Lock::Unavailable] {
-            assert_eq!(decide(lock, Peer::Answers, Holder::default(), false), Launch::HandOff, "{lock:?}");
+            assert_eq!(decide(lock, Peer::Answers, Holder::default(), NOW), Launch::HandOff, "{lock:?}");
         }
         // An earlier version takes no lock: ours, but it answers.
-        assert_eq!(decide(Lock::Held, Peer::Answers, Holder::default(), true), Launch::HandOff);
+        assert_eq!(decide(Lock::Held, Peer::Answers, Holder::default(), QUIT_WAIT), Launch::HandOff);
     }
 
     /// The review of 8A, M1: a relaunch while a copy quits waits for it (its quit can take
@@ -310,12 +360,26 @@ mod tests {
     #[test]
     fn a_quitting_copy_is_waited_for_then_this_one_manages() {
         for lock in [Lock::Held, Lock::Busy, Lock::Unavailable] {
-            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), true), Launch::Wait, "{lock:?}, past the bound");
+            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), LOCK_WAIT), Launch::Wait, "{lock:?}, past the lock's bound");
         }
         // It removed its socket and still holds the lock: waited for while it lives.
-        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, true), Launch::Wait);
+        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, LOCK_WAIT), Launch::Wait);
         // Gone: the lock is free.
-        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), true), Launch::Manage);
+        assert_eq!(decide(Lock::Held, Peer::Silent, Holder::default(), QUIT_WAIT), Launch::Manage);
+    }
+
+    /// The 1.7 review: a copy that said "quitting" and then hung kept a relaunch waiting
+    /// forever. Waited for [`QUIT_WAIT`], then left alone, as a hung copy is.
+    #[test]
+    fn a_quit_that_hangs_is_waited_for_a_bounded_time() {
+        let before = QUIT_WAIT - Duration::from_millis(1);
+        for lock in [Lock::Held, Lock::Busy, Lock::Unavailable] {
+            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), before), Launch::Wait, "{lock:?}");
+            assert_eq!(decide(lock, Peer::Quitting, Holder::default(), QUIT_WAIT), Launch::Leave, "{lock:?}");
+        }
+        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, before), Launch::Wait, "its socket gone, still alive");
+        assert_eq!(decide(Lock::Busy, Peer::Silent, LIVE, QUIT_WAIT), Launch::Leave);
+        assert_eq!(decide(Lock::Held, Peer::Silent, LIVE, QUIT_WAIT), Launch::Manage, "it is gone: the lock is ours");
     }
 
     /// Fable M1: a running copy slow to answer (stopped under a debugger, beach-balling, its
@@ -323,9 +387,9 @@ mod tests {
     /// waited for only [`LOCK_WAIT`].
     #[test]
     fn a_silent_lock_holder_is_waited_for_then_left_alone() {
-        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, false), Launch::Wait);
-        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, true), Launch::Leave, "never answered: bounded");
-        assert_eq!(decide(Lock::Busy, Peer::Silent, GONE, true), Launch::Leave, "its pid is gone, the lock still busy");
+        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, NOW), Launch::Wait);
+        assert_eq!(decide(Lock::Busy, Peer::Silent, SILENT_LIVE, LOCK_WAIT), Launch::Leave, "never answered: bounded");
+        assert_eq!(decide(Lock::Busy, Peer::Silent, GONE, LOCK_WAIT), Launch::Leave, "its pid is gone, the lock still busy");
     }
 
     #[test]
@@ -343,10 +407,26 @@ mod tests {
     /// The review of 8A, L2: two launches at login do not open the Settings.
     #[test]
     fn a_copy_started_moments_ago_shows_no_settings_on_a_hand_off() {
-        assert!(!shows_settings(Some(Duration::from_secs(3))));
-        assert!(shows_settings(Some(HANDOFF_QUIET)));
-        assert!(shows_settings(Some(Duration::from_secs(3600))));
-        assert!(shows_settings(None), "an earlier version does not say");
+        let late = Some(Duration::from_secs(3600));
+        assert!(!shows_settings(Some(Duration::from_secs(3)), late, false));
+        assert!(shows_settings(Some(HANDOFF_QUIET), late, false));
+        assert!(shows_settings(Some(Duration::from_secs(3600)), late, false));
+        assert!(shows_settings(None, late, false), "an earlier version does not say");
+        assert!(shows_settings(None, None, false), "no login time known");
+    }
+
+    /// Rounds early-start, reopen-list: macOS reopens the app (or the agent starts it) 3 s
+    /// after the login; the login item comes 25 s later, past [`HANDOFF_QUIET`] of its
+    /// uptime: no Settings. Nor from launchd's own copy at the agent's registration,
+    /// whenever it comes.
+    #[test]
+    fn a_second_launch_at_login_or_launchds_own_shows_no_settings() {
+        let s = Duration::from_secs;
+        assert!(!shows_settings(Some(s(25)), Some(s(27)), false), "the login item after the reopened copy");
+        assert!(shows_settings(Some(s(25)), Some(LOGIN_QUIET), false), "past the login's quiet: the user's");
+        assert!(!shows_settings(Some(s(3600)), Some(s(7200)), true), "launchd's copy at the registration");
+        assert!(!reopen_shows_settings(Some(s(30))), "a reopen at login");
+        assert!(reopen_shows_settings(Some(s(600))) && reopen_shows_settings(None));
     }
 
     #[test]

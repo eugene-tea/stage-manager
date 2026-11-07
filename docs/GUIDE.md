@@ -57,7 +57,11 @@ If you close the welcome window early, the menu bar icon's menu keeps reminding 
 missing, with an **Allow…** item for each.
 
 Stage Manager also adds itself to your login items the first time it runs from
-Applications, so it starts when you log in. You can turn that off in Settings.
+Applications, so it starts when you log in. You can turn that off in Settings. When you
+restart or log out with "Reopen windows when logging back in" on, macOS reopens it with your
+other apps, earlier than login items open, so their windows go straight to their stages;
+for that its icon shows in the Dock for a moment as you log out (`[app] reopen_with_apps`
+turns this off).
 
 ## How it works
 
@@ -75,7 +79,7 @@ and when you come back to a stage, every window is exactly where you left it.
 Each card shows the stage's windows in miniature, with the app's icon in the corner. As on
 Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity = 1` makes
 them opaque); the card under the pointer turns solid as it grows (`[cards]
-hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through). The strip sits below your windows: when a window covers it, it slides away.
+hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through). The strip sits below your windows: a window over the cards covers them, and when a window comes within about 50 points of the screen's left edge, the strip slides away.
 Rest the pointer at the left edge of the screen to bring it back.
 
 ### Switching
@@ -134,6 +138,21 @@ its app would open there: with that app's windows if it has a stage on that Desk
 a stage of its own, shown in front. Move windows of several apps at once and each app gets
 its own stage; the front one is shown and the rest wait in the strip.
 
+### Screens
+
+Every screen has its own strip and stages, as with Apple's. A window you drag to another
+screen starts a stage of its own there, in front; the stage that was in front there goes to
+a card, and the screen you took it from brings its most recent card forward. Clicking a card
+changes only that screen. A new app opens on the screen you are typing on. Close the lid and
+that screen's stages come to the remaining screen: the one in front stays in front, the
+others become cards; open it and the stages macOS moves back are its own again. Each screen
+hides its stages in a corner of its own, one with no screen beyond it. After a restart each
+screen's stages come back on that screen, by the screen itself, not the cable it hangs on.
+
+`[displays] main_only = true` keeps the first version's way: only the main screen (the one
+with the menu bar) is managed, and a window moved to another screen leaves its stage and is
+left alone there. It is read at launch: quit and open Stage Manager again after changing it.
+
 ### After a restart
 
 When you restart your Mac or log in again, your stages come back as your apps reopen their
@@ -147,25 +166,24 @@ back too: an app that quits keeps its windows' places in your saved stages for t
 Some apps (Electron ones, VS Code or Slack say) reopen their windows on whichever Desktop
 shows at login rather than their own; their stages are made again there.
 
-Once things settle, those windows are listed at the top of the menu bar menu, under
-**Reopened on Another Desktop**, and the menu bar icon shows a small dot. Each entry names
-the app and window, the Desktop it belongs on and the one it is on now. Click an entry to
-bring that window forward, then drag it to its own Desktop in Mission Control. An entry
-leaves the list by itself once its window shows on its own Desktop; **Dismiss** clears the
-whole list. macOS does not tell apps which number Mission Control gives a Desktop, so the
-list names a Desktop by the apps on it ("the Desktop with Terminal and Mail") or as "this
-Desktop". `[stages] restore_notice = false` turns the list off.
-
 What it cannot do:
 
 - It does not open apps. macOS does that when "Reopen windows when logging back in" is on
   in the Log Out or Restart dialog. An app macOS did not reopen loses its saved windows
   once things settle: opened later, it goes where any app you open goes.
 - It cannot move a window to another Desktop. A Desktop's stages come back as far as macOS
-  puts their windows there; the ones on another Desktop are listed in the menu.
+  puts their windows there; a window reopened on another Desktop keeps a stage of its own
+  there, and dragging it to its own Desktop in Mission Control takes its stage with it.
 - A window it is not sure about (two of one app with the same name, say) stays in view and
   goes where a new window of its app would.
-- On a main screen of another size, windows keep the places their apps give them.
+- On a screen of another size than the one they were saved on, windows keep the places
+  their apps give them.
+
+Most windows come back where their apps put them. One an app reopens at under half its
+saved size (VS Code sometimes does) gets its saved size and place back the first time it
+shows, in front or when you click its card, once its name says it is that window; one you
+move or resize first keeps yours. `[restore] saved_size = false` keeps the size the app
+gives it.
 
 `[stages] restore_after_restart = false` (or **Bring stages back after a restart** in
 Settings → Stages) turns it off: after a restart every app starts in a stage of its own, as
@@ -210,7 +228,7 @@ looks empty. With Screen Recording allowed, the patch is a picture of the deskto
 any wallpaper, and the icons and widgets in that corner, which you can still click and drag.
 Without it, the patch is drawn from your wallpaper's file. If a second screen sits beyond
 that corner, a free corner is used instead. Each Desktop has its own patch, which slides in
-with it.
+with it, and each screen's corner has its own, drawn from that screen's desktop.
 
 ## Settings
 
@@ -333,7 +351,10 @@ You can then turn Apple's Stage Manager back on from Control Center.
 
 **Nothing happens.** Look at the menu bar icon's menu. Stage Manager says there if it needs
 Accessibility, or if Apple's Stage Manager is on. While Apple's is on, Stage Manager steps
-aside and leaves your windows alone.
+aside and leaves your windows alone. Rarely, after macOS recovers from a hang, it stops
+telling apps like Stage Manager about any window until you log out; the menu then says
+"macOS isn't reporting windows". Your stages are kept, and come back by themselves if macOS
+starts reporting windows again.
 
 **Cards show plain shapes instead of window pictures.** Screen Recording is off or macOS
 refused it. Choose **Allow Screen Recording…** from the menu.

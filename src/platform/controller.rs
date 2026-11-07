@@ -99,7 +99,8 @@ use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply
 use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
-use crate::engine::displays::{off_every_display, off_screen_not_ours, on_other_display};
+use crate::engine::displays::{display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display};
+use crate::engine::early_start;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::stale_activation;
@@ -114,26 +115,33 @@ use crate::engine::phase::{self, Hold};
 use crate::engine::show_desktop::{self, CloseWatch, Cover, CoverLook, PanelPlace, PushedCover, RevealFacts};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{
-    Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
+    Action, Closing, Display, DisplayId, Home, Model, Observation, SpaceId, StageId, SwitchRefused, Target, WindowId, WindowMeta, WindowRole,
+    WindowState,
 };
 use crate::engine::stage_area::{FitOptions, capacity_for, stage_inset, strip_width};
 use crate::engine::persist::{LaunchHints, StateFile};
-use crate::engine::restore::{self, AppQuiet, End, Restore, Settling};
+use crate::engine::restore::{self, AppQuiet, End, Restore, Settling, Summary};
 use crate::engine::rules::{Decision, RuleAction, ShiftEffect};
+use crate::engine::save_clock::SaveClock;
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
-use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEvent, StripSnapshot, Transition};
+use crate::ui::strip_model::{self, CardSnapshot, CardWindow, LateNote, StripDrop, StripEvent, StripSnapshot, Transition};
 use crate::ui::{motion_math, transition_plan};
 
 mod arrival;
+mod ax_blind;
 mod corner_still;
 mod dock_order;
 mod hide;
-mod notice;
 mod raise_order;
 mod stale;
 
-pub use notice::NoticeCommand;
+/// A focus this soon after a click or key press is the user's: the window is touched
+/// ([`Model::touch_window`]).
+const USER_FOCUS: Duration = Duration::from_millis(1000);
+/// A stage switch this soon after a click or key press is the user's: its windows are
+/// touched ([`Model::touch_stage`]).
+const USER_SWITCH: Duration = Duration::from_millis(1500);
 
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
@@ -143,9 +151,6 @@ const PRESSED_OBS_MAX: Duration = Duration::from_secs(1);
 /// by default (`[windows] focus_echo_ms`).
 pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
 
-/// Quiet time before `state.json` is written after a change.
-const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
-
 /// How long before its app's quit notice a destroyed window still counts as quit with it (an
 /// app closes its windows as it quits, a moment before macOS says it terminated; round 8H).
 const CLOSING_KEEP: Duration = Duration::from_secs(10);
@@ -154,9 +159,6 @@ const CLOSING_KEEP: Duration = Duration::from_secs(10);
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
-
-/// A busy stream of changes is still saved at least this often.
-const SAVE_MAX_DELAY: Duration = Duration::from_secs(3);
 
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
@@ -187,6 +189,66 @@ fn sooner(due: Option<Instant>, at: Instant) -> Instant {
     due.map_or(at, |d| d.min(at))
 }
 
+/// One screen's corner patch as the WM thread plans it (round displays-2: a patch per
+/// screen, each with its own rectangle, order, Show Desktop state and plan).
+#[derive(Default)]
+struct PatchTrack {
+    /// The last plan sent to the main thread.
+    sent: Option<crate::ui::corner_patch::PatchPlan>,
+    /// The rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
+    rect: Option<Rect>,
+    /// The rectangle in use on each of the screen's Desktops (the engine's Space ids): each
+    /// Desktop has a panel of its own ([`crate::ui::corner_patch`]), steady on its own.
+    rects: HashMap<u64, Rect>,
+    /// The order as last checked ([`crate::engine::corner_patch::order_step`]).
+    order: crate::engine::corner_patch::OrderState,
+    /// Why the last plan hid the patch (logged once a change).
+    why: Option<&'static str>,
+    /// The patch was once found ordered right (logged once).
+    honoured: bool,
+    /// The Desktop's windows while Show Desktop is listed: their slide back is its close's
+    /// first sign ([`show_desktop::CloseWatch`]).
+    reveal_close: CloseWatch,
+    /// Where macOS listed the panel at the last plan during Show Desktop (logged when it
+    /// changes; `None` outside Show Desktop).
+    reveal_panel: Option<PanelPlace>,
+    /// The rectangle through Show Desktop: grown over the parked windows macOS pushes into
+    /// view, until they are back ([`show_desktop::PushedCover`]).
+    reveal_cover: PushedCover,
+    /// Since when the list shows this screen's Desktop sliding (the main screen's slide is
+    /// the phase's clock, [`phase::Tracker::slide_seen`]; another screen's is kept here).
+    slide_since: Option<Instant>,
+}
+
+/// Another screen's full-screen settle and overview watch, and what its once-a-second check
+/// counts (round displays-2). The main screen's live on the controller (`settle`, `overview`,
+/// `absent`) and feed the phase; each other screen has its own, so a full-screen app or an
+/// overview on one screen never gates windows arriving on another, and a window left behind
+/// on another screen's Desktop is let go as on the main one.
+#[derive(Default)]
+struct ScreenWatch {
+    settle: Settle,
+    overview: OverviewWatch,
+    /// A full-screen app's Space shows there (logged once a change).
+    fullscreen: bool,
+    /// Windows of its Desktop missing from the screen for no visible reason, by the checks
+    /// in a row ([`SPACE_CHECKS`]).
+    absent: HashMap<u32, u32>,
+}
+
+/// What another screen's window list shows ([`Controller::other_screen_seen`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtherSeen {
+    /// Mission Control, App Exposé or Show Desktop shows there (or just closed).
+    Overview,
+    /// A full-screen animation runs.
+    Animation,
+    /// A full-screen app's Space.
+    FullScreen,
+    /// A Desktop.
+    Desktop,
+}
+
 /// Finder's desktop icons for the corner patch, read on a thread of their own
 /// ([`super::desktop_items::start_read`]).
 #[derive(Default)]
@@ -194,8 +256,9 @@ struct PatchItems {
     /// The icons (grown by their labels) of the last read that knew them; `None` before one,
     /// or after a read found too many to read: the patch stays off.
     known: Option<Vec<Rect>>,
-    /// The rectangle the last read was started for.
-    read_for: Option<Rect>,
+    /// The rectangle the last read was started for, per screen (a new rectangle on a screen
+    /// starts a read; the icons read are every screen's).
+    read_for: BTreeMap<u32, Rect>,
     /// When the next read is due (`None`: at once).
     due: Option<Instant>,
     /// The read running.
@@ -215,6 +278,14 @@ const SPACE_POLL: Duration = Duration::from_secs(1);
 
 /// A window counts as moved to or gone from the shown Space after this many checks in a row.
 const SPACE_CHECKS: u32 = 2;
+
+/// For this long after the set of displays changed, a managed window found on another
+/// display than the model has it on is macOS's doing (the lid opened: a screen that came
+/// back gets the windows it had, at the frames they had there, a parked one at its old
+/// corner; 11-05 16:27:31, two seconds after the screen), never the user's drag. The engine
+/// takes both by where the window is listed ([`Model::windows_moved_to_display`]); the log
+/// says which.
+const DISPLAY_SETTLE: Duration = Duration::from_secs(10);
 
 /// The window list right after a Space change notice may show two Desktops at once (the one
 /// sliding out and the one sliding in, [`Model::shows_two_desktops`]): read again for at most
@@ -255,9 +326,6 @@ pub enum UiUpdate {
     StripVisible(bool),
     /// The wallpaper corner patch's plan (`[windows] corner_patch`).
     CornerPatch(crate::ui::corner_patch::PatchPlan),
-    /// The windows a restart brought back on another Desktop, as the status menu lists them
-    /// (empty: no list; [`notice`]).
-    DesktopNotice(Vec<crate::ui::status_menu::NoticeLine>),
 }
 
 type UiSink = Box<dyn Fn(UiUpdate) + Send + Sync>;
@@ -910,7 +978,8 @@ pub struct Controller {
     displays: Vec<Display>,
     strip_visible: bool,
     echoes: Echoes,
-    dirty: Option<(Instant, Instant)>,
+    /// When `state.json` is written next ([`SaveClock`]: dirty until a save succeeds).
+    save: SaveClock,
     strip_dirty: bool,
     /// Saved entries of windows just destroyed, read before the model forgot them: those of an
     /// app that quits within [`CLOSING_KEEP`] are kept for `state.json` (round 8H,
@@ -943,22 +1012,11 @@ pub struct Controller {
     fallback_said: HashSet<&'static str>,
     /// `[windows] hide_parked_apps`: the apps we hid ([`hide`]).
     hides: hide::Hides,
-    /// The corner patch's last plan sent to the main thread.
-    patch_sent: Option<crate::ui::corner_patch::PatchPlan>,
-    /// The desktop notice's lines last sent to the main thread ([`notice`]).
-    notice_sent: Option<Vec<crate::ui::status_menu::NoticeLine>>,
-    /// The corner patch's rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
-    patch_rect: Option<Rect>,
-    /// The patch's rectangle in use on each Desktop (the engine's Space ids): each Desktop
-    /// has a panel of its own ([`crate::ui::corner_patch`]), steady on its own.
-    patch_rects: HashMap<u64, Rect>,
-    /// The patch's order as last checked ([`crate::engine::corner_patch::order_step`]).
-    patch_order: crate::engine::corner_patch::OrderState,
-    /// Why the last plan hid the patch (logged once a change).
-    patch_why: Option<&'static str>,
-    /// The patch was once found ordered right (logged once).
-    patch_honoured: bool,
-    /// Finder's desktop icons as last read for the patch ([`PatchItems`]).
+    /// Each screen's corner patch as planned here ([`PatchTrack`], by the screen's id; round
+    /// displays-2).
+    patches: BTreeMap<u32, PatchTrack>,
+    /// Finder's desktop icons as last read for the patches ([`PatchItems`]; the icons are
+    /// read for every screen at once).
     patch_items: PatchItems,
     /// Widgets shown on the desktop were logged as possibly under the patch.
     patch_widgets_logged: bool,
@@ -968,6 +1026,10 @@ pub struct Controller {
     /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
     /// when observation started; why and since when. Nothing is built or saved meanwhile.
     build_wait: Option<(session::Blind, Instant)>,
+    /// The launch's stages wait for the screens (round early-start,
+    /// [`early_start::screens_wait`]): why; and when the launch first tried to build.
+    screens_wait: Option<early_start::ScreensWait>,
+    build_tried: Option<Instant>,
     /// The screen is locked (or the session is not on the console): no Space is inferred,
     /// no window is counted gone, and `state.json` is not written until it unlocks.
     locked: bool,
@@ -981,6 +1043,9 @@ pub struct Controller {
     ax_silent_rescan: Option<Instant>,
     /// Waits out full-screen animations.
     settle: Settle,
+    /// The other screens' full-screen settles and overview watches ([`ScreenWatch`], by the
+    /// screen's id; round displays-2): the main screen's are `settle` and `overview`.
+    screens: BTreeMap<u32, ScreenWatch>,
     /// The Desktop and transition axis as one state ([`phase::Tracker`]): a Desktop steady,
     /// a switch's windows held behind their snapshots, a Space change waiting to be
     /// recognized (and for what), a full-screen app's Space; with the settle after a Space
@@ -992,6 +1057,14 @@ pub struct Controller {
     /// When the last animated switch was sent (the desktop's still rests after a while with
     /// no input and no switch, [`desktop_shot::rest`]).
     last_switch: Option<Instant>,
+    /// When the set of displays last changed (a lid closed or opened, a screen plugged in or
+    /// out): for [`DISPLAY_SETTLE`] after it, windows found on another display are macOS's
+    /// doing, not the user's drag ([`Self::follow_display_moves`]).
+    displays_changed_at: Option<Instant>,
+    /// The displays that came at that change (the lid opened), kept through a change after
+    /// it that adds none: within [`DISPLAY_SETTLE`] a window the model has parked elsewhere
+    /// that macOS lists on one of them goes back to it ([`Self::reconcile_parked`]).
+    displays_added: Vec<DisplayId>,
     /// When the latest switch we began started (a batch of ours that parks or focuses): an
     /// activation that fired before it never starts one ([`stale_activation::judge`]).
     our_switch: Option<Instant>,
@@ -1003,15 +1076,6 @@ pub struct Controller {
     /// Mission Control, App Exposé and Show Desktop: no Space is inferred from the window
     /// list while one shows and for a settle after ([`OverviewWatch`]).
     overview: OverviewWatch,
-    /// The Desktop's windows while Show Desktop is listed: their slide back is its close's
-    /// first sign, for the corner patch ([`show_desktop::CloseWatch`]).
-    reveal_close: CloseWatch,
-    /// Where macOS listed the patch's panel at the last plan during Show Desktop (logged when
-    /// it changes; `None` outside Show Desktop).
-    reveal_panel: Option<PanelPlace>,
-    /// The patch's rectangle through Show Desktop: grown over the parked windows macOS pushes
-    /// into view, until they are back ([`show_desktop::PushedCover`]).
-    reveal_cover: PushedCover,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
     /// release. Any event, batch, Space change, config reload, retried restore or window
@@ -1096,12 +1160,14 @@ pub struct Controller {
     /// Space change.
     macos_reveal_at: Option<Instant>,
     /// Shown windows (the active stage's, pinned ones) the window server did not show at the
-    /// last strip snapshot (app hidden, minimized): left out of the strip's overlap test;
-    /// a change seen by the once-a-second check sends a new snapshot.
-    active_off_screen: BTreeSet<u32>,
+    /// last strip snapshot (app hidden, minimized), per display: left out of the strip's
+    /// overlap test; a change seen by the once-a-second check sends a new snapshot.
+    active_off_screen: HashMap<DisplayId, BTreeSet<u32>>,
     /// When each app with pending windows was last busy: a quiet one's pending windows are
     /// given up ([`crate::engine::restore`]).
     quiet: AppQuiet,
+    /// Accessibility blind for the session ([`ax_blind`]).
+    ax: ax_blind::AxWatch,
     /// When pending windows were last checked for giving up.
     quiet_checked: Instant,
     /// Each saved Space's last time shown (Unix seconds), from the loaded file and the saves
@@ -1111,6 +1177,10 @@ pub struct Controller {
     /// [`crate::engine::restore::WINDOW`] after the stages were built from `state.json`); `None` once closed
     /// or when there is none.
     settling: Option<Settling>,
+    /// When a window's new title stops taking it to its saved stage
+    /// ([`Settling::rematch_until`], [`Model::end_rematch`]): the restore window may end
+    /// sooner (a first click), this does not.
+    rematch_until: Option<Instant>,
     /// When the waiting entries of apps not running are given up, once the restore window
     /// ended ([`Settling::give_up_absent_at`], [`Controller::give_up_absent`]).
     absent_due: Option<Instant>,
@@ -1194,7 +1264,7 @@ impl Controller {
             displays: Vec::new(),
             strip_visible: true,
             echoes,
-            dirty: None,
+            save: SaveClock::default(),
             strip_dirty: false,
             closing: Vec::new(),
             triggers: Triggers::default(),
@@ -1210,32 +1280,28 @@ impl Controller {
             activation: ActivationRun::default(),
             fallback_said: HashSet::new(),
             hides: hide::Hides::default(),
-            patch_sent: None,
-            notice_sent: None,
-            patch_rect: None,
-            patch_rects: HashMap::new(),
-            patch_order: Default::default(),
-            patch_why: None,
-            patch_honoured: false,
+            patches: BTreeMap::new(),
             patch_items: PatchItems::default(),
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
             build_wait: None,
+            screens_wait: None,
+            build_tried: None,
             locked: false,
             lock_checked: None,
             ax_silent_since: None,
             ax_silent_rescan: None,
             settle: Settle::default(),
+            screens: BTreeMap::new(),
             phase: phase::Tracker::default(),
             space_changes: 0,
             last_switch: None,
+            displays_changed_at: None,
+            displays_added: Vec::new(),
             our_switch: None,
             space_checked: Instant::now(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
-            reveal_close: CloseWatch::default(),
-            reveal_panel: None,
-            reveal_cover: PushedCover::default(),
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
@@ -1263,12 +1329,14 @@ impl Controller {
             stale: stale::StaleHandles::default(),
             user_focus: HashMap::new(),
             patch_fast_until: None,
-            active_off_screen: BTreeSet::new(),
+            active_off_screen: HashMap::new(),
             macos_reveal_at: None,
             quiet: AppQuiet::default(),
             quiet_checked: Instant::now(),
+            ax: ax_blind::AxWatch::default(),
             seen_times: HashMap::new(),
             settling: None,
+            rematch_until: None,
             absent_due: None,
             front_after_restore: false,
             focus_after_restore: false,
@@ -1304,6 +1372,35 @@ impl Controller {
             .unwrap_or(DisplayId(0))
     }
 
+    /// The displays the model manages, the main one first (round displays): the model's,
+    /// else those reported (the main one alone with `[displays] main_only`).
+    fn managed_displays(&self) -> Vec<Display> {
+        if let Some(m) = &self.model {
+            return m.displays().to_vec();
+        }
+        let mut displays = if self.displays.is_empty() { fallback_displays() } else { self.displays.clone() };
+        if self.main_only() {
+            displays.truncate(1);
+        }
+        displays
+    }
+
+    /// `[displays] main_only` as the stages were built with it: read at launch (the model
+    /// keeps it), the config's own value only until the model is built. A changed value
+    /// applies at the next launch; the platform's reads follow the model's, so a reload never
+    /// leaves the two disagreeing about which screens are managed (the Codex review's S3).
+    fn main_only(&self) -> bool {
+        self.model.as_ref().map_or(self.store.config().displays.main_only, |m| m.options().main_only)
+    }
+
+    /// The managed display that shows most of `frame` ([`display_of`], macOS's rule for a
+    /// window across two screens); the main one when none shows a point of it (off screen,
+    /// a park zone's offscreen part).
+    fn display_at(&self, frame: Rect) -> DisplayId {
+        let rects: Vec<(DisplayId, Rect)> = self.managed_displays().iter().map(|d| (d.id, d.frame)).collect();
+        display_of(frame, &rects).unwrap_or_else(|| self.main_display_id())
+    }
+
     /// The engine's view of a tracked window. A child's parent is the frontmost standard
     /// window of the same app (AX does not say which window a dialog or panel belongs to).
     fn meta(&self, ob: &Observer, id: u32, z: &HashMap<u32, usize>) -> Option<WindowMeta> {
@@ -1327,7 +1424,7 @@ impl Controller {
             title: w.title.clone(),
             role,
             frame: w.frame,
-            display: self.main_display_id(),
+            display: self.display_at(w.frame),
         })
     }
 
@@ -1343,16 +1440,16 @@ impl Controller {
     /// of an app that posts no move notice is where the window was before the user moved it.
     fn observe_with(&self, ob: &mut Observer, list: &[windows::CgWindow]) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
-        let space = m.current_space(m.main_display().id);
         let z_order: Vec<WindowId> = list
             .iter()
             .filter(|w| w.onscreen && w.layer == 0)
             .map(|w| WindowId(w.id))
             .filter(|id| m.window(*id).is_some())
             .collect();
+        // The shown Space of every display (round displays).
         let shown: Vec<(u32, Display, bool)> = m
             .windows()
-            .filter(|w| !w.parked && (w.space == space || w.sticky))
+            .filter(|w| !w.parked && (m.is_shown_space(w.space) || w.sticky))
             .map(|w| (w.meta.id.0, *m.display(w.meta.display), w.sticky))
             .collect();
         let mut reads = Vec::new();
@@ -1365,6 +1462,7 @@ impl Controller {
             list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
         let settling = self.phase.space_settling(Instant::now());
         let frames = observed_frames(&reads, &listed, settling);
+        ob.note_frames(frames.iter().map(|(id, f)| (id.0, *f)));
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
     }
 
@@ -1380,7 +1478,6 @@ impl Controller {
     /// the user moved them (the switch keeps these frames as their restore frames).
     fn observe_activation(&self, ob: &Observer, list: &[windows::CgWindow], focused: Option<WindowId>) -> Observation {
         let Some(m) = &self.model else { return Observation::default() };
-        let space = m.current_space(m.main_display().id);
         let z_order: Vec<WindowId> = list
             .iter()
             .filter(|w| w.onscreen && w.layer == 0)
@@ -1398,7 +1495,7 @@ impl Controller {
         let settling = self.phase.space_settling(Instant::now());
         let shown: Vec<(&WindowState, Rect, Option<Rect>)> = m
             .windows()
-            .filter(|w| !w.parked && (w.space == space || w.sticky))
+            .filter(|w| !w.parked && (m.is_shown_space(w.space) || w.sticky))
             .filter_map(|w| Some((w, ob.window(w.meta.id.0)?.frame, listed.get(&w.meta.id.0).copied())))
             .collect();
         let steady: HashSet<DisplayId> = shown
@@ -1512,10 +1609,11 @@ impl Controller {
     /// From the tick: reads the Dock's pid and bar again (Accessibility, the Dock's bounded
     /// timeout) once the last read is [`DOCK_BAR_FRESH`] old, so its size, side, display or
     /// auto-hide changing is caught while nothing else happens; the tap gets it when it
-    /// changed. Not while an overview shows (the shield is off then).
+    /// changed. Not while an overview shows (the shield is off then). Read whatever the
+    /// config: a press's wallpaper and Dock tests see through the Dock's window by it
+    /// ([`Self::dock_bar_now`]).
     fn refresh_dock_bar(&mut self, now: Instant) {
-        let windows = &self.store.config().windows;
-        if !(windows.inert_slivers || windows.corner_patch) || self.overview.showing().is_some() {
+        if self.overview.showing().is_some() {
             return;
         }
         if self.dock_bar.as_ref().is_some_and(|(at, _)| now.duration_since(*at) < DOCK_BAR_FRESH) {
@@ -1532,12 +1630,18 @@ impl Controller {
         }
     }
 
+    /// The Dock's bar as last read ([`Self::refresh_dock_bar`]; unknown: none), for a
+    /// press's hit tests: no Accessibility call on a press.
+    pub(super) fn dock_bar_now(&self) -> sliver::DockBar {
+        self.dock_bar.as_ref().map(|(_, b)| b.clone()).unwrap_or_default()
+    }
+
     /// Finder's desktop icons for the patch at `rect` as known (`None`: not known, the patch
     /// stays off). Takes a finished read's answer, and starts a read (on its own thread,
     /// [`super::desktop_items::start_read`]) for a new rectangle or when one is due: the last
     /// good read [`PATCH_ITEMS_FRESH`] old, a failed one [`items_retry`] old. A read
     /// that fails keeps the icons known. None starts while `quiet` (a drag, the fast tick).
-    fn patch_items(&mut self, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
+    fn patch_items(&mut self, screen: u32, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
         use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
         let answer = match self.patch_items.reading.as_ref().map(|r| r.try_recv()) {
             Some(Ok(answer)) => Some(answer),
@@ -1550,11 +1654,11 @@ impl Controller {
             let said = match answer {
                 Some(DesktopIcons::Icons(icons)) => {
                     let items: Vec<Rect> = icons.into_iter().map(item_reach).collect();
-                    if let Some(r) = p.read_for {
-                        let under = items.iter().filter(|i| i.intersect(&r).is_some()).count();
-                        let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(&r).is_some()));
+                    for (screen, r) in &p.read_for {
+                        let under = items.iter().filter(|i| i.intersect(r).is_some()).count();
+                        let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(r).is_some()));
                         if under > 0 && !was {
-                            tracing::info!(under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
+                            tracing::info!(screen, under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
                         }
                     }
                     p.known = Some(items);
@@ -1594,9 +1698,9 @@ impl Controller {
         }
         let rect = rect?;
         let p = &mut self.patch_items;
-        let due = p.read_for != Some(rect) || p.due.is_none_or(|d| now >= d);
+        let due = p.read_for.get(&screen) != Some(&rect) || p.due.is_none_or(|d| now >= d);
         if due && p.reading.is_none() && !quiet {
-            p.read_for = Some(rect);
+            p.read_for.insert(screen, rect);
             p.due = Some(now + PATCH_ITEMS_FRESH);
             p.reading = super::desktop_items::start_read();
         }
@@ -1609,17 +1713,15 @@ impl Controller {
         self.patch_items.known.clone()
     }
 
-    /// Works out the wallpaper corner patch's plan ([`crate::engine::corner_patch`]) and sends
-    /// it to the main thread when it changed. Reads the window server's on-screen list only
-    /// while `[windows] corner_patch` is on; checks the patch's order in it every time (an
+    /// Works out the wallpaper corner patch's plan for every screen ([`crate::engine::corner_patch`];
+    /// one patch per screen, round displays-2) and sends each to the main thread when it
+    /// changed. Reads the window server's on-screen list only while `[windows] corner_patch`
+    /// is on, once for every screen; checks each patch's order in it every time (an
     /// activation raising a parked window undoes it), and has it ordered again when it was
     /// right and is not any more. Returns the list when it read one, for the rest of the tick
     /// ([`super::sliver_tap::refresh`]).
     fn update_patch(&mut self) -> Option<Vec<windows::CgWindow>> {
-        use crate::engine::corner_patch::{
-            Listed, PatchFacts, desktop_slides, order_step, ordered_right, patch_rect, slide_waits, steady_rect, visibility, would_be_right,
-        };
-        use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
+        use crate::ui::corner_patch::PatchPlan;
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.patch_reach(), self.space_changes);
         // Mission Control and App Exposé: the panel is Stationary (round show-desktop-patch;
@@ -1648,7 +1750,8 @@ impl Controller {
             self.look_for_overview(&list, display, now);
             early = Some(list);
         }
-        if on && !self.phase.changing() && self.overview.showing() == Some(Overview::MissionControl) && self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()) {
+        let any_shown = self.patches.values().any(|t| t.sent.as_ref().is_some_and(|p| p.show.is_some()));
+        if on && !self.phase.changing() && self.overview.showing() == Some(Overview::MissionControl) && any_shown {
             return early;
         }
         // A Space change being recognized: no plan. Each Desktop has its own panel, which
@@ -1658,255 +1761,304 @@ impl Controller {
         if on && self.phase.changing() && self.model.is_some() {
             return None;
         }
-        let mut read = None;
-        let mut reorder = self.patch_sent.as_ref().map_or(0, |p| p.reorder);
-        let plan = match &self.model {
-            Some(m) if on => {
-                let list = early.take().unwrap_or_else(windows::on_screen);
-                let own = std::process::id() as i32;
-                let main = m.main_display();
-                let display = main.frame;
-                // Only those listed in the park zone (8L6): one the model has parked but the
-                // window server lists elsewhere shows there, and grew the patch's rectangle
-                // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
-                // This Desktop's parked windows only: another Desktop's listed on screen means
-                // it slides in (or out) before the Space change's notice.
-                let here = m.current_space(main.id);
-                // With the windows whose restore failed while they are still listed in the
-                // zone (W4): their slivers are there, whatever the model says.
-                let model_parked: HashSet<u32> = shield_parked(
-                    m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0),
-                    self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
-                );
-                let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
-                let parked = parked_in_zone(&list, model_parked.iter().copied(), main.frame, main.visible, main.corner);
-                // Show Desktop pushes the parked windows partly into view (round
-                // show-desktop-patch, part 2): the patch covers what of them shows, until they
-                // are back at their park frames.
-                let show_desktop = self.overview.show_desktop_up(now);
-                let parked_listed: Vec<(u32, Rect)> =
-                    list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| (w.id, w.bounds)).collect();
-                let cover = self.reveal_cover.see(&CoverLook {
-                    up: show_desktop,
-                    parked: &parked_listed,
-                    in_zone: &parked,
-                    in_use: self.patch_rects.get(&here.0).copied(),
-                    display,
-                    reach,
-                    cap: reveal_cap(display, main.corner, desktop_shot::kept_region()),
-                    now,
-                });
-                // This Desktop's windows as listed while Show Desktop is: their slide back is its
-                // close's first sign (round show-desktop-patch).
-                let listed_sd = self.overview.showing() == Some(Overview::ShowDesktop);
-                let ours: Vec<(u32, Rect)> = if listed_sd {
-                    list.iter()
-                        .filter(|w| w.layer == 0 && m.window(WindowId(w.id)).is_some_and(|x| x.space == here))
-                        .map(|w| (w.id, w.bounds))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                // A Desktop slides before the Space change's notice (10-23: the parked windows
-                // listed at x=110, all together; at 11:51 the next Desktop's listed in the zone
-                // and planned as this one's): the plan stays as it was, so the panel slides away
-                // with its Desktop drawn and is there when it slides back.
-                let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
-                // Never while Show Desktop is up or its cover held: it moves the parked windows
-                // out of the zone too.
-                let slides = !show_desktop
-                    && !self.reveal_cover.holding()
-                    && (elsewhere || parked.is_empty())
-                    && desktop_slides(model_parked.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner);
-                self.phase.slide_seen(slides, now);
-                let shown_now = self.patch_sent.as_ref().is_some_and(|p| p.show.is_some());
-                if slide_waits(self.phase.sliding_for(now), shown_now) {
-                    if self.patch_why != Some("the Desktop slides") {
-                        tracing::debug!("corner patch: the Desktop slides; the plan stays as it was");
-                        self.patch_why = Some("the Desktop slides");
-                    }
-                    return Some(list);
-                }
-                // While the cover is held every parked window listed counts as parked, wherever
-                // Show Desktop put it: the patch is ordered just above them and never taken for
-                // over a shown window there.
-                let parked: HashSet<u32> = match cover {
-                    Cover::Held(_) => parked.into_iter().chain(parked_listed.iter().map(|(id, _)| *id)).collect(),
-                    _ => parked,
-                };
-                let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
-                let usual = patch_rect(&slivers, display, reach);
-                let rect = match cover {
-                    Cover::Held(r) => Some(r),
-                    // The windows are back: the slivers' rectangle at once, not kept at the
-                    // bigger one in use.
-                    Cover::Released => usual,
-                    Cover::Usual => usual.map(|r| steady_rect(self.patch_rects.get(&here.0).copied(), r, reach)),
-                };
-                match cover {
-                    Cover::Held(r) if self.patch_rect != Some(r) => {
-                        tracing::info!(rect = %r, "Show Desktop: the corner patch covers the parked windows it pushes into view");
-                    }
-                    Cover::Released => {
-                        tracing::info!(rect = %rect.map_or_else(|| "none".to_owned(), |r| r.to_string()), "Show Desktop: the parked windows are back; the corner patch covers their slivers");
-                    }
-                    _ => {}
-                }
-                match rect {
-                    Some(r) => self.patch_rects.insert(here.0, r),
-                    None => self.patch_rects.remove(&here.0),
-                };
-                self.patch_rect = rect;
-                let listed: Vec<Listed> =
-                    list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds, drawn: w.alpha > 0.0 && w.pid != own }).collect();
-                // The topmost parked window under the patch: what it is ordered against.
-                let above = rect.and_then(|r| {
-                    list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
-                });
-                // Whether just above it could be right at all (no shown window under it that
-                // reaches the patch); when not, the fallback, without a show to find out.
-                let number = patch_ui::window_number();
-                let possible = match (rect, above) {
-                    (Some(r), Some(a)) => would_be_right(&listed, number.unwrap_or(0), a, r, &parked),
-                    _ => false,
-                };
-                // Checked only while the panel is on screen ordered against that window with
-                // this reorder count, and that order could be right; otherwise not known.
-                let check = match (number, rect, above) {
-                    (Some(n), Some(r), Some(a))
-                        if possible && patch_ui::ordered_against() == Some((a, reorder)) && list.iter().any(|w| w.id == n) =>
-                    {
-                        Some(ordered_right(&listed, n, r, &parked))
-                    }
-                    _ => None,
-                };
-                let was = self.patch_order;
-                let step = order_step(&mut self.patch_order, above, check);
-                if step.reorder {
-                    reorder = reorder.wrapping_add(1);
-                    tracing::debug!("corner patch: no longer just above the parked windows; ordered again");
-                } else if check == Some(true) && !self.patch_honoured {
-                    self.patch_honoured = true;
-                    tracing::info!("corner patch: ordered just above the parked windows (macOS honours the order across apps)");
-                } else if self.patch_order.refused.is_some() && self.patch_order.refused != was.refused {
-                    tracing::info!(
-                        refused_against = self.patch_order.refused,
-                        "corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches (the fallback mode; `ctl state` names it)"
-                    );
-                } else if check.is_some() && check != was.last {
-                    tracing::debug!(?check, "corner patch: order checked");
-                }
-                let ordered = step.ordered;
-                let dragging = input::left_button_down() || self.drag.is_some();
-                let items = self.patch_items(rect, now, dragging || self.wants_fast_tick());
-                // The desktop's still: the patch's picture wherever one can be taken (round
-                // desktop-still-patch), and a switch's cover where a desktop icon lies (8L3).
-                let corner = self.corner_still(rect, items.as_deref(), now);
-                // Show Desktop (round show-desktop-patch): where macOS lists the panel, and the
-                // close's first sign, this Desktop's windows sliding back.
-                let closing = self.reveal_close.see(listed_sd, ours, now);
-                if closing == show_desktop::Closing::Began {
-                    tracing::info!("Show Desktop closes: the windows slide back; the corner patch is planned again");
-                }
-                let panel = if show_desktop {
-                    let listed = number.and_then(|n| list.iter().find(|w| w.id == n)).map(|w| w.bounds);
-                    let asked = self.patch_sent.as_ref().and_then(|p| p.show);
-                    let place = show_desktop::panel_place(listed, patch_ui::placed_at(), asked, display);
-                    if self.reveal_panel != Some(place) {
-                        tracing::info!(listed = ?listed, placed = ?patch_ui::placed_at(), "Show Desktop: the corner patch's panel is {}", place.name());
-                        self.reveal_panel = Some(place);
-                    }
-                    place
-                } else {
-                    self.reveal_panel = None;
-                    PanelPlace::Unknown
-                };
-                let gate = show_desktop::gate(&RevealFacts {
-                    mission_control: self.overview.showing() == Some(Overview::MissionControl),
-                    show_desktop,
-                    closing: closing.is(),
-                    still: matches!(corner.still, crate::engine::patch_still::Still::Ready(_)),
-                    panel,
-                });
-                let facts = PatchFacts {
-                    on,
-                    rect,
-                    // Not the settle after an overview (that is for Space inference): the patch
-                    // comes back with the windows.
-                    overview: gate.err().or(self.phase.changing().then_some(show_desktop::OVERVIEW_UP)),
-                    ordered,
-                    can_order: possible,
-                    fullscreen: self.phase.fullscreen(),
-                    // The same filter as the order's check (`Listed::counts`, the rectangle
-                    // tested by `visibility`).
-                    shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
-                    dragging,
-                    transition: self.phase.switching().is_some(),
-                    items,
-                    still: corner.still,
-                };
-                let visible = visibility(&facts);
-                let why = visible.err();
-                if why != self.patch_why {
-                    if let Some(why) = why {
-                        tracing::debug!(why, "corner patch: hidden by the plan");
-                    }
-                    self.patch_why = why;
-                }
-                let show = visible.ok();
-                read = Some(list);
-                // The test's forced still is compared with the patch's picture (`debug-overlay`).
-                let wanted = desktop_shot::needs_wallpaper() || cover_desktop_forced();
-                let picture = if show.is_none() && corner.picture && wanted { rect } else { None };
-                let clear = rect.is_some_and(|r| crate::engine::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
-                let source = crate::engine::patch_still::source(facts.still, clear);
-                // The icons as last read well, whatever this plan's rectangle (none read for a
-                // plan with no sliver): they are the same on every Desktop, and other Desktops'
-                // panels are checked against them (10-23: `None` here hid them all).
-                PatchPlan {
-                    show,
-                    above: show.and(above),
-                    reorder,
-                    space,
-                    picture,
-                    on: true,
-                    items: self.patch_items.known.clone(),
-                    still: show.and(source.still),
-                    hold: show.is_some() && source.hold,
-                    file: source.file,
-                }
+        let displays: Vec<Display> = if on { self.model.as_ref().map(|m| m.displays().to_vec()).unwrap_or_default() } else { Vec::new() };
+        if displays.is_empty() {
+            // Off, or no model: every screen's patch off (its icons known stay: they do not
+            // depend on the patch; a read is due when the patch is wanted again).
+            self.phase.forget_slide();
+            self.patch_items.read_for.clear();
+            let screens: Vec<u32> = self.patches.keys().copied().collect();
+            for screen in screens {
+                let reorder = self.patches.get(&screen).and_then(|t| t.sent.as_ref()).map_or(0, |p| p.reorder);
+                let track = self.patches.entry(screen).or_default();
+                *track = PatchTrack { sent: track.sent.take(), ..PatchTrack::default() };
+                let plan = PatchPlan { screen, reorder, space, ..PatchPlan::default() };
+                self.send_patch(plan);
             }
-            _ => {
-                self.patch_rect = None;
-                self.patch_rects.clear();
-                self.reveal_cover = PushedCover::default();
-                self.phase.forget_slide();
-                self.patch_order = Default::default();
-                self.patch_why = None;
-                // The icons known stay (they do not depend on the patch); a read is due when
-                // the patch is wanted again.
-                self.patch_items.read_for = None;
-                PatchPlan { show: None, above: None, reorder, space, picture: None, on: false, items: None, still: None, hold: false, file: false }
-            }
-        };
-        if self.patch_sent.as_ref() == Some(&plan) || (self.patch_sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {
-            return read;
+            return None;
         }
-        self.patch_sent = Some(plan.clone());
+        let list = early.take().unwrap_or_else(windows::on_screen);
+        // The screens gone are forgotten (their patches close on the main thread with the
+        // display change).
+        self.patches.retain(|screen, _| displays.iter().any(|d| d.id.0 == *screen));
+        for d in displays {
+            if let Some(plan) = self.plan_patch_on(d, &list, now, reach, space) {
+                self.send_patch(plan);
+            }
+        }
+        Some(list)
+    }
+
+    /// Sends `plan` to the main thread when it differs from the last one sent for its screen
+    /// (a first plan that shows nothing is not sent).
+    fn send_patch(&mut self, plan: crate::ui::corner_patch::PatchPlan) {
+        let track = self.patches.entry(plan.screen).or_default();
+        if track.sent.as_ref() == Some(&plan) || (track.sent.is_none() && plan.show.is_none() && plan.picture.is_none()) {
+            return;
+        }
+        track.sent = Some(plan.clone());
         notify_ui(UiUpdate::CornerPatch(plan));
-        read
+    }
+
+    /// The corner patch's plan for one screen `d` from the window server's list `list`
+    /// ([`Self::update_patch`]); `None` while that screen's Desktop slides (the plan stays as
+    /// it was).
+    fn plan_patch_on(&mut self, d: Display, list: &[windows::CgWindow], now: Instant, reach: crate::engine::corner_patch::Reach, space: u64) -> Option<crate::ui::corner_patch::PatchPlan> {
+        use crate::engine::corner_patch::{
+            Listed, PatchFacts, desktop_slides, order_step, ordered_right, patch_rect, slide_waits, steady_rect, visibility, would_be_right,
+        };
+        use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
+        let screen = d.id.0;
+        let m = self.model.as_ref()?;
+        let is_main = d.id == m.main_display().id;
+        let reorder = self.patches.get(&screen).and_then(|t| t.sent.as_ref()).map_or(0, |p| p.reorder);
+        let mut reorder = reorder;
+        let own = std::process::id() as i32;
+        let display = d.frame;
+        // Only those listed in the park zone (8L6): one the model has parked but the
+        // window server lists elsewhere shows there, and grew the patch's rectangle
+        // (and every switch's cover) to 2087x1316 pt on the owner's Mac (10-16).
+        // This Desktop's parked windows only: another Desktop's listed on screen means
+        // it slides in (or out) before the Space change's notice.
+        let here = m.current_space(d.id);
+        // With the windows whose restore failed while they are still listed in the
+        // zone (W4): their slivers are there, whatever the model says.
+        let model_parked: HashSet<u32> = shield_parked(
+            m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0),
+            self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
+        );
+        let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
+        let parked = parked_in_zone(list, model_parked.iter().copied(), d.frame, d.visible, d.corner);
+        // Show Desktop pushes the parked windows partly into view (round
+        // show-desktop-patch, part 2): the patch covers what of them shows, until they
+        // are back at their park frames.
+        let show_desktop = self.overview.show_desktop_up(now);
+        let parked_listed: Vec<(u32, Rect)> =
+            list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| (w.id, w.bounds)).collect();
+        let track = self.patches.entry(screen).or_default();
+        let cover = track.reveal_cover.see(&CoverLook {
+            up: show_desktop,
+            parked: &parked_listed,
+            in_zone: &parked,
+            in_use: track.rects.get(&here.0).copied(),
+            display,
+            reach,
+            cap: reveal_cap(display, d.corner, desktop_shot::kept_region(screen)),
+            now,
+        });
+        // This Desktop's windows as listed while Show Desktop is: their slide back is its
+        // close's first sign (round show-desktop-patch).
+        let listed_sd = self.overview.showing() == Some(Overview::ShowDesktop);
+        let ours: Vec<(u32, Rect)> = if listed_sd {
+            list.iter()
+                .filter(|w| w.layer == 0 && m.window(WindowId(w.id)).is_some_and(|x| x.space == here))
+                .map(|w| (w.id, w.bounds))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // A Desktop slides before the Space change's notice (10-23: the parked windows
+        // listed at x=110, all together; at 11:51 the next Desktop's listed in the zone
+        // and planned as this one's): the plan stays as it was, so the panel slides away
+        // with its Desktop drawn and is there when it slides back.
+        let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && model_parked.contains(&w.id)).map(|w| w.bounds).collect();
+        let elsewhere = list.iter().any(|w| w.layer == 0 && w.onscreen && parked_elsewhere.contains(&w.id));
+        // Never while Show Desktop is up or its cover held: it moves the parked windows
+        // out of the zone too.
+        let slides = !show_desktop
+            && !track.reveal_cover.holding()
+            && (elsewhere || parked.is_empty())
+            && desktop_slides(model_parked.len(), &listed_parked, elsewhere, d.frame, d.visible, d.corner);
+        // The main screen's slide is the phase's clock (other holds read it); another
+        // screen's is the track's.
+        let sliding_for = if is_main {
+            self.phase.slide_seen(slides, now);
+            self.phase.sliding_for(now)
+        } else {
+            let track = self.patches.entry(screen).or_default();
+            if !slides {
+                track.slide_since = None;
+            }
+            track.slide_since.get_or_insert(now);
+            slides.then(|| now.saturating_duration_since(track.slide_since.unwrap_or(now)))
+        };
+        let track = self.patches.entry(screen).or_default();
+        let shown_now = track.sent.as_ref().is_some_and(|p| p.show.is_some());
+        if slide_waits(sliding_for, shown_now) {
+            if track.why != Some("the Desktop slides") {
+                tracing::debug!(screen, "corner patch: the Desktop slides; the plan stays as it was");
+                track.why = Some("the Desktop slides");
+            }
+            return None;
+        }
+        // While the cover is held every parked window listed counts as parked, wherever
+        // Show Desktop put it: the patch is ordered just above them and never taken for
+        // over a shown window there.
+        let parked: HashSet<u32> = match cover {
+            Cover::Held(_) => parked.into_iter().chain(parked_listed.iter().map(|(id, _)| *id)).collect(),
+            _ => parked,
+        };
+        let slivers: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked.contains(&w.id)).map(|w| w.bounds).collect();
+        let usual = patch_rect(&slivers, display, reach);
+        let rect = match cover {
+            Cover::Held(r) => Some(r),
+            // The windows are back: the slivers' rectangle at once, not kept at the
+            // bigger one in use.
+            Cover::Released => usual,
+            Cover::Usual => usual.map(|r| steady_rect(track.rects.get(&here.0).copied(), r, reach)),
+        };
+        match cover {
+            Cover::Held(r) if track.rect != Some(r) => {
+                tracing::info!(screen, rect = %r, "Show Desktop: the corner patch covers the parked windows it pushes into view");
+            }
+            Cover::Released => {
+                tracing::info!(screen, rect = %rect.map_or_else(|| "none".to_owned(), |r| r.to_string()), "Show Desktop: the parked windows are back; the corner patch covers their slivers");
+            }
+            _ => {}
+        }
+        match rect {
+            Some(r) => track.rects.insert(here.0, r),
+            None => track.rects.remove(&here.0),
+        };
+        track.rect = rect;
+        let listed: Vec<Listed> =
+            list.iter().map(|w| Listed { id: w.id, layer: w.layer, bounds: w.bounds, drawn: w.alpha > 0.0 && w.pid != own }).collect();
+        // The topmost parked window under the patch: what it is ordered against.
+        let above = rect.and_then(|r| {
+            list.iter().find(|w| w.layer == 0 && parked.contains(&w.id) && w.bounds.intersect(&r).is_some()).map(|w| w.id)
+        });
+        // Whether just above it could be right at all (no shown window under it that
+        // reaches the patch); when not, the fallback, without a show to find out.
+        let number = patch_ui::window_number(screen);
+        let possible = match (rect, above) {
+            (Some(r), Some(a)) => would_be_right(&listed, number.unwrap_or(0), a, r, &parked),
+            _ => false,
+        };
+        // Checked only while the panel is on screen ordered against that window with
+        // this reorder count, and that order could be right; otherwise not known.
+        let check = match (number, rect, above) {
+            (Some(n), Some(r), Some(a))
+                if possible && patch_ui::ordered_against(screen) == Some((a, reorder)) && list.iter().any(|w| w.id == n) =>
+            {
+                Some(ordered_right(&listed, n, r, &parked))
+            }
+            _ => None,
+        };
+        let was = track.order;
+        let step = order_step(&mut track.order, above, check);
+        if step.reorder {
+            reorder = reorder.wrapping_add(1);
+            tracing::debug!(screen, "corner patch: no longer just above the parked windows; ordered again");
+        } else if check == Some(true) && !track.honoured {
+            track.honoured = true;
+            tracing::info!(screen, "corner patch: ordered just above the parked windows (macOS honours the order across apps)");
+        } else if track.order.refused.is_some() && track.order.refused != was.refused {
+            tracing::info!(
+                screen,
+                refused_against = track.order.refused,
+                "corner patch: macOS did not keep the patch just above the parked window; it shows only where no window reaches (the fallback mode; `ctl state` names it)"
+            );
+        } else if check.is_some() && check != was.last {
+            tracing::debug!(screen, ?check, "corner patch: order checked");
+        }
+        let ordered = step.ordered;
+        let dragging = input::left_button_down() || self.drag.is_some();
+        let quiet = dragging || self.wants_fast_tick();
+        let items = self.patch_items(screen, rect, now, quiet);
+        // The desktop's still: the patch's picture wherever one can be taken (round
+        // desktop-still-patch), and a switch's cover where a desktop icon lies (8L3).
+        let corner = self.corner_still(&d, rect, items.as_deref(), now);
+        // Show Desktop (round show-desktop-patch): where macOS lists the panel, and the
+        // close's first sign, this Desktop's windows sliding back.
+        let track = self.patches.entry(screen).or_default();
+        let closing = track.reveal_close.see(listed_sd, ours, now);
+        if closing == show_desktop::Closing::Began {
+            tracing::info!(screen, "Show Desktop closes: the windows slide back; the corner patch is planned again");
+        }
+        let panel = if show_desktop {
+            let listed = number.and_then(|n| list.iter().find(|w| w.id == n)).map(|w| w.bounds);
+            let asked = track.sent.as_ref().and_then(|p| p.show);
+            let place = show_desktop::panel_place(listed, patch_ui::placed_at(screen), asked, display);
+            if track.reveal_panel != Some(place) {
+                tracing::info!(screen, listed = ?listed, placed = ?patch_ui::placed_at(screen), "Show Desktop: the corner patch's panel is {}", place.name());
+                track.reveal_panel = Some(place);
+            }
+            place
+        } else {
+            track.reveal_panel = None;
+            PanelPlace::Unknown
+        };
+        let gate = show_desktop::gate(&RevealFacts {
+            mission_control: self.overview.showing() == Some(Overview::MissionControl),
+            show_desktop,
+            closing: closing.is(),
+            still: matches!(corner.still, crate::engine::patch_still::Still::Ready(_)),
+            panel,
+        });
+        let facts = PatchFacts {
+            on: true,
+            rect,
+            // Not the settle after an overview (that is for Space inference): the patch
+            // comes back with the windows.
+            overview: gate.err().or(self.phase.changing().then_some(show_desktop::OVERVIEW_UP)),
+            ordered,
+            can_order: possible,
+            fullscreen: self.phase.fullscreen(),
+            // The same filter as the order's check (`Listed::counts`, the rectangle
+            // tested by `visibility`).
+            shown: listed.iter().filter(|w| w.layer == 0 && w.drawn && !parked.contains(&w.id)).map(|w| w.bounds).collect(),
+            dragging,
+            transition: self.phase.switching().is_some(),
+            items,
+            still: corner.still,
+        };
+        let visible = visibility(&facts);
+        let why = visible.err();
+        if why != track.why {
+            if let Some(why) = why {
+                tracing::debug!(screen, why, "corner patch: hidden by the plan");
+            }
+            track.why = why;
+        }
+        let show = visible.ok();
+        // The test's forced still is compared with the patch's picture (`debug-overlay`).
+        let wanted = desktop_shot::needs_wallpaper(screen) || cover_desktop_forced();
+        let picture = if show.is_none() && corner.picture && wanted { rect } else { None };
+        let clear = rect.is_some_and(|r| crate::engine::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
+        let source = crate::engine::patch_still::source(facts.still, clear);
+        // The icons as last read well, whatever this plan's rectangle (none read for a
+        // plan with no sliver): they are the same on every Desktop, and other Desktops'
+        // panels are checked against them (10-23: `None` here hid them all).
+        Some(PatchPlan {
+            screen,
+            show,
+            above: show.and(above),
+            reorder,
+            space,
+            picture,
+            on: true,
+            items: self.patch_items.known.clone(),
+            still: show.and(source.still),
+            hold: show.is_some() && source.hold,
+            file: source.file,
+        })
     }
 
     /// Keeps the model's stage-area fitting in step with the strip, Apple's settings and
-    /// config, and its park request with config.
+    /// config, and its park request and `[restore] saved_size` with config.
     fn sync_fit(&mut self) {
         let (strip_visible, settings) = (self.strip_visible, self.settings);
         let config = self.store.config();
         if let Some(m) = self.model.as_mut() {
+            // The main display's as the model's own, then each display's against its own
+            // strip's column (round displays-2).
             let fit = fit_options(m.main_display().visible, strip_visible, &settings, config);
             m.set_fit(fit);
+            for d in m.displays().to_vec() {
+                m.set_display_fit(d.id, fit_options(d.visible, strip_visible, &settings, config));
+            }
             m.set_park_request(ParkRequest { inside: config.windows.park_inside, drop: config.windows.park_drop });
+            m.set_saved_size(config.restore.saved_size);
         }
     }
 
@@ -2051,18 +2203,22 @@ impl Controller {
     /// set) differ from those at the last strip snapshot.
     fn active_shown_changed(&self, shown: &HashSet<u32>) -> bool {
         let Some(m) = &self.model else { return false };
-        let Some(active) = m.main_active_stage() else { return !self.active_off_screen.is_empty() };
-        let space = m.current_space(m.main_display().id);
-        let off: BTreeSet<u32> = m
-            .windows()
-            .filter(|w| {
-                !w.parked
-                    && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || w.home == Home::Stage(active))
-            })
-            .map(|w| w.meta.id.0)
-            .filter(|id| !shown.contains(id))
-            .collect();
-        off != self.active_off_screen
+        // Any screen's strip (round displays-2).
+        m.displays().iter().any(|d| {
+            let was = self.active_off_screen.get(&d.id);
+            let Some(active) = m.active_stage(d.id) else { return was.is_some_and(|w| !w.is_empty()) };
+            let space = m.current_space(d.id);
+            let off: BTreeSet<u32> = m
+                .windows()
+                .filter(|w| {
+                    !w.parked
+                        && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || w.home == Home::Stage(active))
+                })
+                .map(|w| w.meta.id.0)
+                .filter(|id| !shown.contains(id))
+                .collect();
+            was.is_none_or(|w| *w != off)
+        })
     }
 
     /// Keeps a window whose `SetFrame` failed registered (with the frame it was asked to
@@ -2113,12 +2269,14 @@ impl Controller {
             self.strays.clear();
             return;
         };
-        let main = *m.main_display();
-        let here = m.current_space(main.id);
+        let displays = m.displays().to_vec();
         let hidden = |pid: i32| self.hides.ours(pid);
+        // Every screen's shown Desktop (round displays-2): a parked window is judged against
+        // its own screen's park zone.
+        let shown_spaces: Vec<SpaceId> = displays.iter().map(|d| m.current_space(d.id)).collect();
         let model_parked: Vec<(u32, i32)> = m
             .windows()
-            .filter(|w| w.parked && w.space == here && w.home != Home::Pinned && !hidden(w.meta.pid))
+            .filter(|w| w.parked && shown_spaces.contains(&w.space) && w.home != Home::Pinned && !hidden(w.meta.pid))
             .map(|w| (w.meta.id.0, w.meta.pid))
             .collect();
         // Shown, closed, or moved on: no stray any more.
@@ -2147,22 +2305,46 @@ impl Controller {
             }
         };
         let parked_here: HashSet<u32> = model_parked.iter().map(|(id, _)| *id).collect();
-        let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked_here.contains(&w.id)).map(|w| w.bounds).collect();
-        let elsewhere = list.iter().any(|w| {
-            w.layer == 0 && w.onscreen && m.window(WindowId(w.id)).is_some_and(|x| x.parked && x.space != here)
-        });
-        if desktop_slides(parked_here.len(), &listed_parked, elsewhere, main.frame, main.visible, main.corner) {
-            return;
+        for d in &displays {
+            let here = m.current_space(d.id);
+            let on_d = |id: u32| m.window(WindowId(id)).is_some_and(|x| x.space == here);
+            let listed_parked: Vec<Rect> = list.iter().filter(|w| w.layer == 0 && parked_here.contains(&w.id) && on_d(w.id)).map(|w| w.bounds).collect();
+            let elsewhere = list.iter().any(|w| {
+                w.layer == 0 && w.onscreen && m.window(WindowId(w.id)).is_some_and(|x| x.parked && x.space != here && m.display_of_space(x.space) == d.id)
+            });
+            let parked_on_d = parked_here.iter().filter(|id| on_d(**id)).count();
+            if desktop_slides(parked_on_d, &listed_parked, elsewhere, d.frame, d.visible, d.corner) {
+                return;
+            }
         }
+        let zone_of = |id: u32| m.window(WindowId(id)).map(|x| *m.display(x.meta.display));
         // The focused window is asked (two Accessibility messages) only once a stray shows.
         let mut focused: Option<Option<u32>> = None;
         let mut displays: Option<Vec<Rect>> = None;
         let mut verdicts: Vec<(u32, Verdict, Rect)> = Vec::new();
+        // A screen came back (the lid opened): a parked window macOS listed in its park zone
+        // is that screen's card, taken by the display reconcile before anything parks it
+        // again elsewhere (11-05 20:26:05: the laptop's two cards, counted on the 5K, were
+        // parked again at the 5K's corner and stayed its cards); one it listed at a normal
+        // frame on the screen that came back shows there, that screen's front (11-06
+        // 12:00:51: Chrome, a card on the 5K since a switch there, was back at its laptop
+        // frame and parked again at the 5K's corner) ([`Model::returned_display`]).
+        let settling_displays = self.displays_settling();
+        let added: &[DisplayId] = if settling_displays { &self.displays_added } else { &[] };
+        let mut returned: Vec<(WindowId, DisplayId, Rect)> = Vec::new();
         for (id, pid) in model_parked {
             let listed = list.iter().find(|w| w.id == id && w.layer == 0);
+            if settling_displays
+                && let Some(w) = listed
+                && let Some(to) = m.window(WindowId(id)).and_then(|x| m.returned_display(w.bounds, x.meta.display, added))
+            {
+                returned.push((WindowId(id), to, w.bounds));
+                self.strays.remove(&id);
+                continue;
+            }
             let seen = match listed {
                 None => Seen::NotListed,
-                Some(w) if main.parks(w.bounds) => Seen::InZone,
+                Some(w) if zone_of(id).is_some_and(|d| d.parks(w.bounds)) => Seen::InZone,
                 Some(_) => Seen::OutOfZone,
             };
             if seen != Seen::OutOfZone {
@@ -2201,6 +2383,10 @@ impl Controller {
             if !matches!(verdict, Verdict::Wait | Verdict::Settled) {
                 verdicts.push((id, verdict, bounds));
             }
+        }
+        if !returned.is_empty() {
+            let z: Vec<WindowId> = list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect();
+            self.take_display_moves(ob, &returned, &z);
         }
         for (id, verdict, bounds) in verdicts {
             let listed = format!("{:.0},{:.0} {:.0}x{:.0}", bounds.x, bounds.y, bounds.w, bounds.h);
@@ -2262,20 +2448,23 @@ impl Controller {
     /// expected from a wallpaper click, with the patch on ([`show_desktop::fast_look`]).
     pub(super) fn reveal_fast(&self, now: Instant) -> bool {
         let patch_on = self.model.is_some() && self.store.config().windows.corner_patch;
-        show_desktop::fast_look(self.overview.show_desktop_up(now) || self.reveal_cover.holding(), patch_on)
+        let holding = self.patches.values().any(|t| t.reveal_cover.holding());
+        show_desktop::fast_look(self.overview.show_desktop_up(now) || holding, patch_on)
     }
 
     /// The corner patch as it runs, for `ctl state` (the Fable review's L3): `mode` is
     /// `ordered` (macOS keeps it just above the parked windows), `fallback` (it refused:
     /// the patch shows only where no shown window reaches), `unknown` (not checked yet) or
     /// `off`; `refused_against` the parked window macOS would not keep it above.
-    fn patch_status(&self) -> Value {
+    fn patch_status(&self, screen: u32) -> Value {
         let on = self.store.config().windows.corner_patch && self.model.is_some();
+        let track = self.patches.get(&screen);
+        let order = track.map(|t| t.order).unwrap_or_default();
         let mode = if !on {
             "off"
-        } else if self.patch_order.refused.is_some() {
+        } else if order.refused.is_some() {
             "fallback"
-        } else if self.patch_order.last == Some(true) || self.patch_honoured {
+        } else if order.last == Some(true) || track.is_some_and(|t| t.honoured) {
             "ordered"
         } else {
             "unknown"
@@ -2283,11 +2472,18 @@ impl Controller {
         json!({
             "on": on,
             "mode": mode,
-            "shown": self.patch_sent.as_ref().is_some_and(|p| p.show.is_some()),
-            "rect": self.patch_rect,
-            "refused_against": self.patch_order.refused,
-            "hidden_why": self.patch_why,
+            "shown": track.and_then(|t| t.sent.as_ref()).is_some_and(|p| p.show.is_some()),
+            "rect": track.and_then(|t| t.rect),
+            "refused_against": order.refused,
+            "hidden_why": track.and_then(|t| t.why),
         })
+    }
+
+    /// The corner patch's last plan on `screen` for `ctl state`: where it shows, and from
+    /// which picture (round desktop-still-patch: the still's serial, held while one comes,
+    /// the file's).
+    fn patch_plan_status(&self, screen: u32) -> Value {
+        json!(self.patches.get(&screen).and_then(|t| t.sent.as_ref()).map(|p| json!({ "show": p.show, "still": p.still, "hold": p.hold, "file": p.file })))
     }
 
     /// Checks windows whose restore failed against the window server, about once a second:
@@ -2316,7 +2512,7 @@ impl Controller {
             let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
             let listed = list.iter().find(|w| w.id == id).map(|w| {
                 let zone = match model_parked {
-                    Some(_) => self.model.as_ref().is_some_and(|m| m.main_display().parks(w.bounds)),
+                    Some(_) => self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.display(x.meta.display).parks(w.bounds))),
                     // A window the model forgot: the safety paths' test, which honours the
                     // other displays (it may sit on one now) and knows it is ours (L2).
                     None => recovery::is_stranded(w.bounds, scan.get_or_insert_with(safety::scan_displays), Known::Registered),
@@ -2521,10 +2717,12 @@ impl Controller {
         for g in &t.incoming {
             tracing::debug!(id = t.id, window = g.window.id, stage = ?g.stage, from_slot = ?g.slot, to = %g.window.frame, "transition: incoming");
         }
+        let plays_on = transition_plan::display_of(m, actions);
         tracing::debug!(
             id = t.id,
-            before = ?transition_plan::order(&self.before.slots),
-            after = ?transition_plan::order(&transition_plan::slots_of(m)),
+            display = plays_on.0,
+            before = ?transition_plan::order(self.before.slots_on(plays_on)),
+            after = ?transition_plan::order(&transition_plan::slots_on(m, plays_on)),
             "transition: strip order"
         );
         Some(t)
@@ -2556,7 +2754,8 @@ impl Controller {
         // first and at once.
         let animated = {
             let anim = &self.store.config().style.animation;
-            anim.animates() && self.strip_visible && !self.phase.fullscreen()
+            let plays_on = self.model.as_ref().map_or_else(|| self.main_display_id(), |m| transition_plan::display_of(m, &actions));
+            anim.animates() && self.strip_visible && !self.fullscreen_on(plays_on)
         };
         let activated: HashSet<u32> = run.now.union(&run.fallback).copied().collect();
         let landing = self.landing_arrivals(ob, &hidden, animated, &activated);
@@ -2640,7 +2839,9 @@ impl Controller {
             return None;
         }
         let m = self.model.as_ref()?;
-        let stage = m.stage(m.main_active_stage()?)?;
+        // The screen the switch plays on: the arriving windows' (round displays-2).
+        let display = arriving.iter().find_map(|id| m.window(WindowId(*id)).map(|w| w.meta.display)).unwrap_or(m.main_display().id);
+        let stage = m.stage(m.active_stage(display)?)?;
         let shown: HashSet<u32> = stage
             .windows
             .iter()
@@ -2684,19 +2885,19 @@ impl Controller {
     /// the desktop's still (round 8L3), whichever is ready; the cover as it will be drawn, or
     /// why not.
     fn cover_ready(&self, c: SwitchCover) -> Result<SwitchCover, &'static str> {
-        let key = self.shot_key();
-        resolve_cover(c, crate::ui::corner_patch::cover_ready, |rect| match &key {
+        let screen = c.screen;
+        let key = self.model.as_ref().and_then(|m| m.displays().iter().find(|d| d.id.0 == screen)).map(|d| self.shot_key(d));
+        resolve_cover(c, |rect| crate::ui::corner_patch::cover_ready(screen, rect), |rect| match &key {
             // A still that holds the icons only is laid over the patch's picture (8L4).
-            Some(key) => desktop_shot::ready(rect, key, crate::ui::corner_patch::cover_ready),
+            Some(key) => desktop_shot::ready(screen, rect, key, |r| crate::ui::corner_patch::cover_ready(screen, r)),
             None => Err("no model"),
         })
     }
 
-    /// What a still of the desktop in the park corner is of now ([`desktop_shot::Key`]): the
-    /// Space count, the main display, Finder's icons as last read.
-    fn shot_key(&self) -> Option<desktop_shot::Key> {
-        let m = self.model.as_ref()?;
-        Some(desktop_shot::Key::new(self.space_changes, m.main_display().frame, self.patch_items.known.as_deref()))
+    /// What a still of the desktop in the park corner of display `d` is of now
+    /// ([`desktop_shot::Key`]): the Space count, the display, Finder's icons as last read.
+    fn shot_key(&self, d: &Display) -> desktop_shot::Key {
+        desktop_shot::Key::new(self.space_changes, d.frame, self.patch_items.known.as_deref())
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
@@ -2720,7 +2921,8 @@ impl Controller {
         }
         let m = self.model.as_ref().ok_or("no model")?;
         let config = self.store.config();
-        let display = m.main_display();
+        // The screen the switch plays on: the arriving windows' (round displays-2).
+        let display = arriving.iter().find_map(|id| m.window(WindowId(*id)).map(|w| m.display(w.meta.display))).unwrap_or(m.main_display());
         let own = std::process::id() as i32;
         // Parked where the window server lists them in the park zone; one the model has parked
         // listed elsewhere shows there and stays shown through the switch (8L6).
@@ -2738,8 +2940,9 @@ impl Controller {
         let now = Instant::now();
         let facts = CoverFacts {
             on: config.windows.corner_patch,
+            screen: display.id.0,
             overview: self.overview.showing_or_expected(now) || self.phase.changing(),
-            fullscreen: self.phase.fullscreen(),
+            fullscreen: self.fullscreen_on(display.id),
             slivers,
             raised,
             display: display.frame,
@@ -2747,7 +2950,7 @@ impl Controller {
             visible: display.visible,
             dock_bars: self.dock_bar.as_ref().map(|(_, b)| b.bars.clone()).filter(|b| !b.is_empty()),
             reach: config.windows.patch_reach(),
-            in_use: self.patch_rect,
+            in_use: self.patches.get(&display.id.0).and_then(|t| t.rect),
             items: self.patch_items.known.clone(),
             staying,
         };
@@ -2942,8 +3145,7 @@ impl Controller {
     }
 
     fn mark_dirty(&mut self) {
-        let now = Instant::now();
-        self.dirty = Some((self.dirty.map_or(now, |d| d.0), now));
+        self.save.mark(Instant::now());
     }
 
     // ----- strip -------------------------------------------------------------------------
@@ -2953,10 +3155,31 @@ impl Controller {
         self.present_with(None);
     }
 
+    /// The display a transition plays on: the one its windows are on (the main one when
+    /// it names none).
+    fn transition_display(&self, transition: Option<&Transition>) -> DisplayId {
+        let main = self.main_display_id();
+        let Some((t, m)) = transition.zip(self.model.as_ref()) else { return main };
+        t.outgoing
+            .iter()
+            .chain(t.incoming.iter())
+            .find_map(|mw| m.window(WindowId(mw.window.id)).map(|w| w.meta.display))
+            .unwrap_or(main)
+    }
+
     /// Counts and logs what changed since the last strip snapshot: the active stage of the
     /// Space the strip shows (a switch, whatever caused it, since that Space's last
     /// snapshot) and stages made.
     fn note_changes(&mut self, space: SpaceId) {
+        let mut user_switched = None;
+        self.note_changes_of(space, &mut user_switched);
+        if let (Some(to), Some(m)) = (user_switched, self.model.as_mut()) {
+            m.touch_stage(to);
+        }
+    }
+
+    /// [`Self::note_changes`]; a switch that followed a click or key press goes to `user_switched`.
+    fn note_changes_of(&mut self, space: SpaceId, user_switched: &mut Option<StageId>) {
         let Some(m) = &self.model else { return };
         let active = m.active_stage_in(space);
         if let Some(&before) = self.seen_active.get(&space.0)
@@ -2966,6 +3189,11 @@ impl Controller {
             counters::bump(Count::Switch);
             let from = before.and_then(|b| m.stage_number(StageId(b)));
             tracing::info!(from, to = m.stage_number(to), stage = to.0, "stage switch");
+            if input::since_last_press() < USER_SWITCH {
+                // The user's switch (a card or Dock click, ⌘-Tab, a shortcut): its windows
+                // are touched; a late title re-matches them no more.
+                *user_switched = Some(to);
+            }
         }
         let known: HashSet<u64> = m.spaces().iter().map(|s| s.id.0).collect();
         self.seen_active.retain(|s, _| known.contains(s));
@@ -2980,20 +3208,41 @@ impl Controller {
         self.seen_stages = Some(stages);
     }
 
-    /// The Space the strip shows: the one shown, or while a Space change settles, the
-    /// Desktop arranged ahead for it (its strip slides in arranged, [`arrival`]).
-    fn strip_space(&self) -> Option<SpaceId> {
+    /// The Space a display's strip shows: the one shown, or (the main display, while a Space
+    /// change settles) the Desktop arranged ahead for it (its strip slides in arranged,
+    /// [`arrival`]).
+    fn strip_space(&self, display: DisplayId) -> Option<SpaceId> {
         let m = self.model.as_ref()?;
-        let ahead = self.phase.changing().then(|| self.ahead_space()).flatten();
-        Some(ahead.unwrap_or_else(|| m.current_space(m.main_display().id)))
+        let ahead = self.phase.changing().then(|| self.ahead_space()).flatten().filter(|s| m.display_of_space(*s) == m.known_display(display));
+        Some(ahead.unwrap_or_else(|| m.current_space(display)))
     }
 
+    /// One snapshot for every display's strip (round displays): the transition, if any, on
+    /// the display its windows are on; the notes of a switch under way (parked, arrived,
+    /// late) to every strip, each acting on the transition it holds.
     fn present_with(&mut self, transition: Option<Transition>) {
         self.strip_dirty = false;
-        let Some(space) = self.strip_space() else { return };
+        let plays_on = self.transition_display(transition.as_ref());
+        let displays: Vec<DisplayId> = self.model.as_ref().map(|m| m.displays().iter().map(|d| d.id).collect()).unwrap_or_default();
+        let notes = PresentNotes {
+            announce: std::mem::take(&mut self.announce),
+            parked: self.parked_note.take(),
+            arrived: self.arrived_note.take(),
+            late: self.late_note.take(),
+        };
+        for d in displays {
+            let t = if d == plays_on { transition.clone() } else { None };
+            self.present_for(d, t, &notes);
+        }
+    }
+
+    /// The snapshot of one display's strip ([`Self::present_with`]).
+    fn present_for(&mut self, display: DisplayId, transition: Option<Transition>, notes: &PresentNotes) {
+        let Some(space) = self.strip_space(display) else { return };
         self.note_changes(space);
         let Some(m) = &self.model else { return };
-        let current = space == m.current_space(m.main_display().id);
+        let main = display == m.main_display().id;
+        let current = space == m.current_space(display);
         let active = m.active_stage_in(space);
         let cards = cards_in(m, space);
         let dragged = self.drag.filter(|d| d.moving);
@@ -3010,7 +3259,7 @@ impl Controller {
             .filter(|w| dragged.is_none_or(|d| d.id != w.meta.id.0))
             .partition(|w| on.contains(&w.meta.id.0));
         let active_frames = active_frames.into_iter().map(|w| w.meta.frame).collect();
-        self.active_off_screen = off.into_iter().map(|w| w.meta.id.0).collect();
+        self.active_off_screen.insert(display, off.into_iter().map(|w| w.meta.id.0).collect());
         let active_windows = active
             .and_then(|a| m.stage(a))
             .map(|s| {
@@ -3038,15 +3287,16 @@ impl Controller {
             active_frames,
             window_drag: dragged.map(|d| CardWindow { id: d.id, pid: d.pid, frame: d.pre }),
             window_drag_grab: dragged.map(|d| d.grab),
-            announce: std::mem::take(&mut self.announce),
+            announce: main && notes.announce,
             active_windows: kept_ready(self.strip_visible, active_windows),
             pinned_windows: kept_ready(self.strip_visible, pinned_windows),
             transition,
-            parked: self.parked_note.take(),
-            arrived: self.arrived_note.take(),
-            late: self.late_note.take(),
+            parked: notes.parked,
+            arrived: notes.arrived.clone(),
+            late: notes.late.clone(),
             space: space.0,
-            fullscreen: current && self.phase.fullscreen(),
+            display: display.0,
+            fullscreen: main && current && self.phase.fullscreen(),
             away: false,
             quiet: m.settling(),
         });
@@ -3076,10 +3326,13 @@ impl Controller {
 
     /// Writes `state.json` now (atomically and durably, [`super::durable`], readable by the user
     /// only in a private folder, [`crate::private_files`]). A state that cannot be encoded (a
-    /// frame that is not finite) is not written: the file on disk stays.
+    /// frame that is not finite) is not written: the file on disk stays. The state is clean
+    /// only once the file is replaced; a failure is tried again later ([`SaveClock::failed`]).
     pub fn save_now(&mut self) {
-        self.dirty = None;
-        let Some(m) = self.model.as_mut() else { return };
+        let Some(m) = self.model.as_mut() else {
+            self.save.saved();
+            return;
+        };
         let path = paths::state_file();
         let now = unix_now();
         // Windows of apps that quit too long ago are not reopened by a login.
@@ -3088,18 +3341,32 @@ impl Controller {
         // The window ids in it hold for this window server session only.
         file.session = session::window_session().map(str::to_string);
         file.stamp(now, &mut self.seen_times);
+        if !self.ax_looked() {
+            // Accessibility listed no window: nothing was looked for in this session.
+            file.not_looked_for();
+        }
         let text = match file.to_json() {
             Ok(text) => text,
             Err(e) => {
-                tracing::error!("{e}; the saved stages on disk are kept");
+                let wait = self.save.failed(Instant::now());
+                tracing::error!(failures = self.save.failures(), retry_s = wait.as_secs(), "{e}; the saved stages on disk are kept");
                 return;
             }
         };
         let result = crate::private_files::ensure_dir(&paths::config_dir())
             .and_then(|_| super::durable::replace(&path, text.as_bytes(), super::durable::Flush::Full));
         match result {
-            Ok(()) => tracing::debug!("state saved to {}", path.display()),
-            Err(e) => tracing::warn!("cannot save {}: {e}", path.display()),
+            Ok(()) => {
+                if self.save.failures() > 0 {
+                    tracing::info!(failures = self.save.failures(), "state saved to {} again", path.display());
+                }
+                self.save.saved();
+                tracing::debug!("state saved to {}", path.display());
+            }
+            Err(e) => {
+                let wait = self.save.failed(Instant::now());
+                tracing::warn!(failures = self.save.failures(), retry_s = wait.as_secs(), "cannot save {}: {e}; tried again later", path.display());
+            }
         }
     }
 
@@ -3230,6 +3497,13 @@ impl Controller {
                 self.maybe_start_drag(ob, id, now);
                 let frame = ob.window(id).map(|w| w.frame);
                 let ours = self.echoes.is_window_echo(id, now);
+                if !ours
+                    && input::left_button_down()
+                    && let Some(m) = self.model.as_mut()
+                {
+                    // Moved or resized by the user: a late title re-matches it no more.
+                    m.touch_window(WindowId(id));
+                }
                 if !ours && input::left_button_down() && self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked) {
                     // Dragged while parked (its sliver grabbed without a focus, ⌘ held): the
                     // user's; the tick adopts it where they leave it rather than parking it
@@ -3253,7 +3527,13 @@ impl Controller {
                 if let (Some(m), Some(title)) = (self.model.as_mut(), title)
                     && m.window_title_changed(WindowId(id), &title)
                 {
+                    // A window titled late (an Electron app's) may be a saved one after all.
+                    let actions = m.window_retitled(WindowId(id));
                     self.mark_dirty();
+                    if !actions.is_empty() {
+                        self.execute(ob, actions);
+                        self.present();
+                    }
                 }
             }
             WinEvent::Focused(id) => {
@@ -3266,12 +3546,23 @@ impl Controller {
                     tracing::debug!(id, "focus echo of our own action ignored");
                     return;
                 }
+                if input::since_last_press() < USER_FOCUS
+                    && let Some(m) = self.model.as_mut()
+                {
+                    // Focused by a click or a key press on it: a late title re-matches it no
+                    // more (a focus an app makes by itself at login leaves it).
+                    m.touch_window(WindowId(id));
+                }
                 if let Some(pid) = ob.window(id).map(|w| w.pid) {
                     let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
                     if !focus_may_switch(hidden, active, input::left_button_down()) {
                         tracing::debug!(id, pid, ?hidden, ?active, "a focus in an app not in front (hidden, or not the active app): its own, or a late echo of ours; no switch");
                         return;
                     }
+                }
+                if self.macos_after_display_change() {
+                    tracing::debug!(id, "a focus macOS made after a display change (no click or key since): no switch");
+                    return;
                 }
                 // Not our echo: the user's (or an app's own), remembered for the reconciler.
                 self.user_focus.insert(id, now);
@@ -3421,13 +3712,22 @@ impl Controller {
                     tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
                     return;
                 }
+                if self.macos_after_display_change() {
+                    // The lid closed or opened: macOS activates an app of its choosing (11-05
+                    // 20:25:46.8, Mail, whose switch sent the laptop's front to a card and
+                    // slid the 5K back to the Desktop it had left).
+                    tracing::info!(pid, "an activation macOS made after a display change (no click or key since): no switch");
+                    return;
+                }
                 if self.model.as_ref().is_some_and(Model::settling) {
                     if input::left_button_down() {
                         // A Dock click whose press the input monitor has not told us about yet.
                         self.end_restore(ob, "a click (or a Dock click)", End::User);
-                    } else {
-                        // A launch-time activation at login is the app's, not the user's: no
-                        // switch, nothing held for later.
+                    }
+                    if self.model.as_ref().is_some_and(Model::settling) {
+                        // A launch-time activation at login is the app's, not the user's (or a
+                        // click the restore window outlives while Accessibility lists no
+                        // window): no switch, nothing held for later.
                         tracing::debug!(pid, "an activation while the login settles: no switch");
                         return;
                     }
@@ -3483,6 +3783,9 @@ impl Controller {
             return;
         }
         let obs = self.observe_activation(ob, &list, focused.filter(|_| needs_focus));
+        // The window server's frames the switch keeps are tracked too: its outgoing picture
+        // starts where the windows are (an app may move one without a notice).
+        ob.note_frames(obs.frames.iter().map(|(id, f)| (id.0, *f)));
         if self.bring_here_if_shift(ob, pid, &obs, now) {
             self.forget_held(ob);
             return;
@@ -3595,11 +3898,9 @@ impl Controller {
         }
     }
 
-    /// True when window `id` sits in a stage that is not active.
+    /// True when window `id` sits in a stage that is not in front on its screen.
     fn window_elsewhere(&self, id: u32) -> bool {
-        self.model.as_ref().is_some_and(|m| {
-            m.stage_of(WindowId(id)).is_some_and(|s| m.main_active_stage() != Some(s))
-        })
+        self.model.as_ref().is_some_and(|m| m.stage_of(WindowId(id)).is_some_and(|s| !m.stage_in_front(s)))
     }
 
     /// True when app `pid` has a standard window on the current stage (or pinned on this
@@ -3607,13 +3908,16 @@ impl Controller {
     /// inside one of its windows, to extend a selection, must not pull in its other windows).
     fn app_present(&self, pid: i32) -> bool {
         self.model.as_ref().is_some_and(|m| {
-            let active = m.main_active_stage();
-            let space = m.current_space(m.main_display().id);
-            m.windows().any(|w| {
-                w.meta.pid == pid
-                    && w.meta.role == WindowRole::Standard
-                    && ((w.home == Home::Pinned && (w.space == space || w.sticky))
-                        || active.is_some_and(|a| w.home == Home::Stage(a)))
+            // On any screen's shown Desktop (round displays-2).
+            m.displays().iter().any(|d| {
+                let active = m.active_stage(d.id);
+                let space = m.current_space(d.id);
+                m.windows().any(|w| {
+                    w.meta.pid == pid
+                        && w.meta.role == WindowRole::Standard
+                        && ((w.home == Home::Pinned && (w.space == space || w.sticky))
+                            || active.is_some_and(|a| w.home == Home::Stage(a)))
+                })
             })
         })
     }
@@ -3648,7 +3952,7 @@ impl Controller {
         let (Some(press), Some(m)) = (&self.press, &self.model) else { return };
         let Some(w) = m.window(WindowId(id)) else { return };
         let shown = !w.parked
-            && (w.home == Home::Pinned || m.main_active_stage().is_some_and(|a| w.home == Home::Stage(a)));
+            && (w.home == Home::Pinned || m.stage_of(WindowId(id)).is_some_and(|s| m.stage_in_front(s)));
         if !shown || w.meta.role != WindowRole::Standard || !input::left_button_down() {
             return;
         }
@@ -3756,6 +4060,7 @@ impl Controller {
                     self.end_restore(ob, "an app switcher key", End::Switcher);
                 } else {
                     self.end_restore(ob, "a key press", End::User);
+                    self.touch_typed_window();
                 }
                 // Typing never cuts a switch's animation short: the keyboard is already the
                 // new stage's (its focus ran before the windows arrived).
@@ -3766,6 +4071,22 @@ impl Controller {
                     tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
                 }
             }
+        }
+    }
+
+    /// A key press (not a switcher's) went to the frontmost app: its focused window is the
+    /// user's, a late title re-matches it no more ([`Model::touch_window`]). Asked of the app
+    /// (bounded) only while a window of it may still be re-matched, so typing costs nothing
+    /// after the re-matches or in an app with none.
+    fn touch_typed_window(&mut self) {
+        let Some(pid) = super::apps::frontmost_pid() else { return };
+        if !self.model.as_ref().is_some_and(|m| m.may_rematch_app(pid)) {
+            return;
+        }
+        let Some(id) = arrival::focused_window_of(pid) else { return };
+        if let Some(m) = self.model.as_mut() {
+            tracing::debug!(id = id.0, pid, "a key press in a window a late title could still move: the user's now");
+            m.touch_window(id);
         }
     }
 
@@ -3830,6 +4151,7 @@ impl Controller {
             if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
                 let list = windows::list_windows();
                 self.arrive_here(ob, &list, main, None);
+                self.arrive_others(ob, &list);
             }
             return;
         }
@@ -3840,13 +4162,18 @@ impl Controller {
         options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, &config);
         let main = displays[0];
         let mut model = Model::new(displays, options);
+        for d in model.displays().to_vec() {
+            model.set_display_fit(d.id, fit_options(d.visible, self.strip_visible, &self.settings, &config));
+        }
         let list = windows::list_windows();
         if !self.can_build(ob, &list) {
             return;
         }
-        // Windows on another display are left alone; they wait until they show on the main one
+        Self::read_desktop_counts(&mut model);
+        // Windows on a display not managed are left alone; they wait until they show on one
         // (and so do windows off every display: none is managed yet).
-        let shown = on_main_screen(&list, main.frame, |_| false);
+        let frames: Vec<Rect> = model.displays().iter().map(|d| d.frame).collect();
+        let shown = on_managed_screens(&list, &frames, |_| false);
         let z = windows::z_order(&list);
         let candidates: Vec<WindowMeta> = ob
             .windows()
@@ -3880,6 +4207,7 @@ impl Controller {
                 tracing::info!(after_restart = restore.new_session, login_ago_s = login.map(|l| l.elapsed().as_secs()), "restore: the restore window opens");
                 Settling::new(Instant::now(), login)
             });
+            self.rematch_until = self.settling.as_ref().map(Settling::rematch_until);
             model.set_restore(restore);
             model.restore_spaces(state.spaces);
         }
@@ -3888,12 +4216,43 @@ impl Controller {
             tracing::info!("launched on a full-screen app's Space: no strip until a Desktop shows");
         }
         let hints = launch_hints(&list);
-        let actions = if self.phase.fullscreen() { Vec::new() } else { model.arrive(main.id, &live, &[], &hints) };
+        // Every display's Desktop recognized from the windows on its screen (round displays).
+        let actions = if self.phase.fullscreen() {
+            Vec::new()
+        } else {
+            let mut all = Vec::new();
+            for d in model.displays().to_vec() {
+                let here: Vec<WindowMeta> = live.iter().filter(|m| m.display == d.id).cloned().collect();
+                // A screen with windows sent to it by the first arrival (back to their saved
+                // stage's screen, `engine::model::pool`) arrives even with nothing else, and so
+                // does one whose only Desktop is its one saved Desktop (its windows not listed
+                // yet: they go to their stages there as they show).
+                if d.id != main.id && here.is_empty() && !model.awaits_travellers(d.id) && !model.forms_saved_desktop(d.id) {
+                    continue;
+                }
+                let more = model.arrive(d.id, &here, &[], &hints);
+                all.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+            }
+            // None is left (every screen arrived on); never one unmanaged for good if it is.
+            let left = model.take_travellers();
+            if !left.is_empty() {
+                tracing::warn!(windows = left.len(), "restore: windows sent to another screen whose Desktop did not form; placed when found");
+                self.unplaced.extend(left.iter().map(|m| m.id.0));
+            }
+            all.push(Action::StateChanged);
+            all
+        };
         if first_start {
             tracing::info!(stages = model.stages().len(), "first start: one stage per app, as Apple's Stage Manager does");
         }
         if self.phase.fullscreen() {
             self.unplaced.extend(live.iter().map(|m| m.id.0));
+        }
+        // Saved windows on screen at the launch went back at once: the first placed now.
+        if let Some(clock) = self.settling.as_mut()
+            && model.restore_summary(0).windows > 0
+        {
+            clock.placed(Instant::now());
         }
         self.model = Some(model);
         // Following the Dock, the first strip shows in the Dock's order already.
@@ -3907,10 +4266,11 @@ impl Controller {
         self.mark_dirty();
     }
 
-    /// [`on_main_screen`] with the model's windows as the managed ones.
-    pub(super) fn shown_main(&self, list: &[windows::CgWindow], main: Rect) -> HashSet<u32> {
+    /// [`on_managed_screens`] with the model's windows as the managed ones.
+    pub(super) fn shown_managed(&self, list: &[windows::CgWindow]) -> HashSet<u32> {
+        let frames: Vec<Rect> = self.managed_displays().iter().map(|d| d.frame).collect();
         let m = self.model.as_ref();
-        on_main_screen(list, main, |id| m.is_some_and(|m| m.window(WindowId(id)).is_some()))
+        on_managed_screens(list, &frames, |id| m.is_some_and(|m| m.window(WindowId(id)).is_some()))
     }
 
     /// True unless a rule says to ignore the window (children always count).
@@ -3937,6 +4297,28 @@ impl Controller {
     /// full-screen animation to settle.
     fn frozen(&self) -> bool {
         self.phase.fullscreen() || self.phase.changing() || self.locked
+    }
+
+    /// Whether `display` shows a full-screen app's Space: the main screen's is the phase's,
+    /// another's its own watch's ([`Self::other_screen_seen`]).
+    fn fullscreen_on(&self, display: DisplayId) -> bool {
+        fullscreen_there(display, self.main_display_id(), self.phase.fullscreen(), |d| self.other_screen_fullscreen(d.0))
+    }
+
+    /// [`Self::frozen`] for input addressed to `display`'s stages (a card of its strip, a
+    /// shortcut with the keyboard on it, a click on its wallpaper): a full-screen app's Space
+    /// on another screen stops nothing here (the Codex review's S1; UX-SPEC Screens). A Space
+    /// change settling and the lock hold every screen.
+    fn frozen_on(&self, display: DisplayId) -> bool {
+        self.fullscreen_on(display) || self.phase.changing() || self.locked
+    }
+
+    /// The screen the keyboard is on ([`Model::keyboard_display`]): the focused window's, by
+    /// the model when it manages it, else the managed screen most of it shows on in `list`;
+    /// the main one with no focused window.
+    fn keyboard_display(&self, focused: Option<WindowId>, list: &[windows::CgWindow]) -> DisplayId {
+        let shown_on = focused.and_then(|f| list.iter().find(|w| w.id == f.0)).map(|w| self.display_at(w.bounds));
+        self.model.as_ref().map_or_else(|| self.main_display_id(), |m| m.keyboard_display(focused, shown_on))
     }
 
     /// Why stage commands are refused now, if they are ([`Self::frozen`]).
@@ -3972,6 +4354,137 @@ impl Controller {
                 .any(|e| e.window_id().ok() == Some(w.id) && e.is_fullscreen().unwrap_or(false)),
         });
         Seen::of(covering, full)
+    }
+
+    /// What another screen `d` (not the main one) shows in `list` ([`OtherSeen`]): its own
+    /// overview watch and full-screen settle step (round displays-2), logged once a change.
+    fn other_screen_seen(&mut self, ob: &Observer, list: &[windows::CgWindow], d: Display, now: Instant) -> OtherSeen {
+        let screen = d.id.0;
+        let sightings = list.iter().map(|w| Sighting { owner: &w.owner, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen });
+        let sight = overview::overview_in(sightings, d.frame);
+        let watch = self.screens.entry(screen).or_default();
+        match watch.overview.see(sight, now) {
+            overview::Change::None => {}
+            overview::Change::Began(kind) => tracing::info!(screen, "{} shows on another screen: no Space is inferred from its windows until it closes", kind.name()),
+            overview::Change::Ended(kind) => tracing::info!(screen, "{} closed on another screen", kind.name()),
+            overview::Change::Stuck(kind) => tracing::warn!(screen, "{} has been listed on another screen for {} s without a break: taken for something else", kind.name(), overview::OVERVIEW_STUCK.as_secs()),
+        }
+        if watch.overview.freezes(now) {
+            watch.absent.clear();
+            return OtherSeen::Overview;
+        }
+        let seen = self.screen_seen(ob, list, d.frame);
+        let watch = self.screens.entry(screen).or_default();
+        let verdict = watch.settle.step(seen, now);
+        let fullscreen = match verdict {
+            Verdict::Wait => return OtherSeen::Animation,
+            Verdict::FullScreen => true,
+            Verdict::Desktop => false,
+        };
+        if watch.fullscreen != fullscreen {
+            watch.fullscreen = fullscreen;
+            watch.absent.clear();
+            if fullscreen {
+                tracing::info!(screen, "a full-screen app's Space shows on another screen (no strip there; the other screens go on)");
+            } else {
+                tracing::info!(screen, "another screen shows a Desktop again");
+            }
+        }
+        if fullscreen { OtherSeen::FullScreen } else { OtherSeen::Desktop }
+    }
+
+    /// Whether another screen `screen` shows a full-screen app's Space, as last seen
+    /// ([`Self::other_screen_seen`]).
+    fn other_screen_fullscreen(&self, screen: u32) -> bool {
+        self.screens.get(&screen).is_some_and(|w| w.fullscreen)
+    }
+
+    /// The once-a-second "left this Space" check for every screen but the main one (round
+    /// displays-2; the main one's is [`Self::check_spaces`] itself): on a screen showing a
+    /// Desktop, windows of another of its Desktops on screen there mean its Desktop changed
+    /// (recognized again, [`Self::arrive_others`]); windows of its Desktop missing from the
+    /// screen for no visible reason at [`SPACE_CHECKS`] checks in a row are let go (most of
+    /// them at once: its Desktop changed instead). Nothing is inferred on a screen showing an
+    /// overview, a full-screen animation or a full-screen app's Space.
+    fn check_other_screens(&mut self, ob: &mut Observer, list: &[windows::CgWindow], now: Instant) {
+        let others: Vec<Display> = self.model.as_ref().map(|m| m.displays().iter().skip(1).copied().collect()).unwrap_or_default();
+        if others.is_empty() {
+            self.screens.clear();
+            return;
+        }
+        self.screens.retain(|screen, _| others.iter().any(|d| d.id.0 == *screen));
+        let shown = on_screen(list);
+        let mut arrive = false;
+        let mut left: Vec<u32> = Vec::new();
+        for d in others {
+            if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop {
+                continue;
+            }
+            let Some(m) = self.model.as_ref() else { return };
+            let space = m.current_space(d.id);
+            let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
+            // Windows of another of this screen's Desktops on screen there: its Desktop
+            // changed (no notice names the screen); recognized again.
+            let elsewhere = m.windows().filter(standard).any(|w| w.space != space && m.display_of_space(w.space) == d.id && shown.contains(&w.meta.id.0));
+            if elsewhere {
+                arrive = true;
+                continue;
+            }
+            let here = m.windows().filter(standard).filter(|w| w.space == space).count();
+            let here_shown = m.windows().filter(standard).filter(|w| w.space == space && shown.contains(&w.meta.id.0)).count();
+            let missing: Vec<(u32, i32)> = m
+                .windows()
+                .filter(standard)
+                .filter(|w| w.space == space && !shown.contains(&w.meta.id.0))
+                .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
+                .filter(|w| !ob.noted_closed(w.meta.id.0))
+                .filter(|w| ob.window(w.meta.id.0).is_some())
+                .map(|w| (w.meta.id.0, w.meta.pid))
+                .collect();
+            let excused = self.off_screen_for_a_reason(ob, &missing);
+            let missing: Vec<u32> = missing.into_iter().map(|(id, _)| id).filter(|id| !excused.contains(id)).collect();
+            let watch = self.screens.entry(d.id.0).or_default();
+            watch.absent.retain(|id, _| missing.contains(id));
+            let mut gone = Vec::new();
+            for &id in &missing {
+                let n = watch.absent.entry(id).or_insert(0);
+                *n += 1;
+                if *n >= SPACE_CHECKS {
+                    gone.push(id);
+                }
+            }
+            if gone.is_empty() {
+                continue;
+            }
+            if missed_space_change(here, here_shown, gone.len()) {
+                tracing::info!(screen = d.id.0, missing = gone.len(), of = here, "most windows of another screen's Desktop are gone from it; recognizing that screen's Desktop again");
+                watch.absent.clear();
+                arrive = true;
+                continue;
+            }
+            let listed: HashSet<u32> = list.iter().map(|w| w.id).collect();
+            for id in gone.into_iter().filter(|id| listed.contains(id)) {
+                watch.absent.remove(&id);
+                left.push(id);
+            }
+        }
+        if arrive {
+            self.arrive_others(ob, list);
+        }
+        for id in left {
+            let Some(m) = self.model.as_mut() else { return };
+            if m.window(WindowId(id)).is_none() {
+                continue;
+            }
+            tracing::info!(id, "window left its Space on another screen (not on screen, not minimized, app not hidden)");
+            let group = m.group_of(WindowId(id));
+            let kept = self.parked_entries_of(&group);
+            let Some(m) = self.model.as_mut() else { return };
+            let (actions, forgotten) = m.window_left_space(WindowId(id));
+            self.execute(ob, actions);
+            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+        }
     }
 
     /// Looks for Mission Control, App Exposé or Show Desktop in the window list `list`
@@ -4016,18 +4529,18 @@ impl Controller {
     /// Space change under way, its notification not handled yet): a known window of another
     /// Space is on screen, or none of this Space's windows is while one of them is missing
     /// for no visible reason.
-    fn space_in_doubt(&self, ob: &Observer, shown: &HashSet<u32>) -> bool {
+    fn space_in_doubt(&self, ob: &Observer, shown: &HashSet<u32>, display: DisplayId) -> bool {
         let Some(m) = &self.model else { return false };
-        let space = m.current_space(m.main_display().id);
+        let space = m.current_space(display);
         let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
-        if m.windows().filter(standard).any(|w| w.space != space && shown.contains(&w.meta.id.0)) {
+        if m.windows().filter(standard).any(|w| w.space != space && m.display_of_space(w.space) == display && shown.contains(&w.meta.id.0)) {
             return true;
         }
         let here: Vec<WindowId> = m.windows().filter(standard).filter(|w| w.space == space).map(|w| w.meta.id).collect();
         if here.is_empty() || here.iter().any(|id| shown.contains(&id.0)) {
             return false;
         }
-        let absent = self.absent_windows(ob, shown);
+        let absent = self.absent_windows(ob, shown, display);
         here.iter().any(|id| absent.contains(id))
     }
 
@@ -4035,11 +4548,12 @@ impl Controller {
     /// is not hidden, they are not minimized and not in full screen (asked through AX; a
     /// window in full screen is on a Space of its own and still belongs to its Desktop).
     /// Evidence that the Space they live on is not the one shown.
-    fn absent_windows(&self, ob: &Observer, shown: &HashSet<u32>) -> Vec<WindowId> {
+    fn absent_windows(&self, ob: &Observer, shown: &HashSet<u32>, display: DisplayId) -> Vec<WindowId> {
         let Some(m) = &self.model else { return Vec::new() };
         let off: Vec<(u32, i32)> = m
             .windows()
             .filter(|w| w.meta.role == WindowRole::Standard && !w.sticky && !shown.contains(&w.meta.id.0))
+            .filter(|w| m.display_of_space(w.space) == display)
             .filter(|w| ob.window(w.meta.id.0).is_some())
             .map(|w| (w.meta.id.0, w.meta.pid))
             .collect();
@@ -4190,7 +4704,7 @@ impl Controller {
     fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display, view: Option<ScreenView>) {
         let Some(m) = self.model.as_ref() else { return };
         let before = m.current_space(main.id);
-        let shown = self.shown_main(list, main.frame);
+        let shown = self.shown_managed(list);
         // Known windows' frames read fresh: the engine matches the screen to the model on
         // arrival (a parked window found shown is parked again, a shown one found parked is
         // brought back), so a frame missed by a notification must not mislead it.
@@ -4226,12 +4740,18 @@ impl Controller {
             self.unplaced.remove(&meta.id.0);
         }
         let hints = launch_hints(list);
+        let hold = self.macos_after_display_change();
         let Some(m) = self.model.as_mut() else { return };
+        m.set_hold_arrivals(hold);
         let mut actions = m.arrive(main.id, &live, &absent, &hints);
+        m.set_hold_arrivals(false);
         let after = m.current_space(main.id);
-        let note = m.last_arrival();
+        let note = m.last_arrival().clone();
+        // Listed for a moment as a display changes: offered again once it still shows.
+        self.unplaced.extend(note.held.iter().map(|w| w.0));
         // `new`: windows this run had not seen (all of a saved Desktop's on its first visit,
-        // placed into its saved stages: `rebuilt`); `moved`: known windows of another Desktop
+        // placed into its saved stages: `rebuilt`, `restored` of them by their saved entries;
+        // each rebuilt stage is a "new stage" line); `moved`: known windows of another Desktop
         // taken as moved here; `beside`: Desktops still on screen whose windows stay theirs.
         tracing::info!(
             from = before.0,
@@ -4239,9 +4759,12 @@ impl Controller {
             on_screen = live.len(),
             new = arrivals.len(),
             rebuilt = ?note.rebuilt,
+            restored = note.restored,
+            other_screen = note.other_screen,
             moved = note.moved,
             carried = note.carried,
             beside = ?note.beside,
+            held = note.held.len(),
             "Space changed"
         );
         self.note_dock_arrival(after, before);
@@ -4256,6 +4779,7 @@ impl Controller {
         // Arriving through an app (Dock, ⌘Tab, an activation) whose window waits in a stage
         // here: show it, as Apple's does, at once (the Desktop's slide is the motion).
         self.bring_focus_forward(ob, "arrival", predicted);
+        self.arrive_others(ob, list);
         self.defer_present = false;
         self.present();
         self.mark_dirty();
@@ -4265,9 +4789,9 @@ impl Controller {
     /// waits to place (rules applied), and the managed windows missing from every screen for
     /// no visible reason ([`Self::absent_windows`]; a window on another display is not
     /// missing).
-    fn screen_view(&self, ob: &Observer, list: &[windows::CgWindow], main: Display) -> ScreenView {
+    fn screen_view(&self, ob: &Observer, list: &[windows::CgWindow], display: Display) -> ScreenView {
         let Some(m) = self.model.as_ref() else { return (Vec::new(), Vec::new()) };
-        let shown = self.shown_main(list, main.frame);
+        let shown = self.shown_managed(list);
         let z = windows::z_order(list);
         let live = ob
             .windows()
@@ -4276,9 +4800,62 @@ impl Controller {
             .filter(|id| shown.contains(id))
             .filter(|id| self.unplaced.contains(id) || m.window(WindowId(*id)).is_some())
             .filter_map(|id| self.meta(ob, id, &z))
+            .filter(|meta| meta.display == display.id)
             .filter(|meta| self.allowed_by_rules(meta))
             .collect();
-        (live, self.absent_windows(ob, &on_screen(list)))
+        (live, self.absent_windows(ob, &on_screen(list), display.id))
+    }
+
+    /// The other displays' Desktops (round displays), each recognized by the windows on its
+    /// screen as the main display's is ([`Self::arrive_here`]; `list`: the window server's
+    /// list read for it), with none of the main display's extras (no arrangement ahead, no
+    /// focus brought forward, no motion). Called after every arrival on the main display and
+    /// when windows of another Desktop show on a secondary screen.
+    fn arrive_others(&mut self, ob: &mut Observer, list: &[windows::CgWindow]) {
+        let others: Vec<Display> = self.model.as_ref().map(|m| m.displays().iter().skip(1).copied().collect()).unwrap_or_default();
+        if others.is_empty() {
+            return;
+        }
+        let hints = launch_hints(list);
+        let now = Instant::now();
+        for d in others {
+            // A screen showing an overview, a full-screen animation or a full-screen app's
+            // Space: its windows say nothing of its Desktop now (round displays-2).
+            if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop {
+                continue;
+            }
+            let (live, absent) = self.screen_view(ob, list, d);
+            let Some(m) = self.model.as_ref() else { return };
+            let new = live.iter().filter(|meta| m.window(meta.id).is_none()).count();
+            for meta in &live {
+                self.unplaced.remove(&meta.id.0);
+            }
+            let hold = self.macos_after_display_change();
+            let Some(m) = self.model.as_mut() else { return };
+            let before = m.current_space(d.id);
+            m.set_hold_arrivals(hold);
+            let actions = m.arrive(d.id, &live, &absent, &hints);
+            m.set_hold_arrivals(false);
+            let after = m.current_space(d.id);
+            let note = m.last_arrival().clone();
+            self.unplaced.extend(note.held.iter().map(|w| w.0));
+            if before != after || new > 0 || note.moved > 0 || note.rebuilt.is_some() {
+                tracing::info!(
+                    display = d.id.0,
+                    from = before.0,
+                    to = after.0,
+                    on_screen = live.len(),
+                    new,
+                    rebuilt = ?note.rebuilt,
+                    restored = note.restored,
+                    other_screen = note.other_screen,
+                    moved = note.moved,
+                    carried = note.carried,
+                    "Space changed on another display"
+                );
+            }
+            self.execute(ob, actions);
+        }
     }
 
     /// True while a settled Space change waits before the Desktop is recognized from `list`:
@@ -4393,8 +4970,43 @@ impl Controller {
                 if let Some((why, since)) = self.build_wait.take() {
                     tracing::info!(was = why.name(), waited_ms = now.duration_since(since).as_millis() as u64, "the Desktop can be seen: building stages");
                 }
+                self.screens_ready(now)
+            }
+        }
+    }
+
+    /// At launch: true when the screens are there to build on ([`early_start::screens_wait`]):
+    /// the displays read, and, at the session's start, every screen `state.json` saved stages
+    /// on connected, each waited for a moment at most. The tick looks again meanwhile.
+    fn screens_ready(&mut self, now: Instant) -> bool {
+        let tried = *self.build_tried.get_or_insert(now);
+        let read = !self.displays.is_empty();
+        let config = self.store.config();
+        let missing = if read && config.stages.restore_after_restart {
+            let connected: Vec<_> = self.displays.iter().map(|d| d.key).collect();
+            std::fs::read_to_string(paths::state_file())
+                .ok()
+                .and_then(|t| StateFile::from_json(&t).ok())
+                .map_or(0, |s| early_start::missing_screens(&s, &connected))
+        } else {
+            0
+        };
+        let since_login = super::apps::login_started().map(|l| l.elapsed());
+        let wait = early_start::screens_wait(read, missing, since_login, now.duration_since(tried), config.displays.main_only);
+        match (wait, self.screens_wait) {
+            (Some(w), was) => {
+                if was != Some(w) {
+                    tracing::info!(why = w.name(), missing, login_ago_s = since_login.map(|d| d.as_secs()), "the launch waits a moment for the screens before building stages");
+                }
+                self.screens_wait = Some(w);
+                false
+            }
+            (None, Some(was)) => {
+                self.screens_wait = None;
+                tracing::info!(was = was.name(), missing, waited_ms = now.duration_since(tried).as_millis() as u64, "building stages on the screens there are");
                 true
             }
+            (None, None) => true,
         }
     }
 
@@ -4460,6 +5072,9 @@ impl Controller {
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
         let list = windows::list_windows();
+        // The other screens first (round displays-2): each is judged on its own, whatever
+        // the main screen shows.
+        self.check_other_screens(ob, &list, now);
         // Mission Control, App Exposé, Show Desktop: the list shows their layout (other
         // Desktops' windows, windows slid aside), not the Desktop. Nothing is inferred while
         // one shows and for a settle after; a Desktop clicked there comes with its
@@ -4500,7 +5115,7 @@ impl Controller {
             return;
         }
         let shown = on_screen(&list);
-        let shown_main = self.shown_main(&list, main.frame);
+        let shown_main = self.shown_managed(&list);
         if self.active_shown_changed(&shown) {
             tracing::debug!("a shown window was hidden or came back: the strip looks again");
             self.strip_dirty = true;
@@ -4510,7 +5125,11 @@ impl Controller {
         for id in showing {
             self.on_found(ob, id);
         }
-        self.leave_other_displays(ob, &shown, &shown_main);
+        if self.main_only() {
+            self.leave_other_displays(ob, &shown, &shown_main);
+        } else {
+            self.follow_display_moves(ob, &list);
+        }
         self.leave_off_screen(ob, &list);
         // A managed window off screen whose handle died: found again, or let go if closed.
         self.check_stale_handles(ob, &list);
@@ -4524,7 +5143,7 @@ impl Controller {
         let mut foreign: Vec<u32> = m
             .windows()
             .filter(standard)
-            .filter(|w| w.space != space && shown.contains(&w.meta.id.0))
+            .filter(|w| w.space != space && m.display_of_space(w.space) == main.id && shown.contains(&w.meta.id.0))
             .map(|w| w.meta.id.0)
             .collect();
         foreign.sort_unstable();
@@ -4650,6 +5269,106 @@ impl Controller {
         }
     }
 
+    /// Managed standard windows that show mostly on another display than the one the model
+    /// has them on ([`display_of`]), in two checks in a row (a drag across the seam; macOS
+    /// moving windows back to a screen that came back), move there
+    /// ([`Model::windows_moved_to_display`]: a stage of its own there, in front; one macOS
+    /// lists in that display's park zone a card there, still). A parked window in its own
+    /// display's park zone never counts, whatever shows of it on a screen beyond. Nothing
+    /// moves while the left button is down ([`display_moves_now`]): a slow drag across the
+    /// seam changes stage when the window is let go. Within
+    /// [`DISPLAY_SETTLE`] of a display change the moves are macOS's, not the user's drag, and
+    /// the log says so. The default (round displays); with `[displays] main_only`
+    /// [`Self::leave_other_displays`] runs instead.
+    fn follow_display_moves(&mut self, ob: &Observer, list: &[windows::CgWindow]) {
+        let Some(m) = self.model.as_ref() else { return };
+        let displays = m.displays().to_vec();
+        if displays.len() < 2 {
+            self.elsewhere.clear();
+            return;
+        }
+        let rects: Vec<(DisplayId, Rect)> = displays.iter().map(|d| (d.id, d.frame)).collect();
+        let mut away: Vec<(u32, DisplayId, Rect)> = Vec::new();
+        for w in list.iter().filter(|w| w.onscreen && w.layer == 0) {
+            let Some(ws) = m.window(WindowId(w.id)) else { continue };
+            if ws.meta.role != WindowRole::Standard {
+                continue;
+            }
+            if ws.parked && m.display(ws.meta.display).parks(w.bounds) {
+                continue;
+            }
+            // A parked one in another screen's park zone is that screen's (macOS put it
+            // back at its old corner), however little of it shows there.
+            let zone = if ws.parked { m.park_zone_display(w.bounds, ws.meta.display) } else { None };
+            let Some(d) = zone.or_else(|| display_of(w.bounds, &rects)) else { continue };
+            if d != ws.meta.display {
+                away.push((w.id, d, w.bounds));
+            }
+        }
+        self.elsewhere.retain(|id, _| away.iter().any(|(a, _, _)| a == id));
+        let mut moves: Vec<(WindowId, DisplayId, Rect)> = Vec::new();
+        for (id, d, bounds) in away {
+            let n = self.elsewhere.entry(id).or_insert(0);
+            *n += 1;
+            if *n >= SPACE_CHECKS {
+                moves.push((WindowId(id), d, bounds));
+            }
+        }
+        // A drag across the seam goes on: decided at the first check after the button comes
+        // up (its count kept), where the window is let go.
+        if moves.is_empty() || !display_moves_now(input::left_button_down(), self.displays_settling()) {
+            return;
+        }
+        for (id, _, _) in &moves {
+            self.elsewhere.remove(&id.0);
+        }
+        let z: Vec<WindowId> = list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect();
+        self.take_display_moves(ob, &moves, &z);
+    }
+
+    /// True for [`DISPLAY_SETTLE`] after a display came or went: what moves now is macOS's.
+    fn displays_settling(&self) -> bool {
+        self.displays_changed_at.is_some_and(|t| Instant::now().duration_since(t) < DISPLAY_SETTLE)
+    }
+
+    /// True when an activation or focus heard now is macOS's after a display change: within
+    /// [`DISPLAY_SETTLE`] of it with no click or key press since
+    /// ([`crate::engine::displays::macos_after_display_change`]).
+    fn macos_after_display_change(&self) -> bool {
+        let since = self.displays_changed_at.map(|t| Instant::now().duration_since(t));
+        crate::engine::displays::macos_after_display_change(since, input::since_last_press(), DISPLAY_SETTLE)
+    }
+
+    /// Windows listed on another display than the model has them on, each with that display
+    /// and its listed frame, go there ([`Model::windows_moved_to_display`]); `z` is the
+    /// window list's front-to-back order. Logged as macOS's within [`DISPLAY_SETTLE`] of a
+    /// display change, else as the user's drag.
+    fn take_display_moves(&mut self, ob: &Observer, moves: &[(WindowId, DisplayId, Rect)], z: &[WindowId]) {
+        // What a card press read no longer holds.
+        self.pressed_obs = None;
+        let by_macos = self.displays_settling();
+        let Some(m) = self.model.as_mut() else { return };
+        let parked_before: Vec<bool> = moves.iter().map(|(id, _, _)| m.window(*id).is_some_and(|w| w.parked)).collect();
+        let (actions, forgotten) = m.windows_moved_to_display(moves, z);
+        for ((id, d, at), was_parked) in moves.iter().zip(parked_before) {
+            let card = m.window(*id).is_some_and(|w| w.parked);
+            if by_macos {
+                tracing::info!(
+                    id = id.0,
+                    display = d.0,
+                    %at,
+                    was_parked,
+                    card,
+                    "window macOS put on a display that changed (not the user's drag): its stage is that display's again; shown where macOS put it, or a card still (the lid's rule)"
+                );
+            } else {
+                tracing::info!(id = id.0, display = d.0, %at, card, "window moved to another display: a stage of its own there, in front (Apple's rule)");
+            }
+        }
+        self.execute(ob, actions);
+        self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+    }
+
     /// Managed windows its app moved off every display ([`off_screen_not_ours`]; one we
     /// parked beyond the edges is not judged), listed so in two checks in a row, are let go
     /// where they are ([`Model::window_went_off_screen`]): never parked, never brought back,
@@ -4701,6 +5420,7 @@ impl Controller {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
+        self.ax_window_found(ob, Instant::now());
         let displays = desktop::cg_display_bounds();
         if let Some(w) = windows::describe(&[id]).into_iter().find(|w| w.onscreen && w.layer == 0)
             && off_screen_not_ours(w.bounds, &displays, false)
@@ -4718,34 +5438,65 @@ impl Controller {
         }
         self.flush_pending(ob);
         let list = windows::list_windows();
-        let main = self.model.as_ref().map_or(Rect::default(), |m| m.main_display().frame);
-        let shown = self.shown_main(&list, main);
-        if self.frozen() || !shown.contains(&id) {
+        let shown = self.shown_managed(&list);
+        // The screen the window shows on: its own overview and full-screen checks gate it
+        // (round displays-2), so a full-screen app on one screen never stops windows arriving
+        // on another. A Space change settling holds every screen (the arrival places it).
+        let screen = list.iter().find(|w| w.id == id).map(|w| w.bounds).map(|b| self.display_at(b));
+        let Some(screen) = screen.and_then(|s| self.managed_displays().into_iter().find(|d| d.id == s)) else {
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "window not on screen; it is placed once it shows");
+            }
+            return;
+        };
+        let is_main = screen.id == self.main_display_id();
+        let frozen = self.locked || self.phase.changing() || (is_main && self.phase.fullscreen());
+        if frozen || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
             return;
         }
-        if self.look_for_overview(&list, main, Instant::now()) {
-            // App Exposé lists other Desktops' windows on screen: placed once it has closed
-            // (the once-a-second check offers it again).
+        let now = Instant::now();
+        if is_main {
+            if self.look_for_overview(&list, screen.frame, now) {
+                // App Exposé lists other Desktops' windows on screen: placed once it has closed
+                // (the once-a-second check offers it again).
+                if self.unplaced.insert(id) {
+                    tracing::debug!(id, "Mission Control, App Exposé or Show Desktop shows; the window is placed once it has closed");
+                }
+                return;
+            }
+            if self.settle.step(self.screen_seen(ob, &list, screen.frame), now) != Verdict::Desktop {
+                // Most likely the full-screen animation's stand-in window (it goes away once the
+                // animation is over), or a window on a full-screen Space not handled yet.
+                if self.unplaced.insert(id) {
+                    tracing::debug!(id, "a full-screen animation or Space shows; the window is placed once a Desktop shows");
+                }
+                return;
+            }
+        } else {
+            match self.other_screen_seen(ob, &list, screen, now) {
+                OtherSeen::Desktop => {}
+                seen => {
+                    if self.unplaced.insert(id) {
+                        tracing::debug!(id, screen = screen.id.0, ?seen, "the window's screen shows no Desktop now; the window is placed once it does");
+                    }
+                    return;
+                }
+            }
+        }
+        if self.macos_after_display_change() {
+            // A display change under way, no click or key since: macOS lists windows of
+            // other Desktops for a moment (11-05 20:59:03.9, the lid closed: a window of the
+            // 5K's other Desktop joined its app's stage here and sent the laptop's front to
+            // a card). Placed once the change settles, if it still shows; never a switch now.
             if self.unplaced.insert(id) {
-                tracing::debug!(id, "Mission Control, App Exposé or Show Desktop shows; the window is placed once it has closed");
+                tracing::info!(id, "a window found after a display change (no click or key since): placed once the change settles, if it still shows");
             }
             return;
         }
-        let display = self.model.as_ref().map(|m| m.main_display().frame);
-        if let Some(display) = display
-            && self.settle.step(self.screen_seen(ob, &list, display), Instant::now()) != Verdict::Desktop
-        {
-            // Most likely the full-screen animation's stand-in window (it goes away once the
-            // animation is over), or a window on a full-screen Space not handled yet.
-            if self.unplaced.insert(id) {
-                tracing::debug!(id, "a full-screen animation or Space shows; the window is placed once a Desktop shows");
-            }
-            return;
-        }
-        if self.space_in_doubt(ob, &on_screen(&list)) {
+        if self.space_in_doubt(ob, &on_screen(&list), screen.id) {
             // Its notification came before the Space change's: placing it now would put it
             // (and maybe a stage switch, a focus) on the Space being left.
             if self.unplaced.insert(id) {
@@ -4753,7 +5504,8 @@ impl Controller {
             }
             return;
         }
-        if self.unplaced.remove(&id) {
+        let waited = self.unplaced.remove(&id);
+        if waited {
             // It waited off screen: one read then as a dialog is read again (a window minimized
             // then or now is standard: taken for a child, it would follow Apple's rule for a
             // child, never its saved stage).
@@ -4772,7 +5524,11 @@ impl Controller {
             // Shift and `[stages] new_apps_join_current` (`Decision::for_new_window`).
             let new_app = self.model.as_ref().is_some_and(|m| m.app_is_new(meta.pid));
             let config = self.store.config();
-            let join_current = config.stages.new_apps_join_current;
+            // While the restore window is open an app's window is one it reopens, not one
+            // the user opened: the saved stages and Apple's rule place it, never the key
+            // (the model ignores it then too, `Model::add_window`).
+            let restoring = self.model.as_ref().is_some_and(Model::restoring);
+            let join_current = config.stages.new_apps_join_current && !restoring;
             let sugar = &config.sugar;
             let mut shift = false;
             if sugar.shift_brings_here && decision.action.shift_counts() {
@@ -4809,7 +5565,7 @@ impl Controller {
             let settling = m.settling();
             if let (Some(clock), true) = (self.settling.as_mut(), back.is_some()) {
                 // The restore is still under way.
-                clock.busy(Instant::now());
+                clock.placed(Instant::now());
             }
             if settling {
                 // While the login settles nothing animates: windows go to their stages quietly.
@@ -4818,19 +5574,68 @@ impl Controller {
                 self.execute_animated(ob, actions);
             }
         }
+        // The measure of round login-observe: from found (tracked) to placed.
+        if let Some(w) = ob.window(id) {
+            tracing::debug!(id, pid = w.pid, ms = w.found_at.elapsed().as_millis() as u64, waited_off_screen = waited, "window placed: ms since it was found");
+        }
     }
 
     // ----- commands ----------------------------------------------------------------------
 
-    /// The main display changed (or was first reported).
-    pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>) {
+    /// Gives the model how many Desktops macOS keeps for each screen (`com.apple.spaces`,
+    /// read only; [`super::desktop_counts`]), logged when it differs from what it had.
+    fn read_desktop_counts(model: &mut Model) {
+        let counts = super::desktop_counts::desktop_counts(model.displays());
+        let changed = model.displays().iter().any(|d| counts.iter().find(|c| c.0 == d.key).map(|c| c.1) != model.desktops_on(d.id));
+        if changed {
+            let named: Vec<String> = counts.iter().map(|(k, n)| format!("{}={n}", k.text())).collect();
+            tracing::info!(screens = %named.join(" "), "Desktops per screen, as macOS keeps them (com.apple.spaces, read only)");
+        }
+        model.set_desktop_counts(counts);
+    }
+
+    /// The displays changed (or were first reported): every screen, the main one first
+    /// (round displays; the main one alone with `[displays] main_only`). Every screen's park
+    /// zone reaches the safety paths, and each screen's strip gets its own capacity. `heard`:
+    /// when the main thread heard the change, where its settle begins ([`DISPLAY_SETTLE`]),
+    /// however long this thread took to come to it.
+    pub fn set_displays(&mut self, ob: &mut Observer, displays: Vec<Display>, heard: Instant) {
         self.flush_pending(ob);
-        let Some(main) = displays.first().copied() else { return };
-        safety::set_main_display(main.visible, main.corner);
+        let mut displays = displays;
+        let config = self.store.config().clone();
+        if self.main_only() {
+            displays.truncate(1);
+        }
+        if displays.is_empty() {
+            return;
+        }
+        safety::set_displays(&displays);
+        let placed = |ds: &[Display]| ds.iter().map(|d| (d.id, d.frame)).collect::<Vec<_>>();
+        if crate::engine::displays::displays_changed(&placed(&self.displays), &placed(&displays)) {
+            // A display came, went or moved (never the launch's first reading): what the
+            // checks counted as moves before it is stale, and the moves, activations and
+            // focuses that follow are macOS's ([`DISPLAY_SETTLE`]).
+            self.displays_changed_at = Some(heard);
+            self.elsewhere.clear();
+            let added: Vec<DisplayId> = displays.iter().filter(|d| !self.displays.iter().any(|o| o.id == d.id)).map(|d| d.id).collect();
+            if added.is_empty() {
+                self.displays_added.retain(|id| displays.iter().any(|d| d.id == *id));
+            } else {
+                self.displays_added = added;
+            }
+        }
         self.displays = displays.clone();
+        let mut actions = Vec::new();
         if let Some(m) = self.model.as_mut() {
-            let actions = m.set_displays(displays);
-            m.set_strip_capacity(strip_capacity(main.visible, self.store.config()));
+            // Each strip's capacity first: a removed display's stages are counted against
+            // the remaining one's capacity as it is now (its Dock, its size), not as it was.
+            for d in displays.iter().filter(|d| d.visible.is_finite()) {
+                m.set_display_capacity(d.id, strip_capacity(d.visible, &config));
+            }
+            actions = m.set_displays(displays);
+            Self::read_desktop_counts(m);
+        }
+        if self.model.is_some() {
             self.sync_fit();
             self.execute(ob, actions);
         }
@@ -4857,24 +5662,27 @@ impl Controller {
     /// whoever reveals: Finder's activation and focus that follow are its echo
     /// ([`DesktopEcho`]) either way.
     pub fn mouse_down(&mut self, ob: &mut Observer, list: &[windows::CgWindow], p: Point, clicks: i64) -> bool {
-        if self.model.is_none() || self.frozen() {
+        if self.model.is_none() {
             return false;
         }
-        if self.model.as_ref().is_some_and(|m| !m.main_display().frame.contains(p)) {
+        // The screen clicked: its own Desktop is revealed (round displays), unless a
+        // full-screen app's Space shows there (another screen's stops nothing here).
+        let Some(screen) = self.managed_displays().into_iter().find(|d| d.frame.contains(p)) else { return false };
+        if self.frozen_on(screen.id) {
             return false;
         }
         // Our own windows (the strip below windows, the motion overlay above them) never
         // receive other apps' clicks, so they never hide the wallpaper.
         let own = std::process::id() as i32;
         let list: Vec<_> = list.iter().filter(|w| w.pid != own).cloned().collect();
-        if !desktop::is_wallpaper_click(&list, p) {
+        if !desktop::is_wallpaper_click(&list, p, &self.dock_bar_now()) {
             return false;
         }
         self.desktop_echo.wallpaper_clicked(Instant::now());
         match wallpaper_click(&self.settings, clicks) {
             WallpaperClick::Toggle => {
-                tracing::info!(x = p.x, y = p.y, "wallpaper click");
-                self.reveal(ob, true);
+                tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "wallpaper click");
+                self.reveal_on(ob, Some(screen.id), true);
             }
             WallpaperClick::LeftToMacOs => {
                 self.macos_reveal_at = Some(Instant::now());
@@ -4900,11 +5708,17 @@ impl Controller {
     /// windows move without the strip's animation (there is no card to grow from or shrink
     /// into).
     fn reveal(&mut self, ob: &mut Observer, animated: bool) -> usize {
+        self.reveal_on(ob, None, animated)
+    }
+
+    /// [`Self::reveal`] on the Desktop `display` shows (a wallpaper click on that screen;
+    /// `None`: the focused window's display, else the main one).
+    fn reveal_on(&mut self, ob: &mut Observer, display: Option<DisplayId>, animated: bool) -> usize {
         let obs = self.observe(ob);
         let hide = self.store.config().strip.hide_while_desktop_shown;
         let hidden_before = self.strip_hidden_for_desktop && self.model.as_ref().is_some_and(Model::desktop_revealed);
         let Some(m) = self.model.as_mut() else { return 0 };
-        let actions = m.reveal_desktop(&obs);
+        let actions = m.reveal_desktop_on(display, &obs);
         let revealed = m.desktop_revealed();
         let n = actions.len();
         self.strip_hidden_for_desktop = hide && revealed;
@@ -4936,7 +5750,7 @@ impl Controller {
         tracing::info!(?command, "hotkey");
         let command = self.end_restore_for_hotkey(ob, command);
         self.flush_pending(ob);
-        if self.frozen() && command != HotkeyCommand::ToggleStrip {
+        if command != HotkeyCommand::ToggleStrip && self.hotkey_frozen() {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the hotkey does nothing");
             return;
@@ -4954,6 +5768,19 @@ impl Controller {
         };
     }
 
+    /// [`Self::frozen_on`] the screen with the keyboard (the focused window's, asked only
+    /// while a screen shows a full-screen app's Space).
+    fn hotkey_frozen(&self) -> bool {
+        if self.locked || self.phase.changing() {
+            return true;
+        }
+        if !self.phase.fullscreen() && !self.screens.values().any(|w| w.fullscreen) {
+            return false;
+        }
+        let list = windows::list_windows();
+        self.frozen_on(self.keyboard_display(focused_window().map(WindowId), &list))
+    }
+
     /// Ends the restore window for a hotkey; a stage number keeps meaning the stage the user
     /// saw under it when the window's end moves a voter (its stage may go: the number then
     /// names the stage its window went to; the review of 8I2).
@@ -4966,14 +5793,17 @@ impl Controller {
             }
         };
         let held = if self.settling.is_some() && self.model.is_some() {
-            let obs = self.observe(ob);
+            let list = windows::list_windows();
+            let obs = self.observe_with(ob, &list);
+            let keyboard = self.keyboard_display(obs.focused, &list);
             self.model.as_ref().map(|m| {
-                // The Space each command acts on: the current one, or the focused window's.
+                // The Space each command acts on: the keyboard's screen's, or the focused
+                // window's.
                 let space = match command {
                     HotkeyCommand::SendTo(_) => obs.focused.and_then(|f| m.space_of(f)),
                     _ => None,
                 }
-                .unwrap_or_else(|| m.current_space_for(&obs));
+                .unwrap_or_else(|| m.hotkey_space(keyboard));
                 (space, m.number_ref(space, n))
             })
         } else {
@@ -5031,7 +5861,8 @@ impl Controller {
             // Read the windows now, while the button is down (~100 ms before the release),
             // so the click's motion starts without waiting on AX. Not while a transition's
             // windows are still on their way (their frames are not the ones to save).
-            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen() && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
+            let display = self.strip_event_display(&event);
+            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen_on(display) && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
             tracing::trace!(stage, read = self.pressed_obs.is_some(), "card pressed");
             return;
         }
@@ -5048,7 +5879,7 @@ impl Controller {
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
         let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
-        if self.frozen() {
+        if self.frozen_on(self.strip_event_display(&event)) {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
             if local_edit {
@@ -5075,10 +5906,15 @@ impl Controller {
             _ => self.observe(ob),
         };
         let Some(m) = self.model.as_mut() else { return };
+        // A card click the engine does not take (its stage on a Desktop not shown: a card
+        // drawn where the engine lists none, round displays-lid-2) says why, and the strips
+        // show the engine's cards again: a click never does nothing silently.
+        let mut refused = None;
         let actions = match event {
             StripEvent::CardClicked { stage, shift } => {
                 counters::bump(Count::CardClick);
                 tracing::info!(stage, number = m.stage_number(StageId(stage)), shift, "card clicked");
+                refused = m.switch_refused(StageId(stage)).filter(|r| *r != SwitchRefused::InFront).map(|r| (stage, r));
                 if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
             }
             StripEvent::CardDropped { stage, x, y } => {
@@ -5106,10 +5942,30 @@ impl Controller {
         };
         let changed = actions.contains(&Action::StateChanged);
         self.execute_animated(ob, actions);
-        if local_edit && !changed {
+        if let Some((stage, why)) = refused.filter(|_| !changed) {
+            tracing::info!(stage, why = why.text(), "card click: nothing to switch to; the strips show the engine's cards again");
+            self.present();
+        } else if local_edit && !changed {
             tracing::debug!("the engine did not take the strip's edit; the strip shows the engine's cards again");
             self.present();
         }
+    }
+
+    /// The screen whose stages a strip event addresses: its stage's (the main one when the
+    /// model has no such stage).
+    fn strip_event_display(&self, event: &StripEvent) -> DisplayId {
+        let stage = match *event {
+            StripEvent::CardClicked { stage, .. }
+            | StripEvent::CardPressed { stage }
+            | StripEvent::CardDropped { stage, .. }
+            | StripEvent::IconClicked { stage, .. }
+            | StripEvent::CardMoved { stage, .. }
+            | StripEvent::CardMerged { stage, .. } => Some(stage),
+            StripEvent::Unveil { .. } => None,
+        };
+        stage
+            .and_then(|s| self.model.as_ref()?.stage(StageId(s)).map(|s| s.display))
+            .unwrap_or_else(|| self.main_display_id())
     }
 
     /// Runs a batch animated (user input) or at once (scripted ctl commands).
@@ -5118,13 +5974,14 @@ impl Controller {
     }
 
     fn switch(&mut self, ob: &mut Observer, n: usize, animated: bool) -> Result<usize, String> {
-        let obs = self.observe(ob);
+        let list = windows::list_windows();
+        let obs = self.observe_with(ob, &list);
+        let keyboard = self.keyboard_display(obs.focused, &list);
         let m = self.model.as_mut().ok_or_else(not_managing)?;
-        let space = m.current_space(m.main_display().id);
-        if m.stage_by_number(space, n).is_none() {
+        if m.stage_by_number(m.hotkey_space(keyboard), n).is_none() {
             return Err(format!("there is no stage {n}"));
         }
-        let actions = m.switch_to_number(n, &obs);
+        let actions = m.switch_to_number(n, keyboard, &obs);
         let count = actions.len();
         self.run_batch(ob, actions, animated);
         Ok(count)
@@ -5209,11 +6066,20 @@ impl Controller {
                     self.style = Arc::new(style);
                 }
                 self.echoes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
+                if self.model.is_some() && config.displays.main_only != self.main_only() {
+                    tracing::warn!(
+                        main_only = config.displays.main_only,
+                        "config: [displays] main_only changed; it applies at the next launch (quit and open Stage Manager again)"
+                    );
+                }
                 self.sync_fit();
                 self.publish_shield();
                 if let Some(m) = self.model.as_mut() {
                     let capacity = strip_capacity(m.main_display().visible, &config);
                     m.set_strip_options(config.strip_options(capacity));
+                    for d in m.displays().to_vec() {
+                        m.set_display_capacity(d.id, strip_capacity(d.visible, &config));
+                    }
                     // Following the Dock, a changed [strip] dock_ignore re-sorts at once, as a
                     // changed Dock does: the strip presents below.
                     if m.set_dock_ignore(config.strip.dock_ignore.clone()) {
@@ -5250,8 +6116,9 @@ impl Controller {
             // The button came up without a mouse-up the monitor saw.
             self.focus_after_press_done(ob);
         }
-        if self.model.is_none() && self.build_wait.is_some() && !safety::quit_requested() {
-            // The launch's stages wait for the Desktop to be seen: look again now and then.
+        if self.model.is_none() && (self.build_wait.is_some() || self.screens_wait.is_some()) && !safety::quit_requested() {
+            // The launch's stages wait for the Desktop to be seen, or for the screens: look again
+            // now and then.
             if self.lock_checked.is_none_or(|t| now.duration_since(t) >= LOCK_POLL) {
                 if !self.poll_lock(now, true) {
                     ob.rescan_all();
@@ -5262,6 +6129,7 @@ impl Controller {
         if self.model.is_some() {
             self.poll_lock(now, false);
         }
+        self.watch_accessibility(ob, now);
         // No capture round while nobody can see the screen (8M: rounds failing for minutes).
         let away = if self.locked {
             Some(capture_pace::Away::Locked)
@@ -5271,10 +6139,7 @@ impl Controller {
             None
         };
         super::capture::set_away(away);
-        if let Some((first, last)) = self.dirty
-            && (now.duration_since(last) >= SAVE_DEBOUNCE || now.duration_since(first) >= SAVE_MAX_DELAY)
-            && !self.locked
-        {
+        if self.save.due(now) && !self.locked {
             // Held while the screen is locked: nothing seen then is written over the file.
             self.save_now();
         }
@@ -5296,8 +6161,14 @@ impl Controller {
             }
             self.expire_ahead(ob, now);
             self.slide_hold_step(ob);
-            if self.absent_due.is_some_and(|t| now >= t) {
+            if self.absent_due.is_some_and(|t| now >= t) && !self.ax_sees_nothing() {
                 self.give_up_absent(ob);
+            }
+            if self.rematch_until.is_some_and(|t| now >= t) {
+                self.rematch_until = None;
+                if let Some(m) = self.model.as_mut() {
+                    m.end_rematch();
+                }
             }
             if now.duration_since(self.quiet_checked) >= Duration::from_secs(1) {
                 self.quiet_checked = now;
@@ -5306,6 +6177,7 @@ impl Controller {
             // An app with saved windows running with no window yet is still opening (Xcode, an
             // Electron app: 30-90 s): the login is not quiet (the review of 8F, M2).
             let opening = self.settling.is_some() && self.pending_apps_opening(ob);
+            let unseen = self.ax_sees_nothing();
             if let Some(clock) = self.settling.as_mut() {
                 if let Some(t) = ob.last_launch() {
                     clock.busy(t);
@@ -5315,7 +6187,8 @@ impl Controller {
                 }
                 // Not while the screen is locked (a login that locks at once): nothing is done
                 // for a screen nobody sees; the end comes after the unlock.
-                if let Some(end) = clock.due(now).filter(|_| !self.locked) {
+                // Nor while Accessibility lists no window ([`ax_blind`]): nothing is seen.
+                if let Some(end) = clock.due(now).filter(|_| !self.locked && !unseen) {
                     let why = if end == End::TimeUp { "its five minutes are up" } else { "apps went quiet" };
                     self.end_restore(ob, why, end);
                 }
@@ -5358,7 +6231,12 @@ impl Controller {
         if self.strip_dirty {
             self.present();
         }
-        self.publish_notice(ob);
+    }
+
+    /// True while the restore window is open (the login settles): apps that do not answer
+    /// Accessibility yet are asked often then ([`crate::engine::observe_retry`]).
+    pub fn restore_window_open(&self) -> bool {
+        self.settling.is_some()
     }
 
     /// Closes the restore window (the first user action, apps quiet, or its time up; see
@@ -5368,7 +6246,14 @@ impl Controller {
     /// after an app switcher key, whose own switch wins), and when it ended by itself the
     /// saved key window takes the keyboard (`focus_after_restore`). After a restart the
     /// restore's line is logged (`log summary` repeats it).
+    ///
+    /// A user's end waits while Accessibility has listed no window in this run, or lists
+    /// none now ([`ax_blind`]): it would end the restore on nothing.
     fn end_restore(&mut self, ob: &Observer, why: &str, end: End) {
+        if self.settling.is_some() && !end.by_itself() && !self.user_may_end_restore(ob) {
+            tracing::debug!(why, "restore: the restore window stays open: Accessibility lists no window");
+            return;
+        }
         let Some(clock) = self.settling.take() else { return };
         let now = Instant::now();
         // The entries of apps not running then: given up at the next tick (or the login's
@@ -5376,11 +6261,13 @@ impl Controller {
         self.absent_due = Some(clock.give_up_absent_at(now));
         let mut voters = Vec::new();
         let mut line = None;
+        let mut away = String::new();
         if let Some(m) = self.model.as_mut()
             && let Some(actions) = m.end_restore()
         {
             tracing::info!(why, pending = m.pending_count(), pending_unvisited = m.pending_unvisited(), "restore: the restore window ends");
-            line = m.restore_line(clock.age(now).as_secs());
+            line = m.restore_line(clock.age(now).as_secs()).map(|l| Summary { first_after_login: clock.first_placed_after_login(), ..l });
+            away = m.away_line(logging::title);
             self.front_after_restore = end.brings_front();
             // Only after a restart: a relaunch in the same session changed no focus.
             self.focus_after_restore = end.by_itself() && m.after_restart();
@@ -5388,7 +6275,7 @@ impl Controller {
         }
         if let Some(line) = line {
             // The windows back on another Desktop follow the counts, titles hashed.
-            tracing::info!("{line}{}", self.notice_log());
+            tracing::info!("{line}{away}");
         }
         // The windows that voted for a saved Desktop, back in their saved stages (round 8I2):
         // run now, before the action that ended the window acts on the model.
@@ -5398,12 +6285,19 @@ impl Controller {
     /// Gives up the pending windows of apps running and quiet for
     /// [`crate::engine::restore::QUIET`] (no new window): the windows were closed inside the
     /// app's own session. An app that is not running keeps them (until a later session); one
-    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet.
+    /// with a window not shown yet (another Desktop, minimized, hidden) is not quiet. Its
+    /// entries on saved Desktops not visited yet stay for that Desktop, taking no window shown
+    /// elsewhere from then on ([`Model::settle_quiet`]); that Desktop's first show starts its
+    /// minute again.
     fn give_up_pending(&mut self, ob: &mut Observer, now: Instant) {
         // Apps that quit have no clock (a later launch starts one again).
         self.quiet.prune(|b| !ob.pids_with_bundle(b).is_empty());
+        let Some(m) = self.model.as_mut() else { return };
+        for b in m.take_shown_apps() {
+            self.quiet.window(&b, now);
+        }
         let Some(m) = self.model.as_ref() else { return };
-        let bundles = m.pending_bundles();
+        let bundles = m.waiting_bundles();
         if bundles.is_empty() {
             return;
         }
@@ -5417,13 +6311,21 @@ impl Controller {
                 self.quiet.running(b, app_has_window(m, &waiting, b), now);
             }
         }
+        if self.ax_sees_nothing() {
+            // Accessibility lists no window: no app can show one, so no app's minute runs.
+            self.quiet.restart_all(now);
+            return;
+        }
         let settled: Vec<String> =
             self.quiet.settled(now).into_iter().filter(|b| bundles.contains(b) && !waiting.contains(b)).collect();
         if settled.is_empty() || self.locked || self.frozen() {
             return;
         }
         let Some(m) = self.model.as_mut() else { return };
-        let (actions, dropped) = m.expire_pending(&settled);
+        let (actions, dropped, closed) = m.settle_quiet(&settled);
+        if !closed.is_empty() {
+            tracing::info!(apps = ?closed, "restore: apps quiet for a minute; their windows saved on Desktops not shown yet wait for those Desktops only");
+        }
         if dropped > 0 {
             tracing::info!(dropped, apps = ?settled, "restore: pending windows given up (their apps opened no window for a minute)");
             self.execute(ob, actions);
@@ -5531,12 +6433,6 @@ impl Controller {
                     Ok(reply) => reply,
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
-            }
-            Command::DebugNotice(id) => {
-                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
-                    return json!({ "ok": false, "error": "debug-notice needs STAGE_MANAGER_TEST=1" });
-                }
-                self.notice_command(ob, id.map_or(NoticeCommand::Dismiss, NoticeCommand::Show))
             }
             Command::DebugClose { id } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
@@ -5653,9 +6549,13 @@ impl Controller {
         };
         let active = m.main_active_stage();
         let number = |s: StageId| m.stage_number(s);
+        // The main screen's stages, as before round displays (every other screen's are under
+        // `displays[i]`): the suite's counts are of the main screen's.
+        let main_id = m.main_display().id;
         let stages: Vec<Value> = m
             .stages()
             .iter()
+            .filter(|s| m.display_of_space(s.space) == main_id)
             .map(|s| {
                 json!({
                     "id": s.id.0,
@@ -5689,6 +6589,10 @@ impl Controller {
                     "role": match w.meta.role { WindowRole::Standard => "standard", WindowRole::Child { .. } => "child" },
                     "parent": match w.meta.role { WindowRole::Child { parent } => parent.map(|p| p.0), WindowRole::Standard => None },
                     "home": match w.home { Home::Pinned => json!("pinned"), Home::Stage(s) => json!(number(s)) },
+                    // Its stage's id: `home` is a number on its own Desktop, so two screens
+                    // each have a stage 2 (round displays-live-1).
+                    "stage": match w.home { Home::Pinned => None, Home::Stage(s) => Some(s.0) },
+                    "display": w.meta.display.0,
                     "restore": w.restore,
                     "original": w.original,
                     "live": live,
@@ -5700,20 +6604,60 @@ impl Controller {
                 })
             })
             .collect();
-        // The desktop's still for a switch's cover (8L3-8L4) and the icons it is keyed by.
-        let mut desktop_still = desktop_shot::status();
+        // The desktop's still for a switch's cover (8L3-8L4) and the icons it is keyed by
+        // (the main display's; every display's in `displays`).
+        let main_screen = m.main_display().id.0;
+        let mut desktop_still = desktop_shot::status(main_screen);
         desktop_still["icons"] = json!(self.patch_items.known);
         // The parked windows the screen contradicts, being parked again or adopted
         // ([`Self::reconcile_parked`]), and the corner patch's mode (L3).
         let strays: Vec<Value> =
             self.strays.iter().map(|(id, s)| json!({ "id": id, "tries": s.tries, "gave_up": s.gave_up, "user_moved": s.user_moved })).collect();
-        let corner_patch = self.patch_status();
-        // The corner patch's last plan: where it shows, and from which picture (round
-        // desktop-still-patch: the still's serial, held while one comes, the file's).
-        desktop_still["patch_plan"] = json!(self.patch_sent.as_ref().map(|p| json!({ "show": p.show, "still": p.still, "hold": p.hold, "file": p.file })));
+        let corner_patch = self.patch_status(main_screen);
+        desktop_still["patch_plan"] = self.patch_plan_status(main_screen);
         // The reach its rectangle grows each sliver by (round fixes-151: per side).
         let reach = self.store.config().windows.patch_reach();
         desktop_still["patch_reach"] = json!({ "left": reach.left, "top": reach.top, "right": reach.right, "bottom": reach.bottom });
+        // Every screen (round displays): its Desktop, front stage, strip and park corner.
+        let displays_json: Vec<Value> = m
+            .displays()
+            .iter()
+            .map(|d| {
+                let space = m.current_space(d.id);
+                let strip_key = if d.id == m.main_display().id { strip_model::MAIN_STRIP } else { d.id.0 };
+                let mut still = desktop_shot::status(d.id.0);
+                still["patch_plan"] = self.patch_plan_status(d.id.0);
+                json!({
+                    "id": d.id.0,
+                    "key": d.key.text(),
+                    "frame": d.frame,
+                    "visible": d.visible,
+                    "corner": format!("{:?}", d.corner).to_lowercase(),
+                    "space": space.0,
+                    // A full-screen app's Space shows there (the main screen's is the phase's,
+                    // the others' their own watch; round displays-2).
+                    "fullscreen": if d.id == m.main_display().id { self.phase.fullscreen() } else { self.other_screen_fullscreen(d.id.0) },
+                    "active": m.active_stage(d.id).and_then(number),
+                    // Its front stage's id (`active` is its number, on this screen's Desktop).
+                    "active_stage": m.active_stage(d.id).map(|s| s.0),
+                    "strip": m.strip_slots(d.id).iter().filter_map(|s| m.stage_number(*s)).collect::<Vec<_>>(),
+                    "capacity": m.capacity_of(space),
+                    // The cards its strip draws now (the main display's strip publishes as 0).
+                    "cards": strip_model::published_cards_of(strip_key)
+                        .into_iter()
+                        .map(|(stage, r)| json!({ "number": m.stage_number(StageId(stage)), "frame": r }))
+                        .collect::<Vec<_>>(),
+                    // Its strip panel and panes, its corner patch and the still of its corner
+                    // (round displays-2: every screen has its own).
+                    "strip_panel": strip_model::panel_status_of(strip_key),
+                    "strip_panels": strip_model::pane_statuses_of(strip_key),
+                    // The windows its strip holds a thumbnail of (drawn on its cards).
+                    "pictures": strip_model::pictures_of(strip_key),
+                    "corner_patch": self.patch_status(d.id.0),
+                    "desktop_still": still,
+                })
+            })
+            .collect();
         let mut state = json!({
             "ok": true,
             "space": m.current_space(m.main_display().id).0,
@@ -5767,8 +6711,9 @@ impl Controller {
             "windows": windows,
         });
         state["corner_patch"] = corner_patch;
-        // The windows a restart brought back on another Desktop (round desktop-notice).
-        state["restore"]["notice"] = self.notice_json();
+        // Accessibility lists no window for the session (round ax-blind), since (Unix s).
+        (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
+        state["displays"] = Value::Array(displays_json);
         state["strays"] = Value::Array(strays);
         // Windows whose handle died judged closed once, waiting for a second look.
         state["stale_closing"] = json!(self.stale.waiting());
@@ -5812,6 +6757,7 @@ impl Controller {
             "locked": self.locked,
             "last_arrival": {
                 "rebuilt": m.last_arrival().rebuilt,
+                "restored": m.last_arrival().restored,
                 "moved": m.last_arrival().moved,
                 "carried": m.last_arrival().carried,
                 "beside": m.last_arrival().beside,
@@ -5862,6 +6808,13 @@ fn pane_on_screen(pane: &strip_model::PanelStatus, space: u64, list: &[windows::
     pane.window != 0 && pane.space == space && list.iter().any(|w| w.id == pane.window && w.onscreen)
 }
 
+/// Whether `display` shows a full-screen app's Space: the main screen's answer is the
+/// phase's (`main_fullscreen`), another screen's its own (`other`), so a full-screen app on
+/// one screen never freezes the other's input (the Codex review's S1).
+fn fullscreen_there(display: DisplayId, main: DisplayId, main_fullscreen: bool, other: impl Fn(DisplayId) -> bool) -> bool {
+    if display == main { main_fullscreen } else { other(display) }
+}
+
 fn on_screen(list: &[windows::CgWindow]) -> HashSet<u32> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| w.id).collect()
 }
@@ -5893,22 +6846,37 @@ fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
         .collect()
 }
 
-/// The windows on screen on the main display: [`on_screen`] minus those that show mostly on
-/// another display ([`on_other_display`]), which are left alone (docs/GUIDE.md: stages live on the
-/// main display only), and minus those off every display ([`off_screen_not_ours`]: a headless
-/// browser's, an offscreen render window; `managed` tells the model's, whose parked frame
-/// beyond the edges stays in). `main` is the main display's frame.
+/// The windows on screen on the managed displays (`managed`: their frames, the main one
+/// first; every screen by default, the main one alone with `[displays] main_only`):
+/// [`on_screen`] minus those that show mostly on a display not managed
+/// ([`on_other_display`]; left alone, docs/GUIDE.md), and minus those off every display
+/// ([`off_screen_not_ours`]: a headless browser's, an offscreen render window; `is_managed`
+/// tells the model's, whose parked frame beyond the edges stays in).
 ///
 /// The one gate every path that takes a window in goes through (a new window, the launch
 /// listing, an arrival on a Desktop and the restore riding on them): a window off every
-/// display waits in `unplaced` and is taken in as new only once it shows on the display.
-fn on_main_screen(list: &[windows::CgWindow], main: Rect, managed: impl Fn(u32) -> bool) -> HashSet<u32> {
+/// display waits in `unplaced` and is taken in as new only once it shows on a display.
+fn on_managed_screens(list: &[windows::CgWindow], managed: &[Rect], is_managed: impl Fn(u32) -> bool) -> HashSet<u32> {
     let displays = desktop::cg_display_bounds();
-    let others = displays.get(1..).unwrap_or_default();
+    // A display CoreGraphics lists that no managed display covers (frames may differ by a
+    // rounding: half its area says it is the same screen).
+    let covered = |d: &Rect| managed.iter().any(|m| m.intersect(d).is_some_and(|r| r.w * r.h > 0.5 * d.w * d.h));
+    let others: Vec<Rect> = displays.iter().filter(|d| !covered(d)).copied().collect();
+    let main = managed.first().copied().unwrap_or_default();
+    let own = |frame: Rect| -> Rect {
+        managed
+            .iter()
+            .copied()
+            .max_by(|a, b| {
+                let area = |d: &Rect| frame.intersect(d).map_or(0.0, |r| r.w * r.h);
+                area(a).total_cmp(&area(b))
+            })
+            .unwrap_or(main)
+    };
     list.iter()
         .filter(|w| w.onscreen && w.layer == 0)
-        .filter(|w| !off_screen_not_ours(w.bounds, &displays, managed(w.id)))
-        .filter(|w| others.is_empty() || !on_other_display(w.bounds, main, others))
+        .filter(|w| !off_screen_not_ours(w.bounds, &displays, is_managed(w.id)))
+        .filter(|w| others.is_empty() || !on_other_display(w.bounds, own(w.bounds), &others))
         .map(|w| w.id)
         .collect()
 }
@@ -6018,6 +6986,7 @@ fn fallback_displays() -> Vec<Display> {
     let visible = Rect::new(main.x, main.y + menu, main.w, main.h - menu);
     vec![Display {
         id: DisplayId(objc2_core_graphics::CGMainDisplayID()),
+        key: desktop::screen_key(objc2_core_graphics::CGMainDisplayID()),
         frame: main,
         visible,
         corner: choose_corner(main, visible, &bounds).corner,
@@ -6037,6 +7006,15 @@ fn frames_differ(cg: Rect, tracked: Rect) -> bool {
 /// (`waiting`: the apps of unplaced windows).
 fn app_has_window(m: &Model, waiting: &HashSet<String>, bundle: &str) -> bool {
     waiting.contains(bundle) || m.windows().any(|w| w.meta.bundle_id == bundle)
+}
+
+/// What one present pass hands every display's strip ([`Controller::present_with`]): the
+/// launch reveal (the main display's) and the notes of a switch under way.
+struct PresentNotes {
+    announce: bool,
+    parked: Option<u64>,
+    arrived: Option<(u64, Vec<(u32, Rect)>)>,
+    late: Option<LateNote>,
 }
 
 /// One shown window's frame as [`Controller::observe_with`] read it through Accessibility.
@@ -6104,6 +7082,18 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Codex review's S1: a full-screen app on the main screen froze every strip's
+    /// input; each screen now answers for itself.
+    #[test]
+    fn a_full_screen_app_freezes_only_its_own_screens_input() {
+        let (main, laptop, third) = (DisplayId(1), DisplayId(2), DisplayId(3));
+        let others = |d: DisplayId| d == third;
+        assert!(fullscreen_there(main, main, true, others), "the main screen's full-screen Space");
+        assert!(!fullscreen_there(laptop, main, true, others), "the laptop's Desktop goes on");
+        assert!(!fullscreen_there(main, main, false, others), "the third screen's stops nothing on the main one");
+        assert!(fullscreen_there(third, main, false, others));
+    }
 
     /// The review's U1: with the strip hidden no switch animates, so the strip is asked to
     /// keep no full-size snapshot (nothing is captured); shown, every window is kept ready.
@@ -6562,7 +7552,7 @@ mod tests {
         // 8L3: the owner's corner has desktop icons; the patch's picture would hide them.
         let rect = Rect::new(2499.0, 1348.0, 61.0, 92.0);
         let cap = Rect::new(2240.0, 1120.0, 320.0, 320.0);
-        let cover = |picture| SwitchCover { rect, cap, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
+        let cover = |picture| SwitchCover { screen: 1, rect, cap, picture, over: vec![(9, Rect::new(2000.0, 1000.0, 560.0, 440.0))] };
         let ok = |_: Rect| Ok(());
         let no = |_: Rect| Err("not ready");
         // Icons there: the still, or nothing (the activation then arrives at once).
@@ -6763,7 +7753,7 @@ mod tests {
     fn a_frame_read_that_times_out_takes_the_window_servers_bounds() {
         // W3: a busy app's timed-out read kept the tracked frame, and for an app that posts no
         // move notice that is where the window was before the user moved it.
-        let display = Display { id: DisplayId(1), frame: DISPLAY, visible: DISPLAY, corner: Corner::BottomRight };
+        let display = Display { id: DisplayId(1), key: crate::engine::displays::ScreenKey::NONE, frame: DISPLAY, visible: DISPLAY, corner: Corner::BottomRight };
         let read = |id: u32, frame: Rect, fresh: bool| FrameRead { id: WindowId(id), display, sticky: false, frame, fresh };
         let tracked = Rect::new(100.0, 200.0, 800.0, 600.0);
         let moved = Rect::new(400.0, 260.0, 800.0, 600.0);

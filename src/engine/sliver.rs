@@ -108,6 +108,48 @@ impl DockBar {
     fn clear_over(&self, w: &Listed, on_bar: impl Fn(Rect) -> bool) -> bool {
         Some(w.pid) == self.pid && w.layer == DOCK_LAYER && !self.bars.iter().any(|b| on_bar(*b))
     }
+
+    /// True when a window listed for `pid` at `layer` with `bounds` is the Dock's and seen
+    /// through at `at`: the bar is known and `at` lies outside the Dock's reach
+    /// ([`dock_reach`]). A press there reaches what lies below (the wallpaper, a window),
+    /// never the Dock. The bar unknown, or read on another screen than this window's (the
+    /// Dock moved there since the last read), the Dock's window counts wherever it is (a
+    /// click may be on the bar), as before.
+    pub fn seen_through(&self, pid: i32, layer: i64, bounds: Rect, at: Point) -> bool {
+        if Some(pid) != self.pid || layer != DOCK_LAYER {
+            return false;
+        }
+        let r = DOCK_REACH;
+        let here = |b: &&Rect| Rect::new(b.x - r, b.y - r, b.w + 2.0 * r, b.h + 2.0 * r).intersect(&bounds).is_some();
+        let reaches: Vec<Rect> = self.bars.iter().filter(here).map(|b| dock_reach(*b, bounds)).collect();
+        !reaches.is_empty() && !reaches.iter().any(|r| contains(*r, at))
+    }
+}
+
+/// How far past its lists (the frame Accessibility gives) the Dock may take a press: its
+/// magnified icons (128 points at most in its settings) and its background reach past the
+/// items, inward and along the edge.
+pub const DOCK_REACH: f64 = 160.0;
+
+/// Where the Dock may take a press, its bar at `bar` in its display-sized window `window`:
+/// the bar carried out to the window's edge it sits on (the nearest; an auto-hidden bar read
+/// while hidden lies at or past that edge), grown by [`DOCK_REACH`] inward and along the
+/// edge, so the bar shown again, magnified, still lies inside.
+pub fn dock_reach(bar: Rect, window: Rect) -> Rect {
+    let bottom = window.max_y() - bar.max_y();
+    let left = bar.x - window.x;
+    let right = window.max_x() - bar.max_x();
+    let r = DOCK_REACH;
+    if bottom <= left && bottom <= right {
+        let top = bar.y.min(window.max_y()) - r;
+        Rect::new(bar.x - r, top, bar.w + 2.0 * r, bar.max_y().max(window.max_y()) - top)
+    } else if left <= right {
+        let x = bar.x.min(window.x);
+        Rect::new(x, bar.y - r, bar.max_x().max(window.x) + r - x, bar.h + 2.0 * r)
+    } else {
+        let x = bar.x.min(window.max_x()) - r;
+        Rect::new(x, bar.y - r, bar.max_x().max(window.max_x()) - x, bar.h + 2.0 * r)
+    }
 }
 
 /// The topmost window of `front_to_back` under `at`, our own (`own_pid`) and transparent

@@ -159,6 +159,13 @@ pub const SECTIONS: &[SectionDef] = &[
     },
     SectionDef { name: "windows", doc: &["How windows are treated."] },
     SectionDef {
+        name: "displays",
+        doc: &[
+            "Screens. Every screen has its own strip and stages, as Apple's Stage Manager does: a",
+            "window dragged to another screen starts a stage of its own there.",
+        ],
+    },
+    SectionDef {
         name: "sugar",
         doc: &["Extras that ride on gestures you already make; invisible until used."],
     },
@@ -170,6 +177,7 @@ pub const SECTIONS: &[SectionDef] = &[
         ],
     },
     SectionDef { name: "stages", doc: &[] },
+    SectionDef { name: "restore", doc: &["Stages coming back after a restart or a new login ([stages] restore_after_restart)."] },
     SectionDef { name: "defaults", doc: &["What a new window does when no [[rule]] matches."] },
     SectionDef {
         name: "log",
@@ -186,6 +194,10 @@ pub const KEYS: &[KeyDef] = &[
     // [app]
     k("app", "launch_at_login", Kind::Bool, "true",
         "Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers."),
+    k("app", "login_start", Kind::Choice(&["login_item", "background_item"]), "\"login_item\"",
+        "How launch at login starts it: \"login_item\" (listed under Open at Login) or \"background_item\" (a launchd agent, listed under Allow in the Background). Both start after the apps macOS reopens at login; a change moves the registration over."),
+    k("app", "reopen_with_apps", Kind::Bool, "true",
+        "Start with the apps macOS reopens at login: Stage Manager shows in the Dock for a moment as you log out. Needs launch at login on; \"Reopen windows when logging back in\" decides, as for every app."),
     k("app", "show_menu_bar_icon", Kind::Bool, "true",
         "Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings."),
     k("app", "check_for_updates", Kind::Bool, "true",
@@ -210,7 +222,7 @@ pub const KEYS: &[KeyDef] = &[
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
     k("strip", "show_names", Kind::Bool, "false", "Draw stage names under cards. Apple shows none."),
     k("strip", "width", f(60.0, 800.0), "200.0",
-        "Width of the strip column: the panel, and the area a window must cover to hide the strip."),
+        "Width of the strip column: the panel, and the area windows keep clear of with fit."),
     k("strip", "capacity", i(0, 30), "0",
         "Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt)."),
     k("strip", "capacity_pitch", f(20.0, 2000.0), "190.0", "With capacity = 0: room per card, in points of visible height."),
@@ -345,6 +357,12 @@ pub const KEYS: &[KeyDef] = &[
         "How far past a sliver the corner patch reaches, in points, to cover its shadow: \"auto\" is a parked (inactive) window's shadow, side by side; a number is used on every side."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
+    // [displays]
+    KeyDef {
+        applies: Applies::Restart,
+        ..k("displays", "main_only", Kind::Bool, "false",
+            "Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it.")
+    },
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
         "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),
@@ -362,10 +380,11 @@ pub const KEYS: &[KeyDef] = &[
         "Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty."),
     k("stages", "restore_after_restart", Kind::Bool, "true",
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
-    k("stages", "restore_notice", Kind::Bool, "true",
-        "After a restart, list in the menu bar menu the windows macOS reopened on another Desktop than the one they were on (a mark on the icon while any is listed), to drag them back in Mission Control; an entry leaves once its window shows on its own Desktop. macOS gives apps no way to move a window to another Desktop."),
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
+    // [restore]
+    k("restore", "saved_size", Kind::Bool, "true",
+        "A window its app reopens after a restart at under half its saved size (matched by its title, on the screen it was saved on) gets its saved frame back once, when first shown; moved or resized by you first, it keeps yours. Off: every window keeps the frame its app gives it, as Apple's does."),
     // [defaults]
     k("defaults", "action", Kind::Action, "\"native\"",
         "\"native\" is Apple's: a window joins its app's stage, a newly opened app gets its own."),
@@ -394,6 +413,11 @@ pub const RETIRED: &[(&str, &str, &str)] = &[
         "it is ignored; the corner patch draws the wallpaper from its file, with no live capture",
     ),
 ];
+
+/// Keys of features taken out: an old file that still sets one loads as if it did not, with
+/// no warning (the user has nothing to change; a debug line notes it). `[stages]
+/// restore_notice`: the menu's list of windows a restart reopened on another Desktop (1.6.0).
+pub const DROPPED: &[(&str, &str)] = &[("stages", "restore_notice")];
 
 /// A key by `section.key` path.
 pub fn find(path: &str) -> Option<&'static KeyDef> {
@@ -525,6 +549,12 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-24.toml"),
     include_str!("legacy/default-25.toml"),
     include_str!("legacy/default-26.toml"),
+    include_str!("legacy/default-27.toml"),
+    include_str!("legacy/default-28.toml"),
+    include_str!("legacy/default-29.toml"),
+    include_str!("legacy/default-30.toml"),
+    include_str!("legacy/default-31.toml"),
+    include_str!("legacy/default-32.toml"),
 ];
 
 #[cfg(test)]
@@ -557,6 +587,16 @@ mod tests {
         assert!(e.contains(REFERENCE_URL), "explain points at the full reference");
         assert!(explain("windows.nope").is_none());
         assert!(explain("nonsense").is_none());
+        assert!(e.contains("applies: within a second of saving"));
+    }
+
+    /// The Codex review's S3: a reloaded `[displays] main_only` never reached the model,
+    /// though the key read as live; it is read at launch, and says so.
+    #[test]
+    fn main_only_applies_at_the_next_launch() {
+        assert_eq!(find("displays.main_only").map(|d| d.applies), Some(Applies::Restart));
+        let e = explain("displays.main_only").expect("known");
+        assert!(e.contains("applies: at the next launch") && e.contains("Read at launch"));
     }
 
     #[test]

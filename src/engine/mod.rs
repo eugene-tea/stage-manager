@@ -3,11 +3,12 @@
 //! The engine compiles and tests on any OS. The platform layer feeds it observations and
 //! executes the [`model::Action`]s it returns.
 
+pub mod ax_blind;
 pub mod busy_apps;
 pub mod corner_patch;
 pub mod desktop_echo;
-pub mod desktop_notice;
 pub mod displays;
+pub mod early_start;
 pub mod enhanced_ui;
 pub mod focus_replay;
 pub mod fullscreen;
@@ -18,8 +19,10 @@ pub mod handoff;
 pub mod hidden_tab;
 pub mod hide;
 pub mod leftovers;
+pub mod logout_watch;
 pub mod model;
 pub mod not_ours;
+pub mod observe_retry;
 pub mod overview;
 pub mod park;
 pub mod park_reconcile;
@@ -29,9 +32,11 @@ pub mod phase;
 pub mod placement;
 pub mod raise_order;
 pub mod recovery;
+pub mod reopen_list;
 pub mod rescan;
 pub mod restore;
 pub mod rules;
+pub mod save_clock;
 pub mod settings;
 pub mod show_desktop;
 pub mod slide_hold;

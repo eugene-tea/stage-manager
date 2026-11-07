@@ -51,13 +51,19 @@
 //! provisional until windows that match a saved Desktop's with confidence make it that
 //! Desktop (adoption, `pending.rs`); all session, saved Spaces are recognized at an arrival
 //! by confident matches (exact title, frame, fingerprint) rather than exact titles alone.
+//! A Desktop's number is the model's own and lasts only when the Desktop is found again; a
+//! screen macOS keeps one Desktop for (`com.apple.spaces`, read only) is the one Desktop saved
+//! on that screen at its arrival, whatever it lists ([`Model::only_desktop_saved_on`]), and
+//! the launch arrives on it even with nothing listed (round desktop-ids, the 11-06 08:27
+//! restart).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Model, NativeTarget, Observation, Stage, StageId, WindowId, WindowMeta, WindowRole};
+use crate::engine::displays::ScreenKey;
 use crate::engine::persist::{LaunchFrames, LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
 use crate::engine::rules::Decision;
 use crate::engine::window_match::LowRule;
@@ -80,12 +86,22 @@ pub const BESIDE_ARRIVALS: u32 = 2;
 pub struct ArrivalNote {
     /// The saved Space (`state.json`) rebuilt on this visit, if any.
     pub rebuilt: Option<u64>,
+    /// Windows shown here that went back into the rebuilt saved Space's stages (a match of
+    /// their saved entries; the rest went by the new-window rules or the pool).
+    pub restored: usize,
+    /// The saved Space rebuilt was saved on another screen than this one (that screen not
+    /// connected, [`Model::saved_fits_display`]; round displays-2).
+    pub other_screen: bool,
     /// Known windows of other Spaces taken as moved here.
     pub moved: usize,
     /// Stages carried over whole (a known Desktop seen under a new id).
     pub carried: usize,
     /// Known Spaces seen on screen beside this one whose windows were left where they are.
     pub beside: Vec<u64>,
+    /// Windows first seen on the Desktop still shown while arrivals are held
+    /// ([`Model::set_hold_arrivals`]): not placed; the platform offers them again once they
+    /// still show after the change.
+    pub held: Vec<WindowId>,
 }
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
@@ -168,6 +184,7 @@ impl Model {
         let saved = self
             .leftovers
             .iter()
+            .filter(|l| self.saved_fits_display(l, display))
             .filter(|l| {
                 let n = exact_matches(l, &arrivals);
                 n >= 2 || 2 * n > l.standard_windows()
@@ -202,7 +219,7 @@ impl Model {
         self.current.values().any(|&s| s == space)
     }
 
-    fn has_space(&self, space: SpaceId) -> bool {
+    pub(crate) fn has_space(&self, space: SpaceId) -> bool {
         self.spaces.iter().any(|s| s.id == space)
     }
 
@@ -232,6 +249,7 @@ impl Model {
         self.slots.remove(&space);
         self.revealed.remove(&space);
         self.spaces.retain(|s| s.id != space);
+        self.front_owed.remove(&space);
         self.moved_from.retain(|_, from| *from != space);
     }
 
@@ -259,6 +277,9 @@ impl Model {
         }
         if let Some(v) = self.active.remove(&old) {
             self.active.insert(new, v);
+        }
+        if self.front_owed.remove(&old) {
+            self.front_owed.insert(new);
         }
         if let Some(v) = self.slots.remove(&old) {
             self.slots.insert(new, v);
@@ -289,6 +310,10 @@ impl Model {
     /// ([`Model::arrive`]) and saved again untouched until then. The model's own Spaces are
     /// renumbered past the saved ids so none collides. Call it before the first arrival.
     pub fn restore_spaces(&mut self, saved: Vec<SavedSpace>) {
+        self.restore.screens = saved
+            .iter()
+            .filter_map(|s| s.screen.as_ref().map(|sc| (s.id, (sc.key.clone(), sc.w.round() as i64, sc.h.round() as i64))))
+            .collect();
         let top = saved.iter().map(|s| s.id).max().unwrap_or(0);
         if self.spaces.iter().any(|s| s.id.0 <= top) {
             let own: Vec<SpaceId> = self.spaces.iter().map(|s| s.id).collect();
@@ -300,10 +325,176 @@ impl Model {
             }
         }
         self.leftovers = saved.into_iter().filter(|s| s.id != 0).collect();
-        self.restore.saved_front = self.leftovers.iter().find(|l| l.current).and_then(|l| l.active_index.map(|i| (l.id, i)));
+        // The main display's shown Desktop first (several are `current`, one per screen).
+        let main = self.main_display().key;
+        self.restore.saved_front = self
+            .leftovers
+            .iter()
+            .filter(|l| l.current)
+            .max_by_key(|l| l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(main) && main.known())
+            .and_then(|l| l.active_index.map(|i| (l.id, i)));
+        self.settle_saved_origins();
+    }
+
+    /// Brings the saved frames of the saved Desktops not visited yet into the arrangement of
+    /// now: a Desktop saved on a screen connected now whose origin moved since (Displays
+    /// settings rearranged while the app was not running, another screen made main) has its
+    /// windows' saved and pre-fit frames moved by the same offset, and takes the new origin,
+    /// as macOS moves a screen's windows along (R2 of the Codex review: a laptop Desktop
+    /// saved at x −1440 put its windows back at −1440 with the laptop now on the right). A
+    /// Desktop saved before files kept the origin keeps its frames while each of them still
+    /// lies on that screen (the origin taken as unchanged), else uses none
+    /// ([`crate::engine::restore::Restore::frames_off`]). One on a screen not connected
+    /// waits for it. Run at the load and at every change of the displays.
+    pub fn settle_saved_origins(&mut self) {
+        let displays = &self.displays;
+        let off = &mut self.restore.frames_off;
+        for l in &mut self.leftovers {
+            if off.contains(&l.id) {
+                continue;
+            }
+            let Some(sc) = l.screen.as_mut() else { continue };
+            let Some(d) = ScreenKey::parse(&sc.key).filter(|k| k.known()).and_then(|k| displays.iter().find(|d| d.is_keyed(k))) else {
+                continue;
+            };
+            let windows = l.stages.iter_mut().flat_map(|st| st.windows.iter_mut());
+            match sc.origin() {
+                Some((x, y)) => {
+                    let (dx, dy) = (d.frame.x - x, d.frame.y - y);
+                    if dx == 0.0 && dy == 0.0 {
+                        continue;
+                    }
+                    for w in windows {
+                        w.frame = w.frame.translate(dx, dy);
+                        w.original = w.original.map(|f| f.translate(dx, dy));
+                    }
+                    tracing::info!(desktop = l.id, dx, dy, "restore: a saved Desktop's screen moved in the arrangement; its saved frames move along");
+                }
+                None => {
+                    let mut windows = windows;
+                    let on = windows.all(|w| w.frame.is_degenerate() || d.frame.contains(w.frame.center()));
+                    if !on {
+                        off.insert(l.id);
+                        tracing::info!(desktop = l.id, "restore: a saved Desktop's frames (saved with no screen origin) are off its screen now; its windows keep the frames their apps give them");
+                        continue;
+                    }
+                }
+            }
+            sc.x = Some(d.frame.x);
+            sc.y = Some(d.frame.y);
+        }
+    }
+
+    /// Moves by (`dx`, `dy`) the saved frames waiting in the model's stages on display
+    /// `display` (pending windows), as macOS moves that screen's windows when its origin
+    /// moves ([`Model::set_displays`]).
+    pub(crate) fn move_pending_frames(&mut self, display: DisplayId, dx: f64, dy: f64) {
+        let on: Vec<StageId> = self
+            .stages
+            .iter()
+            .filter(|st| self.spaces.iter().any(|s| s.id == st.space && s.display == display))
+            .map(|st| st.id)
+            .collect();
+        for (_, list) in self.pending.iter_mut().filter(|(s, _)| on.contains(s)) {
+            for w in list {
+                w.frame = w.frame.translate(dx, dy);
+                w.original = w.original.map(|f| f.translate(dx, dy));
+            }
+        }
+    }
+
+    /// True when saved Desktop `saved` may form on `display`: it was saved on that screen,
+    /// or on one not connected now (its windows are wherever macOS put them: the 10-23 login
+    /// on the laptop's screen, then the lid closed onto the external display), or the file
+    /// does not say. A Desktop saved on another screen that is connected waits for it.
+    pub(crate) fn saved_fits_display(&self, saved: &SavedSpace, display: DisplayId) -> bool {
+        let Some(key) = saved.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) else { return true };
+        match self.display_keyed(key) {
+            Some(d) => d.id == self.known_display(display),
+            None => true,
+        }
+    }
+
+    /// Takes how many Desktops macOS keeps for each screen (by its identity; the platform
+    /// reads `com.apple.spaces`, read only). Call it before the first arrival. A screen not
+    /// named is unknown, and its Desktops are recognized by their windows alone.
+    pub fn set_desktop_counts(&mut self, counts: impl IntoIterator<Item = (ScreenKey, u32)>) {
+        self.desktop_counts = counts.into_iter().filter(|(k, _)| k.known()).collect();
+    }
+
+    /// How many Desktops macOS keeps for `display` ([`Model::set_desktop_counts`]), when known.
+    pub fn desktops_on(&self, display: DisplayId) -> Option<u32> {
+        let key = self.display(display).key;
+        key.known().then(|| self.desktop_counts.get(&key).copied()).flatten()
+    }
+
+    /// The saved Desktop that is `display`'s only Desktop: macOS keeps one Desktop for that
+    /// screen ([`Model::desktops_on`]), exactly one saved Desktop waiting names that screen,
+    /// and no Space of the screen holds a window yet. A Desktop's number is the model's own
+    /// (never Apple's): it lasts over a restart only when the Desktop is found again, and the
+    /// screen's identity with its one Desktop is what lasts when its windows are not listed
+    /// yet. `None` otherwise (two saved for that screen, a screen with more Desktops: their
+    /// windows decide, as before).
+    pub(crate) fn only_desktop_saved_on(&self, display: DisplayId) -> Option<SpaceId> {
+        let display = self.known_display(display);
+        if self.desktops_on(display) != Some(1) {
+            return None;
+        }
+        if self.spaces.iter().any(|s| s.display == display && !self.space_is_empty(s.id)) {
+            return None;
+        }
+        let key = self.display(display).key;
+        let mut keyed = self.leftovers.iter().filter(|l| l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(key));
+        let one = keyed.next()?;
+        keyed.next().is_none().then_some(SpaceId(one.id))
+    }
+
+    /// True when `display`, not arrived on yet, forms its one saved Desktop at its arrival
+    /// whatever it lists ([`Model::only_desktop_saved_on`]): the launch arrives on it even
+    /// with nothing listed there, so its saved stages wait on it from the start (its windows
+    /// go to them as they show, and one its app reopened on another screen comes back to it).
+    pub fn forms_saved_desktop(&self, display: DisplayId) -> bool {
+        !self.display_arrived(display) && self.only_desktop_saved_on(display).is_some()
+    }
+
+    /// True when saved Desktop `saved` names a screen with an identity and it is not
+    /// `display`'s: it forms here only because its own screen is not connected
+    /// ([`Model::saved_fits_display`]).
+    fn saved_on_other_screen(&self, saved: &SavedSpace, display: DisplayId) -> bool {
+        let Some(key) = saved.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) else { return false };
+        key.known() && !self.display(display).is_keyed(key)
+    }
+
+    /// True when `display` has had an arrival (its Desktop recognized): the Space it shows
+    /// was seen. False at the launch for a screen not looked at yet.
+    pub(crate) fn display_arrived(&self, display: DisplayId) -> bool {
+        let space = self.current_space(display);
+        self.spaces.iter().any(|s| s.id == space && s.last_seen > 0)
+    }
+
+    /// True when windows wait for `display`'s first arrival, moved there by the launch's
+    /// first one ([`Model::screen_claims`]): the platform arrives on it even when it lists
+    /// nothing else.
+    pub fn awaits_travellers(&self, display: DisplayId) -> bool {
+        let display = self.known_display(display);
+        self.travellers.iter().any(|t| t.display == display)
+    }
+
+    /// The windows still waiting for an arrival of their screen ([`Model::awaits_travellers`])
+    /// once the launch's arrivals are done: none, unless a screen was not arrived on. The
+    /// platform takes them as windows not placed yet (found again when they show).
+    pub fn take_travellers(&mut self) -> Vec<WindowMeta> {
+        std::mem::take(&mut self.travellers)
     }
 
     // ----- arrival and learning ----------------------------------------------------------
+
+    /// Holds the windows an arrival first sees on the Desktop still shown (`on`: a display
+    /// change under way with no click or key press since): [`Model::arrive`] leaves them out
+    /// and names them in [`ArrivalNote::held`].
+    pub fn set_hold_arrivals(&mut self, on: bool) {
+        self.hold_arrivals = on;
+    }
 
     /// The platform arrived on a Space of `display` (a Space change, launch, or the window
     /// list disagreeing with the Space shown). `live` is every manageable window the window
@@ -322,6 +513,18 @@ impl Model {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let display = self.known_display(display);
+        // Windows the launch's first arrival sent here, to their saved stage's screen
+        // (`pool.rs`): this screen's windows, at their saved frames.
+        let joined: Vec<WindowMeta>;
+        let live = if self.awaits_travellers(display) {
+            let (here, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = std::mem::take(&mut self.travellers).into_iter().partition(|t| t.display == display);
+            self.travellers = rest;
+            let ids: HashSet<WindowId> = here.iter().map(|t| t.id).collect();
+            joined = live.iter().filter(|m| !ids.contains(&m.id)).cloned().chain(here).collect();
+            &joined[..]
+        } else {
+            live
+        };
         let prev = self.current_space(display);
         let known: Vec<WindowId> = live
             .iter()
@@ -341,7 +544,7 @@ impl Model {
         let mut scores = all.clone();
         scores.retain(|_, (n, _, _)| *n > 0);
         let parks = |m: &WindowMeta| self.display(m.display).parks(m.frame);
-        for saved in &self.leftovers {
+        for saved in self.leftovers.iter().filter(|l| self.saved_fits_display(l, display)) {
             let n = if self.restore.new_session { confident_matches(saved, &arrivals, parks) } else { exact_matches(saved, &arrivals) } as i64;
             if n > 0 {
                 scores.entry(SpaceId(saved.id)).or_insert((0, false, 0)).0 += n;
@@ -350,11 +553,16 @@ impl Model {
         // At launch with no exact match (titles change), the Space shown when saved, when
         // the apps on screen say so too (V3: quit on Desktop 2, relaunched on Desktop 1).
         let launch = self.spaces.iter().all(|s| s.last_seen == 0);
+        // With nothing that scores, a screen with one Desktop is the one Desktop saved on it,
+        // whatever it lists (the 11-06 08:27 restart: the laptop listed no window at the
+        // launch and stayed the model's first Space, renumbered 19; saved 17's windows came
+        // in as strays from another Desktop).
         let winner = scores
             .iter()
             .max_by_key(|(id, (n, known, seen))| (*n, *known, *seen, std::cmp::Reverse(**id)))
             .map(|(id, _)| *id)
-            .or_else(|| launch.then(|| self.launch_fallback(&arrivals)).flatten());
+            .or_else(|| self.only_desktop_saved_on(display))
+            .or_else(|| launch.then(|| self.launch_fallback(display, &arrivals)).flatten());
         let target = match winner {
             Some(id) if self.has_space(id) => id,
             Some(id) => {
@@ -368,22 +576,45 @@ impl Model {
             None if self.space_is_empty(prev) => prev,
             None => self.new_space(display),
         };
+        // A display change under way, no click or key since (`hold_arrivals`): a window first
+        // seen on the Desktop still shown is macOS's listing mid-change (11-05 20:59:04, the
+        // lid closed: a window of the 5K's other Desktop, listed here for a moment, became a
+        // stage and a card until it left 2 s later), not placed. A Desktop that changed takes
+        // its windows as ever (the lid closed onto another Desktop: its own are rebuilt).
+        let held: Vec<WindowId> = if self.hold_arrivals && target == prev { arrivals.iter().map(|m| m.id).collect() } else { Vec::new() };
+        let arrivals: Vec<WindowMeta> = arrivals.into_iter().filter(|m| !held.contains(&m.id)).collect();
         let saved = self
             .leftovers
             .iter()
             .position(|l| SpaceId(l.id) == target)
             .map(|i| self.leftovers.remove(i));
+        if let Some(s) = &saved {
+            self.note_shown(s);
+        }
+        // Saved on a screen that is not this one (round displays-2): said in the arrival's
+        // line and counted for the restore's summary.
+        let other_screen = saved.as_ref().is_some_and(|s| self.saved_on_other_screen(s, display));
+        if other_screen {
+            self.restore.other_screen += 1;
+        }
         // No window of its own and no saved stages: a known Desktop seen under a new id (or
         // a new Desktop), whose stages that moved here whole are carried over before the
         // windows seen here for the first time are placed.
         let bare = self.space_is_empty(target) && saved.is_none();
         let beside = self.hold_beside(target, &all);
+        // A Desktop whose front left it while not shown: an empty front for now (never one
+        // of its cards made front with its windows still parked), its card forward below.
+        let owed = self.front_owed.remove(&target);
+        if owed && !self.active.contains_key(&target) {
+            self.fresh_active(target);
+        }
         self.show_space(display, target, prev);
         self.match_screen(target, live, &mut actions);
 
         let mut moving = self.collect_moves(target, &known, &beside, &mut actions);
         let carried = if bare { self.carry_stages(target, &mut moving, &mut actions) } else { 0 };
         let mut arrivals = arrivals;
+        let mut restored = 0;
         if saved.is_none() && self.space_has_pending(target) {
             // A Space with stages still waiting: its new windows go to them first.
             let standard: Vec<WindowMeta> = arrivals.iter().filter(|m| m.role == WindowRole::Standard).cloned().collect();
@@ -397,18 +628,42 @@ impl Model {
             if let Some(s) = &saved {
                 // Its stages whose windows all came back on another Desktop are not built.
                 self.skip_pooled_out(s.id, &mut assignment);
+                restored = assignment.stages.iter().map(|st| st.windows.len()).sum();
             }
             // After a restart, windows this Desktop's saved stages do not take are looked for
             // among every other Desktop's waiting windows (one pool, `pool.rs`).
             let unmatched: Vec<WindowMeta> = arrivals.iter().filter(|m| assignment.unmatched.contains(&m.id)).cloned().collect();
             let pooled = self.pool_claims(target, &unmatched);
             assignment.unmatched.retain(|id| !pooled.contains(id));
+            // At the launch, a window claimed by a saved Desktop of another connected screen
+            // not formed yet goes there now, at its saved frame; that screen's arrival takes
+            // it (the 11-06 restart: Deep House, the laptop's front, reopened on the 5K).
+            let travel = if launch { self.screen_claims(display, target, &unmatched) } else { Vec::new() };
+            let here = display.0;
+            for t in &travel {
+                self.restore.screen_moves += 1;
+                tracing::info!(
+                    id = t.id.0,
+                    bundle = %t.bundle_id,
+                    from = here,
+                    to = t.display.0,
+                    "restore: a window shown on another screen than its saved stage's goes back to that screen"
+                );
+                actions.push(Action::SetFrame { id: t.id, frame: t.frame });
+            }
+            let travelled: HashSet<WindowId> = travel.iter().map(|t| t.id).collect();
+            self.travellers.extend(travel);
             if self.restore.restoring {
                 // Windows no saved one claims go by Apple's rule (counted for the restore's line).
                 self.note_by_apple(unmatched.iter().filter(|m| !pooled.contains(&m.id)));
+            } else {
+                for m in unmatched.iter().filter(|m| !pooled.contains(&m.id)) {
+                    self.note_rescore(m);
+                }
             }
-            let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) = arrivals.iter().cloned().partition(|m| pooled.contains(&m.id));
-            let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id));
+            let (claimed, rest): (Vec<WindowMeta>, Vec<WindowMeta>) =
+                arrivals.iter().filter(|m| !travelled.contains(&m.id)).cloned().partition(|m| pooled.contains(&m.id));
+            let more = self.launch_with(&rest, &assignment, LaunchFrames::Live, hints, saved.as_ref().map(|s| s.id), target);
             actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
             if !claimed.is_empty() {
                 let placed = self.match_waiting(target, &claimed, LowRule::default(), None, Scope::Pool, &mut actions);
@@ -424,9 +679,51 @@ impl Model {
                 }
             }
         }
+        // The stages a removed display's Desktop brought, when macOS put their windows on
+        // this Desktop and showed it (not the one they were adopted into): whole, by the
+        // lid's rule, once this Desktop's own stages stand.
+        let (adopted_front, adopted_cards, carried_adopted) =
+            if bare { (None, Vec::new(), 0) } else { self.carry_adopted(target, live, &mut moving, &mut actions) };
+        let carried = carried + carried_adopted;
+        let capacity = self.capacity_of(target);
+        for s in adopted_cards {
+            // After this Desktop's own cards; past the capacity, hidden (as at the adoption).
+            self.touch(s);
+            let slots = self.slots.entry(target).or_default();
+            if slots.len() < capacity && !slots.contains(&s) {
+                slots.push(s);
+            }
+        }
+        if let Some(f) = adopted_front {
+            // Its windows show where macOS put them: no frame of theirs is set.
+            let shown: Vec<WindowId> = self
+                .stage(f)
+                .map(|s| s.windows.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|id| std::iter::once(id).chain(self.children_of(id)))
+                .filter(|id| self.windows.get(id).is_some_and(|w| !w.parked))
+                .collect();
+            let mut more = Vec::new();
+            self.bring_front(target, f, &mut more);
+            actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown.contains(id))));
+        }
+        // The removed display's windows are waited for until macOS shows them elsewhere:
+        // carried here, or this is another Desktop than theirs (they stayed where they were
+        // adopted). A notice of the Desktop they are on (macOS's, before its slide) keeps
+        // them, so the slide's arrival carries them whole (the review's two-screens 5).
+        if display == self.main_display().id
+            && (carried_adopted > 0 || !self.adopted.iter().any(|id| self.windows.get(id).is_some_and(|w| w.space == target)))
+        {
+            self.adopted.clear();
+        }
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
         self.move_in(target, &moving, live, hints, &mut actions);
+        if owed {
+            // Its most recent card comes forward, as when its front left it while shown.
+            self.forward_after_emptied(target, &mut actions);
+        }
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
         // A window not on screen here broke its run of hops: it is not on every Space.
@@ -440,12 +737,90 @@ impl Model {
         self.normalize_slots();
         self.last_arrival = ArrivalNote {
             rebuilt: saved.map(|s| s.id),
+            restored,
+            other_screen,
             moved,
             carried,
             beside: beside.iter().map(|s| s.0).collect(),
+            held,
         };
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Stages of the Desktop a removed display showed (`adopted`, [`Model::adopt_display`])
+    /// whose every standard window is in `moving` (on screen at `target`, a Desktop other
+    /// than the one they were adopted into): macOS put the removed screen's windows on this
+    /// Desktop and showed it (11-05 16:27: the 5K slid to its second Desktop, with the
+    /// laptop's two windows on it). They come whole, by the lid's rule, not one by one into
+    /// their apps' stages here: the stage that was in front is returned for the front (the
+    /// caller brings it forward once this Desktop's own stages stand), the others become
+    /// cards here, their windows parked at this display's corner (where the adoption parked
+    /// them). Their windows leave `moving`. One `live` lists in this display's park zone is
+    /// parked, whatever the model counted it: the front stage's then comes out of the corner
+    /// (11-05 20:01:38: the laptop's front window, Chrome, was at the 5K's corner on its
+    /// second Desktop, counted shown; that Desktop showed no front for the 4 s until the
+    /// owner's next click). The Desktop the front stage came from owes its front
+    /// ([`Model::forward_after_emptied`]: its own most recent stage when it shows again).
+    /// Returns (the front stage, the cards, how many stages came).
+    fn carry_adopted(
+        &mut self,
+        target: SpaceId,
+        live: &[WindowMeta],
+        moving: &mut Vec<WindowId>,
+        actions: &mut Vec<Action>,
+    ) -> (Option<StageId>, Vec<StageId>, usize) {
+        if self.adopted.is_empty() {
+            return (None, Vec::new(), 0);
+        }
+        let display = self.space_display(target);
+        let whole: Vec<StageId> = self
+            .stages
+            .iter()
+            .filter(|s| s.space != target && !s.windows.is_empty() && s.windows.iter().all(|w| moving.contains(w) && self.adopted.contains(w)))
+            .map(|s| s.id)
+            .collect();
+        let mut front = None;
+        let mut cards = Vec::new();
+        for &sid in &whole {
+            let Some(from) = self.stage(sid).map(|s| s.space) else { continue };
+            let was_front = self.active.get(&from) == Some(&sid);
+            let members: Vec<WindowId> = self.stage(sid).map(|s| s.windows.clone()).unwrap_or_default();
+            for &m in &members {
+                self.moved_from.insert(m, from);
+            }
+            self.carry_stage_to(sid, target, display);
+            moving.retain(|w| !members.contains(w));
+            let zone = *self.display(display);
+            let mut cornered = members.clone();
+            cornered.extend(self.children_in(Home::Stage(sid)));
+            for id in cornered {
+                if live.iter().any(|m| m.id == id && zone.parks(m.frame))
+                    && let Some(w) = self.windows.get_mut(&id)
+                {
+                    w.parked = true;
+                }
+            }
+            if was_front {
+                // The Desktop it was carried from is left with no front (the 5K's first,
+                // where the adoption had brought it): its most recent card comes forward
+                // there, now or when it shows again; never an empty front (11-05 20:25:47).
+                self.forward_after_emptied(from, actions);
+            }
+            if was_front && front.is_none() {
+                front = Some(sid);
+                continue;
+            }
+            let mut ids = members;
+            ids.extend(self.children_in(Home::Stage(sid)));
+            for id in ids {
+                if self.windows.get(&id).is_some_and(|w| !w.parked) {
+                    self.park_window(id, actions);
+                }
+            }
+            cards.push(sid);
+        }
+        (front, cards, whole.len())
     }
 
     /// Known Spaces other than `target` with a positive score in `all` (more of their windows
@@ -471,10 +846,18 @@ impl Model {
     /// title: taken only when at least one window on screen matches it by app and no other
     /// saved Space matches more windows by app; else `None` (a new Space; every saved one
     /// waits for its own visit).
-    fn launch_fallback(&self, arrivals: &[WindowMeta]) -> Option<SpaceId> {
-        let current = self.leftovers.iter().find(|l| l.current)?;
+    fn launch_fallback(&self, display: DisplayId, arrivals: &[WindowMeta]) -> Option<SpaceId> {
+        let key = self.display(display).key;
+        let fits = |l: &&SavedSpace| self.saved_fits_display(l, display);
+        // The Desktop shown on this very screen when saved, else any shown one that may form here.
+        let current = self
+            .leftovers
+            .iter()
+            .filter(|l| l.current)
+            .filter(fits)
+            .max_by_key(|l| key.known() && l.screen.as_ref().and_then(|s| ScreenKey::parse(&s.key)) == Some(key))?;
         let n = bundle_matches(current, arrivals);
-        let beaten = self.leftovers.iter().any(|l| !l.current && bundle_matches(l, arrivals) > n);
+        let beaten = self.leftovers.iter().filter(fits).any(|l| l.id != current.id && bundle_matches(l, arrivals) > n);
         (n > 0 && !beaten).then_some(SpaceId(current.id))
     }
 
@@ -740,7 +1123,7 @@ impl Model {
 
     /// Makes an empty stage `space`'s active one: an unnamed empty stage of its own when it
     /// has one (no child windows either), else a new one.
-    fn fresh_active(&mut self, space: SpaceId) -> StageId {
+    pub(crate) fn fresh_active(&mut self, space: SpaceId) -> StageId {
         let empty = self
             .stages
             .iter()
@@ -906,7 +1289,7 @@ impl Model {
         self.hops.remove(&id);
     }
 
-    fn set_space(&mut self, ids: &[WindowId], space: SpaceId) {
+    pub(crate) fn set_space(&mut self, ids: &[WindowId], space: SpaceId) {
         for id in ids {
             if let Some(w) = self.windows.get_mut(id) {
                 w.space = space;

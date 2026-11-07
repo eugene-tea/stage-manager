@@ -6,6 +6,7 @@ use crate::engine::geometry::Point;
 use crate::engine::park::{GRAB_WIDTH, TITLE_BAR_HEIGHT, clamp_to_visible};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
+use crate::engine::displays::ScreenKey;
 use crate::engine::testkit::*;
 
 /// A model plus a fake desktop that executes every action.
@@ -54,7 +55,8 @@ impl Env {
 
     fn switch(&mut self, n: usize) -> Vec<Action> {
         let obs = self.d.obs();
-        let a = self.m.switch_to_number(n, &obs);
+        let keyboard = self.m.keyboard_display(obs.focused, None);
+        let a = self.m.switch_to_number(n, keyboard, &obs);
         self.run(a)
     }
 
@@ -620,6 +622,8 @@ fn switch_never_records_a_parked_frame_as_restore() {
 fn a_window_the_user_pushed_into_the_corner_comes_back_by_it() {
     // S3: in the park zone but not where a park lands, the frame is the user's. It was
     // never recorded, and the next switch brought the window back at its older frame.
+    // Pulled just within reach it would show 80 by 35 pt at the corner, a piece nobody sees
+    // (the 11-06 corner frame): it comes back wholly on screen in that corner.
     let mut e = Env::new();
     e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     e.add(meta(2, 11, "com.example.b"), RuleAction::New);
@@ -633,7 +637,7 @@ fn a_window_the_user_pushed_into_the_corner_comes_back_by_it() {
     e.switch(2);
     let back = e.d.frames[&w(2)];
     assert!(!parked_at(back), "{back:?}");
-    assert_eq!(back, Rect::new(1440.0 - GRAB_WIDTH, 790.0, 600.0, 400.0), "pulled just within reach, not centered");
+    assert_eq!(back, Rect::new(1440.0 - 600.0, 825.0 - 400.0, 600.0, 400.0), "by the corner, not centered");
 }
 
 #[test]
@@ -956,6 +960,7 @@ fn an_activation_asks_the_focus_only_when_the_answer_depends_on_it() {
 fn an_activation_asks_the_focus_when_it_could_pick_another_display() {
     let second = Display {
         id: DisplayId(2),
+        key: ScreenKey::new(0x10ac, 0x4123, 0x1),
         frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         corner: Default::default(),
@@ -1058,7 +1063,7 @@ fn activating_the_other_app_of_a_shared_stage_brings_its_window_in_front() {
     assert_eq!(e.d.focused, Some(w(1)));
     // Back and forth: the next activation of B gives B the key again.
     let obs = e.d.obs();
-    let a = e.m.switch_to_number(2, &obs);
+    let a = e.m.switch_to_number(2, e.m.main_display().id, &obs);
     e.run(a);
     let obs = Observation { focused: None, ..e.d.obs() };
     let a = e.m.app_activated(11, &obs);
@@ -1295,9 +1300,12 @@ fn unpark_all_restores_every_parked_window_clamped() {
 }
 
 #[test]
-fn removed_display_moves_its_stages_to_main() {
+fn a_removed_displays_front_stage_comes_to_main_in_front() {
+    // Round displays (Apple's, measured 11-05): the removed display's front stage becomes the
+    // main display's front; an empty front there gives way.
     let second = Display {
         id: DisplayId(2),
+        key: ScreenKey::new(0x10ac, 0x4123, 0x1),
         frame: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         visible: Rect::new(1440.0, 0.0, 1920.0, 1080.0),
         corner: Default::default(),
@@ -1312,17 +1320,13 @@ fn removed_display_moves_its_stages_to_main() {
     assert_eq!(e.m.stages().len(), 2);
     let a = e.m.set_displays(vec![display()]);
     e.run(a);
-    assert!(
-        e.d.parked(w(5)),
-        "the second display's active stage is parked on main"
-    );
+    assert_eq!(e.m.main_active_stage(), e.m.stage_of(w(5)), "the second display's front stage is the main display's now");
+    assert!(!e.d.parked(w(5)));
     assert!(e.m.stages().iter().all(|s| s.display == MAIN));
-    let a = e.m.unpark_all();
-    e.run(a);
-    assert!(VISIBLE.contains_rect(&Rect {
-        h: 28.0,
-        ..e.d.frames[&w(5)]
-    }));
+    assert_eq!(e.m.stages().len(), 1, "the empty front gave way");
+    // Its frame is macOS's to move; the restore frame remembered is within reach here.
+    let restore = e.m.window(w(5)).expect("w5").restore;
+    assert!(VISIBLE.contains_rect(&Rect { h: 28.0, ..restore }) && !display().parks(restore), "{restore:?}");
 }
 
 /// The 5K the owner docks to (menu bar on it).
@@ -1355,7 +1359,7 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     // V1-A: same id, a bigger frame (scaling changed, or the panel became main).
     let mut e = three_stages();
     let active = e.m.main_active_stage();
-    let big = Display { id: MAIN, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
+    let big = Display { id: MAIN, key: ScreenKey::NONE, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![big]);
     let mut parks = parks_in(&a);
     parks.sort_by_key(|p| p.0);
@@ -1409,7 +1413,7 @@ fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
     let space = e.m.current_space(MAIN);
     let stages: Vec<StageId> = e.m.stages().iter().map(|s| s.id).collect();
     let slots = e.m.strip_slots(MAIN);
-    let ext = Display { id: DisplayId(7), frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
+    let ext = Display { id: DisplayId(7), key: ScreenKey::NONE, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![ext]);
     assert_eq!(e.m.main_active_stage(), active, "the active stage stays active, never the oldest");
     assert_eq!(e.m.current_space(DisplayId(7)), space, "same Space");
@@ -2153,6 +2157,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         2 => Display { id: DisplayId(9), ..display() },
                         3 => Display {
                             id: DisplayId(9),
+                            key: ScreenKey::NONE,
                             frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
                             visible: Rect::new(0.0, 30.0, 1920.0, 1050.0),
                             corner: Default::default(),

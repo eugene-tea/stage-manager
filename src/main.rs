@@ -19,7 +19,8 @@
 //!   server reports them (bounds, layer, onscreen, z), one JSON line, for test scripts;
 //!   `probe-windows --every MS --for MS <bundle-id>...` samples them that often for that
 //!   long (each sample with its wall-clock time), one JSON line at the end: the Spaces
-//!   check's look at a Desktop slide.
+//!   check's look at a Desktop slide. `--all` in place of the bundle ids: every app's
+//!   windows (never a title), the checks that skip where another app's window is.
 //! - `stage-manager probe-screen` prints the on-screen windows that cover the main display
 //!   (a full-screen app's Space), one JSON line, for test scripts.
 //! - `stage-manager probe-patch [--out FILE.png] [--rect X,Y,W,H] [--reach PT] [--placement P]` renders what
@@ -89,7 +90,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>... | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
             );
             ExitCode::from(2)
         }
@@ -127,11 +128,11 @@ mod app {
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
-    use stage_manager::engine::{fullscreen, leftovers};
+    use stage_manager::engine::{fullscreen, leftovers, logout_watch};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, paths, safety, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, windows};
     use stage_manager::ui::shell;
-    use stage_manager::ui::status_menu::{self, MenuAction, MenuState, NoticeLine, StatusMenu};
+    use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
 
     /// Permission, settings (Apple's Stage Manager coming on included) and display poll
@@ -180,15 +181,17 @@ mod app {
         strip_visible: bool,
         config_error: Option<String>,
         last_mark: Option<String>,
-        /// The desktop notice's entries, as the WM thread last sent them.
-        notice: Vec<NoticeLine>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
         /// Window captures were refused when the menu was last drawn.
         capture_refused: bool,
-        display: Option<Display>,
+        /// Accessibility listed no window when the menu was last drawn (round ax-blind).
+        ax_blind: bool,
+        /// Every display as last sent to the WM thread, the main one first.
+        displays: Vec<Display>,
         _workspace: WorkspaceObservers,
         _spaces: WorkspaceObservers,
+        _screens: WorkspaceObservers,
         _appearance: WorkspaceObservers,
         _power_off: apps::LogoutObservers,
         input: Option<InputMonitor>,
@@ -238,11 +241,11 @@ mod app {
                 permissions: self.permissions,
                 capture_on: shell::capture_on(),
                 capture_refused: self.capture_refused,
+                accessibility_blind: self.ax_blind,
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
                 last_mark: self.last_mark.clone(),
-                notice: self.notice.clone(),
             }
         }
 
@@ -278,6 +281,11 @@ mod app {
                 self.capture_refused = refused;
                 self.refresh_menu();
             }
+            let blind = session::accessibility_blind();
+            if blind != self.ax_blind {
+                self.ax_blind = blind;
+                self.refresh_menu();
+            }
             if let Some(settings) = native_settings::refresh() {
                 warn_if_apple_stage_manager(&settings);
                 self.settings = settings.clone();
@@ -292,23 +300,33 @@ mod app {
             }
         }
 
+        /// Every display (the main one first), sent when any changes: added, removed, moved,
+        /// resized, or its park corner moved (round displays). Read at every poll and at once
+        /// on AppKit's screen-parameters notice ([`apps::observe_screen_parameters`]).
         fn send_display_if_changed(&mut self) {
             let Some(mtm) = MainThreadMarker::new() else { return };
-            let Some(main) = desktop::main_display(mtm) else { return };
-            if self.display != Some(main) {
-                tracing::info!(frame = %main.frame, visible = %main.visible, corner = ?main.corner, "main display");
-                let choice = desktop::park_corner(main.frame, main.visible);
+            let displays = desktop::displays(mtm);
+            if displays.is_empty() || self.displays == displays {
+                return;
+            }
+            for (i, d) in displays.iter().enumerate() {
+                tracing::info!(id = d.id.0, key = %d.key.text(), frame = %d.frame, visible = %d.visible, corner = ?d.corner, main = i == 0, "display");
+                let others: Vec<_> = displays.iter().filter(|o| o.id != d.id).map(|o| o.frame).collect();
+                let choice = stage_manager::engine::park::choose_corner(d.frame, d.visible, &others);
                 if choice.overlap > 0.0 {
                     tracing::warn!(
+                        id = d.id.0,
                         corner = ?choice.corner,
                         overlap = choice.overlap.round(),
-                        "every corner of the main display has another display beyond it: parked windows may show there; this corner overlaps the least"
+                        "every corner of this display has another display beyond it: parked windows may show there; this corner overlaps the least"
                     );
                 }
-                self.display = Some(main);
-                self.wm.send(WmCommand::Displays(vec![main]));
-                stage_manager::ui::corner_patch::display_changed(mtm);
             }
+            self.displays = displays.clone();
+            let ids: Vec<u32> = displays.iter().map(|d| d.id.0).collect();
+            strip::displays_changed(&ids);
+            self.wm.send(WmCommand::Displays(displays, Instant::now()));
+            stage_manager::ui::corner_patch::display_changed(mtm, &ids);
         }
 
         fn on_ui(&mut self, update: UiUpdate) {
@@ -328,7 +346,6 @@ mod app {
                     }
                 }
                 UiUpdate::StripVisible(v) => self.strip_visible = v,
-                UiUpdate::DesktopNotice(lines) => self.notice = lines,
                 UiUpdate::CornerPatch(plan) => {
                     if let Some(mtm) = MainThreadMarker::new() {
                         stage_manager::ui::corner_patch::apply(mtm, plan);
@@ -365,12 +382,6 @@ mod app {
                     if let Err(e) = spawned {
                         tracing::warn!("cannot mark a problem: {e}");
                     }
-                }
-                MenuAction::ShowNoticed(id) => {
-                    self.wm.send(WmCommand::Notice(controller::NoticeCommand::Show(id)));
-                }
-                MenuAction::DismissNotice => {
-                    self.wm.send(WmCommand::Notice(controller::NoticeCommand::Dismiss));
                 }
                 MenuAction::Quit => quit(),
             }
@@ -433,7 +444,18 @@ mod app {
 
     fn finish_exit(ok: bool, code: i32) -> ! {
         if ok {
-            safety::mark_clean_exit();
+            // A quit at a logout: the guardian waits for its cancel, which opens the app again
+            // (round logout-cancel-relaunch); never after the user's own Quit.
+            let reason = stage_manager::ui::app_menu::system_quit_reason();
+            let marker = logout_watch::quit_marker(
+                wm_thread::quit_after_head_start(),
+                reason.is_some_and(logout_watch::logout_reason),
+                stage_manager::ui::app_menu::user_quit(),
+            );
+            if marker == logout_watch::LOGOUT_MARK {
+                tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
+            }
+            safety::mark_clean_exit(marker);
         } else if safety::passed_on() {
             // Only handed-over windows still away (round 8N): this app's guardian takes them over.
             tracing::info!("handed-over windows still away: this app's guardian takes them over");
@@ -450,6 +472,9 @@ mod app {
         capture::quiesce(CAPTURE_QUIESCE);
         logging::write_counts("quit");
         tracing::info!("bye");
+        // The launchd agent's unregistering left for the quit while this copy is its job (launch
+        // at login turned off, or moved to the login item): last, since it ends the job.
+        login_item::at_exit();
         std::process::exit(code);
     }
 
@@ -595,10 +620,12 @@ mod app {
                 let mut pictures = (None, None);
                 if let Some(r) = region {
                     let mean = |p: Option<(objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>, f64)>| p.and_then(|(i, _)| stage_manager::platform::pixels::mean_rgba(&i));
+                    // The main display's (the test tool's screen).
+                    let screen = objc2_core_graphics::CGMainDisplayID();
                     DispatchQueue::main().exec_sync(|| {
                         pictures = (
-                            mean(stage_manager::ui::corner_patch::cover_image(r)),
-                            mean(stage_manager::platform::desktop_shot::image(r)),
+                            mean(stage_manager::ui::corner_patch::cover_image(screen, r)),
+                            mean(stage_manager::platform::desktop_shot::image(screen, r)),
                         );
                     });
                 }
@@ -741,6 +768,13 @@ mod app {
         logging::init(logging::Process::App);
         safety::install_panic_hook();
         tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
+        // How it was started, and how long after the login (rounds early-start, reopen-list:
+        // the open event, once AppKit has it, tells a login item from macOS's reopen).
+        tracing::info!(
+            started = login_item::started().name(),
+            login_ago_s = login_item::since_login().map(|d| d.as_secs()),
+            "launched"
+        );
         if let Some(home) = paths::custom_home() {
             tracing::info!("STAGE_MANAGER_HOME={}", home.display());
         }
@@ -798,6 +832,11 @@ mod app {
 
         let wm_events = wm.clone();
         let to_wm = move |event| {
+            // A logout slowed by apps saving stays under way while apps still quit (the 1.7
+            // review): the reopen list's clock here, the head start's on the WM thread.
+            if matches!(event, apps::AppEvent::Terminated(_)) {
+                shell::app_quit(Instant::now());
+            }
             wm_events.send(WmCommand::App(event));
         };
         // A live check's late notices (round stale-activations; the fixtures' runs only).
@@ -821,6 +860,12 @@ mod app {
             }
             wm_spaces.send(WmCommand::SpaceChanged);
         });
+        // A display change heard as AppKit has it, not up to a second later at the poll: its
+        // settle starts before macOS's activation that follows it (Mail, 0.4 s after the lid).
+        let screens = apps::observe_screen_parameters(|| {
+            tracing::debug!("screen parameters changed: the displays are read now");
+            with_app(App::send_display_if_changed);
+        });
         let appearance = apps::observe_appearance(|| {
             // Windows that follow the system's appearance change with it: read again.
             stage_manager::platform::window_look::appearance_changed();
@@ -839,9 +884,13 @@ mod app {
         // cancel signal resumes at once, and a logout cancelled without one ends the hold two
         // minutes after its latest signal (a fresh start). Each signal is timed here, as it
         // arrives.
+        // The same signal then turns the app regular, on this thread, so macOS lists it with
+        // the apps it reopens at login (round reopen-list, `[app] reopen_with_apps`).
         let wm_power = wm.clone();
         let power_off = apps::observe_logout(mtm, move |name, signal| {
-            wm_power.logout_signal(name, signal, Instant::now());
+            let at = Instant::now();
+            wm_power.logout_signal(name, signal, at);
+            shell::logout_signal(signal, at);
         });
 
         // No system prompts at launch: the welcome window (or the menu) asks, on a click.
@@ -875,13 +924,14 @@ mod app {
             strip_visible: true,
             config_error: None,
             last_mark: None,
-            notice: Vec::new(),
             hotkeys: None,
             thumbnail_interval_ms: None,
             capture_refused: false,
-            display: None,
+            ax_blind: false,
+            displays: Vec::new(),
             _workspace: workspace,
             _spaces: spaces,
+            _screens: screens,
             _appearance: appearance,
             _power_off: power_off,
             input: input_monitor,
@@ -912,12 +962,13 @@ mod app {
         ExitCode::SUCCESS
     }
 
-    /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows.
-    /// Sampling (`--every MS --for MS`), `--focus` adds to each sample the window the keyboard
-    /// goes to (the frontmost app's focused window, through Accessibility) and when it was read.
+    /// `probe-windows <bundle-id>...`: the window server's view of those apps' windows
+    /// (`--all`: every app's). Sampling (`--every MS --for MS`), `--focus` adds to each
+    /// sample the window the keyboard goes to (the frontmost app's focused window, through
+    /// Accessibility) and when it was read.
     pub fn probe_windows(args: &[String]) -> ExitCode {
         let usage = || {
-            eprintln!("usage: stage-manager probe-windows [--every MS --for MS [--focus]] <bundle-id>...");
+            eprintln!("usage: stage-manager probe-windows [--every MS --for MS [--focus]] <bundle-id>... | --all");
             ExitCode::from(2)
         };
         let (sampling, args) = match args {
@@ -936,6 +987,7 @@ mod app {
         if args.is_empty() {
             return usage();
         }
+        let all = args.len() == 1 && args[0] == "--all";
         let pids: Vec<i32> = args
             .iter()
             .flat_map(|bundle| NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle)))
@@ -945,7 +997,7 @@ mod app {
             let list = windows::list_windows();
             let z = windows::z_order(&list);
             list.iter()
-                .filter(|w| pids.contains(&w.pid))
+                .filter(|w| all || pids.contains(&w.pid))
                 .map(|w| {
                     json!({
                         "id": w.id,

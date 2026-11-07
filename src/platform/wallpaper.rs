@@ -59,10 +59,11 @@ const STORE: &str = "Library/Application Support/com.apple.wallpaper/Store/Index
 /// The tz database's zone table (zone names to places).
 const ZONE_TAB: &str = "/usr/share/zoneinfo/zone.tab";
 
-/// One reading of what the main screen's desktop shows.
+/// One reading of what a screen's desktop shows (the main screen's by [`Reader::read`], any
+/// screen's by [`Reader::read_screen`]; round displays-2).
 #[derive(Debug, Clone)]
 pub struct Wall {
-    /// The main screen's frame (global, top-left).
+    /// The screen's frame (global, top-left; the main screen's at the origin).
     pub screen: Rect,
     /// The picture's path as NSWorkspace reports it.
     pub path: Option<String>,
@@ -160,19 +161,29 @@ pub struct Reader {
 impl Reader {
     /// Reads what the main screen's desktop shows now (main thread).
     pub fn read(&mut self, mtm: MainThreadMarker) -> Wall {
-        let dark = dark_appearance(mtm);
         let Some(screen) = NSScreen::screens(mtm).firstObject() else {
+            let dark = dark_appearance(mtm);
             return Wall { screen: Rect::default(), path: None, outcome: Err("no screen".into()), recheck_at: None, frame_due: None, dark, image: None };
         };
+        self.read_screen(mtm, &screen)
+    }
+
+    /// Reads what `screen`'s desktop shows now (main thread; round displays-2): each screen
+    /// may show a different picture, with its own placement, size, scale and colour space.
+    pub fn read_screen(&mut self, mtm: MainThreadMarker, screen: &NSScreen) -> Wall {
+        let dark = dark_appearance(mtm);
         let f = screen.frame();
-        let frame = Rect::new(0.0, 0.0, f.size.width, f.size.height);
+        let frame = super::desktop::to_top_left(
+            Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height),
+            super::desktop::primary_height(mtm),
+        );
         let workspace = NSWorkspace::sharedWorkspace();
         let path = workspace
-            .desktopImageURLForScreen(&screen)
+            .desktopImageURLForScreen(screen)
             .filter(|u| u.isFileURL())
             .and_then(|u| u.path())
             .map(|p| p.to_string());
-        let options = workspace.desktopImageOptionsForScreen(&screen);
+        let options = workspace.desktopImageOptionsForScreen(screen);
         // SAFETY: AppKit's own option-key statics.
         let (k_scale, k_clip, k_fill) =
             unsafe { (NSWorkspaceDesktopImageScalingKey, NSWorkspaceDesktopImageAllowClippingKey, NSWorkspaceDesktopImageFillColorKey) };

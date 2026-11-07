@@ -15,7 +15,7 @@
 //! their first visit.
 //!
 //! Fields added after version 2 first shipped (`saved_at`, `display`, a Space's
-//! `last_seen`, a stage's `last_active`, a window's `fp`, `pending` and `quit_at`) are
+//! `last_seen` and `unvisited`, a stage's `last_active`, a window's `fp`, `pending` and `quit_at`) are
 //! optional both ways: older files load without them, and older builds of version 2 read
 //! newer version-2 files, ignoring them. A file of a later version is not read
 //! ([`StateFile::from_json`]): the build starts without saved stages, as from no file.
@@ -40,7 +40,7 @@ use super::model::{
     Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowMeta, WindowRole,
     WindowState,
 };
-use super::restore::{QUIT_KEEP, merge_order};
+use super::restore::{QUIT_KEEP, UNSEEN_KEEP, merge_order};
 use super::rules::Decision;
 use super::settings::AppWindows;
 use super::stage_area::same_frame;
@@ -160,11 +160,47 @@ pub struct SavedStage {
     pub last_active: Option<u64>,
 }
 
+/// The screen a Space was saved on: its identity ([`ScreenKey::text`]), size in points and
+/// top-left corner in global coordinates. A restart puts the Space's stages back on the
+/// screen with that identity, when connected ([`Model::saved_fits_display`]), with their
+/// saved frames on one of the same size, moved along when the screen's origin moved (the
+/// arrangement changed, another screen became main: [`Model::settle_saved_origins`]).
+///
+/// [`ScreenKey::text`]: crate::engine::displays::ScreenKey::text
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedScreen {
+    /// The screen's identity ([`crate::engine::displays::ScreenKey::text`]).
+    pub key: String,
+    /// Width in points.
+    pub w: f64,
+    /// Height in points.
+    pub h: f64,
+    /// The screen's left edge in global coordinates when saved: the saved frames of its
+    /// Space are in that arrangement's coordinates. Absent in files written before 11-06
+    /// (R2 of the Codex review).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Its top edge, as `x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+}
+
+impl SavedScreen {
+    /// The screen's top-left corner when saved, when the file says (both finite).
+    pub fn origin(&self) -> Option<(f64, f64)> {
+        self.x.zip(self.y).filter(|(x, y)| x.is_finite() && y.is_finite())
+    }
+}
+
 /// One saved Space: its stages, active stage and strip, like a whole Stage Manager.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedSpace {
     /// The model's synthetic Space id (never Apple's).
     pub id: u64,
+    /// The screen it was on when saved (absent in files written before round displays, and
+    /// for a screen with no identity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<SavedScreen>,
     /// The Space shown when saved.
     #[serde(default)]
     pub current: bool,
@@ -179,6 +215,12 @@ pub struct SavedSpace {
     /// When the Space was last shown (Unix seconds), as far as saves saw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
+    /// Not shown in the file's window server session: its pending windows were not looked
+    /// for there, so a new session does not give them up ([`StateFile::start_new_session`]).
+    /// Set on every Space at a load in a new session; a Space shown since is saved without
+    /// it. False in files of earlier versions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unvisited: bool,
 }
 
 impl SavedSpace {
@@ -234,8 +276,8 @@ pub struct SavedDisplay {
     pub w: f64,
     /// Height in points.
     pub h: f64,
-    /// Reserved: the display arrangement (each display's vendor, model and serial), for
-    /// frames per arrangement later.
+    /// The main display's identity ([`crate::engine::displays::ScreenKey::text`]), when
+    /// known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -272,19 +314,42 @@ impl StateFile {
     /// app never brought it back) and is given up, as is one pending since a session that
     /// could not be read (`""`: at least that whole session went by); a saved Space left
     /// without a standard window is dropped. Returns how many windows were given up.
+    ///
+    /// A Space not shown in the file's session (`unvisited`) was not looked for there: its
+    /// windows age by its `last_seen` instead, given up as above only once it was last shown
+    /// more than [`UNSEEN_KEEP`] before the file's save (the Fable review of 11-06, restore
+    /// 3: a Desktop not visited in one session lost its stages at the next restart). Every
+    /// Space is unvisited in the new session until it shows.
     pub fn start_new_session(&mut self) -> usize {
         let since = self.session.clone().unwrap_or_default();
+        let saved_at = self.saved_at;
         let mut expired = 0;
-        for stage in self.spaces.iter_mut().flat_map(|s| s.stages.iter_mut()) {
-            let before = stage.windows.len();
-            stage.windows.retain(|w| w.pending.as_ref().is_none_or(|p| !p.since.is_empty() && p.since == since));
-            expired += before - stage.windows.len();
-            for w in &mut stage.windows {
-                w.pending.get_or_insert_with(|| Pending { since: since.clone() });
+        for space in &mut self.spaces {
+            let aged = saved_at.zip(space.last_seen).is_some_and(|(at, seen)| at.saturating_sub(seen) > UNSEEN_KEEP.as_secs());
+            let looked_for = !space.unvisited || aged;
+            for stage in &mut space.stages {
+                let before = stage.windows.len();
+                stage.windows.retain(|w| !looked_for || w.pending.as_ref().is_none_or(|p| !p.since.is_empty() && p.since == since));
+                expired += before - stage.windows.len();
+                for w in &mut stage.windows {
+                    w.pending.get_or_insert_with(|| Pending { since: since.clone() });
+                }
             }
+            space.unvisited = true;
         }
         self.spaces.retain(|s| s.standard_windows() > 0);
         expired
+    }
+
+    /// A save while nothing could be looked for (Accessibility listing no window,
+    /// [`crate::engine::ax_blind`]): every Space is saved `unvisited`, so the next session gives
+    /// up none of its waiting windows for this one (its Desktop showed, but no window could be
+    /// seen; 11-06: the two waiting on the Desktop shown would have gone at the logout that
+    /// fixes it). They age by `last_seen` as a Desktop not shown does.
+    pub fn not_looked_for(&mut self) {
+        for space in &mut self.spaces {
+            space.unvisited = true;
+        }
     }
 
     /// The entries of windows whose app quit (`quit_at`), as a load must take them before
@@ -401,12 +466,14 @@ impl StateFile {
                 let v1: StateFileV1 =
                     serde_json::from_value(value).map_err(|e| format!("state.json: {e}"))?;
                 Ok(Self::single(SavedSpace {
+                    screen: None,
                     id: 1,
                     current: true,
                     stages: v1.stages,
                     active_index: v1.active_index,
                     strip_slots: v1.strip_slots,
                     last_seen: None,
+                    unvisited: false,
                 }))
             }
             Some(v) if v == u64::from(STATE_VERSION) => {
@@ -665,12 +732,12 @@ impl Model {
             l.remove_stages(&gone);
             l
         }));
-        let main = self.main_display().frame;
+        let main = self.main_display();
         StateFile {
             version: STATE_VERSION,
             session: None,
             saved_at: None,
-            display: Some(SavedDisplay { w: main.w, h: main.h, key: None }),
+            display: Some(SavedDisplay { w: main.frame.w, h: main.frame.h, key: main.key.known().then(|| main.key.text()) }),
             spaces,
         }
     }
@@ -683,7 +750,8 @@ impl Model {
             Some(SavedWindow {
                 bundle_id: w.meta.bundle_id.clone(),
                 title: w.meta.title.clone(),
-                frame: w.restore,
+                // A saved frame still owed (`saved_size.rs`) stays the saved one.
+                frame: self.owed_frame(id).unwrap_or(w.restore),
                 z,
                 key,
                 pinned,
@@ -691,7 +759,7 @@ impl Model {
                     WindowRole::Standard => SavedRole::Standard,
                     WindowRole::Child { .. } => SavedRole::Child,
                 },
-                original: w.original,
+                original: self.owed.get(&id).map_or(w.original, |o| o.original),
                 window: Some(id.0),
                 fp: (!fp.is_empty()).then_some(fp),
                 pending: None,
@@ -752,13 +820,22 @@ impl Model {
         // Windows whose app quit a moment ago, in their stages (round 8H).
         let ids: Vec<StageId> = here.iter().map(|s| s.id).collect();
         let (stages, active_index, strip_slots) = self.with_quit(space, &ids, stages, active_index, strip_slots);
+        let screen = self.display(self.space_display(space));
         SavedSpace {
             id: space.0,
+            screen: screen.key.known().then(|| SavedScreen {
+                key: screen.key.text(),
+                w: screen.frame.w,
+                h: screen.frame.h,
+                x: Some(screen.frame.x),
+                y: Some(screen.frame.y),
+            }),
             current: self.current.values().any(|&c| c == space),
             stages,
             active_index,
             strip_slots,
             last_seen: None,
+            unvisited: false,
         }
     }
 
@@ -801,12 +878,13 @@ impl Model {
         hints: &LaunchHints,
     ) -> Vec<Action> {
         let frames = if restore_frames { LaunchFrames::Saved } else { LaunchFrames::Live };
-        self.launch_with(live, assignment, frames, hints, None)
+        let space = self.current_space(self.main_display().id);
+        self.launch_with(live, assignment, frames, hints, None, space)
     }
 
-    /// [`Model::apply_launch`] with the frames `frames` says; `origin`: the saved Desktop the
-    /// assignment's stages come from, when one does (each stage built is noted as standing
-    /// for its saved stage, for the pool after a restart, `pool.rs`).
+    /// [`Model::apply_launch`] with the frames `frames` says, on `space`; `origin`: the saved
+    /// Desktop the assignment's stages come from, when one does (each stage built is noted as
+    /// standing for its saved stage, for the pool after a restart, `pool.rs`).
     pub(crate) fn launch_with(
         &mut self,
         live: &[WindowMeta],
@@ -814,13 +892,14 @@ impl Model {
         frames: LaunchFrames,
         hints: &LaunchHints,
         origin: Option<u64>,
+        space: SpaceId,
     ) -> Vec<Action> {
         let restore_frames = frames == LaunchFrames::Saved;
-        // Saved frames only on a main display of the saved size (else the live ones).
-        let matched_frames = frames != LaunchFrames::Live && self.saved_frames_fit();
+        // Saved frames only on a display of the saved size (else the live ones).
+        let display = self.space_display(space);
+        let matched_frames = frames != LaunchFrames::Live && self.saved_frames_fit_for(display, origin.or(Some(space.0)));
         let mut actions = Vec::new();
         let metas: HashMap<WindowId, &WindowMeta> = live.iter().map(|m| (m.id, m)).collect();
-        let space = self.current_space(self.main_display().id);
         let mut built: Vec<Option<StageId>> = vec![None; assignment.stages.len()];
         let mut placed: HashSet<WindowId> = HashSet::new();
         let saved_clock = assignment.stages.iter().filter_map(|s| s.last_active).max().unwrap_or(0);
@@ -864,6 +943,10 @@ impl Model {
                     Home::Stage(sid)
                 };
                 self.insert_restored(metas[&w.id], w, home, matched_frames);
+                if frames == LaunchFrames::Live {
+                    // Reopened much smaller than saved: its saved frame when first shown.
+                    self.owe_saved_size(metas[&w.id], w, origin.or(Some(space.0)));
+                }
             }
             for w in &members {
                 self.restored.insert(w.id, super::model::Restored { grade: w.grade, z: w.z });
@@ -900,6 +983,14 @@ impl Model {
         }
 
         self.place_unmatched(space, &metas, assignment, &placed, hints);
+
+        // A front nobody can see (every window listed as a piece at its screen's corner) is
+        // a card, the front an empty stage: it is parked below, its card enters the strip.
+        let hidden_front = if frames == LaunchFrames::Live { self.front_out_of_sight(space) } else { None };
+        if let Some(f) = hidden_front {
+            tracing::info!(stage = f.0, "launch: the front's windows show only a piece at the screen's corner; a card, the front empty");
+            self.fresh_active(space);
+        }
 
         // Every window of every stage clear of the strip, so restored frames already are.
         let ids: Vec<WindowId> = live.iter().map(|m| m.id).collect();
@@ -967,6 +1058,9 @@ impl Model {
         let cards = slots.iter().any(|&s| self.stage(s).is_some_and(|st| !st.windows.is_empty()));
         if (!slots.is_empty() && cards) || !self.slots.contains_key(&space) {
             self.slots.insert(space, slots);
+        }
+        if let Some(f) = hidden_front {
+            self.strip_enter(space, f);
         }
         self.note_front_waits(space);
         self.normalize_slots();
@@ -1112,17 +1206,36 @@ impl Model {
         }
     }
 
+    /// The active stage of `space` when every standard window of it is listed as a piece at
+    /// its display's park corner ([`super::model::Display::corner_piece`]; none in the park
+    /// zone itself, which [`Model::unstick`] brings back): a front nobody can see (11-06
+    /// 14:13: an older version had shown a window 80 by 32 pt of it at the laptop's corner,
+    /// and saved it so).
+    fn front_out_of_sight(&self, space: SpaceId) -> Option<StageId> {
+        let active = self.active_stage_in(space)?;
+        let windows = &self.stage(active)?.windows;
+        let hidden = |id: &WindowId| {
+            self.windows.get(id).is_some_and(|w| {
+                let d = self.display(w.meta.display);
+                !w.parked && d.corner_piece(w.meta.frame) && !d.parks(w.meta.frame)
+            })
+        };
+        (!windows.is_empty() && windows.iter().all(hidden)).then_some(active)
+    }
+
     /// Restores members of an active stage whose live frame is in a park zone (left there by a
-    /// crash), since they would otherwise stay hidden while counted as visible.
+    /// crash) or shows only a piece at the corner ([`super::model::Display::hides`]), since
+    /// they would otherwise stay hidden while counted as visible.
+    /// So do those owed their saved frame after a restart (`model/saved_size.rs`): reopened
+    /// in front much smaller than saved, they get it as they are first shown.
     fn unstick(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let mut ids = s.windows.clone();
         ids.extend(self.children_in(Home::Stage(stage)));
         for id in ids {
-            let stuck = self
-                .windows
-                .get(&id)
-                .is_some_and(|w| self.display(w.meta.display).parks(w.meta.frame));
+            // Owed its saved frame (`saved_size.rs`): shown in front now, so it gets it now.
+            let stuck = self.owes_saved_size(id)
+                || self.windows.get(&id).is_some_and(|w| self.display(w.meta.display).hides(w.meta.frame));
             if stuck {
                 self.restore_window(id, actions);
             }
@@ -1137,7 +1250,7 @@ impl Model {
         restore_frames: bool,
     ) {
         let display = self.known_display(meta.display);
-        let live_parked = self.display(display).parks(meta.frame);
+        let live_parked = self.display(display).hides(meta.frame);
         let base = if (restore_frames && saved.grade.confident()) || live_parked || meta.frame.is_degenerate() {
             saved.frame
         } else {

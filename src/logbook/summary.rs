@@ -40,7 +40,7 @@ pub struct Line<'a> {
 fn restore_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule(; \d+ at the corner)?(; \d+ from other Desktops)?")
+        Regex::new(r"restore: \d+ windows? into \d+ stages? on \d+ Desktops? in \d+ s; \d+ pending; \d+ by Apple's rule(; \d+ at the corner)?(; \d+ from other Desktops)?(; \d+ Desktops? on another screen)?(; \d+ windows? back to their screen)?(; the first \d+ s after the login)?")
             .unwrap_or_else(|e| panic!("bad restore pattern: {e}"))
     })
 }
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn the_last_restore_line_is_repeated() {
-        let line = crate::engine::restore::Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 0, pooled: 3 };
+        let line = crate::engine::restore::Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 0, pooled: 3, other_screen: 0, screen_moves: 1, first_after_login: Some(6) };
         let one = crate::engine::restore::Summary { windows: 1, stages: 1, desktops: 1, ..Default::default() };
         let text = format!(
             "2026-10-12 08:01:00.000 +02:00 app[1] INFO  platform::controller: {one}\n\
@@ -357,6 +357,7 @@ mod tests {
         let s = summarize(Date::new(2026, 10, 12), &text);
         assert_eq!(s.last_restore, Some(("08:02:11".into(), line.to_string())));
         assert!(s.to_string().contains("last restore after a restart: 08:02:11 restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule"));
+        assert!(s.to_string().contains("; 1 window back to their screen; the first 6 s after the login"), "the whole line, its endings too");
         assert!(!summarize(None, DAY).to_string().contains("last restore"), "a day without one says nothing");
     }
 

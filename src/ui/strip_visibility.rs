@@ -1,5 +1,6 @@
 //! When the strip shows, pure: the user's toggle, Apple's "Show recent apps" (`AutoHide`),
-//! auto-hide while an active window overlaps the strip, and the left-edge reveal.
+//! auto-hide while an active window reaches the screen's left edge ([`hides_strip`]), and the
+//! left-edge reveal.
 //!
 //! The strip feeds this with the pointer position and the current time; it answers whether the
 //! strip shows. The pointer is polled (every ~60 ms) only while [`Decision::poll`] says so: a
@@ -54,16 +55,17 @@ pub enum Mode {
     /// Shown, nothing in the way.
     Shown,
     /// Hidden until the pointer rests at the left edge (Apple's `AutoHide`, or an active
-    /// window overlapping the strip area).
+    /// window at the screen's left edge, [`hides_strip`]).
     EdgeOnly,
 }
 
 impl Mode {
-    /// The mode for a snapshot's flags and whether an active window overlaps the strip.
-    pub fn of(user_visible: bool, hide_recent_apps: bool, overlapped: bool) -> Self {
+    /// The mode for a snapshot's flags and whether an active window hides the strip
+    /// ([`hides_strip`]).
+    pub fn of(user_visible: bool, hide_recent_apps: bool, covered: bool) -> Self {
         if !user_visible {
             Self::Off
-        } else if hide_recent_apps || overlapped {
+        } else if hide_recent_apps || covered {
             Self::EdgeOnly
         } else {
             Self::Shown
@@ -71,9 +73,19 @@ impl Mode {
     }
 }
 
-/// Whether any of `frames` intersects the strip area `strip` (global coordinates).
-pub fn overlaps(frames: &[Rect], strip: &Rect) -> bool {
-    frames.iter().any(|f| f.intersect(strip).is_some_and(|i| i.w > 0.5 && i.h > 0.5))
+/// How close to the screen's left edge (the strip's left edge) a window's left edge must come
+/// for the strip to slide away, in points. Apple's strip stays up under a window that covers
+/// the cards and goes only once the window's left edge is about 50 pt from the screen's left
+/// edge (the owner's eye on his Studio Display, 11-05: VS Code dragged left over the cards
+/// from about 308 pt); before, ours hid at any overlap of the column.
+pub const COVER_EDGE: f64 = 50.0;
+
+/// Whether any of `frames` (the active stage's shown windows) hides the strip whose area is
+/// `strip` (global coordinates): it reaches into the strip's area and its left edge is within
+/// [`COVER_EDGE`] of the strip's left edge (or past it). A window over the cards but further
+/// right leaves the strip shown, under the window.
+pub fn hides_strip(frames: &[Rect], strip: &Rect) -> bool {
+    frames.iter().any(|f| f.x <= strip.x + COVER_EDGE && f.intersect(strip).is_some_and(|i| i.w > 0.5 && i.h > 0.5))
 }
 
 /// The answer for one step.
@@ -98,6 +110,10 @@ pub struct Visibility {
     hold_until: Option<Instant>,
     /// The edge tab's area (global), when it shows: resting on it counts as the edge.
     tab: Option<Rect>,
+    /// The left edge of the strip's screen (global x): the edge zone starts there, so a
+    /// pointer on a screen further left is never at this strip's edge (the Codex review's
+    /// S2). `None` until the strip says (unbounded).
+    screen_left: Option<f64>,
     /// Delays and the edge zone.
     timing: Timing,
 }
@@ -106,6 +122,18 @@ impl Visibility {
     /// The edge tab's area while it shows (global), or `None`.
     pub fn set_tab(&mut self, tab: Option<Rect>) {
         self.tab = tab;
+    }
+
+    /// The left edge of the strip's screen (global x; [`Self::at_edge`]).
+    pub fn set_screen_left(&mut self, x: f64) {
+        self.screen_left = Some(x);
+    }
+
+    /// True when `p` (global) is in the left edge zone by the strip's rows: from the strip's
+    /// screen's left edge to [`Timing::edge_zone`] past the strip's left edge (the Dock on the
+    /// left lies between them). A pointer on a screen to the left is not.
+    fn at_edge(&self, p: Point, strip: &Rect) -> bool {
+        p.x <= strip.x + self.timing.edge_zone && self.screen_left.is_none_or(|l| p.x >= l) && p.y >= strip.y && p.y <= strip.max_y()
     }
 
     /// Sets the delays and the edge zone (config reload).
@@ -129,8 +157,8 @@ impl Visibility {
     }
 
     /// Drops the carry-over of a strip in plain view ([`Self::step`]): only a switch the strip
-    /// itself started (a card click) keeps it under the pointer; a window resized into the
-    /// strip's column or a keyboard switch hides it, as Apple's does.
+    /// itself started (a card click) keeps it under the pointer; a window resized to the
+    /// screen's left edge or a keyboard switch hides it, as Apple's does.
     pub fn forget_shown(&mut self) {
         self.was_shown = false;
     }
@@ -139,7 +167,7 @@ impl Visibility {
     /// at the left edge by the strip's rows, or on the edge tab. Between those, moves need no
     /// look.
     pub fn wakes(&self, p: Point, strip: &Rect) -> bool {
-        (p.x <= strip.x + self.timing.edge_zone && p.y >= strip.y && p.y <= strip.max_y()) || self.tab.is_some_and(|t| t.contains(p))
+        self.at_edge(p, strip) || self.tab.is_some_and(|t| t.contains(p))
     }
 
     /// Advances the state with the pointer (global, top-left origin; `None` when unknown)
@@ -147,11 +175,10 @@ impl Visibility {
     pub fn step(&mut self, mode: Mode, pointer: Option<Point>, strip: &Rect, now: Instant) -> Decision {
         match mode {
             Mode::Off | Mode::Shown => {
-                *self = Self { tab: self.tab, timing: self.timing, was_shown: mode == Mode::Shown, ..Self::default() };
+                *self = Self { tab: self.tab, timing: self.timing, screen_left: self.screen_left, was_shown: mode == Mode::Shown, ..Self::default() };
                 Decision { shown: mode == Mode::Shown, poll: false }
             }
             Mode::EdgeOnly => {
-                let in_rows = |p: &Point| p.y >= strip.y && p.y <= strip.max_y();
                 // Shown a moment ago with the pointer on it (a card click to a stage whose
                 // window covers the strip): it stays until the pointer leaves, as after an
                 // edge reveal (10-13: it slid away under the pointer, and the clicked
@@ -167,17 +194,17 @@ impl Visibility {
                     self.hold_until = None;
                 }
                 if self.revealed {
-                    let inside = pointer.is_some_and(|p| strip.contains(p) || (p.x <= strip.x + self.timing.edge_zone && in_rows(&p)));
+                    let inside = pointer.is_some_and(|p| strip.contains(p) || self.at_edge(p, strip));
                     if inside || held {
                         self.left_since = None;
                     } else {
                         let since = *self.left_since.get_or_insert(now);
                         if now.duration_since(since) >= self.timing.leave_delay {
-                            *self = Self { tab: self.tab, timing: self.timing, ..Self::default() };
+                            *self = Self { tab: self.tab, timing: self.timing, screen_left: self.screen_left, ..Self::default() };
                         }
                     }
                 } else {
-                    let at_edge = pointer.is_some_and(|p| (p.x <= strip.x + self.timing.edge_zone && in_rows(&p)) || on_tab(&p));
+                    let at_edge = pointer.is_some_and(|p| self.at_edge(p, strip) || on_tab(&p));
                     if at_edge {
                         let since = *self.dwell_since.get_or_insert(now);
                         if now.duration_since(since) >= self.timing.edge_dwell {
@@ -214,11 +241,30 @@ mod tests {
         assert_eq!(Mode::of(true, false, true), Mode::EdgeOnly);
     }
 
+    /// 11-05: only a window whose left edge comes within 50 pt of the screen's left edge
+    /// hides the strip; one over the cards further right leaves it shown, as Apple's does.
     #[test]
-    fn overlap_needs_a_real_intersection() {
-        assert!(overlaps(&[Rect::new(150.0, 100.0, 500.0, 400.0)], &STRIP));
-        assert!(!overlaps(&[Rect::new(200.0, 100.0, 500.0, 400.0)], &STRIP));
-        assert!(!overlaps(&[], &STRIP));
+    fn only_a_window_at_the_left_edge_hides_the_strip() {
+        // Every one covers the cards: a strip 320 pt wide (his Studio Display's cards end near
+        // 308 pt).
+        let wide = Rect::new(0.0, 30.0, 320.0, 1410.0);
+        let at = |x: f64| Rect::new(x, 100.0, 900.0, 400.0);
+        assert!(hides_strip(&[at(0.0)], &wide), "flush left");
+        assert!(hides_strip(&[at(49.0)], &wide), "49 pt in");
+        assert!(hides_strip(&[at(50.0)], &wide), "50 pt in: the threshold itself");
+        assert!(!hides_strip(&[at(51.0)], &wide), "51 pt in: shown, under the window");
+        assert!(!hides_strip(&[at(300.0)], &wide), "300 pt in, over the cards: shown");
+        assert!(!hides_strip(&[at(320.0)], &wide), "clear of the column");
+        assert!(hides_strip(&[at(-40.0)], &wide), "past the left edge");
+        assert!(hides_strip(&[at(300.0), at(20.0)], &STRIP), "any one of the stage's windows");
+        // The threshold counts from the screen's left edge (a screen further right).
+        let right = Rect::new(1440.0, 30.0, 200.0, 1410.0);
+        assert!(hides_strip(&[Rect::new(1480.0, 100.0, 900.0, 400.0)], &right));
+        assert!(!hides_strip(&[Rect::new(1500.0, 100.0, 900.0, 400.0)], &right));
+        // At the edge but not in the strip's area (another screen, above its rows): shown.
+        assert!(!hides_strip(&[Rect::new(0.0, 1500.0, 900.0, 400.0)], &STRIP));
+        assert!(!hides_strip(&[Rect::new(-950.0, 100.0, 900.0, 400.0)], &STRIP));
+        assert!(!hides_strip(&[], &STRIP));
     }
 
     #[test]
@@ -293,6 +339,35 @@ mod tests {
         assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2100)).shown);
         assert!(v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2500)).shown);
         assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2610)).shown);
+    }
+
+    /// The Codex review's S2: the laptop left of the main screen (global x below 0); a
+    /// pointer on it was at the main strip's edge, revealed it and held it open.
+    #[test]
+    fn a_pointer_on_a_screen_to_the_left_is_not_at_the_strips_edge() {
+        let mut v = Visibility::default();
+        v.set_screen_left(0.0);
+        let t = Instant::now();
+        let laptop = Some(Point::new(-600.0, 500.0));
+        let seam = Some(Point::new(-1.0, 500.0));
+        let edge = Some(Point::new(0.0, 500.0));
+        assert!(!v.wakes(Point::new(-600.0, 500.0), &STRIP) && !v.wakes(Point::new(-1.0, 500.0), &STRIP));
+        assert!(v.wakes(Point::new(0.0, 500.0), &STRIP));
+        assert!(!v.step(Mode::EdgeOnly, laptop, &STRIP, t).shown);
+        assert!(!v.step(Mode::EdgeOnly, laptop, &STRIP, ms(t, 1000)).poll, "no rest begins there");
+        assert!(!v.step(Mode::EdgeOnly, seam, &STRIP, ms(t, 2000)).shown);
+        assert!(!v.step(Mode::EdgeOnly, seam, &STRIP, ms(t, 3000)).shown);
+        // Revealed from its own edge, it hides once the pointer has gone onto the laptop.
+        assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 4000)).shown);
+        assert!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 4300)).shown);
+        assert!(v.step(Mode::EdgeOnly, laptop, &STRIP, ms(t, 4400)).shown, "the leave delay");
+        assert!(!v.step(Mode::EdgeOnly, laptop, &STRIP, ms(t, 5000)).shown, "hidden: the laptop does not hold it");
+        // The bound survives a mode change; the Dock on the left (between the screen's edge
+        // and the strip) is still the edge.
+        v.step(Mode::Shown, None, &STRIP, ms(t, 6000));
+        let docked = Rect::new(70.0, 30.0, 200.0, 1410.0);
+        assert!(!v.wakes(Point::new(-600.0, 500.0), &docked));
+        assert!(v.wakes(Point::new(2.0, 500.0), &docked));
     }
 
     #[test]

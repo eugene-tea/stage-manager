@@ -22,9 +22,17 @@ NSWorkspace notifications     persists state.json               ctl socket (test
               ◀──snapshot───  StripModel to main via GCD
 ```
 
-- **Stages per Space.** A stage is a group of windows on one Space (Desktop); every Space
+- **Stages per screen and Space.** Every screen has its own strip and stages, as Apple's
+  does (round displays, UX-SPEC "Screens"): its own Spaces, park corner (one with no screen
+  beyond it, `engine::park::choose_corner`) and strip capacity; a window belongs to the
+  screen showing most of it (`engine::displays`), moved to another it starts a stage of its
+  own there (`Model::windows_moved_to_display`), and a screen removed hands its stages to the
+  main one (`Model::set_displays`). Screens are known by vendor, model and serial
+  (`ScreenKey`), never by `CGDirectDisplayID`, in the model and in `state.json` (a Space
+  names its screen). `[displays] main_only` keeps the first version's main-screen-only way.
+  A stage is a group of windows on one Space (Desktop); every Space
   has its own stages, active stage and strip, as Apple's does. Inactive stages are parked in
-  the bottom-right corner of their display (macOS keeps a sliver onscreen). Switching = save
+  the park corner of their display (macOS keeps a sliver onscreen). Switching = save
   the active stage's live frames and z-order, park it, restore the target's frames, raise
   back to front, focus the remembered key window last. Nothing acts on another Space's
   windows except the safety paths.
@@ -93,7 +101,9 @@ A parked window that never returns is the worst bug. Defence in depth:
 6. **Recovery scan** (launch, guardian, after a main display change): every app's window in
    a park zone goes back to the frame a crashed copy registered (its parked file, by id),
    else its saved frame (only on a main display of the saved size), else centered; silent apps are retried for 30 s, in
-   slices of two apps a pass so a busy app never holds the WM thread. A sliver (≤ 8 × 256 pt
+   slices of two apps a pass so a busy app never holds the WM thread. At launch each app is
+   read on a thread of its own (the WM thread waits 0.3 s at most) and observed only once its
+   windows are back, so a busy app holds up no other (1.7 review, L1). A sliver (≤ 8 × 256 pt
    past the right or bottom edge) counts as parked only for windows we manage or registered,
    or apps with a window in `state.json`.
 7. **Restore frames are kept within reach** (`Display::reach`): never in a park zone, the title
@@ -153,29 +163,120 @@ Known gaps the owner accepted as rare:
 - **One pool after a restart (8I):** Electron apps reopen on the Desktop shown at login; a
   window matching another Desktop's saved entry with confidence recreates its stage as a part
   where it shows. Left: two Desktops' same-named stages both feed the one stage of that name
-  (`find_named`). Those windows are listed in the status menu once the restore window ends
-  (desktop-notice, `[stages] restore_notice`, on), a dot on the icon; an entry leaves once its
-  window shows on its saved Desktop.
+  (`find_named`). The restore's line names those windows; nothing tells the user (1.6.0's
+  menu list taken out 11-06: he cannot act on it, macOS moves no window between Desktops).
 
 ## Open
 
-- **Screens (after 1.4.0):** follow-up update for external and several screens.
-  - A strip and stages per screen, as Apple's (today only the main screen is managed; a
-    window on a second monitor is left alone). FEATURE-REQUESTS R8: medium.
-  - A login on another screen (10-23: laptop screen at login, then the lid closed onto the
-    external display): macOS reopens every window on one Desktop, and the other Desktop's
-    saved stages wait for windows that will not come. Let those saved stages form where
-    their windows are, and say so in the restore summary.
-  - The first launch after that login drew card switches wrong (the incoming window showed
-    at its place before its snapshot reached it; the log identical to a good run); a
+- **What heals macOS's Accessibility blindness** (round ax-blind, 11-06): after a WindowServer
+  watchdog kill at an unlock (15:02), Accessibility listed no window for any app, System Events
+  too (15:39–15:46 checked). By 16:15 it listed them again; between, our app quit (16:08) and the
+  screen locked and unlocked (~16:09–16:15), nobody checking in between. Next time: quit Stage
+  Manager and check System Events first, then lock and unlock. If the quit heals it, the menu
+  line says "Quit and reopen Stage Manager" instead of "Log out", and there is a bug of ours to
+  find.
+
+- **Screens, after round displays** (built: a strip and stages per screen, Apple's rules
+  as measured 11-05; a saved Desktop of a screen not connected forms where its windows are,
+  the 10-23 login):
+  - **Live with the owner:** the `displays` phase of the suite (fixtures on both screens;
+    its first run), then the lid, by hand (his first run 11-05 16:27, fixed in round
+    displays-lid; run it again): (0) two card clicks on the laptop: no "not in the engine's
+    slot" warning, the log's "transition: strip order" with `display=1` and the laptop's
+    stages; (1) on the laptop a stage in front and two cards, on the 5K a stage in front and
+    a card; close the lid: the laptop's front stage comes to the 5K in front, the 5K's front
+    to a card, the laptop's cards after the 5K's own, every window on screen (`ctl state`:
+    one display, `displays[0].strip`); if macOS slides the 5K to another Desktop with the
+    laptop's windows (11-05: its second Desktop, the log's "Space changed" with `rebuilt`
+    and `carried=2`), the same there: the laptop's front in front, its card a card of its
+    own, not joined to its app's card; while it is closed (his second run 11-05 20:01, fixed
+    in round displays-lid-2), on both Desktops: one strip on the 5K, never a second one over
+    it (after the log's "the strips of displays no longer there closed", never "a strip for
+    another display"; "a snapshot for a display no longer there is not drawn" may show), each card
+    one stage's windows, every card click switching (never "card click: nothing to switch
+    to"), the laptop's front window shown, not left at the 5K's corner, and the 5K's cards at
+    its corner, not pushed whole onto it; no switch from the app macOS activates after the
+    close (round displays-lid-3: the log's "an activation macOS made after a display
+    change", never "activated app lives in another stage" before his first click; a window
+    listed for a moment then: "a window found after a display change", never "new window"
+    and a switch, and "Space changed" with `held` and no new stage, round displays-lid-4), the 5K
+    staying on the Desktop macOS slid to; back on the first Desktop its own front shows; (2)
+    open the lid (his third run 11-05 20:26 left the laptop's cards on the 5K's second
+    Desktop, fixed in round displays-lid-3): the stages macOS moves back are the
+    laptop's again (the log's "window macOS put on a display that changed", never "moved to
+    another display", and for a card never "a parked window is listed out of the park zone:
+    parked again"), the shown one in front at the frame macOS gave it (no move after),
+    the hidden ones cards at the laptop's corner (`card=true`; `ctl state`: the laptop's
+    `strip` has them), nothing of the 5K's moving (`displays[1]`); then a card click on the laptop brings the card back at its old frame
+    there; (3) a restart with both
+    screens: each screen's stages on its screen (the log's "Space changed on another
+    display" with `rebuilt`; a Desktop saved on a screen not connected: `other_screen`, and
+    the restore line's "N Desktops on another screen"); his first, 11-06 04:23 (fixed in
+    round displays-restart; run it again): a window its app reopened on the 5K whose stage
+    was saved on the laptop goes back to the laptop, at its saved frame, its stage in front
+    or a card as saved (the log's "a window shown on another screen than its saved stage's
+    goes back to that screen", the restore line's "N windows back to their screen", never
+    "on another Desktop: … (saved 17, now 2)" for the laptop's Desktop; `ctl state`: its
+    `display` the laptop's, in `displays[1].active_stage` or `strip`); the "stage saved on
+    another screen" line now names its saved Desktop and display; two windows of one app
+    saved as two stages (VS Code's two workspaces, each its own stage on its own Desktop of
+    the 5K, 77 and 78 then) come back as two stages, the one whose title gained the file in
+    front of its workspace's name matched by its frame (a "strong" match, never "2 by
+    Apple's rule" for it), and one titled late goes to its stage when its title comes ("matches its
+    saved one by its new title"), even after his first click, unless he touched that window,
+    and never past two minutes after the login ("no longer matched again by a new title"); Fork and Chrome stay
+    as saved (they did, 11-06 04:23; at 06:29 Fork's second window, saved as its own stage
+    on the other Desktop, reopened at its frame under another repository's name and joined
+    the first's stage by Apple's rule: fixed in round restart-two-windows, run it again:
+    the log's "a window at a saved window's frame under another name, the only one" and
+    "grade=\"medium\"" for it, two Fork stages in `ctl state`, no "asked to join the current
+    stage" line while the restore window is open); his 08:26 restart (fixed in round
+    desktop-ids, run it again): the apps listed no window when Stage Manager started, and the
+    laptop's Desktop came back as a new number (19, saved 17) with its windows "from other
+    Desktops" and Deep House, its front, left on the 5K; now the log's "Desktops per screen,
+    as macOS keeps them" names the laptop with 1, `ctl state` shows the laptop's `space` 17
+    again, no "(saved 17, now …)" in the restore line, and "goes back to that screen" for a
+    laptop window reopened on the 5K; (4) ⌘-Tab to an app whose stage is
+    on the other screen: that screen switches, the other does not, and the Desktop there is
+    arranged ahead of its slide (the log's "arranged ahead" for a window on `displays[1]`);
+    (5) round displays-2, on the laptop's screen: its cards' glass takes its own wallpaper
+    (set a different picture there), its corner patch covers the slivers at its bottom-left
+    corner (`displays[1].corner_patch.shown`, from a still: `displays[1].desktop_still.patch`
+    "ready"), a window opened there with the 5K in a full-screen app is placed at once (the
+    log's "the window's screen shows no Desktop now" never for it), a full-screen app on the
+    laptop (`displays[1].fullscreen`) leaves the 5K's windows arriving, Mission Control on
+    either screen, and a window moved by hand to another Desktop on the laptop's screen
+    (the log's "window left its Space on another screen").
+  - **Still the main screen's, by design (round displays-2):** the phase (a Space change
+    settling, a switch under way) and the slide hold, which gate every screen while a
+    change settles (no notice names the screen); the stage hotkeys, `ctl switch`, `ctl
+    merge` and `ctl space`, which count the main screen's strip; the park, patch, glass
+    and shadow probes and the debug hooks (`debug-overlay`, `debug-dock-press`); the sliver
+    shield's zone for the main screen, always on; `ctl state`'s top-level `space`,
+    `display`, `strip_width`, `strip_panel`, `corner_patch` and `desktop_still` (every
+    screen's are under `displays[i]`).
+  - The first launch after the 10-23 login drew card switches wrong (the incoming window
+    showed at its place before its snapshot reached it; the log identical to a good run); a
     relaunch cured it. Catch it with a screen recording if it comes back; check what the
     overlay and the strip panels hold from a launch while the screens settle.
-- **Desktop numbers in the desktop notice:** the list names a Desktop by its apps or "this
-  Desktop", not "Desktop 2": no public API says which Mission Control number the Desktop shown
-  has (`com.apple.spaces`' "Current Space" stayed put through a dozen switches, 11-03). A way
-  in: the order of Desktops from the slide's direction at each switch, with the count from
-  `com.apple.spaces`; `DesktopRef::number` is ready for it. The menu itself and its icon mark
-  are unverified on screen (no restart yet).
+- **Reopen list (round reopen-list), at his next restarts** (installed copy; nothing live
+  before). First login after the install: 1.6.x's agent starts the app ("launched" with
+  `started="launchd agent"`), which moves to the login item ("moving to the way [app]
+  login_start names", "registered" for the login item, "unregistered at the quit" for the
+  agent: this copy is its job); Login Items lists Stage Manager once after the next quit. At
+  the logout: "logout signal" then "reopen list: activation policy" `policy=Regular
+  done=true` within a few ms of the first signal; the Dock icon shows until the quit. After
+  the login: "Stage Manager starting" about 3 s after the login (macOS's `TALLaunchStart`),
+  "launched: as macOS opened it" with `started="reopened by macOS"`, `listed_at_logout=true`
+  and `login_item_event` (whether macOS marks its own reopen as a login item: unknown, the
+  line says); no Dock icon, no Settings or other window; then the login item's copy, 10-30 s
+  later, "already running … leaving without showing its Settings" (or "opened again moments
+  after the login … no Settings" when macOS hands it over as a reopen). Not known before a
+  restart: whether `loginwindow` reads the activation policy when the logout begins (our
+  switch comes 1.3-1.7 s before `logoutContinued` and 9-18 s before the quit) or the
+  `LSUIElement` key at the relaunch; whether the persistent-apps file lists Stage Manager
+  (read in place only). A logout cancelled in its dialog: "policy=Accessory", the icon gone.
+  `[app] login_start = "background_item"` moves back to the agent (the early-start checks).
 - **Real-restart check (8G)**, with the owner, from the day's log:
   - Stage Manager comes back at login ("Reopen windows" on): "logout, restart or shutdown
     coming …", "asked to quit by the system", "quitting after the logout's head start".
@@ -183,14 +284,16 @@ Known gaps the owner accepted as rare:
   - The order of "logout signal" lines vs the first "app terminated", then trim `SIGNALS`;
     "N at the corner"; `from_other=true` lines and "K from other Desktops".
   - A slow app (Xcode, Electron) in the saved front stage.
+  - Round login-observe (11-06 09:30: windows showed 2-4 s before going to their stages): no
+    "queued_ms" over ~100 at the login; each "observing app" line's `since_ms` (from listed
+    at our start, launched or activated) and `misses`, and each "window placed: ms since it
+    was found" line's `ms` (a few ms, not seconds); "apps asked at once at observation's
+    start" took ≤ 300 ms.
 - **Log caps** (`max_mb_per_day` 100, `max_mb_total` 500, `days` 14) against real days
   (`stage-manager log summary`); the suite's estimate is ~1 MB a normal day, 2–3 MB heavy.
 - **Overlay over a raised strip:** a switch while the strip is raised animates just under the
   strip, the floating level, so an always-on-top window may still be covered then.
 - **After the 10-29 Fable review** (merged as `review-1029`; review files in `tmp/fable-review/`):
-  - **`hide_parked_apps` trial on the owner's Mac** (10-29 to 11-04; the live `hide` phase
-    65/0). Ended 11-04 by the owner: a hidden app ⌘-Tabbed to shows its windows at once,
-    without the switch's motion (macOS unhides them natively). Stays off.
   - **Deferred findings:**
     - K5: `state.json`'s fsync off the WM thread, ordered against the quit's save.
     - L5/U4: the switch cover's Dock carve-out, now that the overlay sits below the Dock;
@@ -222,17 +325,15 @@ Known gaps the owner accepted as rare:
   - **Card glass, not measured:** Dark Mode; a window behind another on one card; the
     hovered card's growth (Apple's read 11 % wider, 11-05) against ours. The script's
     reading beside the card is in the display's colours, the fit's from the picture file.
-  - **The hide trial's live phase, 11-05:** 88 of 89; "supersede: Bravo and Charlie
-    together again" left an empty stage 3 ({1: Charlie, Bravo; 2: Alpha 1, 2; 3: none}).
-    `hide_parked_apps` is off and stays off; look before it is ever offered again.
-  - **Chrome's enhanced interface:** we turn its flag off around our moves and restore it
-    after; Rectangle leaves it off. Keep restoring unless an assistive tool complains.
+  - **`hide_parked_apps` stays off** (its trial ended 11-04: a hidden app ⌘-Tabbed to
+    skips the switch's motion). Its live phase 11-05 was 88 of 89: "supersede: Bravo and
+    Charlie together again" left an empty stage 3. Look there before it is ever offered again.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), the parity checks of §1.
 
 ## Out of scope
 
-Multi-monitor beyond the main display (the model keys stages by display), fullscreen
+A unified stage across screens (FEATURE-REQUESTS R8: hard; Apple's has none), fullscreen
 windows (ignored). UX-SPEC's measurement record of Apple's Stage Manager is that file as of
 commit 20665a3.

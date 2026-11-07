@@ -8,6 +8,16 @@
 //! one, [`Model::remove_window`], has nothing to bring back). [`Model::unpark_all`] therefore
 //! always covers every parked window.
 //!
+//! **Displays.** Every display has its own strip and stages, as Apple's does (round
+//! displays): its own Spaces, each with its own stages, active stage and strip; its own park
+//! corner and strip capacity. A window belongs to the display that shows most of it
+//! ([`crate::engine::displays`]); moved to another display it starts a stage of its own there
+//! ([`Model::windows_moved_to_display`]), and a display removed hands its stages to the main
+//! one ([`Model::set_displays`]). Displays are told apart across reconnects by
+//! [`ScreenKey`], never by `CGDirectDisplayID` alone. With `[displays] main_only`
+//! ([`ModelOptions::main_only`]) only the main display is known: a window elsewhere is not
+//! the model's.
+//!
 //! **Spaces.** Every Space (Desktop) has its own Stage Manager, as Apple's does: its own
 //! stages, active stage, strip order and recency. A stage belongs to one Space ([`SpaceId`],
 //! a synthetic id the model gives each Space as the platform reports visits, see
@@ -22,14 +32,17 @@
 //! against them first ([`Model::add_window`]; `pending.rs`, [`crate::engine::restore`]).
 
 mod ahead;
+mod away;
 mod hide;
-mod notice;
 mod ops;
 mod pending;
 mod pool;
 mod quit;
+mod saved_size;
 mod spaces;
 mod strip;
+#[cfg(test)]
+mod displays_tests;
 #[cfg(test)]
 mod tests;
 
@@ -37,8 +50,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::park::{Corner, ParkRequest, clamp_to_visible, is_parked_in_at, park_frame_asked, reach_in};
+use super::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, park_frame_asked, reach_in};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -46,6 +60,7 @@ pub use ahead::{Ahead, AheadMark, AppFacts};
 pub use pending::{PendingNote, Restored};
 pub use pool::NumberRef;
 pub(crate) use pool::Kin;
+pub use ops::SwitchRefused;
 pub use quit::{Closing, QuitWindow};
 pub use spaces::{ArrivalNote, Space, SpaceId};
 pub use strip::{ActiveCard, DockApp, StripCard, StripOptions, StripOrder};
@@ -102,8 +117,10 @@ pub struct WindowMeta {
 /// A display: its full frame and the visible frame (minus menu bar and Dock).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Display {
-    /// The display's ID.
+    /// The display's ID (`CGDirectDisplayID`, this connection's).
     pub id: DisplayId,
+    /// Its identity across reconnects and restarts ([`ScreenKey`]; `NONE` when unknown).
+    pub key: ScreenKey,
     /// The full frame in global coordinates.
     pub frame: Rect,
     /// The usable frame (no menu bar, no Dock).
@@ -114,6 +131,9 @@ pub struct Display {
 }
 
 impl Display {
+    /// The nominal display used when the platform reports none ([`FALLBACK_DISPLAY`]).
+    pub const FALLBACK: Display = FALLBACK_DISPLAY;
+
     /// True when `frame` sits in this display's park zone at its corner, where macOS really
     /// leaves a parked window (above a bottom Dock too): the one park test
     /// ([`is_parked_in_at`]).
@@ -121,13 +141,50 @@ impl Display {
         is_parked_in_at(frame, self.frame, self.visible, self.corner)
     }
 
+    /// True when `frame` shows only a piece at this display's own park corner
+    /// ([`is_corner_piece_in`]): out of the park zone ([`Display::parks`]) but where a window
+    /// is out of sight all the same. Never a shown frame: [`Display::reach`] brings it on
+    /// screen, and a window listed there at a launch or a restore is a card
+    /// ([`Display::hides`]).
+    pub fn corner_piece(&self, frame: Rect) -> bool {
+        is_corner_piece_in(frame, self.frame, self.visible, self.corner)
+    }
+
+    /// True when a window at `frame` is out of sight at this display's park corner: in its
+    /// park zone ([`Display::parks`]) or a piece at it ([`Display::corner_piece`]).
+    pub fn hides(&self, frame: Rect) -> bool {
+        self.parks(frame) || self.corner_piece(frame)
+    }
+
     /// `frame` brought within reach on this display ([`reach_in`]): moved only as far as its
     /// title bar needs to be grabbed, never resized, and out of this display's own park zone
     /// (its corner, [`Display::parks`]). Where every restore of the model lands: a frame on
     /// the user's screen that another corner's zone test would catch (a window hung off the
-    /// left edge in the upper half) is the user's, and stays (S2).
+    /// left edge in the upper half) is the user's, and stays (S2). One that would still show
+    /// only a piece at the corner ([`Display::corner_piece`]: a grab's width of title bar
+    /// there is no window anyone sees) comes on screen, as far as it fits
+    /// ([`onto_visible`]), never resized.
     pub fn reach(&self, frame: Rect) -> Rect {
-        reach_in(frame, self.visible, self.frame, |f| self.parks(f))
+        let out = reach_in(frame, self.visible, self.frame, |f| self.parks(f));
+        if !self.corner_piece(out) {
+            return out;
+        }
+        let room = if self.visible.is_degenerate() { self.frame } else { self.visible };
+        reach_in(onto_visible(out, room), self.visible, self.frame, |f| self.hides(f))
+    }
+
+    /// `frame`, a window's frame on display `from`, carried onto this display: at the same
+    /// place relative to the visible frame's top-left corner, then within reach
+    /// ([`Display::reach`]). Where a window of a display removed (the lid closed) is
+    /// remembered until it is seen on this display.
+    pub fn adopt(&self, frame: Rect, from: &Display) -> Rect {
+        let moved = frame.translate(self.visible.x - from.visible.x, self.visible.y - from.visible.y);
+        self.reach(moved)
+    }
+
+    /// True when `key` is this display's known identity.
+    pub fn is_keyed(&self, key: ScreenKey) -> bool {
+        self.key.known() && self.key == key
     }
 }
 
@@ -261,6 +318,13 @@ pub struct ModelOptions {
     pub fit: FitOptions,
     /// How park frames are asked (`[windows] park_inside`, `park_drop`).
     pub park: ParkRequest,
+    /// Only the main display is managed (`[displays] main_only`): the model keeps the first
+    /// display alone, and a window moved to another is not its own any more
+    /// ([`Model::windows_moved_to_display`]).
+    pub main_only: bool,
+    /// Windows keep the frames their apps give them at a restore even when much smaller than
+    /// saved (`[restore] saved_size = false`, Apple's plain behaviour; `saved_size.rs`).
+    pub keep_app_frames: bool,
 }
 
 /// State of a desktop reveal, so a second reveal brings the stage back.
@@ -279,6 +343,7 @@ const PARK_LANDED_SLACK: f64 = 2.0;
 /// Nominal display used only when the platform reports none, so the model never panics.
 const FALLBACK_DISPLAY: Display = Display {
     id: DisplayId(0),
+    key: ScreenKey::NONE,
     frame: Rect::new(0.0, 0.0, 1440.0, 900.0),
     visible: Rect::new(0.0, 25.0, 1440.0, 875.0),
     corner: Corner::BottomRight,
@@ -289,6 +354,12 @@ const FALLBACK_DISPLAY: Display = Display {
 pub struct Model {
     /// Displays; the first is the main display.
     pub(crate) displays: Vec<Display>,
+    /// How many cards each display's strip holds (its height decides), where the platform
+    /// said; else [`StripOptions::capacity`].
+    pub(crate) capacity: HashMap<DisplayId, usize>,
+    /// How placed windows are kept clear of each display's strip (its own strip's width;
+    /// round displays-2), where the platform said; else [`ModelOptions::fit`].
+    pub(crate) fits: HashMap<DisplayId, FitOptions>,
     /// Stages in creation order (stage N of a Space = its Nth stage in this list).
     pub(crate) stages: Vec<Stage>,
     /// Every managed window, standard and child.
@@ -346,7 +417,7 @@ pub struct Model {
     /// they stand for.
     pub(crate) pooled: HashMap<WindowId, pool::Kin>,
     /// Windows the pool placed from another Desktop's saved entry, with that saved Desktop,
-    /// in the order they came back, until they leave the list (`notice.rs`).
+    /// in the order they came back, for the restore's line (`away.rs`).
     pub(crate) away: Vec<(WindowId, u64)>,
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
@@ -359,6 +430,36 @@ pub struct Model {
     /// did not list then (their app did not answer at launch): found later, they were there all
     /// along, so they never bring their stage forward ([`Model::set_launch_listed`]).
     pub(crate) launch_listed: HashSet<WindowId>,
+    /// Standard windows of the Desktop a removed display showed, moved onto the main
+    /// display's Desktop (`adopt_display`), until an arrival on the main display carries
+    /// them or shows another Desktop without them (a notice of their own Desktop keeps them),
+    /// or the next display change: macOS may put them on another Desktop of the main display
+    /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
+    pub(crate) adopted: BTreeSet<WindowId>,
+    /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
+    /// brought in front on the 5K's first Desktop, carried whole to the second one macOS
+    /// slid to, [`Model::carry_adopted`]): their most recent card comes forward when they
+    /// show again, never an empty front ([`Model::forward_after_emptied`]).
+    pub(crate) front_owed: BTreeSet<SpaceId>,
+    /// An arrival leaves out windows first seen on the Desktop still shown
+    /// ([`Model::set_hold_arrivals`]).
+    pub(crate) hold_arrivals: bool,
+    /// Windows the launch's first arrival moved to the screen their saved stage is on (that
+    /// screen's Desktop not formed yet; `pool.rs`, [`Model::screen_claims`]), at their saved
+    /// frame there: that screen's arrival takes them with its own ([`Model::arrive`]).
+    pub(crate) travellers: Vec<WindowMeta>,
+    /// How many Desktops macOS keeps for each screen, by the screen's identity, as the
+    /// platform read them (`com.apple.spaces`, read only; [`Model::set_desktop_counts`]):
+    /// a screen with one Desktop is the one its single saved Desktop was on, whatever the
+    /// windows listed on it ([`Model::arrive`]). Empty when unknown.
+    pub(crate) desktop_counts: HashMap<ScreenKey, u32>,
+    /// Standard windows placed by Apple's rule while restore re-matches run
+    /// ([`crate::engine::restore::Restore::rematching`]; they matched no saved window then):
+    /// scored again when their title changes ([`Model::window_retitled`]).
+    pub(crate) rescore: HashSet<WindowId>,
+    /// Windows the user touched (focused by a click or key, moved or resized, their stage
+    /// switched to): never moved by a re-match ([`Model::touch_window`]).
+    pub(crate) touched: HashSet<WindowId>,
     /// Stages that went when the restore window's end moved their voter into its saved stage
     /// (`pool.rs`), with that window: a card click or a number pressed for one follows it
     /// ([`Model::follow_stage`]).
@@ -371,6 +472,8 @@ pub struct Model {
     pub(crate) quit_frames: Vec<quit::QuitFrame>,
     /// The restore's session and mode.
     pub(crate) restore: super::restore::Restore,
+    /// Windows owed their saved frame when first shown (`saved_size.rs`).
+    pub(crate) owed: HashMap<WindowId, saved_size::Owed>,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
     /// The Dock's application items in order, as the platform last read them ("Follow the
@@ -389,13 +492,18 @@ impl Model {
     /// own. Declared named stages are created on the main display's Space; the first becomes
     /// active, else an empty stage does. Every other display gets an empty active stage.
     pub fn new(displays: Vec<Display>, options: ModelOptions) -> Self {
-        let displays = if displays.is_empty() {
+        let mut displays = if displays.is_empty() {
             vec![FALLBACK_DISPLAY]
         } else {
             displays
         };
+        if options.main_only {
+            displays.truncate(1);
+        }
         let mut model = Self {
             displays,
+            capacity: HashMap::new(),
+            fits: HashMap::new(),
             stages: Vec::new(),
             windows: BTreeMap::new(),
             active: HashMap::new(),
@@ -421,10 +529,18 @@ impl Model {
             pooled_out: HashSet::new(),
             merged: HashMap::new(),
             launch_listed: HashSet::new(),
+            adopted: BTreeSet::new(),
+            front_owed: BTreeSet::new(),
+            hold_arrivals: false,
+            travellers: Vec::new(),
+            desktop_counts: HashMap::new(),
+            rescore: HashSet::new(),
+            touched: HashSet::new(),
             followed: HashMap::new(),
             quit: Vec::new(),
             quit_frames: Vec::new(),
             restore: super::restore::Restore::default(),
+            owed: HashMap::new(),
             last_pending: None,
             dock: Vec::new(),
             clock: 0,
@@ -459,6 +575,23 @@ impl Model {
         &self.displays[0]
     }
 
+    /// The display with this identity, when connected.
+    pub fn display_keyed(&self, key: ScreenKey) -> Option<&Display> {
+        self.displays.iter().find(|d| d.is_keyed(key))
+    }
+
+    /// The display a Space belongs to (the main one for an unknown Space).
+    pub fn display_of_space(&self, space: SpaceId) -> DisplayId {
+        self.space_display(space)
+    }
+
+    /// The strip capacity of a Space's display ([`Model::set_display_capacity`], else
+    /// [`StripOptions::capacity`]).
+    pub fn capacity_of(&self, space: SpaceId) -> usize {
+        let display = self.space_display(space);
+        self.capacity.get(&display).copied().unwrap_or(self.options.strip.capacity)
+    }
+
     /// Stages of every Space in creation order (see [`Model::stages_in`] for one Space's).
     pub fn stages(&self) -> &[Stage] {
         &self.stages
@@ -489,6 +622,13 @@ impl Model {
     /// The active stage of the main display.
     pub fn main_active_stage(&self) -> Option<StageId> {
         self.active_stage(self.main_display().id)
+    }
+
+    /// True when `stage` is the front stage of a Desktop some screen shows now, whichever
+    /// screen: its windows are on screen, not cards (the Fable review's switching 1: the
+    /// main screen's front alone made every window of the laptop's front "elsewhere").
+    pub fn stage_in_front(&self, stage: StageId) -> bool {
+        self.stage(stage).is_some_and(|s| self.is_shown_space(s.space) && self.active.get(&s.space) == Some(&stage))
     }
 
     /// True while the main display shows the desktop a wallpaper click revealed: the empty
@@ -548,9 +688,22 @@ impl Model {
         }
     }
 
-    /// Sets how placed windows are kept clear of the strip.
+    /// Sets how placed windows are kept clear of the strip (every display's, unless
+    /// [`Model::set_display_fit`] said otherwise for one).
     pub fn set_fit(&mut self, fit: FitOptions) {
         self.options.fit = fit;
+        self.fits.clear();
+    }
+
+    /// Sets how placed windows are kept clear of one display's strip (its own column:
+    /// `[windows] fit` against the strip of the window's own screen, round displays-2).
+    pub fn set_display_fit(&mut self, display: DisplayId, fit: FitOptions) {
+        self.fits.insert(display, fit);
+    }
+
+    /// The fit in force on `display` ([`Model::set_display_fit`], else [`ModelOptions::fit`]).
+    pub fn fit_of(&self, display: DisplayId) -> FitOptions {
+        self.fits.get(&self.known_display(display)).copied().unwrap_or(self.options.fit)
     }
 
     /// How park frames are asked from now on (windows parked already stay where they are).
@@ -774,6 +927,7 @@ impl Model {
         }
         if usable {
             if by_user {
+                self.forgive_saved_size(id);
                 self.move_restore(id, frame);
             } else if let Some(w) = self.windows.get_mut(&id) {
                 w.restore = frame;
@@ -803,13 +957,14 @@ impl Model {
     /// ([`fit_frame`]) when fitting is on; remembers the frame it had before (once). Returns
     /// true when the restore frame changed.
     pub(crate) fn fit_window(&mut self, id: WindowId) -> bool {
-        let fit = self.options.fit;
-        if !fit.active() {
-            return false;
-        }
         let Some(w) = self.windows.get(&id) else {
             return false;
         };
+        // The window's own display's strip (round displays-2).
+        let fit = self.fit_of(w.meta.display);
+        if !fit.active() {
+            return false;
+        }
         if w.meta.role != WindowRole::Standard || w.home == Home::Pinned {
             return false;
         }
@@ -826,12 +981,15 @@ impl Model {
         true
     }
 
-    /// A restore frame that is safe to record for a new window: `frame`, or a centered one if
-    /// `frame` is unusable.
+    /// A restore frame that is safe to record for a new window: `frame`, a centered one if
+    /// `frame` is unusable, brought on screen if it shows only a piece at the display's
+    /// corner ([`Display::corner_piece`]).
     pub(crate) fn safe_restore(&self, frame: Rect, display: DisplayId) -> Rect {
         let d = self.display(display);
         if frame.is_degenerate() || d.parks(frame) {
             clamp_to_visible(frame, d.visible)
+        } else if d.corner_piece(frame) {
+            d.reach(frame)
         } else {
             frame
         }
@@ -893,6 +1051,8 @@ impl Model {
     /// Brings one window to its restore frame, fitted into the stage area first, within reach
     /// ([`Display::reach`]: exactly its own frame unless its title bar could not be grabbed).
     pub(crate) fn restore_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
+        // A window its app reopened much smaller than saved: its saved frame, once.
+        self.pay_saved_size(id);
         self.fit_window(id);
         let Some(w) = self.windows.get(&id) else {
             return;

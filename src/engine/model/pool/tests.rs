@@ -43,6 +43,7 @@ fn stage(windows: Vec<SavedWindow>, last_active: u64) -> SavedStage {
 /// team chat, music, two git windows, mail. Strip: chat, git, music, mail.
 fn desktop_1() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 4,
         current: true,
         stages: vec![
@@ -55,6 +56,7 @@ fn desktop_1() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![1, 3, 2, 4],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -62,6 +64,7 @@ fn desktop_1() -> SavedSpace {
 /// Strip: calendar, terminal, web.
 fn desktop_2() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 8,
         current: false,
         stages: vec![
@@ -73,6 +76,7 @@ fn desktop_2() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![2, 1, 3],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -270,6 +274,149 @@ fn a_saved_desktops_windows_of_apps_not_running_at_the_end_are_given_up() {
     assert_eq!(dropped, 3);
     assert_eq!(m.unvisited_saved_spaces(), 0);
     assert!(m.to_state().spaces.iter().all(|s| s.id != 4), "no save lists it");
+}
+
+#[test]
+fn a_quiet_apps_windows_of_a_desktop_not_shown_wait_for_that_desktop_alone() {
+    // R3 of the Codex review: Desktop 1, not visited, waits for mail's inbox; Mail runs (its
+    // archive back on Desktop 2) and opens nothing for a minute. Its next window "Inbox" an
+    // hour later, on Desktop 2, is a new window by Apple's rule, not one of Desktop 1's.
+    let mut m = login_on_desktop_2();
+    let d2 = m.current_space(MAIN);
+    m.end_restore();
+    assert!(m.take_shown_apps().contains(&CAL.to_string()), "Desktop 2 adopted at the login");
+    // Before its minute the pool takes it (a stray of Desktop 1, as ever)...
+    let mut early = m.clone();
+    add(&mut early, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(early.is_pooled(w(56)), "a stray before the minute");
+    // ...and the minute's give-up of the model's own stages alone (as before) leaves it so.
+    let mut expired_only = m.clone();
+    expired_only.expire_pending(&[MAIL.to_string()]);
+    add(&mut expired_only, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(expired_only.is_pooled(w(56)), "the bug: Desktop 1's entry still takes it");
+    // The minute closes Desktop 1's entries of Mail to other Desktops.
+    let (_, dropped, closed) = m.settle_quiet(&[MAIL.to_string(), WEB.to_string()]);
+    assert_eq!((dropped, closed), (0, vec![MAIL.to_string()]), "nothing of the model's stages waits; only Mail waits on Desktop 1");
+    assert_eq!(m.pending_unvisited(), 3, "the entry stays, for Desktop 1");
+    add(&mut m, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(!m.is_pooled(w(56)) && m.restored_grade(w(56)).is_none(), "by Apple's rule");
+    assert_eq!(m.window(w(56)).map(|x| x.space), Some(d2));
+    assert_ne!(kin(&m, 56), Some(Kin::Saved(4, 4)));
+    assert!(m.take_shown_apps().is_empty(), "no saved Desktop shown since");
+    // He goes to Desktop 1: its inbox, shown there, goes to its saved stage all the same.
+    let natives = [win(51, 30, TERM, "build", r(2.0)), win(53, 12, MAIL, "Inbox", r(7.0))];
+    let shown: Vec<WindowId> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &natives, &shown, &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 4);
+    assert!(m.restored_grade(w(53)).is_some_and(Grade::confident), "its saved window");
+    assert_ne!(m.stage_of(w(53)), m.stage_of(w(51)));
+    // Its apps' minutes start again there, for the windows of Desktop 1 still to show.
+    let mut apps = m.take_shown_apps();
+    apps.sort();
+    assert_eq!(apps, [MAIL, MUSIC, TERM].map(String::from).to_vec());
+    assert!(m.take_shown_apps().is_empty());
+}
+
+/// Desktops 1 and 2 saved in session "A" with their windows' ids (100 on): a relaunch in the
+/// same session finds each window by its id.
+fn with_ids() -> (SavedSpace, SavedSpace) {
+    let mut d1 = desktop_1();
+    let mut d2 = desktop_2();
+    for (i, x) in d1.stages.iter_mut().chain(d2.stages.iter_mut()).flat_map(|s| s.windows.iter_mut()).enumerate() {
+        x.window = Some(100 + i as u32);
+    }
+    (d1, d2)
+}
+
+/// Desktop 1's windows as macOS lists them at its first show (ids 100 to 107), some titles
+/// changed since the save.
+fn desktop_1_live() -> Vec<WindowMeta> {
+    vec![
+        win(100, 20, IDE, "other.rs — proj", r(0.0)),
+        win(101, 20, IDE, "lib.rs — proj", r(1.0)),
+        win(102, 30, TERM, "build — 2", r(2.0)),
+        win(103, 21, TEAMCHAT, "General (3)", r(3.0)),
+        win(104, 31, MUSIC, "Library", r(4.0)),
+        win(105, 22, GIT, "proj", r(5.0)),
+        win(106, 22, GIT, "site", r(6.0)),
+        win(107, 12, MAIL, "Inbox", r(7.0)),
+    ]
+}
+
+/// Desktop 1 rebuilt as saved: the IDE's two windows with the terminal (in front), the git
+/// windows together, each window its saved entry's (by its id).
+fn assert_desktop_1_rebuilt(m: &Model) {
+    assert_eq!(m.current_space(MAIN).0, 4);
+    assert_eq!((m.last_arrival().rebuilt, m.last_arrival().restored), (Some(4), 8), "{:?}", m.last_arrival());
+    for id in 100..=107 {
+        assert!(m.restored_grade(w(id)).is_some_and(Grade::confident), "window {id} its saved entry's: {:?}", m.restored_grade(w(id)));
+        assert_eq!(m.window(w(id)).map(|x| x.space.0), Some(4));
+    }
+    assert_eq!(kin(m, 100), Some(Kin::Saved(4, 0)));
+    assert_eq!(m.stage_of(w(100)), m.stage_of(w(101)), "the IDE's two windows together");
+    assert_eq!(m.stage_of(w(100)), m.stage_of(w(102)), "with the terminal");
+    assert_eq!(m.stage_of(w(105)), m.stage_of(w(106)), "the git windows together");
+    assert_eq!(m.stages_in(SpaceId(4)).count(), 5, "the five saved stages, no stage per window");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(100)), "the saved front in front");
+    assert_eq!(m.pending_unvisited(), 0);
+}
+
+/// A relaunch in session "A" on Desktop 2 (its windows by their ids), the restore window
+/// over, every app quiet for its minute (R3: Desktop 1's entries closed to other Desktops),
+/// the re-match by titles over: an hour later Desktop 1 has not been shown yet.
+fn relaunched_on_desktop_2_an_hour_ago() -> Model {
+    let (d1, d2) = with_ids();
+    let mut m = launched(vec![d1, d2], Restore::same_session("A"));
+    let live = [win(108, 12, MAIL, "Archive", r(8.0)), win(109, 11, TERM, "server", r(9.0)), win(110, 10, CAL, "Week", r(10.0)), win(111, 13, WEB, "Docs — Web", r(11.0))];
+    m.arrive(MAIN, &live, &[], &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 8);
+    m.end_restore();
+    m.take_shown_apps();
+    let quiet: Vec<String> = m.waiting_bundles();
+    let (_, dropped, closed) = m.settle_quiet(&quiet);
+    assert_eq!(dropped, 0);
+    assert_eq!(closed.len(), 6, "every app of Desktop 1 closed to other Desktops: {closed:?}");
+    m.end_rematch();
+    assert_eq!(m.pending_unvisited(), 8, "Desktop 1 keeps every saved window");
+    m
+}
+
+#[test]
+fn a_desktop_first_shown_an_hour_after_a_relaunch_gets_its_saved_stages_back() {
+    // The 11-06 regression report: relaunched on Desktop 2 at 11:34 (the same login
+    // session), Desktop 1 first shown at 12:00 by a slide. Its saved stages come back
+    // however long after the launch, the quiet minute's R3 closing notwithstanding.
+    let mut m = relaunched_on_desktop_2_an_hour_ago();
+    let d2: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 8).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &desktop_1_live(), &d2, &LaunchHints::default());
+    assert_desktop_1_rebuilt(&m);
+    assert!(m.last_arrival().held.is_empty());
+    let mut apps = m.take_shown_apps();
+    apps.sort();
+    assert_eq!(apps.len(), 6, "their minutes start again: {apps:?}");
+    // R3 holds all the same: a new mail window on Desktop 2 later is a new window.
+    let mut m = relaunched_on_desktop_2_an_hour_ago();
+    add(&mut m, win(56, 12, MAIL, "Inbox", r(7.0)));
+    assert!(!m.is_pooled(w(56)) && m.restored_grade(w(56)).is_none(), "by Apple's rule");
+    assert_eq!(m.window(w(56)).map(|x| x.space.0), Some(8));
+    assert_eq!(m.pending_unvisited(), 8);
+    let d2: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 8).map(|x| x.meta.id).collect();
+    m.arrive(MAIN, &desktop_1_live(), &d2, &LaunchHints::default());
+    assert_desktop_1_rebuilt(&m);
+}
+
+#[test]
+fn a_desktop_first_shown_during_a_display_changes_settle_gets_its_saved_stages_back() {
+    // The lid closed at 12:00:37 and macOS slid to Desktop 1 within the display change's
+    // settle (arrivals of the Desktop still shown held): a Desktop that changed takes its
+    // windows, its saved stages rebuilt.
+    let mut m = relaunched_on_desktop_2_an_hour_ago();
+    let d2: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 8).map(|x| x.meta.id).collect();
+    m.set_hold_arrivals(true);
+    m.arrive(MAIN, &desktop_1_live(), &d2, &LaunchHints::default());
+    m.set_hold_arrivals(false);
+    assert!(m.last_arrival().held.is_empty(), "{:?}", m.last_arrival());
+    assert_desktop_1_rebuilt(&m);
 }
 
 #[test]
@@ -571,7 +718,8 @@ fn the_number_key_that_ends_the_restore_window_keeps_its_stage() {
     m.end_restore().expect("it was open (the key)");
     assert_eq!(m.number_now(here, r), n);
     assert_eq!(m.stage_number(after), Some(n + 1));
-    m.switch_to_number(m.number_now(here, r), &Observation::default());
+    let main = m.main_display().id;
+    m.switch_to_number(m.number_now(here, r), main, &Observation::default());
     assert!(m.is_active(y) && m.window(w(81)).is_some_and(|x| !x.parked));
     // The next number still makes a stage.
     let next = m.number_ref(here, m.stages_in(here).count() + 1);
@@ -700,84 +848,308 @@ fn a_voter_placed_at_its_own_frame_keeps_the_frame_it_had_before_fitting() {
     assert_eq!(x.original, Some(under_strip), "its frame before fitting kept");
 }
 
-// ----- the list of windows back on another Desktop (round desktop-notice) ------------------
+// ----- the windows back on another Desktop, as the restore's line names them ------------------
 
 fn listed(m: &Model) -> Vec<u32> {
-    m.desktop_notice().iter().map(|e| e.window.0).collect()
+    m.away_now().map(|(id, _)| id.0).collect()
 }
 
 #[test]
-fn the_strays_are_listed_with_the_desktop_they_belong_on_and_the_one_they_are_on() {
+fn the_restores_line_names_the_strays_with_the_desktop_they_belong_on_and_the_one_they_are_on() {
     let m = login_on_desktop_2();
     let here = m.current_space(MAIN);
-    let list = m.desktop_notice();
     assert_eq!(listed(&m), [41, 42, 43, 44, 45], "Desktop 1's strays, in the order they came back; no native");
-    for e in &list {
-        assert_eq!((e.saved.id, e.saved.shown), (4, false), "window {}", e.window.0);
-        assert_eq!((e.now.id, e.now.shown), (here.0, true));
-    }
-    let e = &list[2];
-    assert_eq!((e.bundle_id.as_str(), e.title.as_str(), e.pid), (TEAMCHAT, "General", 21));
-    // Desktop 1 (not visited) by the natives waiting there, its saved active stage first;
-    // this Desktop by its own windows, never by the listed ones.
-    assert_eq!(e.saved.apps, [TERM, MUSIC]);
-    assert_eq!(e.now.apps.len(), 2);
-    assert!(e.now.apps.iter().all(|a| ![IDE, TEAMCHAT, GIT].contains(&a.as_str())), "{:?}", e.now.apps);
-    let name = |b: &str| b.rsplit('.').next().unwrap_or(b).to_string();
-    assert_eq!(
-        crate::engine::desktop_notice::entry_detail(e, name),
-        "Belongs on the Desktop with term and music; now on this Desktop"
-    );
+    assert!(m.away_now().all(|(_, saved)| saved == 4));
+    let line = m.away_line(|_| "#1a2b3c4d".to_string());
+    assert!(line.starts_with("; on another Desktop: "), "{line}");
+    assert!(line.contains(&format!("{TEAMCHAT} #1a2b3c4d (saved 4, now {})", here.0)), "{line}");
+    assert!(!line.contains("General"), "titles through the hash");
 }
 
 #[test]
-fn an_entry_leaves_once_its_window_shows_on_its_saved_desktop_for_good() {
+fn a_stray_leaves_the_line_once_its_window_shows_on_its_saved_desktop_or_closes() {
     let mut m = login_on_desktop_2();
     let d2 = m.current_space(MAIN);
     m.end_restore();
+    m.remove_window(w(42));
+    assert_eq!(listed(&m), [41, 43, 44, 45], "closed");
     // In Mission Control he drags the team chat onto Desktop 1, then goes there.
     let natives = [win(51, 30, TERM, "build", r(2.0)), win(52, 31, MUSIC, "Library", r(4.0)), win(53, 12, MAIL, "Inbox", r(7.0))];
     let chat = m.window(w(43)).map(|x| x.meta.clone()).expect("managed");
     let mut live = natives.to_vec();
-    live.push(chat.clone());
+    live.push(chat);
     let absent: Vec<WindowId> = m.windows().filter(|x| x.space == d2 && x.meta.id != w(43)).map(|x| x.meta.id).collect();
     m.arrive(MAIN, &live, &absent, &LaunchHints::default());
-    assert_eq!(m.current_space(MAIN).0, 4);
     assert_eq!(m.window(w(43)).map(|x| x.space.0), Some(4), "moved here");
-    assert_eq!(listed(&m), [41, 42, 44, 45], "on its saved Desktop: off the list");
-    let e = &m.desktop_notice()[0];
-    assert!(e.saved.shown && !e.now.shown, "the others belong on this Desktop, now on another");
-    assert!(m.tidy_desktop_notice(), "forgotten");
-    assert!(!m.tidy_desktop_notice());
-    // Back on Desktop 2 with it: never listed again.
-    let back: Vec<WindowMeta> = m.windows().filter(|x| x.space == d2).map(|x| x.meta.clone()).chain([chat]).collect();
-    let d1: Vec<WindowId> = m.windows().filter(|x| x.space.0 == 4 && x.meta.id != w(43)).map(|x| x.meta.id).collect();
-    m.arrive(MAIN, &back, &d1, &LaunchHints::default());
-    assert_eq!(m.window(w(43)).map(|x| x.space), Some(d2));
-    assert_eq!(listed(&m), [41, 42, 44, 45]);
-}
-
-#[test]
-fn a_closed_window_leaves_the_list_and_a_dismissal_empties_it() {
-    let mut m = login_on_desktop_2();
-    m.remove_window(w(42));
-    assert_eq!(listed(&m), [41, 43, 44, 45]);
-    m.dismiss_desktop_notice();
-    assert!(m.desktop_notice().is_empty());
-    // Nothing restored from another Desktop: nothing listed (a relaunch in the same session).
+    assert_eq!(listed(&m), [41, 44, 45], "on its saved Desktop");
+    // Nothing restored from another Desktop: an empty line (a relaunch in the same session).
     let m = launched(vec![desktop_1(), desktop_2()], Restore::same_session("A"));
-    assert!(m.desktop_notice().is_empty());
+    assert!(m.away_line(|t| t.to_string()).is_empty());
+}
+
+/// One Desktop (saved 4, shown when saved): the IDE's two workspaces as two stages, "alpha"
+/// in front with a terminal, "beta" a card; the IDE's titles are its workspaces' names with
+/// no file open (the 11-06 restart: two VS Code windows, two stages).
+fn two_workspaces() -> SavedSpace {
+    SavedSpace {
+        screen: None,
+        id: 4,
+        current: true,
+        stages: vec![
+            stage(vec![sw(IDE, "alpha (Workspace)", r(0.0), 0), sw(TERM, "build", r(2.0), 1)], 90),
+            stage(vec![sw(IDE, "beta (Workspace)", r(1.0), 0)], 80),
+        ],
+        active_index: Some(0),
+        strip_slots: vec![1],
+        last_seen: None,
+        unvisited: false,
+    }
 }
 
 #[test]
-fn a_listed_window_comes_forward_with_its_stage() {
-    let mut m = login_on_desktop_2();
+fn an_editor_reopened_with_a_file_in_front_of_its_workspace_goes_to_its_own_stage() {
+    // The title gained the file shown, in front of the workspace's name: the fingerprint
+    // (its first segment) differs, the frame is the saved one; strong, not Apple's rule into
+    // the IDE's other stage.
+    let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
+    let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
+    let beta = win(42, 20, IDE, "main.rs — beta (Workspace)", r(1.0));
+    m.arrive(MAIN, &[alpha, beta, win(43, 21, TERM, "build", r(2.0))], &[], &LaunchHints::default());
+    assert_ne!(m.stage_of(w(41)), m.stage_of(w(42)), "two stages, as saved");
+    assert_eq!(m.restored_grade(w(42)), Some(Grade::Strong));
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(43)));
+    assert_eq!(m.restore_summary(0).by_apple, 0);
+}
+
+#[test]
+fn an_editor_titled_late_goes_to_its_own_stage_when_its_title_comes() {
+    // The second window shows first under its app's name (an Electron window's title before
+    // its workspace loads): no saved window takes it, and Apple's rule joins it to the IDE's
+    // stage. Its title comes during the restore window: back in its saved stage, a card.
+    let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
+    let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
+    let early = win(42, 20, IDE, "Example IDE", Rect::new(300.0, 200.0, 700.0, 500.0));
+    m.arrive(MAIN, &[alpha, early, win(43, 21, TERM, "build", r(2.0))], &[], &LaunchHints::default());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)), "joined by Apple's rule, the late title's doing");
+    assert_eq!(m.restore_summary(0).by_apple, 1);
+    // A title that still says nothing: no change.
+    assert!(m.window_title_changed(w(42), "Example IDE — Welcome"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    let a = m.window_retitled(w(42));
+    let beta = m.stage_of(w(42)).expect("placed");
+    assert_ne!(Some(beta), m.stage_of(w(41)), "two stages again");
+    assert_eq!(m.stage(beta).map(|s| s.windows.clone()), Some(vec![w(42)]));
+    assert!(parks(&a, 42), "a card, parked: its stage is not in front: {a:?}");
+    assert_eq!(m.window(w(42)).map(|x| x.restore), Some(r(1.0)), "its saved frame");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(41)), "nothing switched");
+    assert!(m.strip_slots(MAIN).contains(&beta));
+    let line = m.restore_summary(0);
+    assert_eq!((line.by_apple, line.windows), (0, 3));
+    // Once placed, a later title changes nothing.
+    assert!(m.window_title_changed(w(42), "lib.rs — beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+}
+
+/// The second workspace's window joined the first's stage by Apple's rule, titled late.
+fn joined_by_a_late_title() -> Model {
+    let mut m = launched(vec![two_workspaces()], Restore::after_restart("B"));
+    let alpha = win(41, 20, IDE, "alpha (Workspace)", r(0.0));
+    let early = win(42, 20, IDE, "Example IDE", Rect::new(300.0, 200.0, 700.0, 500.0));
+    m.arrive(MAIN, &[alpha, early, win(43, 21, TERM, "build", r(2.0))], &[], &LaunchHints::default());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+    m
+}
+
+#[test]
+fn a_click_on_another_window_early_leaves_a_late_title_its_rematch() {
+    // He clicks the terminal before the editor's title comes: the restore window ends, and
+    // the editor's window, untouched, still goes to its stage when its title comes.
+    let mut m = joined_by_a_late_title();
+    m.touch_window(w(43));
     m.end_restore();
-    let chat = m.stage_of(w(43)).expect("in its part");
-    assert_ne!(m.main_active_stage(), Some(chat));
-    let actions = m.show_noticed(w(43), &Observation::default());
-    assert_eq!(m.main_active_stage(), Some(chat), "its stage in front");
-    assert!(actions.iter().any(|a| matches!(a, Action::Focus { id } if *id == w(43))), "{actions:?}");
-    assert_eq!(m.show_noticed(w(43), &Observation::default()), vec![Action::Focus { id: w(43) }], "in front: the keyboard");
-    assert!(m.show_noticed(w(83), &Observation::default()).is_empty(), "not listed: nothing");
+    assert!(!m.restoring() && m.rematching());
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    let a = m.window_retitled(w(42));
+    assert_ne!(m.stage_of(w(42)), m.stage_of(w(41)), "its own stage");
+    assert!(parks(&a, 42), "a card: {a:?}");
+    assert_eq!(m.main_active_stage(), m.stage_of(w(41)), "nothing switched");
+}
+
+#[test]
+fn a_window_the_user_touched_stays_where_it_is_when_its_title_comes() {
+    // Focused by his click (or moved, or its stage switched to): his.
+    let mut m = joined_by_a_late_title();
+    m.touch_window(w(42));
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+    // So is one whose stage he switched to.
+    let mut m = joined_by_a_late_title();
+    let shared = m.stage_of(w(42)).expect("in a stage");
+    m.touch_stage(shared);
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+}
+
+#[test]
+fn a_key_press_in_a_window_a_late_title_could_move_makes_it_the_users() {
+    // The Fable review of 11-06, restore 2: the IDE focused its late-titled window itself at
+    // the login (no press, no touch), and he types in it. The platform asks the app's focused
+    // window at a key press only while one of its windows may still be re-matched; touched,
+    // its title no longer moves it.
+    let mut m = joined_by_a_late_title();
+    assert!(m.may_rematch_app(20), "the IDE's window went by Apple's rule");
+    assert!(!m.may_rematch_app(21), "the terminal's matched");
+    m.touch_window(w(42));
+    assert!(!m.may_rematch_app(20), "typed in: nothing left to ask");
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+    // After the two minutes no key press asks.
+    let mut m = joined_by_a_late_title();
+    m.end_rematch();
+    assert!(!m.may_rematch_app(20));
+}
+
+#[test]
+fn a_late_title_after_the_two_minutes_moves_nothing() {
+    let mut m = joined_by_a_late_title();
+    m.end_rematch();
+    assert!(m.window_title_changed(w(42), "beta (Workspace)"));
+    assert!(m.window_retitled(w(42)).is_empty());
+    assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
+}
+
+/// The 11-06 restart, Fork's two windows (made-up titles): the git client's "proj" saved as a
+/// stage of its own on Desktop 2 (saved 8), its "site" as a stage of its own on Desktop 1
+/// (saved 4, shown when saved). The login shows Desktop 2, and the app (non-native) reopens
+/// both windows there, at their saved frames.
+fn git_on_two_desktops() -> Vec<SavedSpace> {
+    let one = SavedSpace {
+        screen: None,
+        id: 4,
+        current: true,
+        stages: vec![stage(vec![sw(MAIL, "Inbox", r(7.0), 0)], 50), stage(vec![sw(GIT, "site", r(6.0), 0)], 45)],
+        active_index: Some(0),
+        strip_slots: vec![1],
+        last_seen: None,
+        unvisited: false,
+    };
+    let two = SavedSpace {
+        screen: None,
+        id: 8,
+        current: false,
+        stages: vec![
+            stage(vec![sw(MAIL, "Archive", r(8.0), 0)], 40),
+            stage(vec![sw(TERM, "server", r(9.0), 0)], 30),
+            stage(vec![sw(GIT, "proj", r(5.0), 0)], 35),
+        ],
+        active_index: Some(0),
+        strip_slots: vec![2, 1],
+        last_seen: None,
+        unvisited: false,
+    };
+    vec![one, two]
+}
+
+/// The login on Desktop 2: its two natives adopt it.
+fn login_for_git() -> Model {
+    let mut m = launched(git_on_two_desktops(), Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 12, MAIL, "Archive", r(8.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    assert_eq!(m.current_space(MAIN).0, 8);
+    m
+}
+
+/// A git window as the controller decides it with `[stages] new_apps_join_current` on while
+/// the restore window is open (the key does not apply then; the model ignores it either way).
+fn add_git(m: &mut Model, id: u32, title: &str, frame: Rect) -> Vec<Action> {
+    let joins = Decision { new_app_joins_current: true, ..Decision::default() };
+    m.add_window(win(id, 30, GIT, title, frame), &joins, &Observation::default())
+}
+
+#[test]
+fn an_app_reopening_two_windows_saved_as_two_stages_on_two_desktops_makes_two_stages() {
+    let mut m = login_for_git();
+    let (front, apple) = (m.main_active_stage(), m.restore_summary(0).by_apple);
+    add_git(&mut m, 61, "proj", r(5.0));
+    add_git(&mut m, 62, "site", r(6.0));
+    assert_ne!(m.stage_of(w(61)), m.stage_of(w(62)), "two stages, as saved");
+    assert_eq!(kin(&m, 61), Some(Kin::Saved(8, 2)), "its own Desktop's saved stage");
+    assert_eq!(kin(&m, 62), Some(Kin::Saved(4, 1)), "the other Desktop's, made here");
+    assert!(m.is_pooled(w(62)) && !m.is_pooled(w(61)));
+    assert_eq!(m.main_active_stage(), front, "nothing switched");
+    assert_eq!(m.restore_summary(0).by_apple, apple, "none of them by Apple's rule");
+}
+
+#[test]
+fn a_window_reopened_under_another_name_at_its_saved_frame_goes_to_its_own_stage() {
+    // Fork's second window came back with another title (the repository it shows): two
+    // names, so the frame counted as the size only, a low match, and Apple's rule joined it
+    // to the first window's stage. While the restore window is open it is the only window of
+    // the app at the only saved frame of the app's still waiting there: that window.
+    let mut m = login_for_git();
+    let apple = m.restore_summary(0).by_apple;
+    add_git(&mut m, 61, "proj", r(5.0));
+    let a = add_git(&mut m, 62, "notes", r(6.0));
+    let site = m.stage_of(w(62)).expect("placed");
+    assert_ne!(Some(site), m.stage_of(w(61)), "two stages");
+    assert_eq!(m.stage(site).map(|s| s.windows.clone()), Some(vec![w(62)]));
+    assert_eq!(kin(&m, 62), Some(Kin::Saved(4, 1)));
+    assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
+    assert_eq!(m.restore_summary(0).by_apple, apple);
+    assert!(parks(&a, 62) || m.main_active_stage() == Some(site), "a card or the empty front: {a:?}");
+    let stages = m.stages_in(m.current_space(MAIN)).count();
+    // The other order: the renamed window first (no window of its app back yet: Apple's
+    // rule, a stage of its own), then the one with its name, which shows its app is
+    // reopening its saved windows: the first is looked at again and goes to its saved stage.
+    let mut m = login_for_git();
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.restored_grade(w(62)), None);
+    add_git(&mut m, 61, "proj", r(5.0));
+    assert_ne!(m.stage_of(w(61)), m.stage_of(w(62)));
+    assert_eq!((kin(&m, 61), kin(&m, 62)), (Some(Kin::Saved(8, 2)), Some(Kin::Saved(4, 1))));
+    assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
+    assert_eq!(m.restore_summary(0).by_apple, apple);
+    assert_eq!(m.stages_in(m.current_space(MAIN)).count(), stages, "the stage Apple's rule made is gone");
+}
+
+#[test]
+fn a_renamed_window_at_a_saved_frame_keeps_apples_rule_when_more_could_be_meant() {
+    // After the restore window (a click or key: the user may have opened it, Finder's ⌘N
+    // where a saved window was), the frame never outweighs two names.
+    let mut m = login_for_git();
+    add_git(&mut m, 61, "proj", r(5.0));
+    m.end_restore();
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)), "Apple's rule");
+    // Two saved windows of the app at that frame: either could be meant.
+    let mut spaces = git_on_two_desktops();
+    spaces[0].stages.push(stage(vec![sw(GIT, "blog", r(6.0), 0)], 20));
+    let mut m = launched(spaces, Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 12, MAIL, "Archive", r(8.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    add_git(&mut m, 61, "proj", r(5.0));
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)), "Apple's rule");
+    assert_eq!(m.restored_grade(w(62)), None);
+}
+
+#[test]
+fn a_renamed_window_saved_with_its_sibling_goes_back_to_their_stage() {
+    // The two windows saved in one stage: the renamed one goes there too.
+    let mut spaces = git_on_two_desktops();
+    spaces[0].stages.remove(1);
+    spaces[1].stages[2].windows.push(sw(GIT, "site", r(6.0), 1));
+    let mut m = launched(spaces, Restore::after_restart("B"));
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    add(&mut m, win(81, 12, MAIL, "Archive", r(8.0)));
+    add(&mut m, win(82, 11, TERM, "server", r(9.0)));
+    add_git(&mut m, 61, "proj", r(5.0));
+    add_git(&mut m, 62, "notes", r(6.0));
+    assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)));
+    assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
 }

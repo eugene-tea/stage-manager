@@ -39,7 +39,9 @@
 //! at the quit. A cancel signal (`logoutCancelled`) ends the hold at once: the app starts
 //! afresh from the saved stages, as at a launch (windows parked again per the model), the held
 //! windows still on record. A logout cancelled with no such signal (an app refused to quit)
-//! sends no quit: [`LOGOUT_WAIT`] after the latest signal the app starts afresh the same way.
+//! sends no quit: [`LOGOUT_WAIT`] after the latest signal, or the latest app that quit during
+//! the hold ([`Logout::app_quit`]: the logout still under way), the app starts afresh the same
+//! way.
 
 use std::time::{Duration, Instant};
 
@@ -124,7 +126,10 @@ pub fn logout_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
 /// before it takes the logout for cancelled with no cancel signal (an app refused to quit) and
 /// starts afresh. Two minutes, not one: an early signal may come when the confirmation
 /// dialog shows (a minute's countdown), and a hold that ended then would park the windows
-/// again just as the apps save their frames.
+/// again just as the apps save their frames. Counted from the latest app that quit during the
+/// hold too (the 1.7 review: a restart slowed by apps saving, or one asking about unsaved
+/// changes, outlasted a wait counted from the signals alone, and the app parked the windows
+/// again mid-logout and left macOS's reopen list).
 pub const LOGOUT_WAIT: Duration = Duration::from_secs(120);
 
 /// What a logout signal says.
@@ -266,6 +271,14 @@ impl Logout {
             }
         };
         (heard, ms)
+    }
+
+    /// An app quit at `at`: while held, the logout is still under way, so the wait counts from
+    /// it ([`LOGOUT_WAIT`]). Nothing when no logout is held.
+    pub fn app_quit(&mut self, at: Instant) {
+        if self.since.is_some() && self.last.is_none_or(|l| at > l) {
+            self.last = Some(at);
+        }
     }
 
     /// The head start's work is done; `all_back`: every window came back.
@@ -523,6 +536,27 @@ mod tests {
         assert!(!l.holding() && l.quit() == Quit::Unpark, "managing again: a later quit does everything");
         assert!(!l.cancelled(t0 + LOGOUT_WAIT * 2), "once");
         assert_eq!(l.signal(Signal::Coming, t0 + LOGOUT_WAIT * 3, true), (Heard::HeadStart, 0), "a later logout gets its own head start");
+    }
+
+    /// The 1.7 review: a slow restart (apps saving, one asking about unsaved changes) outlasted
+    /// a wait counted from the signals alone; the windows were parked again mid-logout. Each
+    /// app that quits during the hold counts the wait from it; one quit outside a hold is
+    /// nothing.
+    #[test]
+    fn apps_quitting_during_the_hold_push_the_wait_back() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut l = Logout::default();
+        l.app_quit(s(0));
+        assert!(!l.holding(), "no logout: an app quit holds nothing");
+        l.signal(Signal::Coming, s(0), true);
+        l.app_quit(s(90));
+        l.app_quit(s(60));
+        assert!(!l.cancelled(s(0) + LOGOUT_WAIT), "an app quit 90 s in: still under way");
+        assert!(!l.cancelled(s(90) + LOGOUT_WAIT - Duration::from_millis(1)), "an earlier quit does not pull it forward");
+        assert!(l.cancelled(s(90) + LOGOUT_WAIT));
+        l.app_quit(s(400));
+        assert!(!l.holding(), "after the hold ends, a quit starts none");
     }
 
     /// Round 8H: any first signal starts the head start; repeats are ignored (each only pushes

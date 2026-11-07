@@ -1,19 +1,26 @@
-//! The desktop: displays (from `NSScreen`, converted to top-left coordinates) and wallpaper
-//! clicks (the global mouse-down monitor in [`super::input`] plus a window-list hit test).
+//! The desktop: displays (from `NSScreen`, converted to top-left coordinates, every screen
+//! with its identity and park corner) and wallpaper clicks (the global mouse-down monitor in
+//! [`super::input`] plus a window-list hit test).
 //!
 //! A click counts as a wallpaper click when no window of layer 0 or above contains the
 //! point: the desktop picture and Finder's desktop icons are desktop elements, which the
 //! window list leaves out. A click on the Dock, the menu bar, our strip or any app window
 //! hits a window and is ignored.
 
+use objc2::runtime::AnyObject;
 use objc2_app_kit::NSScreen;
-use objc2_core_graphics::{CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID};
-use objc2_foundation::{MainThreadMarker, NSRect};
+use objc2_core_graphics::{
+    CGDisplayBounds, CGDisplayModelNumber, CGDisplaySerialNumber, CGDisplayVendorNumber, CGGetActiveDisplayList,
+    CGMainDisplayID,
+};
+use objc2_foundation::{MainThreadMarker, NSNumber, NSRect, NSString};
 
 use super::windows::CgWindow;
+use crate::engine::displays::{ScreenKey, number_duplicates};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
 use crate::engine::park::{CornerChoice, choose_corner};
+use crate::engine::sliver::DockBar;
 
 /// Converts an AppKit rectangle (bottom-left origin of the primary screen, `y` up) into
 /// global top-left coordinates, given the primary screen's height.
@@ -33,12 +40,53 @@ fn rect(r: NSRect) -> Rect {
 /// The main display (the one with the menu bar): full and visible frames, top-left
 /// coordinates. `None` when AppKit reports no screen.
 pub fn main_display(mtm: MainThreadMarker) -> Option<Display> {
+    displays(mtm).into_iter().next()
+}
+
+/// Every display, the main one (the menu bar's) first: full and visible frames in top-left
+/// coordinates, the `CGDirectDisplayID`, the identity ([`screen_key`]) and the park corner
+/// chosen against the other displays ([`choose_corner`]). Empty when AppKit reports no screen.
+pub fn displays(mtm: MainThreadMarker) -> Vec<Display> {
     let screens = NSScreen::screens(mtm);
-    let primary = screens.firstObject()?;
-    let frame = rect(primary.frame());
-    let visible = to_top_left(rect(primary.visibleFrame()), frame.h);
-    let frame = to_top_left(frame, frame.h);
-    Some(Display { id: DisplayId(CGMainDisplayID()), frame, visible, corner: park_corner(frame, visible).corner })
+    let Some(primary) = screens.firstObject() else { return Vec::new() };
+    let primary_height = primary.frame().size.height;
+    let raw: Vec<(u32, Rect, Rect)> = screens
+        .iter()
+        .map(|s| {
+            let frame = to_top_left(rect(s.frame()), primary_height);
+            let visible = to_top_left(rect(s.visibleFrame()), primary_height);
+            (screen_number(&s).unwrap_or_else(|| CGMainDisplayID()), frame, visible)
+        })
+        .collect();
+    let mut keys: Vec<ScreenKey> = raw.iter().map(|(id, _, _)| screen_key(*id)).collect();
+    number_duplicates(&mut keys);
+    raw.iter()
+        .zip(keys)
+        .map(|(&(id, frame, visible), key)| {
+            let others: Vec<Rect> = raw.iter().filter(|(o, _, _)| *o != id).map(|(_, f, _)| *f).collect();
+            Display { id: DisplayId(id), key, frame, visible, corner: choose_corner(frame, visible, &others).corner }
+        })
+        .collect()
+}
+
+/// The screen with `CGDirectDisplayID` `id`, when AppKit reports it (round displays-2).
+pub fn screen_with_id(mtm: MainThreadMarker, id: u32) -> Option<objc2::rc::Retained<NSScreen>> {
+    NSScreen::screens(mtm).iter().find(|s| screen_number(s) == Some(id))
+}
+
+/// A screen's `CGDirectDisplayID` (`NSScreenNumber` in its device description).
+pub(crate) fn screen_number(screen: &NSScreen) -> Option<u32> {
+    let description = screen.deviceDescription();
+    let value: objc2::rc::Retained<AnyObject> = description.objectForKey(&NSString::from_str("NSScreenNumber"))?;
+    let number = value.downcast::<NSNumber>().ok()?;
+    Some(number.unsignedIntValue())
+}
+
+/// A display's identity across reconnects and restarts: vendor, model and serial number
+/// from CoreGraphics ([`ScreenKey`]; the serial is 0 for many displays, and identical ones
+/// are told apart by their order, [`number_duplicates`]).
+pub fn screen_key(id: u32) -> ScreenKey {
+    ScreenKey::new(CGDisplayVendorNumber(id), CGDisplayModelNumber(id), CGDisplaySerialNumber(id))
 }
 
 /// The park corner for the main display (`frame`, `visible`) among the other active
@@ -78,9 +126,11 @@ fn bounds_of(id: u32) -> Rect {
 
 /// True when a click at `p` (top-left coordinates) lands on no window: the window list is
 /// front to back; windows below layer 0 are desktop elements and are not in it. Fully
-/// transparent windows do not count.
-pub fn is_wallpaper_click(list: &[CgWindow], p: Point) -> bool {
-    !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p))
+/// transparent windows do not count, nor the Dock's window away from its bar (`dock`): it
+/// spans its whole display, clear and click-through there ([`DockBar`]; the Fable review's
+/// switching 3: no click on the Dock's screen was a wallpaper click).
+pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
+    !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !dock.seen_through(w.pid, w.layer, w.bounds, p))
 }
 
 #[cfg(test)]
@@ -107,11 +157,26 @@ mod tests {
         let app = Rect::new(100.0, 100.0, 500.0, 400.0);
         let dock = Rect::new(0.0, 850.0, 1440.0, 50.0);
         let list = [w(20, dock, true), w(0, app, true), w(0, Rect::new(0.0, 0.0, 1440.0, 900.0), false)];
-        assert!(!is_wallpaper_click(&list, Point::new(200.0, 200.0)), "an app window");
-        assert!(!is_wallpaper_click(&list, Point::new(200.0, 870.0)), "the Dock");
-        assert!(is_wallpaper_click(&list, Point::new(900.0, 600.0)), "nothing there");
+        assert!(!is_wallpaper_click(&list, Point::new(200.0, 200.0), &DockBar::default()), "an app window");
+        assert!(!is_wallpaper_click(&list, Point::new(200.0, 870.0), &DockBar::default()), "the Dock");
+        assert!(is_wallpaper_click(&list, Point::new(900.0, 600.0), &DockBar::default()), "nothing there");
         let mut clear = w(30, Rect::new(0.0, 0.0, 1440.0, 900.0), true);
         clear.alpha = 0.0;
-        assert!(is_wallpaper_click(&[clear], Point::new(900.0, 600.0)), "transparent overlay");
+        assert!(is_wallpaper_click(&[clear], Point::new(900.0, 600.0), &DockBar::default()), "transparent overlay");
+    }
+
+    #[test]
+    fn the_docks_display_sized_window_counts_only_on_its_bar() {
+        // The Dock's window spans its display (seen 11-05 at 2560x1440 with auto-hide on).
+        let dock = CgWindow { pid: 7, ..w(crate::platform::dock::DOCK_LAYER, Rect::new(0.0, 0.0, 2560.0, 1440.0), true) };
+        let list = [dock];
+        let bar = DockBar { pid: Some(7), bars: vec![Rect::new(700.0, 1370.0, 1100.0, 66.0)] };
+        assert!(is_wallpaper_click(&list, Point::new(1200.0, 600.0), &bar), "away from the bar: the wallpaper");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 1400.0), &bar), "on the bar");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 1360.0), &bar), "on the bar's edge");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 600.0), &DockBar { pid: Some(7), bars: Vec::new() }), "the bar unknown: the Dock's");
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 600.0), &DockBar { pid: Some(8), ..bar.clone() }), "another app's window");
+        let elsewhere = DockBar { pid: Some(7), bars: vec![Rect::new(-1500.0, 1100.0, 900.0, 60.0)] };
+        assert!(!is_wallpaper_click(&list, Point::new(1200.0, 600.0), &elsewhere), "the bar read on another screen: the Dock's");
     }
 }

@@ -1,28 +1,150 @@
-//! Which display a window belongs to.
+//! Which display a window belongs to, and a display's stable identity.
 //!
-//! Stages live on the main display only (docs/GUIDE.md: "other displays are left alone"). The
-//! platform asks [`on_other_display`] before it hands a window to the engine and once a
-//! second for every managed window that shows: a window that shows more of itself on another
-//! display than on the main one is not managed there (it waits, unmanaged, until it is back on
-//! the main display). A window on no display at all (off screen, in a park zone's offscreen
-//! part) belongs to the main display, so a window we parked never counts as elsewhere because
-//! of its offscreen body.
+//! **A strip and stages on every screen** (round displays, 11-05), as Apple's Stage Manager
+//! gives every screen its own strip and stages. A window belongs to the display that shows
+//! most of it ([`display_of`]: macOS's own rule for a window straddling two screens; ties go
+//! to the first display listed, the main one). The platform asks it before it hands a window
+//! to the engine and once a second for every managed window that shows: a window that shows
+//! more of itself on another display than on its own has moved there
+//! ([`crate::engine::model::Model::windows_moved_to_display`]). A window on no display at all
+//! (off screen, in a park zone's offscreen part) keeps the display it had, so a window we
+//! parked never counts as elsewhere because of its offscreen body.
+//!
+//! **Main screen only** (`[displays] main_only`, off): the first version's behaviour, kept
+//! for those who want exactly that (FEATURE-REQUESTS R8): only the main screen is managed,
+//! and a window that shows more of itself on another display ([`on_other_display`]) is not
+//! managed there (it waits, unmanaged, until it is back on the main display).
+//!
+//! **macOS's own after a display change** ([`macos_after_display_change`], round
+//! displays-lid-3): a display that comes or goes makes macOS activate an app and focus its
+//! windows (11-05 20:25:46.8, the lid closed: Mail, 0.4 s after the screen went). With no
+//! click or key press of the user's since the change, such an activation or focus is not
+//! the user's and switches no stage: Apple's keeps the closed screen's front in front.
+//!
+//! **A display's identity** ([`ScreenKey`]): `CGDirectDisplayID` changes when a display is
+//! plugged in again, so stages and `state.json` are keyed by the display's vendor, model and
+//! serial number instead (plus a count for identical displays with no serial), which survive
+//! reconnects and restarts.
 //!
 //! **Off every display** ([`off_screen_not_ours`], round offscreen-windows, 11-03): a window
 //! that overlaps no display at all is not the user's. Apps put such windows there themselves
 //! (a headless browser's: Playwright's WebKit lists an untitled `AXUnknown` window at
 //! `-10000,-10180`; offscreen render windows), and no user can drag a window there (macOS keeps
 //! a title bar on screen). Apple's Stage Manager leaves them alone, so they are never managed:
-//! no stage, no card, never parked, moved or saved. The platform's one gate for "shown on the
-//! main display" (`on_main_screen` in the controller) leaves them out, so every path that
-//! takes a window in (a new window, the launch listing, an arrival on a Desktop, the restore
-//! that rides on them) waits for one to show on a display, and then takes it as a new window.
-//! A managed window its app moves off every display is let go where it is, never brought
-//! back (the controller's off-screen check), except one we parked: a park zone's frame may lie
-//! wholly beyond the edges (`[windows] park_inside` below 0).
+//! no stage, no card, never parked, moved or saved. The platform's one gate for "shown on a
+//! managed screen" (`on_managed_screens` in the controller) leaves them out, so every path
+//! that takes a window in (a new window, the launch listing, an arrival on a Desktop, the
+//! restore that rides on them) waits for one to show on a display, and then takes it as a new
+//! window. A managed window its app moves off every display is let go where it is, never
+//! brought back (the controller's off-screen check), except one we parked: a park zone's frame
+//! may lie wholly beyond the edges (`[windows] park_inside` below 0).
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
+use super::model::DisplayId;
 use super::park::is_parked_anywhere;
+
+/// A display's identity that survives reconnects and restarts: its vendor, model and serial
+/// number as CoreGraphics reports them, and `nth`, its place among the connected displays
+/// that report the same three (identical displays with no serial number), 0 for the first.
+/// [`ScreenKey::NONE`] when the platform could not tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub struct ScreenKey {
+    /// `CGDisplayVendorNumber`.
+    pub vendor: u32,
+    /// `CGDisplayModelNumber`.
+    pub model: u32,
+    /// `CGDisplaySerialNumber` (0 for many displays).
+    pub serial: u32,
+    /// Its place among the connected displays with the same vendor, model and serial.
+    pub nth: u32,
+}
+
+impl ScreenKey {
+    /// No identity known (a test display, a platform that reported none).
+    pub const NONE: ScreenKey = ScreenKey { vendor: 0, model: 0, serial: 0, nth: 0 };
+
+    /// A key with the numbers given, the first of its kind.
+    pub const fn new(vendor: u32, model: u32, serial: u32) -> Self {
+        Self { vendor, model, serial, nth: 0 }
+    }
+
+    /// True when the key names a display (not [`ScreenKey::NONE`]).
+    pub fn known(&self) -> bool {
+        *self != Self::NONE
+    }
+
+    /// The key as `state.json` writes it: `vendor:model:serial:nth`, hex numbers.
+    pub fn text(&self) -> String {
+        format!("{:x}:{:x}:{:x}:{}", self.vendor, self.model, self.serial, self.nth)
+    }
+
+    /// A key read back from [`ScreenKey::text`]; `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let vendor = u32::from_str_radix(parts.next()?, 16).ok()?;
+        let model = u32::from_str_radix(parts.next()?, 16).ok()?;
+        let serial = u32::from_str_radix(parts.next()?, 16).ok()?;
+        let nth = parts.next()?.parse().ok()?;
+        parts.next().is_none().then_some(Self { vendor, model, serial, nth })
+    }
+}
+
+/// Gives every display of `keys` (in connection order) its `nth` among those with the same
+/// vendor, model and serial: the first keeps 0, the next is 1, and so on. Unknown keys
+/// ([`ScreenKey::NONE`]) stay as they are.
+pub fn number_duplicates(keys: &mut [ScreenKey]) {
+    for i in 0..keys.len() {
+        if !keys[i].known() {
+            continue;
+        }
+        let same = |k: &ScreenKey| (k.vendor, k.model, k.serial) == (keys[i].vendor, keys[i].model, keys[i].serial);
+        keys[i].nth = keys[..i].iter().filter(|k| same(k)).count() as u32;
+    }
+}
+
+/// The display (its id and frame, in the order given, the main one first) that shows most of
+/// `frame`: macOS's rule for a window across two screens. Ties go to the earlier display.
+/// `None` when no display shows one point of it (then the window keeps the display it had).
+pub fn display_of(frame: Rect, displays: &[(DisplayId, Rect)]) -> Option<DisplayId> {
+    let mut best: Option<(DisplayId, f64)> = None;
+    for (id, d) in displays {
+        let area = frame.intersect(d).map_or(0.0, |r| r.w * r.h);
+        if area > 0.0 && best.is_none_or(|(_, a)| area > a) {
+            best = Some((*id, area));
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+/// True when the displays changed from `before` to `after` (each display's id and frame, in
+/// order): one added, removed or moved. The launch's first reading (`before` empty) is no
+/// change: nothing macOS does then is the screens' doing, and ⌘-Tab and Dock activations
+/// switch as ever (live run 11-05 20:40:57: the first reading counted, and for 10 s after
+/// the launch no activation switched).
+pub fn displays_changed(before: &[(DisplayId, Rect)], after: &[(DisplayId, Rect)]) -> bool {
+    !before.is_empty() && before != after
+}
+
+/// True when an activation or a focus heard now is macOS's after a display change, not the
+/// user's (module docs): the displays changed `since_change` ago, within `settle`, and the
+/// user's last click or key press (`since_press` ago) came before the change. `None`: no
+/// change seen since the launch.
+pub fn macos_after_display_change(since_change: Option<Duration>, since_press: Duration, settle: Duration) -> bool {
+    since_change.is_some_and(|c| c < settle && since_press >= c)
+}
+
+/// True when windows found on another display than the model's, in enough checks in a row,
+/// move there now: never while the left mouse button is down (a window dragged slowly across
+/// the seam changes stage when it is let go, not under the hand; the review's two-screens 3),
+/// except within the settle of a display change, when the moves are macOS's
+/// ([`displays_changed`]) and a press held then is no drag of a window.
+pub fn display_moves_now(button_down: bool, settling: bool) -> bool {
+    !button_down || settling
+}
 
 /// True when `frame` shows more of itself on one of `others` than on `main` (ties go to the
 /// main display).
@@ -43,13 +165,15 @@ pub fn off_every_display(frame: Rect, displays: &[Rect]) -> bool {
 /// True when a window the window server lists at `frame` is off every display and so not the
 /// user's (module docs): never taken in, and let go when managed. `displays` is every active
 /// display, the main one first; `managed`: the model manages the window, whose frame in a
-/// park zone of the main display is ours (a parked window, wholly beyond the edges with a
+/// park zone of any display is ours (a parked window, wholly beyond the edges with a
 /// negative `park_inside`), never judged here. Only where the window is counts: an untitled
 /// `AXUnknown` window on a display is managed as before (a child, by Apple's rule); one that
-/// comes onto a display by itself is taken in then, as a new window.
+/// comes onto a display by itself is taken in then, as a new window. A park zone of any
+/// display counts: every screen parks its hidden stages at a corner of its own (round
+/// displays), so a window parked beyond a screen above the main one is ours as much as one
+/// beyond the main screen's corner.
 pub fn off_screen_not_ours(frame: Rect, displays: &[Rect], managed: bool) -> bool {
-    let Some(main) = displays.first() else { return false };
-    off_every_display(frame, displays) && !(managed && is_parked_anywhere(frame, *main))
+    off_every_display(frame, displays) && !(managed && displays.iter().any(|d| is_parked_anywhere(frame, *d)))
 }
 
 #[cfg(test)]
@@ -59,6 +183,37 @@ mod tests {
     /// The owner's 11-03 log: a headless Playwright WebKit window (untitled, `AXUnknown`).
     const HEADLESS: Rect = Rect::new(-10_000.0, -10_180.0, 1440.0, 900.0);
     const RIGHT: Rect = Rect::new(2560.0, 0.0, 1920.0, 1080.0);
+
+    #[test]
+    fn the_launchs_first_reading_of_the_displays_is_no_change() {
+        let studio = (DisplayId(4), MAIN);
+        let laptop = (DisplayId(1), Rect::new(-1800.0, 271.0, 1800.0, 1169.0));
+        assert!(!displays_changed(&[], &[studio, laptop]), "the launch");
+        assert!(!displays_changed(&[studio, laptop], &[studio, laptop]), "the same screens");
+        assert!(displays_changed(&[studio, laptop], &[studio]), "the lid closed");
+        assert!(displays_changed(&[studio], &[studio, laptop]), "the lid opened");
+        let moved = (DisplayId(1), Rect::new(2560.0, 0.0, 1800.0, 1169.0));
+        assert!(displays_changed(&[studio, laptop], &[studio, moved]), "a screen moved");
+    }
+
+    /// 11-05 20:25:46: the lid closed at 46.44, Mail activated by macOS at 46.81 with no
+    /// press since; the owner's own click at 49.70 and a ⌘-Tab are his.
+    #[test]
+    fn a_window_dragged_across_the_seam_moves_when_it_is_let_go() {
+        assert!(!display_moves_now(true, false), "the button still down: the drag goes on");
+        assert!(display_moves_now(false, false), "let go: it moves");
+        assert!(display_moves_now(true, true), "macOS's moves after a display change");
+    }
+
+    #[test]
+    fn an_activation_after_a_display_change_with_no_press_since_is_macos() {
+        let settle = Duration::from_secs(10);
+        let ms = Duration::from_millis;
+        assert!(macos_after_display_change(Some(ms(370)), ms(20_000), settle), "Mail at 46.81: macOS's");
+        assert!(!macos_after_display_change(Some(ms(3_260)), ms(5), settle), "a click after the change: his");
+        assert!(!macos_after_display_change(Some(ms(11_000)), ms(20_000), settle), "past the settle: as ever");
+        assert!(!macos_after_display_change(None, ms(20_000), settle), "no display change since the launch");
+    }
 
     #[test]
     fn a_window_off_every_display_is_not_the_users() {
@@ -101,6 +256,20 @@ mod tests {
     }
 
     #[test]
+    fn a_window_we_parked_beyond_the_second_screens_corner_stays_ours() {
+        // The review's two-screens 4: `park_inside` below 0, a screen above the main one
+        // parking at its top-right corner: wholly beyond its edges, off every display, and in
+        // no park zone of the main screen's.
+        let above = Rect::new(0.0, -1080.0, 1920.0, 1080.0);
+        let parked = Rect::new(1921.0, -1080.0, 800.0, 600.0);
+        assert!(off_every_display(parked, &[MAIN, above]));
+        assert!(!is_parked_anywhere(parked, MAIN));
+        assert!(!off_screen_not_ours(parked, &[MAIN, above], true), "ours: never let go hidden");
+        assert!(off_screen_not_ours(parked, &[MAIN, above], false), "never managed: not taken in");
+        assert!(off_screen_not_ours(HEADLESS, &[MAIN, above], true), "a headless window still is not ours");
+    }
+
+    #[test]
     fn a_window_we_parked_beyond_the_edges_stays_ours() {
         // `park_inside` below 0: the park frame lies wholly past the right edge.
         let parked = Rect::new(2561.0, 1407.0, 800.0, 600.0);
@@ -113,6 +282,41 @@ mod tests {
     }
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+
+    #[test]
+    fn a_screen_key_round_trips_through_its_text_and_numbers_twins() {
+        let k = ScreenKey::new(0x610, 0xae2f, 0x4d6);
+        assert_eq!(ScreenKey::parse(&k.text()), Some(k));
+        assert_eq!(k.text(), "610:ae2f:4d6:0");
+        assert!(k.known() && !ScreenKey::NONE.known());
+        assert_eq!(ScreenKey::parse("nonsense"), None);
+        assert_eq!(ScreenKey::parse("1:2:3:4:5"), None);
+        // Two identical displays with no serial: the second is told from the first.
+        let twin = ScreenKey::new(0x1234, 0x5678, 0);
+        let mut keys = [twin, ScreenKey::new(0x610, 0xae2f, 0x4d6), twin, ScreenKey::NONE];
+        number_duplicates(&mut keys);
+        assert_eq!(keys.iter().map(|k| k.nth).collect::<Vec<_>>(), [0, 0, 1, 0]);
+        assert!(!keys[3].known());
+    }
+
+    #[test]
+    fn a_window_belongs_to_the_display_showing_most_of_it() {
+        // The owner's arrangement: the Studio Display main, the MacBook screen to its left.
+        let studio = (DisplayId(1), MAIN);
+        let laptop = (DisplayId(2), Rect::new(-1800.0, 271.0, 1800.0, 1169.0));
+        let both = [studio, laptop];
+        assert_eq!(display_of(Rect::new(100.0, 100.0, 800.0, 600.0), &both), Some(DisplayId(1)));
+        assert_eq!(display_of(Rect::new(-1500.0, 400.0, 800.0, 600.0), &both), Some(DisplayId(2)));
+        // Straddling the seam: most of it on the laptop, then most of it on the Studio.
+        assert_eq!(display_of(Rect::new(-500.0, 400.0, 800.0, 600.0), &both), Some(DisplayId(2)));
+        assert_eq!(display_of(Rect::new(-300.0, 400.0, 800.0, 600.0), &both), Some(DisplayId(1)));
+        // Exactly half and half: the main display (listed first).
+        assert_eq!(display_of(Rect::new(-400.0, 400.0, 800.0, 600.0), &both), Some(DisplayId(1)));
+        // Parked beyond the Studio's right edge, or headless: no display shows it.
+        assert_eq!(display_of(Rect::new(2561.0, 1407.0, 800.0, 600.0), &both), None);
+        assert_eq!(display_of(HEADLESS, &both), None);
+        assert_eq!(display_of(Rect::new(100.0, 100.0, 800.0, 600.0), &[]), None);
+    }
 
     #[test]
     fn a_window_on_a_display_below_or_right_belongs_there() {

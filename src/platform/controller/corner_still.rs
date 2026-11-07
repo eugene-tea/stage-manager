@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use super::{Controller, cover_desktop_forced, input};
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::model::Display;
 use crate::engine::patch_still::{self as ps, Still, TakeFacts};
 use crate::platform::{desktop, desktop_shot, windows};
 
@@ -38,15 +39,19 @@ impl Controller {
     /// or a Desktop slides, nor just after a Space change or a drop ([`ps::may_take`]); none on
     /// a full-screen Space, and none at rest ([`desktop_shot::rest`]: the screen locked, the
     /// display asleep; for a cover alone, also no input and no switch for 2 min).
-    pub(super) fn corner_still(&self, rect: Option<Rect>, items: Option<&[Rect]>, now: Instant) -> CornerStill {
+    pub(super) fn corner_still(&self, d: &Display, rect: Option<Rect>, items: Option<&[Rect]>, now: Instant) -> CornerStill {
         let config = self.store.config();
         let Some(rect) = rect.filter(|_| config.windows.corner_patch) else { return CornerStill::default() };
-        let (Some(key), Some(m)) = (self.shot_key(), self.model.as_ref()) else { return CornerStill::default() };
-        let block = desktop_shot::block(m.main_display().frame, Some(rect));
+        if self.model.is_none() {
+            return CornerStill::default();
+        }
+        let screen = d.id.0;
+        let key = self.shot_key(d);
+        let block = desktop_shot::block(d.frame, Some(rect));
         let anim = &config.style.animation;
         let grows = anim.activation_grows && anim.animates() && self.strip_visible;
         let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
-        let cover = grows && (icons || cover_desktop_forced() || crate::ui::corner_patch::cover_ready(rect).is_err());
+        let cover = grows && (icons || cover_desktop_forced() || crate::ui::corner_patch::cover_ready(screen, rect).is_err());
         let overview = self.overview.showing_or_expected(now);
         let safety = ps::may_take(&TakeFacts {
             switching: self.phase.switching().is_some(),
@@ -55,16 +60,16 @@ impl Controller {
             slide: self.phase.sliding(),
             fullscreen: self.phase.fullscreen(),
             since_space_change: self.phase.since_change(now),
-            since_dropped: desktop_shot::since_dropped(now),
+            since_dropped: desktop_shot::since_dropped(screen, now),
         });
         let moment = desktop_shot::Moment {
             locked: self.locked,
-            asleep: objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()),
+            asleep: objc2_core_graphics::CGDisplayIsAsleep(screen),
             since_input: input::since_last_input(),
             since_switch: self.last_switch.map(|t| now.saturating_duration_since(t)),
         };
-        desktop_shot::keep_fresh(key.clone(), block, moment, desktop_shot::Wants { cover, patch: true }, safety, now);
-        let still = desktop_shot::for_patch(rect, &key, moment, safety, now);
+        desktop_shot::keep_fresh(screen, key.clone(), block, moment, desktop_shot::Wants { cover, patch: true }, safety, now);
+        let still = desktop_shot::for_patch(screen, rect, &key, moment, safety, now);
         // As before this round: the file's picture is kept rendered for a cover's still of the
         // icons only, never during an overview, a Space change, a full-screen Space or a
         // switch, nor at rest.
@@ -77,18 +82,20 @@ impl Controller {
     /// the desktop (no window there) takes a new still shortly: an icon selected, deselected
     /// or dropped there shows as it is.
     pub(super) fn corner_touched(&self, at: Point, now: Instant) {
-        if !self.patch_sent.as_ref().is_some_and(|p| p.still.is_some() || p.hold) {
+        // The screen pressed on: its own still (round displays-2).
+        let Some(d) = self.model.as_ref().and_then(|m| m.displays().iter().find(|d| d.frame.contains(at)).copied()) else { return };
+        let screen = d.id.0;
+        if !self.patches.get(&screen).and_then(|t| t.sent.as_ref()).is_some_and(|p| p.still.is_some() || p.hold) {
             return;
         }
-        let Some(m) = self.model.as_ref() else { return };
-        let in_corner = desktop_shot::zone(m.main_display().frame).contains(at);
+        let in_corner = desktop_shot::zone(d.frame).contains(at);
         let on_desktop = in_corner || {
             let own = std::process::id() as i32;
             let list: Vec<_> = windows::list_windows().into_iter().filter(|w| w.pid != own).collect();
-            desktop::is_wallpaper_click(&list, at)
+            desktop::is_wallpaper_click(&list, at, &self.dock_bar_now())
         };
         if on_desktop {
-            desktop_shot::touched(now);
+            desktop_shot::touched(screen, now);
         }
     }
 }

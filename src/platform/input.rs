@@ -12,9 +12,12 @@
 //!   ("hold Shift to bring things here"). A trigger with Command held is the app switcher
 //!   (⌘Tab, ⌘⇧Tab): Shift there means "cycle backward", never "bring here".
 //! - Test support: synthetic clicks and drags posted only where every point is over our own
-//!   windows or a window of an app on the `STAGE_MANAGER_ONLY` list.
+//!   windows or a window of an app on the `STAGE_MANAGER_ONLY` list. A synthetic drag stops,
+//!   and says so, when the user's own mouse or trackpad lets the button go under it
+//!   ([`drag`]).
 
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -107,6 +110,9 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
             return;
         }
         let Some(kind) = kind_of(event.r#type()) else { return };
+        if kind == InputKind::MouseUp {
+            LEFT_UPS.fetch_add(1, Ordering::Relaxed);
+        }
         let flags = event.modifierFlags();
         let at = NSEvent::mouseLocation();
         // clickCount and keyCode raise on the other kind of event: ask each only its own.
@@ -190,6 +196,18 @@ pub fn since_last_click() -> Duration {
         .unwrap_or(Duration::MAX)
 }
 
+/// Since the user last pressed a mouse button or a key in this login session (any thread):
+/// a pointer move or a scroll does not count.
+pub fn since_last_press() -> Duration {
+    let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType::KeyDown);
+    let key = Duration::try_from_secs_f64(key).unwrap_or(Duration::MAX);
+    since_last_click().min(key)
+}
+
+/// Left mouse-ups the monitor has seen (another app's, any source): a synthetic drag posts
+/// none until its own release, so one seen while it runs is the user's ([`drag`]).
+static LEFT_UPS: AtomicU64 = AtomicU64::new(0);
+
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)
@@ -271,7 +289,9 @@ pub fn test_pids() -> Vec<i32> {
 pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), String> {
     let list = windows::list_windows();
     let own = std::process::id() as i32;
-    let cards = strip_model::published_cards();
+    // Every screen's strip: off the main one's cards, another screen's pane read as
+    // click-through and its card's press was refused (round displays-live-1).
+    let cards = strip_model::every_published_card();
     // The Dock draws its bar in one window as large as its display, clear and click-through
     // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
     // it counts only on the bar's own frame, read through Accessibility, and wherever that
@@ -435,6 +455,12 @@ pub fn click(p: Point, shift: bool) -> Result<(), String> {
 /// A synthetic left-button drag along `waypoints` (straight segments), only when every point
 /// it passes is over our own windows or a fixture's (checked before anything is posted). The
 /// button is held `hold` at the end before release; the pointer goes back where it was.
+///
+/// The user's own mouse or trackpad may end it: the window server takes its release
+/// mid-path as the drag's end (the monitor hears a left mouse-up), and the window stays where
+/// the pointer was then (11-06, a live run with the owner at his Mac: Fixture 5 left at
+/// x -39, short of the strip, and the drop's checks failed). Then nothing more is posted,
+/// the pointer is left to him, and the error starts with [`DRAG_INTERRUPTED`].
 pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), String> {
     let (Some(&first), Some(&last)) = (waypoints.first(), waypoints.last()) else {
         return Err("a drag needs points".into());
@@ -448,11 +474,25 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
     move_first(first, shift)?;
     post_mouse(CGEventType::LeftMouseDown, first, shift)?;
     std::thread::sleep(Duration::from_millis(120));
-    for p in path.iter().skip(1) {
+    let ups = LEFT_UPS.load(Ordering::Relaxed);
+    let interrupted = |posted: usize| {
+        let why = drag_interrupted(ups, LEFT_UPS.load(Ordering::Relaxed), left_button_down())?;
+        if shift {
+            release_shift();
+        }
+        Some(Err(format!("{DRAG_INTERRUPTED}: {why} after {posted} of {} points; nothing more posted", path.len())))
+    };
+    for (i, p) in path.iter().enumerate().skip(1) {
+        if let Some(e) = interrupted(i) {
+            return e;
+        }
         post_mouse(CGEventType::LeftMouseDragged, *p, shift)?;
         std::thread::sleep(Duration::from_millis(8));
     }
     std::thread::sleep(hold);
+    if let Some(e) = interrupted(path.len()) {
+        return e;
+    }
     post_mouse(CGEventType::LeftMouseUp, last, shift)?;
     std::thread::sleep(Duration::from_millis(80));
     if shift {
@@ -462,6 +502,23 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
         let _ = CGWarpMouseCursorPosition(back);
     }
     Ok(())
+}
+
+/// The start of a synthetic drag's error when the user's input ended it (the live checks
+/// look for it).
+pub const DRAG_INTERRUPTED: &str = "the drag was interrupted by the user's own input";
+
+/// Why a synthetic drag holding the button is no longer one (`None`: it still is): a left
+/// mouse-up seen since its press (`ups_at_press`, `ups_now`: [`LEFT_UPS`]), or the button
+/// up in the session's state.
+fn drag_interrupted(ups_at_press: u64, ups_now: u64, button_down: bool) -> Option<&'static str> {
+    if ups_now != ups_at_press {
+        Some("a left mouse-up came")
+    } else if !button_down {
+        Some("the left button is up")
+    } else {
+        None
+    }
 }
 
 /// Whether only the desktop lies at `p` in `list` (front to back): the topmost window there,
@@ -652,6 +709,13 @@ mod tests {
         assert_eq!(kind_of(NSEventType::KeyDown), Some(InputKind::KeyDown));
         assert_eq!(kind_of(NSEventType::RightMouseUp), None, "a release is not reported");
         assert_eq!(kind_of(NSEventType::MouseMoved), None, "moves go to the strip");
+    }
+
+    #[test]
+    fn a_release_under_a_synthetic_drag_interrupts_it() {
+        assert_eq!(drag_interrupted(4, 4, true), None, "held, no release: it goes on");
+        assert!(drag_interrupted(4, 5, true).is_some(), "a release seen (the user's), the session's button down again");
+        assert!(drag_interrupted(4, 4, false).is_some(), "the button up (a release the monitor missed)");
     }
 
     #[test]

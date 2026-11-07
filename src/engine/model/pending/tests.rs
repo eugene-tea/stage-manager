@@ -37,6 +37,7 @@ fn stage(name: Option<&str>, windows: Vec<SavedWindow>) -> SavedStage {
 /// browser; the strip showed the browser above Chat.
 fn desktop_5() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 5,
         current: true,
         stages: vec![
@@ -47,6 +48,7 @@ fn desktop_5() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![2, 1],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -118,6 +120,7 @@ fn a_declared_stage_keeps_its_card_while_its_windows_wait() {
     // not declared has no card while it waits (a card is a picture of real windows).
     // Declared stages are made up front, so the saved layout has Chat first.
     let saved = SavedSpace {
+        screen: None,
         id: 5,
         current: true,
         stages: vec![
@@ -128,6 +131,7 @@ fn a_declared_stage_keeps_its_card_while_its_windows_wait() {
         active_index: Some(1),
         strip_slots: vec![2, 0],
         last_seen: None,
+        unvisited: false,
     };
     let options = ModelOptions { named_stages: vec!["Chat".into()], ..Default::default() };
     let mut m = restoring_with(options, vec![saved]);
@@ -211,6 +215,7 @@ fn a_doubtful_window_is_never_parked() {
     // Two saved "Untitled" windows in two inactive stages, the active stage waiting for its
     // own: a new "Untitled" at another frame could be either, so Apple's rule decides.
     let space = SavedSpace {
+        screen: None,
         id: 5,
         current: true,
         stages: vec![
@@ -714,6 +719,44 @@ fn an_adoption_keeps_the_strip_shown() {
 }
 
 #[test]
+fn a_desktop_not_visited_in_a_session_keeps_its_stages_at_the_next() {
+    // The Fable review of 11-06, restore 3: saved in session A with Desktops 5 (shown) and 6;
+    // session B shows only Desktop 5 (Desktop 6's apps reopen its window there, unseen); at
+    // session C, Desktop 6's stage still waits, while Desktop 5's windows that never came
+    // back in B (looked for there all session) are given up.
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(Some("Talk"), vec![sw(CHAT, "Lounge", F_TEAM, 0)])];
+    d6.active_index = Some(0);
+    d6.strip_slots = vec![];
+    let mut m = restoring(vec![desktop_5(), d6]);
+    m.arrive(MAIN, &[win(21, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 5);
+    let save = |m: &Model, seen: u64| {
+        let mut file = StateFile { session: Some("B".into()), ..m.to_state() };
+        file.stamp(10_000_000, &mut std::collections::HashMap::from([(6, seen)]));
+        file
+    };
+    let mut file = save(&m, 10_000_000 - 3_600);
+    assert_eq!(file.start_new_session(), 3, "Desktop 5's Notes.txt, Team and Recipes");
+    let six = file.spaces.iter().find(|s| s.id == 6).expect("Desktop 6 still waits");
+    assert_eq!(six.stages[0].name.as_deref(), Some("Talk"));
+    assert_eq!(six.standard_windows(), 1);
+    // Not shown for longer than UNSEEN_KEEP before the save: looked for no more.
+    let mut file = save(&m, 10_000_000 - crate::engine::restore::UNSEEN_KEEP.as_secs() - 1);
+    file.start_new_session();
+    assert!(file.spaces.iter().all(|s| s.id != 6), "aged out");
+    // A file of an earlier version (no flag): as before, a whole session counts.
+    let mut file = save(&m, 10_000_000 - 3_600);
+    for s in &mut file.spaces {
+        s.unvisited = false;
+    }
+    file.start_new_session();
+    assert!(file.spaces.iter().all(|s| s.id != 6));
+}
+
+#[test]
 fn a_window_pending_since_an_unknown_session_is_given_up_at_the_next_known_one() {
     // A session that could not be read stamps `since: ""`; the next readable new session
     // gives such windows up instead of keeping them forever.
@@ -1079,6 +1122,7 @@ fn an_empty_saved_active_stage_given_up_still_gives_way() {
 /// active stage the editor's third window and Chat's, the browser a stage of its own.
 fn mail_desktop() -> (Model, StageId) {
     let saved = SavedSpace {
+        screen: None,
         id: 7,
         current: true,
         stages: vec![
@@ -1089,6 +1133,7 @@ fn mail_desktop() -> (Model, StageId) {
         active_index: Some(1),
         strip_slots: vec![2, 0],
         last_seen: None,
+        unvisited: false,
     };
     let options = ModelOptions { named_stages: vec!["Mail".into()], ..Default::default() };
     let mut m = restoring_with(options, vec![saved]);
@@ -1318,6 +1363,7 @@ fn new_apps_join_current_waits_for_the_restore_window_to_close() {
 /// the browser's three windows.
 fn desktop_7() -> SavedSpace {
     SavedSpace {
+        screen: None,
         id: 7,
         current: true,
         stages: vec![
@@ -1335,6 +1381,7 @@ fn desktop_7() -> SavedSpace {
         active_index: Some(0),
         strip_slots: vec![2, 1],
         last_seen: None,
+        unvisited: false,
     }
 }
 
@@ -1447,4 +1494,135 @@ fn a_stray_of_a_merged_part_joins_the_merge() {
     add(&mut m, win(42, 40, BROWSER, "Holidays", F_RECIPES));
     assert!(m.is_pooled(w(42)));
     assert_eq!(m.stage_of(w(42)), Some(chat), "the merge stands for its saved stage's other windows");
+}
+
+// ----- Accessibility blind (round ax-blind, his Mac 11-06) ---------------------------------
+
+/// Desktop 6, not shown when saved: the browser's and Chat's other windows.
+fn desktop_6() -> SavedSpace {
+    let mut d6 = desktop_5();
+    d6.id = 6;
+    d6.current = false;
+    d6.stages = vec![stage(None, vec![sw(BROWSER, "Holidays", F_RECIPES, 0)]), stage(None, vec![sw(CHAT, "Family", F_TEAM, 0)])];
+    d6.strip_slots = vec![1];
+    d6
+}
+
+/// His screen after the logout of 11-06: 15 windows of 14 apps on screen, every app
+/// answering, Accessibility listing none.
+fn blind_screen() -> crate::engine::ax_blind::Facts {
+    crate::engine::ax_blind::Facts {
+        trusted: true,
+        since_login: Some(std::time::Duration::from_secs(2200)),
+        shown: 15,
+        regular: 15,
+        answering: 14,
+        ..Default::default()
+    }
+}
+
+/// 15:40:07: the stages built from nothing after the launch's 10 s wait, the restore window
+/// open, a click 0.2 s later. It ended the restore window on nothing, and a minute later the
+/// two windows waiting on the Desktop shown were given up (their apps "quiet"). Now the click
+/// leaves it open while Accessibility has listed no window in this run, no app's minute runs
+/// while it lists none, and every saved window waits, on the Desktop shown and the other.
+#[test]
+fn a_click_while_accessibility_lists_nothing_keeps_every_saved_window_waiting() {
+    use crate::engine::ax_blind::Watch;
+    use crate::engine::restore::{AppQuiet, QUIET};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut m = restoring(vec![desktop_5(), desktop_6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    let waiting = m.pending_count() + m.pending_unvisited();
+    assert_eq!(waiting, 6);
+    let mut watch = Watch::default();
+    watch.feed(&blind_screen(), t0);
+    // The click, as the platform takes it: the watch first.
+    assert!(!watch.user_ends_restore(), "nothing listed in this run");
+    if watch.user_ends_restore() {
+        m.end_restore();
+    }
+    assert!(m.restoring(), "the restore window stays open");
+    // Ten minutes blind, looked at once a second: the clocks of the apps with saved windows
+    // never run, nothing is given up.
+    let mut quiet = AppQuiet::default();
+    for b in m.waiting_bundles() {
+        quiet.window(&b, t0);
+    }
+    for s in 1..=600 {
+        let now = t0 + Duration::from_secs(s);
+        watch.feed(&blind_screen(), now);
+        assert!(watch.sees_nothing());
+        quiet.restart_all(now);
+        let settled = quiet.settled(now);
+        assert!(settled.is_empty(), "{s} s: {settled:?}");
+    }
+    assert!(watch.blind());
+    assert_eq!(m.pending_count() + m.pending_unvisited(), waiting, "every saved window waits");
+    // A minute after windows are listed again, an app that opened none is quiet as before.
+    let seen = t0 + Duration::from_secs(600);
+    assert_eq!(quiet.settled(seen + QUIET).len(), 3);
+}
+
+/// Windows listed again after blindness, in the same run: the restore runs as at a launch.
+/// The restore window had ended (by itself, or a click before this round), so a window going
+/// back to an inactive stage would have brought it forward; open again, it is parked there,
+/// the saved Desktop is adopted, every saved stage comes back and nothing switches.
+#[test]
+fn windows_listed_again_after_blindness_go_back_to_their_saved_stages() {
+    use crate::engine::ax_blind::{Change, Facts, Watch};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut m = restoring(vec![desktop_5(), desktop_6()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m.end_restore();
+    assert!(!m.restoring());
+    let mut watch = Watch::default();
+    for s in 0..=30 {
+        watch.feed(&blind_screen(), t0 + Duration::from_secs(s));
+    }
+    assert!(watch.blind());
+    // The rescan finds the windows macOS showed all along.
+    let back = watch.feed(&Facts { listed: 5, ..blind_screen() }, t0 + Duration::from_secs(400));
+    assert_eq!(back, Some(Change::Ended { lasted: Duration::from_secs(400), recovered: true }));
+    assert!(m.reopen_restore([w(21), w(22), w(23), w(24), w(41)]));
+    assert!(m.restoring() && m.settling() && m.rematching());
+    // The editor's windows: Desktop 5 (shown when saved, Desktop 6 waiting) takes two.
+    add_focused(&mut m, win(23, 50, EDITOR, "Plan.txt", F_PLAN));
+    add_focused(&mut m, win(24, 50, EDITOR, "Notes.txt", F_NOTES));
+    assert_eq!(m.current_space(MAIN).0, 5, "adopted");
+    assert_eq!(names(&m), [None, Some("Chat".into()), None], "the saved stages, with their names");
+    assert_eq!(m.stage_of(w(23)), m.stage_of(w(24)));
+    let front = m.main_active_stage();
+    assert_eq!(front, m.stage_of(w(23)), "the saved active stage");
+    // Chat and the browser go back to their inactive stages: parked, no switch.
+    let a = add_focused(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
+    assert!(parks(&a, 21) && !switches(&a), "{a:?}");
+    let a = add_focused(&mut m, win(22, 40, BROWSER, "Recipes — Example Browser", F_RECIPES));
+    assert!(parks(&a, 22) && !switches(&a), "{a:?}");
+    assert_eq!((number_of(&m, 21), number_of(&m, 22)), (Some(2), Some(3)));
+    assert_eq!(m.main_active_stage(), front, "the stage shown stays");
+    assert_eq!(m.strip().iter().map(|c| c.number).collect::<Vec<_>>(), [3, 2], "the saved strip order");
+    assert_eq!(m.pending_count(), 0);
+    assert_eq!(m.pending_unvisited(), 2, "Desktop 6 still waits for its visit");
+    // Found after this restore window too, a window on screen all along switches nothing.
+    m.end_restore();
+    let a = add_focused(&mut m, win(41, 30, CHAT, "Another chat", DEFAULT));
+    assert!(!switches(&a), "{a:?}");
+}
+
+#[test]
+fn nothing_waiting_opens_no_restore_window_again() {
+    let mut m = restoring(vec![desktop_5()]);
+    m.arrive(MAIN, &[], &[], &LaunchHints::default());
+    m.end_restore();
+    // [stages] restore_after_restart off after a restart: nothing was kept to restore.
+    let mut off = model_with(ModelOptions::default());
+    off.set_restore(Restore::off_after_restart("B"));
+    assert!(!off.reopen_restore([]) && !off.restoring());
+    // Every saved window given up: a plain session goes on.
+    m.give_up_absent(|_| false);
+    assert_eq!(m.pending_count() + m.pending_unvisited(), 0);
+    assert!(!m.reopen_restore([]) && !m.restoring());
 }

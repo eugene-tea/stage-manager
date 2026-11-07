@@ -31,9 +31,9 @@
 use std::collections::HashSet;
 
 use super::pool::Scope;
-use super::{Action, DisplayId, Home, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
+use super::{Action, DisplayId, Home, Kin, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
 use crate::engine::park::clamp_to_visible;
-use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedWindow, live_key, rematch_on};
+use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedSpace, SavedWindow, live_key, rematch_on};
 use crate::engine::restore::{Restore, Summary, clamped_at_corner, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
@@ -123,6 +123,31 @@ impl Model {
         // with windows still waiting keeps them for its visit).
         self.drop_empty_leftovers();
         was.then_some(actions)
+    }
+
+    /// Accessibility lists windows again after listing none ([`crate::engine::ax_blind`]; the
+    /// same run): the restore runs as at a launch, the restore window open again (windows
+    /// going back to inactive stages are parked there, nothing switches, a provisional
+    /// Desktop takes votes again) and windows matched again by a new title. Every saved entry
+    /// still waiting, of the Desktops shown or not, is matched by app, title and frame as the
+    /// windows are found; a saved active stage still empty holds its place. Windows the
+    /// window server showed on screen meanwhile (`shown`) were there all along: found after
+    /// this window too, they bring no stage forward ([`Model::set_launch_listed`]). True when
+    /// the restore window is open now; false with nothing waiting, or with `[stages]
+    /// restore_after_restart` off after a restart.
+    pub fn reopen_restore(&mut self, shown: impl IntoIterator<Item = WindowId>) -> bool {
+        self.launch_listed.extend(shown);
+        let waiting = self.pending_count() + self.pending_unvisited() > 0;
+        if self.restore.drop_missing || !(waiting || self.restore.restoring) {
+            return false;
+        }
+        self.restore.restoring = true;
+        self.restore.rematching = true;
+        let shown: Vec<SpaceId> = self.current.values().copied().collect();
+        for space in shown {
+            self.note_front_waits(space);
+        }
+        true
     }
 
     /// At the restore window's end (and after a give-up once it is over): a Space shown whose
@@ -220,6 +245,9 @@ impl Model {
             by_apple: self.restore.by_apple,
             corner: self.restore.corner,
             pooled: self.pooled_count(),
+            other_screen: self.restore.other_screen,
+            screen_moves: self.restore.screen_moves,
+            first_after_login: None,
         }
     }
 
@@ -230,22 +258,46 @@ impl Model {
         self.after_restart().then(|| self.restore_summary(seconds))
     }
 
-    /// True when saved frames apply on the main display now (its size is the saved one, or
-    /// the file did not say); logs once why not.
-    pub(crate) fn saved_frames_fit(&mut self) -> bool {
-        let main = self.main_display().frame;
-        let fits = self.restore.frames_fit(main.w, main.h);
-        if !fits && !std::mem::replace(&mut self.restore.frames_noted, true) {
-            let (w, h) = self.restore.saved_display.unwrap_or_default();
+    /// True when the frames saved with Desktop `saved` (none: the file's main display) apply
+    /// on `display`: that Desktop was saved on a screen of this identity and size
+    /// ([`crate::engine::restore::Restore::frames_fit_on`]); with no screen saved, on the
+    /// main display at the size the file names. Logged once a run for each saved Desktop and
+    /// display when they do not ([`Model::frames_fit`] says it quietly).
+    pub(crate) fn saved_frames_fit_for(&mut self, display: DisplayId, saved: Option<u64>) -> bool {
+        let fits = self.frames_fit(display, saved);
+        let d = *self.display(display);
+        if !fits && self.restore.frames_noted.insert((saved, d.id.0)) {
+            let screen = saved.and_then(|id| self.restore.screens.get(&id).cloned());
+            let (w, h) = screen
+                .as_ref()
+                .map(|(_, w, h)| (*w as f64, *h as f64))
+                .or_else(|| self.restore.saved_display.map(|(w, h)| (w as f64, h as f64)))
+                .unwrap_or_default();
+            // One saved Desktop's stages on one display (11-06: the line read as the whole
+            // restore's, while it named a laptop stage's window shown on the 5K).
             tracing::info!(
+                desktop = ?saved,
+                saved_key = screen.as_ref().map_or("", |s| s.0.as_str()),
                 saved_w = w,
                 saved_h = h,
-                now_w = main.w,
-                now_h = main.h,
-                "restore: the main display is not the size it had when saved; windows keep the frames their apps give them"
+                display = d.id.0,
+                key = %d.key.text(),
+                now_w = d.frame.w,
+                now_h = d.frame.h,
+                "restore: a stage saved on another screen (or size) than this window's; its windows here keep the frames their apps give them"
             );
         }
         fits
+    }
+
+    /// [`Model::saved_frames_fit_for`] with nothing logged.
+    pub(crate) fn frames_fit(&self, display: DisplayId, saved: Option<u64>) -> bool {
+        let d = self.display(display);
+        let main = d.id == self.main_display().id;
+        match saved {
+            Some(id) => self.restore.frames_fit_on(id, &d.key.text(), d.frame.w, d.frame.h, main),
+            None => main && self.restore.frames_fit(d.frame.w, d.frame.h),
+        }
     }
 
     /// True when stage `stage` holds pending windows.
@@ -311,6 +363,43 @@ impl Model {
                 w
             })
             .collect()
+    }
+
+    /// An app quiet for [`crate::engine::restore::QUIET`] (running, no new window): its pending
+    /// windows in the model's stages are given up ([`Model::expire_pending`]), and its entries
+    /// on the saved Desktops not visited yet wait for that Desktop's first show alone, no
+    /// longer taking a window shown on another ([`crate::engine::restore::Restore::pool_closed`]).
+    /// Returns the actions, how many were given up, and the apps whose saved Desktops'
+    /// entries close now.
+    pub fn settle_quiet(&mut self, bundles: &[String]) -> (Vec<Action>, usize, Vec<String>) {
+        let (actions, dropped) = self.expire_pending(bundles);
+        let waits: HashSet<&str> = self
+            .leftovers
+            .iter()
+            .flat_map(|l| l.stages.iter().flat_map(|s| s.windows.iter()))
+            .filter(|w| w.role == SavedRole::Standard)
+            .map(|w| w.bundle_id.as_str())
+            .collect();
+        let mut closed = Vec::new();
+        for b in bundles.iter().filter(|b| waits.contains(b.as_str())) {
+            if self.restore.pool_closed.insert(b.clone()) {
+                closed.push(b.clone());
+            }
+        }
+        (actions, dropped, closed)
+    }
+
+    /// The apps with entries on saved Desktops shown for the first time since the last call
+    /// ([`crate::engine::restore::Restore::shown_apps`]): their quiet minute starts again.
+    pub fn take_shown_apps(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.restore.shown_apps).into_iter().collect()
+    }
+
+    /// Notes the apps of saved Desktop `saved`, shown for the first time now
+    /// ([`Model::take_shown_apps`]).
+    pub(crate) fn note_shown(&mut self, saved: &SavedSpace) {
+        let apps = saved.stages.iter().flat_map(|s| s.windows.iter()).filter(|w| w.role == SavedRole::Standard).map(|w| w.bundle_id.clone());
+        self.restore.shown_apps.extend(apps);
     }
 
     /// Gives up the pending windows of apps `bundles` (running and quiet for
@@ -479,10 +568,13 @@ impl Model {
         // A window that votes for a saved Desktop goes by Apple's rule until that Desktop is
         // taken (adoption as before); only windows that vote for nothing are strays.
         let mut voted = false;
+        // On whichever screen shows it (the Fable review of 11-06, restore 5: the main
+        // screen's only, before), from the saved Desktops that may form there.
+        let shown_on = self.space_display(space);
         if self.provisional.contains(&space)
             && !self.space_has_pending(space)
-            && space == self.current_space(self.main_display().id)
-            && let Some(i) = self.adoption_for(meta)
+            && space == self.current_space(shown_on)
+            && let Some(i) = self.adoption_for(meta, shown_on)
         {
             let id = self.leftovers[i].id;
             // After a restart, with another saved Desktop waiting (the one the login may show),
@@ -547,11 +639,13 @@ impl Model {
     }
 
     /// The saved Desktop (index into the waiting ones) whose window `meta` matches with
-    /// confidence, unambiguously between Desktops.
-    fn adoption_for(&self, meta: &WindowMeta) -> Option<usize> {
+    /// confidence, unambiguously between Desktops, of those that may form on `display`
+    /// ([`Model::saved_fits_display`]: one saved on another screen that is connected waits
+    /// for it).
+    fn adoption_for(&self, meta: &WindowMeta, display: DisplayId) -> Option<usize> {
         let mut owner = Vec::new();
         let mut keys: Vec<Saved> = Vec::new();
-        for (i, l) in self.leftovers.iter().enumerate() {
+        for (i, l) in self.leftovers.iter().enumerate().filter(|(_, l)| self.saved_fits_display(l, display)) {
             for w in l.stages.iter().flat_map(|s| s.windows.iter()).filter(|w| w.role == SavedRole::Standard) {
                 keys.push(w.scorer_key(i as u64));
                 owner.push(i);
@@ -570,6 +664,7 @@ impl Model {
     /// own stays where it is).
     fn adopt(&mut self, space: SpaceId, index: usize, voters: &[WindowId]) -> Vec<Action> {
         let saved = self.leftovers.remove(index);
+        self.note_shown(&saved);
         let target = SpaceId(saved.id);
         self.provisional.remove(&space);
         self.relabel_space(space, target);
@@ -607,7 +702,7 @@ impl Model {
             assignment.active_index = None;
         }
         // Their saved frames on a confident match, as any window back from a saved entry.
-        actions.extend(self.launch_with(&moved, &assignment, LaunchFrames::Matched, &LaunchHints::default(), Some(saved.id)));
+        actions.extend(self.launch_with(&moved, &assignment, LaunchFrames::Matched, &LaunchHints::default(), Some(saved.id), target));
         actions.retain(|a| *a != Action::StateChanged);
         self.arrange_pool_slots(target);
         tracing::info!(desktop = saved.id, stages = saved.stages.len(), voters = moved.len(), "restore: a Desktop made from an empty screen is the saved Desktop its windows belong to");
@@ -634,7 +729,8 @@ impl Model {
 
     /// Puts window `meta` into `stage` of `space` from its saved entry: a strong or medium
     /// match at its saved frame with its flags (pinned, pre-fit frame), a low one at its live
-    /// frame (a live frame in a park zone always takes the saved one); in the saved place
+    /// frame (a live frame in a park zone, or a piece at the corner, [`super::Display::hides`],
+    /// always takes the saved one, brought on screen); in the saved place
     /// among the stage's restored windows, the stage's key when it was saved as the key (not
     /// over a window of the stage the user has focused, `obs`). A window of an inactive stage
     /// is parked and the stage's card takes its saved strip place, or, for a window appearing
@@ -653,13 +749,18 @@ impl Model {
         actions: &mut Vec<Action>,
     ) -> Placed {
         let display: DisplayId = self.known_display(meta.display);
-        let live_parked = self.display(display).parks(meta.frame);
+        let live_parked = self.display(display).hides(meta.frame);
         let sure = grade.confident();
-        // Saved frames only on a main display of the saved size; there a live frame in a park
-        // zone takes the saved one even from a doubtful match. On another size it is centered
-        // at its own size, as the recovery scan does (S6 of the Fable review of 10-29): a
-        // frame from another display, clamped onto this one, is no frame the user gave it.
-        let fit = self.saved_frames_fit();
+        // Saved frames only on the screen of the saved size they were saved on; there a live
+        // frame in a park zone takes the saved one even from a doubtful match. On another it
+        // is centered at its own size, as the recovery scan does (S6 of the Fable review of
+        // 10-29): a frame from another display, clamped onto this one, is no frame the user
+        // gave it.
+        let saved_desktop = match self.kin.get(&stage) {
+            Some(Kin::Saved(id, _)) => Some(*id),
+            _ => Some(space.0),
+        };
+        let fit = self.saved_frames_fit_for(display, saved_desktop);
         let frames = sure && fit;
         let base = if frames || (live_parked && fit) || meta.frame.is_degenerate() { entry.frame } else { meta.frame };
         let restore = self.safe_restore(base, display);
@@ -728,7 +829,7 @@ impl Model {
 
     /// [`Model::strip_enter_restored`] for a stage of the Desktop's own saved order.
     fn strip_enter_saved(&mut self, space: SpaceId, stage: StageId) {
-        let capacity = self.options.strip.capacity;
+        let capacity = self.capacity_of(space);
         let place = self
             .slot_order
             .get(&space)
@@ -759,11 +860,21 @@ impl Model {
     pub(crate) fn note_by_apple<'a>(&mut self, metas: impl IntoIterator<Item = &'a WindowMeta>) {
         for m in metas {
             self.restore.by_apple += 1;
+            self.note_rescore(m);
             let d = self.display(self.known_display(m.display));
             if !d.parks(m.frame) && clamped_at_corner(m.frame, d.visible, d.corner) {
                 self.restore.corner += 1;
                 tracing::info!(id = m.id.0, bundle = %m.bundle_id, "restore: a window matching no saved one came back clamped against the park corner; left where it is");
             }
+        }
+    }
+
+    /// Window `m` went by Apple's rule, no saved window matching it: while re-matches run
+    /// ([`crate::engine::restore::Restore::rematching`]) its title changing scores it again
+    /// ([`Model::window_retitled`]).
+    pub(crate) fn note_rescore(&mut self, m: &WindowMeta) {
+        if self.restore.rematching && m.role == WindowRole::Standard {
+            self.rescore.insert(m.id);
         }
     }
 

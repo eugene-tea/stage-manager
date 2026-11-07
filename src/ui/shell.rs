@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSEvent, NSPasteboard, NSPasteboardTypeString, NSWorkspace};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSPasteboard, NSPasteboardTypeString, NSRunningApplication, NSWorkspace};
 use objc2_core_graphics::{CGDisplayIsAsleep, CGEventSource, CGEventSourceStateID, CGEventType, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, NSURL};
 
@@ -35,13 +35,15 @@ use super::welcome::{self, WelcomeAction};
 use super::about;
 use crate::app_state::{AppState, now_secs};
 use crate::config::schema::REFERENCE_URL;
-use crate::config::{self, Config, FitMode, edit};
-use crate::platform::login_item;
+use crate::config::{self, Config, FitMode, LoginStart, edit};
+use crate::engine::reopen_list::{self, BackStep, Policy, ReopenSwitch};
+use crate::engine::stand_down::Signal;
+use crate::platform::login_item::{self, Service};
 use crate::platform::native_settings::{self, RawSettings};
 use crate::platform::permissions::{self, Approval, PermissionState};
 use crate::platform::wm_thread::{WmCommand, WmHandle};
 use crate::platform::updater::{self, PrepareError, Prepared};
-use crate::platform::{capture, paths, session, update_check};
+use crate::platform::{capture, instance, paths, session, update_check};
 use crate::self_update::{self, Moment, Refusal};
 use crate::updates::{self, Outcome, Release};
 
@@ -99,6 +101,11 @@ struct Shell {
     update: Option<(u64, bool)>,
     update_serial: u64,
     install: Install,
+    /// The activation policy through a logout (round reopen-list).
+    reopen: ReopenSwitch,
+    /// Counts the activation policy's switches: a pending retry of the switch back to
+    /// accessory runs only while no newer switch came ([`Shell::back_to_accessory`]).
+    policy_serial: u64,
     _timers: Vec<Retained<NSTimer>>,
 }
 
@@ -196,7 +203,8 @@ fn parse_read(read: std::io::Result<String>) -> Option<Config> {
 }
 
 /// What a change of `[app]` asks of the shell: the menu bar icon to show, and the login item
-/// to set (each `None` when unchanged).
+/// to set (each `None` when unchanged; `login_item` also when `login_start` changed while
+/// launch at login is on, so the registration moves to the new way).
 #[derive(Debug, PartialEq, Eq)]
 struct AppEffects {
     menu_icon: Option<bool>,
@@ -205,9 +213,71 @@ struct AppEffects {
 
 fn app_effects(before: &config::AppConfig, after: &config::AppConfig) -> AppEffects {
     let changed = |b: bool, a: bool| (b != a).then_some(a);
+    let moved = after.launch_at_login && before.login_start != after.login_start;
     AppEffects {
         menu_icon: changed(before.show_menu_bar_icon, after.show_menu_bar_icon),
-        login_item: changed(before.launch_at_login, after.launch_at_login),
+        login_item: changed(before.launch_at_login, after.launch_at_login).or(moved.then_some(true)),
+    }
+}
+
+/// The login service `[app] login_start` names.
+fn login_way(app: &config::AppConfig) -> Service {
+    match app.login_start {
+        LoginStart::LoginItem => Service::MainApp,
+        LoginStart::BackgroundItem => Service::Agent,
+    }
+}
+
+/// The first launch's registration of launch at login (`on`: `[app] launch_at_login`):
+/// whether it is done, so later launches leave it to the user's choice. One that failed is
+/// not (the 1.7 review: it was marked done and never tried again).
+fn first_login_set_up(on: bool, register: impl FnOnce() -> Result<(), String>) -> bool {
+    !on || register().is_ok()
+}
+
+/// The way an install's launch at login was last set to (`AppState::login_start`); before
+/// round reopen-list, the agent once round early-start moved it, else the login item.
+fn login_way_done(state: &AppState) -> Service {
+    match &state.login_start {
+        Some(key) => Service::from_key(key),
+        None if state.login_agent_moved => Service::Agent,
+        None => Service::MainApp,
+    }
+}
+
+/// A test run (`STAGE_MANAGER_TEST` or `STAGE_MANAGER_HOME`): the policy never changes,
+/// unless the live suite asks ([`test_joins_reopen_list`]).
+fn test_run() -> bool {
+    std::env::var_os("STAGE_MANAGER_TEST").is_some() || paths::custom_home().is_some()
+}
+
+/// The live suite's own copy joins the reopen list at its simulated logout:
+/// `STAGE_MANAGER_TEST_REOPEN_LIST`, honoured only with `STAGE_MANAGER_TEST`.
+fn test_joins_reopen_list() -> bool {
+    std::env::var_os("STAGE_MANAGER_TEST").is_some() && std::env::var_os("STAGE_MANAGER_TEST_REOPEN_LIST").is_some()
+}
+
+/// One try of the switch back to accessory (`resync`: regular first, [`BackStep::Resync`]);
+/// returns AppKit's reading and macOS's (the running app's, as the Dock has it). Nothing is
+/// activated and no window shown.
+fn try_accessory(mtm: MainThreadMarker, resync: bool) -> (bool, bool) {
+    let app = NSApplication::sharedApplication(mtm);
+    if resync {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    }
+    // The answer is no measure: a switch to the policy AppKit reads answers NO (the probe).
+    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    let accessory = NSApplicationActivationPolicy::Accessory;
+    (app.activationPolicy() == accessory, NSRunningApplication::currentApplication().activationPolicy() == accessory)
+}
+
+/// Whether the launch is macOS's reopen after a logout that listed the app: `listed_at`
+/// (the logout's Unix seconds, [`AppState::reopen_listed`]) came before the login, which
+/// began `since_login` before `now`.
+fn listed_before_login(listed_at: Option<u64>, now: u64, since_login: Option<Duration>) -> bool {
+    match (listed_at, since_login) {
+        (Some(at), Some(d)) => at <= now.saturating_sub(d.as_secs()),
+        _ => false,
     }
 }
 
@@ -217,7 +287,20 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
     let config = config::last_good::read_in_force(&paths::config_file());
     let state = AppState::load(&paths::app_state_file());
     app_menu::install(mtm, |event| match event {
-        AppEvent::Reopen => show_settings(),
+        AppEvent::Launched(login_item_event) => {
+            with(|s| s.launched(login_item_event));
+        }
+        AppEvent::Reopen => {
+            // At login macOS reopened this copy (or the agent started it); the login item then
+            // reaches it as a reopen, which nobody asked for (rounds early-start, reopen-list).
+            let since_login = login_item::since_login();
+            if instance::reopen_shows_settings(since_login) {
+                tracing::info!("opened again while running: showing Settings");
+                show_settings();
+            } else {
+                tracing::info!(login_ago_s = since_login.map(|d| d.as_secs()), "opened again moments after the login (the login item or macOS reopening it): no Settings");
+            }
+        }
     });
     let shell = Shell {
         mtm,
@@ -232,6 +315,8 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
         update: None,
         update_serial: 0,
         install: Install::Idle,
+        reopen: ReopenSwitch::default(),
+        policy_serial: 0,
         _timers: Vec::new(),
     };
     SHELL.with(|s| *s.borrow_mut() = Some(shell));
@@ -269,17 +354,25 @@ impl Shell {
         } else if first && !prompts {
             tracing::debug!("first launch in a test run: no welcome");
         }
+        let way = login_way(&self.config.app);
         if !self.state.login_item_set_up {
             match login_item::refusal() {
-                None => {
-                    if self.config.app.launch_at_login {
-                        let _ = login_item::set(true);
-                    }
+                None if first_login_set_up(self.config.app.launch_at_login, || login_item::set(true, way)) => {
                     self.state.login_item_set_up = true;
+                    self.state.login_start = Some(way.key().into());
                     self.save_state();
                 }
+                None => tracing::warn!("launch at login: the first registration failed; tried again at the next launch"),
                 Some(why) => tracing::debug!("login item not set up: {why}"),
             }
+        } else if login_way_done(&self.state) != way {
+            // The way changed (1.6.x's agent, now the login item; or the key): moved once.
+            if login_item::move_to(way) {
+                self.state.login_start = Some(way.key().into());
+                self.save_state();
+            }
+        } else {
+            login_item::tidy(way);
         }
         let first_check = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
         let tick = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
@@ -296,6 +389,72 @@ impl Shell {
             self._timers.push(NSTimer::scheduledTimerWithTimeInterval_repeats_block(CHECK_TICK, true, &tick));
             self._timers.push(NSTimer::scheduledTimerWithTimeInterval_repeats_block(NOTE_DELAY, false, &note));
         }
+    }
+
+    /// AppKit finished launching (its open event read, `login_item_event`): the launch's
+    /// name, now that a login item's launch and macOS's reopen can be told apart
+    /// ([`login_item::opened_as`]); the reopen list's mark is read and cleared.
+    fn launched(&mut self, login_item_event: Option<bool>) {
+        let since_login = login_item::since_login();
+        let listed = listed_before_login(self.state.reopen_listed, now_secs(), since_login);
+        tracing::info!(
+            started = login_item::opened_as(login_item::started(), login_item_event, listed),
+            login_item_event,
+            listed_at_logout = listed,
+            login_ago_s = since_login.map(|d| d.as_secs()),
+            "launched: as macOS opened it"
+        );
+        if self.state.reopen_listed.take().is_some() {
+            self.save_state();
+        }
+    }
+
+    /// Sets the app's activation policy for the reopen list (round reopen-list): no window
+    /// shown, nothing activated. Regular marks the logout in `app-state.json`, so the next
+    /// launch can tell macOS's reopen; accessory clears it. Done is the policy read after
+    /// the switch, not AppKit's answer; the switch back is tried again until it holds
+    /// ([`reopen_list::back_step`]), and a newer switch ends those tries.
+    fn set_policy(&mut self, policy: Policy, why: &'static str) {
+        self.policy_serial += 1;
+        match policy {
+            Policy::Regular => {
+                let app = NSApplication::sharedApplication(self.mtm);
+                let answered = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+                let done = app.activationPolicy() == NSApplicationActivationPolicy::Regular;
+                tracing::info!(policy = ?policy, done, answered, why, "reopen list: activation policy");
+                self.state.reopen_listed = done.then(now_secs);
+                self.save_state();
+            }
+            Policy::Accessory => {
+                self.state.reopen_listed = None;
+                self.save_state();
+                self.back_to_accessory(self.policy_serial, 1, false, why);
+            }
+        }
+    }
+
+    /// Try number `tries` of the switch back to accessory, while no newer switch came
+    /// (`serial`); the outcome is logged once, when it holds or no try is left.
+    fn back_to_accessory(&mut self, serial: u64, tries: usize, resync: bool, why: &'static str) {
+        if serial != self.policy_serial {
+            tracing::debug!(tries, "reopen list: the switch back to accessory is over: a newer switch came");
+            return;
+        }
+        let (appkit, listed) = try_accessory(self.mtm, resync);
+        let (wait, resync) = match reopen_list::back_step(tries, appkit, listed) {
+            step @ (BackStep::Done | BackStep::GaveUp) => {
+                let done = step == BackStep::Done;
+                tracing::info!(policy = ?Policy::Accessory, done, tries, appkit_accessory = appkit, listed_accessory = listed, why, "reopen list: activation policy");
+                return;
+            }
+            BackStep::Again(wait) => (wait, false),
+            BackStep::Resync(wait) => (wait, true),
+        };
+        tracing::debug!(tries, appkit_accessory = appkit, listed_accessory = listed, wait_ms = wait.as_millis() as u64, resync, "reopen list: the switch back to accessory did not hold; trying again");
+        let when = dispatch2::DispatchTime::try_from(wait).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = dispatch2::DispatchQueue::main().after(when, move || {
+            with(|s| s.back_to_accessory(serial, tries + 1, resync, why));
+        });
     }
 
     fn welcome_rows(&self, apple_row: bool) -> Vec<welcome::WelcomeRow> {
@@ -380,7 +539,7 @@ impl Shell {
         match change {
             Change::LaunchAtLogin(on) => {
                 self.write_config("app.launch_at_login", if on { "true" } else { "false" });
-                let _ = login_item::set(on);
+                let _ = login_item::set(on, login_way(&self.config.app));
                 self.refresh_settings();
             }
             Change::OpenLoginItems => login_item::open_login_items(),
@@ -434,6 +593,34 @@ impl Shell {
 }
 
 /// Shows the Settings window in front (menu, ⌘,, a second launch, the welcome).
+/// A logout signal, on the main thread as it arrives (round reopen-list): at the first of a
+/// logout the app turns regular, so macOS reopens it with the other apps at login
+/// ([`reopen_list`]); a cancel turns it back.
+pub fn logout_signal(signal: Signal, at: Instant) {
+    with(|s| {
+        let key = s.config.app.reopen_with_apps;
+        let policy = s.reopen.signal(signal, at, || {
+            let login = login_item::status();
+            let ok = reopen_list::allowed(key, login.starts_at_login(), test_run(), test_joins_reopen_list());
+            if !ok {
+                tracing::info!(reopen_with_apps = key, login = ?login, test = test_run(), "reopen list: not joined at this logout");
+            }
+            ok
+        });
+        match policy {
+            Some(Policy::Regular) => s.set_policy(Policy::Regular, "a logout, restart or shutdown is coming: listed with the apps macOS reopens"),
+            Some(Policy::Accessory) => s.set_policy(Policy::Accessory, "the logout was cancelled"),
+            None => {}
+        }
+    });
+}
+
+/// An app quit (any, on the main thread as its notice arrives): during a logout that listed
+/// the app, the logout is still under way ([`ReopenSwitch::app_quit`]).
+pub fn app_quit(at: Instant) {
+    with(|s| s.reopen.app_quit(at));
+}
+
 pub fn show_settings() {
     let Some((mtm, values, pane)) = with(|s| {
         let pane = s.state.settings_pane.as_deref().and_then(Pane::from_id).unwrap_or_default();
@@ -460,7 +647,7 @@ pub fn menu(action: MenuAction) {
         MenuAction::Settings => show_settings(),
         MenuAction::Allow(a) => allow(a),
         MenuAction::TurnOffAppleStageManager => turn_off_apple(),
-        MenuAction::MarkProblem | MenuAction::ShowNoticed(_) | MenuAction::DismissNotice | MenuAction::Quit => {}
+        MenuAction::MarkProblem | MenuAction::Quit => {}
     }
 }
 
@@ -482,6 +669,11 @@ pub fn allow(a: Approval) {
 
 /// The main thread's poll: approvals, Apple's settings, refused captures.
 pub fn poll(permissions: PermissionState, raw: &RawSettings, capture_refused: bool) {
+    with(|s| {
+        if let Some(policy) = s.reopen.tick(Instant::now()) {
+            s.set_policy(policy, "no quit came in time: the logout was cancelled");
+        }
+    });
     let Some((changed, apple_rows)) = with(|s| {
         let changed = s.permissions != permissions || s.raw != *raw || s.capture_refused != capture_refused;
         if changed {
@@ -517,8 +709,13 @@ pub fn config_changed(error: Option<String>, config: Config) {
         if let Some(on) = effects.login_item
             && login_item::refusal().is_none()
         {
-            // An edit of the file (an agent's) turns the login item on or off too.
-            let _ = login_item::set(on);
+            // An edit of the file (an agent's) turns the login item on or off too, or moves it
+            // to the way `login_start` names.
+            let way = login_way(&s.config.app);
+            if login_item::set(on, way).is_ok() {
+                s.state.login_start = Some(way.key().into());
+                s.save_state();
+            }
         }
         s.refresh_settings();
     });
@@ -934,6 +1131,15 @@ pub fn turn_off_wait() -> Duration {
 mod tests {
     use super::*;
 
+    /// The 1.7 review: a failed first registration is not marked done, so the next launch
+    /// tries it again; launch at login off is done without asking macOS.
+    #[test]
+    fn a_failed_first_registration_is_tried_again() {
+        assert!(first_login_set_up(true, || Ok(())));
+        assert!(!first_login_set_up(true, || Err("macOS said no".into())));
+        assert!(first_login_set_up(false, || panic!("not asked")));
+    }
+
     #[test]
     fn the_agent_prompt_points_at_the_notes_and_the_file() {
         let p = agent_instructions("/Users/me/.config/stage-manager/config.toml", "/Applications/Stage Manager.app/Contents/MacOS/stage-manager");
@@ -984,6 +1190,39 @@ mod tests {
                 login_item: Some(defaults.launch_at_login)
             }
         );
+    }
+
+    /// Round reopen-list: the way launch at login was last set to, and its move.
+    #[test]
+    fn the_login_way_moves_once_whichever_way_the_key_says() {
+        let fresh = AppState::default();
+        assert_eq!(login_way_done(&fresh), Service::MainApp, "1.6.0 and earlier: the login item");
+        let early = AppState { login_agent_moved: true, ..Default::default() };
+        assert_eq!(login_way_done(&early), Service::Agent, "round early-start's build moved it to the agent");
+        let back = AppState { login_agent_moved: true, login_start: Some("login_item".into()), ..Default::default() };
+        assert_eq!(login_way_done(&back), Service::MainApp, "moved back: the key's value is remembered");
+        let defaults = config::AppConfig::default();
+        assert_eq!(login_way(&defaults), Service::MainApp, "the default");
+        let agent = config::AppConfig { login_start: LoginStart::BackgroundItem, ..defaults };
+        assert_eq!(login_way(&agent), Service::Agent);
+        assert_eq!(app_effects(&defaults, &agent), AppEffects { menu_icon: None, login_item: Some(true) }, "the key changed while on: moved");
+        assert_eq!(app_effects(&agent, &defaults).login_item, Some(true), "and back");
+        let off = config::AppConfig { launch_at_login: false, ..defaults };
+        let off_agent = config::AppConfig { launch_at_login: false, ..agent };
+        assert_eq!(app_effects(&off, &off_agent).login_item, None, "off: nothing to move");
+    }
+
+    #[test]
+    fn a_launch_after_a_listed_logout_is_told_apart() {
+        let s = Duration::from_secs;
+        let now = 1_000_000;
+        assert!(listed_before_login(Some(now - 100), now, Some(s(5))), "listed at the logout, 95 s before this login");
+        assert!(!listed_before_login(Some(now - 2), now, Some(s(5))), "listed after the login: not this login's");
+        assert!(!listed_before_login(None, now, Some(s(5))));
+        assert!(!listed_before_login(Some(now - 100), now, None), "no login time");
+        // Round logout-cancel-relaunch: the guardian opens the app again 40 s after a logout
+        // cancelled once macOS had quit it, in the login of hours ago: no reopen of a login.
+        assert!(!listed_before_login(Some(now - 40), now, Some(s(3 * 3600))), "a relaunch after a cancelled logout");
     }
 
     #[test]

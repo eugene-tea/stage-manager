@@ -2,7 +2,7 @@
 
 Every option lives in `~/.config/stage-manager/config.toml`. The file lists every key below,
 commented out with its default; remove the `#` to change one. Saved changes apply within a
-second; a mistake, or a file that can't be read, keeps the last working settings. Settings already in System Settings →
+second (a key marked "Read at launch" at the next launch); a mistake, or a file that can't be read, keeps the last working settings. Settings already in System Settings →
 Desktop & Dock (show recent apps, show an app's windows all at once or one at a time, click
 wallpaper to reveal desktop) are read from there and are not repeated here. The
 [user guide](GUIDE.md#the-config-file) shows how to edit the file, with examples.
@@ -42,6 +42,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | Key | Default | Values | What it does |
 |---|---|---|---|
 | `app.launch_at_login` | `true` | true or false | Open Stage Manager when you log in (a login item; System Settings → General → Login Items can also turn it off). Only an installed copy (in Applications) registers. |
+| `app.login_start` | `"login_item"` | "login_item", "background_item" | How launch at login starts it: "login_item" (listed under Open at Login) or "background_item" (a launchd agent, listed under Allow in the Background). Both start after the apps macOS reopens at login; a change moves the registration over. |
+| `app.reopen_with_apps` | `true` | true or false | Start with the apps macOS reopens at login: Stage Manager shows in the Dock for a moment as you log out. Needs launch at login on; "Reopen windows when logging back in" decides, as for every app. |
 | `app.show_menu_bar_icon` | `true` | true or false | Show the menu bar icon (Apple's Stage Manager has none). Without it, open Stage Manager again from Applications to reach Settings. |
 | `app.check_for_updates` | `true` | true or false | Check GitHub for a newer release at most once a day and offer it; nothing about you or this Mac is sent. Check for Updates… in the menu works either way. |
 | `app.install_updates` | `false` | true or false | Install a newer release without asking: downloaded and verified in the background, installed while you are away from the Mac (windows come back first, then the new version opens). Off: the app asks first. |
@@ -54,7 +56,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
-| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area a window must cover to hide the strip. |
+| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area windows keep clear of with fit. |
 | `strip.capacity` | `0` | whole number, 0 to 30 | Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt). |
 | `strip.capacity_pitch` | `190.0` | number, 20 to 2000 | With capacity = 0: room per card, in points of visible height. |
 | `strip.capacity_margin` | `60.0` | number, 0 to 2000 | With capacity = 0: visible height kept free above and below the cards. |
@@ -149,6 +151,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. |
 | `windows.corner_patch_reach` | `"auto"` | "auto" or a number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow: "auto" is a parked (inactive) window's shadow, side by side; a number is used on every side. |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
+| `displays.main_only` | `false` | true or false | Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it. |
 | `sugar.shift_brings_here` | `true` | true or false | Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way. |
 | `sugar.launch_window_ms` | `10000` | whole number, 0 to 60000 | A newly opened app's first window counts a Shift held this long before. |
 | `sugar.activation_window_ms` | `2000` | whole number, 0 to 60000 | An activation counts a Shift held this long before. |
@@ -160,8 +163,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `hotkeys.toggle_strip` | `"ctrl+alt+s"` | hotkey such as "ctrl+alt+n", or "" for none | Show or hide the strip. |
 | `stages.names` | `[]` | list of names | Named stages created at launch in this order (hotkey numbers 1, 2, ...); they stay when empty. |
 | `stages.restore_after_restart` | `true` | true or false | After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's "Reopen windows when logging back in"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch. |
-| `stages.restore_notice` | `true` | true or false | After a restart, list in the menu bar menu the windows macOS reopened on another Desktop than the one they were on (a mark on the icon while any is listed), to drag them back in Mission Control; an entry leaves once its window shows on its own Desktop. macOS gives apps no way to move a window to another Desktop. |
 | `stages.new_apps_join_current` | `false` | true or false | A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule. |
+| `restore.saved_size` | `true` | true or false | A window its app reopens after a restart at under half its saved size (matched by its title, on the screen it was saved on) gets its saved frame back once, when first shown; moved or resized by you first, it keeps yours. Off: every window keeps the frame its app gives it, as Apple's does. |
 | `defaults.action` | `"native"` | "native", "current", "new", "stage:<name>", "float", "ignore" | "native" is Apple's: a window joins its app's stage, a newly opened app gets its own. |
 | `defaults.placement` | `"as-is"` | "as-is", "center", "cascade" | Where it goes: "as-is", "center", or "cascade" (offset from the front window). |
 | `log.level` | `"info"` | "error", "warn", "info", "debug", "trace" | How much the log keeps: "info" the main events, "debug" every decision (and shows Mark a Problem in the menu). |

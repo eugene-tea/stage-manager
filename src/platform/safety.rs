@@ -65,7 +65,8 @@ use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
-use crate::engine::recovery::{self, HiddenApp, Known, LiveWindow, ParkedFile, Registered, ScanDisplays};
+use crate::engine::model::Display;
+use crate::engine::recovery::{self, HiddenApp, Known, LiveWindow, ParkZone, ParkedFile, Registered, ScanDisplays};
 use crate::logbook::counters::{self, Count};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
@@ -245,6 +246,16 @@ pub fn unhide_apps(reason: &str, apps: impl IntoIterator<Item = HiddenApp>) -> u
 /// The main display's visible frame as last reported (for scans in this process).
 static VISIBLE: Mutex<Option<Rect>> = Mutex::new(None);
 
+/// The other managed displays' park zones as last reported (round displays; the
+/// guardian's: those the app's parked file names), so a window parked at a secondary
+/// display's corner counts as parked in every scan.
+static ZONES: Mutex<Vec<ParkZone>> = Mutex::new(Vec::new());
+
+/// The other managed displays' park zones (or those named by the guardian's parked file).
+pub(crate) fn zones_used() -> Vec<ParkZone> {
+    ZONES.lock().map(|z| z.clone()).unwrap_or_default()
+}
+
 /// Every park corner used this run (the guardian's: those the app's parked file names), so a
 /// window parked at a corner the arrangement no longer picks still counts as parked.
 static CORNERS: Mutex<BTreeSet<Corner>> = Mutex::new(BTreeSet::new());
@@ -367,7 +378,7 @@ fn lock_written() -> MutexGuard<'static, Option<ParkedFile>> {
 fn write_parked_file(listed: &[Registered]) {
     let hidden = hidden_now();
     let empty = listed.is_empty() && hidden.is_empty();
-    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), hidden };
+    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), hidden };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
@@ -435,6 +446,56 @@ fn registry_forget(ids: &[u32]) {
         registered(&guard)
     };
     write_parked_file(&listed);
+}
+
+/// Remembers every managed display's park zone (the main one first: its visible frame and
+/// corner, [`set_main_display`]; the others as zones of their own) for the park test and
+/// clamping in scans, and writes them to the parked file for the guardian. A display's
+/// corners add up over the run, as the main display's do ([`next_zones`]).
+pub fn set_displays(displays: &[Display]) {
+    let Some(main) = displays.first() else { return };
+    let zones = next_zones(&zones_used(), &displays[1..]);
+    let changed = ZONES.lock().is_ok_and(|mut z| {
+        let changed = *z != zones;
+        *z = zones;
+        changed
+    });
+    set_main_display(main.visible, main.corner);
+    if changed {
+        let listed = registered(&lock_registry());
+        write_parked_file(&listed);
+    }
+}
+
+/// The park zones of `others` (every display but the main one), each with the corners its
+/// zone had while the display kept its frame (they add up over the run: a window of another
+/// Desktop may still sit at an earlier one) plus its corner now. A display removed or moved
+/// leaves no zone behind: macOS moves its windows (onto the remaining screen, or along with
+/// it), and a zone at its old frame could take a window on a screen there now for a parked
+/// one (the review's two-screens 7).
+fn next_zones(old: &[ParkZone], others: &[Display]) -> Vec<ParkZone> {
+    others
+        .iter()
+        .map(|d| {
+            let mut corners = old.iter().find(|z| z.frame == d.frame).map(|z| z.corners.clone()).unwrap_or_default();
+            if !corners.contains(&d.corner) {
+                corners.push(d.corner);
+            }
+            ParkZone { frame: d.frame, visible: d.visible, corners }
+        })
+        .collect()
+}
+
+/// Takes the other displays' park zones without writing a parked file (the guardian, from
+/// the app's parked file).
+pub fn assume_zones(zones: &[ParkZone]) {
+    if let Ok(mut z) = ZONES.lock() {
+        for zone in zones {
+            if !z.contains(zone) {
+                z.push(zone.clone());
+            }
+        }
+    }
 }
 
 /// Remembers the main display's visible frame and park corner for the park test and
@@ -936,11 +997,12 @@ pub fn watch_signals(on_quit: impl Fn(i32) + Send + 'static) -> std::io::Result<
 }
 
 /// Writes this process's clean-exit marker (every window is back onscreen) and removes its
-/// parked file.
-pub fn mark_clean_exit() {
+/// parked file. `text`: what the guardian reads in it
+/// ([`crate::engine::logout_watch::quit_marker`]: a quit at a logout, or any other).
+pub fn mark_clean_exit(text: &str) {
     let _ = std::fs::remove_file(paths::parked_file(std::process::id()));
     let path = paths::clean_exit_marker(std::process::id());
-    if let Err(e) = std::fs::write(&path, b"clean\n") {
+    if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
         tracing::warn!("cannot write {}: {e}", path.display());
     }
 }
@@ -959,7 +1021,7 @@ pub(crate) fn scan_displays() -> ScanDisplays {
     let visible = visible_frame()
         .filter(|v| main.contains_rect(v))
         .unwrap_or_else(|| Rect::new(main.x, main.y + MENU_BAR_GUESS, main.w, main.h - MENU_BAR_GUESS));
-    ScanDisplays::new(main, visible, bounds, corners_used())
+    ScanDisplays::new(main, visible, bounds, corners_used()).with_zones(zones_used())
 }
 
 /// Which windows a recovery scan looks at.
@@ -994,65 +1056,25 @@ pub fn recovery_scan(reason: &str) -> Report {
 pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
     // Each app's enhanced UI off once for all its windows here, not once per window.
     let _quiet = enhanced_ui::Batch::open();
-    let only = observe::only_from_env();
-    let own = std::process::id() as i32;
-    let mut pids: Vec<i32> = windows::list_windows().iter().filter(|w| w.layer == 0).map(|w| w.pid).collect();
-    pids.sort_unstable();
-    pids.dedup();
+    let mut pids = scan_targets();
     if let Some(wanted) = &scope.pids {
-        pids.retain(|p| wanted.contains(p));
+        pids.retain(|(p, _)| wanted.contains(p));
     }
     let state = read_state("recovery scan");
     let displays = scan_displays();
-    let mut live = Vec::new();
-    let mut elements = Vec::new();
+    let mut read = Vec::new();
     let mut unanswered = Vec::new();
-    let mut registered = BTreeMap::new();
-    for pid in pids {
-        let bundle = bundle_id_of(pid);
-        if !observe::app_allowed(only.as_ref(), own, pid, bundle.as_deref()) {
-            continue;
-        }
-        let list = match AxElement::application(pid).windows() {
-            Ok(list) => list,
+    for (pid, bundle) in pids {
+        match read_app_windows(pid, bundle.as_deref(), &scope.skip) {
+            Ok(list) => read.extend(list),
             Err(e) => {
-                if e != AxError::NO_VALUE {
-                    tracing::debug!(reason, pid, bundle, "recovery scan: the app does not answer: {e}");
-                    unanswered.push(pid);
-                }
-                continue;
-            }
-        };
-        for w in list {
-            if w.role().ok().as_deref() != Some(names::ROLE_WINDOW) {
-                continue;
-            }
-            let id = w.window_id().ok();
-            if id.is_some_and(|id| scope.skip.contains(&id)) {
-                continue;
-            }
-            let Ok(frame) = w.frame() else { continue };
-            // A window id names one window in this session; its process makes sure.
-            if let Some(r) = id.and_then(|id| scope.registered.get(&id)).filter(|r| r.pid == pid) {
-                registered.insert(r.id, r.restore);
-            }
-            live.push(LiveWindow { id, bundle_id: bundle.clone().unwrap_or_default(), title: w.title().unwrap_or_default(), frame });
-            elements.push(w);
-        }
-    }
-    let mut report = Report { checked: live.len(), ..Report::default() };
-    for (i, frame, source) in recovery::plan_with(&live, &registered, state.as_ref(), &displays) {
-        match elements[i].set_frame(frame) {
-            Ok(()) => {
-                report.restored += 1;
-                tracing::warn!(reason, id = live[i].id, bundle = live[i].bundle_id, from = %live[i].frame, to = %frame, source = source.name(), "recovery: window brought back");
-            }
-            Err(e) => {
-                report.failed += 1;
-                tracing::error!(reason, bundle = live[i].bundle_id, "recovery: cannot move window: {e}");
+                tracing::debug!(reason, pid, bundle, "recovery scan: the app does not answer: {e}");
+                unanswered.push(pid);
             }
         }
     }
+    let mut report = Report::default();
+    bring_back_scanned(reason, read, &scope.registered, state.as_ref(), &displays, &mut report);
     if report.restored > 0 {
         counters::bump(Count::Recovery);
     }
@@ -1064,6 +1086,90 @@ pub fn recovery_scan_with(reason: &str, scope: &ScanScope) -> (Report, Vec<i32>)
         tracing::info!(reason, checked = report.checked, restored = report.restored, failed = report.failed, unanswered = ?unanswered, "recovery scan (some apps did not answer)");
     }
     (report, unanswered)
+}
+
+/// The apps a recovery scan looks at, with their bundle ids: every app with a window on layer
+/// zero, `STAGE_MANAGER_ONLY` honored, our own process and the system's excluded apps skipped.
+pub(crate) fn scan_targets() -> Vec<(i32, Option<String>)> {
+    let only = observe::only_from_env();
+    let own = std::process::id() as i32;
+    let mut pids: Vec<i32> = windows::list_windows().iter().filter(|w| w.layer == 0).map(|w| w.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids.into_iter()
+        .map(|pid| (pid, bundle_id_of(pid)))
+        .filter(|(pid, bundle)| observe::app_allowed(only.as_ref(), own, *pid, bundle.as_deref()))
+        .collect()
+}
+
+/// A window a recovery scan read: what the plan needs, its element, and its app.
+pub struct ScannedWindow {
+    /// Its app's process.
+    pub pid: i32,
+    /// Its id, bundle, title and frame.
+    pub live: LiveWindow,
+    /// The element a move goes through.
+    pub element: AxElement,
+}
+
+/// App `pid`'s windows (bundle `bundle`) as a recovery scan reads them, those of `skip` left
+/// out: an error when the app does not answer (`AXWindows` with no value: no window). Only
+/// reads; safe off the WM thread (the launch's scan reads each app on a thread of its own).
+pub(crate) fn read_app_windows(pid: i32, bundle: Option<&str>, skip: &BTreeSet<u32>) -> Result<Vec<ScannedWindow>, AxError> {
+    let list = match AxElement::application(pid).windows() {
+        Ok(list) => list,
+        Err(e) if e == AxError::NO_VALUE => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut read = Vec::new();
+    for w in list {
+        if w.role().ok().as_deref() != Some(names::ROLE_WINDOW) {
+            continue;
+        }
+        let id = w.window_id().ok();
+        if id.is_some_and(|id| skip.contains(&id)) {
+            continue;
+        }
+        let Ok(frame) = w.frame() else { continue };
+        let live = LiveWindow { id, bundle_id: bundle.unwrap_or_default().to_string(), title: w.title().unwrap_or_default(), frame };
+        read.push(ScannedWindow { pid, live, element: w });
+    }
+    Ok(read)
+}
+
+/// Brings back each window of `read` stranded in the park zone ([`recovery::plan_with`]): to
+/// the frame a crashed copy registered for it (`crashed`, used only for a window of the very
+/// process that registered it), else its `state` frame, else centered; counted in `report`.
+/// On the WM thread (it moves windows); the caller holds an [`enhanced_ui::Batch`] and
+/// counts the recovery ([`Count::Recovery`]).
+pub(crate) fn bring_back_scanned(
+    reason: &str,
+    read: Vec<ScannedWindow>,
+    crashed: &BTreeMap<u32, Registered>,
+    state: Option<&StateFile>,
+    displays: &ScanDisplays,
+    report: &mut Report,
+) {
+    // A window id names one window in this session; its process makes sure.
+    let registered: BTreeMap<u32, Rect> = read
+        .iter()
+        .filter_map(|w| w.live.id.and_then(|id| crashed.get(&id)).filter(|r| r.pid == w.pid))
+        .map(|r| (r.id, r.restore))
+        .collect();
+    let (live, elements): (Vec<LiveWindow>, Vec<AxElement>) = read.into_iter().map(|w| (w.live, w.element)).unzip();
+    report.checked += live.len();
+    for (i, frame, source) in recovery::plan_with(&live, &registered, state, displays) {
+        match elements[i].set_frame(frame) {
+            Ok(()) => {
+                report.restored += 1;
+                tracing::warn!(reason, id = live[i].id, bundle = live[i].bundle_id, from = %live[i].frame, to = %frame, source = source.name(), "recovery: window brought back");
+            }
+            Err(e) => {
+                report.failed += 1;
+                tracing::error!(reason, bundle = live[i].bundle_id, "recovery: cannot move window: {e}");
+            }
+        }
+    }
 }
 
 /// The windows earlier copies of the app registered and left behind (their parked files, an
@@ -1102,7 +1208,7 @@ pub fn saved_window_ids() -> BTreeSet<u32> {
 /// window server session ([`StateFile::for_session`]: after a reboot or a new login an id
 /// names another window), so the scans match by id first only when the id still means
 /// the same window.
-fn read_state(what: &str) -> Option<StateFile> {
+pub(crate) fn read_state(what: &str) -> Option<StateFile> {
     let text = std::fs::read_to_string(paths::state_file()).ok()?;
     match StateFile::from_json(&text) {
         Ok(s) => Some(s.for_session(super::session::window_session()).0),
@@ -1285,6 +1391,25 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_display_removed_or_moved_leaves_no_park_zone_behind() {
+        use crate::engine::displays::ScreenKey;
+        use crate::engine::model::DisplayId;
+        let display = |frame: Rect, corner: Corner| Display { id: DisplayId(2), key: ScreenKey::NONE, frame, visible: frame, corner };
+        let laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
+        let zones = next_zones(&[], &[display(laptop, Corner::BottomLeft)]);
+        assert_eq!(zones.len(), 1);
+        // The same frame, another corner chosen (a third screen beyond): both count.
+        let zones = next_zones(&zones, &[display(laptop, Corner::TopLeft)]);
+        assert_eq!(zones[0].corners, vec![Corner::BottomLeft, Corner::TopLeft]);
+        // The laptop main now (its frame moved): one zone, at its frame now, its corner now.
+        let moved = Rect::new(2560.0, 0.0, 1800.0, 1169.0);
+        let zones = next_zones(&zones, &[display(moved, Corner::BottomRight)]);
+        assert_eq!(zones, vec![ParkZone { frame: moved, visible: moved, corners: vec![Corner::BottomRight] }]);
+        // The lid closed: none.
+        assert!(next_zones(&zones, &[]).is_empty());
+    }
 
     /// Review S10: a panic while the parked file's lock is held does not stop later writes.
     #[test]

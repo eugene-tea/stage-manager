@@ -17,8 +17,13 @@
 //!   login screen's heels ends the window while macOS is still reopening apps). An app
 //!   running then keeps its entries under the rule above (one launched during the window and
 //!   still opening keeps them until its own minute is up);
+//!   Entries of a saved Desktop not shown yet stay for that Desktop's first show, but from
+//!   then on take no window shown on another Desktop ([`Restore::pool_closed`]); at that
+//!   show the app's minute starts again ([`Restore::shown_apps`]);
 //! - it was pending through a whole window server session already (its app never brought it
 //!   back): [`crate::engine::persist::StateFile::start_new_session`] drops it at the next one.
+//!   A session in which its Desktop never showed does not count (nothing looked for it),
+//!   until that Desktop was last shown [`UNSEEN_KEEP`] before the save.
 //!
 //! **The restore window** ([`Restore::restoring`]) opens at a launch that finds saved stages
 //! and closes at the first user action (a click, a key press, a card click, a Dock click, a
@@ -60,10 +65,21 @@
 //!
 //! **One pool** (round 8I): after a restart a window that shows on another Desktop than the one
 //! it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
-//! again where it shows (`model/pool.rs`); "K from other Desktops" in the line.
+//! again where it shows (`model/pool.rs`); "K from other Desktops" in the line. One that shows
+//! on another screen than its saved stage's, that screen connected, goes back to that screen
+//! ("N windows back to their screen", [`Restore::screen_moves`]).
 //!
-//! **Frames** come back from `state.json` only on a main display of the saved size
-//! ([`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//! **Frames** come back from `state.json` only on the screen a Desktop was saved on, at the
+//! saved size ([`Restore::screens`]; a file naming no screen: the main display of the saved
+//! size, [`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//! The launch's arrival keeps the frames apps give the windows it matches, except one
+//! reopened at under half its saved area on a strong match: its saved frame when first shown,
+//! once (`model/saved_size.rs`, `[restore] saved_size`).
+//! Saved frames are in the arrangement's global coordinates of the save: a screen whose
+//! origin moved since (Displays settings, another screen main) has its Desktops' saved frames
+//! moved by the same offset ([`crate::engine::model::Model::settle_saved_origins`]); a file
+//! that does not keep the origin has them used only while they all still lie on that screen
+//! ([`Restore::frames_off`]).
 //!
 //! **Off** (`[stages] restore_after_restart = false`): after a restart nothing waits
 //! ([`Restore::off_after_restart`]): saved windows not on screen are dropped as 1.2.0 did.
@@ -73,6 +89,7 @@
 //! press) has a window matching a saved one in an inactive stage parked there (a card),
 //! not switched to; the restore cannot tell it from the app reopening its saved windows.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -90,6 +107,12 @@ pub const QUIET: Duration = Duration::from_secs(60);
 /// save; an app the user quit earlier is not reopened by a login.
 pub const QUIT_KEEP: Duration = Duration::from_secs(120);
 
+/// A saved Desktop not shown for this long before the last save is looked for no more: at
+/// the next session its pending windows are given up as any other's
+/// ([`crate::engine::persist::StateFile::start_new_session`]). Until then a Desktop not
+/// visited keeps its stages through sessions (its apps reopen its windows there, unseen).
+pub const UNSEEN_KEEP: Duration = Duration::from_secs(30 * 86_400);
+
 /// How long the frames of an app's windows are kept after it quit, for a window it opens
 /// again in the park zone ([`crate::engine::model::Model::add_window`]; W2 of the Fable review
 /// of 10-29): an app that saves its own window frames wrote the park frame for a window
@@ -98,6 +121,12 @@ pub const QUIT_FRAMES_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The restore window's longest life after the launch (the design's cap).
 pub const WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// How long after the login (or the launch, for a launch a while after it:
+/// [`Settling::rematch_until`]) a window whose title changes may still go to its saved stage
+/// ([`crate::engine::model::Model::window_retitled`]; his word 11-06: apps reopen with us, he
+/// may click before an editor's late title comes).
+pub const REMATCH: Duration = Duration::from_secs(2 * 60);
 
 /// Settling ends once apps have been this quiet (no launch, no window back from a saved
 /// entry)...
@@ -125,14 +154,44 @@ pub struct Restore {
     /// The main display's size (points, rounded) when `state.json` was saved, if it says:
     /// saved frames are used only on a main display of this size.
     pub saved_display: Option<(i64, i64)>,
-    /// Why saved frames are not used was logged already (once a run).
-    pub frames_noted: bool,
+    /// Per saved Desktop (its id), the screen it was saved on: identity and size (points,
+    /// rounded), where the file says ([`crate::engine::persist::SavedScreen`]): its saved
+    /// frames are used only on that screen at that size.
+    pub screens: BTreeMap<u64, (String, i64, i64)>,
+    /// Saved Desktops whose frames apply nowhere: saved before files kept the screen's origin,
+    /// their frames no longer on that screen now (it moved in the arrangement; R2 of the Codex
+    /// review). Their windows keep the frames their apps give them, as on another screen.
+    pub frames_off: std::collections::BTreeSet<u64>,
+    /// Apps quiet for [`QUIET`] (their pending windows given up,
+    /// [`crate::engine::model::Model::expire_pending`]): their entries on the saved Desktops
+    /// not visited yet wait for that Desktop's first show alone, and no longer take a window
+    /// shown on another Desktop (the pool; R3 of the Codex review: Finder's new window for
+    /// a saved folder an hour later went into a stage of a Desktop never shown).
+    pub pool_closed: std::collections::BTreeSet<String>,
+    /// Apps with entries on a saved Desktop shown for the first time since the platform last
+    /// asked ([`crate::engine::model::Model::take_shown_apps`]): their quiet minute starts
+    /// again there, for the windows of that Desktop still to show.
+    pub shown_apps: std::collections::BTreeSet<String>,
+    /// Why saved frames are not used was logged already, for these (saved Desktop, display)
+    /// pairs (once a run each).
+    pub frames_noted: std::collections::BTreeSet<(Option<u64>, u32)>,
     /// Windows placed by Apple's rule while the restore window was open (they matched no
     /// saved window), for the restore's line.
     pub by_apple: usize,
+    /// A window placed by Apple's rule (or by a low match) that the user has not touched is
+    /// still scored again when its title changes: from the launch until [`REMATCH`] after
+    /// the login, whatever the restore window does ([`Settling::rematch_until`]; the platform
+    /// clears it, [`crate::engine::model::Model::end_rematch`]).
+    pub rematching: bool,
     /// Of those, the ones macOS reopened clamped against the park corner (an app that saved
     /// its frame while parked; round 8H): left where they are, counted for the line.
     pub corner: usize,
+    /// Saved Desktops rebuilt on another screen than they were saved on (that screen not
+    /// connected; round displays-2), for the line.
+    pub other_screen: usize,
+    /// Windows that showed on another screen than their saved stage's, that screen connected,
+    /// and went back to it (round displays-restart), for the line.
+    pub screen_moves: usize,
     /// Saved active stages that kept their place while empty, their windows still to come:
     /// emptied for good (given up), they still give way to a stage with windows
     /// ([`crate::engine::model::Model::front_after_restore`]).
@@ -146,12 +205,12 @@ pub struct Restore {
 impl Restore {
     /// A launch in another window server session than the file's, now `session`.
     pub fn after_restart(session: &str) -> Self {
-        Self { session: session.to_string(), restoring: true, new_session: true, ..Self::default() }
+        Self { session: session.to_string(), restoring: true, new_session: true, rematching: true, ..Self::default() }
     }
 
     /// A launch in the file's own session (or one that cannot be told apart), now `session`.
     pub fn same_session(session: &str) -> Self {
-        Self { session: session.to_string(), restoring: true, new_session: false, ..Self::default() }
+        Self { session: session.to_string(), restoring: true, new_session: false, rematching: true, ..Self::default() }
     }
 
     /// A launch after a restart with `[stages] restore_after_restart = false`: no restore
@@ -176,6 +235,19 @@ impl Restore {
     /// that size, or the file does not say.
     pub fn frames_fit(&self, w: f64, h: f64) -> bool {
         self.saved_display.is_none_or(|d| d == (w.round() as i64, h.round() as i64))
+    }
+
+    /// True when the frames saved with Desktop `saved` apply on a display of identity `key`
+    /// and `w`×`h` points: the Desktop was saved on that screen at that size; a Desktop saved
+    /// with no screen goes by [`Restore::frames_fit`] on the main display (`main`) alone.
+    pub fn frames_fit_on(&self, saved: u64, key: &str, w: f64, h: f64, main: bool) -> bool {
+        if self.frames_off.contains(&saved) {
+            return false;
+        }
+        match self.screens.get(&saved) {
+            Some((k, sw, sh)) => k == key && (*sw, *sh) == (w.round() as i64, h.round() as i64),
+            None => main && self.frames_fit(w, h),
+        }
     }
 }
 
@@ -216,13 +288,38 @@ pub struct Settling {
     login: Instant,
     /// The last app launch or window back from a saved entry (the launch at first).
     busy: Instant,
+    /// The login's time was known (else `login` is the launch).
+    login_known: bool,
+    /// The first window back from a saved entry ([`Settling::placed`]).
+    first_placed: Option<Instant>,
 }
 
 impl Settling {
     /// Opens at `launch`; `login`: when the login session began, if known.
     pub fn new(launch: Instant, login: Option<Instant>) -> Self {
-        let login = login.filter(|l| *l <= launch).unwrap_or(launch);
-        Self { started: launch, login, busy: launch }
+        let known = login.filter(|l| *l <= launch);
+        Self { started: launch, login: known.unwrap_or(launch), busy: launch, login_known: known.is_some(), first_placed: None }
+    }
+
+    /// A window went back to its saved stage at `at` (busy too, [`Settling::busy`]).
+    pub fn placed(&mut self, at: Instant) {
+        self.busy(at);
+        self.first_placed = Some(self.first_placed.map_or(at, |t| t.min(at)));
+    }
+
+    /// Seconds from the login to the first window placed back, when both are known (round
+    /// early-start: the restore's line says how soon after the login windows came back).
+    pub fn first_placed_after_login(&self) -> Option<u64> {
+        let first = self.first_placed?;
+        self.login_known.then(|| first.saturating_duration_since(self.login).as_secs())
+    }
+
+    /// Until when a window's new title may still take it to its saved stage ([`REMATCH`]):
+    /// after the login, for a launch within [`SETTLE_AFTER_LOGIN`] of it (Stage Manager
+    /// opening with the apps macOS reopens); else after the launch (a relaunch later on).
+    pub fn rematch_until(&self) -> Instant {
+        let base = if self.started.saturating_duration_since(self.login) <= SETTLE_AFTER_LOGIN { self.login } else { self.started };
+        base + REMATCH
     }
 
     /// An app launched, or a window went back to its saved stage, at `at`.
@@ -271,7 +368,7 @@ pub fn still_opening<'a>(
 
 /// The restore summed up in one line, no titles (the log at its end, `log summary`):
 /// "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 0 at
-/// the corner; 3 from other Desktops".
+/// the corner; 3 from other Desktops; the first 6 s after the login".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
     /// Windows back from a saved entry.
@@ -291,6 +388,17 @@ pub struct Summary {
     /// Windows back from a saved entry of another Desktop than the one they showed on (the
     /// pool after a restart, round 8I).
     pub pooled: usize,
+    /// Saved Desktops that formed on another screen than the one they were saved on (that
+    /// screen not connected: the 10-23 login on the laptop alone; round displays-2). Named
+    /// on the line only when there were any.
+    pub other_screen: usize,
+    /// Windows that showed on another screen than the one their stage was saved on and went
+    /// back to it (that screen connected; round displays-restart). Named on the line only
+    /// when there were any.
+    pub screen_moves: usize,
+    /// Seconds from the login to the first window back from a saved entry
+    /// ([`Settling::first_placed_after_login`]; round early-start). Named when known.
+    pub first_after_login: Option<u64>,
 }
 
 /// True when `frame` is clamped against the park corner `corner` of the visible frame
@@ -328,7 +436,17 @@ impl fmt::Display for Summary {
             self.by_apple,
             self.corner,
             self.pooled
-        )
+        )?;
+        if self.other_screen > 0 {
+            write!(f, "; {} on another screen", n(self.other_screen, "Desktop"))?;
+        }
+        if self.screen_moves > 0 {
+            write!(f, "; {} back to their screen", n(self.screen_moves, "window"))?;
+        }
+        if let Some(s) = self.first_after_login {
+            write!(f, "; the first {s} s after the login")?;
+        }
+        Ok(())
     }
 }
 
@@ -352,6 +470,14 @@ impl AppQuiet {
     /// App `bundle` opened a window at `now`.
     pub fn window(&mut self, bundle: &str, now: Instant) {
         self.last.insert(bundle.to_string(), now);
+    }
+
+    /// Every clock starts again at `now`: while Accessibility lists no window
+    /// ([`crate::engine::ax_blind`]) no app can show one, so no app's minute runs.
+    pub fn restart_all(&mut self, now: Instant) {
+        for t in self.last.values_mut() {
+            *t = now;
+        }
     }
 
     /// App `bundle` is not running: a later launch starts its clock again.
@@ -437,6 +563,22 @@ mod tests {
         q.window("com.example.b", t0 + Duration::from_secs(200));
         assert!(q.settled(t0 + Duration::from_secs(259)).is_empty());
         assert_eq!(q.settled(t0 + Duration::from_secs(260)), ["com.example.b"]);
+    }
+
+    #[test]
+    fn no_apps_minute_runs_while_accessibility_lists_nothing() {
+        // 11-06 15:41:08: the two windows waiting on the Desktop shown were given up a minute
+        // after the stages were built from nothing, Accessibility blind all along.
+        let t0 = Instant::now();
+        let mut q = AppQuiet::default();
+        q.window("com.example.a", t0);
+        for s in 1..=600 {
+            q.restart_all(t0 + Duration::from_secs(s));
+            assert!(q.settled(t0 + Duration::from_secs(s)).is_empty());
+        }
+        let seen = t0 + Duration::from_secs(600);
+        assert!(q.settled(seen + QUIET - Duration::from_secs(1)).is_empty(), "a minute from when windows can be seen");
+        assert_eq!(q.settled(seen + QUIET), ["com.example.a"]);
     }
 
     #[test]
@@ -558,6 +700,20 @@ mod tests {
     }
 
     #[test]
+    fn rematches_run_two_minutes_from_the_login_or_from_a_later_launch() {
+        let login = Instant::now();
+        // Opened with the apps macOS reopens: from the login.
+        let at_login = Settling::new(login + Duration::from_secs(23), Some(login));
+        assert_eq!(at_login.rematch_until(), login + REMATCH);
+        // A relaunch long after the login: from the launch.
+        let later = login + Duration::from_secs(3600);
+        assert_eq!(Settling::new(later, Some(login)).rematch_until(), later + REMATCH);
+        // No login known: from the launch.
+        assert_eq!(Settling::new(later, None).rematch_until(), later + REMATCH);
+        assert!(Restore::after_restart("s").rematching && !Restore::off_after_restart("s").rematching);
+    }
+
+    #[test]
     fn saved_frames_only_on_a_display_of_the_saved_size() {
         let r = Restore::after_restart("s").with_display(Some((2560.0, 1440.0)));
         assert!(r.frames_fit(2560.0, 1440.0));
@@ -569,16 +725,51 @@ mod tests {
 
     #[test]
     fn the_summary_line_has_counts_and_no_titles() {
-        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3 };
+        let s = Summary { windows: 9, stages: 4, desktops: 2, seconds: 41, pending: 2, by_apple: 1, corner: 1, pooled: 3, other_screen: 0, screen_moves: 0, first_after_login: None };
         assert_eq!(
             s.to_string(),
             "restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule; 1 at the corner; 3 from other Desktops"
         );
-        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0 };
+        let one = Summary { windows: 1, stages: 1, desktops: 1, seconds: 0, pending: 0, by_apple: 0, corner: 0, pooled: 0, other_screen: 0, screen_moves: 0, first_after_login: None };
         assert_eq!(
             one.to_string(),
             "restore: 1 window into 1 stage on 1 Desktop in 0 s; 0 pending; 0 by Apple's rule; 0 at the corner; 0 from other Desktops"
         );
+        // A Desktop that formed on another screen than it was saved on (round displays-2):
+        // said at the end, only when it happened.
+        let moved = Summary { other_screen: 1, ..s };
+        assert!(moved.to_string().ends_with("; 3 from other Desktops; 1 Desktop on another screen"), "{moved}");
+        // Windows back to the screen their stage was saved on (round displays-restart).
+        let back = Summary { screen_moves: 2, ..s };
+        assert!(back.to_string().ends_with("; 3 from other Desktops; 2 windows back to their screen"), "{back}");
+        // How soon after the login the first window came back (round early-start).
+        let early = Summary { first_after_login: Some(6), ..back };
+        assert!(early.to_string().ends_with("; 2 windows back to their screen; the first 6 s after the login"), "{early}");
+    }
+
+    /// Round early-start: the agent starts the app 2 s after the login, before the apps
+    /// macOS reopens. The restore window's clocks still count from the login: quiet ends no
+    /// sooner than a minute after it, rematches run two minutes from it, the cap five minutes
+    /// from the launch; and the line says when the first window came back.
+    #[test]
+    fn an_early_launch_keeps_the_logins_clocks_and_times_its_first_window() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut c = Settling::new(s(2), Some(t0));
+        assert_eq!(c.first_placed_after_login(), None, "nothing placed yet");
+        // Apps launch from 20 s on (busy), their windows come back from 28 s.
+        c.busy(s(20));
+        c.placed(s(31));
+        c.placed(s(28));
+        c.placed(s(44));
+        assert_eq!(c.first_placed_after_login(), Some(28), "the earliest, whatever the order heard");
+        assert_eq!(c.due(s(63)), None, "busy until 44 s");
+        assert_eq!(c.due(s(64)), Some(End::Quiet));
+        assert_eq!(c.rematch_until(), t0 + REMATCH, "from the login");
+        assert_eq!(Settling::new(s(2), Some(t0)).due(s(59)), None, "never before the login's minute");
+        let mut c = Settling::new(s(2), None);
+        c.placed(s(10));
+        assert_eq!(c.first_placed_after_login(), None, "the login unknown: not said");
     }
 
     #[test]

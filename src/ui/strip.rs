@@ -67,18 +67,18 @@
 //!   left edge while a window covers the strip; the **launch reveal**, a covered strip shown
 //!   for a moment at launch.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AllocAnyThread, MainThreadOnly, define_class, msg_send};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel,
     NSNormalWindowLevel, NSPanel, NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
@@ -161,11 +161,44 @@ const HELD_FADE: &str = "held";
 // Main-thread state
 
 thread_local! {
+    /// The main display's strip (the first screen, whatever its id).
     static STRIP: RefCell<Option<Strip>> = const { RefCell::new(None) };
+    /// The other displays' strips, by display id (round displays): one per screen, made at
+    /// its first snapshot, closed when the screen goes ([`displays_changed`]).
+    static OTHERS: RefCell<BTreeMap<u32, Strip>> = const { RefCell::new(BTreeMap::new()) };
     /// Snapshots that found the strip busy (a run loop turning inside one of its calls: a
     /// menu, a drag), waiting to be presented in the order they came (the review's U7: one
     /// was dropped, and a lost transition left the controller waiting with stale cards).
     static WAITING: RefCell<VecDeque<StripSnapshot>> = const { RefCell::new(VecDeque::new()) };
+    /// The same for the other displays' strips.
+    static WAITING_OTHERS: RefCell<VecDeque<StripSnapshot>> = const { RefCell::new(VecDeque::new()) };
+    /// The thumbnail interval the strips are made with ([`install`]).
+    static THUMB_INTERVAL: Cell<u64> = const { Cell::new(1000) };
+    /// Every display connected, as last reported ([`displays_changed`]; `None` before the
+    /// first report): a snapshot for any other is not drawn ([`draws_strip_for`]).
+    static CONNECTED: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+}
+
+/// True when a snapshot for `display` may be drawn: the main strip's, or a display among
+/// `connected` (every display connected, as last reported; `None` before the first report).
+///
+/// The lid closed, 11-05 20:01:38: the strips of the displays gone closed, then a snapshot the
+/// window-manager thread sent for the laptop before it heard of the change made that strip
+/// again. Its screen gone, it took the main screen's geometry, its pane lay over the 5K's
+/// strip on that Desktop, and its two cards over the 5K's own: the laptop's two-app card over
+/// the 5K's three-app one, seen as one card of five apps, and a click on it reached a stage
+/// on another Desktop, which did nothing.
+fn draws_strip_for(connected: Option<&[u32]>, display: u32) -> bool {
+    display == strip_model::MAIN_STRIP || connected.is_none_or(|ids| ids.contains(&display))
+}
+
+/// The main display's id as last reported ([`displays_changed`]): its snapshots name it,
+/// and go to [`STRIP`].
+static MAIN_DISPLAY: AtomicU32 = AtomicU32::new(0);
+
+/// True when a snapshot's display is the main display's strip's.
+fn is_main_display(display: u32) -> bool {
+    display == strip_model::MAIN_STRIP || display == MAIN_DISPLAY.load(Ordering::Relaxed)
 }
 
 fn with_strip<R>(f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
@@ -183,10 +216,72 @@ fn with_strip<R>(f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
     result
 }
 
-/// Presents `snapshot` after every one still waiting, now if the strip is free. Main thread.
+/// Runs `f` on every strip up (the main display's, then the other displays'), where free.
+fn with_strips(mut f: impl FnMut(&mut Strip)) {
+    with_strip(&mut f);
+    let done = OTHERS.with(|o| match o.try_borrow_mut() {
+        Ok(mut others) => {
+            for s in others.values_mut() {
+                f(s);
+            }
+            true
+        }
+        Err(_) => false,
+    });
+    if done && WAITING_OTHERS.with(|w| w.try_borrow().is_ok_and(|w| !w.is_empty())) {
+        DispatchQueue::main().exec_async(present_waiting_others);
+    }
+}
+
+/// Runs `f` on the strip of `display` (as a strip is keyed: [`strip_model::MAIN_STRIP`] or
+/// the main display's id for the main one, else the display's id), where up and free.
+///
+/// Every strip's views, tab and timers carry their strip's key and come back through here
+/// (round displays-live-1: they went to the main display's strip, so a card click on another
+/// screen's strip hit nothing there, and that strip's transitions never landed).
+fn with_strip_of<R>(display: u32, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
+    if is_main_display(display) {
+        return with_strip(f);
+    }
+    with_other(&OTHERS, display, f)
+}
+
+/// Runs `f` on the entry keyed `display` of `others` (the other displays' strips), where
+/// there and free.
+fn with_other<S, R>(
+    others: &'static std::thread::LocalKey<RefCell<BTreeMap<u32, S>>>,
+    display: u32,
+    f: impl FnOnce(&mut S) -> R,
+) -> Option<R> {
+    others.with(|o| {
+        let mut others = o.try_borrow_mut().ok()?;
+        others.get_mut(&display).map(f)
+    })
+}
+
+/// Runs `f` on the first strip (the main display's first) whose column holds `p`, if any.
+fn with_strip_at<R>(p: Point, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
+    let main = with_strip(|s| s.geometry.global.contains(p)).unwrap_or(false);
+    if main {
+        return with_strip(f);
+    }
+    OTHERS.with(|o| {
+        let mut others = o.try_borrow_mut().ok()?;
+        let s = others.values_mut().find(|s| s.geometry.global.contains(p))?;
+        Some(f(s))
+    })
+}
+
+/// Presents `snapshot` after every one still waiting for its display's strip, now if that
+/// strip is free. Main thread.
 fn present_in_order(snapshot: StripSnapshot) {
-    WAITING.with(|w| w.borrow_mut().push_back(snapshot));
-    present_waiting();
+    if is_main_display(snapshot.display) {
+        WAITING.with(|w| w.borrow_mut().push_back(snapshot));
+        present_waiting();
+    } else {
+        WAITING_OTHERS.with(|w| w.borrow_mut().push_back(snapshot));
+        present_waiting_others();
+    }
 }
 
 /// Presents the snapshots waiting, in order, if the strip is free; else they wait for the
@@ -194,6 +289,60 @@ fn present_in_order(snapshot: StripSnapshot) {
 fn present_waiting() {
     if !hand_over(&STRIP, &WAITING, Strip::present) {
         tracing::debug!("strip busy; the snapshot waits");
+    }
+}
+
+/// Presents the snapshots waiting for the other displays' strips, in order, making a
+/// display's strip at its first snapshot. Main thread.
+fn present_waiting_others() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let free = OTHERS.with(|o| {
+        let Ok(mut others) = o.try_borrow_mut() else { return false };
+        while let Some(snapshot) = WAITING_OTHERS.with(|q| q.borrow_mut().pop_front()) {
+            let screen = snapshot.display;
+            let connected = CONNECTED.with(|c| draws_strip_for(c.borrow().as_deref(), screen));
+            if !connected {
+                // Sent before the display went: no strip for a screen not there.
+                others.remove(&screen);
+                tracing::debug!(screen, "strip: a snapshot for a display no longer there is not drawn");
+                continue;
+            }
+            let strip = others.entry(screen).or_insert_with(|| {
+                let interval = THUMB_INTERVAL.with(Cell::get);
+                tracing::info!(screen, "strip: a strip for another display");
+                Strip::new(mtm, Duration::from_millis(interval.max(1)), screen)
+            });
+            strip.present(snapshot);
+        }
+        true
+    });
+    if !free {
+        tracing::debug!("the other displays' strips are busy; the snapshot waits");
+    }
+}
+
+/// The displays changed (main thread; `ids`: every display's id, the main one first): the
+/// strips of displays gone close, and the main display's strip knows its id.
+pub fn displays_changed(ids: &[u32]) {
+    let Some(&main) = ids.first() else { return };
+    MAIN_DISPLAY.store(main, Ordering::Relaxed);
+    CONNECTED.with(|c| *c.borrow_mut() = Some(ids.to_vec()));
+    let gone = OTHERS.with(|o| match o.try_borrow_mut() {
+        Ok(mut others) => {
+            let before = others.len();
+            others.retain(|d, _| ids.contains(d) && *d != main);
+            before - others.len()
+        }
+        Err(_) => 0,
+    });
+    WAITING_OTHERS.with(|w| w.borrow_mut().retain(|s| ids.contains(&s.display) && s.display != main));
+    let mut kept: Vec<u32> = ids.iter().copied().filter(|d| *d != main).collect();
+    kept.push(strip_model::MAIN_STRIP);
+    strip_model::retain_cards_of(&kept);
+    card_glass::displays_changed(&kept);
+    strip_model::retain_panel_statuses_of(&kept);
+    if gone > 0 {
+        tracing::info!(gone, "strip: the strips of displays no longer there closed");
     }
 }
 
@@ -218,7 +367,8 @@ fn hand_over<S, T>(
 /// [`strip_model`] presenter and starts thumbnail capture every `thumbnail_interval_ms`.
 /// Main thread, once.
 pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
-    let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)));
+    THUMB_INTERVAL.with(|i| i.set(thumbnail_interval_ms));
+    let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)), strip_model::MAIN_STRIP);
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
@@ -228,20 +378,21 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
 
 /// The user went to another Space (`activeSpaceDidChangeNotification`). Main thread.
 pub fn space_changed() {
-    with_strip(Strip::space_changed);
+    with_strips(Strip::space_changed);
 }
 
 /// Apple's Stage Manager took over, or a logout is coming (`why`, for the log): every other
 /// Desktop's pane closes, and the pane shown hides with no cards (a drag in progress ends).
 /// The next snapshot after the stand-down brings the strip back. Main thread.
 pub fn stand_down(why: &str) {
-    with_strip(|s| {
+    // Snapshots from before the stand-down never bring a strip back after it.
+    WAITING.with(|w| w.borrow_mut().clear());
+    WAITING_OTHERS.with(|w| w.borrow_mut().clear());
+    with_strips(|s| {
         s.others.clear();
         s.card_drag = None;
         s.pressed = None;
         s.squeezed = None;
-        // Snapshots from before the stand-down never bring the strip back after it.
-        WAITING.with(|w| w.borrow_mut().clear());
         let mut snapshot = s.snapshot.clone();
         snapshot.cards.clear();
         snapshot.user_visible = false;
@@ -258,23 +409,21 @@ pub fn stand_down(why: &str) {
 
 /// Changes the thumbnail refresh interval (config reload). Main thread.
 pub fn set_thumbnail_interval(ms: u64) {
-    with_strip(|s| s.capturer.set_interval(Duration::from_millis(ms.max(1))));
+    THUMB_INTERVAL.with(|i| i.set(ms));
+    with_strips(|s| s.capturer.set_interval(Duration::from_millis(ms.max(1))));
 }
 
 /// Where a window released at `p` (global, top-left origin) goes: `None` when it is not over
 /// the strip (the user hid the strip, or `p` is outside the strip column), else the slot under
 /// `p`, the same one the strip's gap shows. Main thread.
 pub fn drop_slot(p: Point) -> Option<StripDrop> {
-    with_strip(|s| {
-        (s.snapshot.user_visible && s.geometry.global.contains(p)).then(|| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })
-    })
-    .flatten()
+    with_strip_at(p, |s| s.snapshot.user_visible.then(|| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })).flatten()
 }
 
 /// The pointer moved to `p` (global, top-left origin) over another app's window or the
 /// desktop (the global monitor). Main thread.
 pub fn pointer_moved(p: Point) {
-    with_strip(|s| s.pointer_moved(p));
+    with_strips(|s| s.pointer_moved(p));
 }
 
 /// The global monitor feeds [`pointer_moved`]: a strip hidden at the edge waits for its moves
@@ -367,8 +516,12 @@ pub fn debug_hover(p: Option<Point>) -> bool {
 /// Whether the strip is mid-transition or a card is being dragged (a ready update waits for
 /// neither). Busy while the strip is borrowed, too. Main thread.
 pub fn busy() -> bool {
+    let busy = |s: &Strip| s.card_drag.is_some() || s.transition_starting || s.motion_running();
     STRIP.with(|s| match s.try_borrow() {
-        Ok(g) => g.as_ref().is_some_and(|s| s.card_drag.is_some() || s.transition_starting || s.motion_running()),
+        Ok(g) => g.as_ref().is_some_and(busy),
+        Err(_) => true,
+    }) || OTHERS.with(|o| match o.try_borrow() {
+        Ok(others) => others.values().any(busy),
         Err(_) => true,
     })
 }
@@ -376,7 +529,7 @@ pub fn busy() -> bool {
 /// Refreshes the full-size snapshots of the shown windows now: a switch may follow (the
 /// app switcher was opened). Main thread.
 pub fn prefetch() {
-    with_strip(|s| s.prefetch(None));
+    with_strips(|s| s.prefetch(None));
 }
 
 /// Draws the strip, slid in, into `path` with the offscreen renderer (see
@@ -413,12 +566,12 @@ pub fn set_screen_override(frame: NSRect, visible: NSRect) {
 
 /// Receives captured thumbnails on the main thread.
 fn thumbnail_arrived(id: u32, picture: Picture) {
-    with_strip(|s| s.set_thumbnail(id, picture));
+    with_strips(|s| s.set_thumbnail(id, picture.clone()));
 }
 
 /// Receives full-size window snapshots (for transitions) on the main thread.
 fn snapshot_arrived(id: u32, picture: Picture) {
-    with_strip(|s| s.set_snapshot(id, picture));
+    with_strips(|s| s.set_snapshot(id, picture.clone()));
 }
 
 /// Shows `picture` in `layer`, which draws a window at `window` (its superlayer's
@@ -438,6 +591,7 @@ define_class!(
     #[unsafe(super = NSView)]
     #[thread_kind = MainThreadOnly]
     #[name = "SMStripView"]
+    #[ivars = Cell<u32>]
     pub struct StripView;
 
     // SAFETY: NSObjectProtocol has no safety requirements.
@@ -459,14 +613,14 @@ define_class!(
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.local_point(event);
             // Emit outside the borrow, as on release: the sink may call back into the strip.
-            if let Some(Some(e)) = with_strip(|s| s.mouse_down(p)) {
+            if let Some(Some(e)) = with_strip_of(self.strip(), |s| s.mouse_down(p)) {
                 strip_model::emit(e);
             }
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, _event: &NSEvent) {
-            with_strip(Strip::mouse_dragged);
+            with_strip_of(self.strip(), Strip::mouse_dragged);
         }
 
         #[unsafe(method(mouseUp:))]
@@ -474,7 +628,7 @@ define_class!(
             let p = self.local_point(event);
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
             // Emit outside the borrow: the sink may call back into the strip.
-            if let Some(Some(e)) = with_strip(|s| s.mouse_up(p, shift)) {
+            if let Some(Some(e)) = with_strip_of(self.strip(), |s| s.mouse_up(p, shift)) {
                 tracing::debug!(?e, "strip click");
                 strip_model::emit(e);
             }
@@ -483,27 +637,35 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.hover_at(Some(p)));
+            with_strip_of(self.strip(), |s| s.hover_at(Some(p)));
         }
 
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip(|s| s.hover_at(Some(p)));
+            with_strip_of(self.strip(), |s| s.hover_at(Some(p)));
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
-            with_strip(|s| s.hover_at(None));
+            with_strip_of(self.strip(), |s| s.hover_at(None));
         }
     }
 );
 
 impl StripView {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    /// A view of the strip keyed `strip` ([`with_strip_of`]): its events go to that strip.
+    fn new(mtm: MainThreadMarker, frame: NSRect, strip: u32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(strip));
         // SAFETY: NSView's designated initializer on a fresh instance.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// The key of the strip this view draws (the main display's, or another screen's; round
+    /// displays-live-1: every view's events went to the main display's strip, so a card
+    /// click on another screen's strip did nothing).
+    fn strip(&self) -> u32 {
+        self.ivars().get()
     }
 
     /// The event's location in view coordinates (top-left origin).
@@ -518,6 +680,7 @@ define_class!(
     #[unsafe(super = NSView)]
     #[thread_kind = MainThreadOnly]
     #[name = "SMEdgeTabView"]
+    #[ivars = Cell<u32>]
     pub struct EdgeTabView;
 
     // SAFETY: NSObjectProtocol has no safety requirements.
@@ -538,7 +701,7 @@ define_class!(
         // our own windows, and nothing is polled while the strip waits at the edge).
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
-            with_strip(Strip::update_visibility);
+            with_strip_of(self.ivars().get(), Strip::update_visibility);
         }
 
         // The tab acts on release, once the click is over: ordered out while its own click
@@ -546,16 +709,18 @@ define_class!(
         // (measured 10-12: gone for 60 ms, then listed again over the revealed strip).
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            DispatchQueue::main().exec_async(|| {
-                with_strip(Strip::tab_clicked);
+            let strip = self.ivars().get();
+            DispatchQueue::main().exec_async(move || {
+                with_strip_of(strip, Strip::tab_clicked);
             });
         }
     }
 );
 
 impl EdgeTabView {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    /// The tab of the strip keyed `strip` ([`with_strip_of`]): its events go to that strip.
+    fn new(mtm: MainThreadMarker, frame: NSRect, strip: u32) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(strip));
         // SAFETY: NSView's designated initializer on a fresh instance.
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
@@ -570,7 +735,7 @@ struct EdgeTab {
 }
 
 impl EdgeTab {
-    fn new(mtm: MainThreadMarker, frame: NSRect) -> Self {
+    fn new(mtm: MainThreadMarker, frame: NSRect, strip: u32) -> Self {
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
             frame,
@@ -590,7 +755,7 @@ impl EdgeTab {
         // SAFETY: the panel is owned by the tab for the life of the app.
         unsafe { panel.setReleasedWhenClosed(false) };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
-        let view = EdgeTabView::new(mtm, bounds);
+        let view = EdgeTabView::new(mtm, bounds, strip);
         let options =
             NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
         // SAFETY: the view owns the tracking area and outlives it; no user info.
@@ -665,19 +830,28 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn current(mtm: MainThreadMarker, style: &StripStyle) -> Self {
+    /// The geometry of `display`'s strip: [`strip_model::MAIN_STRIP`] is the first screen
+    /// (the main display's), else the screen with that id (the first when none has it).
+    fn for_display(mtm: MainThreadMarker, display: u32, style: &StripStyle) -> Self {
         let screens = NSScreen::screens(mtm);
-        let main = screens.firstObject();
-        let (frame, visible) = match &main {
+        let primary = screens.firstObject();
+        let screen = if display == strip_model::MAIN_STRIP {
+            primary.clone()
+        } else {
+            screens.iter().find(|s| crate::platform::desktop::screen_number(s) == Some(display)).or_else(|| primary.clone())
+        };
+        let (frame, visible) = match &screen {
             Some(s) => (s.frame(), s.visibleFrame()),
             None => {
                 let r = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0));
                 (r, r)
             }
         };
+        let primary_height = primary.map_or(frame.size.height, |p| p.frame().size.height);
         #[cfg(feature = "debug-render")]
         let (frame, visible) = SCREEN_OVERRIDE.with(|o| o.get()).unwrap_or((frame, visible));
-        let primary_height = frame.size.height;
+        #[cfg(feature = "debug-render")]
+        let primary_height = if display == strip_model::MAIN_STRIP { frame.size.height } else { primary_height };
         let size = Size::new(visible.size.width, visible.size.height);
         let k = length_scale(size, style);
         let top = primary_height - (visible.origin.y + visible.size.height);
@@ -967,14 +1141,15 @@ fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>,
     image.setOpacity(to_opacity);
 }
 
-/// A new picture of the wallpaper for the cards' glass, or none ([`card_glass`]): the strip
-/// shown repaints it.
-pub fn glass_changed() {
-    if with_strip(|s| s.repaint_glass()).is_none() {
+/// A new picture of the wallpaper for the cards' glass of `display`'s strip, or none
+/// ([`card_glass`]; `display` as the strip is keyed, [`strip_model::MAIN_STRIP`] for the
+/// main one): that strip repaints it.
+pub fn glass_changed(display: u32) {
+    if with_strip_of(display, |s| s.repaint_glass()).is_none() {
         // Busy (or not installed yet): once more shortly; a strip built later paints its own.
         let when = dispatch2::DispatchTime::try_from(Duration::from_millis(20)).unwrap_or(dispatch2::DispatchTime::NOW);
-        let _ = DispatchQueue::main().after(when, || {
-            let _ = with_strip(|s| s.repaint_glass());
+        let _ = DispatchQueue::main().after(when, move || {
+            let _ = with_strip_of(display, |s| s.repaint_glass());
         });
     }
 }
@@ -1205,8 +1380,9 @@ struct Pane {
 }
 
 impl Pane {
-    /// A new pane (not ordered in, so not on any Desktop yet), sized for `geometry`.
-    fn new(mtm: MainThreadMarker, geometry: &Geometry) -> Self {
+    /// A new pane of the strip keyed `strip` (not ordered in, so not on any Desktop yet),
+    /// sized for `geometry`.
+    fn new(mtm: MainThreadMarker, geometry: &Geometry, strip: u32) -> Self {
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -1229,7 +1405,7 @@ impl Pane {
         unsafe { panel.setReleasedWhenClosed(false) };
 
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), geometry.panel.size);
-        let view = StripView::new(mtm, bounds);
+        let view = StripView::new(mtm, bounds, strip);
         let root = CALayer::new();
         root.setGeometryFlipped(true);
         // Layer-hosting: set the layer before turning layers on.
@@ -1248,7 +1424,7 @@ impl Pane {
 
         let cards_root = CALayer::new();
         root.addSublayer(&cards_root);
-        let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()));
+        let tab = EdgeTab::new(mtm, geometry.cocoa(geometry.tab()), strip);
         Self {
             panel,
             view,
@@ -1303,6 +1479,9 @@ impl Drop for EdgeTab {
 
 struct Strip {
     mtm: MainThreadMarker,
+    /// The display this strip is on: [`strip_model::MAIN_STRIP`] for the main display's
+    /// (the first screen), else the display's id (round displays).
+    display: u32,
     /// The pane of the Desktop shown (or last shown, on a full-screen app's Space).
     pane: Pane,
     /// Other Desktops' panes, each on its own Desktop with the cards it had when left.
@@ -1353,14 +1532,15 @@ struct Strip {
 }
 
 impl Strip {
-    fn new(mtm: MainThreadMarker, interval: Duration) -> Self {
+    fn new(mtm: MainThreadMarker, interval: Duration, display: u32) -> Self {
         let style = Arc::new(StripStyle::default());
-        let geometry = Geometry::current(mtm, &style);
-        let pane = Pane::new(mtm, &geometry);
+        let geometry = Geometry::for_display(mtm, display, &style);
+        let pane = Pane::new(mtm, &geometry, display);
         let scale = pane.panel.backingScaleFactor();
         let capturer = Capturer::start(interval, thumbnail_arrived);
         let mut strip = Self {
             mtm,
+            display,
             pane,
             others: Vec::new(),
             style,
@@ -1388,7 +1568,7 @@ impl Strip {
             drop_before: None,
             announced: false,
             space_epoch: 0,
-            motion: motion::Motion::new(mtm),
+            motion: motion::Motion::new(mtm, display),
         };
         strip.apply_geometry();
         strip.slide(false, false);
@@ -1465,8 +1645,8 @@ impl Strip {
             // (the strip was built with the defaults, so `hide_delay_ms` never applied).
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
-        card_glass::set_wanted(self.glass().on());
-        let geometry = Geometry::current(self.mtm, &self.style);
+        card_glass::set_wanted(self.display, self.glass().on());
+        let geometry = Geometry::for_display(self.mtm, self.display, &self.style);
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
             self.geometry = geometry;
@@ -1538,10 +1718,10 @@ impl Strip {
                 self.order_in();
                 // Ordered in for the first time while the Space still slides, a new pane
                 // could land on the Desktop being left: look again once the slide is over.
-                let epoch = self.space_epoch;
+                let (epoch, display) = (self.space_epoch, self.display);
                 for seconds in REHOME_CHECKS {
                     let _once = motion::after(seconds, move || {
-                        with_strip(|s| s.ensure_on_active_space(epoch));
+                        with_strip_of(display, |s| s.ensure_on_active_space(epoch));
                     });
                 }
             }
@@ -1629,7 +1809,7 @@ impl Strip {
         } else if let Some(i) = self.others.iter().position(|p| !p.placed) {
             self.others.swap_remove(i)
         } else {
-            let mut pane = Pane::new(self.mtm, &self.geometry);
+            let mut pane = Pane::new(self.mtm, &self.geometry, self.display);
             pane.shown = self.pane.shown;
             pane
         };
@@ -1675,7 +1855,7 @@ impl Strip {
         self.others.retain(|p| !p.on_space_shown());
         let mut gone = before - self.others.len();
         if self.pane.on_space_shown() {
-            let fresh = Pane::new(self.mtm, &self.geometry);
+            let fresh = Pane::new(self.mtm, &self.geometry, self.display);
             drop(std::mem::replace(&mut self.pane, fresh));
             self.layouts.clear();
             gone += 1;
@@ -1970,7 +2150,7 @@ impl Strip {
         } else {
             Vec::new()
         };
-        strip_model::publish_cards(frames);
+        strip_model::publish_cards(self.display, frames);
     }
 
     /// The transform of a card's container (anchored at the eye): a scale about the card's
@@ -2106,7 +2286,7 @@ impl Strip {
         if !glass.on() {
             return None;
         }
-        let shown = card_glass::current()?;
+        let shown = card_glass::current(self.display)?;
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
@@ -2345,6 +2525,7 @@ impl Strip {
             ghost.set_image(&picture);
         }
         self.thumbs.insert(id, picture);
+        strip_model::publish_pictures(self.display, self.thumbs.keys().copied());
     }
 
     /// Tells the capturer what to capture: every shown thumbnail while the strip shows.
@@ -2360,6 +2541,7 @@ impl Strip {
             let dropped: Vec<u32> = self.thumbs.keys().copied().filter(|id| !shown_ids.contains(id)).collect();
             tracing::debug!(?dropped, "strip: pictures of windows no card shows now are let go");
             self.thumbs.retain(|id, _| shown_ids.contains(id));
+            strip_model::publish_pictures(self.display, self.thumbs.keys().copied());
         }
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
         let targets = if self.pane.shown {
@@ -2440,9 +2622,9 @@ impl Strip {
         if let Some(t) = timer.take() {
             t.invalidate();
         }
-        let stage = *stage;
+        let (stage, display) = (*stage, self.display);
         let t = motion::after(settle, move || {
-            with_strip(|s| {
+            with_strip_of(display, |s| {
                 if s.lifted_card.as_ref().is_some_and(|l| l.0 == stage && l.1.is_some()) {
                     s.lifted_card = None;
                     s.set_card_z(stage, 0.0);
@@ -2687,21 +2869,21 @@ impl Strip {
         }
         // The card stays pressed until its transition takes it (the incoming snapshots grow
         // from it as drawn); if none comes, it lets go.
-        Self::release_squeeze_later(pressed);
+        Self::release_squeeze_later(self.display, pressed);
         Some(self.click_event(pressed, p, shift))
     }
 
     /// In [`SQUEEZE_MAX`]: a released card still drawn pressed lets go, unless a transition
     /// holds it (then it is looked at again after as long, so one that a later transition
     /// took never stays pressed: R3 6). A new press of any card ends the watch.
-    fn release_squeeze_later(stage: u64) {
+    fn release_squeeze_later(display: u32, stage: u64) {
         let _once = motion::after(SQUEEZE_MAX, move || {
-            with_strip(|s| {
+            with_strip_of(display, |s| {
                 if s.squeezed != Some(stage) || s.pressed.is_some() {
                     return;
                 }
                 if s.motion.holds(stage) {
-                    Self::release_squeeze_later(stage);
+                    Self::release_squeeze_later(display, stage);
                 } else {
                     s.squeeze(None);
                 }
@@ -2807,6 +2989,7 @@ impl Strip {
     /// the cards hover from here and the pane catches clicks again once it is on one.
     fn pointer_moved(&mut self, p: Point) {
         let g = self.geometry.global;
+        self.visibility.set_screen_left(self.geometry.screen.origin.x);
         // Hidden at the edge, nothing polled: a move to the edge or the tab starts the rest.
         if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
             self.update_visibility();
@@ -2889,11 +3072,12 @@ impl Strip {
         self.geometry.global_point(NSEvent::mouseLocation())
     }
 
-    /// True when the strip is on but a window of the active stage covers it.
+    /// True when the strip is on but a window of the active stage at the screen's left edge
+    /// hides it ([`strip_visibility::hides_strip`]).
     fn covered(&self) -> bool {
         self.snapshot.user_visible
             && !self.snapshot.hide_recent_apps
-            && strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global)
+            && strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global)
     }
 
     /// A click on the edge tab reveals the strip at once (on release).
@@ -2934,7 +3118,7 @@ impl Strip {
         // left (the review's U9): a new one takes over (the stray one closes) and shows here.
         if self.pane.tab.shown && !self.pane.tab.panel.isOnActiveSpace() {
             tracing::info!("strip: the edge tab is not on the Space shown; a new one takes over");
-            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()));
+            self.pane.tab = EdgeTab::new(self.mtm, self.geometry.cocoa(self.geometry.tab()), self.display);
             self.update_visibility();
         }
         self.publish_panel();
@@ -2946,25 +3130,30 @@ impl Strip {
         self.motion.space_changed(self.mtm);
     }
 
-    /// Publishes the panes' state for `ctl state` ([`strip_model::panel_status`]).
+    /// Publishes the panes' state for `ctl state` ([`strip_model::panel_status_of`]): every
+    /// display's strip's, by the strip's display key (round displays-2).
     fn publish_panel(&self) {
-        strip_model::publish_panel_status(strip_model::PanelStatus {
-            shown: self.pane.shown,
-            lifted: self.pane.lifted.unwrap_or(false),
-            ordered_in: self.pane.panel.isVisible(),
-            on_active_space: self.pane.panel.isOnActiveSpace(),
-            frame: self.geometry.global,
-            space: self.snapshot.space,
-            window: u32::try_from(self.pane.panel.windowNumber()).unwrap_or(0),
-        });
+        strip_model::publish_panel_status(
+            self.display,
+            strip_model::PanelStatus {
+                shown: self.pane.shown,
+                lifted: self.pane.lifted.unwrap_or(false),
+                ordered_in: self.pane.panel.isVisible(),
+                on_active_space: self.pane.panel.isOnActiveSpace(),
+                frame: self.geometry.global,
+                space: self.snapshot.space,
+                window: u32::try_from(self.pane.panel.windowNumber()).unwrap_or(0),
+            },
+        );
         let panes = std::iter::once(self.pane.status(true)).chain(self.others.iter().map(|p| p.status(false))).collect();
-        strip_model::publish_pane_statuses(panes);
+        strip_model::publish_pane_statuses(self.display, panes);
     }
 
     fn update_visibility(&mut self) {
-        let overlapped = strip_visibility::overlaps(&self.snapshot.active_frames, &self.geometry.global);
-        let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, overlapped);
+        let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global);
+        let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, covered);
         self.visibility.set_tab(self.pane.tab.shown.then(|| self.geometry.tab()));
+        self.visibility.set_screen_left(self.geometry.screen.origin.x);
         let window_drag = self.snapshot.window_drag.is_some();
         let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
@@ -3070,8 +3259,9 @@ impl Strip {
     fn set_polling(&mut self, on: bool) {
         match (on, self.poll_timer.is_some()) {
             (true, false) => {
-                let tick = RcBlock::new(|_t: NonNull<NSTimer>| {
-                    with_strip(Strip::update_visibility);
+                let display = self.display;
+                let tick = RcBlock::new(move |_t: NonNull<NSTimer>| {
+                    with_strip_of(display, Strip::update_visibility);
                 });
                 let seconds = (self.style.reveal.poll_ms.max(10) as f64) / 1000.0;
                 // SAFETY: the block runs on the main run loop only.
@@ -3111,6 +3301,44 @@ mod tests {
     thread_local! {
         static SEEN: RefCell<Option<Vec<u32>>> = const { RefCell::new(Some(Vec::new())) };
         static QUEUE: RefCell<VecDeque<u32>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    thread_local! {
+        static SCREENS: RefCell<BTreeMap<u32, Vec<&'static str>>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    /// Round displays-lid-2: a snapshot for a screen no longer connected (sent before the
+    /// window-manager thread heard the lid close) makes no strip; the main strip's always draws.
+    #[test]
+    fn a_snapshot_for_a_screen_gone_makes_no_strip() {
+        let (studio, laptop) = (4, 1);
+        assert!(draws_strip_for(None, laptop), "before the first report every strip draws");
+        assert!(draws_strip_for(Some(&[studio, laptop]), laptop));
+        assert!(!draws_strip_for(Some(&[studio]), laptop), "the lid closed: no strip for the laptop");
+        assert!(draws_strip_for(Some(&[studio]), strip_model::MAIN_STRIP));
+        assert!(draws_strip_for(Some(&[studio, laptop]), laptop), "the lid opened: the laptop's strip again");
+    }
+
+    /// Round displays-live-1: an event keyed by another screen's strip reaches that strip
+    /// alone (a card click on the second screen went to the main display's strip and did
+    /// nothing); the main display's key never names another screen's strip.
+    #[test]
+    fn an_event_keyed_by_another_screen_reaches_that_screens_strip() {
+        SCREENS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.insert(1, Vec::new());
+            s.insert(7, Vec::new());
+        });
+        assert_eq!(with_other(&SCREENS, 1, |s| s.push("card click")), Some(()));
+        assert_eq!(SCREENS.with(|s| s.borrow().clone()), BTreeMap::from([(1, vec!["card click"]), (7, Vec::new())]));
+        assert_eq!(with_other(&SCREENS, 3, |s| s.push("hover")), None, "no strip on that screen: nothing");
+        let busy = SCREENS.with(|s| {
+            let _held = s.borrow_mut();
+            with_other(&SCREENS, 7, |s| s.push("timer"))
+        });
+        assert_eq!(busy, None, "borrowed: dropped, never sent to another strip");
+        assert!(is_main_display(strip_model::MAIN_STRIP), "the main display's views carry MAIN_STRIP");
+        assert!(!is_main_display(1) && !is_main_display(7), "another screen's key is never the main strip's");
     }
 
     /// U7: an item that finds the receiver borrowed waits, and goes before the next one once

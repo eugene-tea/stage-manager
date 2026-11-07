@@ -14,6 +14,7 @@
 //! so, [`StripSnapshot::parked`], so theirs start shrinking), and incoming ones are held
 //! until the strip says their growing snapshots cover their frames ([`StripEvent::Unveil`]).
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,8 +37,9 @@ pub struct StripSnapshot {
     pub user_visible: bool,
     /// How the strip looks and moves (config; changes apply live).
     pub style: Arc<StripStyle>,
-    /// Frames of the active stage's onscreen windows, for auto-hide when one overlaps the
-    /// strip area (a window being dragged is left out).
+    /// Frames of the active stage's onscreen windows, for auto-hide when one reaches the
+    /// screen's left edge over the strip ([`crate::ui::strip_visibility::hides_strip`]; a
+    /// window being dragged is left out).
     pub active_frames: Vec<Rect>,
     /// A managed window is being dragged by its title bar: the strip reveals itself while the
     /// pointer is over the strip area and shows a drop target (a placeholder card sized
@@ -54,6 +56,9 @@ pub struct StripSnapshot {
     /// has its own strip: when it changes, the strip drops the old cards at once and shows
     /// itself on the Space now shown.
     pub space: u64,
+    /// The display whose strip this is (its `CGDirectDisplayID`; 0: the main display).
+    /// Every display has a strip of its own (round displays).
+    pub display: u32,
     /// The shown Space is a full-screen app's: no strip there.
     pub fullscreen: bool,
     /// The active stage's standard windows, front to back, at their live frames: the strip
@@ -353,41 +358,92 @@ pub fn emit(event: StripEvent) {
 // ---------------------------------------------------------------------------------------
 // Where the cards are (for `ctl state` and scripted tests)
 
-fn card_frames() -> &'static Mutex<Vec<(u64, Rect)>> {
-    static F: OnceLock<Mutex<Vec<(u64, Rect)>>> = OnceLock::new();
-    F.get_or_init(|| Mutex::new(Vec::new()))
+/// The display id the main display's strip publishes under (it is the first screen,
+/// whatever that screen's id).
+pub const MAIN_STRIP: u32 = 0;
+
+/// Each display's cards (stage id, global bounds), by the display they were published under.
+type CardFrames = BTreeMap<u32, Vec<(u64, Rect)>>;
+
+fn card_frames() -> &'static Mutex<CardFrames> {
+    static F: OnceLock<Mutex<CardFrames>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// The strip publishes its cards' frames (stage id, global bounds, top to bottom; empty
-/// while it is hidden) after every layout (main thread).
-pub fn publish_cards(frames: Vec<(u64, Rect)>) {
+/// A display's strip publishes its cards' frames (stage id, global bounds, top to bottom;
+/// empty while it is hidden) after every layout (main thread). `display`: [`MAIN_STRIP`]
+/// for the main display's strip, else the display's id (round displays).
+pub fn publish_cards(display: u32, frames: Vec<(u64, Rect)>) {
     if let Ok(mut f) = card_frames().lock() {
-        *f = frames;
+        f.insert(display, frames);
     }
 }
 
-/// The cards' frames last published (any thread).
+/// The main display's cards' frames last published (any thread).
 pub fn published_cards() -> Vec<(u64, Rect)> {
-    card_frames().lock().map(|f| f.clone()).unwrap_or_default()
+    published_cards_of(MAIN_STRIP)
 }
 
-fn snapshot_ids() -> &'static Mutex<std::collections::HashSet<u32>> {
-    static S: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+/// Every strip's cards' frames last published, every screen's (any thread): a synthetic
+/// press is safe on any of them (round displays-live-1: the test's click on the second
+/// screen's card was refused, its pane counted click-through as off the main strip's cards).
+pub fn every_published_card() -> Vec<(u64, Rect)> {
+    card_frames().lock().map(|f| f.values().flatten().copied().collect()).unwrap_or_default()
 }
 
-/// The strip publishes the windows it holds a full-size snapshot of (main thread, whenever
-/// its snapshot cache changes).
-pub fn publish_snapshots(ids: impl IntoIterator<Item = u32>) {
-    if let Ok(mut s) = snapshot_ids().lock() {
-        *s = ids.into_iter().collect();
+/// The cards' frames a display's strip last published (any thread; [`publish_cards`]).
+pub fn published_cards_of(display: u32) -> Vec<(u64, Rect)> {
+    card_frames().lock().ok().and_then(|f| f.get(&display).cloned()).unwrap_or_default()
+}
+
+/// Forgets the cards of displays no longer there (`kept`: the strips still up).
+pub fn retain_cards_of(kept: &[u32]) {
+    if let Ok(mut f) = card_frames().lock() {
+        f.retain(|d, _| kept.contains(d));
     }
 }
 
-/// Whether the strip holds a full-size snapshot of window `id` (any thread): a switch's cover
+/// Each display's strip's full-size snapshots (window ids), by display.
+type SnapshotIds = BTreeMap<u32, std::collections::HashSet<u32>>;
+
+fn snapshot_ids() -> &'static Mutex<SnapshotIds> {
+    static S: OnceLock<Mutex<SnapshotIds>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A display's strip publishes the windows it holds a full-size snapshot of (main thread,
+/// whenever its snapshot cache changes; `display` as [`publish_cards`]).
+pub fn publish_snapshots(display: u32, ids: impl IntoIterator<Item = u32>) {
+    if let Ok(mut s) = snapshot_ids().lock() {
+        s.insert(display, ids.into_iter().collect());
+    }
+}
+
+/// Whether a strip holds a full-size snapshot of window `id` (any thread): a switch's cover
 /// can draw a window that stays shown into the park corner from it (round 8L5).
 pub fn has_snapshot(id: u32) -> bool {
-    snapshot_ids().lock().is_ok_and(|s| s.contains(&id))
+    snapshot_ids().lock().is_ok_and(|s| s.values().any(|ids| ids.contains(&id)))
+}
+
+fn picture_ids() -> &'static Mutex<SnapshotIds> {
+    static S: OnceLock<Mutex<SnapshotIds>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A display's strip publishes the windows whose thumbnail it holds and draws on its cards
+/// (main thread, whenever one arrives or goes; `display` as [`publish_cards`]): `ctl state`
+/// lists them per screen (round displays-2).
+pub fn publish_pictures(display: u32, ids: impl IntoIterator<Item = u32>) {
+    if let Ok(mut s) = picture_ids().lock() {
+        s.insert(display, ids.into_iter().collect());
+    }
+}
+
+/// The windows `display`'s strip holds a thumbnail of (any thread), sorted.
+pub fn pictures_of(display: u32) -> Vec<u32> {
+    let mut ids: Vec<u32> = picture_ids().lock().ok().and_then(|s| s.get(&display).map(|i| i.iter().copied().collect())).unwrap_or_default();
+    ids.sort_unstable();
+    ids
 }
 
 /// The strip panel's state as the window server and AppKit see it, for `ctl state` and the
@@ -411,21 +467,39 @@ pub struct PanelStatus {
     pub window: u32,
 }
 
-fn panel_status_slot() -> &'static Mutex<PanelStatus> {
-    static S: OnceLock<Mutex<PanelStatus>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(PanelStatus::default()))
+fn panel_status_slot() -> &'static Mutex<BTreeMap<u32, PanelStatus>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, PanelStatus>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// The strip publishes its panel's state after every change (main thread).
-pub fn publish_panel_status(status: PanelStatus) {
+/// A strip publishes its panel's state after every change (main thread); `display` as the
+/// strip is keyed ([`MAIN_STRIP`] for the main display's; round displays-2).
+pub fn publish_panel_status(display: u32, status: PanelStatus) {
     if let Ok(mut s) = panel_status_slot().lock() {
-        *s = status;
+        s.insert(display, status);
     }
 }
 
-/// The panel's state last published (any thread).
+/// The main display's strip panel's state last published (any thread).
 pub fn panel_status() -> PanelStatus {
-    panel_status_slot().lock().map(|s| *s).unwrap_or_default()
+    panel_status_of(MAIN_STRIP)
+}
+
+/// `display`'s strip panel's state last published (any thread; [`MAIN_STRIP`] or the main
+/// display's own id for the main one, which publishes as [`MAIN_STRIP`]).
+pub fn panel_status_of(display: u32) -> PanelStatus {
+    panel_status_slot().lock().ok().and_then(|s| s.get(&display).copied()).unwrap_or_default()
+}
+
+/// The strips of displays gone forget their statuses (`kept`: the strips' display keys
+/// still there).
+pub fn retain_panel_statuses_of(kept: &[u32]) {
+    if let Ok(mut s) = panel_status_slot().lock() {
+        s.retain(|d, _| kept.contains(d));
+    }
+    if let Ok(mut s) = pane_status_slot().lock() {
+        s.retain(|d, _| kept.contains(d));
+    }
 }
 
 /// One Desktop's strip panel (the strip keeps one per Desktop visited), for `ctl state`.
@@ -446,21 +520,27 @@ pub struct PaneStatus {
     pub behavior: usize,
 }
 
-fn pane_status_slot() -> &'static Mutex<Vec<PaneStatus>> {
-    static S: OnceLock<Mutex<Vec<PaneStatus>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Vec::new()))
+fn pane_status_slot() -> &'static Mutex<BTreeMap<u32, Vec<PaneStatus>>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, Vec<PaneStatus>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// The strip publishes every pane's state, the active one first (main thread).
-pub fn publish_pane_statuses(panes: Vec<PaneStatus>) {
+/// A strip publishes every pane's state, the active one first (main thread); `display` as
+/// the strip is keyed.
+pub fn publish_pane_statuses(display: u32, panes: Vec<PaneStatus>) {
     if let Ok(mut s) = pane_status_slot().lock() {
-        *s = panes;
+        s.insert(display, panes);
     }
 }
 
-/// Every pane's state last published, the active one first (any thread).
+/// The main display's strip's panes' state last published (any thread).
 pub fn pane_statuses() -> Vec<PaneStatus> {
-    pane_status_slot().lock().map(|s| s.clone()).unwrap_or_default()
+    pane_statuses_of(MAIN_STRIP)
+}
+
+/// `display`'s strip's panes' state last published (any thread).
+pub fn pane_statuses_of(display: u32) -> Vec<PaneStatus> {
+    pane_status_slot().lock().ok().and_then(|s| s.get(&display).cloned()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -618,6 +698,18 @@ pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round displays-live-1: a card on another screen's strip is among every strip's cards
+    /// (the synthetic click's safety check), and the main strip's own list stays its own.
+    #[test]
+    fn every_screens_cards_count_for_a_press() {
+        let other = Rect::new(-1780.0, 830.0, 80.0, 98.0);
+        publish_cards(9_101, vec![(4, other)]);
+        assert!(every_published_card().contains(&(4, other)));
+        assert!(!published_cards().contains(&(4, other)), "the main strip's cards are its own");
+        publish_cards(9_101, Vec::new());
+        assert!(!every_published_card().contains(&(4, other)), "a strip hidden publishes none");
+    }
 
     /// A late window shown at the unhide, then active at its app's activation, in one note
     /// or two; a newer transition's note replaces an older one's.

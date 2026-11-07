@@ -30,7 +30,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -46,8 +46,10 @@ use super::controller::Controller;
 use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
+use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
+use super::observe_probe;
 use super::{enhanced_ui, safety};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
@@ -102,13 +104,14 @@ pub enum WmCommand {
     Apps(Vec<AppInfo>),
     /// A workspace event.
     App(AppEvent),
-    /// Accessibility trust changed: start or stop observation. The first grant runs the
-    /// recovery scan before observation starts.
+    /// Accessibility trust changed: start or stop observation. The first grant starts the
+    /// recovery scan: each app is observed once its windows are back ([`launch_scan`]).
     Accessibility(bool),
     /// Fresh `com.apple.WindowManager` values.
     NativeSettings(RawSettings),
-    /// The main display (first) and its visible frame, top-left coordinates.
-    Displays(Vec<Display>),
+    /// Every display (the main one first), top-left coordinates, and when the main thread
+    /// heard the change (AppKit's screen-parameters notice, or the poll).
+    Displays(Vec<Display>, Instant),
     /// Global input in another app (left mouse down/up, key down); for a mouse-up over the
     /// visible strip, the slot a window dropped there goes to.
     Input(InputEvent, Option<StripDrop>),
@@ -120,8 +123,6 @@ pub enum WmCommand {
     SpaceChanged,
     /// Show or hide the strip.
     ToggleStrip,
-    /// The desktop notice's menu: a listed window brought forward, or the list dismissed.
-    Notice(super::controller::NoticeCommand),
     /// Re-read config.toml.
     ReloadConfig,
     /// A ctl command for the engine; the reply is one JSON value.
@@ -133,6 +134,11 @@ pub enum WmCommand {
     /// A logout signal (its name, what it says, when the main thread got it): the first starts
     /// the head start ([`logout_plan`], no quit), a cancel resumes ([`Logout::signal`]).
     LogoutSignal(String, Signal, Instant),
+    /// An app that did not answer Accessibility answers now, or was given up
+    /// ([`super::observe_probe`]).
+    Probe(observe_probe::Note),
+    /// The launch's recovery scan read an app after observation's start ([`launch_scan`]).
+    LaunchScan(launch_scan::Done<launch_scan::Read>),
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -156,6 +162,15 @@ pub struct WmHandle {
 /// may take. Back to 0 when the logout is cancelled.
 static LOGOUT_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 
+/// Set when the quit came while the logout's head start held (round logout-cancel-relaunch):
+/// the guardian then waits for the logout's cancel.
+static QUIT_AFTER_HEAD_START: AtomicBool = AtomicBool::new(false);
+
+/// Whether the quit came while the logout's head start held.
+pub fn quit_after_head_start() -> bool {
+    QUIT_AFTER_HEAD_START.load(Ordering::SeqCst)
+}
+
 /// How many windows were parked when the logout now held was announced (0: none held).
 pub fn logout_windows() -> usize {
     LOGOUT_WINDOWS.load(Ordering::SeqCst)
@@ -176,13 +191,16 @@ impl WmHandle {
     pub fn spawn() -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel::<WmCommand>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<RemoteRunLoop>(1);
+        let probe_tx = tx.clone();
         std::thread::Builder::new().name("wm".into()).spawn(move || {
             let Some(run_loop) = CFRunLoop::current() else {
                 tracing::error!("WM thread has no run loop");
                 return;
             };
             let _ = ready_tx.send(RemoteRunLoop(run_loop.clone()));
-            run(rx, &run_loop);
+            // The probes of apps that do not answer yet post their notes to this thread.
+            let own = WmHandle { tx: probe_tx, run_loop: Arc::new(RemoteRunLoop(run_loop.clone())) };
+            run(rx, &run_loop, own);
         })?;
         let run_loop = ready_rx
             .recv_timeout(Duration::from_secs(5))
@@ -252,6 +270,10 @@ struct WmState {
     logout: Logout,
     /// The windows taken from an old guardian (round 8N), watched until each is back.
     taken: TakenWatch,
+    /// The launch's recovery scan while apps are still read ([`launch_scan`]).
+    launch_scan: Option<launch_scan::Run>,
+    /// This thread's own handle: the launch scan's late reads come back through it.
+    own: WmHandle,
 }
 
 thread_local! {
@@ -335,7 +357,8 @@ unsafe extern "C-unwind" fn ax_callback(
 }
 
 impl WmState {
-    /// Hands the observer's events to the controller.
+    /// Hands the observer's events to the controller; then the retry cadence of apps that do
+    /// not answer yet follows the restore window (fast while it is open).
     fn pump(&mut self) {
         loop {
             let events = self.observer.take_events();
@@ -344,11 +367,12 @@ impl WmState {
             }
             self.controller.on_events(&mut self.observer, events);
         }
+        self.observer.set_fast_retry(self.controller.restore_window_open());
     }
 
     fn handle(&mut self, cmd: WmCommand) {
         match cmd {
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip | WmCommand::Notice(_)
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.logout.admits(Work::Input) =>
             {
                 tracing::debug!("a logout is coming: input ignored");
@@ -361,6 +385,7 @@ impl WmState {
                 // The head start did the work: nothing is unparked or saved again (the
                 // controller is a fresh one with no stages; saving it would write none).
                 let Quit::Done { all_back } = self.logout.quit() else { return };
+                QUIT_AFTER_HEAD_START.store(true, Ordering::SeqCst);
                 // Windows it could not bring back (another Desktop's) are tried once more,
                 // knowing what its check knew, as the quit after a stand-down does.
                 let back = if self.stand_down.stranded() {
@@ -382,25 +407,19 @@ impl WmState {
                 return;
             }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
-            WmCommand::App(event) => self.observer.on_app_event(event, ax_callback),
+            WmCommand::App(event) => {
+                // An app quitting during a logout's hold: the logout is still under way.
+                if matches!(event, AppEvent::Terminated(_)) {
+                    self.logout.app_quit(Instant::now());
+                }
+                self.observer.on_app_event(event, ax_callback)
+            }
+            WmCommand::Probe(note) => self.observer.on_probe(note, ax_callback),
+            WmCommand::LaunchScan(done) => self.launch_scanned(done),
             WmCommand::Accessibility(trusted) => {
                 if trusted && !self.scanned {
                     self.scanned = true;
-                    // A crashed copy's parked file has the exact frames of the windows it parked
-                    // (S4): the scan uses them first, as its guardian does.
-                    let scope = safety::ScanScope { registered: safety::crashed_registered(), ..safety::ScanScope::default() };
-                    let (r, unanswered) = safety::recovery_scan_with("launch", &scope);
-                    if r.restored > 0 {
-                        tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
-                    }
-                    if !unanswered.is_empty() {
-                        tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
-                        // Their episodes start here: the rescans log only their ends (8M).
-                        for &pid in &unanswered {
-                            self.rescan_unanswered.missed(pid, Instant::now());
-                        }
-                        self.rescan.unanswered(unanswered, Why::Launch, Instant::now());
-                    }
+                    self.start_launch_scan();
                 }
                 self.trusted = trusted;
                 if (self.stand_down.admits(Work::Observe) && self.logout.admits(Work::Observe)) || !trusted {
@@ -427,19 +446,19 @@ impl WmState {
                     }
                 }
             }
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip | WmCommand::Notice(_)
+            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.stand_down.admits(Work::Input) =>
             {
                 tracing::debug!("Apple's Stage Manager is on: input ignored");
             }
             WmCommand::SpaceChanged if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
-            WmCommand::Displays(displays) => {
+            WmCommand::Displays(displays, heard) => {
                 let moved = self.displays.as_ref().and_then(|d| d.first()).map(|d| d.frame) != displays.first().map(|d| d.frame);
                 if moved && self.displays.is_some() {
                     self.display_sweep = Some(Instant::now() + DISPLAY_SWEEP_AFTER);
                 }
                 self.displays = Some(displays.clone());
-                self.controller.set_displays(&mut self.observer, displays);
+                self.controller.set_displays(&mut self.observer, displays, heard);
             }
             // Without Accessibility no window can move: a stage change now would leave the
             // model out of step with the screen (its parked windows unregistered), so the
@@ -458,9 +477,6 @@ impl WmState {
                 self.controller.on_space_changed(&mut self.observer);
             }
             WmCommand::ToggleStrip => self.controller.toggle_strip(),
-            WmCommand::Notice(cmd) => {
-                self.controller.notice_command(&mut self.observer, cmd);
-            }
             WmCommand::ReloadConfig => self.controller.reload_config(&mut self.observer),
             WmCommand::Ctl(cmd, reply) => {
                 let value = self.controller.ctl(&mut self.observer, cmd);
@@ -504,6 +520,84 @@ impl WmState {
         }
     }
 
+    /// The launch's recovery scan (S4; the 1.7 review, L1): every app with a window is read on
+    /// a thread of its own, for [`launch_scan::SCAN_WAIT`] at most; those read by then have
+    /// their windows a crashed copy left in the park zone brought back now, and are observed
+    /// at observation's start. Each one read later is held from observation until then
+    /// ([`Observer::hold_for_scan`]): one slow app holds up no other.
+    fn start_launch_scan(&mut self) {
+        let apps = safety::scan_targets();
+        let pids: Vec<i32> = apps.iter().map(|(pid, _)| *pid).collect();
+        self.launch_scan = Some(launch_scan::Run::new(pids.iter().copied()));
+        self.observer.hold_for_scan(pids);
+        let own = self.own.clone();
+        let (done, not_started) = launch_scan::read_all(apps, launch_scan::read, launch_scan::SCAN_WAIT, move |d| {
+            own.send(WmCommand::LaunchScan(d));
+        });
+        for d in done {
+            self.launch_scanned(d);
+        }
+        // An app whose thread did not start is read here, as every app used to be.
+        for (pid, bundle) in not_started {
+            let t0 = Instant::now();
+            let value = Some(launch_scan::read(pid, bundle.as_deref()));
+            self.launch_scanned(launch_scan::Done { pid, bundle, value, took: t0.elapsed() });
+        }
+        match &self.launch_scan {
+            // No app to read.
+            Some(run) if run.finished() => self.end_launch_scan(),
+            Some(run) => tracing::info!(waiting = run.waiting(), "launch scan: apps not read yet are observed once they are"),
+            None => {}
+        }
+    }
+
+    /// The launch scan read one app: its windows in the park zone come back now; then it is
+    /// observed (if observation wants it), or asked again on the schedule and scanned again
+    /// for a while when it did not answer. The last app read ends the scan with its summary.
+    fn launch_scanned(&mut self, done: launch_scan::Done<launch_scan::Read>) {
+        let pid = done.pid;
+        let Some(run) = self.launch_scan.as_mut() else {
+            self.observer.scan_done(pid, false, ax_callback);
+            return;
+        };
+        let answered = run.apply(done);
+        let finished = run.finished();
+        if !answered {
+            let now = Instant::now();
+            // Its episode starts here: the rescans log only its end (8M).
+            self.rescan_unanswered.missed(pid, now);
+            self.rescan.unanswered([pid], Why::Launch, now);
+        }
+        self.observer.scan_done(pid, answered, ax_callback);
+        if finished {
+            self.end_launch_scan();
+        }
+    }
+
+    /// Every app was read: the scan's summary.
+    fn end_launch_scan(&mut self) {
+        let Some(run) = self.launch_scan.take() else { return };
+        let (r, unanswered) = run.finish();
+        if r.restored > 0 {
+            tracing::warn!(restored = r.restored, "windows left parked by an earlier run were brought back");
+        }
+        if !unanswered.is_empty() {
+            tracing::info!(apps = ?unanswered, "apps that did not answer the recovery scan are scanned again for a while");
+        }
+    }
+
+    /// An app whose launch-scan read takes [`launch_scan::HOLD_MAX`] is observed without it
+    /// (its windows still come back when the read ends).
+    fn release_overdue_scans(&mut self) {
+        if self.launch_scan.is_none() {
+            return;
+        }
+        for pid in self.observer.scan_overdue(Instant::now(), launch_scan::HOLD_MAX) {
+            tracing::warn!(pid, "launch scan: the app's read takes long; it is observed without waiting for it");
+            self.observer.scan_done(pid, false, ax_callback);
+        }
+    }
+
     /// Apple's Stage Manager came on: carries out [`release_plan`].
     fn release(&mut self) {
         tracing::warn!("Apple's Stage Manager is on: standing down (every window back, no strip, nothing arranged)");
@@ -536,7 +630,7 @@ impl WmState {
                 Task::NewController => self.controller = Controller::new(),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.controller.set_displays(&mut self.observer, d);
+                        self.controller.set_displays(&mut self.observer, d, Instant::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -607,7 +701,7 @@ impl WmState {
                 Task::NewController => self.controller = Controller::new(),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.controller.set_displays(&mut self.observer, d);
+                        self.controller.set_displays(&mut self.observer, d, Instant::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -618,7 +712,7 @@ impl WmState {
                 Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(|| {
                     crate::ui::strip::stand_down("a logout, restart or shutdown is coming");
                     if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
-                        crate::ui::corner_patch::apply(mtm, crate::ui::corner_patch::PatchPlan::default());
+                        crate::ui::corner_patch::stand_down(mtm);
                     }
                 }),
                 Task::DropSavedStages | Task::RetryHeld | Task::StartObserving => {}
@@ -699,6 +793,7 @@ impl WmState {
         // failed each tick, the apps with tracked windows about once a second.
         self.observer.reap_gone(full);
         if full {
+            self.release_overdue_scans();
             self.observer.retry_pending(ax_callback);
             // Windows closed while their app did not answer (8M): no destroyed notice came.
             self.observer.sweep_closed();
@@ -816,7 +911,7 @@ fn drop_saved_stages() {
     }
 }
 
-fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
+fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     match AxElement::system_wide().set_messaging_timeout(AX_TIMEOUT_SECONDS) {
         Ok(()) => tracing::debug!("AX messaging timeout set to {AX_TIMEOUT_SECONDS} s"),
         Err(e) => tracing::warn!("could not set the AX messaging timeout: {e}"),
@@ -827,8 +922,13 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         list.sort();
         tracing::info!("management restricted to {}", list.join(", "));
     }
+    let mut observer = Observer::new(std::process::id() as i32, only);
+    let probes = own.clone();
+    observer.set_probe_notify(Arc::new(move |note| {
+        probes.send(WmCommand::Probe(note));
+    }));
     let state = WmState {
-        observer: Observer::new(std::process::id() as i32, only),
+        observer,
         controller: Controller::new(),
         scanned: false,
         ticks: 0,
@@ -842,6 +942,8 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop) {
         display_sweep: None,
         logout: Logout::default(),
         taken: TakenWatch::default(),
+        launch_scan: None,
+        own,
     };
     STATE.with(|s| *s.borrow_mut() = Some(state));
     INBOX.with(|i| *i.borrow_mut() = Some(rx));

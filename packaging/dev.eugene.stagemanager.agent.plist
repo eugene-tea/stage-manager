@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Launch at login as a launchd agent (round early-start), used with
+  `[app] login_start = "background_item"`; the default is the login item (SMAppService.mainApp,
+  round reopen-list). SMAppService.agentServiceWithPlistName registers this file from the
+  bundle's Contents/Library/LaunchAgents (scripts/bundle.sh puts it there; the signature seals
+  it). On his Mac (11-06) launchd held the job until loginwindow's reopened apps had checked in,
+  so it started with the login items, no earlier. It stays in the bundle so an agent registered
+  by 1.6.x still starts the app at the first login after the update, which moves it back to the
+  login item. src/platform/login_item.rs names this label (AGENT_LABEL).
+
+  - RunAtLoad: start at the session's start (and once at registration; that copy hands off to
+    the running one and leaves quietly).
+  - No KeepAlive: a relaunch after a crash could come while the screen is locked; the guardian
+    already brings every window back after a crash.
+  - AbandonProcessGroup: the guardian and an update's helper outlive the app on purpose (they
+    run in sessions of their own already; this keeps launchd from ending them with it).
+  - ProcessType Interactive: the user's own app, not background work to be throttled.
+  - LimitLoadToSessionType Aqua: the GUI login session only.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.eugene.stagemanager.agent</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/stage-manager</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>dev.eugene.stagemanager</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>

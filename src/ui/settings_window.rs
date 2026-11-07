@@ -208,6 +208,7 @@ impl SettingsValues {
             LoginStatus::NeedsApproval => 1,
             LoginStatus::Off => 2,
             LoginStatus::Unavailable(_) => 3,
+            LoginStatus::Late => 4,
         };
         // The Shift row says what Shift does, which the new-apps switch flips.
         (login, self.apple_on, self.config_error.is_some(), self.animations_on, self.new_apps_join_current)
@@ -575,6 +576,10 @@ fn general(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, 
             login_row = login_row.detail("Allow Stage Manager in System Settings → General → Login Items.");
             login_row.trailing.push(view(&m.button("Login Items…", tag::LOGIN_ITEMS)));
         }
+        LoginStatus::Late => {
+            login_row = login_row.detail("Starts after your apps until allowed in Login Items.");
+            login_row.trailing.push(view(&m.button("Login Items…", tag::LOGIN_ITEMS)));
+        }
         LoginStatus::Unavailable(_) => {
             login.setEnabled(false);
             login_row = login_row.detail("Available when Stage Manager runs from Applications.");
@@ -777,6 +782,9 @@ pub fn create(mtm: MainThreadMarker, values: SettingsValues, pane: Pane) -> Reta
     // SAFETY: the window is owned by OPEN until closed; AppKit must not release it on close.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTabbingMode(objc2_app_kit::NSWindowTabbingMode::Disallowed);
+    // Titled windows are restorable by default: Settings never reopens by itself when macOS
+    // reopens the app at login (round reopen-list).
+    window.setRestorable(false);
     let delegate = ToolbarDelegate::new(mtm, target.clone());
     let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &NSString::from_str("StageManagerSettings"));
     toolbar.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
@@ -991,6 +999,7 @@ mod tests {
         assert_eq!(base.shape(), toggled.shape(), "a switch or the slider updates in place");
         for other in [
             SettingsValues { login: LoginStatus::NeedsApproval, ..base.clone() },
+            SettingsValues { login: LoginStatus::Late, ..base.clone() },
             SettingsValues { apple_on: true, ..base.clone() },
             SettingsValues { config_error: Some("bad".into()), ..base.clone() },
             SettingsValues { animations_on: false, ..base.clone() },

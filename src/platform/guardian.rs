@@ -1,6 +1,8 @@
 //! The guardian process (`stage-manager --guardian <pid>`), safety layer 5: spawned at
 //! launch in its own session, it waits for the app to exit (kqueue `NOTE_EXIT`). After a
-//! clean exit (the app's clean-exit marker) it has nothing to do. Otherwise:
+//! clean exit (the app's clean-exit marker) it has nothing to do, unless the app quit for a
+//! logout: it then waits a while for the logout's cancel, which opens the app again
+//! ([`super::logout_watch`], round logout-cancel-relaunch). Otherwise:
 //!
 //! 1. It reads the windows the app had registered (the parked file the registry keeps,
 //!    [`paths::parked_file`]) and runs the recovery scan.
@@ -53,6 +55,7 @@ use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, windows};
 use crate::engine::guard_watch::{Event, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
+use crate::engine::logout_watch;
 use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use crate::logbook::UNCLEAN_EXIT;
 use crate::logbook::counters::{self, Count};
@@ -86,9 +89,34 @@ const BUSY_CAP: Duration = Duration::from_secs(30);
 /// A stop signal received while watching (0: none).
 static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
+/// How many times a guardian that exits while the app runs is started again (the 1.7 review:
+/// one killed or crashed was never replaced, and a later crash of the app left its windows
+/// parked). Bounded: a guardian that cannot run does not respawn forever.
+const RESPAWNS: u32 = 3;
+
+/// The pause before a guardian that exited is started again: one that dies at once does not
+/// spin, and a quit under way is seen first.
+const RESPAWN_PAUSE: Duration = Duration::from_secs(2);
+
+/// How old another process's clean-exit marker must be, its process gone, before the launch
+/// removes it: its guardian reads it the moment that process exits, so one this old was never
+/// read (its guardian had died).
+const MARKER_KEEP: Duration = Duration::from_secs(600);
+
 /// Spawns the guardian for this process. It runs in its own session, so it outlives the app
-/// and its process group.
+/// and its process group. A guardian that exits while the app runs (killed, crashed) is
+/// started again, up to [`RESPAWNS`] times, unless the app is quitting. Clean-exit markers
+/// left behind are removed first ([`prune_markers`]).
 pub fn spawn() -> Option<u32> {
+    prune_markers();
+    let child = start()?;
+    let pid = child.id();
+    let _ = std::thread::Builder::new().name("guardian-reaper".into()).spawn(move || reap(child));
+    Some(pid)
+}
+
+/// Starts one guardian process.
+fn start() -> Option<std::process::Child> {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -110,22 +138,84 @@ pub fn spawn() -> Option<u32> {
         });
     }
     match cmd.spawn() {
-        Ok(mut child) => {
-            let pid = child.id();
-            tracing::info!(pid, "guardian started");
-            let _ = std::thread::Builder::new().name("guardian-reaper".into()).spawn(move || {
-                match child.wait() {
-                    Ok(status) => tracing::warn!(?status, "guardian exited while the app runs"),
-                    Err(e) => tracing::warn!("guardian wait failed: {e}"),
-                }
-            });
-            Some(pid)
+        Ok(child) => {
+            tracing::info!(pid = child.id(), "guardian started");
+            Some(child)
         }
         Err(e) => {
             tracing::error!("cannot start the guardian: {e}");
             None
         }
     }
+}
+
+/// Waits for the guardian; one that exits while the app runs is replaced ([`respawn_after`]).
+fn reap(mut child: std::process::Child) {
+    let mut respawned = 0;
+    loop {
+        match child.wait() {
+            Ok(status) => tracing::warn!(?status, "guardian exited while the app runs"),
+            Err(e) => tracing::warn!("guardian wait failed: {e}"),
+        }
+        let Some(pause) = respawn_after(respawned, safety::quit_requested()) else {
+            if !safety::quit_requested() {
+                tracing::error!(respawned, "the guardian is not started again: a crash from now on leaves parked windows to the next launch's scan");
+            }
+            return;
+        };
+        std::thread::sleep(pause);
+        if safety::quit_requested() {
+            return;
+        }
+        respawned += 1;
+        match start() {
+            Some(c) => {
+                tracing::warn!(respawned, pid = c.id(), "guardian started again");
+                child = c;
+            }
+            None => return,
+        }
+    }
+}
+
+/// After a guardian exited while the app runs, `respawned` guardians already started again:
+/// the pause before the next, or `None` (the app is quitting, or [`RESPAWNS`] are used).
+fn respawn_after(respawned: u32, quitting: bool) -> Option<Duration> {
+    (!quitting && respawned < RESPAWNS).then_some(RESPAWN_PAUSE)
+}
+
+/// Removes the clean-exit markers no guardian will read: this process's own (a marker with our
+/// pid is an earlier process's whose guardian had died, and would make our guardian take a
+/// crash of ours for a clean exit) and another process's once it is gone and the marker is
+/// [`MARKER_KEEP`] old.
+fn prune_markers() {
+    let own = std::process::id();
+    let Ok(dir) = std::fs::read_dir(paths::config_dir()) else { return };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let age = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+        if stale_marker(name, own, age, process_alive) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => tracing::info!(marker = name, "a clean-exit marker no guardian read is removed"),
+                Err(e) => tracing::warn!(marker = name, "cannot remove a stale clean-exit marker: {e}"),
+            }
+        }
+    }
+}
+
+/// Whether the file `name` is a clean-exit marker ([`paths::clean_exit_marker`]) no guardian
+/// will read ([`prune_markers`]). `age` unknown keeps another process's marker.
+fn stale_marker(name: &str, own: u32, age: Option<Duration>, alive: impl Fn(u32) -> bool) -> bool {
+    let Some(pid) = name.strip_prefix(".clean-exit-").and_then(|p| p.parse::<u32>().ok()) else { return false };
+    pid == own || (age.is_some_and(|a| a >= MARKER_KEEP) && !alive(pid))
+}
+
+/// Whether process `pid` exists.
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
 }
 
 /// `stage-manager --guardian <pid>`: waits for `pid` to exit; unless it wrote its clean-exit
@@ -147,9 +237,15 @@ pub fn run(args: &[String]) -> ExitCode {
     wait_for_exit(parent);
     let marker = paths::clean_exit_marker(parent as u32);
     let parked_file = paths::parked_file(parent as u32);
-    if marker.exists() {
+    if let Ok(text) = std::fs::read_to_string(&marker) {
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(&parked_file);
+        // A quit at a logout: a cancel opens the app again (round logout-cancel-relaunch).
+        if logout_watch::quit_for_logout(&text) {
+            install_stop_handlers();
+            super::logout_watch::run(parent as u32, &stop_signal);
+            return ExitCode::SUCCESS;
+        }
         tracing::debug!(parent, "guardian: clean exit; nothing to do");
         return ExitCode::SUCCESS;
     }
@@ -159,8 +255,9 @@ pub fn run(args: &[String]) -> ExitCode {
         Some(v) => safety::assume_visible_frame(v),
         None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide parked windows from the scan)"),
     }
-    // Windows may sit at any corner the app parked them in this run.
+    // Windows may sit at any corner the app parked them in this run, on any of its screens.
     safety::assume_corners(&file.corners);
+    safety::assume_zones(&file.zones);
     // Apps the app hid instead of parking: shown again first (their windows sit at their own
     // frames, or parked, which the scan and the watch below cover).
     if !file.hidden.is_empty() {
@@ -677,8 +774,13 @@ extern "C" fn on_stop(sig: libc::c_int) {
     STOP_SIGNAL.store(sig, Ordering::SeqCst);
 }
 
-/// SIGTERM, SIGINT and SIGHUP stop the watch after one last scan (logged), instead of
-/// killing the guardian silently.
+/// The stop signal received, if any (SIGTERM, SIGINT, SIGHUP).
+fn stop_signal() -> Option<i32> {
+    Some(STOP_SIGNAL.load(Ordering::SeqCst)).filter(|s| *s != 0)
+}
+
+/// SIGTERM, SIGINT and SIGHUP stop the watch after one last scan (logged), or the wait after
+/// a quit at a logout (the session ends), instead of killing the guardian silently.
 fn install_stop_handlers() {
     let handler: extern "C" fn(libc::c_int) = on_stop;
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
@@ -749,6 +851,33 @@ fn poll_for_exit(pid: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 1.7 review: a guardian that exits while the app runs is started again, bounded,
+    /// and never once the app quits.
+    #[test]
+    fn a_dead_guardian_is_replaced_a_few_times() {
+        assert_eq!(respawn_after(0, false), Some(RESPAWN_PAUSE));
+        assert_eq!(respawn_after(RESPAWNS - 1, false), Some(RESPAWN_PAUSE));
+        assert_eq!(respawn_after(RESPAWNS, false), None, "bounded");
+        assert_eq!(respawn_after(0, true), None, "quitting: no new guardian");
+    }
+
+    /// The 1.7 review: a marker with our pid is an earlier process's (its guardian had died):
+    /// trusted, it made a crash of ours look clean. Another's goes once old and its process gone.
+    #[test]
+    fn markers_no_guardian_reads_are_stale() {
+        let old = Some(MARKER_KEEP);
+        let young = Some(Duration::from_secs(5));
+        let alive = |pid| pid == 77;
+        assert!(stale_marker(".clean-exit-42", 42, young, alive), "ours, however young");
+        assert!(stale_marker(".clean-exit-42", 42, None, alive));
+        assert!(stale_marker(".clean-exit-9", 42, old, alive), "old, its process gone");
+        assert!(!stale_marker(".clean-exit-9", 42, young, alive), "its guardian may read it yet");
+        assert!(!stale_marker(".clean-exit-9", 42, None, alive));
+        assert!(!stale_marker(".clean-exit-77", 42, old, alive), "its process runs");
+        assert!(!stale_marker(".parked-42.json", 42, old, alive));
+        assert!(!stale_marker(".clean-exit-x", 42, old, alive));
+    }
 
     #[test]
     fn a_new_apps_answer_says_what_it_adopted() {

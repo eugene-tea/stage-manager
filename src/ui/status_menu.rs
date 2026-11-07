@@ -1,18 +1,9 @@
 //! The menu bar status item and its menu.
 //!
-//! **The desktop notice** (round desktop-notice): after a restart, the windows macOS reopened on
-//! another Desktop than their own are listed in a section of the menu, above About: a header,
-//! one entry per window (the app and title; below it where the window belongs and where it
-//! is), then Dismiss. While any is listed the icon carries one passive mark
-//! ([`crate::ui::glyph::marked_shapes`]). Nothing pops up: the login is busy with apps
-//! opening, and a list that waits in the menu until it is done is seen at the next look at the
-//! menu bar. A click on an entry brings its window forward; an entry leaves by itself once its
-//! window shows on its own Desktop ([`crate::engine::desktop_notice`]).
-//!
 //! Menu items call a small Objective-C target ([`MenuTarget`]) that forwards each click as a
 //! [`MenuAction`] to the handler installed with [`set_action_handler`]. Main thread only.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
@@ -38,10 +29,6 @@ pub enum MenuAction {
     MarkProblem,
     /// Turn Apple's Stage Manager off (the user's click; never without one).
     TurnOffAppleStageManager,
-    /// Bring a window the desktop notice lists forward (its window id).
-    ShowNoticed(u32),
-    /// Dismiss the desktop notice's list.
-    DismissNotice,
     Quit,
 }
 
@@ -122,23 +109,8 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
+            crate::ui::app_menu::note_user_quit();
             dispatch(MenuAction::Quit);
-        }
-
-        #[unsafe(method(showNoticed:))]
-        fn show_noticed(&self, sender: Option<&AnyObject>) {
-            let Some(sender) = sender else { return };
-            // SAFETY: the sender of this action is one of our NSMenuItems; `tag` returns an
-            // NSInteger, the window id it was given.
-            let tag: isize = unsafe { msg_send![sender, tag] };
-            if let Ok(id) = u32::try_from(tag) {
-                dispatch(MenuAction::ShowNoticed(id));
-            }
-        }
-
-        #[unsafe(method(dismissNotice:))]
-        fn dismiss_notice(&self, _sender: Option<&AnyObject>) {
-            dispatch(MenuAction::DismissNotice);
         }
     }
 );
@@ -159,6 +131,9 @@ pub struct MenuState {
     pub capture_on: bool,
     /// macOS refused window captures; "Allow Screen Recording…" shows and retries them.
     pub capture_refused: bool,
+    /// Accessibility lists no window for the session ([`crate::engine::ax_blind`]): the
+    /// menu's top line says so.
+    pub accessibility_blind: bool,
     /// Apple's Stage Manager is on (`GloballyEnabled = 1`).
     pub apple_stage_manager_on: bool,
     /// config.toml failed to load (the last good config stays in force).
@@ -167,60 +142,13 @@ pub struct MenuState {
     pub mark_shown: bool,
     /// When the last problem mark was written (`HH:MM:SS`).
     pub last_mark: Option<String>,
-    /// The desktop notice's entries (empty: no section, no mark).
-    pub notice: Vec<NoticeLine>,
-}
-
-/// One window the desktop notice lists, as the menu shows it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NoticeLine {
-    /// The window's id (the entry's tag; a click brings it forward).
-    pub window: u32,
-    /// The entry's title: the app and the window's title.
-    pub title: String,
-    /// Its second line: where the window belongs and where it is.
-    pub detail: String,
-}
-
-/// The desktop notice section's header.
-pub const NOTICE_HEADER: &str = "Reopened on Another Desktop";
-
-/// The item that dismisses the list.
-pub const NOTICE_DISMISS: &str = "Dismiss";
-
-/// One item of the desktop notice's section.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoticeItem {
-    /// [`NOTICE_HEADER`] (a section header).
-    Header,
-    /// The entry for line `.0`.
-    Entry(usize),
-    /// [`NOTICE_DISMISS`].
-    Dismiss,
-    /// The separator before About.
-    Separator,
-}
-
-/// The desktop notice's section for `lines`, in menu order: nothing when none is listed.
-pub fn notice_items(lines: &[NoticeLine]) -> Vec<NoticeItem> {
-    if lines.is_empty() {
-        return Vec::new();
-    }
-    let mut out = vec![NoticeItem::Header];
-    out.extend((0..lines.len()).map(NoticeItem::Entry));
-    out.extend([NoticeItem::Dismiss, NoticeItem::Separator]);
-    out
-}
-
-/// An entry's title and second line: the detail as the item's subtitle where macOS has one
-/// (14.4), else in the title after the window's.
-pub fn entry_texts(line: &NoticeLine, subtitles: bool) -> (String, Option<String>) {
-    if subtitles { (line.title.clone(), Some(line.detail.clone())) } else { (format!("{} ({})", line.title, line.detail), None) }
 }
 
 /// One entry of the menu, in Apple's menu-bar-app order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
+    /// "macOS isn't reporting windows…" (disabled), while Accessibility lists none.
+    AxBlind,
     /// "Stage Manager needs … access" (disabled), while it is missing.
     Needs(Approval),
     /// "Allow ……", while it is missing.
@@ -243,6 +171,10 @@ pub enum Item {
 /// verbose) and Quit, with separators between the groups.
 pub fn items(state: &MenuState) -> Vec<Item> {
     let mut out = Vec::new();
+    // Not while Apple's Stage Manager is on: ours stands down, and Apple's sees the windows.
+    if state.accessibility_blind && !state.apple_stage_manager_on {
+        out.push(Item::AxBlind);
+    }
     for a in permissions::missing(&state.permissions, state.capture_on, state.capture_refused) {
         out.extend([Item::Needs(a), Item::Allow(a)]);
     }
@@ -265,7 +197,7 @@ pub fn items(state: &MenuState) -> Vec<Item> {
 
 /// Every entry that may show, in menu order.
 fn all_items() -> Vec<Item> {
-    let mut all = Vec::new();
+    let mut all = vec![Item::AxBlind];
     for a in Approval::ALL {
         all.extend([Item::Needs(a), Item::Allow(a)]);
     }
@@ -284,6 +216,10 @@ fn all_items() -> Vec<Item> {
     ]);
     all
 }
+
+/// The menu's top line while Accessibility lists no window for the session (draft wording,
+/// the owner's read before a release).
+pub const AX_BLIND_LINE: &str = "macOS isn't reporting windows. Log out or restart to fix it; your stages are saved.";
 
 /// The menu item while Apple's Stage Manager is on.
 pub const APPLE_ITEM: &str = "Turn Off Apple's Stage Manager";
@@ -310,13 +246,8 @@ pub fn config_line(error: Option<&str>) -> Option<String> {
 /// The status item, its menu and its entries.
 pub struct StatusMenu {
     item: Retained<NSStatusItem>,
-    menu: Retained<NSMenu>,
-    target: Retained<MenuTarget>,
+    _target: Retained<MenuTarget>,
     entries: Vec<(Item, Retained<NSMenuItem>)>,
-    /// The desktop notice's lines shown and the items showing them.
-    notice: RefCell<(Vec<NoticeLine>, Vec<Retained<NSMenuItem>>)>,
-    /// The icon carries the desktop notice's mark.
-    marked: Cell<bool>,
 }
 
 fn item(mtm: MainThreadMarker, title: &str, action: Option<Sel>, key: &str, target: &MenuTarget) -> Retained<NSMenuItem> {
@@ -353,6 +284,7 @@ fn entry(mtm: MainThreadMarker, which: Item, target: &MenuTarget) -> Retained<NS
         }
         Item::AppleWarning => item(mtm, APPLE_ITEM, Some(sel!(turnOffAppleStageManager:)), "", target),
         Item::ConfigError => disabled(""),
+        Item::AxBlind => disabled(AX_BLIND_LINE),
         Item::About => item(mtm, "About Stage Manager", Some(sel!(about:)), "", target),
         Item::CheckForUpdates => item(mtm, "Check for Updates…", Some(sel!(checkForUpdates:)), "", target),
         Item::Settings => item(mtm, "Settings…", Some(sel!(settings:)), ",", target),
@@ -382,7 +314,7 @@ impl StatusMenu {
         }
         status_item.setMenu(Some(&menu));
 
-        Self { item: status_item, menu, target, entries, notice: RefCell::new((Vec::new(), Vec::new())), marked: Cell::new(false) }
+        Self { item: status_item, _target: target, entries }
     }
 
     /// Shows or hides the menu bar icon (`[app] show_menu_bar_icon`).
@@ -408,52 +340,8 @@ impl StatusMenu {
                 _ => {}
             }
         }
-        self.show_notice(&state.notice);
     }
 
-    /// Shows the desktop notice's `lines`: its section rebuilt above About when they changed,
-    /// the icon's mark while any is listed.
-    fn show_notice(&self, lines: &[NoticeLine]) {
-        let Some(mtm) = MainThreadMarker::new() else { return };
-        let marked = !lines.is_empty();
-        if self.marked.replace(marked) != marked
-            && let Some(button) = self.item.button(mtm)
-        {
-            let image = if marked { glyph::status_image_marked() } else { glyph::status_image() };
-            button.setImage(Some(&image));
-            tracing::debug!(marked, "menu bar icon: the desktop notice's mark");
-        }
-        let mut shown = self.notice.borrow_mut();
-        if shown.0 == lines {
-            return;
-        }
-        for it in shown.1.drain(..) {
-            self.menu.removeItem(&it);
-        }
-        let about = self.entries.iter().find(|(i, _)| *i == Item::About).map(|(_, it)| it);
-        let first = about.map_or(0, |it| self.menu.indexOfItem(it).max(0));
-        for (at, which) in (first..).zip(notice_items(lines)) {
-            let it = match which {
-                NoticeItem::Header => NSMenuItem::sectionHeaderWithTitle(&NSString::from_str(NOTICE_HEADER), mtm),
-                NoticeItem::Entry(i) => {
-                    let it = item(mtm, "", Some(sel!(showNoticed:)), "", &self.target);
-                    // `subtitle` came with macOS 14.4; the app runs from 14.0.
-                    let (title, subtitle) = entry_texts(&lines[i], it.respondsToSelector(sel!(setSubtitle:)));
-                    it.setTitle(&NSString::from_str(&title));
-                    it.setTag(lines[i].window as isize);
-                    if let Some(sub) = subtitle {
-                        it.setSubtitle(Some(&NSString::from_str(&sub)));
-                    }
-                    it
-                }
-                NoticeItem::Dismiss => item(mtm, NOTICE_DISMISS, Some(sel!(dismissNotice:)), "", &self.target),
-                NoticeItem::Separator => NSMenuItem::separatorItem(mtm),
-            };
-            self.menu.insertItem_atIndex(&it, at);
-            shown.1.push(it);
-        }
-        shown.0 = lines.to_vec();
-    }
 }
 
 #[cfg(test)]
@@ -507,30 +395,28 @@ mod tests {
     }
 
     #[test]
+    fn a_blind_accessibility_is_the_top_line_while_it_lasts() {
+        use Item::*;
+        let blind = MenuState { accessibility_blind: true, config_error: Some("bad".into()), ..state(false, true) };
+        let a = Approval::Accessibility;
+        assert_eq!(&items(&blind)[..5], &[AxBlind, Needs(a), Allow(a), ConfigError, Separator(0)]);
+        assert_eq!(&items(&MenuState { accessibility_blind: true, ..state(true, true) })[..3], &[AxBlind, Separator(0), About]);
+        assert_eq!(items(&state(true, true))[0], About, "gone once windows are listed");
+        let apple = MenuState { accessibility_blind: true, apple_stage_manager_on: true, ..state(true, true) };
+        assert_eq!(items(&apple)[0], AppleWarning, "Apple's Stage Manager on: ours stands down, Apple's sees");
+        assert!(AX_BLIND_LINE.chars().count() <= 90, "as short as the config line");
+    }
+
+    #[test]
     fn every_shown_item_exists_in_menu_order() {
         let all = all_items();
-        let s = MenuState { apple_stage_manager_on: true, mark_shown: true, ..state(false, false) };
-        let shown = items(&s);
-        let positions: Vec<usize> = shown.iter().map(|i| all.iter().position(|a| a == i).expect("built")).collect();
-        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
-    }
-
-    fn line(n: u32) -> NoticeLine {
-        NoticeLine { window: n, title: format!("Git — repo {n}"), detail: "Belongs on the Desktop with Term; now on this Desktop".into() }
-    }
-
-    #[test]
-    fn the_desktop_notice_is_a_section_only_while_windows_are_listed() {
-        assert!(notice_items(&[]).is_empty(), "nothing listed: the menu as it was");
-        use NoticeItem::*;
-        assert_eq!(notice_items(&[line(1), line(2)]), vec![Header, Entry(0), Entry(1), Dismiss, Separator]);
-    }
-
-    #[test]
-    fn an_entry_puts_where_its_window_belongs_under_it_or_after_it() {
-        let l = line(7);
-        assert_eq!(entry_texts(&l, true), (l.title.clone(), Some(l.detail.clone())));
-        assert_eq!(entry_texts(&l, false).0, "Git — repo 7 (Belongs on the Desktop with Term; now on this Desktop)");
+        let blind = MenuState { accessibility_blind: true, config_error: Some("bad".into()), mark_shown: true, ..state(false, false) };
+        let apple = MenuState { apple_stage_manager_on: true, mark_shown: true, ..state(false, false) };
+        for s in [blind, apple] {
+            let shown = items(&s);
+            let positions: Vec<usize> = shown.iter().map(|i| all.iter().position(|a| a == i).expect("built")).collect();
+            assert!(positions.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
+        }
     }
 
     #[test]

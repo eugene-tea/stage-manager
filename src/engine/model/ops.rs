@@ -5,11 +5,35 @@ use super::{
     Action, Display, DisplayId, Home, Model, NativeTarget, Observation, Pid, Reveal, SpaceId, StripOrder,
     StageId, Target, WindowId, WindowMeta, WindowRole, WindowState,
 };
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
+
+/// Why a switch to a stage does nothing ([`Model::switch_refused`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchRefused {
+    /// No such stage (it went: its windows closed, or it merged).
+    Gone,
+    /// Its stage is on a Desktop no screen shows now.
+    OtherDesktop,
+    /// It is the stage in front already.
+    InFront,
+}
+
+impl SwitchRefused {
+    /// The reason, for the log.
+    pub fn text(self) -> &'static str {
+        match self {
+            SwitchRefused::Gone => "the stage is gone",
+            SwitchRefused::OtherDesktop => "its stage is on a Desktop not shown",
+            SwitchRefused::InFront => "its stage is in front already",
+        }
+    }
+}
 
 impl Model {
     /// A window appeared on the Space its display shows now (the platform offers a window
@@ -107,6 +131,12 @@ impl Model {
         self.forget_quit_of(&meta.bundle_id);
         if decision.action == RuleAction::Native {
             if self.place_from_pending(&meta, space, obs, &mut actions) {
+                // Its app is reopening its saved windows: one of them by Apple's rule may be
+                // a saved one under another name ([`Model::rescore_siblings`]).
+                if self.restored.get(&meta.id).is_some_and(|r| r.grade.confident()) {
+                    let more = self.rescore_siblings(meta.pid, meta.id);
+                    actions.extend(more);
+                }
                 self.normalize_slots();
                 actions.push(Action::StateChanged);
                 return actions;
@@ -117,6 +147,9 @@ impl Model {
         if decision.action == RuleAction::Native && self.restore.restoring {
             // Matched no saved window: Apple's rule (counted for the restore's line).
             self.note_by_apple([&meta]);
+        } else if decision.action == RuleAction::Native {
+            // After the restore window, its title may still name a saved one.
+            self.note_rescore(&meta);
         }
         // Adoption may have renamed the Space.
         let space = self.current_space(display);
@@ -305,6 +338,19 @@ impl Model {
         self.switch_in(space, current, target, Some(obs))
     }
 
+    /// Why a switch to `target` ([`Model::switch_to`], a card click) does nothing, or `None`
+    /// when it switches. A card click never changes the Desktop, so a stage on a Desktop not
+    /// shown is never switched to: the strip of the Desktop shown never lists one (round
+    /// displays-lid-2: a strip left over from the laptop, drawn over the 5K's, showed a
+    /// card of a stage macOS had put on the 5K's other Desktop; four clicks did nothing).
+    pub fn switch_refused(&self, target: StageId) -> Option<SwitchRefused> {
+        let Some(space) = self.stage(target).map(|s| s.space) else { return Some(SwitchRefused::Gone) };
+        if !self.is_shown_space(space) {
+            return Some(SwitchRefused::OtherDesktop);
+        }
+        (self.active.get(&space) == Some(&target)).then_some(SwitchRefused::InFront)
+    }
+
     /// The body of a switch on `space` from its active stage `current` to `target`: `obs`
     /// saves the live state of the stage left (none for a Desktop not shown, whose windows
     /// keep the frames last recorded: [`Model::arrange_ahead`]).
@@ -344,14 +390,36 @@ impl Model {
         actions
     }
 
-    /// Switches to stage `n` (1-based, creation order) of the current Space; a no-op when
-    /// there is none.
-    pub fn switch_to_number(&mut self, n: usize, obs: &Observation) -> Vec<Action> {
-        let space = self.current_space_for(obs);
+    /// Switches to stage `n` (1-based, creation order) of the Desktop the screen with the
+    /// keyboard shows (`keyboard`, [`Model::keyboard_display`]; [`Model::hotkey_space`]); a
+    /// no-op when there is none.
+    pub fn switch_to_number(&mut self, n: usize, keyboard: DisplayId, obs: &Observation) -> Vec<Action> {
+        let space = self.hotkey_space(keyboard);
         match self.stage_by_number(space, n) {
             Some(s) => self.switch_to(s, obs),
             None => Vec::new(),
         }
+    }
+
+    /// The screen the keyboard is on, for the stage hotkeys and `ctl switch N` (his word,
+    /// 11-06): the focused window's, as the model has it when it manages the window, else
+    /// `shown_on` (the screen most of the focused window shows on, as the platform reads it:
+    /// an unmanaged or full-screen window), else the main screen (no focused window).
+    pub fn keyboard_display(&self, focused: Option<WindowId>, shown_on: Option<DisplayId>) -> DisplayId {
+        focused
+            .and_then(|id| self.windows.get(&id))
+            .map(|w| w.meta.display)
+            .or(shown_on)
+            .map_or(self.displays[0].id, |d| self.known_display(d))
+    }
+
+    /// The Desktop whose stages the stage hotkeys and `ctl switch N` count: the one the
+    /// keyboard's screen shows (`keyboard`, [`Model::keyboard_display`]). One answer for the
+    /// platform's "is there a stage `n`" and the switch itself (the Fable review's switching
+    /// 4: the check read the main screen, the switch the focused one; the Codex review's W3:
+    /// the main screen's count refused a stage only the other screen has).
+    pub fn hotkey_space(&self, keyboard: DisplayId) -> SpaceId {
+        self.current_space(self.known_display(keyboard))
     }
 
     /// Sends a standard window (a child stands for its parent) and its children to another
@@ -656,17 +724,25 @@ impl Model {
     /// when the app has no window elsewhere.
     pub fn bring_app_here(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
         let one = self.options.settings.app_windows == AppWindows::OneAtATime;
-        self.gather_app(pid, obs, one)
+        let space = self.current_space_for(obs);
+        self.gather_app(pid, space, obs, one)
     }
 
     /// A click on a card's app icon: switch to the card's stage, then bring every window of
     /// app `pid` from the other stages there too (Apple: the icon shows all of the app's
     /// windows, including those in other sets). With nothing elsewhere it is a plain switch.
+    /// The windows come from the card's own Desktop, on whichever screen its strip is (the
+    /// focus, still the stage left's, says nothing of where the card was clicked).
     pub fn show_app_everywhere(&mut self, stage: StageId, pid: Pid, obs: &Observation) -> Vec<Action> {
+        let Some(space) = self.stage(stage).map(|s| s.space) else { return Vec::new() };
         let mut actions = self.switch_to(stage, obs);
+        if !self.stage_in_front(stage) {
+            // Not switched to (a Desktop not shown): nothing gathers on that Desktop either.
+            return actions;
+        }
         actions.retain(|a| *a != Action::StateChanged);
         // The stage just shown has no live frames to save yet.
-        let mut more = self.gather_app(pid, &Observation::default(), false);
+        let mut more = self.gather_app(pid, space, &Observation::default(), false);
         actions.append(&mut more);
         if actions.last() != Some(&Action::StateChanged) {
             actions.push(Action::StateChanged);
@@ -687,12 +763,11 @@ impl Model {
         self.send_window(id, Target::New, obs)
     }
 
-    /// Moves app `pid`'s windows from the current Space's inactive stages into the active one
-    /// (only the most recent one when `one`); see [`Model::bring_app_here`].
-    fn gather_app(&mut self, pid: Pid, obs: &Observation, one: bool) -> Vec<Action> {
+    /// Moves app `pid`'s windows from `space`'s inactive stages into its active one (only the
+    /// most recent one when `one`); see [`Model::bring_app_here`].
+    fn gather_app(&mut self, pid: Pid, space: SpaceId, obs: &Observation, one: bool) -> Vec<Action> {
         let mut actions = Vec::new();
-        let display = self.current_display(obs);
-        let space = self.current_space(display);
+        let display = self.space_display(space);
         let active = self.ensure_active(space);
         let mut sources: Vec<(u64, StageId, Vec<WindowId>)> = self
             .stages
@@ -988,7 +1063,7 @@ impl Model {
         };
         match self.options.strip.order {
             StripOrder::Native => {
-                let capacity = self.options.strip.capacity;
+                let capacity = self.capacity_of(space);
                 if capacity == 0 || self.is_active(stage) {
                     return false;
                 }
@@ -1329,8 +1404,17 @@ impl Model {
     /// still active and the revealed stage is still the most recent, brings the stage back.
     /// A no-op when the active stage is empty and nothing is pending.
     pub fn reveal_desktop(&mut self, obs: &Observation) -> Vec<Action> {
+        self.reveal_desktop_on(None, obs)
+    }
+
+    /// [`Model::reveal_desktop`] on the Space `display` shows (a wallpaper click on that
+    /// screen); `None`: the focused window's display, else the main one.
+    pub fn reveal_desktop_on(&mut self, display: Option<DisplayId>, obs: &Observation) -> Vec<Action> {
         let mut actions = Vec::new();
-        let space = self.current_space_for(obs);
+        let space = match display {
+            Some(d) => self.current_space(d),
+            None => self.current_space_for(obs),
+        };
         let current = self.ensure_active(space);
         let current_empty = self.stage(current).is_some_and(|s| s.windows.is_empty());
         if let Some(r) = self.revealed.get(&space).copied()
@@ -1429,21 +1513,22 @@ impl Model {
         actions
     }
 
-    /// Replaces the display list (first = main). An empty list is ignored.
+    /// Replaces the displays (the first is the main one): a display plugged in again under
+    /// a new id is known by its identity ([`ScreenKey`]), as is the main display when neither
+    /// id survives (docking moves the menu bar to the 5K; the review's V1-B); a display
+    /// removed (the lid closed) hands its stages to the main display
+    /// ([`Model::adopt_display`]); a display added gets a Space and an empty front stage (the
+    /// stages macOS moves back onto it come with their windows,
+    /// [`Model::windows_moved_to_display`]). A display whose frame or visible frame changed
+    /// (resolution, scaling, a Dock moved) re-parks the parked windows of a Space shown on it
+    /// at its corner (V1-A) and keeps every restore frame out of its park zone; parked
+    /// windows of Spaces not shown are parked again when their Space shows
+    /// ([`Model::arrive`]). A display whose origin moved (the main display changed) moves its
+    /// parked windows' restore and pre-fit frames by the same offset, as macOS moves the
+    /// windows. With `[displays] main_only` only the first display is kept. An empty list is
+    /// ignored.
     ///
-    /// - **The main display under a new id** (docking or undocking moves the menu bar to
-    ///   another display, and the old main display is not in the list any more): the same
-    ///   desk, relabeled in place. Its Spaces, stages, active stages and strip slots stay;
-    ///   the active stage stays active and shown (the review's V1-B).
-    /// - **A display's frame or visible frame changed** (resolution, scaling, a Dock moved,
-    ///   a new id): every parked window of a Space shown on it is parked again at its new
-    ///   corner (V1-A: parked windows would otherwise sit mid-screen on a bigger display).
-    ///   Parked windows of Spaces not shown are parked again when their Space shows
-    ///   ([`Model::arrive`]).
-    /// - Spaces of a secondary display that is gone are folded into the main display's
-    ///   current Space: their stages move there, the ones that were active become inactive
-    ///   and are parked, and windows already parked are parked again on the main display.
-    ///   New displays get a Space with an empty active stage.
+    /// [`ScreenKey`]: crate::engine::displays::ScreenKey
     pub fn set_displays(&mut self, displays: Vec<Display>) -> Vec<Action> {
         let mut actions = Vec::new();
         // A report with a frame that is not finite is garbled: every restore frame would be
@@ -1451,7 +1536,26 @@ impl Model {
         if displays.is_empty() || displays.iter().any(|d| !d.frame.is_finite() || !d.visible.is_finite()) {
             return actions;
         }
+        let mut displays = displays;
+        if self.options.main_only {
+            displays.truncate(1);
+        }
+        // Windows adopted at an earlier change are not that any more (the lid opened).
+        self.adopted.clear();
         let mut before = std::mem::take(&mut self.displays);
+        // The same display under a new id: by its identity, else the main display when
+        // neither id survives.
+        for d in &displays {
+            if before.iter().any(|o| o.id == d.id) {
+                continue;
+            }
+            let again = before.iter().position(|o| o.is_keyed(d.key) && !displays.iter().any(|n| n.id == o.id));
+            if let Some(i) = again {
+                let old = before[i].id;
+                self.relabel_display(old, d.id);
+                before[i].id = d.id;
+            }
+        }
         let (old_main, new_main) = (before[0].id, displays[0].id);
         if old_main != new_main
             && !displays.iter().any(|d| d.id == old_main)
@@ -1465,49 +1569,36 @@ impl Model {
             .filter(|d| before.iter().any(|o| o.id == d.id && (o.frame != d.frame || o.visible != d.visible || o.corner != d.corner)))
             .map(|d| d.id)
             .collect();
+        // A display whose origin moved (the menu bar went to another screen: global
+        // coordinates start at the main display's top-left; the arrangement changed) has
+        // its windows moved along by macOS, on every Desktop. A parked window's frames are
+        // not read while it is parked, so its restore and pre-fit frames move by the same
+        // offset here, before a removed display's windows are carried onto it (theirs are
+        // in the new coordinates already). A shown window's are read again as it is seen.
+        for d in &displays {
+            let Some(o) = before.iter().find(|o| o.id == d.id) else { continue };
+            let (dx, dy) = (d.frame.x - o.frame.x, d.frame.y - o.frame.y);
+            if dx == 0.0 && dy == 0.0 {
+                continue;
+            }
+            for w in self.windows.values_mut().filter(|w| w.parked && w.meta.display == d.id) {
+                w.restore = w.restore.translate(dx, dy);
+                w.original = w.original.map(|f| f.translate(dx, dy));
+            }
+            self.move_pending_frames(d.id, dx, dy);
+        }
+        let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
+        let removed = !gone.is_empty();
         self.displays = displays;
-        let main = self.displays[0].id;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
+        self.capacity.retain(|d, _| live.contains(d));
+        let main = self.displays[0].id;
         if !self.current.contains_key(&main) {
             let s = self.new_space(main);
             self.current.insert(main, s);
         }
-        let main_space = self.current_space(main);
-        let gone: Vec<SpaceId> = self
-            .spaces
-            .iter()
-            .filter(|s| !live.contains(&s.display))
-            .map(|s| s.id)
-            .collect();
-        let moved: Vec<StageId> = self
-            .stages
-            .iter()
-            .filter(|s| gone.contains(&s.space) || !live.contains(&s.display))
-            .map(|s| s.id)
-            .collect();
-        for g in &gone {
-            self.active.remove(g);
-            self.revealed.remove(g);
-            self.slots.remove(g);
-        }
-        self.current.retain(|d, _| live.contains(d));
-        self.spaces.retain(|s| live.contains(&s.display));
-        for s in &moved {
-            if let Some(st) = self.stage_mut(*s) {
-                st.display = main;
-                st.space = main_space;
-            }
-        }
-        let ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        for id in ids {
-            let on_gone = {
-                let w = &self.windows[&id];
-                gone.contains(&w.space) || !live.contains(&w.meta.display)
-            };
-            if on_gone && let Some(w) = self.windows.get_mut(&id) {
-                w.meta.display = main;
-                w.space = main_space;
-            }
+        for g in gone {
+            self.adopt_display(g, &mut actions);
         }
         for d in live {
             if !self.current.contains_key(&d) {
@@ -1516,12 +1607,6 @@ impl Model {
             }
             let space = self.current_space(d);
             self.ensure_active(space);
-        }
-        for s in &moved {
-            if !self.is_active(*s) {
-                self.park_stage(*s, &mut actions);
-                self.drop_if_dead(*s, &mut actions);
-            }
         }
         let parked_again: Vec<WindowId> = actions
             .iter()
@@ -1546,10 +1631,14 @@ impl Model {
                 w.restore = restore;
             }
         }
+        // A display removed: macOS puts the windows hanging off the screens left fully on
+        // them (11-05 20:01:38, the lid closed: six of the 5K's cards were listed whole at
+        // its bottom-right corner, a pile of windows over its front stage), so every parked
+        // window of a Desktop shown is parked again, as on a display that moved.
         let repark: Vec<WindowId> = self
             .windows
             .values()
-            .filter(|w| w.parked && moved_frames.contains(&w.meta.display) && self.is_shown_space(w.space))
+            .filter(|w| w.parked && (removed || moved_frames.contains(&w.meta.display)) && self.is_shown_space(w.space))
             .map(|w| w.meta.id)
             .filter(|id| !parked_again.contains(id))
             .collect();
@@ -1557,8 +1646,411 @@ impl Model {
             self.park_window(id, &mut actions);
         }
         self.normalize_slots();
+        self.settle_saved_origins();
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// A display removed (the lid closed; `gone` is no longer in [`Model::displays`]): what
+    /// Apple's Stage Manager does, measured 11-05. The Desktop it showed joins the one the
+    /// main display shows: its front stage comes in front there (at its own size: macOS
+    /// moves the windows, their frames are read back), the main display's front stage goes to
+    /// a card, and its other stages become stages there too, parked at the main corner, after
+    /// the main display's own cards (past the capacity they are hidden). An empty front stage
+    /// on the main display gives way instead of taking a card. Its other Desktops stay
+    /// Desktops, of the main display now, recognized by their windows when they show. Every
+    /// restore frame of its windows is carried onto the main display ([`Display::adopt`]).
+    /// The windows of the Desktop it showed are noted as adopted (`adopted`): macOS may put
+    /// them on another Desktop of the main display and show that one (11-05 16:27: the 5K
+    /// slid to its second Desktop), where their stages come whole, by the same rule
+    /// ([`Model::carry_adopted`]).
+    fn adopt_display(&mut self, gone: Display, actions: &mut Vec<Action>) {
+        let main = *self.main_display();
+        let main_space = self.current_space(main.id);
+        let shown = self.current.remove(&gone.id);
+        for s in &mut self.spaces {
+            if s.display == gone.id {
+                s.display = main.id;
+            }
+        }
+        for s in &mut self.stages {
+            if s.display == gone.id {
+                s.display = main.id;
+            }
+        }
+        for w in self.windows.values_mut() {
+            if w.meta.display == gone.id {
+                w.meta.display = main.id;
+                w.restore = main.adopt(w.restore, &gone);
+                w.original = w.original.map(|o| main.adopt(o, &gone));
+            }
+        }
+        let Some(shown) = shown.filter(|s| *s != main_space) else { return };
+        self.adopted = self
+            .windows
+            .values()
+            .filter(|w| w.space == shown && w.meta.role == WindowRole::Standard)
+            .map(|w| w.meta.id)
+            .collect();
+        let front = self.active.remove(&shown);
+        let mut order = self.slots.remove(&shown).unwrap_or_default();
+        self.revealed.remove(&shown);
+        self.slot_order.remove(&shown);
+        self.provisional.remove(&shown);
+        self.adopt_votes.remove(&shown);
+        self.beside.remove(&shown);
+        self.spaces.retain(|s| s.id != shown);
+        self.front_owed.remove(&shown);
+        self.moved_from.retain(|_, from| *from != shown);
+        for q in &mut self.quit {
+            if q.space == shown {
+                q.space = main_space;
+            }
+        }
+        let stages_gone: Vec<StageId> = self.stages.iter().filter(|s| s.space == shown).map(|s| s.id).collect();
+        for s in &stages_gone {
+            if let Some(st) = self.stage_mut(*s) {
+                st.space = main_space;
+            }
+        }
+        for w in self.windows.values_mut() {
+            if w.space == shown {
+                w.space = main_space;
+            }
+        }
+        let rest: Vec<StageId> = stages_gone.iter().copied().filter(|s| !order.contains(s)).collect();
+        order.extend(rest);
+        let front = front.filter(|f| self.stage(*f).is_some_and(|s| !s.windows.is_empty()));
+        if let Some(f) = front {
+            // Its windows are on the main display already, where macOS put them: no frame
+            // of theirs is set here (the next observation records them).
+            let members: Vec<WindowId> = self.stage(f).map(|s| s.windows.clone()).unwrap_or_default();
+            let shown_ids: Vec<WindowId> = members
+                .into_iter()
+                .flat_map(|id| std::iter::once(id).chain(self.children_of(id)))
+                .filter(|id| self.windows.get(id).is_some_and(|w| !w.parked))
+                .collect();
+            let mut more = Vec::new();
+            self.bring_front(main_space, f, &mut more);
+            actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown_ids.contains(id))));
+        }
+        let capacity = self.capacity_of(main_space);
+        for s in order {
+            if Some(s) == front || self.stage(s).is_none() {
+                continue;
+            }
+            if self.is_active(s) {
+                continue;
+            }
+            // Parked at the main corner now (a Park for every window, parked before or not).
+            self.park_stage(s, actions);
+            self.drop_if_dead(s, actions);
+            if self.stage(s).is_some()
+                && let Some(slots) = self.slots.get_mut(&main_space)
+                && slots.len() < capacity
+                && !slots.contains(&s)
+            {
+                slots.push(s);
+            }
+        }
+    }
+
+    /// Makes `stage` the front stage of `space` (one it is on): an empty, unnamed front stage
+    /// with nothing pending gives way and goes (a display with nothing on it yet, as a carried
+    /// Desktop's placeholder does); else the usual switch, the front stage going to a card.
+    /// Parked windows of `stage` come back ([`Model::restore_window`]).
+    pub(crate) fn bring_front(&mut self, space: SpaceId, stage: StageId, actions: &mut Vec<Action>) {
+        let active = self.ensure_active(space);
+        let placeholder = active != stage
+            && self.stage_is_empty(active)
+            && self.children_in(Home::Stage(active)).is_empty()
+            && self.stage(active).is_some_and(|s| s.name.is_none());
+        if active != stage && !placeholder {
+            let more = self.switch_in(space, active, stage, None);
+            actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+            return;
+        }
+        if placeholder {
+            self.active.insert(space, stage);
+            self.touch(stage);
+            self.stages.retain(|s| s.id != active);
+            if let Some(sl) = self.slots.get_mut(&space) {
+                sl.retain(|&x| x != active && x != stage);
+            }
+        }
+        let mut ids: Vec<WindowId> = self.stage(stage).map(|s| s.windows.clone()).unwrap_or_default();
+        ids.extend(self.children_in(Home::Stage(stage)));
+        for id in ids {
+            if self.windows.get(&id).is_some_and(|w| w.parked) {
+                self.restore_window(id, actions);
+            }
+        }
+    }
+
+    /// Managed standard windows that show mostly on another display now (`moves`: each with
+    /// the display that shows most of it and its frame there): the user's drag across the
+    /// seam, or macOS's own move (the lid opened: windows go back to the screen they were on).
+    /// What Apple's Stage Manager does, measured 11-05:
+    ///
+    /// - A window moved to another display starts **a stage of its own there**, in front;
+    ///   the stage that was in front there goes to a card (an empty front stage gives way).
+    ///   Of several windows moved at once, the frontmost's stage (`z_order`) comes in front,
+    ///   the others wait in the strip.
+    /// - A stage whose every standard window moved together stays one stage (the lid
+    ///   opened: that screen's stages are its own again, grouping, key window and name kept).
+    /// - A window dragged out of a stage of several leaves the rest in their stage
+    ///   (unmeasured; the natural reading of "a stage of its own").
+    /// - The display it left, its front stage now empty, brings its most recent card
+    ///   forward ([`Model::forward_after_emptied`]).
+    ///
+    /// Where the window is listed on the new display says whether it shows (the lid opened,
+    /// 11-05 16:27:31: macOS put a window it had on the 5K back on the laptop at the frame
+    /// it had there, and a parked one at the laptop's old park corner): listed in that
+    /// display's park zone, or as a piece at its corner ([`Display::hides`]), it is a card,
+    /// parked there with its restore frame carried over
+    /// ([`Display::adopt`]), whether the model had it parked or shown (a card of that screen
+    /// before the close, shown on the other since); listed outside, it shows at that frame, the user's (its
+    /// restore frame), whether the model had it parked or not, and is never moved. Only a
+    /// shown window's stage comes in front: a card put back brings nothing forward, and
+    /// nothing comes forward when only cards came. A window moved to a display the model
+    /// does not know (`[displays] main_only`) is not its own any more: it leaves its stage
+    /// as a window that left its Space does ([`Model::window_left_space`]). Children follow
+    /// their parents and are never moved on their own. Returns the actions and every window
+    /// the model forgot (the platform takes one in again once it shows on a display it
+    /// manages).
+    pub fn windows_moved_to_display(&mut self, moves: &[(WindowId, DisplayId, Rect)], z_order: &[WindowId]) -> (Vec<Action>, Vec<WindowId>) {
+        let mut actions = Vec::new();
+        let mut forgotten = Vec::new();
+        let mut by_target: BTreeMap<DisplayId, Vec<WindowId>> = BTreeMap::new();
+        let mut frames: HashMap<WindowId, Rect> = HashMap::new();
+        for &(id, to, frame) in moves {
+            let Some(w) = self.windows.get(&id) else { continue };
+            if w.meta.role != WindowRole::Standard {
+                continue;
+            }
+            if !self.displays.iter().any(|d| d.id == to) {
+                let (more, gone) = self.window_left_space(id);
+                actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+                forgotten.extend(gone);
+                continue;
+            }
+            if w.meta.display == to || by_target.values().any(|v| v.contains(&id)) {
+                continue;
+            }
+            by_target.entry(to).or_default().push(id);
+            frames.insert(id, frame);
+        }
+        if by_target.is_empty() {
+            if !forgotten.is_empty() {
+                actions.push(Action::StateChanged);
+            }
+            return (actions, forgotten);
+        }
+        let mut left: BTreeSet<SpaceId> = BTreeSet::new();
+        for (to, ids) in by_target {
+            let target = self.current_space(to);
+            let display = *self.display(to);
+            for &id in &ids {
+                let from = *self.display(self.windows[&id].meta.display);
+                let at_corner = frames.get(&id).is_some_and(|f| display.hides(*f));
+                let mut group = vec![id];
+                group.extend(self.children_of(id));
+                for g in group {
+                    if let Some(w) = self.windows.get_mut(&g) {
+                        w.meta.display = to;
+                        // A shown one put back at the corner is a card from now on: its
+                        // restore frame is carried over as a parked one's.
+                        if w.parked || at_corner {
+                            w.restore = display.adopt(w.restore, &from);
+                        }
+                        w.original = w.original.map(|o| display.adopt(o, &from));
+                    }
+                }
+                let Some(&f) = frames.get(&id) else { continue };
+                if at_corner {
+                    // A card (macOS put the window back at that display's corner, where it
+                    // was a card before the lid closed): one the model had shown on the other
+                    // screen is a card too (11-06 12:00:52: Deep House, a laptop card shown on
+                    // the 5K by a click there, came back to the laptop's corner and was taken
+                    // as shown, its stage in front, invisible). Its children park with it
+                    // below, its stage stays in the strip.
+                    if let Some(w) = self.windows.get_mut(&id) {
+                        w.parked = true;
+                    }
+                    continue;
+                }
+                // Shown there, at that frame: a parked one macOS put back where it was is
+                // not parked any more (no action: it is where the user sees it).
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.parked = false;
+                }
+                self.record_frame(id, f);
+            }
+            let whole: Vec<StageId> = self
+                .stages
+                .iter()
+                .filter(|s| s.space != target && !s.windows.is_empty() && s.windows.iter().all(|w| ids.contains(w)))
+                .map(|s| s.id)
+                .collect();
+            let mut went: Vec<(WindowId, StageId)> = Vec::new();
+            for &id in &ids {
+                let Some(w) = self.windows.get(&id) else { continue };
+                let (from_space, home) = (w.space, w.home);
+                // A window carried here already with its stage's first window (a stage of
+                // two cards) left nothing here: the display it came to is not one it left,
+                // whose empty front would take its card forward.
+                if from_space != target {
+                    left.insert(from_space);
+                }
+                let mut group = vec![id];
+                group.extend(self.children_of(id));
+                match home {
+                    Home::Pinned => {
+                        self.set_home(id, Home::Pinned, to);
+                        self.set_space(&group, target);
+                        for &g in &group {
+                            if self.windows.get(&g).is_some_and(|w| w.parked) {
+                                self.restore_window(g, &mut actions);
+                            }
+                        }
+                    }
+                    Home::Stage(s) if whole.contains(&s) => {
+                        if self.stage(s).is_some_and(|st| st.space != target) {
+                            self.carry_stage_to(s, target, to);
+                        }
+                        went.push((id, s));
+                    }
+                    Home::Stage(s) => {
+                        if let Some(st) = self.stage_mut(s) {
+                            st.windows.retain(|&x| x != id);
+                            if st.key == Some(id) {
+                                st.key = st.windows.first().copied();
+                            }
+                        }
+                        let dest = self.create_stage(target, None);
+                        if let Some(st) = self.stage_mut(dest) {
+                            st.windows.push(id);
+                            st.key = Some(id);
+                        }
+                        self.set_home(id, Home::Stage(dest), to);
+                        self.set_space(&group, target);
+                        self.drop_if_dead(s, &mut actions);
+                        went.push((id, dest));
+                    }
+                }
+            }
+            if went.is_empty() {
+                continue;
+            }
+            // The frontmost moved window that shows: its stage comes in front. A card put
+            // back at the corner brings nothing forward, whatever its place in the order.
+            let is_shown = |id: &WindowId| self.windows.get(id).is_some_and(|w| !w.parked);
+            let front = z_order
+                .iter()
+                .find_map(|z| went.iter().find(|(id, _)| id == z && is_shown(id)))
+                .or_else(|| went.iter().rev().find(|(id, _)| is_shown(id)))
+                .map(|(_, d)| *d);
+            // A window shown where the user put it is not moved: only parked ones come back.
+            let shown: Vec<WindowId> = ids
+                .iter()
+                .flat_map(|id| std::iter::once(*id).chain(self.children_of(*id)))
+                .filter(|id| self.windows.get(id).is_some_and(|w| !w.parked))
+                .collect();
+            if let Some(front) = front {
+                let mut more = Vec::new();
+                self.bring_front(target, front, &mut more);
+                actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown.contains(id))));
+            }
+            let mut waiting: Vec<StageId> = Vec::new();
+            for &(id, dest) in &went {
+                if Some(dest) == front {
+                    continue;
+                }
+                // Parked at this display's corner now, one parked before too (macOS moved it
+                // onto this display, out of the corner it was in).
+                let mut group = vec![id];
+                group.extend(self.children_of(id));
+                for g in group {
+                    self.park_window(g, &mut actions);
+                }
+                if !waiting.contains(&dest) {
+                    waiting.push(dest);
+                }
+            }
+            for stage in waiting {
+                self.touch(stage);
+                self.strip_enter(target, stage);
+            }
+        }
+        for space in left {
+            self.forward_after_emptied(space, &mut actions);
+        }
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        (actions, forgotten)
+    }
+
+    /// Carries `stage` whole to `target` (a Space of `display`): members, children, key
+    /// window, name; its card leaves its old Space's strip, and the old Space loses it as its
+    /// front stage if it was ([`Model::forward_after_emptied`] then brings a card forward).
+    pub(crate) fn carry_stage_to(&mut self, stage: StageId, target: SpaceId, display: DisplayId) {
+        let Some(from) = self.stage(stage).map(|s| s.space) else { return };
+        if let Some(sl) = self.slots.get_mut(&from) {
+            sl.retain(|&x| x != stage);
+        }
+        if self.active.get(&from) == Some(&stage) {
+            self.active.remove(&from);
+        }
+        let mut group: Vec<WindowId> = self.stage(stage).map(|s| s.windows.clone()).unwrap_or_default();
+        group.extend(self.children_in(Home::Stage(stage)));
+        self.set_space(&group, target);
+        for g in group {
+            if let Some(w) = self.windows.get_mut(&g) {
+                w.meta.display = display;
+            }
+        }
+        if let Some(st) = self.stage_mut(stage) {
+            st.space = target;
+            st.display = display;
+        }
+    }
+
+    /// A shown Space whose front stage is empty (its windows left for another display, or
+    /// it lost its front stage) brings its most recently used stage with windows forward, as
+    /// Apple's does (measured 11-05: Music came in front, and a hidden card took the freed
+    /// slot). A Space with no stage with windows keeps an empty front stage (a fresh one
+    /// when it has none: never a parked stage made active without its windows shown). A
+    /// Space not shown owes its front (`front_owed`): it comes forward by this rule when the
+    /// Space shows again ([`Model::arrive`]; the lid closed, 11-05 20:25:47: the 5K's first
+    /// Desktop lost the laptop's front to the second one and would have shown nothing).
+    pub(crate) fn forward_after_emptied(&mut self, space: SpaceId, actions: &mut Vec<Action>) {
+        if !self.has_space(space) {
+            return;
+        }
+        if !self.is_shown_space(space) {
+            if self.active.get(&space).is_none_or(|a| self.stage_is_empty(*a)) {
+                self.front_owed.insert(space);
+            }
+            return;
+        }
+        self.front_owed.remove(&space);
+        let active = match self.active.get(&space).copied() {
+            Some(a) => a,
+            None => self.fresh_active(space),
+        };
+        if !self.stage_is_empty(active) {
+            return;
+        }
+        let pick = self
+            .stages
+            .iter()
+            .filter(|s| s.space == space && s.id != active && !s.windows.is_empty())
+            .max_by_key(|s| s.last_active)
+            .map(|s| s.id);
+        let Some(pick) = pick else { return };
+        let more = self.switch_in(space, active, pick, None);
+        actions.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
+        self.drop_if_dead(active, actions);
     }
 
     /// Renames display `old` to `new` everywhere (the main display under a new id).
@@ -1605,5 +2097,33 @@ impl Model {
     /// platform's recovery scan of windows it observes.
     pub fn frame_is_parked(&self, display: DisplayId, frame: Rect) -> bool {
         self.display(display).parks(frame)
+    }
+
+    /// The display other than `except` whose park zone holds `frame`: where macOS put a
+    /// parked window back when a screen came back (the lid opened, 11-05 20:26:05: the
+    /// laptop's two cards, counted on the 5K, listed at the laptop's bottom-left corner,
+    /// where they were before the close). Such a window is that display's card
+    /// ([`Model::windows_moved_to_display`]), never parked again on the other.
+    pub fn park_zone_display(&self, frame: Rect, except: DisplayId) -> Option<DisplayId> {
+        self.displays.iter().find(|d| d.id != except && d.parks(frame)).map(|d| d.id)
+    }
+
+    /// The display other than `except` (the one the model has a parked window on) that macOS
+    /// put the window back on as a screen came back: the one whose park zone holds `frame`
+    /// ([`Model::park_zone_display`], a card there), else, out of `except`'s own park zone, a
+    /// display of `returned` (those added in the change settling now) that shows most of it
+    /// (shown there at that frame). The lid opened 11-06 12:00:51: Chrome, a card on the 5K
+    /// since a switch there, was listed at its pre-close frame on the laptop and parked again
+    /// at the 5K's corner before the display reconcile saw it; it is the laptop's front
+    /// ([`Model::windows_moved_to_display`]).
+    pub fn returned_display(&self, frame: Rect, except: DisplayId, returned: &[DisplayId]) -> Option<DisplayId> {
+        if let Some(d) = self.park_zone_display(frame, except) {
+            return Some(d);
+        }
+        if returned.is_empty() || self.display(except).parks(frame) {
+            return None;
+        }
+        let rects: Vec<(DisplayId, Rect)> = self.displays.iter().map(|d| (d.id, d.frame)).collect();
+        crate::engine::displays::display_of(frame, &rects).filter(|d| *d != except && returned.contains(d))
     }
 }

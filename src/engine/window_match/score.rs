@@ -12,7 +12,14 @@
 //! **The frame never outweighs two different names.** When both titles have a fingerprint
 //! and they differ, the frame counts only as the size: an app opens a new window at its last
 //! window's frame (a browser's "Start Page" where the saved page was, Finder's ⌘N where
-//! "Downloads" was), and that window is not the saved one.
+//! "Downloads" was), and that window is not the saved one. Names where one is, whole, a
+//! segment of the other ([`super::named_within`]: "proj (Workspace)" and "main.rs — proj
+//! (Workspace)", an editor that put the file it shows in front of its workspace's name) are
+//! not different: there the frame counts (the 11-06 restart).
+//!
+//! The model's restore after a restart makes one exception while its restore window is open
+//! ([`at_saved_frame`]: the only window of the app at the only saved frame of the app's
+//! waiting there, `Model::picks`); the scorer itself never counts that frame.
 //!
 //! A window with no title yet at the saved frame is a medium match at most
 //! ([`points::FRAME_UNTITLED`]): the frame alone, with no name to back it.
@@ -23,7 +30,7 @@
 //! another stage scores within [`AMBIGUOUS_WITHIN`] points is ambiguous and counts as low,
 //! unless both carry the frame signal and the pick's frame is the nearer one.
 
-use super::fingerprint::same_fingerprint;
+use super::fingerprint::{named_within, same_fingerprint};
 use crate::engine::geometry::Rect;
 
 /// Points per signal.
@@ -158,6 +165,21 @@ pub struct LowRule {
     pub shown: Option<u64>,
 }
 
+/// True when `live` is of `saved`'s app and shows at one of its saved frames (within
+/// [`FRAME_TOLERANCE`]), its live frame usable, whatever the titles say: the evidence of a
+/// window reopened under another name at its saved frame. The scorer never counts it then
+/// ([`score`]: the frame never outweighs two different names); the model's restore after a
+/// restart weighs it alone, when nothing else can be meant (`Model::picks`).
+pub fn at_saved_frame(saved: &Saved, live: &Live) -> bool {
+    let near = |a: f64, b: f64| (a - b).abs() <= FRAME_TOLERANCE;
+    let l = live.frame;
+    !saved.bundle.is_empty()
+        && saved.bundle == live.bundle
+        && live.frame_usable
+        && !l.is_degenerate()
+        && saved.frames.iter().flatten().filter(|f| !f.is_degenerate()).any(|f| near(f.x, l.x) && near(f.y, l.y) && near(f.w, l.w) && near(f.h, l.h))
+}
+
 /// The score of `saved` for `live`; `None` for another app.
 pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
     if saved.bundle.is_empty() || saved.bundle != live.bundle {
@@ -176,7 +198,8 @@ pub fn score(saved: &Saved, live: &Live) -> Option<Score> {
     }
     // Two different names: the frame says only that the app opened a window where the
     // saved one was.
-    let named_apart = !same_title && !same_fp && !saved.fp.is_empty() && !live.fp.is_empty();
+    let named_apart =
+        !same_title && !same_fp && !saved.fp.is_empty() && !live.fp.is_empty() && !named_within(saved.title, live.title);
     let frames = || saved.frames.iter().flatten().filter(|f| !f.is_degenerate());
     let near = |a: f64, b: f64| (a - b).abs() <= FRAME_TOLERANCE;
     let usable = live.frame_usable && !live.frame.is_degenerate();
@@ -509,6 +532,20 @@ mod tests {
         // A number that names the window is another name.
         let s = saved("com.example.books", "Invoice 101", F1, 1);
         assert_eq!(score(&s, &live(5, "com.example.books", "Invoice 102", F1)).map(|x| x.points), Some(25));
+    }
+
+    #[test]
+    fn a_name_whole_within_the_other_is_not_another_name() {
+        // The 11-06 restart: an editor saved with no file open, reopened with one in front of
+        // its workspace's name, at its saved frame: strong, the frame counted.
+        let s = saved("com.example.editor", "beta (Workspace)", F1, 1);
+        let back = live(6, "com.example.editor", "main.rs — beta (Workspace)", F1);
+        assert_eq!(score(&s, &back).map(|x| (x.points, x.frame)), Some((60, true)));
+        assert_eq!(assign(std::slice::from_ref(&s), std::slice::from_ref(&back), LowRule::default()).first().copied().flatten().map(|p| p.grade), Some(Grade::Strong));
+        // Elsewhere (another size): the app alone; the name adds no points of its own.
+        assert_eq!(score(&s, &live(6, "com.example.editor", "main.rs — beta (Workspace)", F2)).map(|x| x.points), Some(10));
+        // Another file of another workspace at that frame: apart, as before.
+        assert_eq!(score(&s, &live(7, "com.example.editor", "main.rs — alpha (Workspace)", F1)).map(|x| x.points), Some(25));
     }
 
     /// A small deterministic generator (xorshift64*), so a failing case can be replayed.

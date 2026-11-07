@@ -141,7 +141,7 @@ impl Controller {
                 let model = self.model.as_ref();
                 // A window the model does not place is left to the paths that place it.
                 let other_space = model.and_then(|m| m.window(WindowId(id)).map(|w| (m, w))).is_none_or(|(m, w)| {
-                    !w.sticky && w.space != m.current_space(m.main_display().id)
+                    !w.sticky && !m.is_shown_space(w.space)
                 });
                 // A full-screen window is on a Space of its own: the window server's bounds
                 // are the only public evidence (no public API names a window's Space).
@@ -197,11 +197,10 @@ impl Controller {
     pub(super) fn check_stale_handles(&mut self, ob: &Observer, list: &[CgWindow]) {
         let Some(m) = &self.model else { return };
         let now = Instant::now();
-        let space = m.current_space(m.main_display().id);
         let onscreen: HashSet<u32> = list.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
         let candidates: Vec<(u32, i32)> = m
             .windows()
-            .filter(|w| (w.sticky || w.space == space) && !onscreen.contains(&w.meta.id.0))
+            .filter(|w| (w.sticky || m.is_shown_space(w.space)) && !onscreen.contains(&w.meta.id.0))
             .filter_map(|w| ob.window(w.meta.id.0).map(|t| (t.id, t.pid)))
             .filter(|&(id, _)| !self.echoes.is_window_echo(id, now))
             .collect();

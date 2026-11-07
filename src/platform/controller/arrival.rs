@@ -19,7 +19,7 @@
 //!   that Desktop's own strip pane is redrawn in its final order. The window is held as its
 //!   focus would be. No Space change within [`DOCK_SWITCH_WAIT`] undoes it.
 //! - **At the notice**: an arrangement made at the click whose window the window server
-//!   does not list on the main screen now is undone (another Desktop slid in). With none,
+//!   does not list on its screen now is undone (another Desktop slid in). With none,
 //!   when the held window, or with none held the activated (else frontmost) app's focused
 //!   window asked at once (a bounded Accessibility query), waits on the Desktop listed now,
 //!   its stage is arranged before every app's window list is read again.
@@ -46,7 +46,7 @@ use super::{Controller, Unrestored, cards_in};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Model, Observation, SpaceId, StageId, WindowId};
+use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
 use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::enhanced_ui;
@@ -574,9 +574,10 @@ fn ms(then: Instant, now: Instant) -> u64 {
 /// mouse-up, ⌘Tab's key): its timing is logged from there.
 const INPUT_RECENT: Duration = Duration::from_secs(3);
 
-/// True when window `id` is listed on the main screen (`shown_main`: [`on_main_screen`])
-/// at layer 0 and does not cover the display (`main`): its Desktop is the one shown or
-/// sliding in, not a full-screen Space.
+/// True when window `id` is listed on a managed screen (`shown_main`:
+/// [`Controller::shown_managed`]) at layer 0 and does not cover its own display (`main`:
+/// that display's frame): its Desktop is the one shown or sliding in, not a full-screen
+/// Space.
 fn listed_for_arrival(list: &[CgWindow], id: u32, shown_main: &HashSet<u32>, main: Rect) -> bool {
     list.iter().any(|w| w.id == id && w.layer == 0 && shown_main.contains(&w.id) && !fullscreen::covers_display(w.bounds, main))
 }
@@ -630,7 +631,7 @@ fn hold_step(contradicted: bool, ahead: bool, held_window: bool, pending: bool, 
 enum NoticeStep {
     /// An overview shows: its list is not the Desktop's.
     Nothing,
-    /// An arrangement stands and its window is listed on the main screen.
+    /// An arrangement stands and its window is listed on its screen.
     Keep,
     /// An arrangement stands and its window is not listed: another Desktop slid in. Undone,
     /// then as [`NoticeStep::Arrange`].
@@ -640,7 +641,7 @@ enum NoticeStep {
 }
 
 /// The notice's step: `overview` shows, `ahead_listed` is whether a standing arrangement's
-/// window is listed on the main screen (`None`: none stands).
+/// window is listed on its screen (`None`: none stands).
 fn notice_step(overview: bool, ahead_listed: Option<bool>) -> NoticeStep {
     match (overview, ahead_listed) {
         (true, _) => NoticeStep::Nothing,
@@ -842,16 +843,18 @@ impl Controller {
             self.undo_ahead(ob, "another focus or activation came");
         }
         let (true, Some(id)) = (arrange, held) else { return };
-        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        if self.model.is_none() {
+            return;
+        }
         let list = windows::list_windows();
-        if self.arrange_if_listed(ob, &list, main.frame, id, Trigger::Settle, now) {
+        if self.arrange_if_listed(ob, &list, id, Trigger::Settle, now) {
             // The Desktop sliding in shows its strip arranged too ([`Self::strip_space`]).
             self.present();
         }
     }
 
     /// The Space change notice ([`notice_step`]). An arrangement whose window the window
-    /// server does not list on the main screen now is undone (another Desktop slid in).
+    /// server does not list on its screen now is undone (another Desktop slid in).
     /// With none, when the held window, or with none held the activated (else frontmost)
     /// app's focused window, waits on the Desktop listed now (the one sliding in), its stage
     /// is arranged before every app's window list is read again and the Desktop recognized.
@@ -859,8 +862,9 @@ impl Controller {
         let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
         let list = windows::list_windows();
         let overview = self.look_for_overview(&list, main.frame, now) || self.overview.holds_arrival(now);
-        let shown = self.shown_main(&list, main.frame);
-        let listed = self.ahead.as_ref().map(|s| listed_for_arrival(&list, s.ahead.window.0, &shown, main.frame));
+        let shown = self.shown_managed(&list);
+        // The arranged window's own screen (round displays-2).
+        let listed = self.ahead.as_ref().map(|s| listed_for_arrival(&list, s.ahead.window.0, &shown, self.screen_of_space(s.ahead.space).frame));
         match notice_step(overview, listed) {
             NoticeStep::Nothing | NoticeStep::Keep => return,
             NoticeStep::Undo => {
@@ -871,7 +875,7 @@ impl Controller {
         }
         match self.focus_replay.peek(now) {
             Some(Wanted::Window { id, .. }) => {
-                if !self.arrange_if_listed(ob, &list, main.frame, id, Trigger::Notice, now) {
+                if !self.arrange_if_listed(ob, &list, id, Trigger::Notice, now) {
                     tracing::debug!(id = id.0, "the held window is not on screen at the Space change notice; its Desktop is arranged on arrival");
                 }
             }
@@ -884,7 +888,7 @@ impl Controller {
                 };
                 let Some(pid) = pid else { return };
                 let Some(id) = focused_window_of(pid) else { return };
-                if self.arrange_if_listed(ob, &list, main.frame, id, Trigger::NoticeAx, now) {
+                if self.arrange_if_listed(ob, &list, id, Trigger::NoticeAx, now) {
                     // Held as its focus event would have been (replayed on arrival).
                     self.focus_replay.hold(Wanted::Window { id, pid }, now);
                 }
@@ -892,20 +896,26 @@ impl Controller {
         }
     }
 
+    /// The display a Space belongs to (the main one for an unknown Space).
+    pub(super) fn screen_of_space(&self, space: SpaceId) -> Display {
+        self.model.as_ref().map_or(Display::FALLBACK, |m| *m.display(m.display_of_space(space)))
+    }
+
     /// Arranges window `id`'s Desktop when the window waits on a Desktop not shown (for the
-    /// model) and the window server lists it on the main screen with no window of that
-    /// Desktop covering the display; the stage left is saved in the list's order. True when
-    /// arranged.
-    fn arrange_if_listed(&mut self, ob: &Observer, list: &[CgWindow], main: Rect, id: WindowId, trigger: Trigger, now: Instant) -> bool {
+    /// model) and the window server lists it on its Desktop's own screen (round displays-2)
+    /// with no window of that Desktop covering that screen; the stage left is saved in the
+    /// list's order. True when arranged.
+    fn arrange_if_listed(&mut self, ob: &Observer, list: &[CgWindow], id: WindowId, trigger: Trigger, now: Instant) -> bool {
         let Some(m) = self.model.as_ref() else { return false };
         if !m.waits_on_another_space(id) {
             return false;
         }
         let Some(standard) = m.resolve_standard(id) else { return false };
         let target = m.space_of(standard);
+        let screen = target.map_or(m.main_display().frame, |s| m.display(m.display_of_space(s)).frame);
         let elsewhere = |w: u32| m.space_of(WindowId(w)).is_some_and(|s| Some(s) != target);
-        let shown = self.shown_main(list, main);
-        if !listed_for_arrival(list, standard.0, &shown, main) || display_covered(list, main, elsewhere) {
+        let shown = self.shown_managed(list);
+        if !listed_for_arrival(list, standard.0, &shown, screen) || display_covered(list, screen, elsewhere) {
             return false;
         }
         let obs = listed_order(list, |w| m.window(w).is_some());
@@ -1102,11 +1112,11 @@ impl Controller {
         if !self.verify_stands() {
             return;
         }
-        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let screens = self.screens_of_moves();
         let Some(v) = self.verify.as_mut() else { return };
         let list = windows::list_windows();
         let listed = |id: u32| list.iter().find(|w| w.id == id);
-        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), main.frame, |r| main.parks(r))).collect();
+        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), screens[&e.id].frame, |r| screens[&e.id].parks(r))).collect();
         let elapsed = ms(v.sent, now);
         let over = now.saturating_duration_since(v.sent) >= VERIFY_FOR;
         if seen.contains(&Seen::Sliding) {
@@ -1160,6 +1170,21 @@ impl Controller {
         }
     }
 
+    /// The screen of each of the arrangement's moves (the window's own; the main one for a
+    /// window the model forgot), so a move is judged against its own screen's frame and park
+    /// zone (round displays-2).
+    fn screens_of_moves(&self) -> HashMap<u32, Display> {
+        let Some(v) = self.verify.as_ref() else { return HashMap::new() };
+        let main = self.model.as_ref().map_or(Display::FALLBACK, |m| *m.main_display());
+        v.moves
+            .iter()
+            .map(|e| {
+                let d = self.model.as_ref().and_then(|m| m.window(WindowId(e.id)).map(|w| *m.display(w.meta.display))).unwrap_or(main);
+                (e.id, d)
+            })
+            .collect()
+    }
+
     /// The predicted Desktop arrived (`list`: the window server's list read for the arrival,
     /// maybe still mid-slide: it is read ~60 ms after the notice). The fast tick goes on
     /// looking for [`ARRIVAL_CHECK_FOR`] more, whatever Space change settles meanwhile
@@ -1188,7 +1213,7 @@ impl Controller {
         if !self.verify_stands() {
             return;
         }
-        let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
+        let screens = self.screens_of_moves();
         let Some(v) = self.verify.as_mut() else { return };
         let Some((arrived, until)) = v.tail else { return };
         let over = now >= until;
@@ -1198,7 +1223,7 @@ impl Controller {
         let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(*v.over_since.get_or_insert(now)));
         let listed = |id: u32| list.iter().find(|w| w.id == id);
         let seen: Vec<Option<Seen>> =
-            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), main.frame, |r| main.parks(r)))).collect();
+            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), screens[&e.id].frame, |r| screens[&e.id].parks(r)))).collect();
         v.rounds += 1;
         v.next = now + VERIFY_EVERY;
         let due = match tail_step(&v.moves, &seen, over) {
@@ -1320,7 +1345,7 @@ impl Controller {
             return;
         }
         let Some(dock) = self.dock_pid(list) else { return };
-        if !dock::dock_under(list, p, dock) {
+        if !dock::dock_under(list, p, dock, &self.dock_bar_now()) {
             return;
         }
         match dock::item_at(dock, p) {
@@ -1431,8 +1456,8 @@ impl Controller {
             _ => return Err("several instances of the app run"),
         };
         m.dock_gates(pid)?;
-        let main = *m.main_display();
-        let visible_here = dock::visible_window_of(list, pid, |r| main.parks(r));
+        let displays = m.displays().to_vec();
+        let visible_here = dock::visible_window_of(list, pid, |r| displays.iter().any(|d| d.parks(r)));
         let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
         // One bounded round with the app (`press_round`): hidden, active, its focused (else
         // main) window; it stops at the first failure and within PRESS_ROUND_CAP.
@@ -1474,7 +1499,7 @@ impl Controller {
             ax_focused_desktop = ?space_of(focused),
             ax_main = ?main_window,
             ax_main_desktop = ?space_of(main_window),
-            desktop_shown = m.current_space(main.id).0,
+            desktop_shown = m.current_space(m.main_display().id).0,
             visible_here,
             unplaced,
             took_ms,
@@ -1513,7 +1538,9 @@ impl Controller {
     /// that arrangement undone), with its cards, so it slides in as it is.
     fn present_away(&mut self, space: SpaceId) {
         let Some(m) = self.model.as_ref() else { return };
-        if m.current_space(m.main_display().id) == space {
+        // Its own screen's strip (round displays-2).
+        let display = m.display_of_space(space);
+        if m.current_space(display) == space {
             return;
         }
         strip_model::present(StripSnapshot {
@@ -1521,6 +1548,7 @@ impl Controller {
             active_stage: m.active_stage_in(space).map(|s| s.0),
             style: self.style.clone(),
             space: space.0,
+            display: display.0,
             away: true,
             ..StripSnapshot::default()
         });

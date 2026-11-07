@@ -26,8 +26,8 @@
 mod fingerprint;
 mod score;
 
-pub use fingerprint::{TITLE_RULES, TitleRule, fingerprint, same_fingerprint};
-pub use score::{AMBIGUOUS_WITHIN, FRAME_TOLERANCE, Grade, Live, LowRule, MEDIUM, Pick, STRONG, Saved, Score, assign, points, score};
+pub use fingerprint::{TITLE_RULES, TitleRule, fingerprint, named_within, same_fingerprint};
+pub use score::{AMBIGUOUS_WITHIN, FRAME_TOLERANCE, Grade, Live, LowRule, MEDIUM, Pick, STRONG, Saved, Score, assign, at_saved_frame, points, score};
 
 /// A window as the matcher sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

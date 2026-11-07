@@ -8,7 +8,8 @@
 //! are read from `com.apple.WindowManager` (see [`crate::engine::settings`]) and never
 //! repeated here.
 //!
-//! Unknown keys and out-of-range numbers produce warnings (numbers are clamped); a value of
+//! Unknown keys and out-of-range numbers produce warnings (numbers are clamped), except the
+//! keys of features taken out ([`schema::DROPPED`]), ignored with a debug line; a value of
 //! the wrong type is an error, and a bad file keeps the previous config: at a reload the one
 //! in force, at launch the last good copy ([`last_good`]).
 
@@ -26,7 +27,7 @@ use crate::engine::rules::{Decision, Placement, Rule, RuleAction, RuleSet};
 use crate::engine::settings::NativeSettings;
 
 pub use hotkey::{Hotkey, HotkeyCommand, HotkeyConfig, Key, Mods, NumberedHotkey};
-use schema::{KEYS, Kind, RETIRED, RULE_KEYS, SECTIONS};
+use schema::{DROPPED, KEYS, Kind, RETIRED, RULE_KEYS, SECTIONS};
 
 /// The file written on first run: every key commented out with its default.
 pub fn default_file() -> String {
@@ -368,6 +369,14 @@ impl WindowsConfig {
     }
 }
 
+/// The `[displays]` section: screens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaysConfig {
+    /// Only the main screen is managed (the first version's behaviour; off by default: every
+    /// screen has its own strip and stages, as Apple's).
+    pub main_only: bool,
+}
+
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SugarConfig {
@@ -389,10 +398,6 @@ pub struct StagesConfig {
     /// for their apps to reopen them (on by default); off is 1.2.0's behaviour. Read at
     /// launch.
     pub restore_after_restart: bool,
-    /// After a restart, the windows macOS reopened on another Desktop than their own are
-    /// listed in the status menu, with a mark on its icon (on by default: it serves the
-    /// restore; round desktop-notice).
-    pub restore_notice: bool,
     /// A newly opened app's first windows join the active stage instead of a stage of their
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
@@ -401,7 +406,22 @@ pub struct StagesConfig {
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, restore_notice: true, new_apps_join_current: false }
+        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
+    }
+}
+
+/// The `[restore]` section: how stages coming back after a restart treat window frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreConfig {
+    /// A window its app reopens much smaller than saved (under half the area, matched by its
+    /// title) gets its saved frame back when first shown (on by default; off: every window
+    /// keeps the frame its app gives it).
+    pub saved_size: bool,
+}
+
+impl Default for RestoreConfig {
+    fn default() -> Self {
+        Self { saved_size: true }
     }
 }
 
@@ -478,11 +498,25 @@ fn log_config(v: &Values) -> LogConfig {
     }
 }
 
+/// `[app] login_start`: how launch at login registers (round reopen-list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoginStart {
+    /// `SMAppService.mainApp`: a login item, opened after the apps macOS reopens.
+    #[default]
+    LoginItem,
+    /// A launchd agent (round early-start), listed under "Allow in the Background".
+    BackgroundItem,
+}
+
 /// `[app]`: the app itself (Settings writes these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppConfig {
     /// Open at login (an installed copy registers a login item).
     pub launch_at_login: bool,
+    /// How launch at login registers.
+    pub login_start: LoginStart,
+    /// Turn regular at a logout so macOS reopens the app with the others at login.
+    pub reopen_with_apps: bool,
     /// The menu bar icon shows.
     pub show_menu_bar_icon: bool,
     /// Check for a newer release at most once a day.
@@ -508,12 +542,16 @@ pub struct Config {
     pub style: StripStyle,
     /// Window treatment.
     pub windows: WindowsConfig,
+    /// Screens.
+    pub displays: DisplaysConfig,
     /// New-window rules with the `[defaults]` decision.
     pub rules: RuleSet,
     /// Hotkeys (an extension; off unless `[hotkeys] enabled = true`).
     pub hotkeys: HotkeyConfig,
     /// Named stages.
     pub stages: StagesConfig,
+    /// Frames of windows coming back after a restart.
+    pub restore: RestoreConfig,
     /// Modifier sugar.
     pub sugar: SugarConfig,
     /// The daily log.
@@ -745,6 +783,10 @@ impl Config {
                     legacy_show_active = on;
                     continue;
                 }
+                if DROPPED.iter().any(|(s, k)| s == section && k == key) {
+                    tracing::debug!("config: [{section}] {key} is no longer read (its feature was taken out); ignored");
+                    continue;
+                }
                 if let Some((_, _, why)) = RETIRED.iter().find(|(s, k, _)| s == section && k == key) {
                     warnings.push(format!("[{section}] {key}: {why}"));
                     continue;
@@ -822,6 +864,11 @@ impl Config {
         let config = Config {
             app: AppConfig {
                 launch_at_login: v.flag("app.launch_at_login"),
+                login_start: match v.text("app.login_start") {
+                    "background_item" => LoginStart::BackgroundItem,
+                    _ => LoginStart::LoginItem,
+                },
+                reopen_with_apps: v.flag("app.reopen_with_apps"),
                 show_menu_bar_icon: v.flag("app.show_menu_bar_icon"),
                 check_for_updates: v.flag("app.check_for_updates"),
                 install_updates: v.flag("app.install_updates"),
@@ -969,14 +1016,15 @@ impl Config {
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
             },
+            displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
             stages: StagesConfig {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
-                restore_notice: v.flag("stages.restore_notice"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
             },
+            restore: RestoreConfig { saved_size: v.flag("restore.saved_size") },
             sugar: SugarConfig {
                 shift_brings_here: v.flag("sugar.shift_brings_here"),
                 launch_window_ms: v.uint("sugar.launch_window_ms"),
@@ -1009,6 +1057,8 @@ impl Config {
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
             park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
+            main_only: self.displays.main_only,
+            keep_app_frames: !self.restore.saved_size,
         }
     }
 }
@@ -1244,6 +1294,15 @@ mod tests {
     }
 
     #[test]
+    fn restore_saved_size_is_on_by_default_and_can_be_turned_off() {
+        let c = Config::default();
+        assert!(c.restore.saved_size && !c.model_options(NativeSettings::default(), 5).keep_app_frames);
+        let p = parse("[restore]\nsaved_size = false\n");
+        assert!(!p.config.restore.saved_size && p.warnings.is_empty(), "{:?}", p.warnings);
+        assert!(p.config.model_options(NativeSettings::default(), 5).keep_app_frames, "the frames apps give, as Apple's");
+    }
+
+    #[test]
     fn new_apps_join_current_is_off_by_default_and_can_be_turned_on() {
         assert!(!Config::default().stages.new_apps_join_current, "Apple's: a newly opened app gets a stage of its own");
         let p = parse("[stages]\nnew_apps_join_current = true\n");
@@ -1270,7 +1329,14 @@ mod tests {
         let c = Config::default();
         assert_eq!(
             c.app,
-            AppConfig { launch_at_login: true, show_menu_bar_icon: true, check_for_updates: true, install_updates: false },
+            AppConfig {
+                launch_at_login: true,
+                login_start: LoginStart::LoginItem,
+                reopen_with_apps: true,
+                show_menu_bar_icon: true,
+                check_for_updates: true,
+                install_updates: false
+            },
             "the menu bar icon and launch at login are on (the owner's word, 10-13; Apple's Stage Manager has neither)"
         );
         assert_eq!(c.windows.fit, FitMode::Off, "windows keep their exact frames");
@@ -1286,7 +1352,6 @@ mod tests {
         assert_eq!(c.style.drag.merge_zone, 0.5);
         assert!(!c.strip.hide_while_desktop_shown, "the strip stays shown while the desktop is revealed");
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
-        assert!(c.stages.restore_notice, "windows back on another Desktop are listed (it serves the restore: his word, 11-03)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
         assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
@@ -1510,6 +1575,16 @@ swipe = true
         assert!(p.warnings.iter().any(|w| w.contains("position")));
         assert!(p.warnings.iter().any(|w| w.contains("[gestures]")));
         assert!(p.warnings.iter().any(|w| w.contains("fit_windows") && w.contains("[windows] fit")));
+    }
+
+    #[test]
+    fn a_key_of_a_feature_taken_out_loads_without_a_word() {
+        for text in ["[stages]\nrestore_notice = true\n", "[stages]\nrestore_notice = false\nrestore_after_restart = false\n"] {
+            let p = parse(text);
+            assert!(p.warnings.is_empty(), "{text}: {:?}", p.warnings);
+            assert_eq!(p.config.stages.names, Config::default().stages.names);
+        }
+        assert!(!parse("[stages]\nrestore_notice = false\nrestore_after_restart = false\n").config.stages.restore_after_restart, "the rest still read");
     }
 
     #[test]

@@ -38,12 +38,25 @@
 //! the fresh element replaces the tracked one (its notifications moved over), and a closed
 //! window is dropped and reported destroyed, so if it comes back it is a new window. A focus
 //! naming a new element for a tracked window whose handle is dead takes it at once.
+//!
+//! **Apps that do not answer yet** (round login-observe, [`crate::engine::observe_retry`]): an
+//! app is observed on the WM thread only once it answers. One that does not (just launched,
+//! or reopened at the login and still busy) is asked on a thread of its own
+//! ([`super::observe_probe`]), every 150 ms while the login settles, every second after; its
+//! answer ([`Observer::on_probe`]) observes it then. At the start every app is asked at once,
+//! in parallel and for a bounded time ([`START_WAIT`]); those that answer are observed before
+//! [`WinEvent::Started`], as before. An app the launch's recovery scan has not read yet
+//! ([`super::launch_scan`]) waits for it: observed, or asked, once its scan is done
+//! ([`Observer::scan_done`]). Each app observed logs, at debug, the ms since it was
+//! first known (listed at our start, launched, or activated) and how many windows the window
+//! server listed for it then; each window placed logs the ms since it was found
+//! ([`TrackedWindow::found_at`]).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use objc2_application_services::{AXObserver, AXUIElement};
 use objc2_core_foundation::CFString;
@@ -54,14 +67,22 @@ use super::apps::{AppEvent, AppInfo};
 use super::ax::{AxElement, AxError, AxObserver, AxResult, names, notifications as n};
 use super::logging;
 use super::native_settings::RawSettings;
+use super::observe_probe::{self, Note, Notify, Probes};
 use super::windows::{self, CgWindow};
 use crate::engine::busy_apps::Reply;
 use crate::engine::geometry::Rect;
 use crate::engine::gone::{self, GoneCheck};
+use crate::engine::observe_retry::{Next, Retry};
 use crate::engine::vanished::Vanished;
 
-/// How often an app whose AX is not ready yet (just launched) is retried, one per retry pass.
-const MAX_ATTEMPTS: u32 = 10;
+/// How often an app with a window the window server did not list yet is rescanned, one per
+/// retry pass (about once a second).
+const RECHECK_ATTEMPTS: u32 = 10;
+
+/// At observation's start every app is asked at once, in parallel; the start waits this long
+/// at most for their answers (a miss takes the 0.25 s messaging timeout, so every answer that
+/// can come is in). Those that do not answer are asked on their own threads.
+pub const START_WAIT: Duration = Duration::from_millis(300);
 
 /// Test only (round 8M): with `STAGE_MANAGER_TEST` set too, any value ignores Accessibility's
 /// destroyed notifications, as an app that does not answer sends none (Home, 10-21), so a
@@ -110,6 +131,8 @@ pub struct TrackedWindow {
     /// Minimized when first read, or since (`AXWindowMiniaturized`); never cleared: a window
     /// once minimized is a standard window ([`kind_of`]).
     pub minimized: bool,
+    /// When it was first tracked: a window's ms from found to placed are logged from it.
+    pub found_at: Instant,
 }
 
 /// What changed, for the controller.
@@ -228,7 +251,17 @@ pub struct Observer {
     apps: BTreeMap<i32, AppInfo>,
     observed: HashMap<i32, ObservedApp>,
     windows: BTreeMap<u32, TrackedWindow>,
-    pending: HashMap<i32, u32>,
+    /// Apps that did not answer yet, with their retries ([`super::observe_probe`] asks them).
+    pending: HashMap<i32, Retry>,
+    /// The threads asking the pending apps.
+    probes: Probes,
+    /// Apps the launch's recovery scan has not read yet, since when ([`Self::hold_for_scan`]):
+    /// neither observed nor asked until it has.
+    scan_held: HashMap<i32, Instant>,
+    /// Held apps observation wanted meanwhile: observed or asked once their scan is done.
+    scan_wanted: HashSet<i32>,
+    /// When each running app was first known, and how: the measure logged when it is observed.
+    known: HashMap<i32, (Instant, &'static str)>,
     /// Apps with a window the window server did not list yet (just created): rescanned on
     /// the next retry passes, counting attempts.
     recheck: HashMap<i32, u32>,
@@ -286,6 +319,10 @@ impl Observer {
             observed: HashMap::new(),
             windows: BTreeMap::new(),
             pending: HashMap::new(),
+            probes: Probes::new(observe_probe::ask_ax),
+            scan_held: HashMap::new(),
+            scan_wanted: HashSet::new(),
+            known: HashMap::new(),
             recheck: HashMap::new(),
             events: Vec::new(),
             activated_at: HashMap::new(),
@@ -473,11 +510,6 @@ impl Observer {
         self.apps.get(&pid).and_then(|a| a.bundle_id.as_deref())
     }
 
-    /// The name of a running app with bundle id `bundle` (as the Dock shows it), if known.
-    pub fn app_name(&self, bundle: &str) -> Option<&str> {
-        self.apps.values().find(|a| a.bundle_id.as_deref() == Some(bundle)).and_then(|a| a.name.as_deref())
-    }
-
     /// True once the running apps are known (the first list came).
     pub fn knows_apps(&self) -> bool {
         !self.apps.is_empty()
@@ -494,6 +526,22 @@ impl Observer {
     /// shown window read twice on each focus event, card press, new window and hotkey.
     pub fn refresh_frame(&mut self, id: u32) -> Option<Rect> {
         self.read_frame(id).map(|(f, _)| f)
+    }
+
+    /// Takes `frames` (window id, frame), an observation's as decided against the window
+    /// server's list, as the tracked frames of the windows it names: a window of an app that
+    /// posts no move notice is then tracked where it is, and a switch's outgoing picture
+    /// starts there, not where it was before the user moved it (the Fable review's switching
+    /// 5). Unknown windows are skipped.
+    pub fn note_frames(&mut self, frames: impl IntoIterator<Item = (u32, Rect)>) {
+        for (id, frame) in frames {
+            if let Some(w) = self.windows.get_mut(&id)
+                && w.frame != frame
+            {
+                tracing::trace!(id, from = %w.frame, to = %frame, "tracked frame taken from the observation");
+                w.frame = frame;
+            }
+        }
     }
 
     /// [`Self::refresh_frame`], saying whether the frame was read now (`true`) or is the
@@ -538,6 +586,18 @@ impl Observer {
         self.observed.contains_key(&pid)
     }
 
+    /// True when app `pid` is a running regular app that would be observed (allowed, not
+    /// ours), answering yet or not.
+    pub fn wants(&self, pid: i32) -> bool {
+        self.apps.get(&pid).is_some_and(|a| self.allowed(a))
+    }
+
+    /// True when app `pid` answers Accessibility: observed, and its window list read with no
+    /// error (an app whose `AXWindows` failed is read again on the retry passes).
+    pub fn answers(&self, pid: i32) -> bool {
+        self.observed.contains_key(&pid) && !self.recheck.contains_key(&pid)
+    }
+
     /// The `STAGE_MANAGER_ONLY` filter in force.
     pub fn only(&self) -> Option<&HashSet<String>> {
         self.only.as_ref()
@@ -551,6 +611,11 @@ impl Observer {
     /// The full list of running regular apps.
     pub fn set_apps(&mut self, list: Vec<AppInfo>, callback: Callback) {
         self.apps = list.into_iter().map(|a| (a.pid, a)).collect();
+        let now = Instant::now();
+        self.known.retain(|pid, _| self.apps.contains_key(pid));
+        for &pid in self.apps.keys() {
+            self.known.entry(pid).or_insert((now, "listed at our start"));
+        }
         tracing::debug!("{} regular apps running", self.apps.len());
         if self.observing {
             self.observe_all(callback);
@@ -583,9 +648,23 @@ impl Observer {
         let z = windows::z_order(&list);
         let cg: HashMap<u32, CgWindow> = list.into_iter().map(|w| (w.id, w)).collect();
         let mut found = Vec::new();
-        let pids: Vec<i32> = self.apps.values().filter(|a| self.allowed(a)).map(|a| a.pid).collect();
+        let (held, pids): (Vec<i32>, Vec<i32>) =
+            self.apps.values().filter(|a| self.allowed(a)).map(|a| a.pid).partition(|p| self.scan_held.contains_key(p));
+        // An app the launch's recovery scan has not read yet is observed once it has.
+        let held_n = held.len();
+        self.scan_wanted.extend(held);
+        // Every app asked at once, for a bounded time: one that does not answer yet costs the
+        // start nothing more and is asked on its own thread (round login-observe).
+        let asked = Instant::now();
+        let answered = observe_probe::ask_once(&pids, self.probes.ask(), START_WAIT);
+        let waiting = pids.len() - answered.len();
+        tracing::debug!(apps = pids.len(), answered = answered.len(), waiting, held = held_n, took_ms = asked.elapsed().as_millis() as u64, "apps asked at once at observation's start");
         for pid in pids {
-            found.extend(self.observe_app_or_queue(pid, &cg, callback));
+            if answered.contains(&pid) {
+                found.extend(self.observe_app_or_queue(pid, &cg, callback));
+            } else {
+                self.queue(pid, "did not answer at observation's start", true);
+            }
         }
         found.sort_by_key(|id| z.get(id).copied().unwrap_or(usize::MAX));
         for id in &found {
@@ -608,6 +687,9 @@ impl Observer {
         self.observed.clear();
         self.windows.clear();
         self.pending.clear();
+        self.probes.stop_all();
+        // Still held (a scan still reads them), but no longer wanted: a new start wants them.
+        self.scan_wanted.clear();
         self.recheck.clear();
         self.gone.borrow_mut().clear();
         if was {
@@ -615,36 +697,202 @@ impl Observer {
         }
     }
 
-    fn observe_all(&mut self, callback: Callback) {
-        let cg = cg_lookup();
+    /// Apps listed now that are neither observed nor waited for: each is asked on a thread
+    /// of its own and observed once it answers ([`Self::queue`]).
+    fn observe_all(&mut self, _callback: Callback) {
         let pids: Vec<i32> = self
             .apps
             .values()
-            .filter(|a| self.allowed(a) && !self.observed.contains_key(&a.pid))
+            .filter(|a| self.allowed(a) && !self.observed.contains_key(&a.pid) && !self.pending.contains_key(&a.pid))
             .map(|a| a.pid)
             .collect();
         for pid in pids {
+            self.queue(pid, "listed", false);
+        }
+    }
+
+    /// Apps `pids` are read by the launch's recovery scan ([`super::launch_scan`]): none is
+    /// observed or asked until [`Self::scan_done`] says its windows are back.
+    pub fn hold_for_scan(&mut self, pids: impl IntoIterator<Item = i32>) {
+        let now = Instant::now();
+        for pid in pids {
+            self.scan_held.entry(pid).or_insert(now);
+        }
+    }
+
+    /// True (and wanted once its scan is done) while app `pid` waits for the launch scan.
+    fn held_for_scan(&mut self, pid: i32) -> bool {
+        if !self.scan_held.contains_key(&pid) {
+            return false;
+        }
+        self.scan_wanted.insert(pid);
+        true
+    }
+
+    /// The launch scan read app `pid` (`answered`: it answered; else it did not, or the read
+    /// was given up): wanted meanwhile, it is observed now, or asked off the WM thread on the
+    /// schedule when it did not answer. Logs, at debug, how long the scan held it.
+    pub fn scan_done(&mut self, pid: i32, answered: bool, callback: Callback) {
+        let Some(since) = self.scan_held.remove(&pid) else { return };
+        let wanted = self.scan_wanted.remove(&pid) && self.observing;
+        tracing::debug!(pid, bundle = self.bundle_of(pid), answered, wanted, held_ms = since.elapsed().as_millis() as u64, "launch scan done for the app");
+        if !wanted {
+            return;
+        }
+        if answered {
+            let cg = cg_lookup();
             for id in self.observe_app_or_queue(pid, &cg, callback) {
                 self.found(id, "window found");
+            }
+        } else {
+            self.queue(pid, "did not answer the launch scan", true);
+        }
+    }
+
+    /// The apps held for the launch scan since before `now - max` (a read that takes that
+    /// long: its app is observed without it; its windows still come back when it ends).
+    pub fn scan_overdue(&self, now: Instant, max: Duration) -> Vec<i32> {
+        self.scan_held.iter().filter(|(_, since)| now.duration_since(**since) >= max).map(|(pid, _)| *pid).collect()
+    }
+
+    /// Where the probes' notes go (the WM thread's inbox); until set, apps that do not answer
+    /// are retried on the WM thread's once-a-second pass ([`Self::retry_pending`]).
+    pub fn set_probe_notify(&mut self, notify: Notify) {
+        self.probes.set_notify(notify);
+    }
+
+    /// Test only: the question the probes ask, standing in for apps.
+    #[cfg(test)]
+    fn set_probe_ask(&mut self, ask: observe_probe::Ask) {
+        self.probes = Probes::new(ask);
+    }
+
+    /// The fast retry cadence on while the login settles (the restore window open), off
+    /// after; logged when it changes.
+    pub fn set_fast_retry(&mut self, fast: bool) {
+        if self.probes.set_fast(fast) {
+            let waiting = self.pending.len();
+            if fast {
+                tracing::debug!(waiting, "apps that do not answer yet: asked every 150 ms while the login settles");
+            } else {
+                tracing::debug!(waiting, "apps that do not answer yet: asked once a second (the restore window ended)");
             }
         }
     }
 
-    /// Observes `pid`; on failure queues a retry. Returns newly tracked window ids.
+    /// App `pid` is waited for from now: asked on a thread of its own, at once or, when it
+    /// has just `missed` an ask, on the schedule ([`crate::engine::observe_retry`]); nothing
+    /// on the WM thread waits for it.
+    fn queue(&mut self, pid: i32, why: &str, missed: bool) {
+        if self.held_for_scan(pid) {
+            return;
+        }
+        let now = Instant::now();
+        let fast = self.probes.fast();
+        let retry = self.pending.entry(pid).or_insert_with(|| Retry::new(now));
+        let due = if missed {
+            match retry.missed(now, fast) {
+                Next::At(due) => due,
+                Next::GiveUp => return self.give_up(pid, why),
+            }
+        } else {
+            now
+        };
+        let retry = *retry;
+        if self.probes.start(pid, retry, due) {
+            tracing::debug!(pid, bundle = self.bundle_of(pid), why, "an app to observe: asked off the WM thread until it answers");
+        }
+    }
+
+    /// App `pid` did not answer the WM thread (`e`): asked on its own thread on the schedule,
+    /// or given up.
+    fn missed(&mut self, pid: i32, e: AxError) {
+        let now = Instant::now();
+        let fast = self.probes.fast();
+        let retry = self.pending.entry(pid).or_insert_with(|| Retry::new(now));
+        match retry.missed(now, fast) {
+            Next::At(due) => {
+                let retry = *retry;
+                tracing::debug!(pid, bundle = self.bundle_of(pid), misses = retry.misses(), "cannot observe app yet: {e}; asked again off the WM thread");
+                self.probes.start(pid, retry, due);
+            }
+            Next::GiveUp => self.give_up(pid, &format!("{e}")),
+        }
+    }
+
+    /// App `pid` is no longer waited for: it did not answer for a minute (`why`).
+    fn give_up(&mut self, pid: i32, why: &str) {
+        self.probes.stop(pid);
+        if let Some(retry) = self.pending.remove(&pid) {
+            let waited_s = retry.first().elapsed().as_secs();
+            tracing::warn!(pid, bundle = self.bundle_of(pid), misses = retry.misses(), waited_s, "giving up observing app: {why} (an activation tries again)");
+        }
+    }
+
+    /// A probe's note ([`super::observe_probe`]): an app that answers now is observed (its
+    /// windows found), one given up or gone is no longer waited for. A note of a probe stopped
+    /// before it came is dropped: the app's running probe, if any, goes on.
+    pub fn on_probe(&mut self, note: Note, callback: Callback) {
+        let pid = note.pid();
+        if !self.probes.current(&note) {
+            tracing::debug!(pid, ?note, "a stopped probe's note: dropped");
+            return;
+        }
+        self.probes.stop(pid);
+        if !self.observing || !self.pending.contains_key(&pid) || self.observed.contains_key(&pid) {
+            self.pending.remove(&pid);
+            return;
+        }
+        match note {
+            Note::Answered { retry, .. } => {
+                if let Some(r) = self.pending.get_mut(&pid) {
+                    *r = retry;
+                }
+                let cg = cg_lookup();
+                for id in self.observe_app_or_queue(pid, &cg, callback) {
+                    self.found(id, "window found");
+                }
+            }
+            Note::GaveUp { retry, .. } => {
+                if let Some(r) = self.pending.get_mut(&pid) {
+                    *r = retry;
+                }
+                self.give_up(pid, "it did not answer");
+            }
+            // Its quit is handled by the notice, or found by the next reap ([`Self::reap_gone`]).
+            Note::Gone { .. } => {
+                self.pending.remove(&pid);
+                self.suspect(pid);
+            }
+        }
+    }
+
+    /// Observes `pid`; on failure it is asked again off the WM thread. Returns newly tracked
+    /// window ids. Logs, once observed, the ms since the app was first known.
     fn observe_app_or_queue(&mut self, pid: i32, cg: &HashMap<u32, CgWindow>, callback: Callback) -> Vec<u32> {
+        if self.observed.contains_key(&pid) || self.held_for_scan(pid) {
+            return Vec::new();
+        }
         match self.observe_app(pid, cg, callback) {
             Ok(ids) => {
-                self.pending.remove(&pid);
+                self.probes.stop(pid);
+                let misses = self.pending.remove(&pid).map_or(0, |r| r.misses());
+                let (since, known) = self.known.get(&pid).copied().unwrap_or((Instant::now(), "unknown"));
+                let listed = cg.values().filter(|w| w.pid == pid && w.layer == 0).count();
+                tracing::debug!(
+                    pid,
+                    bundle = self.bundle_of(pid),
+                    known,
+                    since_ms = since.elapsed().as_millis() as u64,
+                    misses,
+                    listed,
+                    windows = ids.len(),
+                    "observing app"
+                );
                 ids
             }
             Err(e) => {
-                let attempts = self.pending.entry(pid).or_insert(0);
-                *attempts += 1;
-                tracing::debug!(pid, attempt = *attempts, "cannot observe app yet: {e}");
-                if *attempts >= MAX_ATTEMPTS {
-                    tracing::warn!(pid, bundle = self.bundle_of(pid), "giving up observing app: {e}");
-                    self.pending.remove(&pid);
-                }
+                self.missed(pid, e);
                 Vec::new()
             }
         }
@@ -661,6 +909,8 @@ impl Observer {
         for name in n::APP_LEVEL {
             match observer.add(&element, name, refcon(pid)) {
                 Ok(()) => registered += 1,
+                // Not answering (the timeout): the other registrations would wait it out too.
+                Err(e) if e == AxError::CANNOT_COMPLETE && registered == 0 => return Err(e),
                 Err(e) => last_err = Some(e),
             }
         }
@@ -675,7 +925,6 @@ impl Observer {
             self.recheck.entry(pid).or_insert(0);
         }
         self.observed.insert(pid, ObservedApp { element, observer });
-        tracing::debug!(pid, bundle = self.bundle_of(pid), "observing app");
         let mut ids: Vec<u32> = ax_windows.into_iter().filter_map(|w| self.track_window(pid, w, cg)).collect();
         // Creation order, so rules see windows in the order the app opened them.
         ids.sort_unstable();
@@ -684,6 +933,8 @@ impl Observer {
 
     fn unobserve_app(&mut self, pid: i32) {
         self.pending.remove(&pid);
+        self.scan_wanted.remove(&pid);
+        self.probes.stop(pid);
         self.recheck.remove(&pid);
         if self.observed.remove(&pid).is_some() {
             let gone: Vec<u32> = self.windows.values().filter(|w| w.pid == pid).map(|w| w.id).collect();
@@ -695,8 +946,9 @@ impl Observer {
         }
     }
 
-    /// Retries apps whose AX was not ready, and rescans apps with windows the window server
-    /// did not list yet (called about once a second).
+    /// Rescans apps with windows the window server did not list yet, and retries here the
+    /// apps waited for that no probe asks (its thread could not start; called about once a
+    /// second). The probes ask the rest ([`super::observe_probe`]).
     pub fn retry_pending(&mut self, callback: Callback) {
         if !self.observing {
             return;
@@ -705,17 +957,17 @@ impl Observer {
         for pid in recheck {
             let attempts = self.recheck.entry(pid).or_insert(0);
             *attempts += 1;
-            if *attempts > MAX_ATTEMPTS {
+            if *attempts > RECHECK_ATTEMPTS {
                 self.recheck.remove(&pid);
                 continue;
             }
             self.rescan_app(pid);
         }
-        if self.pending.is_empty() {
+        let pids: Vec<i32> = self.pending.keys().copied().filter(|p| !self.probes.running(*p)).collect();
+        if pids.is_empty() {
             return;
         }
         let cg = cg_lookup();
-        let pids: Vec<i32> = self.pending.keys().copied().collect();
         for pid in pids {
             for id in self.observe_app_or_queue(pid, &cg, callback) {
                 self.found(id, "window found");
@@ -799,6 +1051,7 @@ impl Observer {
             frame: element.frame().unwrap_or(cg_window.bounds),
             minimized,
             element,
+            found_at: Instant::now(),
         };
         if let Some(app) = self.observed.get(&pid) {
             for name in n::WINDOW_LEVEL {
@@ -1019,15 +1272,16 @@ impl Observer {
         match event {
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
-                self.last_launch = Some(Instant::now());
+                let now = Instant::now();
+                self.last_launch = Some(now);
                 let pid = app.pid;
                 let allowed = self.allowed(&app);
                 self.apps.insert(pid, app);
-                if self.observing && allowed {
-                    let cg = cg_lookup();
-                    for id in self.observe_app_or_queue(pid, &cg, callback) {
-                        self.found(id, "window found");
-                    }
+                self.known.entry(pid).or_insert((now, "launched"));
+                // Asked off the WM thread, observed once it answers (a launching app rarely
+                // answers at its notice; one that does is observed within a few ms).
+                if self.observing && allowed && !self.observed.contains_key(&pid) && !self.pending.contains_key(&pid) {
+                    self.queue(pid, "launched", false);
                 }
             }
             AppEvent::Terminated(app) => {
@@ -1061,8 +1315,11 @@ impl Observer {
                 self.activated_at.insert(pid, at);
                 let allowed = self.allowed(&app);
                 self.apps.entry(pid).or_insert(app);
+                self.known.entry(pid).or_insert((at, "activated"));
                 if self.observing && allowed {
-                    if !self.observed.contains_key(&pid) {
+                    // One waited for is asked by its probe: the WM thread does not wait for it.
+                    // Any other (given up, or never known) is tried at once, as before.
+                    if !self.observed.contains_key(&pid) && !self.pending.contains_key(&pid) {
                         let cg = cg_lookup();
                         for id in self.observe_app_or_queue(pid, &cg, callback) {
                             self.found(id, "window found");
@@ -1090,6 +1347,7 @@ impl Observer {
     /// windows reported destroyed, then [`WinEvent::AppTerminated`].
     fn terminated(&mut self, app: AppInfo) {
         self.activated_at.remove(&app.pid);
+        self.known.remove(&app.pid);
         self.apps.remove(&app.pid);
         self.unobserve_app(app.pid);
         if self.observing {
@@ -1427,6 +1685,168 @@ mod tests {
         assert!(d["note"].as_str().unwrap_or_default().contains("Accessibility not granted"));
         assert_eq!(d["apps"].as_array().map(Vec::len), Some(1));
         assert_eq!(d["windows"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// Round login-observe: apps standing in for the 11-06 login's. The stuck one waits out
+    /// the 0.25 s timeout at every ask and never answers; the other answers at once.
+    const STUCK: i32 = 5001;
+    const READY: i32 = 5002;
+
+    fn stand_in(pid: i32) -> observe_probe::Answer {
+        if pid == STUCK {
+            std::thread::sleep(Duration::from_millis(250));
+            return observe_probe::Answer::NotYet;
+        }
+        observe_probe::Answer::Answers
+    }
+
+    /// An observing observer whose probes ask [`stand_in`], their notes on a channel.
+    fn probing() -> (Observer, std::sync::mpsc::Receiver<Note>) {
+        let mut ob = observing(Vec::new());
+        ob.set_probe_ask(stand_in);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        ob.set_probe_notify(std::sync::Arc::new(move |note| {
+            let _ = tx.lock().unwrap_or_else(|e| e.into_inner()).send(note);
+        }));
+        (ob, rx)
+    }
+
+    #[test]
+    fn a_launch_of_an_app_that_does_not_answer_holds_up_neither_the_wm_thread_nor_another_app() {
+        let (mut ob, notes) = probing();
+        let t0 = Instant::now();
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        ob.on_app_event(AppEvent::Launched(app(READY, Some("com.example.ready"))), no_callback);
+        let took = t0.elapsed();
+        assert!(took < Duration::from_millis(50), "the notices are handled at once ({took:?})");
+        assert!(ob.pending.contains_key(&STUCK) && ob.pending.contains_key(&READY));
+        // The ready app's answer comes while the stuck one's first ask still waits.
+        let note = notes.recv_timeout(Duration::from_millis(200)).expect("the ready app's answer");
+        assert!(matches!(note, Note::Answered { pid: READY, .. }), "{note:?}");
+        assert!(t0.elapsed() < Duration::from_millis(200));
+        assert!(ob.probes.running(STUCK), "the stuck one is still asked");
+        // A second launch notice for it starts no second probe and costs nothing.
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        assert!(notes.recv_timeout(Duration::from_millis(400)).is_err(), "the stuck app sends nothing");
+        ob.stop();
+        assert!(ob.pending.is_empty() && !ob.probes.running(STUCK));
+    }
+
+    #[test]
+    fn an_activation_of_an_app_waited_for_does_not_ask_it_on_the_wm_thread() {
+        let (mut ob, _notes) = probing();
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        let t0 = Instant::now();
+        ob.on_app_event(AppEvent::Activated(app(STUCK, Some("com.example.stuck")), Instant::now()), no_callback);
+        // Before, Slack's activation at the 11-06 login came 3.3 s late behind such tries.
+        assert!(t0.elapsed() < Duration::from_millis(50));
+        assert_eq!(ob.take_events(), vec![WinEvent::AppActivated(STUCK, ob.activated_at(STUCK).unwrap_or(t0))]);
+        assert!(ob.pending.contains_key(&STUCK) && !ob.observes(STUCK));
+        ob.stop();
+    }
+
+    /// The number of the probe asking `pid` now.
+    fn probe_of(ob: &Observer, pid: i32) -> u64 {
+        ob.probes.probe_of(pid).expect("a probe asks it")
+    }
+
+    #[test]
+    fn a_probes_note_for_an_app_no_longer_waited_for_is_dropped() {
+        let (mut ob, _notes) = probing();
+        let now = Instant::now();
+        // Given up: forgotten, an activation tries it again.
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        let probe = probe_of(&ob, STUCK);
+        ob.on_probe(Note::GaveUp { pid: STUCK, probe, retry: Retry::new(now) }, no_callback);
+        assert!(!ob.pending.contains_key(&STUCK) && !ob.probes.running(STUCK));
+        // A note for an app that quit meanwhile (not waited for): nothing observed.
+        ob.on_probe(Note::Answered { pid: READY, probe: 1, retry: Retry::new(now) }, no_callback);
+        assert!(!ob.observes(READY) && ob.take_events().is_empty());
+        // Its process gone: no longer waited for, and a suspect for the next reap.
+        ob.pending.insert(READY, Retry::new(now));
+        ob.probes.start(READY, Retry::new(now), now + Duration::from_secs(60));
+        let probe = probe_of(&ob, READY);
+        ob.on_probe(Note::Gone { pid: READY, probe }, no_callback);
+        assert!(!ob.pending.contains_key(&READY));
+        ob.stop();
+    }
+
+    /// The 1.7 review: a probe stopped with observation (a logout's head start) may still send
+    /// its note (it was mid-ask); after a cancelled logout observation starts again and a new
+    /// probe asks the same app. The old probe's GaveUp stopped the new one and gave the app up:
+    /// never observed until activated. Now it is dropped and the new probe goes on.
+    #[test]
+    fn an_old_probes_give_up_leaves_the_fresh_probe_asking() {
+        let (mut ob, _notes) = probing();
+        let now = Instant::now();
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        let old = probe_of(&ob, STUCK);
+        ob.stop();
+        ob.observing = true;
+        ob.on_app_event(AppEvent::Launched(app(STUCK, Some("com.example.stuck"))), no_callback);
+        assert!(ob.probes.running(STUCK));
+        ob.on_probe(Note::GaveUp { pid: STUCK, probe: old, retry: Retry::new(now) }, no_callback);
+        assert!(ob.pending.contains_key(&STUCK), "still waited for");
+        assert!(ob.probes.running(STUCK), "the fresh probe still asks");
+        ob.stop();
+    }
+
+    /// L1: an app the launch's recovery scan has not read yet is neither asked nor observed
+    /// (a window a crash left parked comes back first); one read is asked at once, whatever
+    /// the apps still read; one that did not answer the scan is asked on the schedule.
+    #[test]
+    fn an_app_waits_for_its_own_launch_scan_only() {
+        let (mut ob, notes) = probing();
+        const LATER: i32 = 5003;
+        ob.hold_for_scan([STUCK, READY, LATER]);
+        ob.on_app_event(AppEvent::Launched(app(READY, Some("com.example.ready"))), no_callback);
+        ob.on_app_event(AppEvent::Activated(app(STUCK, Some("com.example.stuck")), Instant::now()), no_callback);
+        ob.on_app_event(AppEvent::Launched(app(LATER, Some("com.example.later"))), no_callback);
+        assert!(ob.pending.is_empty() && !ob.probes.running(READY) && !ob.probes.running(STUCK), "held: nothing asked");
+        assert!(!ob.observes(READY) && !ob.observes(STUCK));
+        // The ready app's scan is done while the stuck one's still reads: asked now.
+        let t0 = Instant::now();
+        ob.scan_done(READY, false, no_callback);
+        assert!(ob.probes.running(READY) && !ob.probes.running(STUCK));
+        let note = notes.recv_timeout(Duration::from_millis(400)).expect("the ready app's answer");
+        assert!(matches!(note, Note::Answered { pid: READY, .. }), "{note:?}");
+        assert!(t0.elapsed() < Duration::from_millis(400));
+        // A held app that quit is no longer wanted when its scan is done.
+        ob.on_app_event(AppEvent::Terminated(app(LATER, Some("com.example.later"))), no_callback);
+        ob.scan_done(LATER, false, no_callback);
+        assert!(!ob.pending.contains_key(&LATER) && !ob.probes.running(LATER));
+        // Overdue: a read holding its app too long is let go.
+        let later = Instant::now() + Duration::from_secs(11);
+        assert_eq!(ob.scan_overdue(later, Duration::from_secs(10)), vec![STUCK]);
+        ob.scan_done(STUCK, false, no_callback);
+        assert!(ob.pending.contains_key(&STUCK), "asked on the schedule");
+        assert!(ob.scan_overdue(later, Duration::from_secs(10)).is_empty());
+        ob.stop();
+    }
+
+    /// A start of observation leaves the held apps to their scans; a stop forgets them as
+    /// wanted, and a scan done while stopped observes nothing.
+    #[test]
+    fn a_held_app_waits_through_a_stop() {
+        let (mut ob, _notes) = probing();
+        ob.hold_for_scan([STUCK]);
+        ob.on_app_event(AppEvent::Activated(app(STUCK, Some("com.example.stuck")), Instant::now()), no_callback);
+        assert!(ob.scan_wanted.contains(&STUCK));
+        ob.stop();
+        assert!(ob.scan_wanted.is_empty() && ob.scan_held.contains_key(&STUCK));
+        ob.scan_done(STUCK, false, no_callback);
+        assert!(ob.pending.is_empty() && !ob.probes.running(STUCK) && ob.scan_held.is_empty());
+    }
+
+    #[test]
+    fn the_cadence_follows_the_restore_window() {
+        let (mut ob, _notes) = probing();
+        assert!(ob.probes.fast(), "fast as observation starts (the login settles)");
+        ob.set_fast_retry(false);
+        assert!(!ob.probes.fast());
+        ob.set_fast_retry(true);
+        assert!(ob.probes.fast());
     }
 
     #[test]

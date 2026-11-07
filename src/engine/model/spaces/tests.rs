@@ -289,10 +289,10 @@ fn stage_numbers_and_hotkeys_are_per_desktop() {
     let first = mac.m.stages_in(d2).next().map(|s| s.id).expect("stage");
     assert_eq!(mac.m.stage_number(first), Some(1));
     let obs = mac.obs();
-    let a = mac.m.switch_to_number(2, &obs);
+    let a = mac.m.switch_to_number(2, mac.m.main_display().id, &obs);
     mac.run(a);
     assert!(mac.elsewhere.is_empty());
-    assert!(mac.m.switch_to_number(3, &obs).is_empty(), "no third stage on Desktop 2");
+    assert!(mac.m.switch_to_number(3, mac.m.main_display().id, &obs).is_empty(), "no third stage on Desktop 2");
     // Sending the focused window to a new stage stays on its Desktop.
     let obs = mac.obs();
     let focused = mac.focused.expect("focused");
