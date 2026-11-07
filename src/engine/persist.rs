@@ -750,7 +750,8 @@ impl Model {
             Some(SavedWindow {
                 bundle_id: w.meta.bundle_id.clone(),
                 title: w.meta.title.clone(),
-                frame: w.restore,
+                // A saved frame still owed (`saved_size.rs`) stays the saved one.
+                frame: self.owed_frame(id).unwrap_or(w.restore),
                 z,
                 key,
                 pinned,
@@ -758,7 +759,7 @@ impl Model {
                     WindowRole::Standard => SavedRole::Standard,
                     WindowRole::Child { .. } => SavedRole::Child,
                 },
-                original: w.original,
+                original: self.owed.get(&id).map_or(w.original, |o| o.original),
                 window: Some(id.0),
                 fp: (!fp.is_empty()).then_some(fp),
                 pending: None,
@@ -942,6 +943,10 @@ impl Model {
                     Home::Stage(sid)
                 };
                 self.insert_restored(metas[&w.id], w, home, matched_frames);
+                if frames == LaunchFrames::Live {
+                    // Reopened much smaller than saved: its saved frame when first shown.
+                    self.owe_saved_size(metas[&w.id], w, origin.or(Some(space.0)));
+                }
             }
             for w in &members {
                 self.restored.insert(w.id, super::model::Restored { grade: w.grade, z: w.z });
@@ -1221,15 +1226,16 @@ impl Model {
     /// Restores members of an active stage whose live frame is in a park zone (left there by a
     /// crash) or shows only a piece at the corner ([`super::model::Display::hides`]), since
     /// they would otherwise stay hidden while counted as visible.
+    /// So do those owed their saved frame after a restart (`model/saved_size.rs`): reopened
+    /// in front much smaller than saved, they get it as they are first shown.
     fn unstick(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let mut ids = s.windows.clone();
         ids.extend(self.children_in(Home::Stage(stage)));
         for id in ids {
-            let stuck = self
-                .windows
-                .get(&id)
-                .is_some_and(|w| self.display(w.meta.display).hides(w.meta.frame));
+            // Owed its saved frame (`saved_size.rs`): shown in front now, so it gets it now.
+            let stuck = self.owes_saved_size(id)
+                || self.windows.get(&id).is_some_and(|w| self.display(w.meta.display).hides(w.meta.frame));
             if stuck {
                 self.restore_window(id, actions);
             }

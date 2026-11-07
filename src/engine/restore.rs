@@ -72,6 +72,9 @@
 //! **Frames** come back from `state.json` only on the screen a Desktop was saved on, at the
 //! saved size ([`Restore::screens`]; a file naming no screen: the main display of the saved
 //! size, [`Restore::saved_display`]); on another one a window keeps the frame its app gave it.
+//! The launch's arrival keeps the frames apps give the windows it matches, except one
+//! reopened at under half its saved area on a strong match: its saved frame when first shown,
+//! once (`model/saved_size.rs`, `[restore] saved_size`).
 //! Saved frames are in the arrangement's global coordinates of the save: a screen whose
 //! origin moved since (Displays settings, another screen main) has its Desktops' saved frames
 //! moved by the same offset ([`crate::engine::model::Model::settle_saved_origins`]); a file

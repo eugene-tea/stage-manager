@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- After a restart, a window its app reopens at a fraction of the size it had (VS Code, say)
+  gets its size and place back the first time it shows, instead of you resizing it by
+  hand. Only a window recognised by its name, on the screen it was on, and only once: a
+  window you move or resize first keeps yours. `[restore] saved_size = false` keeps the
+  size the app gives it.
 - When macOS stops reporting windows to apps (it can happen after it recovers from a hang,
   until you log out), the menu says so instead of Stage Manager just seeming broken. Your
   saved stages are kept meanwhile, a click no longer throws them away, and if macOS starts

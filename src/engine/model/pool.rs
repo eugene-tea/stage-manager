@@ -892,6 +892,7 @@ impl Model {
     pub(crate) fn prune_restore_refs(&mut self) {
         let windows = &self.windows;
         self.followed.retain(|_, v| windows.contains_key(v));
+        self.owed.retain(|id, _| windows.contains_key(id));
         let stages: HashSet<StageId> = self.stages.iter().map(|s| s.id).collect();
         self.merged.retain(|_, s| stages.contains(s));
         self.restore.front_waits.retain(|s| stages.contains(s));

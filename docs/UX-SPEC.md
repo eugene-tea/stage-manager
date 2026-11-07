@@ -429,6 +429,7 @@ until used; the rest are off.
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
+| A window an app reopens after a restart at under half its saved size gets its saved frame back, once (`[restore] saved_size`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 | Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |
@@ -512,7 +513,16 @@ stage's, that screen connected, goes back to that screen, at its saved frame the
 stage, in front or a card as saved (11-06: the laptop's front window, reopened by its app
 on the 5K; Apple's keeps no stages over a restart, so this decides nothing of Apple's); a
 stage saved on a Desktop of that screen not shown now is made again where the window
-shows, as above, and a window reopened on its own screen stays where its app put it. A
+shows, as above, and a window reopened on its own screen stays where its app put it. The
+one exception (`[restore] saved_size`, on; his go 11-06: VS Code reopened a 2082x1253
+window at 665x401 and he resized it back by hand): after a restart only, a window matched
+by its title (a strong match, not by app and size), reopened at under half its saved area
+on the screen of its saved stage at the saved size, the saved size fitting that screen,
+gets its saved frame once, when it is first shown (in front at the restore, or its card's
+first click), within reach as every restore frame; one log line names it (bundle, from,
+to). A move or resize seen first keeps the user's frame; a medium match, a relaunch in the
+same session, a window larger than saved and another screen size keep the app's frame
+(`state.json` keeps the saved frame while it is owed). A
 Desktop is found again by its windows; a screen macOS keeps one Desktop for (read from
 `com.apple.spaces`, never written) is the Desktop saved on that screen even before any of
 its windows show, so they go back to their stages there as their apps reopen them, and one

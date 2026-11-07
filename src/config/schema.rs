@@ -177,6 +177,7 @@ pub const SECTIONS: &[SectionDef] = &[
         ],
     },
     SectionDef { name: "stages", doc: &[] },
+    SectionDef { name: "restore", doc: &["Stages coming back after a restart or a new login ([stages] restore_after_restart)."] },
     SectionDef { name: "defaults", doc: &["What a new window does when no [[rule]] matches."] },
     SectionDef {
         name: "log",
@@ -381,6 +382,9 @@ pub const KEYS: &[KeyDef] = &[
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
+    // [restore]
+    k("restore", "saved_size", Kind::Bool, "true",
+        "A window its app reopens after a restart at under half its saved size (matched by its title, on the screen it was saved on) gets its saved frame back once, when first shown; moved or resized by you first, it keeps yours. Off: every window keeps the frame its app gives it, as Apple's does."),
     // [defaults]
     k("defaults", "action", Kind::Action, "\"native\"",
         "\"native\" is Apple's: a window joins its app's stage, a newly opened app gets its own."),
@@ -550,6 +554,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-29.toml"),
     include_str!("legacy/default-30.toml"),
     include_str!("legacy/default-31.toml"),
+    include_str!("legacy/default-32.toml"),
 ];
 
 #[cfg(test)]
