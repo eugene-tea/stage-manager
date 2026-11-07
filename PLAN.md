@@ -52,9 +52,16 @@ stage list in the menu (R2), dropping a window on a card (R3b), the parity check
 - **Full-screen windows in the closed-window rule:** a dead handle off screen at about a
   display's size is kept (`stale_handle::on_full_screen_space`); the window's last read
   AXFullScreen would retire the size test.
-- **Deferred review findings** (`tmp/fable-review/`): K5, `state.json`'s fsync off the WM
-  thread, ordered against the quit's save; L5/U4, the switch cover's Dock carve-out now the
-  overlay sits below the Dock; C4, a step journal for non-APFS swaps.
+- **Saving stages off the window thread.** `state.json` is flushed to disk on the WM thread,
+  up to every 3 s while windows move (`controller.rs`, `durable.rs`). Move the flush to its
+  own thread, still finished before the quit's save.
+- **The switch cover gives up too often.** During a switch, the still painted over the
+  hiding corner refuses when a window not ours without a picture reaches the corner, a
+  window lands outside its 320 pt square, or the strip is hidden (`corner_patch.rs`). It
+  also still leaves the Dock's area out, from before the overlay moved below the Dock, so a
+  translucent Dock can show a hidden window's sliver.
+- **An update on a non-APFS disk.** A forced kill between the updater's two renames leaves
+  no app at the install path (`updater.rs`). A step journal, or an APFS check, would close it.
 
 ## To decide
 
