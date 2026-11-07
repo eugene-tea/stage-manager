@@ -19,6 +19,11 @@ From FEATURE-REQUESTS §2: a right-click menu on cards (R4), naming stages from 
 the strip scrolling past its capacity with "+N" (R5), no unasked stage switches (R6), a
 stage list in the menu (R2), dropping a window on a card (R3b), the parity checks.
 
+Big: **one stage across all screens** (R8's second half, one request), an option, off.
+One strip on the main screen; a switch brings a stage's windows back on every screen. Open:
+what it means with "Displays have separate Spaces" on (each screen changes Desktops on its
+own), and the lid and restart rules once a window moved to another screen keeps its stage.
+
 ## Check live with the owner
 
 - **Screens:** ⌘-Tab to the other screen's stage; the second screen's card glass and corner
@@ -87,5 +92,5 @@ stage list in the menu (R2), dropping a window on a card (R3b), the parity check
 
 ## Out of scope
 
-A unified stage across screens (Apple's has none); full-screen windows (ignored). UX-SPEC's
-measurement record of Apple's Stage Manager is that file as of commit 20665a3.
+Full-screen windows (ignored). UX-SPEC's measurement record of Apple's Stage Manager is
+that file as of commit 20665a3.
