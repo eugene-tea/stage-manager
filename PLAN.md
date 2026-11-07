@@ -12,6 +12,9 @@ What is still to do. What shipped is in [CHANGELOG.md](CHANGELOG.md); how the ap
   says so.
 - **The corner patch's Settings text** still says "until checked live" (`schema.rs`; a new
   legacy default file).
+- **Accessibility gaps** (`.github/ACCESSIBILITY.md`): VoiceOver labels on the strip's
+  cards (which stage, which apps); follow the system's Reduce Motion (what Apple's does
+  under it is not measured yet).
 
 ## Feature requests not built
 
