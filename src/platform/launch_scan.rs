@@ -220,13 +220,15 @@ impl Run {
 mod tests {
     use super::*;
 
-    /// The stuck apps: each read waits out the 0.25 s timeout.
+    /// The stuck apps: each read hangs for a second, well past the wait, so the bounds below
+    /// keep room for a slow, shared CI machine (a 250 ms hang left 100 ms and failed there).
     const STUCK: [i32; 2] = [6001, 6003];
+    const HANG: Duration = Duration::from_millis(1000);
     const READY: i32 = 6002;
 
     fn fake(pid: i32, _bundle: Option<&str>) -> i32 {
         if STUCK.contains(&pid) {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(HANG);
         }
         pid
     }
@@ -245,15 +247,15 @@ mod tests {
         });
         let took = t0.elapsed();
         assert!(not_started.is_empty());
-        assert!(took < Duration::from_millis(200), "the wait is bounded, not the stuck apps' sum ({took:?})");
+        assert!(took < Duration::from_millis(600), "the wait is bounded, not a stuck app's read ({took:?})");
         let read: Vec<i32> = done.iter().map(|d| d.pid).collect();
         assert_eq!(read, vec![READY], "the ready app is read within the wait");
         assert_eq!(done[0].bundle.as_deref(), Some("com.example.ready"));
         assert_eq!(done[0].value, Some(READY));
         let mut late = Vec::new();
         for _ in 0..2 {
-            let (d, at) = rx.recv_timeout(Duration::from_secs(2)).expect("the stuck apps' reads come later");
-            assert!(at.duration_since(t0) < Duration::from_millis(450), "read side by side, not in turn");
+            let (d, at) = rx.recv_timeout(Duration::from_secs(5)).expect("the stuck apps' reads come later");
+            assert!(at.duration_since(t0) < Duration::from_millis(1700), "read side by side, not in turn");
             late.push(d.pid);
         }
         late.sort_unstable();

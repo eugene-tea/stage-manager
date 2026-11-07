@@ -3,7 +3,9 @@
 name: check
 
 on:
+  # dev only: master moves by fast-forward to a commit dev already checked.
   push:
+    branches: [dev]
   pull_request:
 
 permissions:
