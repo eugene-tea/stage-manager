@@ -176,6 +176,9 @@ guardian runs or the screen is locked.
 - **`hide_parked_apps` stays off:** a hidden app ⌘-Tabbed to skips the switch's motion, and
   its live phase left an empty stage after "supersede: Bravo and Charlie together again".
   Look there before offering it.
+- **Next version: "Only the main screen" in Settings** (`[displays] main_only`, off; R8).
+  Read at launch, so the switch quits (every window back) and reopens the app, as an update
+  does; its line says so.
 - **Feature requests not built** (`docs/FEATURE-REQUESTS.md` §3): card context menu (R4),
   stage names from the UI (R7), strip overflow scroll with "+N" (R5), quiet activations
   (R6), a stage list in the menu (R2), drop a window on a card (R3b), the parity checks.
