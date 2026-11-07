@@ -243,6 +243,15 @@ fn ping() -> (Pong, PathBuf) {
     (Pong::SILENT, places.swap_remove(0))
 }
 
+/// Whether a Stage Manager runs now: one answers `ping` (quitting or not), or another
+/// process holds the lock. For a process that never manages (the guardian): a lock it gets is
+/// let go at once.
+pub fn running() -> bool {
+    let (lock, file) = try_lock();
+    drop(file);
+    lock == Lock::Busy || ping().0.peer != Peer::Silent
+}
+
 /// Claims the single instance (module docs). `Manage` with the lock kept for the process's
 /// life; `HandOff` after asking the running copy to show its Settings; `Leave` when a copy
 /// holds the lock and never answered. Runs before anything is managed.

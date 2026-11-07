@@ -1162,6 +1162,9 @@ mod tests {
         assert!(!listed_before_login(Some(now - 2), now, Some(s(5))), "listed after the login: not this login's");
         assert!(!listed_before_login(None, now, Some(s(5))));
         assert!(!listed_before_login(Some(now - 100), now, None), "no login time");
+        // Round logout-cancel-relaunch: the guardian opens the app again 40 s after a logout
+        // cancelled once macOS had quit it, in the login of hours ago: no reopen of a login.
+        assert!(!listed_before_login(Some(now - 40), now, Some(s(3 * 3600))), "a relaunch after a cancelled logout");
     }
 
     #[test]

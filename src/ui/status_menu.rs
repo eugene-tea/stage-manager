@@ -109,6 +109,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
+            crate::ui::app_menu::note_user_quit();
             dispatch(MenuAction::Quit);
         }
     }

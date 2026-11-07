@@ -30,7 +30,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -161,6 +161,15 @@ pub struct WmHandle {
 /// quit that comes while the head start still brings them back waits as long as their unpark
 /// may take. Back to 0 when the logout is cancelled.
 static LOGOUT_WINDOWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Set when the quit came while the logout's head start held (round logout-cancel-relaunch):
+/// the guardian then waits for the logout's cancel.
+static QUIT_AFTER_HEAD_START: AtomicBool = AtomicBool::new(false);
+
+/// Whether the quit came while the logout's head start held.
+pub fn quit_after_head_start() -> bool {
+    QUIT_AFTER_HEAD_START.load(Ordering::SeqCst)
+}
 
 /// How many windows were parked when the logout now held was announced (0: none held).
 pub fn logout_windows() -> usize {
@@ -376,6 +385,7 @@ impl WmState {
                 // The head start did the work: nothing is unparked or saved again (the
                 // controller is a fresh one with no stages; saving it would write none).
                 let Quit::Done { all_back } = self.logout.quit() else { return };
+                QUIT_AFTER_HEAD_START.store(true, Ordering::SeqCst);
                 // Windows it could not bring back (another Desktop's) are tried once more,
                 // knowing what its check knew, as the quit after a stand-down does.
                 let back = if self.stand_down.stranded() {

@@ -5588,6 +5588,15 @@ def restore_after_logout(run_id):
     check("quitting after the logout's head start" in log_text(), "macOS's quit (here ctl quit) only exits after the head start")
     check(read_state_file() == held, "the quit writes nothing over it")
 
+    say("-- the guardian waits for the logout's cancel after the quit; the cancel would open the app again")
+    check(wait_until(lambda: "guardian: the app quit for a logout" in log_text(), 5, "the guardian's wait") is not None,
+          "a quit after the head start leaves the guardian waiting for a cancel")
+    check(post_note(note + ".cancelled"), "the cancel note is posted after the quit")
+    check(wait_until(lambda: re.search(rf'guardian: logout signal after the quit signal="{re.escape(note)}\.cancelled" cancel=true since_quit_ms=\d+',
+                                       log_text()), 5, "the guardian hears the cancel") is not None, "the guardian logs the cancel it hears")
+    check(wait_until(lambda: "guardian: a test run: would open the bundle again" in log_text(), 5, "the relaunch") is not None,
+          "a cancel after the quit opens the app again (a test run only says so)")
+
     say("-- session E (a restart): the apps reopen, Bravo clamped against the park corner, Charlie at the park spot")
     s = start_app(0, extra_env=env["E"])
     if not check(s is not None, "session E: app up on an empty screen"):
@@ -5613,7 +5622,18 @@ def restore_after_logout(run_id):
         wrong = [w["title"] for w in s["windows"] if w["role"] == "standard" and w.get("restored") not in ("strong", "medium")]
         check(not wrong, f"each matched by title and app, whatever its frame ({wrong})")
         consistent("session E")
+    say("-- a logout that goes on: the guardian ends with the session, nothing opened")
+    check(post_note(note), "the logout note is posted in session E")
+    check(wait_until(lambda: re.search(rf'logout signal signal="{re.escape(note)}" .*then="head start"', log_text()), 5, "E's head start") is not None,
+          "session E's head start")
+    time.sleep(1.5)
+    guardians = re.findall(r"guardian started pid=(\d+)", log_text())
     stop_app()
+    if check(guardians and wait_until(lambda: "guardian: the app quit for a logout" in log_text(), 5, "the guardian's wait") is not None,
+             "session E's guardian waits for a cancel"):
+        os.kill(int(guardians[-1]), signal.SIGTERM)
+        check(wait_until(lambda: "the logout goes on (the session ends): nothing is opened" in log_text(), 5, "the end") is not None,
+              "its stop signal (the session ending) ends the wait with nothing opened")
     all_onscreen("session E quit")
 
     say("-- no early signal (the 10-16 restart): the apps quit first, then the app")

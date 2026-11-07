@@ -128,7 +128,7 @@ mod app {
     use stage_manager::platform::native_settings::{self, RawSettings};
     use stage_manager::platform::permissions::{self, PermissionState};
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
-    use stage_manager::engine::{fullscreen, leftovers};
+    use stage_manager::engine::{fullscreen, leftovers, logout_watch};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
     use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, windows};
     use stage_manager::ui::shell;
@@ -444,7 +444,18 @@ mod app {
 
     fn finish_exit(ok: bool, code: i32) -> ! {
         if ok {
-            safety::mark_clean_exit();
+            // A quit at a logout: the guardian waits for its cancel, which opens the app again
+            // (round logout-cancel-relaunch); never after the user's own Quit.
+            let reason = stage_manager::ui::app_menu::system_quit_reason();
+            let marker = logout_watch::quit_marker(
+                wm_thread::quit_after_head_start(),
+                reason.is_some_and(logout_watch::logout_reason),
+                stage_manager::ui::app_menu::user_quit(),
+            );
+            if marker == logout_watch::LOGOUT_MARK {
+                tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
+            }
+            safety::mark_clean_exit(marker);
         } else if safety::passed_on() {
             // Only handed-over windows still away (round 8N): this app's guardian takes them over.
             tracing::info!("handed-over windows still away: this app's guardian takes them over");

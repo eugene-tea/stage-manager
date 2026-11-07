@@ -29,6 +29,7 @@ pub mod input;
 pub mod instance;
 pub mod launch_scan;
 pub mod logging;
+pub mod logout_watch;
 pub mod login_item;
 pub mod native_settings;
 pub mod observe;

@@ -501,7 +501,18 @@ timing allows (best effort: macOS may ask apps to quit first); from then on noth
 arranged (no switch, no card added or removed) and the app itself quits when macOS asks it
 to; a cancelled logout brings the stages back at once (one macOS says nothing of: two minutes
 after its latest sign, or after the latest app that quit meanwhile, so a slow restart, an app
-asking about unsaved changes, is not taken for one). An app that quits keeps its windows'
+asking about unsaved changes, is not taken for one). A logout cancelled after macOS quit the
+app (another app's unsaved document, its Cancel clicked later) stops there, and apps already
+quit stay quit; Apple's Stage Manager, part of the window server, never quits. So after a
+quit at a logout (the head start held, or the quit event's reason a logout, restart or
+shutdown; never the user's own Quit) the guardian waits up to ten minutes, logging each
+logout sign it hears: at a cancel (`com.apple.logoutCancelled` or its notify(3) name) it
+opens the installed app again in the background (`open -g -a`), which restores the stages
+saved at the head start, in the same session, by window id, as an accessory app (not
+macOS's reopen at a login: the reopen list's mark is cleared as at any launch). A logout that
+goes on ends the session and the guardian with it, nothing opened; so does the end of the
+ten minutes, or the app already running again. The guardian is no app: `loginwindow` never
+waits for it. An app that quits keeps its windows'
 places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
 before macOS announced the logout still come back after the restart; a window reopened
 squeezed into the park corner, or showing only a piece at it, goes to its saved frame
