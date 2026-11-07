@@ -67,10 +67,12 @@ running from anywhere else: `make run` stops only the dev copy's own process.
 its ctl socket and reading the window server's view of the windows:
 
 ```sh
-scripts/test-stages.sh                    # every phase
-scripts/test-stages.sh m3 safety          # some phases: m3 safety m4 m6 restore strip native
+scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
                                           # visible parity motion slots expose capture raise park
-scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still
+                                          # offscreen enhanced stale handles displays
+scripts/test-stages.sh m3 safety          # some phases
+scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still,
+                                          # away and glass
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh

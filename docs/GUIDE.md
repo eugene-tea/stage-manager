@@ -79,8 +79,10 @@ and when you come back to a stage, every window is exactly where you left it.
 Each card shows the stage's windows in miniature, with the app's icon in the corner. As on
 Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity = 1` makes
 them opaque); the card under the pointer turns solid as it grows (`[cards]
-hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through). The strip sits below your windows: a window over the cards covers them, and when a window comes within about 50 points of the screen's left edge, the strip slides away.
-Rest the pointer at the left edge of the screen to bring it back.
+hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through).
+The strip sits below your windows: a window over the cards covers them, and when a window
+comes within about 50 points of the screen's left edge, the strip slides away. Rest the
+pointer at the left edge of the screen to bring it back.
 
 ### Switching
 
@@ -149,9 +151,8 @@ others become cards; open it and the stages macOS moves back are its own again. 
 hides its stages in a corner of its own, one with no screen beyond it. After a restart each
 screen's stages come back on that screen, by the screen itself, not the cable it hangs on.
 
-`[displays] main_only = true` keeps the first version's way: only the main screen (the one
-with the menu bar) is managed, and a window moved to another screen leaves its stage and is
-left alone there. It is read at launch: quit and open Stage Manager again after changing it.
+`[displays] main_only = true` manages only the main screen (the one with the menu bar): a
+window moved to another screen leaves its stage and is left alone there. It is read at launch: quit and open Stage Manager again after changing it.
 
 ### After a restart
 
@@ -383,8 +384,6 @@ was, and the next launch checks the corner again.
 
 Some limits to know about:
 
-- Only the main screen is managed: windows on a second monitor are left alone. Every
-  Desktop on the main screen has its own stages.
 - Windows an app keeps wholly off every screen, as headless browsers and test tools do, are
   left alone: they get no stage and no card, and are never moved onto the screen.
 - Moving windows are pictures taken a moment earlier, so content that changed meanwhile can

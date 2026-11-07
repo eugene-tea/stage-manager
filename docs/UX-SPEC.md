@@ -38,9 +38,9 @@ screen, and one left in the hiding corner comes back just out of it.
 
 **The strip.** It sits below windows: a window moved over the cards covers them and the strip
 stays up under it. It slides away only once a window of the front stage comes within 50 pt of
-the screen's left edge, as Apple's does (measured 11-05 on a Studio Display: Apple's stayed up
-under VS Code dragged left over the cards from about 308 pt, and went at about 50 pt; a laptop's
-windows nearly fill the screen, so there it goes more often). Each screen's strip follows its
+the screen's left edge, as Apple's does (measured on a Studio Display: Apple's stayed up under
+a window dragged left over the cards and went at about 50 pt; a laptop's windows nearly fill
+the screen, so there it goes more often). Each screen's strip follows its
 own front stage. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
@@ -52,8 +52,8 @@ screen) is left off: the card shows the window alone. So is a popup over a windo
 macOS's capture does not place (a calendar's event popup reaching past the window's top):
 never a fill around a window on a card.
 
-**Cards let the wallpaper through**, as Apple's do (seen on the owner's screenshots
-11-03, measured 11-05): each window's picture is drawn at 78 % over a flat colour of its own,
+**Cards let the wallpaper through**, as Apple's do (measured): each window's picture is
+drawn at 78 % over a flat colour of its own,
 the wallpaper's average behind the thumbnail at 95 % of its saturation and 78 % of its
 brightness (`[cards] window_opacity`, `backdrop_saturation`, `backdrop_brightness`).
 `scripts/measure-apple-card-glass.py` read one of Apple's cards with its window flat white,
@@ -63,15 +63,15 @@ colour is flat over a card where the wallpaper behind it changes, so it is an av
 blur. Not measured yet: dark mode, and what Apple shows through a window behind
 another on one card (here each window has the wallpaper behind it). A switch's snapshots
 take the card's look as they shrink into it and leave it as they grow into their windows.
-The card under the pointer turns solid as it grows (the owner, 11-03: "Apple's SM doing
-that"): its pictures ease to `[cards] hover_window_opacity` (1) on the hover's own curve and
-time, and back as it shrinks on leave; a card a dragged card would merge into does the same,
-as it grows. A click on it hands the snapshot over at the look drawn that moment (solid, or
-part way), so nothing jumps; a card the snapshots land in under the pointer shows at rest,
-then grows and turns solid together. Not measured on Apple's yet: whether its hovered card
-turns fully solid, and on the same timing as the growth (`measure-apple-card-glass.py
---hover` reads it). The wallpaper is drawn from its file, as the clean corner's is; where it cannot be (a
-shuffle, an unreadable picture), the cards are opaque.
+The card under the pointer turns solid as it grows, as Apple's does: its pictures ease to
+`[cards] hover_window_opacity` (1) on the hover's own curve and time, and back as it shrinks
+on leave; a card a dragged card would merge into does the same, as it grows. A click on it
+hands the snapshot over at the look drawn that moment (solid, or part way), so nothing jumps;
+a card the snapshots land in under the pointer shows at rest, then grows and turns solid
+together. Not measured on Apple's yet: whether its card turns solid on the same timing as the
+growth (`measure-apple-card-glass.py --hover` reads it). The wallpaper is drawn from its file,
+as the clean corner's is; where it cannot be (a shuffle, an unreadable picture), the cards are
+opaque.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
@@ -96,23 +96,25 @@ Sheets and dialogs follow their window. An app that quits takes its windows out 
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 An app that saved a hidden window's corner place when it quit, and reopens the window there
 within a day, has the window put back where it was before the quit (else centered).
+
 A window an app keeps wholly off every screen (a headless browser's, an offscreen render
 window) is left alone, as Apple's leaves it: no stage, no card, never moved; it is taken in as
 a new window if it ever comes on screen.
+
 An app whose `AXEnhancedUserInterface` an assistive client turned on animates the frame
-changes made through Accessibility (Chrome's window slid in from the park corner, 11-03).
+changes made through Accessibility (Chrome's window slides in from the park corner).
 Apple's Stage Manager is no Accessibility client and never shows this; we turn the flag off
 around our moves, once per app per switch, and back on after (Rectangle's and yabai's way), on
-by default with no key. A write the app answers with an error is read back (Chromium's setter
-acts on the value, then passes it to AppKit's, whose answer may be an error: -25208 from Chrome); an app that refuses is left alone for a while (1 s, doubling to
-30 s), not asked at every move.
-**Deviation (stale activations, 11-03):** under load an activation notice reaches us seconds
-late (14:09:57: 1–2.6 s; each late one switched stages, each switch brought its own late one,
-ten switches back and forth). An activation that fired before the latest switch we began, or
-whose app is no longer frontmost when we decide, switches nothing (logged once with its
-reason and age); a focus that would switch stages switches nothing when its app's focused
-window is in another stage by then. His latest ⌘-Tab or Dock click is neither, so it still
-switches, late.
+by default with no key. A write the app answers with an error is read back (Chromium acts on
+the value, then may answer with AppKit's error); an app that refuses is left alone for a
+while (1 s, doubling to 30 s), not asked at every move.
+
+**Deviation (stale activations):** under load an activation notice can reach us seconds late,
+and a late one acted on switches stages back and forth. An activation that fired before the
+latest switch we began, or whose app is no longer frontmost when we decide, switches nothing
+(logged once with its reason and age); a focus that would switch stages switches nothing when
+its app's focused window is in another stage by then. The user's latest ⌘-Tab or Dock click is
+neither, so it still switches, late.
 
 **First start.** Every app with windows becomes its own stage, as when you turn Apple's on.
 The frontmost app's stage is shown; the others enter the strip, most recently used first.
@@ -132,77 +134,73 @@ Desktop shows that window's stage. An app macOS activates as a Desktop slides in
 Desktop is recognized, as Apple's never touches the Desktop left. Full-screen apps have no
 strip.
 
-**Screens.** Every screen has its own strip and stages, as Apple's (measured 11-05 on the
-owner's Mac: a 5K Studio Display main, the MacBook's screen to its left, "Displays have
-separate Spaces" on): a strip on the left edge of each screen, its cards sized and counted
-for that screen (6 on the 5K, 5 on the laptop), each screen with its own front stage and
-cards, each strip sliding away under its own windows. A window dragged to another screen
-starts a stage of its own there, in front, once it is let go (nothing changes under the
-hand, however slow the drag across the seam); the stage that was in front there goes to a
-card; the screen it left, its front stage now empty, brings its most recent card forward. A
-card click changes only its own screen, and so does a click on a card's app icon: the app's
-windows come from that screen's stages. A window dragged onto either screen's strip becomes
-a stage of its own there. A new app opens on the screen with keyboard focus,
-as its own stage there, by the one-screen rules (macOS picks the screen; the window is
-taken where it shows). A window straddling two screens belongs to the one showing most of
-it (macOS's rule). The lid closed: that screen's front stage comes to the remaining screen
-as its front stage (its windows where macOS puts them, at their size), the remaining
-screen's front goes to a card, and the removed screen's other stages become cards there
-too, after the remaining screen's own (past the capacity, hidden); its hidden windows wait
-at the remaining screen's corner. macOS may put the closed screen's windows on another of
-the remaining screen's Desktops and slide to it (the owner's 11-05: the 5K went to its
-second Desktop, not shown since the launch): the same rule holds there, the closed screen's
-stages whole, that Desktop's own front a card (round displays-lid), also when macOS
-announces the Desktop still shown before it slides. Nothing joins: the
-closed screen's strip goes with it, each card is one stage, its front window shows, and
-the hidden windows macOS pushes whole onto the remaining screen at the change go back to its
-corner (round displays-lid-2). The app macOS activates after the change (Mail, 0.4 s
-after the screen went) switches nothing: with no click or key press since, an activation
-or focus in the 10 s after a display change (heard as macOS announces it, not at the next
-second's look) is macOS's, and the closed screen's front stays
-in front. So is a window found then (macOS lists windows of the remaining screen's other
-Desktop for a moment): it is placed once the change settles, if it still shows, and one
-gone by then leaves no stage or card (round displays-lid-4). A Desktop the closed screen's front left for the one macOS slid to shows its own
-most recent stage again when it comes back, never nothing in front (round displays-lid-3).
-The lid opened: the
-stages whose windows macOS moves back to that screen are its stages again (the one in front
-before, a card; a stage moved whole stays one stage); the stage that came over in front
-stays where it is. macOS puts each window back at the frame it had on that screen, a hidden
-one at its old corner: a window put back in the open shows there, at that frame (never
-moved to a frame carried over from the other screen), its stage that screen's front, also
-when the user had sent it to a card on the remaining screen meanwhile; one put back at the
-corner is a card, also when the user had brought it in front on the remaining screen, that
-screen's card again even from another Desktop of the remaining screen, never hidden again
-at the remaining screen's corner (round displays-lid-3; the owner's 11-06 run: the two
-stages he had used on the 5K while the lid was closed stayed there), and a card put back
-brings nothing forward; the remaining screen, its front gone back, brings its own most
-recent stage forward; none of it is the user's drag. A window showing only a piece at its
-screen's own hidden corner (where a hidden window's sliver would be, give or take: what shows
-reaches past the corner's side and lies within 120 pt of it and 64 pt of the corner's edge)
-is never a shown window: brought back, it comes wholly on screen in that corner, at its
-size; found there at a launch, or put back there as the lid opens, it is a card, its stage
-not in front (the owner's 11-06 14:13 launch: an earlier version had left the laptop's front
-window 80 by 32 pt on the laptop at its corner, the laptop's front, nobody seeing it, and no
-card); the front an empty one. A window hung off an edge elsewhere stays where the user put
-it. Apple never leaves a window there. A stage
-belongs to the screen its windows are on. Decided, not measured:
-a window dragged out of a stage of several leaves the rest in their stage; ⌘-Tab or the
-Dock to an app whose stage is on the other screen switches that screen only. Each screen's
-hidden stages wait in a corner of that screen with no screen beyond it (the laptop's
-bottom-left, its right edge touching the 5K). Each screen's strip samples its own desktop
-picture for the cards' glass, each screen's hidden corner has a patch of its own (a still of
-that screen's desktop where Screen Recording is allowed, else its own wallpaper's file),
-`[windows] fit` keeps a window clear of its own screen's strip, a ⌘-Tab or Dock click to a
-Desktop on either screen arranges that Desktop ahead of its slide, and a full-screen app or
-Mission Control on one screen stops nothing on the other (round displays-2). The main
-screen changing (the menu bar moved to the other screen, or the lid closed with the laptop
-main) moves no stage: macOS moves every window with its screen, and each hidden window
-comes back where it was on its screen. `[displays]
-main_only` (off) is the first version's behaviour: only the main screen, a window moved off
-it left alone; it is read at launch (turned on mid-session it would have to bring back
-every hidden window of the other screens, on Desktops not shown too; a quit does that
-safely). Each screen's left-edge reveal is its own: a pointer on a
-screen to the left of a strip never reveals or holds that strip.
+**Screens.** Every screen has its own strip and stages, as Apple's (measured with a 5K main
+screen and a laptop's screen to its left, "Displays have separate Spaces" on). Each screen's
+strip sits on its left edge, its cards sized and counted for that screen (6 on the 5K, 5 on
+the laptop), with its own front stage and cards, sliding away under its own windows. A stage
+belongs to the screen its windows are on; a window straddling two screens belongs to the one
+showing most of it (macOS's rule).
+
+- **A drag.** A window dragged to another screen starts a stage of its own there, in front,
+  once it is let go (nothing changes under the hand, however slow the drag across the
+  seam). The stage in front there goes to a card; the screen it left, its front now empty,
+  brings its most recent card forward. A window dragged onto either screen's strip becomes a
+  stage of its own there. Decided, not measured: a window dragged out of a stage of several
+  leaves the rest in their stage.
+- **Clicks and activations.** A card click changes only its own screen, and so does a click
+  on a card's app icon: the app's windows come from that screen's stages. Decided, not
+  measured: ⌘-Tab or the Dock to an app whose stage is on the other screen switches that
+  screen only. A Dock click or ⌘-Tab to a Desktop on either screen is arranged as on one
+  screen (the Dock click ahead of the slide; see Known gaps).
+- **A new app** opens on the screen with keyboard focus, as its own stage there, by the
+  one-screen rules (macOS picks the screen; the window is taken where it shows).
+- **The lid closed.** That screen's front stage comes to the remaining screen as its front
+  (its windows where macOS puts them, at their size); the remaining screen's front goes to a
+  card, and the closed screen's other stages become cards after the remaining screen's own
+  (past the capacity, hidden). Nothing joins: the closed screen's strip goes with it, each
+  card is one stage, and its front window shows. The closed screen's hidden windows wait at the remaining screen's corner, those
+  macOS pushes whole onto that screen at the change too. macOS may put the closed screen's
+  windows on another of the remaining screen's Desktops, one not shown since the launch, and
+  slide to it: the same rule holds there, that Desktop's own front a card, also when macOS
+  announces the Desktop still shown before it slides; the Desktop left shows its own most
+  recent stage again when it comes back, never nothing in front.
+- **macOS's activations at a display change.** The app macOS activates after the change
+  (Mail, 0.4 s after the screen goes) switches nothing: with no click or key press since, an
+  activation or focus in the 10 s after a display change (counted from macOS's notice) is
+  macOS's, and the closed screen's front stays in front. A window found then (macOS lists
+  windows of the remaining screen's other Desktop for a moment) is placed once the change
+  settles, if it still shows; one gone by then leaves no stage or card.
+- **The lid opened.** The stages whose windows macOS moves back to that screen are its
+  stages again (the one in front before, a card; a stage moved whole stays one stage); the
+  stage that came over in front stays where it is. macOS puts each window back at the frame
+  it had on that screen, a hidden one at its old corner. A window put back in the open shows
+  there at that frame (never one carried over from the other screen), its stage that
+  screen's front, also when the user had sent it to a card meanwhile. One put back at the
+  corner is that screen's card, also when the user had brought it in front on the remaining
+  screen, from any of its Desktops; it is never hidden again at the remaining screen's
+  corner. A card put back brings nothing forward; the remaining screen, its front gone back,
+  brings its own most recent stage forward. None of it counts as the user's drag.
+- **The hidden corner.** Each screen's hidden stages wait in a corner of that screen with no
+  screen beyond it (the laptop's bottom-left, its right edge touching the 5K). A window
+  showing only a piece at its screen's hidden corner (what shows reaches past the corner's
+  side and lies within 120 pt of it and 64 pt of the corner's edge) is never a shown window:
+  brought back, it comes wholly on screen in that corner, at its size; found there at a
+  launch, or put back there as the lid opens, it is a card, its stage not in front (the front
+  an empty one). Apple never leaves a window there. A window hung off an edge elsewhere stays
+  where the user put it.
+- **Each screen its own.** Each screen's strip samples its own desktop picture for the
+  cards' glass; each screen's hidden corner has a patch of its own (a still of that screen's
+  desktop where Screen Recording is allowed, else its own wallpaper's file); `[windows] fit`
+  keeps a window clear of its own screen's strip; a full-screen app or Mission Control on one
+  screen stops nothing on the other.
+- **The edge reveal.** Each screen's left-edge reveal is its own: a pointer on a screen to
+  the left of a strip never reveals or holds that strip.
+- **The main screen changing** (the menu bar moved to the other screen, or the lid closed
+  with the laptop main) moves no stage: macOS moves every window with its screen, and each
+  hidden window comes back where it was on its screen.
+- **`[displays] main_only`** (off) manages the main screen only, a window moved off it left
+  alone. It is read at launch: turned on mid-session it would have to bring back every hidden
+  window of the other screens, on Desktops not shown too, which a quit does safely.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. The strip never appears in ⌘-Tab or the ⌘\`
@@ -239,9 +237,9 @@ the menu bar's default size (12 pt of ink, their median).
 Applications, and Settings can turn that off. It registers as a login item
 (`SMAppService.mainApp`). At login `loginwindow` first relaunches the apps of its reopen
 list (about 3 s after the login) and holds the login items, and launchd agents with them,
-until every one has checked in (12, 27 and 17 s on his Mac, 11-06): as a login item, or as
-the launchd agent round early-start tried, Stage Manager opened 23-35 s after the login,
-with most windows already up and piled. The list holds the regular (Dock) apps running at
+until every one has checked in (measured: 12 to 27 s): as a login item, or as a launchd
+agent, Stage Manager opened 23-35 s after the login, with most windows already up and
+piled. The list holds the regular (Dock) apps running at
 the logout; ours is an accessory app. So at the logout's first signal it turns regular
 (`[app] reopen_with_apps`, on by default with launch at login on: its icon shows in the
 Dock for a moment, no window, nothing activated) and macOS reopens it with the other apps;
@@ -252,15 +250,15 @@ of it reopens but the app. The login item's copy then hands off without a word.
 `[app] login_start = "background_item"` keeps the launchd agent
 instead (listed under Allow in the Background; when macOS refuses it or it awaits approval,
 the login item stands in and Settings says "Starts after your apps until allowed in Login
-Items."); a change of the key moves the registration once, and 1.6.x's agent moves back to
-the login item. Within 90 s of the login, opening the app again (the login item after the
+Items."); a change of the key moves the registration once, and an agent an older version registered
+moves back to the login item. Within 90 s of the login, opening the app again (the login item after the
 reopened copy) shows no Settings. An early launch waits for the screens a moment: the
 displays' first reading (5 s at most) and, within a minute of the login, a screen the
 stages were saved on that is not connected yet (10 s at most).
 
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
-so switches are animated with snapshots in a click-through layer above everything, while
-the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
+so switches are animated with snapshots in a click-through layer above every normal window
+(always-on-top windows stay above it), while the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
 nears a card, so content that changed meanwhile can jump when the motion ends. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). An arriving window takes its place under its picture once the
@@ -268,12 +266,12 @@ picture as shown on screen is within a point of it on every edge (about 600 ms a
 click for a window growing from its card, 450 ms at the least: `[animation] unpark_at` is the
 floor), so the hand-over shows no step. The picture comes to rest on the spring's own curve
 (within a tenth of a point, about 750 ms for a 2000-point travel; Core Animation's settling
-time stopped it 1 pt short and jumped, the owner's recording 11-01), and fades out over its
+time stops 1 pt short, a visible jump), and fades out over its
 window over 200 ms a moment after the unveil, so a look that differs (a picture taken while
 the window was parked and inactive, a window's own late redraw) melts instead of flipping.
 The arriving pictures fade as one picture, overlapping as their windows do: a window behind
-never shows through the one in front as both fade (each faded on its own showed the one
-behind at a quarter at mid-fade, 11-02).
+never shows through the one in front as both fade (each faded on its own would show the one
+behind at a quarter at mid-fade).
 The incoming key window is captured again about 180 ms into the switch, once it is key, and
 that picture cross-fades into its growing snapshot. Each picture
 carries macOS's own window shadow, measured on a Studio Display (`stage-manager probe-shadow
@@ -286,52 +284,50 @@ appearance macOS draws that window in, read from the window's own shadow: a smal
 the window with its shadow (half a pixel a point) next to its usual capture, when it was
 never read, read before the system's appearance last changed, or 20 seconds ago; the alpha
 past three of its sides is compared with the four shadows (light or dark, key or inactive).
-An app may draw its window in another appearance than the system's (11-02: Messages, a
-conversation with a dark chat background, drew its whole window dark on a light system, and
-the light shadow the system's appearance picked flickered at the handover). With no reading
+An app may draw its window in another appearance than the system's (Messages draws a
+conversation with a dark chat background all dark on a light system, and the system's light
+shadow would flicker at the handover). With no reading
 the system's appearance stands in. The log's `transition ghost` line names the shadow each
 picture carries and where its appearance came from. macOS also draws a thin white line just inside
 each window's edge, with the shadow (a capture that leaves the shadow out lacks it): a point
 wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
 shows only on dark content. The picture carries it too, over its edge and corner, coming
-and going with the window's shadow; without it every edge stepped lighter at the handover
-(the owner, 11-01, Dark Mode). The hairline and the rim follow the curve macOS's shadow
+and going with the window's shadow; without it every edge steps lighter at the handover. The hairline and the rim follow the curve macOS's shadow
 follows, measured on the dark hairline (nearly opaque, so a tenth of a point shows): Core
 Animation's continuous corner with a longer tail, the hairline a band just outside it, sharp
 where the edge runs along the pixels and softer at 45 degrees; the radius is read from how
-much of the picture's diagonal is clear. A filled shape grown by a spread put a darker notch
-at every corner (up to 126 alpha levels). A window's own
+much of the picture's diagonal is clear (a filled shape grown by a spread would put a darker
+notch at every corner). A window's own
 shadow appears in one frame, so the picture keeps its shadow until the window server lists
 the window on screen at its frame (asked every half frame from the unveil), then fades it
 over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few
-frames read about 2 levels darker, while a shadow faded before its window showed read 16
-lighter for 80 ms (the owner's third recording, 11-01; the window reached the screen a frame
-after a fade centred on the unveil had ended). The picture goes only after that, 300 ms past
+frames read about 2 levels darker, while a shadow faded before its window shows reads 16
+lighter for 80 ms (a window can reach the screen a frame after a fade centred on the unveil
+has ended). The picture goes only after that, 300 ms past
 the unveil at the most; an outgoing picture's shadow comes in over twice
 `[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
-switch's pictures move (a round of captures is the window server's work, and dropped a frame).
+switch's pictures move (a round of captures is the window server's work, and drops a frame).
 With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
 unhide after the unveil has taken (about 100 ms later), when the window server lists it on
 screen: its picture's shadow hands over then, except the key window's: it shows inactive
 first, so its picture keeps the key shadow until the app is active and has focused it again
-(drawn key then; 11-02, Telegram: handed over as it showed, a frame of the inactive shadow
-alone read 4 levels lighter before it turned key, and the key shadow over the inactive one is
-the smaller error, as the inactive one lies mostly within it). The picture stays until the
+(drawn key then: a frame of the inactive shadow alone reads 4 levels lighter, and the key
+shadow over the inactive one is the smaller error, as the inactive one lies mostly within
+it). The picture stays until the
 app has taken the activation of its key window focused again, so the window is never seen in
-its inactive look (11-01: Messages flipped to its key look 180 ms after it showed); 400 ms
-past the unveil at the most. An app that has not taken that activation 60 ms after its key window was focused
-again is focused once more, twice at most (11-01: Messages's window took the focus, the app
-never became active, and the keyboard stayed with the app before).
-**Deviation (superseded switches, 11-02):** a switch overtaken before it lands (another card
+its inactive look (Messages turns to its key look up to 180 ms after it shows); 400 ms past
+the unveil at the most. An app that has not taken that activation 60 ms after its key window
+was focused again is focused once more, twice at most (a window can take the focus while its
+app never becomes active, the keyboard staying with the app before).
+
+**Deviation (superseded switches):** a switch overtaken before it lands (another card
 click, a click of yours anywhere, an activation, a focus) still brings its windows, but
 never focuses one or activates its app afterwards: its held focus, the focus again after its
 app's unhide and the retries above are dropped, so the keyboard is the newer switch's or
-where you clicked (11-02: two card clicks 0.56 s apart on two hidden apps' stages; the first
-app's window was focused 120 ms into the second switch and the two apps took the activation
-in turn). A window's focus brings its stage only in the active app (or with the button down
+where you clicked (else two card clicks half a second apart hand the activation back and
+forth between the two apps). A window's focus brings its stage only in the active app (or with the button down
 on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
-of ours (with apps slow to answer, notices came up to a second late, past the echo window,
-and each switched stages). A window on screen when Stage Manager started but found late (its
+of ours (with apps slow to answer, notices come up to a second late, past the echo window). A window on screen when Stage Manager started but found late (its
 app not answering then) goes to its stage as during the restore window, parked when that
 stage is inactive, never bringing it forward.
 Arriving windows
@@ -480,9 +476,9 @@ Dock place, not the drop position.
 
 **After a restart.** The restore is invisible when it works and Apple's behaviour when it
 cannot match. Saved windows not on screen at launch wait, with no card, in their stages; as
-apps reopen them each goes back to its stage, at its saved frame when the main screen has
-the saved size, parked only on a confident match (a doubtful one goes by Apple's rule and
-stays in view or gets a card of its own). While the login settles (until apps have been
+apps reopen them each goes back to its stage, at its saved frame when the screen it was saved
+on has the saved size, parked only on a confident match (a doubtful one goes by Apple's rule
+and stays in view or gets a card of its own). While the login settles (until apps have been
 quiet for 20 s, none still opening its first window, and the login is a minute old; the
 first click or key press; or 5 minutes) launch-time activations and new windows switch
 nothing and animate nothing, and cards come in quietly in their saved order; then the stage
@@ -494,134 +490,139 @@ Accessibility yet (busy reopening at the login) are asked on threads of their ow
 150 ms while the login settles and every second after, for a minute at most: a window goes
 to its stage about as soon as its app answers, and one slow app holds up no other app's
 windows. Before its app answers a window shows where macOS reopened it (moving a window
-needs its app's answer). At a logout, restart or shutdown
-every window comes back at the first sign of it macOS gives (any of `loginwindow`'s logout
-notices, `willPowerOff` the last), so apps save their windows where they are as far as the
-timing allows (best effort: macOS may ask apps to quit first); from then on nothing is
-arranged (no switch, no card added or removed) and the app itself quits when macOS asks it
-to; a cancelled logout brings the stages back at once (one macOS says nothing of: two minutes
-after its latest sign, or after the latest app that quit meanwhile, so a slow restart, an app
-asking about unsaved changes, is not taken for one). A logout cancelled after macOS quit the
-app (another app's unsaved document, its Cancel clicked later) stops there, and apps already
-quit stay quit; Apple's Stage Manager, part of the window server, never quits. So after a
-quit at a logout (the head start held, or the quit event's reason a logout, restart or
-shutdown; never the user's own Quit) the guardian waits up to ten minutes, logging each
-logout sign it hears: at a cancel (`com.apple.logoutCancelled` or its notify(3) name) it
-opens the installed app again in the background (`open -g -a`), which restores the stages
-saved at the head start, in the same session, by window id, as an accessory app (not
-macOS's reopen at a login: the reopen list's mark is cleared as at any launch). A logout that
-goes on ends the session and the guardian with it, nothing opened; so does the end of the
-ten minutes, or the app already running again. The guardian is no app: `loginwindow` never
-waits for it. An app that quits keeps its windows'
-places in the saved stages for two minutes (no card meanwhile), so stages whose apps quit
-before macOS announced the logout still come back after the restart; a window reopened
-squeezed into the park corner, or showing only a piece at it, goes to its saved frame
-(brought on screen) when it is matched, and is left where
-it is (and counted) when it is not. A window an app reopens on another Desktop than the one
-it was saved on (non-native apps reopen on the Desktop shown) goes into its saved stage made
-again on the Desktop where it shows. A window reopened on another screen than its saved
-stage's, that screen connected, goes back to that screen, at its saved frame there, in its
-stage, in front or a card as saved (11-06: the laptop's front window, reopened by its app
-on the 5K; Apple's keeps no stages over a restart, so this decides nothing of Apple's); a
-stage saved on a Desktop of that screen not shown now is made again where the window
-shows, as above, and a window reopened on its own screen stays where its app put it. The
-one exception (`[restore] saved_size`, on; his go 11-06: VS Code reopened a 2082x1253
-window at 665x401 and he resized it back by hand): after a restart only, a window matched
-by its title (a strong match, not by app and size), reopened at under half its saved area
-on the screen of its saved stage at the saved size, the saved size fitting that screen,
-gets its saved frame once, when it is first shown (in front at the restore, or its card's
-first click), within reach as every restore frame; one log line names it (bundle, from,
-to). A move or resize seen first keeps the user's frame; a medium match, a relaunch in the
-same session, a window larger than saved and another screen size keep the app's frame
-(`state.json` keeps the saved frame while it is owed). A
-Desktop is found again by its windows; a screen macOS keeps one Desktop for (read from
-`com.apple.spaces`, never written) is the Desktop saved on that screen even before any of
-its windows show, so they go back to their stages there as their apps reopen them, and one
-reopened on the other screen comes back to it (11-06 08:27: the apps listed no window yet
-when Stage Manager started; the laptop's windows counted as from another Desktop and its
-front stayed on the 5K). A screen with several Desktops, or two Desktops saved for a
-screen that keeps one now, is left to the windows. A
-window that went by Apple's rule (no saved window matched it: an Electron app's window
+needs its app's answer).
+
+At a logout, restart or shutdown every window comes back at the first sign of it macOS gives
+(any of `loginwindow`'s logout notices, `willPowerOff` the last), so apps save their windows
+where they are as far as the timing allows (best effort: macOS may ask apps to quit first);
+from then on nothing is arranged (no switch, no card added or removed) and the app itself
+quits when macOS asks it to. A cancelled logout brings the stages back at once (one macOS
+says nothing of: two minutes after its latest sign, or after the latest app that quit
+meanwhile, so a slow restart, an app asking about unsaved changes, is not taken for one).
+
+A logout cancelled after macOS quit the app (another app's unsaved document, its Cancel
+clicked later) stops there, and apps already quit stay quit; Apple's Stage Manager, part of
+the window server, never quits. So after a quit at a logout (the head start held, or the
+quit event's reason a logout, restart or shutdown; never the user's own Quit) the guardian
+waits up to ten minutes, logging each logout sign it hears: at a cancel
+(`com.apple.logoutCancelled` or its notify(3) name) it opens the installed app again in the
+background (`open -g -a`), which restores the stages saved at the head start, in the same
+session, by window id, as an accessory app (not macOS's reopen at a login: the reopen list's
+mark is cleared as at any launch). A logout that goes on ends the session and the guardian
+with it, nothing opened; so does the end of the ten minutes, or the app already running
+again. The guardian is no app: `loginwindow` never waits for it.
+
+An app that quits keeps its windows' places in the saved stages for two minutes (no card
+meanwhile), so stages whose apps quit before macOS announced the logout still come back after
+the restart. A window reopened squeezed into the park corner, or showing only a piece at it,
+goes to its saved frame (brought on screen) when it is matched, and is left where it is (and
+counted) when it is not.
+
+A window an app reopens on another Desktop than the one it was saved on (non-native apps
+reopen on the Desktop shown) goes into its saved stage made again on the Desktop where it
+shows. A window reopened on another screen than its saved stage's, that screen connected,
+goes back to that screen, at its saved frame there, in its stage, in front or a card as saved
+(Apple's keeps no stages over a restart, so nothing of Apple's is changed); a stage saved on
+a Desktop of that screen not shown now is made again where the window shows, as above, and a
+window reopened on its own screen stays where its app put it. Saved frames come back on the
+screen they were saved on, at the same place on it when the screens were rearranged in
+between.
+
+The one exception to the app's frame (`[restore] saved_size`, on; VS Code can reopen a window
+at a third of its size): after a restart only, a window matched by its title (a strong
+match, not by app and size), reopened at under half its saved area on the screen of its saved
+stage at the saved size, the saved size fitting that screen, gets its saved frame once, when
+it is first shown (in front at the restore, or its card's first click), within reach as every
+restore frame; one log line names it (bundle, from, to). A move or resize seen first keeps the
+user's frame; a medium match, a relaunch in the same session, a window larger than saved and
+another screen size keep the app's frame (`state.json` keeps the saved frame while it is
+owed).
+
+A Desktop is found again by its windows; a screen macOS keeps one Desktop for (read from
+`com.apple.spaces`, never written) is the Desktop saved on that screen even before any of its
+windows show (apps may list none yet when Stage Manager starts), so they go back to their
+stages there as their apps reopen them, and one reopened on the other screen comes back to
+it. A screen with several Desktops, or two Desktops saved for a screen that keeps one now, is
+left to the windows.
+
+A window that went by Apple's rule (no saved window matched it: an Electron app's window
 still titled with its app's name, say) or by a doubtful match is looked at again when its
 title changes, and goes to its saved stage on a confident match, a card when that stage is
 not in front, nothing switching. This holds per window, until two minutes after the login
 (after the launch, for Stage Manager started later): a click on one window, which ends the
 settle, leaves the others to it, since apps are still opening then. A window the user has
 touched stays where it is: one focused by a click or a key press on it, typed in, moved or
-resized, or whose stage was switched to (a card click, a Dock click, ⌘-Tab, a shortcut). A saved
-window that shows only after the settle still goes to its stage, as above; that wait is
+resized, or whose stage was switched to (a card click, a Dock click, ⌘-Tab, a shortcut). A
+saved window that shows only after the settle still goes to its stage, as above; that wait is
 bounded per app, not by the two minutes (its entries go a minute after its app's last new
 window, at the settle's end when its app is not running, and at the next session; a session
 in which its Desktop never showed does not count, up to 30 days since that Desktop last
 showed). An entry of a Desktop not shown yet stays through that minute for the Desktop's
-first show, its app's minute starting again there, but from then on a window shown on
-another Desktop is a new window by Apple's rule, never a stage of that Desktop's. Saved
-frames come back on the screen they were saved on, at the same place on it when the screens
-were rearranged in between. A title that only puts
-something in front of the saved one ("main.rs — proj" for a saved "proj", an editor showing
-a file in its workspace) is the same name, so the frame the window reopened at counts. While
-the restore window is open (no click or key yet, so every window that shows is one an app
-reopens) a window under another name at the exact saved frame of a saved window of its app
-is that window, when nothing else can be meant and the app is reopening its saved
-windows: the only one of the app waiting at that frame, no other window at it, and another
-window of the app back in its saved stage (a browser's first window, a Start Page where a
-saved page was, is not that page; a window that showed before its sibling is looked at again
-when the sibling comes) (11-06: Fork's two windows, saved as two stages on two
-Desktops, reopened on the one shown, the second showing another repository: it joined the
-first's stage by Apple's rule; now it gets its own stage there). After the restore window
-the frame never outweighs two names: a window the user opens (Finder's ⌘N where a saved
-window was) keeps Apple's rule. `[stages] new_apps_join_current` never applies while the
-restore window is open: an app reopening its windows is not one the user opened. No
-apps are relaunched (that is macOS's
-"Reopen windows when logging back in") and no window moves between Desktops (no public API
-does); nothing lists those windows for the user, who could not act on such a list (his
-word 11-06; 1.6.0's menu list is gone). When the restore window ends (no sooner than a minute after the login), the saved windows of apps
-not running then are given up (one log line names them): an app opened later goes by the
-new-window rules, never back to a stage of the last session. A running app keeps its saved
-windows until it has opened none for a minute. Off, a restart
-starts every app in a stage of its own, as Apple's does. One log line sums it up, ending
-with the windows back on another Desktop (bundle id, hashed title, the Desktops' ids;
+first show, its app's minute starting again there, but from then on a window shown on another
+Desktop is a new window by Apple's rule, never a stage of that Desktop's.
+
+A title that only puts something in front of the saved one ("main.rs — proj" for a saved
+"proj", an editor showing a file in its workspace) is the same name, so the frame the window
+reopened at counts. While the restore window is open (no click or key yet, so every window
+that shows is one an app reopens) a window under another name at the exact saved frame of a
+saved window of its app is that window, when nothing else can be meant and the app is
+reopening its saved windows: the only one of the app waiting at that frame, no other window
+at it, and another window of the app back in its saved stage (a browser's first window, a
+Start Page where a saved page was, is not that page; a window that showed before its sibling
+is looked at again when the sibling comes). So a second window of Fork showing another
+repository gets its own stage, not its sibling's. After the restore window the frame never
+outweighs two names: a window the user opens (Finder's ⌘N where a saved window was) keeps
+Apple's rule. `[stages] new_apps_join_current` never applies while the restore window is
+open: an app reopening its windows is not one the user opened.
+
+No apps are relaunched (that is macOS's "Reopen windows when logging back in") and no window
+moves between Desktops (no public API does); nothing lists those windows for the user, who
+could not act on such a list. When the restore window ends (no sooner than a minute after the
+login), the saved windows of apps not running then are given up (one log line names them): an
+app opened later goes by the new-window rules, never back to a stage of the last session. A
+running app keeps its saved windows until it has opened none for a minute. Off, a restart
+starts every app in a stage of its own, as Apple's does. One log line sums it up, ending with
+the windows back on another Desktop (bundle id, hashed title, the Desktops' ids;
 `stage-manager log summary` repeats the counts).
 
-**When macOS's Accessibility sees no window** (his Mac, 11-06: WindowServer hung on wake,
-macOS logged him out, and after the login Accessibility listed no window of any app while
-every app answered and the window server showed them; only another logout fixes it). Apple's
-Stage Manager lives in WindowServer and never meets this; ours can do nothing then. The
-line (`engine/ax_blind.rs`): Accessibility trusted, at least 3 real windows of regular apps
-on screen, of at least 2 apps that answer, none listed, for 30 s; not within 30 s of the
-login, not while the screen is locked, Mission Control or a full-screen Space shows. One app
-quiet is not it. Once it holds, the menu's top line says *"macOS isn't reporting windows.
-Log out or restart to fix it; your stages are saved."* (no notification, no dialog; not
-while Apple's Stage Manager is on), `ctl state` has `accessibility_blind` and
-`accessibility_blind_since`, and one log line marks its start and one its end. It ends the
-moment any window is listed. Meanwhile every app is read again every 2 s, nothing waiting
-is given up (no app's quiet minute runs, apps not running wait too), and a save marks every
-Desktop not looked for, so the next login gives up none of their windows for this session.
-While Accessibility lists nothing (from the first look, no hold), and while the window
-server shows windows of regular apps before Accessibility has listed any in this run (an
-empty screen is not that), a click or a key press does not end the restore window; its own
-ends wait while it lists nothing (11-06 15:40:07: a click 0.2 s after the restore window opened ended it on nothing, and
-the two windows waiting on the Desktop shown were given up a minute later). Windows listed
-again in the same run bring the restore back as at a launch: the restore window opens again
-(its clocks from then), every saved window still waiting, of the Desktops shown or not, goes
-back to its stage by app, title and frame as it is found, parked when its stage is not in
-front, and the windows on screen all along bring no stage forward even after it.
+**When macOS's Accessibility sees no window.** After WindowServer recovers from a hang,
+Accessibility can list no window of any app for the whole session while every app answers and
+the window server shows them; a logout fixes it. Apple's Stage Manager lives in WindowServer
+and never meets this; ours can do nothing then. The line (`engine/ax_blind.rs`):
+Accessibility trusted, at least 3 real windows of regular apps on screen, of at least 2 apps
+that answer, none listed, for 30 s; not within 30 s of the login, not while the screen is
+locked, Mission Control or a full-screen Space shows. One app quiet is not it. Once it holds,
+the menu's top line says *"macOS isn't reporting windows. Log out or restart to fix it; your
+stages are saved."* (no notification, no dialog; not while Apple's Stage Manager is on),
+`ctl state` has `accessibility_blind` and `accessibility_blind_since`, and one log line marks
+its start and one its end. It ends the moment any window is listed. Meanwhile every app is
+read again every 2 s, nothing waiting is given up (no app's quiet minute runs, apps not
+running wait too), and a save marks every Desktop not looked for, so the next login gives up
+none of their windows for this session.
+
+While Accessibility lists nothing (from the first look, no hold), and while the window server
+shows windows of regular apps before Accessibility has listed any in this run (an empty
+screen is not that), a click or a key press does not end the restore window, and its own ends
+wait while it lists nothing, so no waiting window is given up for a click on nothing. Windows
+listed again in the same run bring the restore back as at a launch: the restore window opens
+again (its clocks from then), every saved window still waiting, of the Desktops shown or not,
+goes back to its stage by app, title and frame as it is found, parked when its stage is not
+in front, and the windows on screen all along bring no stage forward even after it.
 
 ## Known gaps
 
-- The lid closed and opened (above) is what Apple's does, built and unit tested, not yet
-  seen live with ours; so are a second screen's own card glass, corner patch and desktop
-  still, and a full-screen app on one screen while windows arrive on the other (round
-  displays-2, built from the one-screen code, checked by the suite's `displays` phase).
+- Not yet seen live with ours, built from the one-screen code and checked by the suite's
+  `displays` phase: a second screen's own card glass and corner patch, a full-screen app or
+  Mission Control on one screen while windows arrive on the other, ⌘-Tab to the other
+  screen's stage, and a window moved to another Desktop of the second screen.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
-  on (the focused window's; the main screen's with no focused window; his call 11-06);
-  which screen Apple's hotkeys address is not measured.
+  on (the focused window's; the main screen's with no focused window); which screen
+  Apple's hotkeys address is not measured.
 - No public API names a Desktop, so Desktops are told apart by their windows. An empty
   Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
   looks new until one of them shows.
-- A Dock click to another Desktop arranges it before it slides in. ⌘-Tab cannot do the same
-  yet: no public notice names the chosen app early enough, so the Desktop is arranged when
-  it arrives.
+- A Dock click to another Desktop arranges it before it slides in. ⌘-Tab cannot: no public
+  notice names the chosen app early enough, so the Desktop is arranged when it arrives.
 - A Desktop's strip appears after the Desktop has slid in on its first visit; Apple's slides
   in with it.
 - A dialog's parent window is a guess: the app's frontmost window at the time.

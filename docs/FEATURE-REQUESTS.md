@@ -12,7 +12,7 @@ click, a drag, the Dock, ⌘Tab, a menu, the strip), it is preferred over a new 
 
 ## 1. Apple's documented behavior (corrects or confirms UX-SPEC)
 
-The last column is the state as of 1.4.0.
+The last column is the state as of 1.7.0.
 
 | Behavior | What Apple (or the best source) says | Status |
 |---|---|---|
@@ -28,8 +28,8 @@ The last column is the state as of 1.4.0.
 
 ## 2. Requests, ranked by how often and for how long people have asked
 
-Feasibility assumes our architecture: one Space, parked windows, AX, ScreenCaptureKit, our
-own `NSPanel` strip.
+Feasibility assumes our architecture: stages per screen and Desktop, parked windows, AX,
+ScreenCaptureKit, our own `NSPanel` strips.
 
 ### R1. Put an app or window into the current stage, not a new one (2022 → 2025, the most common request)
 - **Sources:** new Finder window or IB library "throws me into a new stage" (ObjC4Life on [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); "a shortcut for opening an app in the current stage" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); developers cannot open a helper window into the caller's stage ([Apple Dev Forums 2022](https://developer.apple.com/forums/thread/719749)); Calculator from the Dock pushes Safari aside ([Apple Community 2023](https://discussions.apple.com/thread/255102446)); adding to a set is the "Achilles heel" ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)); Shift-click should launch apps and work from Spotlight ([MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=3)). A MacRumors search excerpt suggests "Option-click when opening an app to place it in the current stage".
@@ -77,8 +77,8 @@ own `NSPanel` strip.
 ### R8. Multiple displays: leave the others alone (2022 → 2024)
 - **Sources:** two displays make it "in the way of any productivity" (Philip on [Tsai 2022](https://mjtsai.com/blog/2022/10/25/stage-manager-in-macos-13-0/)); moving a window to another display "creates a new group" ([Tao of Mac 2023](https://taoofmac.com/space/blog/2023/05/20/1130)); "I wish the Stage Manager will only work with my main monitor" (Topre) and "treated as a single, unified stage" (iPersuade), both in [MPU 2024](https://talk.macpowerusers.com/t/is-anyone-using-stage-manager/32549?page=2).
 - **Gap:** Apple's per-display stages cannot be turned off.
-- **Sugar (done, 1.0.0; the switch since round displays):** `[displays] main_only = true` manages the main screen only, which is exactly Topre's wish: a window moved to a second monitor leaves its stage and is left alone. Off (the default, by the hard rule), every screen has its own strip and stages as Apple's, measured on the owner's Mac (UX-SPEC, "Screens").
-- **Feasibility: easy** for "leave alone" (done). Per-display strips: **done** (round displays). A unified stage across displays is **hard**.
+- **Sugar (done, 1.7.0):** `[displays] main_only = true` manages the main screen only, which is exactly Topre's wish: a window moved to a second monitor leaves its stage and is left alone. Off (the default, by the hard rule), every screen has its own strip and stages as Apple's (UX-SPEC, "Screens").
+- **Feasibility: easy** for "leave alone" (done). Per-display strips: **done** (1.7.0). A unified stage across displays is **hard**.
 
 ### R9. Minimize to the Dock when I mean the Dock (2022 → 2025)
 - **Sources:** it "sends things to the strip more often than I'd like" ([MacStories 2022](https://www.macstories.net/stories/macos-ventura-the-macstories-review/2/)); how do I minimize to the Dock with Stage Manager on? Answer: you can't ([Apple Community 2023](https://discussions.apple.com/thread/254954825)); minimized windows can't be moved between sets ([MacSales 2025](https://eshop.macsales.com/blog/97454-on-the-eve-of-macos-tahoe-has-stage-manager-improved/)).
@@ -97,7 +97,7 @@ own `NSPanel` strip.
 
 ## 3. Recommended first batch
 
-Status as of 1.4.0:
+Status as of 1.7.0:
 
 1. **Shift = bring here, everywhere (R1).** *Done:* Shift-click a card, Shift while opening
    an app or Shift-clicking it in the Dock (1.0.0); `[stages] new_apps_join_current`, off,
