@@ -2,12 +2,15 @@
 
 ## What it is
 
-Stage Manager is a replacement for the Stage Manager built into macOS. Out of the box it
-looks and works like Apple's: your recent groups of windows wait as cards in a strip on the
-left, and the windows you are using float in the middle, at the size and place you gave
-them. On top of that it adds a few things Apple's lacks, such as merging stages, rules for
-new windows and keyboard shortcuts. Each extra stays out of sight until you use it, and
-everything can be changed in one config file.
+Stage Manager is a free and open-source app that works and looks like the Stage Manager
+built into macOS. Your recent stages wait as cards on the left, and the windows you are
+using stay in the middle, where you put them. If you know Apple's, you already know this one.
+
+It also adds what people have asked Apple for since 2022: stages that come back after a
+restart, Shift to open an app in the stage you are in, a card dropped on another to combine
+them, keyboard shortcuts, your own card order, named stages and rules for new windows. None
+of it changes how Apple's clicks, drags and keys work; if you never use it, it behaves
+exactly like Apple's. Everything can be changed in one config file.
 
 ## Install
 

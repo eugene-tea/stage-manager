@@ -7,7 +7,7 @@ cask "stage-manager" do
 
   url "https://github.com/eugene-tea/stage-manager/releases/download/v#{version}/Stage-Manager.dmg"
   name "Stage Manager"
-  desc "Floating-window stage manager with rules, named stages and hotkeys"
+  desc "Works like Apple's Stage Manager, and keeps stages across restarts"
   homepage "https://eugene-tea.github.io/stage-manager/"
 
   livecheck do

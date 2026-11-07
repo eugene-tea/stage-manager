@@ -8,37 +8,27 @@
 <h1 align="center">Stage Manager</h1>
 
 <p align="center"><a href="https://github.com/eugene-tea/stage-manager/releases/latest"><b>Download</b></a>
-· signed and notarized · Apple silicon, macOS 14 Sonoma or later<br>
+· free and open source · signed and notarized · Apple silicon, macOS 14 Sonoma or later<br>
 or <code>brew install eugene-tea/tap/stage-manager</code></p>
 
-## Like Apple's. Then more.
+## What it is
 
-It looks and works like Apple's Stage Manager. A few extras come switched on, and Settings
-has more.
+Stage Manager works and looks like the Stage Manager built into macOS. Your recent stages
+wait as cards on the left, and the windows you are using stay in the middle, where you put
+them. If you know Apple's, you already know this one.
 
-- **Survives a restart.** Your stages, their order and the stage in front come back after a
-  reboot, as fully as macOS allows ([the gaps](docs/GUIDE.md#after-a-restart)).
-- **Merge with a drop.** Drop one card on another to make one stage. Drag a window to the
-  strip to split it off.
-- **A strip that stays put.** Each stage keeps its place, or follows your Dock's order.
-  Windows can keep clear of the strip.
-- **New apps join you.** Open an app straight into the stage you are in. Hold Shift to give
-  it a stage of its own.
-- **Shortcuts if you want them.** ⌃⌥1–9 switches stages or sends a window to one.
-  Everything works without them too.
-- **Your windows come back.** When Stage Manager quits, updates or crashes, every hidden
-  window returns to the screen.
+It also adds what people have asked Apple for since 2022. None of it changes how Apple's
+clicks, drags and keys work; if you never use it, it behaves exactly like Apple's.
 
-## More in the config file
+- Your stages come back after a restart, in the same order.
+- Hold Shift while opening an app to put it in the stage you are in, not a new one.
+- Drop one card on another to combine the two stages.
+- Switch stages, or send a window to one, from the keyboard (⌃⌥1–9, turned on in Settings).
+- Keep the cards in your own order, or in your Dock's order (Settings).
+- Name your stages, and set where new windows go (config file).
 
-Everything else is in one plain text file. An AI assistant can edit it for you, and Settings →
-Advanced shows how.
-
-- **Rules for new windows:** by app and title, a named stage, every stage, centred or cascaded.
-- **Named stages:** names and numbers on the cards.
-- **The strip:** width, size, tilt, an edge tab, above or below windows.
-- **Motion:** every animation's timing, measured from Apple's.
-- **More shortcuts:** new stage, pin a window, show or hide the strip.
+The config file is one plain text file. An AI assistant can edit it for you, and Settings →
+Advanced shows how. Every option is in the [configuration reference](docs/CONFIG.md).
 
 ## First launch
 
@@ -46,8 +36,8 @@ Turn off Apple's Stage Manager (the app offers to do it), then allow **Accessibi
 which is required. **Screen Recording** is optional and puts live pictures of your windows on
 the cards.
 
-Everything about your windows stays on your Mac. It goes online only to check GitHub for
-updates once a day, and to download one when you install it.
+Everything about your windows stays on your Mac. It goes online only for a daily update
+check on GitHub, which you can turn off.
 
 ## Learn more
 

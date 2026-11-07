@@ -29,8 +29,8 @@
   old way: the main screen only.
 - A second screen looks and behaves as the main one: its cards let its own wallpaper
   through, the corner where its hidden windows wait is covered by a patch of its own
-  desktop, windows stay clear of its own strip, a Dock click or ⌘-Tab to a Desktop there
-  arranges it before it slides in, and a full-screen app on one screen no longer holds up
+  desktop, windows stay clear of its own strip, a Dock click to a Desktop there arranges
+  it before it slides in, and a full-screen app on one screen no longer holds up
   windows opening on the other. After a restart the log says when a Desktop came back on
   another screen than it was saved on.
 - After a restart with two screens, a window its app reopens on the other screen goes back
