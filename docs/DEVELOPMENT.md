@@ -1,8 +1,9 @@
 # Stage Manager — development
 
 How to build, sign, run and test Stage Manager. The architecture and its safety layers are
-in [PLAN.md](../PLAN.md); how the app should behave is in [UX-SPEC.md](UX-SPEC.md);
-publishing a release is in [RELEASING.md](RELEASING.md).
+in [ARCHITECTURE.md](ARCHITECTURE.md); what is still to do in [PLAN.md](../PLAN.md); how the
+app should behave is in [UX-SPEC.md](UX-SPEC.md); publishing a release is in
+[RELEASING.md](RELEASING.md).
 
 ## Requirements
 

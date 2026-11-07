@@ -1,5 +1,5 @@
 //! Safety: no window stays parked. A parked window that never comes back is the worst bug
-//! this app can have, so there are seven layers (PLAN.md, "Safety"):
+//! this app can have, so there are seven layers (docs/ARCHITECTURE.md, "Safety"):
 //!
 //! 1. **Registry**: every parked window's AX element and (clamped) restore frame, kept in sync
 //!    by the controller before and after each batch of actions.
