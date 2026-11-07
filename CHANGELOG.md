@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 — 2026-11-06
 
 - After a restart, a window its app reopens at a fraction of the size it had (VS Code, say)
   gets its size and place back the first time it shows, instead of you resizing it by
