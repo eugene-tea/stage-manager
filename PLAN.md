@@ -89,8 +89,3 @@ own), and the lid and restart rules once a window moved to another screen keeps 
 
 - **Medium matches in the restore:** windows shown after the launch get saved frames on a
   medium match too (the saved size only on a strong one).
-
-## Out of scope
-
-Full-screen windows (ignored). UX-SPEC's measurement record of Apple's Stage Manager is
-that file as of commit 20665a3.
