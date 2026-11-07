@@ -57,7 +57,7 @@ case "${1:-}" in
     cp "$BIN" "$APP/Contents/MacOS/stage-manager"
     # The icon (scripts/icon.sh): Assets.car holds the Liquid Glass icon macOS 26 draws
     # (CFBundleIconName); AppIcon.icns is the fallback older systems read (CFBundleIconFile).
-    cp resources/Assets.car resources/AppIcon.icns "$APP/Contents/Resources/"
+    cp packaging/Assets.car packaging/AppIcon.icns "$APP/Contents/Resources/"
     # Launch at login as a launchd agent (src/platform/login_item.rs), when
     # `[app] login_start = "background_item"`: the plist SMAppService registers, sealed by the
     # bundle's signature. Kept with the login item as the default: an agent registered by

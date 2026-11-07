@@ -104,8 +104,8 @@ word.
 ## Art
 
 - `make icon` regenerates the app icon from `art/icon.py` (an Icon Composer document,
-  `art/AppIcon.icon`, compiled with Xcode 26's `actool` to `resources/Assets.car`, plus the
-  fallback `resources/AppIcon.icns` and the info page's icons). The outputs are committed, so
+  `art/AppIcon.icon`, compiled with Xcode 26's `actool` to `packaging/Assets.car`, plus the
+  fallback `packaging/AppIcon.icns` and the info page's icons). The outputs are committed, so
   building needs no Xcode. `ICON_VARIANT=graphite|aurora` builds another variant. The
   `.icon` opens in Icon Composer (`/Applications/Xcode.app/Contents/Applications/Icon
   Composer.app`) for hand tuning; then compile it with `ICON_FROM_DOCUMENT=1 make icon`

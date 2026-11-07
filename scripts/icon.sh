@@ -3,8 +3,8 @@
 # the outputs are committed.
 #
 #   art/icon.py          -> art/AppIcon.icon      Icon Composer document: icon.json + SVG layers
-#   actool               -> resources/Assets.car  the Liquid Glass icon (CFBundleIconName, macOS 26+)
-#   ictool + icon_frame  -> resources/AppIcon.icns the fallback for older macOS (CFBundleIconFile)
+#   actool               -> packaging/Assets.car  the Liquid Glass icon (CFBundleIconName, macOS 26+)
+#   ictool + icon_frame  -> packaging/AppIcon.icns the fallback for older macOS (CFBundleIconFile)
 #                        -> docs/assets/app-icon.png, app-icon-dark.png  the info page's icons (512 px)
 #
 # The tools are called inside XCODE_DEVELOPER_DIR (default /Applications/Xcode.app/...), never
@@ -31,14 +31,14 @@ DEVELOPER_DIR="$DEV" "$ACTOOL" art/AppIcon.icon --compile "$WORK/car" --app-icon
   --output-partial-info-plist "$WORK/car/partial.plist" \
   --errors --warnings --output-format human-readable-text >"$WORK/actool.log"
 grep -q "Assets.car" "$WORK/actool.log" || { cat "$WORK/actool.log" >&2; exit 1; }
-cp "$WORK/car/Assets.car" resources/Assets.car
+cp "$WORK/car/Assets.car" packaging/Assets.car
 
 # actool's own .icns stops at 256 px; the fallback is built from Icon Composer's render instead.
 DEVELOPER_DIR="$DEV" "$ICTOOL" art/AppIcon.icon --export-image --output-file "$WORK/render.png" \
   --platform macOS --rendition Default --width 1024 --height 1024 --scale 1 >/dev/null
 swiftc -O -o "$WORK/icon_frame" art/tools/icon_frame.swift
 "$WORK/icon_frame" "$WORK/render.png" "$WORK/AppIcon.iconset"
-iconutil -c icns -o resources/AppIcon.icns "$WORK/AppIcon.iconset"
+iconutil -c icns -o packaging/AppIcon.icns "$WORK/AppIcon.iconset"
 cp "$WORK/AppIcon.iconset/icon_256x256@2x.png" docs/assets/app-icon.png
 
 # The info page's dark-appearance icon.
@@ -47,4 +47,4 @@ DEVELOPER_DIR="$DEV" "$ICTOOL" art/AppIcon.icon --export-image --output-file "$W
 "$WORK/icon_frame" "$WORK/render-dark.png" "$WORK/Dark.iconset"
 cp "$WORK/Dark.iconset/icon_256x256@2x.png" docs/assets/app-icon-dark.png
 
-echo "Icon: resources/Assets.car, resources/AppIcon.icns, docs/assets/app-icon.png"
+echo "Icon: packaging/Assets.car, packaging/AppIcon.icns, docs/assets/app-icon.png"
