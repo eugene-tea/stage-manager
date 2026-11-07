@@ -16,8 +16,16 @@
 //! launches as an accessory app as ever (`LSUIElement` stays).
 //!
 //! [`ReopenSwitch`] is the pure rule; the shell carries out its [`Policy`].
+//!
+//! The switch back can fail: at a cancelled restart on his Mac (11-06) AppKit answered NO and
+//! the Dock icon stayed. A throwaway probe app could not make it fail outside a logout: right
+//! after the switch to regular, 0.1-4 s later, while active, with a status item and its menu
+//! open, in a modal run, with a terminate answered later, and hidden, the switch to accessory
+//! answered YES and macOS listed a `UIElement` at once. The one NO it measured is a switch to
+//! the policy already in force, so the answer is no measure of success: the policy read
+//! afterwards is. [`back_step`] tries again until both readings say accessory.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::engine::stand_down::{LOGOUT_WAIT, Signal};
 
@@ -34,8 +42,49 @@ pub enum Policy {
 /// System Settings (`starts_at_login`: an app the user keeps from starting at login is not
 /// brought back this way either), and not a test run (`test`: `STAGE_MANAGER_TEST` or
 /// `STAGE_MANAGER_HOME`). The dev copy and builds never start at login, so never join.
-pub fn allowed(key_on: bool, starts_at_login: bool, test: bool) -> bool {
-    key_on && starts_at_login && !test
+/// A test run joins only through `test_joins` (`STAGE_MANAGER_TEST_REOPEN_LIST` with
+/// `STAGE_MANAGER_TEST`: the live suite's way to switch its own copy, never a login item).
+pub fn allowed(key_on: bool, starts_at_login: bool, test: bool, test_joins: bool) -> bool {
+    key_on && if test { test_joins } else { starts_at_login }
+}
+
+/// The waits between tries of the switch back to accessory: seven tries over about 10 s.
+pub const BACK_RETRIES: [Duration; 6] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(3),
+];
+
+/// What follows a try of the switch back to accessory ([`back_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackStep {
+    /// Accessory as AppKit and macOS read it: the Dock icon is gone.
+    Done,
+    /// Try again after the wait.
+    Again(Duration),
+    /// AppKit reads accessory while macOS still lists a regular app: after the wait, regular
+    /// first (no icon change: macOS lists one already), then accessory, since AppKit answers
+    /// NO to a switch to the policy it reads.
+    Resync(Duration),
+    /// No try left; the icon stays until the app quits.
+    GaveUp,
+}
+
+/// After try number `tries` (from 1) of the switch back: `appkit_accessory` is AppKit's own
+/// reading (`activationPolicy`), `listed_accessory` macOS's (the running app's, as the Dock
+/// has it).
+pub fn back_step(tries: usize, appkit_accessory: bool, listed_accessory: bool) -> BackStep {
+    if appkit_accessory && listed_accessory {
+        return BackStep::Done;
+    }
+    match BACK_RETRIES.get(tries.saturating_sub(1)) {
+        None => BackStep::GaveUp,
+        Some(&wait) if appkit_accessory => BackStep::Resync(wait),
+        Some(&wait) => BackStep::Again(wait),
+    }
 }
 
 /// The switch through a logout: regular from the first "coming" signal while allowed, back
@@ -149,9 +198,29 @@ mod tests {
         assert_eq!(s.signal(Signal::Coming, t, || false), None);
         assert_eq!(s.signal(Signal::Cancelled, t, || true), None, "nothing to turn back");
         assert_eq!(s.tick(t + LOGOUT_WAIT), None);
-        assert!(!allowed(false, true, false), "the key off");
-        assert!(!allowed(true, false, false), "launch at login off (or the dev copy, a build)");
-        assert!(!allowed(true, true, true), "a test run");
-        assert!(allowed(true, true, false));
+        assert!(!allowed(false, true, false, false), "the key off");
+        assert!(!allowed(true, false, false, false), "launch at login off (or the dev copy, a build)");
+        assert!(!allowed(true, true, true, false), "a test run");
+        assert!(allowed(true, true, false, false));
+        assert!(allowed(true, false, true, true), "the live suite's own copy, with its flag");
+        assert!(!allowed(false, false, true, true), "the key off there too");
+        assert!(allowed(true, true, false, true), "outside a test run the flag changes nothing: the login item decides");
+        assert!(!allowed(true, false, false, true), "nor joins without the login item");
+    }
+
+    /// His cancel 11-06: AppKit answered NO and the icon stayed; the switch back now tries
+    /// again until both readings say accessory, seven tries over about 10 s.
+    #[test]
+    fn the_switch_back_tries_until_it_holds() {
+        assert_eq!(back_step(1, true, true), BackStep::Done, "the first try holds: no retry");
+        assert_eq!(back_step(1, false, false), BackStep::Again(Duration::from_millis(250)));
+        assert_eq!(back_step(2, false, false), BackStep::Again(Duration::from_millis(500)));
+        assert_eq!(back_step(4, true, true), BackStep::Done, "a later try holds");
+        assert_eq!(back_step(3, true, false), BackStep::Resync(Duration::from_secs(1)), "AppKit says accessory, macOS lists a regular app");
+        assert_eq!(back_step(3, false, true), BackStep::Again(Duration::from_secs(1)), "macOS ahead of AppKit: the plain try");
+        assert_eq!(back_step(7, false, false), BackStep::GaveUp, "seven tries, then none");
+        assert_eq!(back_step(7, true, true), BackStep::Done, "the last try may hold");
+        let total: Duration = BACK_RETRIES.iter().sum();
+        assert!(total >= Duration::from_secs(9) && total <= Duration::from_secs(11), "about 10 s in all: {total:?}");
     }
 }

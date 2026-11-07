@@ -119,6 +119,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item or the launchd agent |
 | `STAGE_MANAGER_NO_CAPTURE` | window captures off, whatever the config says |
 | `STAGE_MANAGER_TEST` | enables the test-only `ctl debug-*` commands |
+| `STAGE_MANAGER_TEST_REOPEN_LIST` | with `STAGE_MANAGER_TEST` only: the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
