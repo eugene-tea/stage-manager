@@ -139,16 +139,13 @@ guardian runs or the screen is locked.
   a real cancel was not reproduced outside a logout (cause unmeasured). The fix retries for
   about 10 s and reads macOS's listing; if its INFO line shows tries > 1 or `done=false` at a
   real cancel, look again.
-- **Reopen list at real restarts:** "reopened by macOS", no Dock icon or Settings, the
-  login item's copy leaving quietly. Unknown: when `loginwindow` reads the activation policy
-  (or `LSUIElement`), and whether it marks its reopen as a login item (the launch line says).
 - **Real-restart check, from the day's log:** no window reopens parked; "logout signal"
   lines vs the first "app terminated" (then trim `SIGNALS`); a slow app in the saved front
-  stage; windows placed within ms of being found (no "queued_ms" over ~100).
-- **Screens, live with the owner:** the `displays` phase; the lid
-  closed and opened; a restart with both screens; ⌘-Tab to the other screen's stage; the
-  second screen's glass, patch, full screen, Mission Control, a window moved to another
-  Desktop. The log lines to read are in the displays rounds' commits.
+  stage; windows placed within ms of being found (no "queued_ms" over ~100). The reopen list
+  worked at the 11-06 restart ("reopened by macOS", 7 s after login).
+- **Screens, live with the owner:** the `displays` phase, the lid and a restart with both
+  screens passed 11-06. Still to try: ⌘-Tab to the other screen's stage; the second screen's
+  glass, patch, full screen, Mission Control, a window moved to another Desktop.
 - **Still the main screen's, by design:** a Space change settling and the lock gate every
   screen (no notice names the screen); `ctl merge`, `ctl space`; the probes and debug
   hooks; the sliver shield; `ctl state`'s top-level fields (each screen's: `displays[i]`).
