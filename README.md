@@ -25,7 +25,7 @@ clicks, drags and keys work; if you never use it, it behaves exactly like Apple'
 - Drop one card on another to combine the two stages.
 - Switch stages, or send a window to one, from the keyboard (⌃⌥1–9, turned on in Settings).
 - Keep the cards in your own order, or in your Dock's order (Settings).
-- Keep windows clear of the strip, so it never covers them (Settings).
+- Keep windows clear of the strip, so the cards stay in view (Settings).
 
 ## More in the config file
 
