@@ -25,10 +25,18 @@ clicks, drags and keys work; if you never use it, it behaves exactly like Apple'
 - Drop one card on another to combine the two stages.
 - Switch stages, or send a window to one, from the keyboard (⌃⌥1–9, turned on in Settings).
 - Keep the cards in your own order, or in your Dock's order (Settings).
-- Name your stages, and set where new windows go (config file).
+- Keep windows clear of the strip, so it never covers them (Settings).
 
-The config file is one plain text file. An AI assistant can edit it for you, and Settings →
-Advanced shows how. Every option is in the [configuration reference](docs/CONFIG.md).
+## More in the config file
+
+Everything else is in one plain text file. An AI assistant can edit it for you, and Settings →
+Advanced shows how.
+
+- **Rules for new windows:** by app and title, a named stage, every stage, centred or cascaded.
+- **Named stages:** names and numbers on the cards.
+- **The strip:** width, size, tilt, an edge tab, above or below windows.
+- **Motion:** every animation's timing, measured from Apple's.
+- **More shortcuts:** new stage, pin a window, show or hide the strip.
 
 ## First launch
 

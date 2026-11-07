@@ -129,19 +129,26 @@
   h2 { font-size: 40px; line-height: 1.1; font-weight: 600; text-align: center; margin: 0 0 12px; letter-spacing: 0; }
   .lede { text-align: center; color: var(--secondary); font-size: 19px; max-width: 640px; margin: 0 auto 52px; }
 
-  .lede + .lede { margin-top: -36px; }
-  .plain { max-width: 640px; margin: 0 auto; padding: 0; list-style: none; }
-  .plain li { padding: 12px 0; border-bottom: 1px solid var(--edge); }
-  .plain li:last-child { border-bottom: none; }
+  .grid { display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .grid.two { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .card { background: var(--card); border-radius: 20px; padding: 26px 26px 24px; box-shadow: var(--card-shadow), 0 0 0 1px var(--edge); }
+  .card h3 { font-size: 21px; line-height: 1.2; font-weight: 600; margin: 12px 0 6px; letter-spacing: 0.011em; }
+  .card p { margin: 0; color: var(--secondary); font-size: 16px; }
+  .tag { margin-top: 14px; font-size: 12px; font-weight: 600; color: var(--secondary);
+         text-transform: uppercase; letter-spacing: 0.06em; }
+  .tag + h3 { margin-top: 2px; }
+  .card svg { width: 44px; height: 44px; padding: 8px; border-radius: 12px; display: block;
+              background: var(--gold-tint); color: var(--gold-ink); }
   .privacy { text-align: center; color: var(--secondary); max-width: 640px; margin: 32px auto 0; font-size: 16px; }
 
   footer { padding: 48px 0; color: var(--secondary); font-size: 13px; text-align: center; }
   footer nav { margin-bottom: 12px; font-size: 15px; }
   footer nav a { margin: 0 12px; }
   /* Centred lines (and the card titles) wrap into even lines, never a lone word. */
-  h1, h2, .lede, .meta, .privacy, footer p { text-wrap: balance; }
+  h1, h2, h3, .lede, .meta, .privacy, footer p { text-wrap: balance; }
 
   @media (max-width: 640px) {
+    .grid.two { grid-template-columns: 1fr; }
     .shot { padding-bottom: 72px; }
     .steps li { display: block; text-align: center; }
     .steps b, .steps li > span { display: block; text-align: center; text-wrap: balance; }
@@ -189,17 +196,53 @@
 <section class="alt">
   <div class="wrap">
     <h2>What it is</h2>
-    <p class="lede">It works and looks like the Stage Manager built into macOS: recent stages wait as cards on the left, and the windows you are using stay in the middle, where you put them. If you know Apple’s, you already know this one.</p>
-    <p class="lede">It also adds what people have asked Apple for since 2022. None of it changes how Apple’s clicks, drags and keys work; if you never use it, it behaves exactly like&nbsp;Apple’s.</p>
-    <ul class="plain">
-      <li>Your stages come back after a restart, in the same order.</li>
-      <li>Hold Shift while opening an app to put it in the stage you are in, not a new one.</li>
-      <li>Drop one card on another to combine the two stages.</li>
-      <li>Switch stages, or send a window to one, from the keyboard (⌃⌥1–9, turned on in Settings).</li>
-      <li>Keep the cards in your own order, or in your Dock’s order (Settings).</li>
-      <li>Name your stages, and set where new windows go (config file).</li>
+    <p class="lede">It works and looks like the Stage Manager built into macOS, plus what people have asked Apple for since 2022. None of it changes how Apple’s clicks, drags and keys work; if you never use it, it behaves exactly like&nbsp;Apple’s.</p>
+    <div class="grid">
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4h-4"/></svg>
+        <h3>Stages after a restart</h3>
+        <p>Your stages come back after a restart, in the same order.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="12" height="12" rx="2.5"/><rect x="9" y="3" width="12" height="12" rx="2.5"/></svg>
+        <h3>Combine stages</h3>
+        <p>Drop one card on another to combine the two stages.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h3.5M3 12h3.5M3 18.5h3.5"/><rect x="9.5" y="3.5" width="12" height="17" rx="3"/><path d="M9.5 8h12"/></svg>
+        <h3>Your own card order</h3>
+        <p>Keep the cards in your own order, or in your Dock’s order (Settings).</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+        <h3>Open an app here</h3>
+        <p>Hold Shift while opening an app to put it in the stage you are in, not a new one.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/></svg>
+        <h3>Keyboard shortcuts</h3>
+        <p>Switch stages, or send a window to one, with ⌃⌥1–9 (turned on in&nbsp;Settings).</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 4v16"/><rect x="9" y="5" width="12" height="14" rx="2.5"/><path d="m6.5 12 1.5 0"/></svg>
+        <h3>Windows clear of the strip</h3>
+        <p>Windows can keep clear of the strip, so it never covers them (Settings).</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>More in the config file</h2>
+    <p class="lede">Everything else is in one plain text&nbsp;file. An AI assistant can edit it for you,<br>and Settings&nbsp;→&nbsp;Advanced shows how.</p>
+    <ul class="steps">
+      <li><b>Rules for new windows</b><span>By app and title: a named stage, every stage, centred or cascaded.</span></li>
+      <li><b>Named stages</b><span>Names and numbers on the cards.</span></li>
+      <li><b>The strip</b><span>Width, size, tilt, an edge tab, above or below windows.</span></li>
+      <li><b>Motion</b><span>Every animation’s timing, measured from Apple’s.</span></li>
+      <li><b>More shortcuts</b><span>New stage, pin a window, show or hide the strip.</span></li>
     </ul>
-    <p class="privacy">The config file is one plain text file. An AI assistant can edit it for you, and Settings&nbsp;→&nbsp;Advanced shows&nbsp;how.</p>
   </div>
 </section>
 
