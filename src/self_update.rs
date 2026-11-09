@@ -398,6 +398,59 @@ pub fn idle_after_rest(input_idle: f64, since_rest: Option<f64>) -> f64 {
     since_rest.map_or(input_idle, |r| input_idle.min(r.max(0.0)))
 }
 
+/// What a quit looks like when it may install a ready update ([`quit_installs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuitFacts {
+    /// The user chose Quit: the menu bar menu's item, or ⌘Q in Settings and About.
+    pub user_quit: bool,
+    /// Every window came back (the clean-exit marker is written; the guardian has no work).
+    pub clean: bool,
+    /// A logout, restart or shutdown: the system's quit said so, or the quit came during the
+    /// logout's head start.
+    pub for_logout: bool,
+    /// Apple's Stage Manager is on (the app stands down).
+    pub apple_on: bool,
+    /// An installer helper is armed already: the quit was made for an install.
+    pub helper_armed: bool,
+}
+
+/// Whether a quit installs the ready update (his go 11-09): only the user's own, clean Quit;
+/// never at a logout, restart or shutdown, while Apple's Stage Manager is on, after windows
+/// were left for the guardian, or on a quit already made for an install (whose helper
+/// reopens the app). Such an install does not reopen the app ([`HelperArgs::relaunch`]).
+pub fn quit_installs(f: QuitFacts) -> bool {
+    f.user_quit && f.clean && !f.for_logout && !f.apple_on && !f.helper_armed
+}
+
+/// What the launch found beside the installed app ([`checks_early`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleWork {
+    /// No working folder.
+    Nothing,
+    /// An installer helper runs: the folder is its own.
+    HelperRuns,
+    /// A folder marked [`KEEP_MARK`]: it holds a copy an update could not put back.
+    Kept,
+    /// An earlier run's staged update, removed.
+    Removed,
+    /// An earlier run's staged update that could not be removed.
+    NotRemoved,
+}
+
+/// Whether the launch checks for updates within its first minute instead of waiting for the
+/// daily check: an earlier run downloaded and verified an update that never went in (it quit
+/// while the update waited). The new check verifies from scratch; the old folder is never
+/// trusted (a fresh download replaces it).
+pub fn checks_early(found: StaleWork) -> bool {
+    matches!(found, StaleWork::Removed | StaleWork::NotRemoved)
+}
+
+/// Whether an automatic check runs now: a left-behind update is owed one (`left_behind`, until
+/// a check gets an answer), else when the daily check is due.
+pub fn check_due(left_behind: bool, daily_due: bool) -> bool {
+    left_behind || daily_due
+}
+
 // ---------------------------------------------------------------------------------------
 // The helper's arguments
 
@@ -414,7 +467,16 @@ pub struct HelperArgs {
     pub version: String,
     /// The `codesign -R` requirement, checked once more right before the swap.
     pub requirement: String,
+    /// Whether the new app is opened after the swap: an install at a quiet moment reopens
+    /// it; one at the user's own Quit does not (they asked it to stop), and nothing is
+    /// opened after a failure either ([`run_swap`]).
+    pub relaunch: bool,
 }
+
+/// The helper's last word when the app is reopened after the swap.
+pub const RELAUNCH_WORD: &str = "relaunch";
+/// The helper's last word when the app stays closed (an install at the user's Quit).
+pub const NO_RELAUNCH_WORD: &str = "no-relaunch";
 
 impl HelperArgs {
     /// The command-line words after `--update-helper`.
@@ -425,14 +487,21 @@ impl HelperArgs {
             self.staged.to_string_lossy().into_owned(),
             self.version.clone(),
             self.requirement.clone(),
+            if self.relaunch { RELAUNCH_WORD } else { NO_RELAUNCH_WORD }.to_string(),
         ]
     }
 
     /// Parses the words after `--update-helper`; the staged copy must sit in the working
-    /// folder beside the target, both named [`APP_NAME`].
+    /// folder beside the target, both named [`APP_NAME`]. The helper is always the running
+    /// app's own binary, so the words are always this version's: no older form is read.
     pub fn parse(args: &[String]) -> Result<Self, String> {
-        let [pid, target, staged, version, requirement] = args else {
-            return Err(format!("expected 5 arguments, got {}", args.len()));
+        let [pid, target, staged, version, requirement, relaunch] = args else {
+            return Err(format!("expected 6 arguments, got {}", args.len()));
+        };
+        let relaunch = match relaunch.as_str() {
+            RELAUNCH_WORD => true,
+            NO_RELAUNCH_WORD => false,
+            _ => return Err("bad relaunch word".into()),
         };
         let pid = pid.parse::<u32>().ok().filter(|p| *p > 1).ok_or("bad pid")?;
         let (target, staged) = (PathBuf::from(target), PathBuf::from(staged));
@@ -448,7 +517,7 @@ impl HelperArgs {
         if requirement.is_empty() {
             return Err("no requirement".into());
         }
-        Ok(Self { pid, target, staged, version: version.clone(), requirement: requirement.clone() })
+        Ok(Self { pid, target, staged, version: version.clone(), requirement: requirement.clone(), relaunch })
     }
 }
 
@@ -475,9 +544,10 @@ pub enum Step {
     Verify,
     /// The staged copy and the installed app trade places, atomically.
     Exchange,
-    /// The new app is opened.
+    /// The new app is opened (a relaunch only).
     Launch,
-    /// The new app answers, with the new version.
+    /// The new app answers, with the new version; with no relaunch, the copy now at the
+    /// installed path satisfies the requirement and carries the new version.
     Confirm,
     /// The old app (now at the staged path) is removed.
     RemoveOld,
@@ -494,6 +564,9 @@ pub trait SwapOps {
     fn launch(&mut self) -> Result<(), String>;
     /// Waits for the app just opened to answer with the expected version.
     fn confirm(&mut self) -> Result<(), String>;
+    /// With no relaunch: checks the copy now at the installed path (its signature against the
+    /// requirement, its version), in place of opening it.
+    fn check_installed(&mut self) -> Result<(), String>;
     /// Stops the app the helper opened from the installed path that did not confirm (its quit
     /// path first, then a kill). Returns whether it is gone: `false` when it still runs.
     fn stop_launched(&mut self) -> bool;
@@ -508,10 +581,11 @@ pub enum SwapOutcome {
     Installed,
     /// The new app runs; the old one could not be removed (left in the working folder).
     InstalledOldLeft(String),
-    /// A step failed; the old app is back in place and was opened again (`relaunched`).
+    /// A step failed; the old app is back in place and was opened again (`relaunched`; `Ok`
+    /// with nothing opened when no relaunch was asked).
     RolledBack { step: Step, why: String, relaunched: Result<(), String> },
-    /// A step failed and the old app could not be put back: the new one stays and is opened;
-    /// the old one is left at the staged path (the working folder is kept).
+    /// A step failed and the old app could not be put back: the new one stays and is opened
+    /// (on a relaunch); the old one is left at the staged path (the working folder is kept).
     RollbackFailed { step: Step, why: String, undo: String },
     /// A step failed and an exchange (the swap's, or the undo's) stopped part way: the old app
     /// is not at the installed path. `old` and `new` say where each one is; the working folder
@@ -576,42 +650,51 @@ pub const NEW_APP_STILL_RUNS: &str = "the new version did not stop, so the old o
 /// except when the unconfirmed new app cannot be stopped: then nothing is undone under it
 /// (review 8C #2). An exchange that stops part way is reported where each app is, never as
 /// rolled back unless the old app is at the installed path (review R1).
-pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
+///
+/// With no `relaunch` (an install at the user's own Quit) nothing is ever opened: the copy at
+/// the installed path is checked instead of launched and confirmed ([`SwapOps::check_installed`]),
+/// and a failure puts the old app back without opening it.
+pub fn run_swap(ops: &mut dyn SwapOps, relaunch: bool) -> SwapOutcome {
     if let Err(why) = ops.verify_staged() {
-        return SwapOutcome::RolledBack { step: Step::Verify, why, relaunched: ops.launch() };
+        return SwapOutcome::RolledBack { step: Step::Verify, why, relaunched: reopen(ops, relaunch) };
     }
     match ops.exchange() {
         Ok(()) => {}
         Err(ExchangeError::Unchanged(why)) => {
-            return SwapOutcome::RolledBack { step: Step::Exchange, why, relaunched: ops.launch() };
+            return SwapOutcome::RolledBack { step: Step::Exchange, why, relaunched: reopen(ops, relaunch) };
         }
         Err(ExchangeError::Stranded { why, was_target, was_staged }) => {
-            return stranded(ops, Step::Exchange, why, was_target, was_staged);
+            return stranded(ops, relaunch, Step::Exchange, why, was_target, was_staged);
         }
     }
-    let failed = match ops.launch() {
-        Err(why) => Some((Step::Launch, why)),
-        Ok(()) => match ops.confirm() {
-            Ok(()) => None,
-            Err(why) => {
-                if !ops.stop_launched() {
-                    return SwapOutcome::RollbackFailed { step: Step::Confirm, why, undo: NEW_APP_STILL_RUNS.into() };
+    let failed = if !relaunch {
+        ops.check_installed().err().map(|why| (Step::Confirm, why))
+    } else {
+        match ops.launch() {
+            Err(why) => Some((Step::Launch, why)),
+            Ok(()) => match ops.confirm() {
+                Ok(()) => None,
+                Err(why) => {
+                    if !ops.stop_launched() {
+                        return SwapOutcome::RollbackFailed { step: Step::Confirm, why, undo: NEW_APP_STILL_RUNS.into() };
+                    }
+                    Some((Step::Confirm, why))
                 }
-                Some((Step::Confirm, why))
-            }
-        },
+            },
+        }
     };
     if let Some((step, why)) = failed {
         return match ops.exchange() {
-            Ok(()) => SwapOutcome::RolledBack { step, why, relaunched: ops.launch() },
+            Ok(()) => SwapOutcome::RolledBack { step, why, relaunched: reopen(ops, relaunch) },
             Err(ExchangeError::Unchanged(undo)) => {
-                // The new app stays in place: open it rather than leave no app running.
-                let _ = ops.launch();
+                // The new app stays in place: open it rather than leave no app running (on a
+                // relaunch; after the user's Quit, none was running).
+                let _ = reopen(ops, relaunch);
                 SwapOutcome::RollbackFailed { step, why, undo }
             }
             // The undo's exchange runs with the new app installed: its `was_target` is the new.
             Err(ExchangeError::Stranded { why: undo, was_target, was_staged }) => {
-                stranded(ops, step, format!("{why}; and putting the old version back: {undo}"), was_staged, was_target)
+                stranded(ops, relaunch, step, format!("{why}; and putting the old version back: {undo}"), was_staged, was_target)
             }
         };
     }
@@ -621,11 +704,17 @@ pub fn run_swap(ops: &mut dyn SwapOps) -> SwapOutcome {
     }
 }
 
+/// Opens whatever is at the installed path after a failure, on a relaunch only; with none
+/// asked, nothing is opened (`Ok`).
+fn reopen(ops: &mut dyn SwapOps, relaunch: bool) -> Result<(), String> {
+    if relaunch { ops.launch() } else { Ok(()) }
+}
+
 /// The outcome of an exchange that stopped part way with the old app at `old` and the new at
 /// `new`: rolled back when the old app is at the installed path anyway, else stranded. Either
-/// way, whatever is at the installed path is opened.
-fn stranded(ops: &mut dyn SwapOps, step: Step, why: String, old: Place, new: Place) -> SwapOutcome {
-    let relaunched = ops.launch();
+/// way, whatever is at the installed path is opened (on a relaunch).
+fn stranded(ops: &mut dyn SwapOps, relaunch: bool, step: Step, why: String, old: Place, new: Place) -> SwapOutcome {
+    let relaunched = reopen(ops, relaunch);
     if old == Place::Target {
         SwapOutcome::RolledBack { step, why, relaunched }
     } else {
@@ -952,8 +1041,10 @@ Runtime Version=26.0.0";
             staged: PathBuf::from("/Applications/.Stage Manager update/Stage Manager.app"),
             version: "1.2.0".into(),
             requirement: OWN_DR.into(),
+            relaunch: true,
         };
         assert_eq!(HelperArgs::parse(&a.to_args()), Ok(a.clone()));
+        assert_eq!(a.to_args()[5], "relaunch");
         let mut bad = a.to_args();
         bad[2] = "/tmp/Stage Manager.app".into();
         assert!(HelperArgs::parse(&bad).is_err(), "a staged copy elsewhere is refused");
@@ -967,8 +1058,55 @@ Runtime Version=26.0.0";
         bad[3] = "1.2.0-rc.1".into();
         assert!(HelperArgs::parse(&bad).is_err(), "never a pre-release");
         assert!(HelperArgs::parse(&a.to_args()[..4]).is_err());
+        assert!(HelperArgs::parse(&a.to_args()[..5]).is_err(), "the relaunch word is required");
+        let mut bad = a.to_args();
+        bad[5] = "yes".into();
+        assert!(HelperArgs::parse(&bad).is_err());
     }
 
+    /// His go 11-09: an install at the user's Quit tells the helper not to reopen the app.
+    #[test]
+    fn a_quit_install_tells_the_helper_not_to_relaunch() {
+        let a = HelperArgs {
+            pid: 4242,
+            target: PathBuf::from("/Applications/Stage Manager.app"),
+            staged: PathBuf::from("/Applications/.Stage Manager update/Stage Manager.app"),
+            version: "1.7.0".into(),
+            requirement: OWN_DR.into(),
+            relaunch: false,
+        };
+        let words = a.to_args();
+        assert_eq!(words.len(), 6);
+        assert_eq!(words[5], "no-relaunch");
+        assert_eq!(HelperArgs::parse(&words).map(|p| p.relaunch), Ok(false));
+    }
+
+    /// His go 11-09: only the user's own clean Quit installs a ready update.
+    #[test]
+    fn only_the_users_own_quit_installs() {
+        let user = QuitFacts { user_quit: true, clean: true, for_logout: false, apple_on: false, helper_armed: false };
+        assert!(quit_installs(user), "Quit in the menu, or ⌘Q in Settings and About");
+        assert!(!quit_installs(QuitFacts { user_quit: false, ..user }), "the system's quit, ctl quit, a signal");
+        assert!(!quit_installs(QuitFacts { for_logout: true, ..user }), "a logout, restart or shutdown");
+        assert!(!quit_installs(QuitFacts { for_logout: true, user_quit: false, ..user }));
+        assert!(!quit_installs(QuitFacts { apple_on: true, ..user }), "the stand-down");
+        assert!(!quit_installs(QuitFacts { helper_armed: true, ..user }), "a quit already made for an install");
+        assert!(!quit_installs(QuitFacts { clean: false, ..user }), "windows left for the guardian");
+    }
+
+    /// His go 11-09: a staged update an earlier run left is checked again at once, from
+    /// scratch; a kept copy (a failed install's) and a running helper's folder are not.
+    #[test]
+    fn a_left_behind_update_is_checked_again_early() {
+        assert!(checks_early(StaleWork::Removed));
+        assert!(checks_early(StaleWork::NotRemoved));
+        for w in [StaleWork::Nothing, StaleWork::HelperRuns, StaleWork::Kept] {
+            assert!(!checks_early(w), "{w:?}");
+        }
+        assert!(check_due(true, false), "owed a check: not waiting for the daily one");
+        assert!(check_due(false, true));
+        assert!(!check_due(false, false));
+    }
     /// A fake disk and process table: which app sits at the target and the staged path, what
     /// runs, and one step that fails.
     struct Fake {
@@ -1027,6 +1165,10 @@ Runtime Version=26.0.0";
             let ok = self.running == Some("new") || !self.confirm_new_only;
             if self.fail == Some(Step::Confirm) || !ok { Err("no answer".into()) } else { Ok(()) }
         }
+        fn check_installed(&mut self) -> Result<(), String> {
+            let ok = self.target == Some("new") && self.running.is_none();
+            if self.fail == Some(Step::Confirm) || !ok { Err("does not verify".into()) } else { Ok(()) }
+        }
         fn stop_launched(&mut self) -> bool {
             if !self.unstoppable {
                 self.running = None;
@@ -1045,18 +1187,41 @@ Runtime Version=26.0.0";
     #[test]
     fn a_clean_swap_installs_and_removes_the_old_app_after_the_new_one_answers() {
         let mut f = Fake::new(None);
-        assert_eq!(run_swap(&mut f), SwapOutcome::Installed);
+        assert_eq!(run_swap(&mut f, true), SwapOutcome::Installed);
         assert_eq!(f.target, Some("new"));
         assert_eq!(f.staged, None, "the old one is removed only at the end");
         assert_eq!(f.launched, vec!["new"]);
         assert_eq!(f.running, Some("new"));
     }
 
+    /// His go 11-09: an install at the user's Quit replaces the app and opens nothing; a
+    /// failure puts the old one back, still without opening anything.
+    #[test]
+    fn a_quit_install_opens_nothing() {
+        let mut f = Fake::new(None);
+        assert_eq!(run_swap(&mut f, false), SwapOutcome::Installed);
+        assert_eq!(f.target, Some("new"));
+        assert_eq!(f.staged, None);
+        assert!(f.launched.is_empty() && f.running.is_none(), "not reopened: {:?}", f.launched);
+        for step in [Step::Verify, Step::Exchange, Step::Confirm] {
+            let mut f = Fake::new(Some(step));
+            let out = run_swap(&mut f, false);
+            assert!(matches!(&out, SwapOutcome::RolledBack { step: s, relaunched: Ok(()), .. } if *s == step), "{step:?}: {out:?}");
+            assert_eq!(f.target, Some("old"), "{step:?}: the old app is back");
+            assert!(f.launched.is_empty(), "{step:?}: nothing opened");
+        }
+        let mut f = Fake::new(Some(Step::Confirm));
+        f.fail_exchange_from = Some(2);
+        let out = run_swap(&mut f, false);
+        assert!(matches!(out, SwapOutcome::RollbackFailed { .. }), "{out:?}");
+        assert!(f.launched.is_empty(), "the new app stays, unopened");
+    }
+
     #[test]
     fn a_failure_at_each_step_puts_the_old_app_back_and_opens_it() {
         for step in [Step::Verify, Step::Exchange, Step::Launch, Step::Confirm] {
             let mut f = Fake::new(Some(step));
-            let out = run_swap(&mut f);
+            let out = run_swap(&mut f, true);
             assert!(matches!(&out, SwapOutcome::RolledBack { step: s, relaunched: Ok(()), .. } if *s == step), "{step:?}: {out:?}");
             assert_eq!(f.target, Some("old"), "{step:?}: the old app is back in place");
             assert_eq!(f.staged, Some("new"), "{step:?}: the new copy is set aside, not lost");
@@ -1064,14 +1229,14 @@ Runtime Version=26.0.0";
             assert_eq!(f.launched.last(), Some(&"old"));
         }
         let mut f = Fake::new(Some(Step::Confirm));
-        run_swap(&mut f);
+        run_swap(&mut f, true);
         assert_eq!(f.launched, vec!["new", "old"], "the unconfirmed new app was stopped before the old one opened");
     }
 
     #[test]
     fn a_failed_removal_keeps_the_new_app() {
         let mut f = Fake::new(Some(Step::RemoveOld));
-        assert!(matches!(run_swap(&mut f), SwapOutcome::InstalledOldLeft(_)));
+        assert!(matches!(run_swap(&mut f, true), SwapOutcome::InstalledOldLeft(_)));
         assert_eq!((f.target, f.staged, f.running), (Some("new"), Some("old"), Some("new")));
     }
 
@@ -1080,7 +1245,7 @@ Runtime Version=26.0.0";
         let mut f = Fake::new(Some(Step::Confirm));
         f.fail_exchange_from = Some(2);
         f.confirm_new_only = true;
-        let out = run_swap(&mut f);
+        let out = run_swap(&mut f, true);
         assert!(matches!(out, SwapOutcome::RollbackFailed { step: Step::Confirm, .. }), "{out:?}");
         assert_eq!(f.running, Some("new"), "the new app is opened rather than none");
     }
@@ -1090,7 +1255,7 @@ Runtime Version=26.0.0";
     fn an_unstoppable_new_app_is_left_in_place_and_said_so() {
         let mut f = Fake::new(Some(Step::Confirm));
         f.unstoppable = true;
-        let out = run_swap(&mut f);
+        let out = run_swap(&mut f, true);
         assert!(matches!(&out, SwapOutcome::RollbackFailed { step: Step::Confirm, undo, .. } if undo == NEW_APP_STILL_RUNS), "{out:?}");
         assert_eq!(f.exchanges, 1, "no undo under a running app");
         assert_eq!((f.target, f.staged, f.running), (Some("new"), Some("old"), Some("new")));
@@ -1226,6 +1391,12 @@ Runtime Version=26.0.0";
         fn confirm(&mut self) -> Result<(), String> {
             if self.fail == Some(Step::Confirm) { Err("no answer".into()) } else { Ok(()) }
         }
+        fn check_installed(&mut self) -> Result<(), String> {
+            match Self::holds(&self.target).as_deref() {
+                Some("new") if self.fail != Some(Step::Confirm) => Ok(()),
+                other => Err(format!("the installed path holds {other:?}")),
+            }
+        }
         fn stop_launched(&mut self) -> bool {
             true
         }
@@ -1238,7 +1409,8 @@ Runtime Version=26.0.0";
     /// and the outcome says where it is.
     #[test]
     fn a_stranded_exchange_never_loses_the_last_app() {
-        for fail in [None, Some(Step::Launch), Some(Step::Confirm)] {
+        let runs = [(None, true), (Some(Step::Launch), true), (Some(Step::Confirm), true), (None, false), (Some(Step::Confirm), false)];
+        for (fail, relaunch) in runs {
             for mask in 0u32..(1 << 10) {
                 let fails: Vec<usize> = (1..=10).filter(|i| mask & (1 << (i - 1)) != 0).collect();
                 let tmp = tempfile::tempdir().unwrap();
@@ -1248,14 +1420,14 @@ Runtime Version=26.0.0";
                     std::fs::create_dir_all(path).unwrap();
                     std::fs::write(path.join("version"), v).unwrap();
                 }
-                let out = run_swap(&mut d);
+                let out = run_swap(&mut d, relaunch);
                 // The helper's cleanup.
                 if matches!(out, SwapOutcome::RolledBack { .. }) {
                     let _ = std::fs::remove_dir_all(&work);
                 }
                 assert_eq!(out.keeps_work(), work.exists(), "{fail:?} {fails:?}: {out:?}");
                 let (target, staged) = (Disk::holds(&d.target), Disk::holds(&d.staged));
-                let ctx = format!("{fail:?} {fails:?}: {out:?}");
+                let ctx = format!("{fail:?} relaunch {relaunch} {fails:?}: {out:?}");
                 match &out {
                     SwapOutcome::Installed | SwapOutcome::InstalledOldLeft(_) => assert_eq!(target.as_deref(), Some("new"), "{ctx}"),
                     SwapOutcome::RolledBack { .. } => assert_eq!(target.as_deref(), Some("old"), "{ctx}"),
@@ -1266,7 +1438,7 @@ Runtime Version=26.0.0";
                         assert_eq!(Disk::holds(&old.path(&d.target, &d.staged)).as_deref(), Some("old"), "{ctx}");
                         assert_eq!(Disk::holds(&new.path(&d.target, &d.staged)).as_deref(), Some("new"), "{ctx}");
                         assert_ne!(*old, Place::Target, "{ctx}");
-                        assert!(*new == Place::Target || relaunched.is_err(), "{ctx}: nothing to open");
+                        assert!(*new == Place::Target || relaunched.is_err() || !relaunch, "{ctx}: nothing to open");
                     }
                 }
             }
@@ -1284,7 +1456,7 @@ Runtime Version=26.0.0";
             std::fs::create_dir_all(path).unwrap();
             std::fs::write(path.join("version"), v).unwrap();
         }
-        let out = run_swap(&mut d);
+        let out = run_swap(&mut d, true);
         assert!(
             matches!(&out, SwapOutcome::Stranded { step: Step::Exchange, old: Place::Aside, new: Place::Staged, relaunched: Err(_), .. }),
             "{out:?}"

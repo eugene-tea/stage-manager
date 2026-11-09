@@ -96,6 +96,14 @@ Rules for every run that manages windows:
 Synthetic clicks and drags are posted only where the app's own or a fixture's windows are
 topmost along the whole path, and the pointer is put back afterwards.
 
+`scripts/test-update-quit.sh` checks an update installed at the user's Quit with a local
+fake release: a test build (`--features update-test`) runs from a scratch folder, a copy
+relabelled 99.0.0 sits on a local disk image, and the script checks that `ctl quit` installs
+nothing, the next launch removes the left-behind copy and owes an early check, and the
+menu's Quit (`ctl debug-menu-quit`) installs 99.0.0 without reopening it. It manages no app
+and refuses to run beside a running Stage Manager; run it while at the Mac (an automatic
+install goes by itself after 120 s with no input).
+
 ### The fixture app
 
 `make fixture` builds `target/SM Fixture.app` (`dev.eugene.stagemanager.fixture`): numbered
@@ -126,6 +134,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
+| `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only: `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
 | `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` toggle Apple's Stage Manager (it restores the setting on exit) |
 
 ## The ctl socket
