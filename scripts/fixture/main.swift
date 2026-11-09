@@ -66,7 +66,7 @@
 //                                      server and through Accessibility, as a headless browser's
 //                                      is (Playwright's WebKit on 11-03, round offscreen-windows)
 //   --hang-ms N  | FIXTURE_HANG_MS=N   with SIGURG: how long the main thread blocks after the
-//                                      close (default 3000)
+//                                      close (default 3000); with SIGPROF: how long it blocks
 //   --raise-delay-ms N | FIXTURE_RAISE_DELAY_MS=N  the standard windows answer Accessibility's
 //                                      raise (AXRaise) at once and reorder N ms later, as a
 //                                      real app may that orders on a later run-loop pass
@@ -100,6 +100,12 @@
 // SIGURG closes the last standard window opened and lets it go (its window-server window is
 // destroyed), then blocks the main thread for --hang-ms: the app answers no Accessibility
 // message meanwhile (Home on 10-21, round 8M).
+// SIGVTALRM opens "T Dialog", a dialog (an NSPanel whose Accessibility subrole is AXDialog, on
+// layer 0) in the middle of the main screen's visible frame, ordered front without activating
+// the app: a dialog an app opens while its window waits in a hidden stage (Safari's download
+// prompt). Each signal opens one more.
+// SIGPROF blocks the main thread for --hang-ms and closes nothing: the app answers no
+// Accessibility message meanwhile (an app busy when Stage Manager quits).
 // SIGALRM moves every visible standard window parked in the screen's bottom-right corner to
 // the middle of the screen by itself, without activating (an app that re-centres its own
 // window, or restores its saved bounds, while parked: round park-reconcile, the
@@ -250,6 +256,11 @@ final class LateRaiseWindow: NSWindow {
         }
         return true
     }
+}
+
+/// A panel Accessibility reports as a dialog (`AXDialog`), as an app's alert or prompt is.
+final class DialogPanel: NSPanel {
+    override func accessibilitySubrole() -> NSAccessibility.Subrole? { .dialog }
 }
 
 final class LabelView: NSView {
@@ -683,6 +694,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Thread.sleep(forTimeInterval: Double(max(0, options.hangMs)) / 1000)
     }
 
+    /// SIGVTALRM: a dialog in the middle of the main screen, ordered front without activating.
+    func openDialog() {
+        let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = NSSize(width: 420, height: 180)
+        let panel = DialogPanel(
+            contentRect: NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2, width: size.width, height: size.height),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        panel.title = "\(options.title) Dialog"
+        // Not floating: on layer 0, a manageable child window.
+        panel.isFloatingPanel = false
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.contentView = LabelView(frame: .zero, color: .brown, label: "Dialog")
+        panel.orderFrontRegardless()
+        windows.append(panel)
+    }
+
+    /// SIGPROF: the main thread blocks for --hang-ms (no Accessibility answer meanwhile).
+    func hang() {
+        Thread.sleep(forTimeInterval: Double(max(0, options.hangMs)) / 1000)
+    }
+
     /// SIGUSR1: one more window, ordered front without activating the app.
     func openAnother() {
         let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -782,6 +816,14 @@ signal(SIGURG, SIG_IGN)
 let closeHung = DispatchSource.makeSignalSource(signal: SIGURG, queue: .main)
 closeHung.setEventHandler { delegate.closeWhileHung() }
 closeHung.resume()
+signal(SIGVTALRM, SIG_IGN)
+let dialog = DispatchSource.makeSignalSource(signal: SIGVTALRM, queue: .main)
+dialog.setEventHandler { delegate.openDialog() }
+dialog.resume()
+signal(SIGPROF, SIG_IGN)
+let busy = DispatchSource.makeSignalSource(signal: SIGPROF, queue: .main)
+busy.setEventHandler { delegate.hang() }
+busy.resume()
 signal(SIGIO, SIG_IGN)
 let nextTab = DispatchSource.makeSignalSource(signal: SIGIO, queue: .main)
 nextTab.setEventHandler { delegate.selectNextTabs() }

@@ -6772,6 +6772,7 @@ impl Controller {
             | Command::DebugDrag { .. }
             | Command::DebugDesktop { .. }
             | Command::DebugStrip
+            | Command::DebugToggleStrip
             | Command::DebugOverlay { .. }
             | Command::DebugGlass { .. }
             | Command::DebugStripHover { .. }

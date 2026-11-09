@@ -602,6 +602,12 @@ mod app {
                 }
                 debug_space(&wm, direction, numpad)
             }
+            Command::DebugToggleStrip => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-toggle-strip needs STAGE_MANAGER_TEST=1");
+                }
+                json!({ "ok": wm.send(WmCommand::ToggleStrip) })
+            }
             Command::DebugStrip => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-strip needs STAGE_MANAGER_TEST=1");
