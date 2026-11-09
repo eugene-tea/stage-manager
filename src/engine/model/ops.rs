@@ -945,10 +945,12 @@ impl Model {
     }
 
     /// One window dragged off a card of several and dropped onto another card (`[strip]
-    /// merge_on_drop`, an extension): `id` alone (with its children) joins `into`'s stage,
-    /// behind its windows, as a card dropped there would ([`Model::merge_stages`]). Both
-    /// stages are inactive, so nothing moves on screen: the window stays parked with its
-    /// saved frame. `into` keeps its slot, number, name and key window; the stage it left keeps
+    /// merge_on_drop`, an extension): `id` alone (with its children) joins `into`'s stage in
+    /// front of its windows, its key window, as a card dropped there would
+    /// ([`Model::merge_stages`]): the window just moved is the one cared about, drawn at the
+    /// card's front and raised last and focused when that stage shows (Eugene, 11-09: it went
+    /// behind them all). Both stages are inactive, so nothing moves on screen: the window
+    /// stays parked with its saved frame. `into` keeps its slot, number and name; the stage it left keeps
     /// its other windows in their order, its slot and its number (its key moves on when it was
     /// this one). Into the active stage (a card of it shows only with `[strip] active =
     /// "card"`) the window comes forward, as when dragged out ([`Model::move_window_into_active_at`]
@@ -972,10 +974,8 @@ impl Model {
         self.take_off(home, id);
         self.set_home(id, Home::Stage(into), display);
         if let Some(d) = self.stage_mut(into) {
-            d.windows.push(id);
-            if d.key.is_none_or(|k| !d.windows.contains(&k)) {
-                d.key = Some(id);
-            }
+            d.windows.insert(0, id);
+            d.key = Some(id);
         }
         self.normalize_slots();
         vec![Action::StateChanged]
@@ -1073,13 +1073,15 @@ impl Model {
     }
 
     /// A card dropped onto another card (`[strip] merge_on_drop`, an extension: Apple's strip
-    /// does not merge): every window of `stage` joins `into`, behind `into`'s own windows and
-    /// in its own order, each child with its parent. Both stages are inactive, so nothing
-    /// moves on screen: the windows stay parked with their saved frames. `into` keeps its
-    /// slot, name and key window (an empty one takes `stage`'s) and the more recent of the
-    /// two recencies; `stage`'s slot frees by the slot rule (the cards below close up, and a
-    /// free slot takes the most recent stage out of view). `stage`'s windows still awaited
-    /// after a restart move with it, behind, in saved order (R5). The emptied stage goes away
+    /// does not merge): every window of `stage` joins `into`, in front of `into`'s own windows
+    /// and in its own order, each child with its parent: the card just dropped is the one
+    /// cared about (Eugene, 11-09), so its key window (or its first) is `into`'s key, raised
+    /// last and focused when that stage shows. Both stages are inactive, so nothing moves on
+    /// screen: the windows stay parked with their saved frames. `into` keeps its slot and name
+    /// and takes the more recent of the two recencies; `stage`'s slot frees by the slot rule
+    /// (the cards below close up, and a free slot takes the most recent stage out of view).
+    /// `stage`'s windows still awaited after a restart move with it, in front, in saved order
+    /// (R5). The emptied stage goes away
     /// unless it is declared in config. Into the active stage (a card of it shows only in
     /// place with `[strip] active = "card"`) it is [`Model::merge_into_active`]. A no-op for one
     /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
@@ -1149,7 +1151,7 @@ impl Model {
         let members = src.windows.clone();
         let src_key = src.key.filter(|k| members.contains(k));
         let recency = src.last_active.max(dest.last_active);
-        self.merge_pending(stage, into, false);
+        self.merge_pending(stage, into, true);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
@@ -1169,9 +1171,12 @@ impl Model {
             }
         }
         if let Some(d) = self.stage_mut(into) {
-            d.windows.extend(members.iter().copied());
-            if d.key.is_none_or(|k| !d.windows.contains(&k)) {
-                d.key = src_key.or(d.windows.first().copied());
+            let behind = std::mem::take(&mut d.windows);
+            d.windows = members.iter().copied().chain(behind).collect();
+            if let Some(key) = src_key.or(members.first().copied()) {
+                d.key = Some(key);
+            } else if d.key.is_none_or(|k| !d.windows.contains(&k)) {
+                d.key = d.windows.first().copied();
             }
             d.last_active = recency;
         }

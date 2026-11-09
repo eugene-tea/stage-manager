@@ -383,12 +383,16 @@ pub struct Echoes {
     apps: HashMap<i32, Instant>,
     /// Apps we made frontmost whose activation has not been reported yet.
     awaiting: HashMap<i32, Instant>,
+    /// The app whose activation was reported last (ours or not): frontmost as far as we know.
+    /// A focus on it awaits no activation, since macOS reports none for an app already in
+    /// front.
+    front: Option<i32>,
     window: Duration,
 }
 
 impl Default for Echoes {
     fn default() -> Self {
-        Self { windows: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), window: ECHO_WINDOW }
+        Self { windows: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, window: ECHO_WINDOW }
     }
 }
 
@@ -403,10 +407,17 @@ impl Echoes {
         self.windows.insert(id, now);
     }
 
-    /// We just made this app frontmost.
+    /// We just made this app frontmost. Its activation is awaited only when another app was
+    /// in front: a switch focuses its key window twice (at once, then again at the landing),
+    /// and the second focus, after the activation was reported, left one awaited that never
+    /// came, so macOS's own activation of that app up to 5 s later was taken for ours
+    /// (11-09 suite: the front app quit, macOS activated the fixture 4.4 s after the
+    /// landing, and its stage never came).
     pub fn touch_app(&mut self, pid: i32, now: Instant) {
         self.apps.insert(pid, now);
-        self.awaiting.insert(pid, now);
+        if self.front != Some(pid) {
+            self.awaiting.insert(pid, now);
+        }
     }
 
     /// True when a focus event for `id` is probably our own.
@@ -418,6 +429,7 @@ impl Echoes {
     /// the first activation reported since we made it frontmost with no user input between.
     /// Call it once per reported activation: it consumes the awaited one.
     pub fn is_app_echo(&mut self, pid: i32, now: Instant) -> bool {
+        self.front = Some(pid);
         let late = self.awaiting.remove(&pid).is_some_and(|t| now.saturating_duration_since(t) < LATE_ACTIVATION_MAX);
         late || self.apps.get(&pid).is_some_and(|t| now.duration_since(*t) < self.window)
     }
@@ -7939,6 +7951,29 @@ mod tests {
         // A window of the app that does show now (un-minimized, say) is a new window: placed.
         let shows: HashSet<u32> = [134, 166, 176].into();
         assert_eq!(offered_at_notice(unplaced, &shows), vec![176]);
+    }
+
+    #[test]
+    fn a_landing_focus_after_the_activation_awaits_no_second_one() {
+        // The 11-09 suite: a card click to the fixture's stage focuses its window at once
+        // (46.981) and macOS reports the activation (46.996); the landing focuses it again
+        // (~47.5). A card click to Alpha follows (49.8, its activation ours), then Alpha quits
+        // and macOS activates the fixture (51.939): the user's, not an echo.
+        let (fixture, alpha) = (67303, 67932);
+        let mut e = Echoes::default();
+        let t0 = Instant::now();
+        e.touch_app(fixture, t0);
+        assert!(e.is_app_echo(fixture, t0 + Duration::from_millis(15)));
+        e.touch_app(fixture, t0 + Duration::from_millis(560));
+        e.touch_app(alpha, t0 + Duration::from_millis(2850));
+        assert!(e.is_app_echo(alpha, t0 + Duration::from_millis(2910)));
+        assert!(!e.is_app_echo(fixture, t0 + Duration::from_millis(4960)), "macOS's activation after the front app quit");
+        // A landing focus that comes before the activation is reported still awaits it.
+        let mut e = Echoes::default();
+        e.touch_app(alpha, t0);
+        e.touch_app(fixture, t0 + Duration::from_millis(10));
+        e.touch_app(fixture, t0 + Duration::from_millis(500));
+        assert!(e.is_app_echo(fixture, t0 + Duration::from_millis(1500)), "late, but the one we asked for");
     }
 
     #[test]

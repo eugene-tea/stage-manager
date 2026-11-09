@@ -1887,6 +1887,16 @@ def phase_native():
     time.sleep(1.5)
     front = state()["stages"][1]["windows"][0]
     drop = (vis["x"] + 700, cy)
+    # The whole card by its app icons: since window-out-of-card (11-09) a press on one window
+    # of a combined card drags that window alone, and the press at the card's middle took
+    # Charlie 1 out by itself (Lifted, alone=true).
+    probe = strip_probe() or {}
+    card_stage = ids_by_number(s).get(2)
+    card = next((c for c in probe.get("cards", []) if c.get("stage") == card_stage), None)
+    icons = (card or {}).get("icons") or []
+    if icons:
+        cx, cy = center(icons[0])
+    check(bool(icons), f"the card's app icons are drawn, to grip the whole card ({icons})")
     r = ctl("debug-drag", cx, cy, cx + 60, cy, *drop)
     if not blocked(r, "the card drop (the drag, its windows joining, where they land)"):
         check(r.get("ok"), f"dragged the card to {drop[0]:.0f},{drop[1]:.0f} ({r.get('error', 'ok')}{whose(r.get('error'))})")
@@ -2589,8 +2599,8 @@ def merge_sub_test(vis):
     s = state()
     after = {st["id"]: list(st["windows"]) for st in s["stages"]}
     check(src not in after, f"the dropped card's stage is gone ({sorted(after)})")
-    check(after.get(dst) == staying + moving,
-          f"the target's stage holds both, its own in front ({after.get(dst)}, wanted {staying + moving})")
+    check(after.get(dst) == moving + staying,
+          f"the target's stage holds both, the dropped card's in front (11-09) ({after.get(dst)}, wanted {moving + staying})")
     parked = {w["id"]: w["parked"] for w in s["windows"]}
     check(all(parked.get(i) for i in staying + moving), "every window of both stays parked (nothing moved on screen)")
     num = numbers_by_id(s)
@@ -2904,6 +2914,10 @@ def phase_behave():
     before_log = len(log_text())
     out, _ = card_drag(center(card["frame"]), drop, "Alpha's card onto the other screen")
     if blocked(out, "the card dragged onto the other screen (where its window opens)"):
+        return
+    # A refusal used to pass unseen here (11-09: the path over the other screen's bare desktop
+    # was refused unposted, and only the wait below failed).
+    if not check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:160]}{whose(out)})"):
         return
     s = wait_state(lambda x: by_title(x)["Alpha 1"]["display"] == other["id"] and not by_title(x)["Alpha 1"]["parked"],
                    "Alpha 1 on the other screen")
@@ -3663,12 +3677,12 @@ def drop_settle_checks():
 def merge_hold_check():
     """A card held over another card's middle (`[strip] merge_on_drop`; owner 10-22, round 9C:
     "both windows render with the same content until I release"): the target previews the
-    merge, its own windows in front and the dragged card's behind, and each of its planes
-    shows its own window's picture (`shows` in `ctl debug-strip`: none while captures are
-    off), never another's; the dragged card, lying right over the target, fades to
-    `[drag] lifted_opacity` so the target's front window shows. Released there, the stages
-    merge."""
-    say("-- a card held over another card: the preview shows the target's own front window")
+    merge, the dragged card's windows in front and its own behind (11-09: what is moved is
+    what is cared about), and each of its planes shows its own window's picture (`shows` in
+    `ctl debug-strip`: none while captures are off), never another's; the dragged card, lying
+    right over the target, fades to `[drag] lifted_opacity` so the target's preview shows.
+    Released there, the stages merge."""
+    say("-- a card held over another card: the preview shows the dragged card's windows in front")
     with open(os.path.join(HOME, "config.toml"), "w") as fh:
         fh.write(CONFIG_DROP)
     ctl("reload")
@@ -3709,8 +3723,8 @@ def merge_hold_check():
         return
     planes = t["planes"]
     front = planes[-1]["window"] if planes else None
-    check(front in mine and any(p["window"] in theirs for p in planes),
-          f"the target previews the merge: its own window in front ({front}), the dragged card's behind "
+    check(front in theirs and any(p["window"] in mine for p in planes),
+          f"the target previews the merge: the dragged card's window in front ({front}), its own behind "
           f"({[p['window'] for p in planes]})")
     wrong = [(p["window"], p["shows"]) for h in held for c in h["cards"] for p in c["planes"]
              if p.get("shows") is not None and p["shows"] != p["window"]]
@@ -4022,9 +4036,11 @@ def landing_blend_check():
     say("-- a stage's overlapping windows land as one picture: the one behind never shows through the one in front")
     s = state()
     t = by_title(s)
-    nums = numbers_by_id(s)
-    here = nums.get(t["Fixture 3"]["home"])
-    away = nums.get(t["Fixture 1"]["home"])
+    # `home` is the stage's number already. Read through `numbers_by_id` (keyed by stage id)
+    # it held only while ids and numbers matched: with a second screen its first stage takes
+    # id 2 and the main screen's second stage is id 3, number 2 (11-09: "(1, None)").
+    here = t["Fixture 3"]["home"]
+    away = t["Fixture 1"]["home"]
     if not check(here is not None and away is not None and here != away,
                  f"Fixture 3 and Fixture 1 in stages of their own ({here}, {away})"):
         return
@@ -4276,8 +4292,6 @@ def phase_glass():
     # A snapshot shrinking into a card lands on its look: Fixture 4 leaves into the slot of
     # the card clicked (Apple's order), Fixture 1 arrives.
     s = state()
-    nums = numbers_by_id(s)
-    one = nums.get(by_title(s)["Fixture 1"]["home"])
     before = (s.get("last_transition") or {}).get("id")
     # A card click, as a person switches: `ctl switch` lands at once, with no snapshots (11-05).
     click_card(s, "Fixture 1", "Fixture 1's card")
@@ -4304,7 +4318,6 @@ def phase_glass():
 
     # A snapshot growing from a card leaves it as the window, opaque: Fixture 4 comes back.
     s = state()
-    four = numbers_by_id(s).get(by_title(s)["Fixture 4"]["home"])
     before = (s.get("last_transition") or {}).get("id")
     # A card click, as a person switches: `ctl switch` lands at once, with no snapshots (11-05).
     click_card(s, "Fixture 4", "Fixture 4's card")
@@ -4394,6 +4407,7 @@ def phase_capture():
     cap = state().get("capture", {})
     check(cap.get("images", 0) > (s or {}).get("capture", {}).get("images", 0),
           f"pictures keep coming ({cap.get('images')} so far)")
+    sharp_ghost_check()
     if not os.environ.get("SM_SKIP_LANDING"):
         landing_blend_check()
     captures_stop_with_strip_hidden()
@@ -4418,6 +4432,67 @@ def phase_capture():
     all_onscreen("capture quit")
     for over in (0, 230):
         popup_over_check(over)
+
+
+GHOST_LAYER = 4  # NSFloatingWindowLevel + 1: a dragged card's ghost panel
+
+
+def sharp_ghost_check():
+    """11-09 (Eugene, Mail's card dragged out): past the column a dragged card's ghost is its
+    window at full size drawn from the window's full-size snapshot, never the card's thumbnail
+    stretched (it covered his screen, blurred); until the snapshot comes it stays at the card's
+    size. Fixture 1 and 2's combined card, by its app icons (the whole card) and by Fixture 1's
+    own part (the window lifted off), each dragged past the column, held there about a second
+    and brought back over the card: nothing changes, and no ghost panel is left on screen."""
+    say("-- a card dragged past the column: its ghost is the window, sharp, never the thumbnail stretched")
+    s = state()
+    vis = s["display"]["visible"]
+    t = by_title(s)
+    number = t["Fixture 1"]["home"]
+    stage = ids_by_number(s).get(number)
+    p = strip_probe() or {}
+    c = next((c for c in p.get("cards", []) if c.get("stage") == stage), None)
+    if not check(c is not None and c.get("icons") and len(c.get("planes", [])) >= 2,
+                 f"Fixture 1 and 2's card drawn with its icons ({c and len(c.get('planes', []))} planes)"):
+        return
+    planes = {q["window"]: q["plane"] for q in c["planes"]}
+    f1 = t["Fixture 1"]["id"]
+    others = [r for w, r in planes.items() if w != f1]
+    back = planes.get(f1)
+    # Fixture 1's own part: right of the other window's far edge, if it shows there.
+    own = None
+    if back and others and rect_right(back) > max(rect_right(r) for r in others) + 4:
+        own = ((max(rect_right(r) for r in others) + rect_right(back)) / 2, back["y"] + back["h"] / 2)
+    for how, press in (("by its icons", center(c["icons"][0])), ("by Fixture 1's own part", own)):
+        if press is None:
+            skip(f"sharp ghost {how}", "Fixture 1 shows no part of its own on the card")
+            continue
+        out_at = (vis["x"] + s["strip_width"] + 600, press[1])
+        wiggle = [out_at, (out_at[0], out_at[1] + 30)] * 6 + [out_at]
+        path = [press, (press[0], press[1] + 12), *wiggle, press]
+        words = [str(round(v, 1)) for q in path for v in q] + ["hold=300"]
+        say(f"  dragging the card {how} past the column and back")
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        seen = sample_strip_during(proc, after=0.0)
+        out, _ = proc.communicate(timeout=20)
+        if blocked(out, f"the sharp ghost {how}"):
+            continue
+        if not check('"ok": true' in out or '"ok":true' in out, f"{how}: the drag ran ({out.strip()[:120]}{whose(out)})"):
+            continue
+        ghosts = [q["drag_ghost"] for q in seen if q.get("drag_ghost") and q["drag_ghost"].get("out")]
+        if not check(bool(ghosts), f"{how}: its ghost was seen past the column ({len(seen)} samples)"):
+            continue
+        stretched = [g["frame"] for g in ghosts if not g["window"] and g["frame"]["w"] > g["full"]["w"] * 0.6]
+        check(not stretched, f"{how}: never the thumbnail at the window's size ({stretched[:2]})")
+        sharp = [g for g in ghosts if g["window"] and abs(g["frame"]["w"] - g["full"]["w"]) <= 1]
+        check(bool(sharp), f"{how}: the window at its size with its own snapshot ({len(sharp)} of {len(ghosts)} past the column; "
+              f"the first {ghosts[0]})")
+        time.sleep(1.3)  # a dropped ghost lingers at most a second for its landing
+        left = [w for w in our_windows() if w["layer"] == GHOST_LAYER]
+        check(not left, f"{how}: no ghost left on screen after the release ({left})")
+        x = state()
+        check(by_title(x)["Fixture 1"]["home"] == number and by_title(x)["Fixture 2"]["home"] == number,
+              f"{how}: back over its card, nothing changed ({stage_titles(x)})")
 
 
 def captures_stop_with_strip_hidden():

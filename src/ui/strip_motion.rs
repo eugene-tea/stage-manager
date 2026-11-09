@@ -1520,8 +1520,18 @@ impl Strip {
             c.ghost.set_image(&picture, false);
             c.has_image = true;
         }
+        // A card dragged past the column: its ghost drawn as the window takes the newer
+        // snapshot; one waiting at the card's size for it turns into the window now.
+        let dragged = self.card_drag.as_ref().filter(|d| d.window == id).map(|d| (d.ghost_out, d.ghost_window));
+        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.window == id && d.ghost_window).and_then(|d| d.ghost.as_mut()) {
+            ghost.set_image(&picture);
+        }
         self.motion.cache.insert(id, picture, bytes);
         strip_model::publish_snapshots(self.display, self.motion.cache.ids());
+        if dragged == Some((true, false)) {
+            tracing::debug!(window = id, "card drag: the window's full-size snapshot arrived; the ghost turns into the window");
+            self.mouse_dragged();
+        }
     }
 
     /// While a window is dragged with the pointer over the strip column (`over`, global), its

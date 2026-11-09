@@ -211,13 +211,15 @@ pub struct CardSnapshot {
 
 impl CardSnapshot {
     /// This card after `dropped`'s stage merged into it (`[strip] merge_on_drop`), as the
-    /// engine's merge leaves it: its own windows in front, `dropped`'s behind them in their
-    /// order, and `dropped`'s apps after its own. The strip draws it while a card is held
+    /// engine's merge leaves it: `dropped`'s windows in front in their order (the one just
+    /// moved is the one cared about, 11-09), its own behind them, and the apps in icon order,
+    /// by their front-most window (`dropped`'s first). The strip draws it while a card is held
     /// over this one, and until the controller's next snapshot after the drop.
     pub fn merged_with(&self, dropped: &CardSnapshot) -> CardSnapshot {
         let mut card = self.clone();
-        card.windows.extend(dropped.windows.iter().copied().filter(|w| !self.windows.iter().any(|o| o.id == w.id)));
-        for pid in &dropped.apps {
+        card.windows = dropped.windows.iter().copied().chain(self.windows.iter().copied().filter(|w| !dropped.windows.iter().any(|d| d.id == w.id))).collect();
+        card.apps = Vec::new();
+        for pid in dropped.apps.iter().chain(self.apps.iter()) {
             if !card.apps.contains(pid) {
                 card.apps.push(*pid);
             }
@@ -236,7 +238,7 @@ impl CardSnapshot {
     }
 
     /// This card's window `id` alone, as the card it makes when dragged off this one (what a
-    /// card it is held over shows behind its own windows).
+    /// card it is held over shows in front of its own windows).
     pub fn only_window(&self, id: u32) -> CardSnapshot {
         let mut card = self.clone();
         card.windows.retain(|w| w.id == id);
@@ -787,14 +789,14 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_card_keeps_its_windows_in_front_and_adds_the_dropped_ones_behind() {
+    fn a_merged_card_shows_the_dropped_windows_in_front_of_its_own() {
         let win = |id: u32, pid: i32| CardWindow { id, pid, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
         let target = CardSnapshot { stage: 2, number: 2, name: Some("Work".into()), windows: vec![win(5, 50), win(6, 60)], apps: vec![50, 60], ..Default::default() };
         let dropped = CardSnapshot { stage: 7, number: 3, name: None, windows: vec![win(9, 60), win(8, 80)], apps: vec![60, 80], ..Default::default() };
         let m = target.merged_with(&dropped);
         assert_eq!((m.stage, m.number, m.name.as_deref()), (2, 2, Some("Work")), "the target's identity");
-        assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 6, 9, 8]);
-        assert_eq!(m.apps, [50, 60, 80]);
+        assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [9, 8, 5, 6]);
+        assert_eq!(m.apps, [60, 80, 50]);
     }
 
     #[test]

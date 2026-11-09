@@ -207,13 +207,15 @@ with Apple's.
 - **Drag one window off a card of several** by its picture: it comes off alone as soon as you
   move, and the others stay on the card. Let it go in the middle and it joins the stage you
   are in, as with Apple's; between two cards, it gets a stage of its own there; on another
-  card, it joins that card's stage; back on its own card, nothing changes.
+  card, it joins that card's stage in front of its windows, and is the one in front when you
+  switch there; back on its own card, nothing changes.
 - **Drag a window onto the strip** by its title bar to give it a stage of its own. The cards
   stay under the window as you drag; once the pointer is over the strip, a small picture of
   the window shows where it will go.
 - **Drag a card up or down** to move it to another place in the strip.
-- **Drop a card onto another card** to merge the two stages. To split them again, drag a
-  window off the merged card into the middle or between two cards.
+- **Drop a card onto another card** to merge the two stages; the dropped card's windows go in
+  front. To split them again, drag a window off the merged card into the middle or between
+  two cards.
 - To move a whole card of several windows (up or down, onto another card, or into the
   middle), drag it by its app icons. A card of one window moves whole wherever you hold it.
 
