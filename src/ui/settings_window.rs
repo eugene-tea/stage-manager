@@ -599,7 +599,7 @@ fn general(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, 
         Row::new("Check for updates automatically", Some(view(&updates)))
             .detail("Once a day, from GitHub. Nothing about you or this Mac is sent."),
         Row::new("Install updates automatically", Some(view(&install)))
-            .detail("While you're away from the Mac; otherwise Stage Manager asks first. Your windows come back before it relaunches."),
+            .detail("While you're away from the Mac or when you quit Stage Manager; otherwise it asks first. Your windows come back before it installs."),
         Row::new(&format!("Stage Manager {}", v.version), Some(view(&m.button("Check for Updates…", tag::CHECK)))),
     ]);
     (login, icon, updates, install)
