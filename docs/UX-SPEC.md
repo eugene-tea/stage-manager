@@ -282,8 +282,29 @@ frontmost window drawn under the pointer (its turned plane, as drawn), the stand
 window's picture and grows to its size, and the drop brings that window alone into the current
 stage, in front with the keyboard, held the same way. The stage it left keeps its other windows in their order, its slot and its
 number, and its card shows them at once (a stage's only window is the whole card's drop).
-Within the column a card still moves whole: reordering and dropping onto another card are
-extensions (below), and there the card is what is arranged. A window dragged onto the strip
+
+How Apple's lifts one window off a combined card (06, 11-09: Green pressed in the Blue + Green
+card, 60 fps, a 5K screen): the press squeezes the hovered card a little; as the pointer
+starts to move, Blue slides in behind Green and Green stays on the card; nothing follows the
+pointer inside the strip. After about 135 pt (16 frames, the pointer about 245 pt from the
+screen's left edge) Green comes out as its own window, turned, about half its width, just
+right of the pointer; within 6 frames (100 ms) it slides under the pointer and keeps
+growing and straightening, full size after about 16 frames, while the card shows Blue alone.
+Ours lifts the window off from the first move instead (past `[drag] threshold`, owner 11-09:
+with the whole card following the pointer inside the column, "both windows move together"):
+its picture leaves the card at the card's size, turned as the card and flattening on the same
+spring as a card dragged out, held where it was pressed; its plane on the card fades to
+`[drag] lifted_opacity`, the card keeping the others where they are; past the column it grows
+toward the window's size as above. Inside the column it can go where Apple's has nothing to
+offer (extensions, always on, as a window dropped on the strip): into a gap between cards,
+which opens under the pointer, as a stage of its own there (`Model::move_window_to_new_stage`;
+the stage it left keeps its number and slot); onto another card's middle (`[strip]
+merge_on_drop`, `[drag] merge_zone`), which grows and shows it behind its own windows, into
+that card's stage alone (`Model::move_window_to_stage`); back over its own card, nothing
+changes (released there after a wobble that went nowhere, it is a click). The press decides
+what moves: on one window of a card of several, that window; on the card's app icons (they
+are drawn over the windows), or anywhere on a card of one window, the whole card, which
+reorders and merges in the column as below and drops whole in the main area. A window dragged onto the strip
 becomes a stage of its own in the slot under the pointer. While it is dragged over the cards
 they stay under it, as Apple's do; once the pointer is over the strip, a card-sized picture of
 it follows the pointer above everything (Apple's window itself turns into a card there,
@@ -515,6 +536,9 @@ first visit still shows its edges for a moment, until its patch is drawn.
 card-sized picture of it, where Apple shrinks the window itself: Stage Manager cannot resize
 another app's window while you hold it without fighting the drag. A card dragged out is shown
 by a growing picture of the window it was pressed on (its front window on a card of one).
+A window of a combined card lifts off as that picture from the first move, inside the strip
+too, where Apple's leaves it on the card until the pointer is about 245 pt from the edge
+(Drag and drop, above).
 
 **⌘M** parks the window and then un-minimizes it there, so macOS may show its restore
 animation toward the corner. Apple's window shrinks straight into the strip. macOS's

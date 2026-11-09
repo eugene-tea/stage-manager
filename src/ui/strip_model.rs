@@ -233,6 +233,15 @@ impl CardSnapshot {
         card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
         card
     }
+
+    /// This card's window `id` alone, as the card it makes when dragged off this one (what a
+    /// card it is held over shows behind its own windows).
+    pub fn only_window(&self, id: u32) -> CardSnapshot {
+        let mut card = self.clone();
+        card.windows.retain(|w| w.id == id);
+        card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
+        card
+    }
 }
 
 /// Moves the item `id` says is `stage` right above `before`'s (the bottom for `None`): the
@@ -311,6 +320,14 @@ pub enum StripEvent {
     /// A card was dropped onto another card (`[strip] merge_on_drop`): `stage`'s windows join
     /// `into`'s stage, which keeps its slot.
     CardMerged { stage: u64, into: u64 },
+    /// One window of a card of several, dragged off it alone, was released in a gap between
+    /// the strip's cards (an extension): it gets a stage of its own, whose card goes right
+    /// above `before`'s (the bottom for `None`); `stage` keeps its other windows.
+    WindowToNewCard { stage: u64, window: u32, before: Option<u64> },
+    /// One window of a card of several, dragged off it alone, was released onto another card
+    /// (`[strip] merge_on_drop`): it alone joins `into`'s stage; `stage` keeps its other
+    /// windows.
+    WindowToCard { stage: u64, window: u32, into: u64 },
     /// The incoming windows of transition `id` are covered by their growing snapshots: put
     /// them in place now.
     Unveil { id: u64 },
@@ -788,6 +805,8 @@ mod tests {
         assert_eq!(left.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 7]);
         assert_eq!(left.apps, [50], "the app with no window left loses its icon");
         assert_eq!(card.without_window(5).apps, [50, 60], "an app with a window left keeps it");
+        let lifted = card.only_window(6);
+        assert_eq!((lifted.windows.iter().map(|w| w.id).collect::<Vec<_>>(), lifted.apps), (vec![6], vec![60]), "the window lifted off, with its app");
     }
 
     #[test]

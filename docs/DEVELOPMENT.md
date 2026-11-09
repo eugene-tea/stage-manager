@@ -74,7 +74,8 @@ scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still,
                                           # away, glass and crop (a combined card drawn whole,
-                                          # one of its windows dragged out alone)
+                                          # one of its windows lifted off alone in the column,
+                                          # dropped in a gap, and dragged out)
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh

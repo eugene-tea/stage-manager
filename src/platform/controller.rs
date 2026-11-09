@@ -33,7 +33,10 @@
 //!   its pre-drag frame. A card dragged out of the strip arrives as
 //!   [`StripEvent::CardDropped`] (with a window id: that window of a combined card alone,
 //!   [`Model::move_window_into_active_at`]), one dropped onto another card as
-//!   [`StripEvent::CardMerged`] (`[strip] merge_on_drop`).
+//!   [`StripEvent::CardMerged`] (`[strip] merge_on_drop`). A window of a combined card dragged
+//!   off it alone and released in the column arrives as [`StripEvent::WindowToNewCard`] (a gap:
+//!   [`Model::move_window_to_new_stage`]) or [`StripEvent::WindowToCard`] (onto a card:
+//!   [`Model::move_window_to_stage`]).
 //! - **Spaces**: every Space (Desktop) has its own stages and strip, as Apple's does. A
 //!   window is given to the engine only once the window server lists it on screen (so its
 //!   Space is the shown one); until then it waits in `unplaced` (another Space, minimized,
@@ -5971,6 +5974,8 @@ impl Controller {
             StripEvent::IconClicked { stage, pid } => StripEvent::IconClicked { stage: f(stage), pid },
             StripEvent::CardMoved { stage, before } => StripEvent::CardMoved { stage: f(stage), before: before.map(f) },
             StripEvent::CardMerged { stage, into } => StripEvent::CardMerged { stage: f(stage), into: f(into) },
+            StripEvent::WindowToNewCard { stage, window, before } => StripEvent::WindowToNewCard { stage: f(stage), window, before: before.map(f) },
+            StripEvent::WindowToCard { stage, window, into } => StripEvent::WindowToCard { stage: f(stage), window, into: f(into) },
             StripEvent::Unveil { id } => StripEvent::Unveil { id },
         }
     }
@@ -6010,8 +6015,15 @@ impl Controller {
         self.flush_superseded(ob, "a strip click");
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
-        // A window dragged out of a combined card leaves the card drawn without it, the same.
-        let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. } | StripEvent::CardDropped { window: Some(_), .. });
+        // A window dragged off a combined card leaves the card drawn without it, the same.
+        let local_edit = matches!(
+            event,
+            StripEvent::CardMoved { .. }
+                | StripEvent::CardMerged { .. }
+                | StripEvent::CardDropped { window: Some(_), .. }
+                | StripEvent::WindowToNewCard { .. }
+                | StripEvent::WindowToCard { .. }
+        );
         if self.frozen_on(self.strip_event_display(&event)) {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
@@ -6090,6 +6102,16 @@ impl Controller {
                 );
                 m.merge_stages(StageId(stage), StageId(into), &obs)
             }
+            StripEvent::WindowToNewCard { stage, window, before } => {
+                counters::bump(Count::Drop);
+                tracing::info!(stage, window, ?before, "a window dragged off a combined card into a gap of the strip: a stage of its own");
+                m.move_window_to_new_stage(StageId(stage), WindowId(window), before.map(StageId))
+            }
+            StripEvent::WindowToCard { stage, window, into } => {
+                counters::bump(Count::Drop);
+                tracing::info!(stage, window, into, "a window dragged off a combined card onto a card: it alone joins that stage");
+                m.move_window_to_stage(StageId(stage), WindowId(window), StageId(into), &obs)
+            }
             StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } | StripEvent::CardPressed { .. } => Vec::new(),
         };
         let changed = actions.contains(&Action::StateChanged);
@@ -6123,7 +6145,9 @@ impl Controller {
             | StripEvent::CardDropped { stage, .. }
             | StripEvent::IconClicked { stage, .. }
             | StripEvent::CardMoved { stage, .. }
-            | StripEvent::CardMerged { stage, .. } => Some(stage),
+            | StripEvent::CardMerged { stage, .. }
+            | StripEvent::WindowToNewCard { stage, .. }
+            | StripEvent::WindowToCard { stage, .. } => Some(stage),
             StripEvent::Unveil { .. } => None,
         };
         stage

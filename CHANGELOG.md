@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A window of a combined card now comes off the card alone as soon as you drag it, also
+  inside the strip, where the whole card used to follow the pointer. Let it go between two
+  cards for a stage of its own there, on another card to join that stage, or back on its own
+  card to change nothing. Drag a card by its app icons to move the whole card.
 - Hovering a card of two apps grows each window a little on its own, as Apple's does, so
   the card keeps its shape instead of swelling as a whole; the app icons stay where they
   are, at their size, on every card.
@@ -25,8 +29,7 @@
   toward the edge show whole.
 - Each window of a combined card drags out on its own, as with Apple's: drag a card by one of
   its windows into the middle and that window alone joins the stage you are in, where you let
-  it go; the others stay on the card. Dragged up or down the strip, or onto another card, the
-  card still moves whole.
+  it go; the others stay on the card.
 - A card holding windows of two apps looks like Apple's: about the size of a single card,
   the window you used last in front, the other peeking out above it on the side where it
   sits on your screen, instead of the two side by side. A second window of the same app

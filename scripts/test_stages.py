@@ -2422,6 +2422,12 @@ def phase_crop():
                       f"grown, it still fits the panel (to {g and round(rect_right(g))}, panel to {panel and round(rect_right(panel['bounds']))})")
                 strip_hover(None)
 
+    if not lift_sub_test(s, stage, card, planes, column):
+        return
+    s = state()
+    card = by_title(s)["Fixture 1"]["home"]
+    stage = ids_by_number(s)[card]
+
     say("-- the back window dragged out by its own part joins the current stage alone; the card keeps the other")
     time.sleep(1.0)
     if reveal_strip("crop: one window out") is None:
@@ -2455,6 +2461,95 @@ def phase_crop():
     check(sorted(drawn) == [a1], f"the card shows Alpha 1 alone ({sorted(drawn)})")
     check("a window dragged out of a combined card" in log_text()[before_log:], "logged as one window out of a combined card")
     consistent("one window out of a combined card")
+
+
+def lift_sub_test(s, stage, card, planes, column):
+    """Round window-out-of-card (owner 11-09: inside the column the whole combined card
+    followed the pointer, "both windows move together"). Fixture 1, the back window of the
+    combined card (Alpha 1 in front), pressed by its own part inside the column: from the first
+    move it alone lifts off (the strip reports `Lifted`, never `Reorder`), its plane on the card
+    fades and Alpha 1's stays. Let go over its own card, nothing changes and nothing switches.
+    Dropped in the gap below the last card, it gets a stage of its own there, parked; the card
+    keeps Alpha 1, its number and its slot. Then Alpha 1 is sent into Fixture 1's new stage
+    (Alpha 1 in front again) for the drag out of the column that follows. True when the caller
+    may go on."""
+    t = by_title(s)
+    f1, a1 = t["Fixture 1"]["id"], t["Alpha 1"]["id"]
+    active = s["active"]
+    say("-- inside the column the back window lifts off alone from the first move; let go over its card, nothing changes")
+    time.sleep(1.0)
+    if reveal_strip("crop: one window lifted") is None:
+        return False
+    drawn, _ = planes()
+    if not check(f1 in drawn and a1 in drawn, f"the combined card drawn ({sorted(drawn)})"):
+        return False
+    front, back = drawn[a1], drawn[f1]
+    # Fixture 1's own part right of Alpha 1, inside the column.
+    right = min(rect_right(back), column - 4)
+    if not check(rect_right(front) + 4 < right, f"Fixture 1 shows right of Alpha 1 inside the column ({rect_right(front):.0f} .. {right:.0f})"):
+        return False
+    press = ((rect_right(front) + right) / 2, back["y"] + back["h"] / 2)
+    home = (front["x"] + 10, front["y"] + front["h"] / 2)
+
+    def plane_opacity(p, wid):
+        c = next((c for c in p.get("cards", []) if c.get("stage") == stage), None)
+        q = next((q for q in (c or {}).get("planes", []) if q.get("window") == wid), None)
+        return q.get("opacity") if q else None
+
+    before_log = len(log_text())
+    out, seen = card_drag(press, home, "Fixture 1 by its own part, back over its card")
+    if blocked(out, "the window lifted off the combined card inside the column"):
+        return False
+    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
+    moving = [p for p in seen if p.get("dragging") not in (None, "Pressed")]
+    check(bool(moving) and all(p.get("dragging") == "Lifted" for p in moving),
+          f"from the first move it is the window alone, never the whole card ({sorted({p.get('dragging') for p in moving})})")
+    check(all(p.get("drag_window") == f1 and p.get("drag_alone") for p in moving), "the press picked Fixture 1, to go alone")
+    lifted = [p for p in moving if (plane_opacity(p, f1) or 1.0) < 0.99 and (plane_opacity(p, a1) or 0.0) > 0.99]
+    check(bool(lifted), f"its plane on the card fades, Alpha 1's stays ({len(lifted)} of {len(moving)} samples)")
+    check(any(p.get("drag_spot") == "Home" for p in moving[-3:]), "over its own card it goes back home")
+    time.sleep(0.6)
+    s = state()
+    t = by_title(s)
+    check(s["active"] == active and t["Fixture 1"]["home"] == card and t["Alpha 1"]["home"] == card,
+          f"nothing changed, nothing switched ({stage_titles(s)})")
+    check("the stages merge" not in log_text()[before_log:] and "a stage of its own" not in log_text()[before_log:], "nothing logged as moved")
+
+    say("-- the back window dropped in the gap below the last card gets a stage of its own there")
+    time.sleep(1.0)
+    if reveal_strip("crop: one window into a gap") is None:
+        return False
+    s = state()
+    cards = s.get("strip_cards", [])
+    if not check(bool(cards) and cards[-1]["number"] == s["strip"][-1], f"cards drawn ({[c['number'] for c in cards]})"):
+        return False
+    last = cards[-1]["frame"]
+    gap = (s["display"]["visible"]["x"] + 60, last["y"] + last["h"] + 30)
+    drawn, _ = planes()
+    front, back = drawn.get(a1, front), drawn.get(f1, back)
+    press = ((rect_right(front) + min(rect_right(back), column - 4)) / 2, back["y"] + back["h"] / 2)
+    before_log = len(log_text())
+    out, seen = card_drag(press, gap, "Fixture 1 by its own part into the gap below the last card")
+    if blocked(out, "the window dropped in a gap of the strip"):
+        return False
+    check(any(p.get("drag_spot") == "Gap(None)" for p in seen), f"held below the last card, the gap there opens ({sorted({str(p.get('drag_spot')) for p in seen})})")
+    s = wait_state(lambda x: by_title(x)["Fixture 1"]["home"] not in (card, x["active"]), "Fixture 1 to get a stage of its own")
+    if not check(s is not None, f"Fixture 1 gets a stage of its own ({stage_titles(state())})"):
+        return False
+    t = by_title(s)
+    own = t["Fixture 1"]["home"]
+    check(t["Fixture 1"]["parked"] and s["active"] == active, "parked; nothing switched")
+    check(t["Alpha 1"]["home"] == card and card in s["strip"], f"Alpha 1 stays in its stage, number {card}, its card in the strip ({s['strip']})")
+    check(s["strip"][-1] == own, f"its card is the last, where it was dropped ({s['strip']})")
+    check("into a gap of the strip" in log_text()[before_log:], "logged as a window into a gap of the strip")
+    consistent("one window into a gap of the strip")
+    # Combined again for the drag out: Alpha 1 in front of Fixture 1.
+    do("send", own, a1)
+    time.sleep(1.0)
+    s = state()
+    members = {st["number"]: list(st["windows"]) for st in s["stages"]}
+    card = by_title(s)["Fixture 1"]["home"]
+    return check(members.get(card) == [a1, f1] and card in s["strip"], f"combined again, Alpha 1 in front ({stage_titles(s)})")
 
 
 def phase_behave():

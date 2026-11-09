@@ -45,10 +45,16 @@
 //!   column a ghost of the window pressed (the frontmost turned plane under the press)
 //!   follows the pointer in its own click-through panel, turned as the card at first and flat
 //!   on the growing spring, and grows toward that window's size;
-//!   released outside the strip it goes out as [`StripEvent::CardDropped`]. On a card of
-//!   several windows that window goes alone, as on Apple's (the event names it; its plane
-//!   fades while it is out, and the card drops it at the release); in the column the card
-//!   moves whole.
+//!   released outside the strip it goes out as [`StripEvent::CardDropped`].
+//! - **Drag one window off a combined card** ([`strip_layout::grip`]: a press on one window of
+//!   a card of several; on the app icons, or on a card of one window, the card moves whole):
+//!   that window alone comes off from the first move (`DragMode::Lifted`), its ghost at the
+//!   card's size in the column and growing past it, its plane on the card faded. Released
+//!   in the main area it goes out as [`StripEvent::CardDropped`] naming it (Apple's); in the
+//!   column, in a gap that opens under the pointer, as [`StripEvent::WindowToNewCard`]; on
+//!   another card's middle, which shows it behind its own windows, as
+//!   [`StripEvent::WindowToCard`]; over its own card, nothing. Apple's leaves it on the card
+//!   until the pointer leaves the strip (UX-SPEC, Drag and drop).
 //! - **Drop a card on a card** (`[strip] merge_on_drop`, an extension): over the middle part
 //!   of another card (`[drag] merge_zone` of its height, measured on the cards at rest) the
 //!   reorder gap closes and that card grows and shows the dragged card's windows stacked
@@ -115,7 +121,7 @@ use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::overlay::GlassLook;
 use crate::ui::card_glass;
 use crate::ui::panels;
-use crate::ui::strip_layout::{self, CardLayout, Metrics};
+use crate::ui::strip_layout::{self, CardLayout, Grip, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
 use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
 
@@ -1448,8 +1454,25 @@ enum DragMode {
     /// Following the pointer within the strip column: to another slot (`[strip] reorder`) or
     /// onto another card (`[strip] merge_on_drop`).
     Reorder,
+    /// One window of a card of several ([`Grip::Window`]) lifted off it within the column: its
+    /// ghost follows the pointer at the card's size, its plane on the card faded, and the column
+    /// shows where it goes ([`WindowSpot`]).
+    Lifted,
     /// Dragged out: the ghost follows the pointer and grows.
     Out,
+}
+
+/// Where a window lifted off its card ([`DragMode::Lifted`]) goes when released there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowSpot {
+    /// Over its own card: back onto it, nothing changes.
+    Home,
+    /// Into the gap right above this stage's card (`None`: below the last card), which opens:
+    /// a stage of its own there.
+    Gap(Option<u64>),
+    /// Onto this stage's card (`[strip] merge_on_drop`), which grows and shows it behind its
+    /// own windows: it joins that stage.
+    Onto(u64),
 }
 
 /// A press on a card that may become a drag.
@@ -1476,9 +1499,12 @@ struct CardDrag {
     /// The window pressed: the frontmost under the press (the front one off every window: on
     /// an icon). Its thumbnail is the ghost's image, and it is the window that lands.
     window: u32,
-    /// The card has other windows: dragged out, `window` goes alone, as Apple's does
-    /// ([`StripEvent::CardDropped`] with its id). Within the column the card moves whole.
-    alone: bool,
+    /// What the press drags ([`strip_layout::grip`]): `window` alone from the first move (a
+    /// press on one window of a card of several, as Apple's), or the whole card (its app
+    /// icons, or a card of one window).
+    grip: Grip,
+    /// Where the lifted window goes when released in the column ([`DragMode::Lifted`]).
+    spot: WindowSpot,
     /// The ghost, once the press moved past the threshold.
     ghost: Option<Ghost>,
     /// The drag went somewhere: over another card, or half a card away from the press. Then a
@@ -2049,6 +2075,24 @@ impl Strip {
             }
             cards.insert(to, card);
         }
+        // A window lifted off its card: the card it is held over shows it behind its own
+        // windows, or the gap under the pointer opens, a card of it in size.
+        if let Some(d) = self.card_drag.as_ref().filter(|d| d.mode == DragMode::Lifted)
+            && let Some(lifted) = cards.iter().find(|c| c.stage == d.stage).map(|c| c.only_window(d.window))
+        {
+            match d.spot {
+                WindowSpot::Onto(into) => {
+                    if let Some(target) = cards.iter_mut().find(|c| c.stage == into) {
+                        *target = target.merged_with(&lifted);
+                    }
+                }
+                WindowSpot::Gap(before) => {
+                    let to = before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
+                    cards.insert(to, CardSnapshot { stage: DROP_STAGE, ..lifted });
+                }
+                WindowSpot::Home => {}
+            }
+        }
         if let Some(w) = self.snapshot.window_drag.filter(|_| self.drop_over) {
             let gap = CardSnapshot { stage: DROP_STAGE, windows: vec![w], ..Default::default() };
             let to = self.drop_before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
@@ -2117,9 +2161,14 @@ impl Strip {
         }
     }
 
-    /// The card a dragged card would merge into now.
+    /// The card a dragged card, or a window lifted off its card, would merge into now.
     fn merge_onto(&self) -> Option<u64> {
-        self.card_drag.as_ref().filter(|d| d.mode == DragMode::Reorder).and_then(|d| d.onto)
+        let d = self.card_drag.as_ref()?;
+        match (d.mode, d.spot) {
+            (DragMode::Reorder, _) => d.onto,
+            (DragMode::Lifted, WindowSpot::Onto(into)) => Some(into),
+            _ => None,
+        }
     }
 
     /// A card is drawn grown: under the pointer, or about to take a dragged card.
@@ -2248,7 +2297,8 @@ impl Strip {
                         let glass = l.glass.iter().find(|(w, _)| w == id).and_then(|(_, g)| g.as_ref()).map(|g| {
                             serde_json::json!({ "under": g.rgb.map(|c| (c * 255.0 * 100.0).round() / 100.0), "opacity": g.opacity, "image_opacity": image.opacity() })
                         });
-                        serde_json::json!({ "window": id, "plane": in_root(plane), "image": in_root(image), "shows": shows(image), "glass": glass })
+                        // `opacity`: the plane's own (a window lifted off the card fades).
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
                     })
                     .collect();
                 Some(serde_json::json!({
@@ -2289,7 +2339,8 @@ impl Strip {
             "dragging": self.card_drag.as_ref().map(|d| format!("{:?}", d.mode)),
             // The window pressed, and whether it goes alone out of the column.
             "drag_window": self.card_drag.as_ref().map(|d| d.window),
-            "drag_alone": self.card_drag.as_ref().map(|d| d.alone),
+            "drag_alone": self.card_drag.as_ref().map(|d| d.grip == Grip::Window),
+            "drag_spot": self.card_drag.as_ref().filter(|d| d.mode == DragMode::Lifted).map(|d| format!("{:?}", d.spot)),
             "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
             "overlay_top_down": self.motion_top_down(),
@@ -2879,7 +2930,9 @@ impl Strip {
     fn drag_for(&self, stage: u64, p: Point) -> Option<CardDrag> {
         let layout = self.layouts.iter().find(|l| l.stage == stage)?;
         let card = self.snapshot.cards.iter().find(|c| c.stage == stage)?;
-        let slot = layout.thumbs.get(self.window_at(layout, p).unwrap_or(0))?;
+        let hit = self.window_at(layout, p);
+        let grip = strip_layout::grip(card.windows.len(), hit.is_some(), self.icon_at(stage, p).is_some());
+        let slot = layout.thumbs.get(hit.unwrap_or(0))?;
         let pressed = card.windows.iter().find(|w| w.id == slot.id)?;
         let g = self.geometry.global;
         let b = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
@@ -2902,7 +2955,8 @@ impl Strip {
             grab,
             full: pressed.frame.size(),
             window: pressed.id,
-            alone: card.windows.len() > 1,
+            grip,
+            spot: WindowSpot::Home,
             ghost: None,
             strayed: false,
         })
@@ -2968,10 +3022,18 @@ impl Strip {
         }
         let stage = drag.stage;
         let in_column = self.geometry.global.contains(p);
-        let mode = if follow && in_column { DragMode::Reorder } else { DragMode::Out };
+        let alone = drag.grip == Grip::Window;
+        // A window of several lifts off its card from the first move and goes alone wherever
+        // it goes; the whole card follows the pointer in the column (reorder, merge).
+        let mode = match (in_column, alone) {
+            (true, true) => DragMode::Lifted,
+            (true, false) if follow => DragMode::Reorder,
+            _ => DragMode::Out,
+        };
         let (before, onto) = if mode == DragMode::Reorder { self.card_spot(p, stage) } else { (None, None) };
+        let spot = if mode == DragMode::Lifted { self.window_spot(p, stage) } else { WindowSpot::Home };
         let image = self.thumbs.get(&drag.window).cloned();
-        let (window, alone) = (drag.window, drag.alone);
+        let window = drag.window;
         let look = {
             let (m, g, full) = (self.m(), self.geometry.global, &self.style);
             let (tilt, eye, perspective) = (m.tilt, Point::new(g.x + m.eye.x, g.y + m.eye.y), m.perspective);
@@ -2980,10 +3042,10 @@ impl Strip {
             let fade = full.animation.seconds(full.cards.fade_ms);
             move || GhostLook { tilt, eye, perspective, flatten, plate: plate.clone(), fade }
         };
-        let was = drag.mode;
+        let (was, was_spot) = (drag.mode, drag.spot);
         let was_onto = self.merge_onto();
         if was == DragMode::Pressed {
-            tracing::debug!(stage, ?mode, "card drag started");
+            tracing::debug!(stage, ?mode, ?spot, alone, "card drag started");
             self.squeeze(None);
         }
         {
@@ -2991,10 +3053,13 @@ impl Strip {
             drag.mode = mode;
             drag.before = before;
             drag.onto = onto;
-            drag.strayed |= onto.is_some() || (p.x - drag.press.x).hypot(p.y - drag.press.y) > drag.thumb.h / 2.0;
+            drag.spot = spot;
+            drag.strayed |= onto.is_some() || spot != WindowSpot::Home || (p.x - drag.press.x).hypot(p.y - drag.press.y) > drag.thumb.h / 2.0;
             if mode == DragMode::Reorder {
                 drag.ghost = None;
             } else {
+                // The ghost: the pressed window, at its plane's size in the column, growing
+                // toward its own past the column's edge.
                 let hold = strip_layout::window_grab(drag.full, (style.window_grab_x, style.window_grab_y));
                 let frame = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, strip_right, style.grow_distance, hold, p);
                 let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32, look()));
@@ -3010,10 +3075,6 @@ impl Strip {
                 // dragged card's picture twice (owner 10-22, round 9C).
                 let held = if onto.is_some() { style.lifted_opacity as f32 } else { 1.0 };
                 let seconds = if was == DragMode::Reorder { self.style.animation.seconds(self.style.cards.hover_ms) } else { 0.0 };
-                if was == DragMode::Out && alone {
-                    // Back in the column the card moves whole again.
-                    self.set_plane_opacity(stage, window, 1.0);
-                }
                 self.fade_card(stage, held, seconds);
                 if was != DragMode::Reorder {
                     self.lift_card(stage);
@@ -3021,29 +3082,56 @@ impl Strip {
                 }
                 self.layout_cards(false);
             }
-            DragMode::Out | DragMode::Pressed => {
+            DragMode::Lifted | DragMode::Out | DragMode::Pressed => {
                 if was == DragMode::Reorder {
                     self.settle_lifted();
                 }
-                if was != DragMode::Out {
-                    // Out of the column a window of several goes alone: its plane fades, the
-                    // card keeps the others; a card of one window fades whole.
+                if matches!(was, DragMode::Pressed | DragMode::Reorder) {
+                    // A window of several goes alone: its plane fades, the card keeps the
+                    // others; a card of one window (or pressed on its icons) fades whole.
                     if alone {
                         self.set_card_opacity(stage, 1.0);
                         self.set_plane_opacity(stage, window, style.lifted_opacity as f32);
                     } else {
                         self.set_card_opacity(stage, style.lifted_opacity as f32);
                     }
-                    // The card goes back to its slot while its ghost is out.
+                }
+                // The card goes back to its slot while its ghost is out; a lifted window's gap
+                // opens (or moves, or closes) under the pointer.
+                if was != mode || spot != was_spot {
+                    if spot != was_spot {
+                        tracing::debug!(stage, window, ?spot, "lifted window over the column");
+                    }
                     self.layout_cards(false);
                 }
             }
         }
-        if onto != was_onto {
-            tracing::debug!(stage, ?onto, "card held over a card");
-            self.ease_growth([was_onto, onto]);
+        let now_onto = self.merge_onto();
+        if now_onto != was_onto {
+            tracing::debug!(stage, onto = ?now_onto, "card held over a card");
+            self.ease_growth([was_onto, now_onto]);
         }
         self.update_visibility();
+    }
+
+    /// Where a window lifted off `stage`'s card goes when released at `p` (global), measured on
+    /// the cards at rest: over its own card back home; over the middle of another card
+    /// (`[strip] merge_on_drop`, `[drag] merge_zone`) onto it; anywhere else in the column the
+    /// gap there.
+    fn window_spot(&self, p: Point, stage: u64) -> WindowSpot {
+        let resting = self.resting_layouts();
+        let g = self.geometry.global;
+        let local = Point::new(p.x - g.x, p.y - g.y);
+        if resting.iter().find(|l| l.stage == stage).is_some_and(|l| l.bounds(self.m()).contains(local)) {
+            return WindowSpot::Home;
+        }
+        let band = if self.style.merge_on_drop { self.style.drag.merge_zone.clamp(0.0, 1.0) } else { 0.0 };
+        match self.spot_at(&resting, p, None, band) {
+            // A card a transition is still landing in is not drawn yet: nothing to join.
+            Spot::Onto(into) if into == stage || self.motion.holds(into) => WindowSpot::Home,
+            Spot::Onto(into) => WindowSpot::Onto(into),
+            Spot::Before(before) => WindowSpot::Gap(before),
+        }
     }
 
     fn mouse_up(&mut self, p: Point, shift: bool) -> Option<StripEvent> {
@@ -3075,6 +3163,9 @@ impl Strip {
             }
             self.set_card_opacity(drag.stage, 1.0);
             self.set_plane_opacity(drag.stage, drag.window, 1.0);
+            if drag.mode == DragMode::Lifted {
+                return self.release_lifted(drag, p, shift);
+            }
             if drag.mode == DragMode::Reorder {
                 // Put the card in its new slot now; the controller's snapshot agrees. It stays
                 // above the others until it has glided in.
@@ -3106,7 +3197,7 @@ impl Strip {
                     g.flatten();
                 }
                 self.motion.keep_landing(drag.ghost, drag.window, rect);
-                if drag.alone {
+                if drag.grip == Grip::Window {
                     // The card shows its other windows at once; the controller's snapshot agrees.
                     self.leave_locally(drag.stage, drag.window);
                 }
@@ -3121,7 +3212,7 @@ impl Strip {
             }
             let d = &self.style.drag;
             let origin = strip_layout::drop_origin(strip_layout::window_grab(drag.full, (d.window_grab_x, d.window_grab_y)), at);
-            let window = drag.alone.then_some(drag.window);
+            let window = (drag.grip == Grip::Window).then_some(drag.window);
             tracing::debug!(stage = drag.stage, ?window, "card dragged out: dropped in the main area");
             return Some(StripEvent::CardDropped { stage: drag.stage, window, x: origin.x, y: origin.y });
         }
@@ -3137,6 +3228,52 @@ impl Strip {
         // from it as drawn); if none comes, it lets go.
         Self::release_squeeze_later(self.display, pressed);
         Some(self.click_event(pressed, p, shift))
+    }
+
+    /// A window lifted off its card released in the column (`p`, panel coordinates) at the spot
+    /// the column showed: into the gap (a stage of its own), onto a card (it joins that stage),
+    /// or back home (nothing; after a wobble that went nowhere, a click). The cards show the
+    /// result at once; the controller's snapshot agrees, or puts them back.
+    fn release_lifted(&mut self, drag: CardDrag, p: Point, shift: bool) -> Option<StripEvent> {
+        let (stage, window) = (drag.stage, drag.window);
+        drop(drag.ghost);
+        let event = match drag.spot {
+            WindowSpot::Home => None,
+            WindowSpot::Gap(before) => {
+                // The gap stays open until the new card comes with the controller's snapshot.
+                let lifted = self.snapshot.cards.iter().find(|c| c.stage == stage).map(|c| c.only_window(window));
+                self.leave_locally(stage, window);
+                if let Some(lifted) = lifted {
+                    let cards = &mut self.snapshot.cards;
+                    let to = before.and_then(|b| cards.iter().position(|c| c.stage == b)).unwrap_or(cards.len());
+                    cards.insert(to, CardSnapshot { stage: DROP_STAGE, ..lifted });
+                }
+                tracing::debug!(stage, window, ?before, "lifted window dropped in a gap of the strip");
+                Some(StripEvent::WindowToNewCard { stage, window, before: self.real_stage(before) })
+            }
+            WindowSpot::Onto(into) => {
+                let lifted = self.snapshot.cards.iter().find(|c| c.stage == stage).map(|c| c.only_window(window));
+                self.leave_locally(stage, window);
+                if let (Some(lifted), Some(target)) = (lifted, self.snapshot.cards.iter_mut().find(|c| c.stage == into)) {
+                    *target = target.merged_with(&lifted);
+                }
+                self.set_hover(Some(into));
+                tracing::debug!(stage, window, into, "lifted window dropped on a card");
+                Some(StripEvent::WindowToCard { stage, window, into })
+            }
+        };
+        self.layout_cards(false);
+        self.update_visibility();
+        self.update_targets();
+        if event.is_some() {
+            return event;
+        }
+        if !drag.strayed && self.layouts.iter().find(|l| l.stage == stage).is_some_and(|l| l.bounds(self.m()).contains(p)) {
+            tracing::debug!(stage, "a lifted window let go over its card after a wobble: a click");
+            return Some(self.click_event(stage, p, shift));
+        }
+        tracing::debug!(stage, window, "lifted window let go over its own card: it goes back, nothing changes");
+        None
     }
 
     /// In [`SQUEEZE_MAX`]: a released card still drawn pressed lets go, unless a transition
