@@ -5,10 +5,8 @@
 //!   both ways from the same moment: stiffness 289, damping 34 (ω = 17 rad/s: 50 % at ~99 ms,
 //!   90 % at ~229 ms, 99 % at ~390 ms), fitted 11-09 to the four corners of a window growing
 //!   out of its card and of one shrinking into its card, frame by frame on a 5K screen at 60
-//!   fps, together with the path below ([`Path`]); our own 1.6.0 switch read back the same way
-//!   as its known 272/33 (ω 16.5) on a straight path. The faster 353/37.6 the parity round
-//!   read for a growing window came from its left edge and width, which run ahead of the
-//!   spring on Apple's path; its height and vertical position run on the spring itself. Cards
+//!   fps, together with the path below ([`Path`]): the fixture's 1100 pt window, then its
+//!   1800 pt one, three runs each way, which read ω 16.8 growing and 17.3 shrinking. Cards
 //!   glide at ω ≈ 17.0, the strip slides at ω ≈ 16.8 (Apple's slide-in read ω 16.3 on 11-09),
 //!   and a card under the pointer grows on ω ≈ 16.6 ([`hover_spring`]). [`spring_progress`]
 //!   gives the fraction of the way covered after `t` seconds for any mass, stiffness and
@@ -17,18 +15,27 @@
 //!   ([`Spring::at_speed`]: the same curve, ω times the speed) and duration;
 //!   [`switch_spring`], [`shrink_spring`], [`glide_spring`] and [`slide_spring`] are the
 //!   style's springs with it applied.
-//! - **Path.** Apple's window does not move on a straight line between its card and its
-//!   frame. Its horizontal motion and its width run ahead toward the window's end, and its
-//!   turn flattens ahead of the spring, while its height and vertical position follow the
-//!   spring ([`Path::at`]): growing, it is out sideways and flat early and rises later, "from
-//!   the bottom up"; shrinking, it first drops and loses height, wide and flat, then slides
-//!   into the card and turns. Measured 11-09 (the fixture's blue window out of its card, the
-//!   green one into a combined card): the window-side lead is [`SIDEWAYS_LEAD`] of p·(1 − p)
-//!   for the middle's x and the width and [`FLATTEN_LEAD`] for the turn, with the snapshot
-//!   turned about its vertical middle ([`Pose`]); this reproduces Apple's corners within
-//!   3.4 pt rms (10 at worst) growing and 3.5 (10) shrinking, where the straight path turned
-//!   about the left edge, on the parity round's springs, read 20.3 pt rms (54 at worst) and
-//!   16.7 (83), and no straight path on any spring, pivot or eye came within 9 and 7.
+//! - **Flight.** Apple's snapshot in flight is its window's picture, never stretched, turned
+//!   about its vertical middle and seen through an eye in front of the display's middle,
+//!   [`FLIGHT_DISTANCE`] of its width away (3000 pt on the 5K display; [`Flight`]): the
+//!   1800 × 1100 pt window, its corners tracked frame by frame to a tenth of a point, fits
+//!   that rigid plane within 0.16 pt rms growing and 0.43 shrinking, where the strip's eye
+//!   (15, 720 at 2260 pt) misses by 6.1 and 4.1 (read through it, the same frames are up to
+//!   14 % wider than the window). Seen so, its card is the window far back
+//!   (0.12 of its size: 21,700 pt behind the screen), turned 76°.
+//! - **Path.** Its size (its depth), turn and height run on the spring together; its
+//!   sideways place runs ahead toward the window's end ([`Path::at`]). Growing, it is out over
+//!   the desktop while still small and far back, then comes forward to the viewer; shrinking,
+//!   it shrinks back in place first, then slides into the card. Apple scales the sideways
+//!   place about a point left of the screen ([`SCALE_ORIGIN`]), which makes the lead depend on
+//!   the window's place and the card's size ([`Path::sideways_lead`]): 0.75 of p·(1 − p) for
+//!   the 1800 pt window from slot 5, 0.3 for the 1100 pt one, both from that one origin
+//!   (each set alone fits it within −200 to −228 pt). Against Apple's corners, on 289/34:
+//!   5.3 pt rms (22 at worst) growing and 6.0 (17) shrinking for the 1800 pt window, 6.1 (24)
+//!   and 5.3 (17) for the 1100 pt one, where the motion-path model before it (the strip's
+//!   eye; the middle's x and the width 0.33 ahead, the turn 0.19 ahead, the height on the
+//!   spring: it stretched the window up to 16 % wide while it flew) read 26.5 (118) and 27.2
+//!   (135) on the 1800 pt window (3.4 and 3.5 on the 1100 pt one it was fitted to).
 //! - **Unveil.** An incoming window takes its place behind its growing snapshot when the
 //!   snapshot as shown is within [`UNVEIL_TOLERANCE`] of the window on every edge
 //!   ([`unveil_time`]): by distance, from the transition's own start and end rectangles
@@ -44,13 +51,12 @@
 //!   never before a presentation lag past the unveil, and lands once it has handed over
 //!   ([`shown_lands`]). Both shadows for a few frames read about 2 levels darker; a shadow
 //!   faded before its window showed read 16 lighter for 80 ms (11-01).
-//! - **Planes.** A snapshot is a plane turned about its left edge, like a strip card: at a
-//!   window's frame it is flat and full size; on a card it is the card's thumbnail, turned by
-//!   the strip's tilt and seen from the strip's eye. In flight it turns about its vertical
-//!   middle ([`Pose`]: the same look at either end, the plane moved along the eye's rays so
-//!   its middle is in the screen's plane), as Apple's does: a snapshot turning about its left
-//!   edge kept that edge put while the far side swung, and Apple's left side comes toward the
-//!   viewer as it turns (its bottom-left corner stays low while the window grows).
+//! - **Planes.** Callers give a snapshot as a plane turned about its left edge, like a strip
+//!   card, seen through the strip's eye: at a window's frame it is flat and full size; on a
+//!   card it is the card's thumbnail, turned by the strip's tilt. In flight it is the pose
+//!   the flight's eye draws exactly as the strip's eye draws the plane ([`Plane::pose`], from
+//!   the drawn trapezoid, [`Drawn`]), so it leaves and lands on a card with no change on
+//!   screen, and is read back the same way ([`Pose::plane`]).
 //! - **Drop spot.** A card or a window released over the column goes into the gap between the
 //!   cards whose middles are above and below the pointer. A band around each card's middle
 //!   (`[drag] merge_zone` of its height, for a card dragged with `[strip] merge_on_drop`)
@@ -328,18 +334,73 @@ impl Plane {
     }
 }
 
-/// The perspective snapshots are seen through: the strip's eye (overlay coordinates) and its
-/// distance in front of the screen (points).
+/// A perspective: the eye (overlay coordinates) and its distance in front of the screen
+/// (points).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Eye {
     pub at: Point,
     pub distance: f64,
 }
 
-/// A snapshot's pose in flight: turned about its vertical middle line, which lies in the
-/// screen's plane (Apple's turns that way: see the module notes, "Planes"). Its middle, its
-/// size before the turn, the turn (radians, the right side away) and its corner radius, in
-/// the overlay's coordinates.
+/// How a turned rectangle is drawn on the screen: its left edge's x, that edge's top and
+/// bottom, its right edge's x, that edge's top and bottom (a trapezoid whose sides stay
+/// upright: every turn is about a vertical axis).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drawn {
+    pub left: f64,
+    pub left_top: f64,
+    pub left_bottom: f64,
+    pub right: f64,
+    pub right_top: f64,
+    pub right_bottom: f64,
+}
+
+impl Drawn {
+    /// The six numbers in their order.
+    pub fn array(&self) -> [f64; 6] {
+        [self.left, self.left_top, self.left_bottom, self.right, self.right_top, self.right_bottom]
+    }
+
+    /// The bounding box.
+    pub fn bounds(&self) -> Rect {
+        let (x0, x1) = (self.left.min(self.right), self.left.max(self.right));
+        let (y0, y1) = (self.left_top.min(self.right_top), self.left_bottom.max(self.right_bottom));
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
+}
+
+/// How far in front of the screen Apple's snapshots are seen from in flight, in display widths
+/// (3000 pt on a 2560 pt wide display; measured 11-09, see the module notes, "Flight").
+pub const FLIGHT_DISTANCE: f64 = 1.17;
+/// Where, in display widths from the display's left edge, Apple's flight scales a snapshot's
+/// sideways place about (−205 pt on a 2560 pt wide display: left of the screen; module notes,
+/// "Path").
+pub const SCALE_ORIGIN: f64 = -0.08;
+
+/// What a snapshot is seen through in flight: Apple's eye, at the display's middle
+/// ([`FLIGHT_DISTANCE`] away), and the sideways origin of its path ([`SCALE_ORIGIN`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flight {
+    pub eye: Eye,
+    /// The x its path scales the sideways place about ([`Path::sideways_lead`]).
+    pub origin_x: f64,
+}
+
+impl Flight {
+    /// The flight over a display `size` points large whose left edge is at `left` (overlay
+    /// coordinates), its eye level with the strip's eye at `eye_y` (Apple's are both at the
+    /// display's vertical middle; one level keeps a card's look exact through either).
+    pub fn over(left: f64, size: Size, eye_y: f64) -> Self {
+        let w = size.w.max(1.0);
+        Self { eye: Eye { at: Point::new(left + w / 2.0, eye_y), distance: FLIGHT_DISTANCE * w }, origin_x: left + SCALE_ORIGIN * w }
+    }
+}
+
+/// A snapshot's pose in flight: a flat rectangle turned about its vertical middle line, which
+/// lies in the screen's plane, seen through the flight's eye ([`Flight`]): its middle, its size
+/// before the turn, the turn (radians, the right side away) and its corner radius, in the
+/// overlay's coordinates. A pose farther back is the same pose smaller: nearer the eye along
+/// its rays, everything shrinks by one factor and nothing changes on screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     pub middle: Point,
@@ -348,57 +409,98 @@ pub struct Pose {
     pub corner: f64,
 }
 
-/// The factor that moves a point at depth `z` (toward the viewer positive) along the eye's ray
-/// into the screen's plane, where it looks the same: `d / (d − z)`.
-fn into_screen(eye: Eye, z: f64) -> f64 {
-    let d = eye.distance.max(1.0);
-    d / (d - z).max(1.0)
-}
-
 impl Plane {
-    /// The pose that looks exactly like this plane through `eye`: the plane turned about its
-    /// left edge has its middle `w/2 · sin tilt` behind the screen; moved along the eye's rays
-    /// until the middle is in it, everything scales by the same factor and nothing changes
-    /// on screen.
-    pub fn pose(&self, eye: Eye) -> Pose {
-        let half = self.size.w / 2.0;
-        let k = into_screen(eye, -half * self.tilt.sin());
-        let mx = self.left_mid.x + half * self.tilt.cos();
-        let my = self.left_mid.y;
-        Pose {
-            middle: Point::new(eye.at.x + (mx - eye.at.x) * k, eye.at.y + (my - eye.at.y) * k),
-            size: Size::new(self.size.w * k, self.size.h * k),
-            tilt: self.tilt,
-            corner: self.corner * k,
+    /// How the plane is drawn through `eye`: its left edge in the screen's plane, its far side
+    /// `w · sin tilt` behind it.
+    pub fn drawn(&self, eye: Eye) -> Drawn {
+        let d = eye.distance.max(1.0);
+        let (top, bottom) = (self.left_mid.y - self.size.h / 2.0, self.left_mid.y + self.size.h / 2.0);
+        let f = d / (d + self.size.w * self.tilt.sin()).max(1.0);
+        let far = self.left_mid.x + self.size.w * self.tilt.cos();
+        Drawn {
+            left: self.left_mid.x,
+            left_top: top,
+            left_bottom: bottom,
+            right: eye.at.x + (far - eye.at.x) * f,
+            right_top: eye.at.y + (top - eye.at.y) * f,
+            right_bottom: eye.at.y + (bottom - eye.at.y) * f,
         }
+    }
+
+    /// The plane turned about its left edge that `eye` draws as `d` (the left edge as drawn;
+    /// the far side from its height and place); its corner `corner`.
+    pub fn from_drawn(d: Drawn, eye: Eye, corner: f64) -> Self {
+        let dist = eye.distance.max(1.0);
+        let hl = (d.left_bottom - d.left_top).max(1e-9);
+        let f = ((d.right_bottom - d.right_top) / hl).max(1e-9);
+        let w_sin = dist * (1.0 / f - 1.0);
+        let w_cos = eye.at.x + (d.right - eye.at.x) / f - d.left;
+        Self {
+            left_mid: Point::new(d.left, (d.left_top + d.left_bottom) / 2.0),
+            size: Size::new(w_sin.hypot(w_cos), hl),
+            tilt: w_sin.atan2(w_cos),
+            corner,
+        }
+    }
+
+    /// The pose that `flight` draws exactly as `strip` draws this plane ([`Pose::from_drawn`]):
+    /// a card's thumbnail, seen through the strip's eye, becomes a snapshot seen through the
+    /// flight's, with no change on screen.
+    pub fn pose(&self, strip: Eye, flight: Eye) -> Pose {
+        let mut pose = Pose::from_drawn(self.drawn(strip), flight, 0.0);
+        pose.corner = self.corner * pose.size.h / self.size.h.max(1e-9);
+        pose
     }
 }
 
 impl Pose {
-    /// The plane turned about its left edge that looks exactly like this pose ([`Plane::pose`]
-    /// the other way: the left edge, `w/2 · sin tilt` in front of the screen, moved into it).
-    pub fn plane(&self, eye: Eye) -> Plane {
+    /// How the pose is drawn through `eye`: each side moved along the eye's rays by its depth
+    /// (`± w/2 · sin tilt`).
+    pub fn drawn(&self, eye: Eye) -> Drawn {
+        let d = eye.distance.max(1.0);
         let half = self.size.w / 2.0;
-        let k = into_screen(eye, half * self.tilt.sin());
-        let lx = self.middle.x - half * self.tilt.cos();
-        let ly = self.middle.y;
-        Plane {
-            left_mid: Point::new(eye.at.x + (lx - eye.at.x) * k, eye.at.y + (ly - eye.at.y) * k),
-            size: Size::new(self.size.w * k, self.size.h * k),
-            tilt: self.tilt,
-            corner: self.corner * k,
+        let side = |u: f64| {
+            let s = d / (d + u * self.tilt.sin()).max(1.0);
+            let x = eye.at.x + (self.middle.x + u * self.tilt.cos() - eye.at.x) * s;
+            let y = |v: f64| eye.at.y + (self.middle.y + v - eye.at.y) * s;
+            (x, y(-self.size.h / 2.0), y(self.size.h / 2.0))
+        };
+        let (l, r) = (side(-half), side(half));
+        Drawn { left: l.0, left_top: l.1, left_bottom: l.2, right: r.0, right_top: r.1, right_bottom: r.2 }
+    }
+
+    /// The pose that `eye` draws as `d` (closed form: the sides' heights give the depth
+    /// between them, so the turn and the size; their places give the middle); its corner
+    /// `corner`.
+    pub fn from_drawn(d: Drawn, eye: Eye, corner: f64) -> Self {
+        let dist = eye.distance.max(1.0);
+        let (hl, hr) = (d.left_bottom - d.left_top, d.right_bottom - d.right_top);
+        let depth = dist * (hl - hr) / (hl + hr).max(1e-9);
+        let (sl, sr) = (dist / (dist - depth).max(1.0), dist / (dist + depth).max(1.0));
+        let left = eye.at.x + (d.left - eye.at.x) / sl;
+        let right = eye.at.x + (d.right - eye.at.x) / sr;
+        let across = (right - left) / 2.0;
+        Self {
+            middle: Point::new((left + right) / 2.0, eye.at.y + ((d.left_top + d.left_bottom) / 2.0 - eye.at.y) / sl),
+            size: Size::new(2.0 * depth.hypot(across), hl / sl),
+            tilt: depth.atan2(across),
+            corner,
         }
+    }
+
+    /// The plane turned about its left edge that `strip` draws exactly as `flight` draws this
+    /// pose ([`Plane::pose`] the other way).
+    pub fn plane(&self, flight: Eye, strip: Eye) -> Plane {
+        let mut plane = Plane::from_drawn(self.drawn(flight), strip, 0.0);
+        plane.corner = self.corner * plane.size.h / self.size.h.max(1e-9);
+        plane
     }
 }
 
-/// How far ahead of the spring a flying snapshot's middle moves sideways and its width
-/// changes, toward the window's end, at the middle of the way: `p + SIDEWAYS_LEAD · p (1 − p)`
-/// of the way there when the spring is at `p` (Apple's, measured 11-09; see the module notes,
-/// "Path").
-pub const SIDEWAYS_LEAD: f64 = 0.33;
-/// How far ahead of the spring the snapshot's turn flattens, toward the window's end (the
-/// same form as [`SIDEWAYS_LEAD`]; Apple's, measured 11-09).
-pub const FLATTEN_LEAD: f64 = 0.19;
+/// The most a flight's middle runs ahead of the spring sideways, as the `k` of
+/// `p + k·p(1 − p)` ([`Path::sideways_lead`]): at 1 it reaches its end with the spring and
+/// never passes it.
+pub const MAX_LEAD: f64 = 1.0;
 
 /// Which end of a flight is a window's frame: the path leans toward it ([`Path`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -423,37 +525,59 @@ impl Toward {
 }
 
 /// A snapshot's flight from one pose to another on a spring, along Apple's path (module notes,
-/// "Path").
+/// "Path"), seen through the flight's eye; `origin_x` is the flight's ([`Flight::origin_x`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Path {
     pub from: Pose,
     pub to: Pose,
     pub toward: Toward,
+    pub origin_x: f64,
 }
 
 impl Path {
-    /// The pose when the spring has covered `p` of the way: the middle's height, the height
-    /// and the corner on the spring; the middle's sideways place and the width
-    /// [`SIDEWAYS_LEAD`] and the turn [`FLATTEN_LEAD`] of `p (1 − p)` toward the window's end.
+    /// How far ahead of the spring the middle moves sideways toward the window's end: the `k`
+    /// of `p + k·p(1 − p)`. Apple's sideways place is scaled about `origin_x` with the
+    /// snapshot while the place it is scaled from moves on the spring, so the card's end
+    /// counts as the card at the window's size, scaled out about the origin, and the lead is
+    /// how far that lies past the window's middle: `(1 − s)·(X − x_w)/(x_w − x_c)`, the card's
+    /// scale `s` against the window, `X = o + (x_c − o)/s`. Kept within 0..[`MAX_LEAD`]: never
+    /// behind the spring, never past the end. 0 on a straight path.
+    pub fn sideways_lead(&self) -> f64 {
+        let (card, window) = match self.toward {
+            Toward::Window => (self.from, self.to),
+            Toward::Card => (self.to, self.from),
+            Toward::Straight => return 0.0,
+        };
+        let s = card.size.h / window.size.h.max(1e-9);
+        let span = window.middle.x - card.middle.x;
+        if s <= 0.0 || span.abs() < 1.0 {
+            return 0.0;
+        }
+        let scaled_out = self.origin_x + (card.middle.x - self.origin_x) / s;
+        ((1.0 - s) * (scaled_out - window.middle.x) / span).clamp(0.0, MAX_LEAD)
+    }
+
+    /// The pose when the spring has covered `p` of the way: the size, the turn, the middle's
+    /// height and the corner on the spring (the snapshot keeps its window's proportions:
+    /// Apple's never stretches); the middle's sideways place [`Self::sideways_lead`] of
+    /// `p (1 − p)` toward the window's end.
     pub fn at(&self, p: f64) -> Pose {
-        let bend = p * (1.0 - p) * self.toward.lean();
-        let side = p + SIDEWAYS_LEAD * bend;
-        let flat = p + FLATTEN_LEAD * bend;
+        let side = p + self.sideways_lead() * p * (1.0 - p) * self.toward.lean();
         let lerp = |a: f64, b: f64, u: f64| a + (b - a) * u;
         let (a, b) = (self.from, self.to);
         Pose {
             middle: Point::new(lerp(a.middle.x, b.middle.x, side), lerp(a.middle.y, b.middle.y, p)),
-            size: Size::new(lerp(a.size.w, b.size.w, side), lerp(a.size.h, b.size.h, p)),
-            tilt: lerp(a.tilt, b.tilt, flat),
+            size: Size::new(lerp(a.size.w, b.size.w, p), lerp(a.size.h, b.size.h, p)),
+            tilt: lerp(a.tilt, b.tilt, p),
             corner: lerp(a.corner, b.corner, p),
         }
     }
 
     /// How much farther than the spring's own way any part of the pose can still be from its
-    /// end: shrinking into a card, the sideways motion trails the spring by up to
-    /// [`SIDEWAYS_LEAD`] of what is left; growing, every part is at least as far along.
+    /// end: shrinking into a card, the sideways place trails the spring by up to
+    /// [`MAX_LEAD`] of what is left; growing, every part is at least as far along.
     pub fn trail(toward: Toward) -> f64 {
-        1.0 + (-toward.lean()).max(0.0) * SIDEWAYS_LEAD.max(FLATTEN_LEAD)
+        1.0 + (-toward.lean()).max(0.0) * MAX_LEAD
     }
 }
 
@@ -628,8 +752,14 @@ mod tests {
         }
     }
 
-    /// The 5K screen's eye, where the overlay covers the main display (global = overlay).
+    /// The 5K screen's strip eye, where the overlay covers the main display (global = overlay).
     const EYE: Eye = Eye { at: Point::new(15.0, 720.0), distance: 2260.0 };
+
+    /// The flight over the 5K screen: its eye in front of the middle, 3000 pt away; its
+    /// sideways origin 205 pt left of the screen.
+    fn flight() -> Flight {
+        Flight::over(0.0, Size::new(2560.0, 1440.0), 720.0)
+    }
 
     /// Apple's switch, measured 11-09 (5K screen, 60 fps, the fixture windows), as each frame
     /// draws the window: ms after the fitted onset (about a frame before the first moving
@@ -705,9 +835,75 @@ mod tests {
     ];
     const NAN: f64 = f64::NAN;
 
+    /// Apple's switch recorded for its depth (11-09, `capture-11-09/depth`, the second of
+    /// three identical runs each way): the fixture's 1800 × 1100 pt blue window at 300, 130
+    /// and its card in slot 5, each frame's blue rectangle as drawn (its corners tracked to a
+    /// tenth of a point: colour edges fitted with lines), ms after the last still frame, in
+    /// [`Drawn`]'s order. Growing out of its card, from [`GROWN_1800_FROM`].
+    const GROWN_1800_FROM: [f64; 6] = [10.7, 889.8, 1028.0, 148.8, 878.6, 1007.6];
+    const WINDOW_1800: [f64; 6] = [300.7, 130.3, 1229.7, 2100.7, 130.3, 1229.7];
+    const GROWN_1800: [(f64, [f64; 6]); 25] = [
+        (16.7, [45.2, 868.1, 1035.9, 220.9, 855.8, 1010.7]),
+        (33.3, [120.1, 801.9, 1055.5, 388.8, 793.0, 1018.5]),
+        (50.0, [202.8, 733.8, 1080.8, 599.8, 731.9, 1030.0]),
+        (66.7, [272.5, 652.5, 1108.3, 818.9, 663.6, 1044.9]),
+        (83.3, [320.5, 571.8, 1135.6, 1028.3, 598.3, 1061.7]),
+        (100.0, [346.8, 496.1, 1160.1, 1216.1, 537.0, 1079.9]),
+        (116.7, [356.8, 428.1, 1180.6, 1379.9, 480.2, 1098.5]),
+        (133.3, [354.8, 369.4, 1196.7, 1517.7, 428.2, 1116.8]),
+        (150.0, [348.5, 320.4, 1208.5, 1632.6, 381.4, 1133.9]),
+        (166.7, [338.8, 280.4, 1216.9, 1727.7, 340.1, 1149.4]),
+        (183.3, [330.5, 248.3, 1222.5, 1802.9, 304.0, 1163.2]),
+        (200.0, [322.8, 222.9, 1226.2, 1864.2, 273.0, 1175.1]),
+        (216.7, [317.2, 202.8, 1228.4, 1913.4, 246.8, 1185.2]),
+        (233.3, [312.4, 187.1, 1229.7, 1952.1, 224.8, 1193.7]),
+        (250.0, [309.3, 174.8, 1230.4, 1983.7, 206.6, 1200.7]),
+        (266.7, [306.8, 165.2, 1230.7, 2007.8, 191.6, 1206.6]),
+        (283.3, [304.6, 157.6, 1230.9, 2026.9, 179.4, 1211.1]),
+        (300.0, [304.0, 151.7, 1231.0, 2042.6, 169.4, 1215.0]),
+        (316.7, [303.6, 147.1, 1230.8, 2054.8, 161.4, 1218.2]),
+        (333.3, [301.9, 143.4, 1230.9, 2064.2, 154.9, 1220.4]),
+        (350.0, [301.6, 140.5, 1230.7, 2072.1, 149.8, 1222.5]),
+        (366.7, [301.5, 138.3, 1230.7, 2077.8, 145.6, 1224.0]),
+        (383.3, [301.3, 136.5, 1230.5, 2082.9, 142.3, 1225.4]),
+        (400.0, [301.2, 135.1, 1230.5, 2086.0, 139.7, 1226.2]),
+        (416.7, [301.2, 134.0, 1230.3, 2090.0, 137.6, 1227.3]),
+    ];
+    /// The same window shrinking into its card ([`SHRUNK_1800_TO`]); 100–133 ms are missing,
+    /// the incoming window over its edges.
+    const SHRUNK_1800_TO: [f64; 6] = [11.0, 889.7, 1027.8, 149.3, 878.5, 1007.5];
+    const SHRUNK_1800: [(f64, [f64; 6]); 22] = [
+        (16.7, [320.4, 193.7, 1225.0, 1941.0, 231.7, 1188.5]),
+        (33.3, [344.0, 260.6, 1213.6, 1781.6, 315.2, 1154.8]),
+        (50.0, [364.6, 339.1, 1195.4, 1600.0, 397.1, 1122.9]),
+        (66.7, [372.7, 419.9, 1173.1, 1412.0, 471.0, 1095.8]),
+        (83.3, [364.9, 496.1, 1150.0, 1229.9, 535.5, 1074.1]),
+        (150.0, [240.4, 714.1, 1078.8, 666.9, 714.8, 1027.6]),
+        (166.7, [205.7, 748.6, 1067.8, 571.1, 744.1, 1022.1]),
+        (183.3, [175.6, 768.5, 1058.5, 490.9, 764.1, 1018.0]),
+        (200.0, [147.1, 793.1, 1051.4, 424.5, 785.3, 1014.7]),
+        (216.7, [124.5, 812.8, 1045.4, 370.5, 803.6, 1012.1]),
+        (233.3, [104.0, 831.0, 1040.9, 325.3, 817.9, 1010.3]),
+        (250.0, [87.6, 845.2, 1038.4, 288.6, 830.3, 1008.3]),
+        (266.7, [72.6, 851.1, 1034.1, 260.0, 845.8, 1007.7]),
+        (283.3, [61.7, 866.6, 1031.4, 236.8, 850.2, 1006.9]),
+        (300.0, [53.2, 868.3, 1029.4, 216.7, 858.6, 1006.2]),
+        (316.7, [45.3, 873.6, 1028.0, 202.5, 863.7, 1005.5]),
+        (333.3, [39.6, 877.5, 1026.8, 189.7, 867.9, 1005.4]),
+        (350.0, [34.4, 880.6, 1026.4, 181.2, 870.6, 1005.2]),
+        (366.7, [29.6, 882.8, 1026.4, 173.5, 872.9, 1005.4]),
+        (383.3, [26.5, 884.5, 1026.2, 168.1, 874.6, 1005.6]),
+        (400.0, [23.6, 885.8, 1026.4, 163.2, 875.6, 1005.9]),
+        (416.7, [21.1, 886.9, 1026.5, 160.1, 876.3, 1006.1]),
+    ];
+
+    fn drawn(a: [f64; 6]) -> Drawn {
+        Drawn { left: a[0], left_top: a[1], left_bottom: a[2], right: a[3], right_top: a[4], right_bottom: a[5] }
+    }
+
     /// The blue card as drawn (hovered) and its window; the green window and its place in the
-    /// combined card: as planes turned about their left edge (solved from the drawn
-    /// trapezoids through [`EYE`]).
+    /// combined card (the 1100 pt recordings): as planes turned about their left edge (solved
+    /// from the drawn trapezoids through [`EYE`]).
     fn grow_ends() -> (Plane, Plane) {
         (plane(11.0, 935.9, 162.68, 107.44, 0.8995), plane(759.0, 258.5, 1100.0, 748.5, 0.0))
     }
@@ -716,36 +912,6 @@ mod tests {
     }
     fn plane(x: f64, top: f64, w: f64, h: f64, tilt: f64) -> Plane {
         Plane { left_mid: Point::new(x, top + h / 2.0), size: Size::new(w, h), tilt, corner: 0.0 }
-    }
-
-    /// How a pose is drawn through `eye`: [left x, its top, its bottom, right x, its top, its
-    /// bottom].
-    fn drawn_pose(p: Pose, eye: Eye) -> [f64; 6] {
-        let half = p.size.w / 2.0;
-        let mut out = [0.0; 6];
-        for (i, u) in [-half, half].into_iter().enumerate() {
-            let x = p.middle.x + u * p.tilt.cos();
-            let s = eye.distance / (eye.distance + u * p.tilt.sin());
-            out[3 * i] = eye.at.x + (x - eye.at.x) * s;
-            out[3 * i + 1] = eye.at.y + (p.middle.y - p.size.h / 2.0 - eye.at.y) * s;
-            out[3 * i + 2] = eye.at.y + (p.middle.y + p.size.h / 2.0 - eye.at.y) * s;
-        }
-        out
-    }
-
-    /// How a plane turned about its left edge is drawn through `eye` (the same order).
-    fn drawn_plane(p: Plane, eye: Eye) -> [f64; 6] {
-        let (top, bottom) = (p.left_mid.y - p.size.h / 2.0, p.left_mid.y + p.size.h / 2.0);
-        let s = eye.distance / (eye.distance + p.size.w * p.tilt.sin());
-        let x = p.left_mid.x + p.size.w * p.tilt.cos();
-        [
-            p.left_mid.x,
-            top,
-            bottom,
-            eye.at.x + (x - eye.at.x) * s,
-            eye.at.y + (top - eye.at.y) * s,
-            eye.at.y + (bottom - eye.at.y) * s,
-        ]
     }
 
     /// Root mean square and worst miss of `model` against `measured` (points; NaN skipped).
@@ -765,14 +931,46 @@ mod tests {
         ((sum / n).sqrt(), worst)
     }
 
-    /// The pose of a flight from plane `a` to plane `b` toward `toward`, `t` seconds in.
+    /// The flight from plane `a` to plane `b` (given through the strip's eye) toward
+    /// `toward`, as drawn `t` seconds in.
     fn flown(a: Plane, b: Plane, toward: Toward, s: Spring, t: f64) -> [f64; 6] {
-        let path = Path { from: a.pose(EYE), to: b.pose(EYE), toward };
-        drawn_pose(path.at(spring_progress(s, t)), EYE)
+        let f = flight();
+        flown_poses(a.pose(EYE, f.eye), b.pose(EYE, f.eye), toward, s, t)
+    }
+
+    /// The flight between two poses (through the flight's eye), as drawn `t` seconds in.
+    fn flown_poses(a: Pose, b: Pose, toward: Toward, s: Spring, t: f64) -> [f64; 6] {
+        let f = flight();
+        let path = Path { from: a, to: b, toward, origin_x: f.origin_x };
+        path.at(spring_progress(s, t)).drawn(f.eye).array()
+    }
+
+    /// The flight between two drawn ends (Apple's stills), as drawn `t` seconds in.
+    fn flown_drawn(a: [f64; 6], b: [f64; 6], toward: Toward, s: Spring, t: f64) -> [f64; 6] {
+        let e = flight().eye;
+        flown_poses(Pose::from_drawn(drawn(a), e, 0.0), Pose::from_drawn(drawn(b), e, 0.0), toward, s, t)
+    }
+
+    /// The motion-path round's model (11-09, before this one), `t` seconds in: through the
+    /// strip's eye, the middle's x and the width 0.33 and the turn 0.19 of `p (1 − p)` ahead
+    /// toward the window, the height and the middle's height on the spring.
+    fn motion_path(a: Plane, b: Plane, toward: Toward, s: Spring, t: f64) -> [f64; 6] {
+        let (from, to) = (Pose::from_drawn(a.drawn(EYE), EYE, 0.0), Pose::from_drawn(b.drawn(EYE), EYE, 0.0));
+        let p = spring_progress(s, t);
+        let bend = p * (1.0 - p) * toward.lean();
+        let (side, flat) = (p + 0.33 * bend, p + 0.19 * bend);
+        let lerp = |x: f64, y: f64, u: f64| x + (y - x) * u;
+        let pose = Pose {
+            middle: Point::new(lerp(from.middle.x, to.middle.x, side), lerp(from.middle.y, to.middle.y, p)),
+            size: Size::new(lerp(from.size.w, to.size.w, side), lerp(from.size.h, to.size.h, p)),
+            tilt: lerp(from.tilt, to.tilt, flat),
+            corner: 0.0,
+        };
+        pose.drawn(EYE).array()
     }
 
     /// A plane turned about its left edge moved straight on one spring (every snapshot until
-    /// 11-09), `t` seconds in.
+    /// the motion-path round), `t` seconds in.
     fn straight(a: Plane, b: Plane, s: Spring, t: f64) -> [f64; 6] {
         let p = spring_progress(s, t);
         let lerp = |x: f64, y: f64| x + (y - x) * p;
@@ -782,106 +980,164 @@ mod tests {
             tilt: lerp(a.tilt, b.tilt),
             corner: 0.0,
         };
-        drawn_plane(q, EYE)
+        q.drawn(EYE).array()
     }
 
     /// [`misses`] with the model's own onset: the best within 40 ms of the table's (each
-    /// model is judged at its best start, as the tables' onset is the new path's).
+    /// model is judged at its best start; the 1800 pt tables count from the last still frame,
+    /// and Apple's shrinking flight starts a frame before it shows).
     fn best_misses(measured: &[(f64, [f64; 6])], model: impl Fn(f64) -> [f64; 6]) -> (f64, f64) {
         (-80..=80).map(|i| misses(measured, |t| model(t + i as f64 * 0.0005))).fold((f64::MAX, 0.0), |best, m| if m.0 < best.0 { m } else { best })
+    }
+
+    /// Apple's snapshot never stretches, seen through the flight's eye: every frame of the
+    /// 1800 × 1100 pt window at least 300 pt tall (smaller ones are too few pixels for its
+    /// turn), read as a pose there, keeps the window's proportions within 1.5 %; through the
+    /// strip's eye the same frames read far apart.
+    #[test]
+    fn apples_snapshot_is_its_window_seen_through_the_flight_eye() {
+        let aspect = |d: [f64; 6], eye: Eye| {
+            let p = Pose::from_drawn(drawn(d), eye, 0.0);
+            p.size.w / p.size.h / (1800.0 / 1100.0)
+        };
+        let frames: Vec<[f64; 6]> = GROWN_1800.iter().chain(SHRUNK_1800.iter()).map(|r| r.1).filter(|d| d[2] - d[1] >= 300.0).collect();
+        assert!(frames.len() >= 28, "{}", frames.len());
+        let f = flight().eye;
+        for d in &frames {
+            let a = aspect(*d, f);
+            assert!((a - 1.0).abs() < 0.015, "{a:.3} for {d:?}");
+        }
+        let through_strip: Vec<f64> = frames.iter().map(|d| aspect(*d, EYE)).collect();
+        let (lo, hi) = through_strip.iter().fold((f64::MAX, 0.0_f64), |(lo, hi), a| (lo.min(*a), hi.max(*a)));
+        assert!(hi - lo > 0.1, "the strip's eye: {lo:.3}..{hi:.3}");
+        // The card is the window far back and turned: 0.12 of its height, 76°.
+        let card = Pose::from_drawn(drawn(GROWN_1800_FROM), f, 0.0);
+        assert!((card.size.h / 1100.0 - 0.121).abs() < 0.003 && (card.tilt.to_degrees() - 75.8).abs() < 1.0, "{card:?}");
     }
 
     #[test]
     fn apples_path_matches_the_measured_corners() {
         let s = Spring::APPLE;
         assert_eq!(s, Spring::APPLE_SHRINK, "one spring both ways");
+        // The 1800 pt window, recorded for this.
+        let (rms, worst) = best_misses(&GROWN_1800, |t| flown_drawn(GROWN_1800_FROM, WINDOW_1800, Toward::Window, s, t));
+        assert!(rms < NEW_GROWN.0 && worst < NEW_GROWN.1, "growing: {rms:.2} pt rms, {worst:.1} at worst");
+        let (rms, worst) = best_misses(&SHRUNK_1800, |t| flown_drawn(WINDOW_1800, SHRUNK_1800_TO, Toward::Card, s, t));
+        assert!(rms < NEW_SHRUNK.0 && worst < NEW_SHRUNK.1, "shrinking: {rms:.2} pt rms, {worst:.1} at worst");
+        // The 1100 pt window, the one origin's other place.
         let (a, b) = grow_ends();
         let (rms, worst) = best_misses(&GROWN, |t| flown(a, b, Toward::Window, s, t));
-        assert!(rms < 3.5 && worst < 10.5, "growing: {rms:.2} pt rms, {worst:.1} at worst");
+        assert!(rms < OLD_GROWN.0 && worst < OLD_GROWN.1, "1100 pt growing: {rms:.2} pt rms, {worst:.1} at worst");
         let (c, d) = shrink_ends();
         let (rms, worst) = best_misses(&SHRUNK, |t| flown(c, d, Toward::Card, s, t));
-        assert!(rms < 3.6 && worst < 10.5, "shrinking: {rms:.2} pt rms, {worst:.1} at worst");
-        // The straight path of every snapshot until now (turned about the left edge, the
-        // parity round's springs: 353/37.6 growing, 272/33 shrinking) misses by far more: the
-        // window comes up later than it goes sideways, and the other way drops before it
-        // slides in. On this spring, straight, too.
-        let parity_grow = Spring { stiffness: 353.0, damping: 37.6, mass: 1.0 };
-        let parity_shrink = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
-        for spring in [parity_grow, s] {
-            let (rms, worst) = best_misses(&GROWN, |t| straight(a, b, spring, t));
-            assert!(rms > 15.0 && worst > 40.0, "growing straight on {spring:?}: {rms:.2}, {worst:.1}");
-        }
-        for spring in [parity_shrink, s] {
-            let (rms, worst) = best_misses(&SHRUNK, |t| straight(c, d, spring, t));
-            assert!(rms > 10.0 && worst > 25.0, "shrinking straight on {spring:?}: {rms:.2}, {worst:.1}");
-        }
-        // Turned about its middle without the lean: still far off.
-        let (rms, _) = best_misses(&GROWN, |t| flown(a, b, Toward::Straight, s, t));
-        assert!(rms > 12.0, "about the middle, straight: {rms:.2}");
+        assert!(rms < OLD_SHRUNK.0 && worst < OLD_SHRUNK.1, "1100 pt shrinking: {rms:.2} pt rms, {worst:.1} at worst");
+        // The motion-path model before this one fitted the 1100 pt window, and misses the
+        // 1800 pt one by far: it stretched the snapshot wide early and saw it from the strip.
+        let strip = |x: [f64; 6]| Plane::from_drawn(drawn(x), EYE, 0.0);
+        let (rms, _) = best_misses(&GROWN, |t| motion_path(a, b, Toward::Window, s, t));
+        assert!(rms < 3.5, "motion-path on its own recording: {rms:.2}");
+        let (rms, worst) = best_misses(&GROWN_1800, |t| motion_path(strip(GROWN_1800_FROM), strip(WINDOW_1800), Toward::Window, s, t));
+        assert!(rms > 15.0 && worst > 80.0, "motion-path growing 1800: {rms:.2}, {worst:.1}");
+        let (rms, worst) = best_misses(&SHRUNK_1800, |t| motion_path(strip(WINDOW_1800), strip(SHRUNK_1800_TO), Toward::Card, s, t));
+        assert!(rms > 15.0 && worst > 80.0, "motion-path shrinking 1800: {rms:.2}, {worst:.1}");
+        // A straight path, or the new one without its sideways lead, are far off too.
+        let (rms, _) = best_misses(&GROWN_1800, |t| straight(strip(GROWN_1800_FROM), strip(WINDOW_1800), s, t));
+        assert!(rms > 15.0, "straight: {rms:.2}");
+        let (rms, _) = best_misses(&GROWN_1800, |t| flown_drawn(GROWN_1800_FROM, WINDOW_1800, Toward::Straight, s, t));
+        assert!(rms > 15.0, "no lead: {rms:.2}");
         // Critically damped: no overshoot, 99 % at about 390 ms.
         assert!((0..2000).all(|i| spring_progress(s, i as f64 / 1000.0) <= 1.0 + 1e-9));
         assert!((0.38..0.40).contains(&time_to_progress(s, 0.99)));
     }
 
+    /// Each fit's bound (rms, worst; points).
+    const NEW_GROWN: (f64, f64) = (5.5, 23.0);
+    const NEW_SHRUNK: (f64, f64) = (6.2, 17.5);
+    const OLD_GROWN: (f64, f64) = (6.3, 25.0);
+    const OLD_SHRUNK: (f64, f64) = (5.5, 18.0);
+
     #[test]
     fn a_pose_looks_exactly_like_its_plane() {
+        let f = flight().eye;
         for p in [
             plane(11.0, 935.9, 162.68, 107.44, 0.8995),
             plane(55.0, 937.6, 118.7, 86.5, 0.8258),
             plane(759.0, 258.5, 1100.0, 748.5, 0.0),
             plane(300.0, 100.0, 900.0, 600.0, 0.3),
         ] {
-            let pose = p.pose(EYE);
-            let (a, b) = (drawn_plane(p, EYE), drawn_pose(pose, EYE));
+            let pose = p.pose(EYE, f);
+            let (a, b) = (p.drawn(EYE).array(), pose.drawn(f).array());
             assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9), "{a:?} vs {b:?}");
-            let back = pose.plane(EYE);
+            let back = pose.plane(f, EYE);
             assert!((back.left_mid.x - p.left_mid.x).abs() < 1e-9 && (back.size.w - p.size.w).abs() < 1e-9 && (back.left_mid.y - p.left_mid.y).abs() < 1e-9);
+            assert!((back.tilt - p.tilt).abs() < 1e-9);
             if p.tilt == 0.0 {
-                assert_eq!(pose.size, p.size, "a flat plane is its own pose");
+                assert!((pose.size.w - p.size.w).abs() < 1e-9 && pose.tilt.abs() < 1e-12, "a flat plane is its own pose");
             } else {
-                assert!(pose.size.w < p.size.w, "a turned card's pose is nearer, so smaller");
+                assert!(pose.tilt > p.tilt, "a card seen from the display's middle is turned farther");
             }
         }
+        // One eye both ways: the pose turned about the middle, the same look.
+        let p = plane(300.0, 100.0, 900.0, 600.0, 0.3);
+        let same = p.pose(EYE, EYE);
+        assert!(p.drawn(EYE).array().iter().zip(same.drawn(EYE).array()).all(|(x, y)| (x - y).abs() < 1e-9));
+        assert!(same.size.w < p.size.w, "its middle moved into the screen: nearer, so smaller");
     }
 
     #[test]
     fn the_path_leans_toward_the_window_and_ends_on_both_poses() {
         let (a, b) = grow_ends();
-        let path = Path { from: a.pose(EYE), to: b.pose(EYE), toward: Toward::Window };
+        let f = flight();
+        let path = Path { from: a.pose(EYE, f.eye), to: b.pose(EYE, f.eye), toward: Toward::Window, origin_x: f.origin_x };
         assert_eq!(path.at(0.0), path.from);
         assert_eq!(path.at(1.0), path.to);
+        let lead = path.sideways_lead();
+        assert!((0.2..0.4).contains(&lead), "the 1100 pt window: {lead}");
+        let big = Path {
+            from: Pose::from_drawn(drawn(GROWN_1800_FROM), f.eye, 0.0),
+            to: Pose::from_drawn(drawn(WINDOW_1800), f.eye, 0.0),
+            ..path
+        };
+        assert!((0.65..0.85).contains(&big.sideways_lead()), "the 1800 pt window: {}", big.sideways_lead());
         let half = path.at(0.5);
         let mid = |x: f64, y: f64| (x + y) / 2.0;
-        assert!(half.middle.x > mid(path.from.middle.x, path.to.middle.x) + 100.0, "out sideways early");
-        assert!(half.size.w > mid(path.from.size.w, path.to.size.w), "wide early");
-        assert!(half.tilt < mid(path.from.tilt, path.to.tilt), "flat early");
+        assert!(half.middle.x > mid(path.from.middle.x, path.to.middle.x) + 50.0, "out sideways early");
+        assert!((half.size.w - mid(path.from.size.w, path.to.size.w)).abs() < 1e-9, "the size on the spring");
+        assert!((half.size.h - mid(path.from.size.h, path.to.size.h)).abs() < 1e-9);
+        assert!((half.tilt - mid(path.from.tilt, path.to.tilt)).abs() < 1e-9, "the turn on the spring");
         assert!((half.middle.y - mid(path.from.middle.y, path.to.middle.y)).abs() < 1e-9, "up on the spring");
-        assert!((half.size.h - mid(path.from.size.h, path.to.size.h)).abs() < 1e-9, "tall on the spring");
-        // Into a card it trails sideways and stays flat longer; nothing ever overshoots.
-        let back = Path { from: path.to, to: path.from, toward: Toward::Card };
-        let h = back.at(0.5);
-        assert!(h.middle.x > mid(back.from.middle.x, back.to.middle.x) + 100.0 && h.tilt < mid(back.from.tilt, back.to.tilt));
+        // Into a card it trails sideways: the same curve the other way; nothing overshoots.
+        let back = Path { from: path.to, to: path.from, toward: Toward::Card, origin_x: f.origin_x };
+        assert!((back.sideways_lead() - lead).abs() < 1e-12, "one curve both ways");
+        assert!((back.at(0.3).middle.x - path.at(0.7).middle.x).abs() < 1e-9);
         for i in 0..=100 {
-            let p = path.at(i as f64 / 100.0);
-            assert!(p.middle.x <= path.to.middle.x + 1e-9 && p.size.w <= path.to.size.w + 1e-9 && p.tilt >= -1e-12);
+            let p = big.at(i as f64 / 100.0);
+            assert!(p.middle.x <= big.to.middle.x + 1e-9 && p.size.w <= big.to.size.w + 1e-9 && p.tilt >= -1e-12);
         }
+        // Never past the end, however far the window is from its card.
+        let near = Path { to: Pose { middle: Point::new(400.0, 600.0), ..big.to }, ..big };
+        assert_eq!(near.sideways_lead(), MAX_LEAD);
+        assert!((0..=100).all(|i| near.at(i as f64 / 100.0).middle.x <= 400.0 + 1e-9));
         let straight = Path { toward: Toward::Straight, ..path };
+        assert_eq!(straight.sideways_lead(), 0.0);
         assert!((straight.at(0.5).middle.x - mid(path.from.middle.x, path.to.middle.x)).abs() < 1e-9);
         // A trailing flight runs longer and settles later than its spring alone.
         let s = Spring::APPLE;
         assert!(path_duration(s, 1500.0, Toward::Card) > spring_duration(s, 1500.0));
         assert_eq!(path_duration(s, 1500.0, Toward::Window), spring_duration(s, 1500.0));
         assert!(path_settle_time(s, 0.002, Toward::Card) > settle_time(s, 0.002));
-        // Within that time every part is within the tolerance of its end.
-        let d = path_duration(s, 1500.0, Toward::Card);
+        // Within that time every part is within the end tolerance of its end.
+        let travel = (back.from.middle.x - back.to.middle.x).abs();
+        let d = path_duration(s, travel, Toward::Card);
         let at = back.at(spring_progress(s, d));
-        assert!((at.middle.x - back.to.middle.x).abs() <= END_TOLERANCE * 1500.0 / (back.from.middle.x - back.to.middle.x).abs().max(1.0) * 1500.0 + 0.1);
+        assert!((at.middle.x - back.to.middle.x).abs() <= END_TOLERANCE + 1e-9, "{}", (at.middle.x - back.to.middle.x).abs());
     }
 
     #[test]
     fn a_flight_is_drawn_from_poses_a_frame_apart_and_ends_exactly() {
         let (a, b) = grow_ends();
-        let path = Path { from: a.pose(EYE), to: b.pose(EYE), toward: Toward::Window };
+        let f = flight();
+        let path = Path { from: a.pose(EYE, f.eye), to: b.pose(EYE, f.eye), toward: Toward::Window, origin_x: f.origin_x };
         let s = Spring::APPLE;
         let d = path_duration(s, 1750.0, Toward::Window);
         let samples = flight_samples(&path, s, d);
@@ -895,21 +1151,24 @@ mod tests {
         assert_eq!(flight_samples(&path, s, 0.0).len(), 2, "nothing to fly: from and to");
     }
 
-    /// The unveil waits for the snapshot as drawn: on the new path, turned about its middle,
-    /// each drawn edge is within the tolerance of the window by the unveil (less the lag).
+    /// The unveil waits for the snapshot as drawn: on Apple's path, through the flight's eye,
+    /// each drawn edge is within the tolerance of the window by the unveil (less the lag), for
+    /// both recorded windows.
     #[test]
     fn the_unveil_holds_on_apples_path() {
         let style = StripStyle::default();
         let (a, b) = grow_ends();
-        let card = drawn_plane(a, EYE);
-        let start = Rect::new(card[0], card[1].min(card[4]), card[3] - card[0], card[2].max(card[5]) - card[1].min(card[4]));
-        let end = Rect::new(759.0, 258.5, 1100.0, 748.5);
-        let t = unveil_time(&style, travel(start, end)) - PRESENTATION_LAG;
-        let w = [end.x, end.y, end.max_y(), end.max_x(), end.y, end.max_y()];
-        for i in 0..400 {
-            let shown = flown(a, b, Toward::Window, switch_spring(&style), t + i as f64 / 1000.0);
-            let off = shown.iter().zip(w).fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
-            assert!(off <= UNVEIL_TOLERANCE, "{off:.2} pt off {i} ms after the unveil");
+        let big = (Plane::from_drawn(drawn(GROWN_1800_FROM), EYE, 0.0), Plane::from_drawn(drawn(WINDOW_1800), EYE, 0.0));
+        for (a, b) in [(a, b), big] {
+            let start = a.drawn(EYE).bounds();
+            let end = Rect::new(b.left_mid.x, b.left_mid.y - b.size.h / 2.0, b.size.w, b.size.h);
+            let t = unveil_time(&style, travel(start, end)) - PRESENTATION_LAG;
+            let w = [end.x, end.y, end.max_y(), end.max_x(), end.y, end.max_y()];
+            for i in 0..400 {
+                let shown = flown(a, b, Toward::Window, switch_spring(&style), t + i as f64 / 1000.0);
+                let off = shown.iter().zip(w).fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+                assert!(off <= UNVEIL_TOLERANCE, "{off:.2} pt off {i} ms after the unveil");
+            }
         }
     }
 
