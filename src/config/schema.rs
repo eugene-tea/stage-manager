@@ -570,6 +570,8 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-32.toml"),
     include_str!("legacy/default-33.toml"),
     include_str!("legacy/default-34.toml"),
+    include_str!("legacy/default-35.toml"),
+    include_str!("legacy/default-36.toml"),
 ];
 
 #[cfg(test)]

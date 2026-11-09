@@ -1709,8 +1709,7 @@ def phase_native():
         check(s is not None and len(active_titles(s)) == 6, "the dropped card's windows join the current stage")
         if s:
             f = next(w for w in s["windows"] if w["id"] == front)["restore"]
-            inside = f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + 30
-            check(inside, f"its front window lands with its title bar under the drop point ({fmt(f)})")
+            check(held_at(f, drop, x_too=False), f"its front window lands held at the grab point, {WINDOW_GRAB[1]:.0f} pt below its top ({fmt(f)})")
     consistent("card drop")
 
     say("-- drag a window onto the strip")
@@ -2323,9 +2322,24 @@ def rect_right(r):
     return r["x"] + r["w"]
 
 
+# Where a card dragged out holds its window: `[drag] window_grab_x`, `window_grab_y`'s
+# defaults (Apple's, 11-09), at most half the window's width and height.
+WINDOW_GRAB = (96.0, 100.0)
+
+
+def held_at(f, drop, x_too=True):
+    """True when a window dropped from a card landed held at the grab point: `drop` lies in
+    it, `WINDOW_GRAB`'s y below its top (and its x right of its left edge with `x_too`; a
+    window too wide to stay whole on screen there is moved left), within a few points."""
+    gx, gy = min(WINDOW_GRAB[0], f["w"] / 2), min(WINDOW_GRAB[1], f["h"] / 2)
+    inside = f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + f["h"]
+    return inside and abs(drop[1] - f["y"] - gy) <= 12 and (not x_too or abs(drop[0] - f["x"] - gx) <= 12)
+
+
 def phase_crop():
     """Round strip-crop-window-drag (owner 11-09). A combined card (Alpha 1 in front, Fixture 1
-    behind it: a second app's window, `[cards] second_app_dx` to the right) is drawn whole,
+    behind it: a second app's window, right of Alpha 1 on the screen, so `[cards]
+    second_app_dx` to the right on the card, and as wide as the screen) is drawn whole,
     at rest and grown under the pointer: its back window reaches past the strip column and
     stays inside the strip's panel (the panel was the column's width, and cut it off with a
     straight edge). Then the back window is dragged out by its own part (Apple's: each window
@@ -2335,9 +2349,11 @@ def phase_crop():
     stop_app()
     stop_all_fixtures()
     write_config(CONFIG_BACKDROP)
-    # Wide windows make a wide card; Fixture 2 (the current stage) sits clear of the strip.
-    start_extra_frames("a", 1, "40,40,-80,700")
-    start_fixture(2, "--frames", "40,40,-80,700;560,80,640,420")
+    # Fixture 1 as wide as the screen, its middle right of Alpha 1's: it peeks out right of
+    # Alpha 1 on the card, the widest a card of two apps gets (about 14 pt past a laptop's
+    # column, 32 at 5K). Fixture 2 (the current stage) sits clear of the strip.
+    start_extra_frames("a", 1, "40,40,-600,700")
+    start_fixture(2, "--frames", "0,40,0,700;560,80,640,420")
     s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
     if not check(s is not None, "app up with two fixture windows and Alpha's"):
         return
@@ -2371,7 +2387,7 @@ def phase_crop():
         back = drawn.get(f1)
         if check(back is not None and panel is not None and a1 in drawn, f"the card's two planes and the strip panel ({sorted(drawn)}, {panel and panel['bounds']})"):
             right = rect_right(panel["bounds"])
-            check(rect_right(back) > column + 10, f"Fixture 1's window reaches past the column ({rect_right(back):.0f} > {column:.0f})")
+            check(rect_right(back) > column + 4, f"Fixture 1's window reaches past the column ({rect_right(back):.0f} > {column:.0f})")
             check(all(rect_right(r) <= right + 0.5 for r in drawn.values()),
                   f"and the panel holds it: nothing cut off at a straight edge (planes to {max(rect_right(r) for r in drawn.values()):.0f}, panel to {right:.0f})")
             front = drawn[a1]
@@ -2413,8 +2429,7 @@ def phase_crop():
     check(t["Alpha 1"]["home"] == card and t["Alpha 1"]["parked"], f"Alpha 1 stays in its stage, number {card}, hidden ({t['Alpha 1']['home']})")
     check(card in s["strip"], f"its card stays in the strip ({s['strip']})")
     f = t["Fixture 1"]["restore"]
-    check(f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + 30,
-          f"Fixture 1 lands with its title bar under the drop point ({fmt(f)})")
+    check(held_at(f, drop, x_too=False), f"Fixture 1 lands held at the grab point, {WINDOW_GRAB[1]:.0f} pt below its top ({fmt(f)})")
     time.sleep(0.5)
     drawn, _ = planes()
     check(sorted(drawn) == [a1], f"the card shows Alpha 1 alone ({sorted(drawn)})")
@@ -2431,8 +2446,8 @@ def phase_behave():
       in front after a switch away and back (Apple's showed Red 2, opened last; ours raised
       the older one, found first, over it and kept it so).
     - A card dragged from the main screen's strip onto the other screen (skipped with one
-      screen): its window opens there, in that screen's current stage, its title bar under
-      the drop point; the main screen's front stays and the card leaves its strip (Apple's:
+      screen): its window opens there, in that screen's current stage, held at the grab
+      point under the drop (`[drag] window_grab_x`, `window_grab_y`); the main screen's front stays and the card leaves its strip (Apple's:
       the window opened on the laptop; ours: the windows came to the main screen)."""
     say("\n== behave: an app's front window on arrival; a card dropped on the other screen ==")
     stop_app()
@@ -2498,8 +2513,7 @@ def phase_behave():
     check(other_front is None or a["stage"] == there["active_stage"],
           f"in that screen's current stage ({a['stage']}, its front {there['active_stage']}, before {other_front})")
     f = a["restore"]
-    check(f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + 30,
-          f"its title bar under the drop point ({fmt(f)}, drop {drop[0]:.0f},{drop[1]:.0f})")
+    check(held_at(f, drop), f"held at the grab point, {WINDOW_GRAB[0]:.0f} pt in and {WINDOW_GRAB[1]:.0f} down ({fmt(f)}, drop {drop[0]:.0f},{drop[1]:.0f})")
     check(next(k for k in s["displays"] if k["id"] == main["id"])["active_stage"] == main_front, "the main screen's front is unchanged")
     check(all(c["number"] != alpha["home"] for c in s.get("strip_cards", [])) or a["home"] != alpha["home"],
           f"its card left the main screen's strip ({[c['number'] for c in s.get('strip_cards', [])]})")
