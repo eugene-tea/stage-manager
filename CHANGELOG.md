@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- With "Click wallpaper to reveal desktop: Only in Stage Manager", pressing a file or folder
+  on the desktop no longer sends your stage to the strip: you can select it, or drag it onto
+  a window, as with Apple's. Only a click on bare wallpaper reveals the desktop.
 - In a switch, the new stage's windows no longer jump in early, full size, with their pictures
   still flying toward them. Switching to an app with another window waiting out of sight (a
   minimized one, one on another Desktop, a dialog kept off screen) brought them in a moment

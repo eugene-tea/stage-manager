@@ -100,6 +100,7 @@ use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, Hot
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
 use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
+use crate::engine::desktop_click;
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::{display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display};
 use crate::engine::early_start;
@@ -175,6 +176,11 @@ const PATCH_ITEMS_FRESH: Duration = Duration::from_secs(5);
 /// How soon a read of Finder's desktop icons that failed is tried again (the next tick),
 /// and how soon after a mouse-up (a desktop icon may have been dropped) they are read.
 const PATCH_ITEMS_RETRY: Duration = Duration::from_millis(250);
+
+/// How long a press with no window under it waits for a read of Finder's desktop icons when
+/// none is fresh ([`Controller::icons_for_press`]): whether it is on a desktop icon decides
+/// whether it reveals the desktop.
+const PRESS_ITEMS_WAIT: Duration = Duration::from_millis(60);
 
 /// The longest wait between reads of Finder's desktop icons while they keep failing.
 const PATCH_ITEMS_RETRY_MAX: Duration = Duration::from_secs(4);
@@ -258,6 +264,8 @@ struct PatchItems {
     /// The icons (grown by their labels) of the last read that knew them; `None` before one,
     /// or after a read found too many to read: the patch stays off.
     known: Option<Vec<Rect>>,
+    /// When `known` was read.
+    known_at: Option<Instant>,
     /// The rectangle the last read was started for, per screen (a new rectangle on a screen
     /// starts a read; the icons read are every screen's).
     read_for: BTreeMap<u32, Rect>,
@@ -1684,59 +1692,13 @@ impl Controller {
     /// good read [`PATCH_ITEMS_FRESH`] old, a failed one [`items_retry`] old. A read
     /// that fails keeps the icons known. None starts while `quiet` (a drag, the fast tick).
     fn patch_items(&mut self, screen: u32, rect: Option<Rect>, now: Instant, quiet: bool) -> Option<Vec<Rect>> {
-        use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
         let answer = match self.patch_items.reading.as_ref().map(|r| r.try_recv()) {
             Some(Ok(answer)) => Some(answer),
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(None),
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => None,
         };
         if let Some(answer) = answer {
-            let p = &mut self.patch_items;
-            p.reading = None;
-            let said = match answer {
-                Some(DesktopIcons::Icons(icons)) => {
-                    let items: Vec<Rect> = icons.into_iter().map(item_reach).collect();
-                    for (screen, r) in &p.read_for {
-                        let under = items.iter().filter(|i| i.intersect(r).is_some()).count();
-                        let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(r).is_some()));
-                        if under > 0 && !was {
-                            tracing::info!(screen, under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
-                        }
-                    }
-                    p.known = Some(items);
-                    p.fails = 0;
-                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
-                    None
-                }
-                Some(DesktopIcons::TooMany(n)) => {
-                    p.known = None;
-                    p.fails = 0;
-                    p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
-                    Some(format!("{n} desktop items, more than the {MAX_ICONS} read; the patch stays off"))
-                }
-                Some(DesktopIcons::Unexpected(why)) => {
-                    // Not knowing is off: an older good read must not stand for a desktop
-                    // Finder now answers oddly (an icon just dropped with no frame yet).
-                    p.known = None;
-                    p.fails = p.fails.saturating_add(1);
-                    p.due = Some(sooner(p.due, now + items_retry(p.fails)));
-                    Some(format!("Finder's desktop is not as expected ({why}); its icons are unknown"))
-                }
-                None => {
-                    if p.fails == 0 {
-                        tracing::debug!("corner patch: Finder's desktop icons unreadable; the last read stands, tried again");
-                    }
-                    p.fails = p.fails.saturating_add(1);
-                    p.due = Some(sooner(p.due, now + items_retry(p.fails)));
-                    p.said.clone()
-                }
-            };
-            if said != p.said {
-                if let Some(line) = &said {
-                    tracing::info!("corner patch: {line}");
-                }
-                p.said = said;
-            }
+            self.take_items_answer(answer, now);
         }
         let rect = rect?;
         let p = &mut self.patch_items;
@@ -1753,6 +1715,97 @@ impl Controller {
             );
         }
         self.patch_items.known.clone()
+    }
+
+    /// Takes a finished read of Finder's desktop icons ([`Self::patch_items`]): the icons it
+    /// gave are known from now, a desktop not as expected or too crowded leaves them unknown,
+    /// a failed read keeps the last ones; the next read is planned.
+    fn take_items_answer(&mut self, answer: Option<crate::engine::corner_patch::DesktopIcons>, now: Instant) {
+        use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
+        let p = &mut self.patch_items;
+        p.reading = None;
+        let said = match answer {
+            Some(DesktopIcons::Icons(icons)) => {
+                let items: Vec<Rect> = icons.into_iter().map(item_reach).collect();
+                for (screen, r) in &p.read_for {
+                    let under = items.iter().filter(|i| i.intersect(r).is_some()).count();
+                    let was = p.known.as_ref().is_some_and(|k| k.iter().any(|i| i.intersect(r).is_some()));
+                    if under > 0 && !was {
+                        tracing::info!(screen, under, "corner patch: a desktop icon lies under the corner; only a still of the desktop stands for it");
+                    }
+                }
+                p.known = Some(items);
+                p.known_at = Some(now);
+                p.fails = 0;
+                p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
+                None
+            }
+            Some(DesktopIcons::TooMany(n)) => {
+                p.known = None;
+                p.fails = 0;
+                p.due = Some(sooner(p.due, now + PATCH_ITEMS_FRESH));
+                Some(format!("{n} desktop items, more than the {MAX_ICONS} read; the patch stays off"))
+            }
+            Some(DesktopIcons::Unexpected(why)) => {
+                // Not knowing is off: an older good read must not stand for a desktop
+                // Finder now answers oddly (an icon just dropped with no frame yet).
+                p.known = None;
+                p.fails = p.fails.saturating_add(1);
+                p.due = Some(sooner(p.due, now + items_retry(p.fails)));
+                Some(format!("Finder's desktop is not as expected ({why}); its icons are unknown"))
+            }
+            None => {
+                if p.fails == 0 {
+                    tracing::debug!("corner patch: Finder's desktop icons unreadable; the last read stands, tried again");
+                }
+                p.fails = p.fails.saturating_add(1);
+                p.due = Some(sooner(p.due, now + items_retry(p.fails)));
+                p.said.clone()
+            }
+        };
+        if said != p.said {
+            if let Some(line) = &said {
+                tracing::info!("corner patch: {line}");
+            }
+            p.said = said;
+        }
+    }
+
+    /// Finder's desktop icons for a press at `p` with no window under it
+    /// ([`desktop_click::desktop_press`]): the last read when it is fresh (the corner patch
+    /// reads them every [`PATCH_ITEMS_FRESH`]), else one read now, waited for
+    /// [`PRESS_ITEMS_WAIT`] at most (the read already running, or a new one); one that does
+    /// not answer in time stays running for the patch, and the last icons known stand, of
+    /// any age; none known: the press reveals as before (never guessed on an icon). Logged
+    /// when not fresh.
+    fn icons_for_press(&mut self, p: Point, now: Instant) -> Option<Vec<Rect>> {
+        let fresh = self.patch_items.known_at.is_some_and(|t| now.saturating_duration_since(t) <= PATCH_ITEMS_FRESH + PATCH_ITEMS_RETRY);
+        if fresh && self.patch_items.known.is_some() {
+            return self.patch_items.known.clone();
+        }
+        let rx = self.patch_items.reading.take().or_else(super::desktop_items::start_read);
+        let answered = match rx {
+            Some(rx) => match rx.recv_timeout(PRESS_ITEMS_WAIT) {
+                Ok(answer) => {
+                    self.take_items_answer(answer, Instant::now());
+                    true
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    self.patch_items.reading = Some(rx);
+                    false
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.take_items_answer(None, Instant::now());
+                    true
+                }
+            },
+            None => false,
+        };
+        let known = self.patch_items.known.clone();
+        let waited_ms = now.elapsed().as_millis() as u64;
+        tracing::debug!(x = p.x, y = p.y, answered, waited_ms, icons = known.as_ref().map(Vec::len),
+            "a press on the desktop: Finder's desktop icons read for it (none fresh); unknown, the press counts as on the wallpaper");
+        known
     }
 
     /// Works out the wallpaper corner patch's plan for every screen ([`crate::engine::corner_patch`];
@@ -5748,7 +5801,16 @@ impl Controller {
         if !desktop::is_wallpaper_click(&list, p, &self.dock_bar_now()) {
             return false;
         }
+        // The desktop is Finder's either way: its activation and focus that follow are echoes.
         self.desktop_echo.wallpaper_clicked(Instant::now());
+        // A press on a desktop file or folder (to select it, drag it onto a window, open it) is
+        // Finder's, as on Apple's: nothing reveals, ours or macOS's.
+        let icons = self.icons_for_press(p, Instant::now());
+        let known = icons.as_deref().map_or(desktop_click::Icons::Unknown, desktop_click::Icons::Read);
+        if desktop_click::desktop_press(p, known) == desktop_click::DesktopPress::Icon {
+            tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "a press on a desktop icon: Finder's, no wallpaper click");
+            return true;
+        }
         match wallpaper_click(&self.settings, clicks) {
             WallpaperClick::Toggle => {
                 tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "wallpaper click");

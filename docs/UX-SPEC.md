@@ -257,7 +257,11 @@ switches stages. The Dock's window spans its whole screen, clear away from its b
 there is on the wallpaper (or the window) below it, and only one on or near the bar (its
 magnified icons included) is the Dock's. So with the screenshot tool's window, which macOS
 leaves over the whole screen for minutes after a screenshot and which lets every click
-through: a click under it is on whatever is below.
+through: a click under it is on whatever is below. A press on a file or folder on the
+desktop, or its name, is Finder's, as on Apple's: it selects it or starts dragging it, and
+nothing is revealed. The icons are the ones read for the corner patch (every 5 s); when none
+are that fresh the press waits up to 60 ms for a read, and where they cannot be read at all
+the press counts as on the wallpaper.
 
 **Drag and drop.** A card dragged into the main area grows to window size within about
 100 pt past the strip (`[drag] grow_distance`) and joins the current stage where you drop it.
@@ -727,8 +731,6 @@ in front, and the windows on screen all along bring no stage forward even after 
 - New windows are matched to rules by the title they have when they appear.
 - Windows of a relaunched app are matched to their stages by title and frame; two of one
   app with the same title and no telling frame stay in view rather than guess.
-- With "Click wallpaper: Only in Stage Manager", a click on a desktop icon also counts as a
-  wallpaper click.
 - With "Click wallpaper: Always" (macOS's default), a wallpaper click moves every window
   aside as macOS does outside Stage Manager, where Apple's puts the stage into the strip and
   the strip stays (recorded 11-09). Only "Only in Stage Manager" gives the click to Stage
