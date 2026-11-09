@@ -113,9 +113,13 @@ leave takes the slot the clicked card vacated. A stage entering a full strip tak
 of the least recently used card. (Keep stages in place, an extra below, orders it otherwise.)
 
 **Switching.** The pressed card eases back on mouse-down. On release, the windows you leave
-shrink into their card's slot and the new stage grows from its card, each on Apple's spring for
-its way: a window growing out of its card moves faster than one shrinking into its card
-(measured, below). Both start on the same frame, as Apple's do.
+shrink into their card's slot and the new stage grows from its card, on Apple's spring and
+along Apple's path (measured, below). Both start on the same frame, as Apple's do. The path is
+not a straight line: a window growing out of its card goes out sideways, widens and flattens
+ahead of the spring while it rises and gains height on it, so it seems to come up from the
+card's bottom; one shrinking into its card drops and loses height first, staying wide and
+flat, then slides into the card and turns. In flight a window turns about its vertical
+middle, so its left side comes toward you as it turns.
 Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
 Clicking a card's app icon brings every window of that app, from all stages.
 
@@ -349,8 +353,8 @@ screen).
 
 | Motion | Apple's timing |
 |---|---|
-| Windows growing out of the strip: a switch's incoming stage, the desktop coming back, a card dropped in the middle | critically damped spring, 50 % at about 90 ms, 99 % at about 355 ms (stiffness 353, damping 37.6) |
-| Windows shrinking into the strip: the stage you leave, the desktop reveal, ⌘M, a window dropped on the strip | critically damped spring, 50 % at about 100 ms, 99 % at about 400 ms (272, 33) |
+| Windows growing out of the strip: a switch's incoming stage, the desktop coming back, a card dropped in the middle | critically damped spring, 50 % at about 99 ms, 99 % at about 390 ms (stiffness 289, damping 34); sideways motion, width and the turn's flattening ahead of it (the path) |
+| Windows shrinking into the strip: the stage you leave, the desktop reveal, ⌘M, a window dropped on the strip | the same spring; sideways motion, width and the turn trailing it |
 | Cards gliding to new slots | spring, 99 % at about 375 ms |
 | The strip sliding out and in | spring, 99 % at about 400 ms, 286 pt |
 | The edge reveal | starts about 180 ms after the pointer reaches the left edge |
@@ -360,12 +364,35 @@ screen).
 
 Measured 11-09 on a 5K screen at 60 frames a second, Apple's and ours running the same
 scripted clicks and drags, each edge of a window tracked frame by frame (our own known springs
-read back within 1 % the same way). Both of Apple's switch springs start from rest at the same
-moment; a single spring for both ways (the 10-12 fit, 272/33) left the growing window behind
-from the first frames (half way 12 ms later, 90 % 30 ms later), the "speed curve" ours
-lacked. Apple's hover is a spring too: an ease-out of any length misses its gentle first
-frames and its long tail. The slide (Apple's read ω 16.3, ours 16.8) and the press are
-unchanged.
+read back within 1 % the same way). Apple's hover is a spring too: an ease-out of any length
+misses its gentle first frames and its long tail. The slide (Apple's read ω 16.3, ours 16.8)
+and the press are unchanged.
+
+**The switch's path** (measured 11-09, the same recordings: the fixture's blue window growing
+out of its hovered card, slot 5, to 1100 × 748 pt; the green one shrinking from 1000 × 692
+into its place in a combined card; each frame's window traced as drawn, a trapezoid with the
+turn, its six numbers: the left edge's x, top and bottom, the right edge's). Growing, Apple's
+left edge is 17 % of its way across while the top edge is 11 % up, 56 % against 42 % five
+frames in, 86 % against 79 % at ten; the bottom-left corner stays within 3 pt of the card's
+bottom for the first 100 ms (the left side coming toward the eye as the window turns about
+its middle). Shrinking, the other way: the top and height lead and the sideways motion trails
+(the left edge 30 % of its way at 85 ms, the top 41 %). Neither way is one spring on a
+straight line: none came within 9 pt rms growing or 7 shrinking, whatever the spring, the
+pivot or the eye, and the last round's springs on our left-edge path missed by 20.3 pt rms (54
+at worst) growing and 16.7 (83) shrinking.
+Fitted: one critically damped spring both ways, stiffness 289 (ω 17.0), from the same moment;
+the window turned about its vertical middle, seen from the strip's eye; its height, vertical
+place and corner on the spring; its middle's sideways place and its width 0.33 · p (1 − p)
+ahead toward the window's end (p the spring's progress), its turn 0.19 · p (1 − p). That
+draws Apple's corners within 3.4 pt rms (10 at worst) growing and 3.5 (10) shrinking, both
+directions from the same numbers. Ours (1.6.0), read through the same pipeline, came back as
+what it is: ω 16.6 (its 272/33 is 16.5), a lean of 0.02 and the left-edge pivot (1.5 pt rms;
+turned about the middle, 4.1). The faster growing spring of the last
+round (353/37.6) was this lean read through the left edge and width. Not settled: his real
+windows (Notes, VS Code) take long, dropped-frame recordings whose cards sit among others;
+VS Code's late frames fit the path within 6.6 pt rms with its card placed by the fit, the
+straight path not within 14. A recording of one fixture window growing from and shrinking
+into the same slot, in both apps, would pin the lean on a large window.
 
 ## Deliberate differences
 

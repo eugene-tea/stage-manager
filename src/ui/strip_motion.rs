@@ -11,7 +11,9 @@
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
 //!   snapshots appear exactly over them and shrink into their card's slot on the spring;
-//!   incoming windows' snapshots grow from their card to their frames. Both start on one
+//!   incoming windows' snapshots grow from their card to their frames, both along Apple's
+//!   path (`motion_math::Path`: turned about their middle, sideways and flat ahead of the
+//!   spring at the window's end; a dropped window's card goes straight). Both start on one
 //!   frame, as Apple's do, once the outgoing windows have parked behind their snapshots (the
 //!   controller's note, [`PARK_WAIT_MAX`] at most): until then every snapshot holds still, the
 //!   incoming ones on their cards, so no outgoing window shows at full size beside a moving
@@ -75,8 +77,8 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::platform::windows;
 use crate::ui::motion_math::{
-    Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, shrink_spring, switch_spring, travel,
-    unveil_time,
+    Plane, SHOWN_FADE, SnapshotCache, Spring, Toward, path_settle_time, settle_time, shown_handover, shown_lands, shows_at, shrink_spring,
+    switch_spring, travel, unveil_time,
 };
 use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, Overlay};
 use crate::ui::shadow_math::handover;
@@ -133,8 +135,9 @@ struct Running {
     /// ([`GhostGroup`]).
     incoming: Option<GhostGroup>,
     /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane,
-    /// the card's glass there).
-    waiting: Vec<(usize, Plane, Option<GlassLook>)>,
+    /// the card's glass there, the path's lean: a window's into its card, a dropped window's
+    /// card straight).
+    waiting: Vec<(usize, Plane, Option<GlassLook>, Toward)>,
     /// The incoming snapshots' motion, waiting with the outgoing ones until their windows
     /// have parked ([`Rise`]); taken when it starts.
     rise: Option<Rise>,
@@ -667,6 +670,7 @@ impl Strip {
                 };
             // A window dropped on the strip: its card under the pointer becomes the snapshot.
             let dragged = self.motion.window_card.take_if(|c| c.window == id);
+            let toward = if dragged.is_some() { Toward::Straight } else { Toward::Card };
             let (ghost, shadow_note) = match dragged {
                 Some(c) => (c.ghost, None),
                 None => {
@@ -698,7 +702,7 @@ impl Strip {
                 handover_ms: None,
                 shadow: shadow_note,
             });
-            waiting.push((ghosts.len(), end, glass));
+            waiting.push((ghosts.len(), end, glass, toward));
             ghosts.push(ghost);
             cover.outgoing = true;
             if let Some(stage) = card.filter(|s| !held.contains(s)) {
@@ -921,7 +925,7 @@ impl Strip {
                     let off = (t.left_mid.x - to.left_mid.x).abs().max((t.left_mid.y - to.left_mid.y).abs()).max((t.size.w - to.size.w).abs()).max((t.size.h - to.size.h).abs());
                     tracing::debug!(id, window, real = %real, off, "transition: ghost end vs the window's real frame");
                     if off > 0.25 {
-                        g.spring_to(to, spring);
+                        g.spring_to(to, spring, Toward::Window);
                         g.spring_shadow(1.0, spring);
                     }
                 }
@@ -958,9 +962,9 @@ impl Strip {
         objc2_quartz_core::CATransaction::begin();
         self.start_motion(id, waited_out);
         if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
-            for (i, end, glass) in std::mem::take(&mut r.waiting) {
+            for (i, end, glass, toward) in std::mem::take(&mut r.waiting) {
                 if let Some(g) = r.ghosts.get_mut(i) {
-                    g.spring_to(end, spring);
+                    g.spring_to(end, spring, toward);
                     g.spring_shadow(0.0, spring);
                     g.spring_glass(glass.as_ref(), 1.0, spring);
                 }
@@ -968,7 +972,8 @@ impl Strip {
         }
         objc2_quartz_core::CATransaction::commit();
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
-        r.timers.push(after(settle_time(spring, SETTLED), move || {
+        // Shrinking into a card trails the spring sideways: it lands once that part is in too.
+        r.timers.push(after(path_settle_time(spring, SETTLED, Toward::Card), move || {
             with_strip_of(display, |s| s.end_transition(id));
         }));
     }
@@ -986,7 +991,7 @@ impl Strip {
         let Some(rise) = r.rise.take() else { return };
         for (i, end, glass) in &rise.ghosts {
             if let Some(g) = r.ghosts.get_mut(*i) {
-                g.spring_to(*end, spring);
+                g.spring_to(*end, spring, Toward::Window);
                 g.spring_shadow(1.0, spring);
                 g.spring_glass(glass.as_ref(), 0.0, spring);
             }

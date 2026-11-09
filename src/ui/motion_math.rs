@@ -1,14 +1,14 @@
 //! Motion math, pure: the spring's progress over time, the planes snapshots move between,
 //! where a drop lands in the column, and the snapshot cache's bookkeeping.
 //!
-//! - **Springs.** Apple moves windows on critically damped springs that start at rest, the
-//!   two ways at different speeds (measured 11-09 on a 5K screen at 60 fps, frame by frame,
-//!   each edge on its own; our own known spring read back within 1 % the same way): a window
-//!   growing out of its card on stiffness 353, damping 37.6 (ω ≈ 18.8 rad/s: 50 % at ~90 ms,
-//!   90 % at ~205 ms, 99 % at ~355 ms), one shrinking into its card on 272/33 (ω ≈ 16.5: 50 %
-//!   at ~100 ms, 99 % at ~400 ms), both from the same moment. The 10-12 fit (272/33 for both,
-//!   37 windows of the laptop session) read the growing snapshot's size, which the card's
-//!   turn holds back: our 272/33 read by width in the same recording looks like ω 14.4. Cards
+//! - **Springs.** Apple moves windows on one critically damped spring that starts at rest,
+//!   both ways from the same moment: stiffness 289, damping 34 (ω = 17 rad/s: 50 % at ~99 ms,
+//!   90 % at ~229 ms, 99 % at ~390 ms), fitted 11-09 to the four corners of a window growing
+//!   out of its card and of one shrinking into its card, frame by frame on a 5K screen at 60
+//!   fps, together with the path below ([`Path`]); our own 1.6.0 switch read back the same way
+//!   as its known 272/33 (ω 16.5) on a straight path. The faster 353/37.6 the parity round
+//!   read for a growing window came from its left edge and width, which run ahead of the
+//!   spring on Apple's path; its height and vertical position run on the spring itself. Cards
 //!   glide at ω ≈ 17.0, the strip slides at ω ≈ 16.8 (Apple's slide-in read ω 16.3 on 11-09),
 //!   and a card under the pointer grows on ω ≈ 16.6 ([`hover_spring`]). [`spring_progress`]
 //!   gives the fraction of the way covered after `t` seconds for any mass, stiffness and
@@ -17,6 +17,18 @@
 //!   ([`Spring::at_speed`]: the same curve, ω times the speed) and duration;
 //!   [`switch_spring`], [`shrink_spring`], [`glide_spring`] and [`slide_spring`] are the
 //!   style's springs with it applied.
+//! - **Path.** Apple's window does not move on a straight line between its card and its
+//!   frame. Its horizontal motion and its width run ahead toward the window's end, and its
+//!   turn flattens ahead of the spring, while its height and vertical position follow the
+//!   spring ([`Path::at`]): growing, it is out sideways and flat early and rises later, "from
+//!   the bottom up"; shrinking, it first drops and loses height, wide and flat, then slides
+//!   into the card and turns. Measured 11-09 (the fixture's blue window out of its card, the
+//!   green one into a combined card): the window-side lead is [`SIDEWAYS_LEAD`] of p·(1 − p)
+//!   for the middle's x and the width and [`FLATTEN_LEAD`] for the turn, with the snapshot
+//!   turned about its vertical middle ([`Pose`]); this reproduces Apple's corners within
+//!   3.4 pt rms (10 at worst) growing and 3.5 (10) shrinking, where the straight path turned
+//!   about the left edge, on the parity round's springs, read 20.3 pt rms (54 at worst) and
+//!   16.7 (83), and no straight path on any spring, pivot or eye came within 9 and 7.
 //! - **Unveil.** An incoming window takes its place behind its growing snapshot when the
 //!   snapshot as shown is within [`UNVEIL_TOLERANCE`] of the window on every edge
 //!   ([`unveil_time`]): by distance, from the transition's own start and end rectangles
@@ -34,8 +46,11 @@
 //!   faded before its window showed read 16 lighter for 80 ms (11-01).
 //! - **Planes.** A snapshot is a plane turned about its left edge, like a strip card: at a
 //!   window's frame it is flat and full size; on a card it is the card's thumbnail, turned by
-//!   the strip's tilt and seen from the strip's eye. Moving between the two on one spring
-//!   (position of the left edge's middle, size, turn, corner radius) is the switch animation.
+//!   the strip's tilt and seen from the strip's eye. In flight it turns about its vertical
+//!   middle ([`Pose`]: the same look at either end, the plane moved along the eye's rays so
+//!   its middle is in the screen's plane), as Apple's does: a snapshot turning about its left
+//!   edge kept that edge put while the far side swung, and Apple's left side comes toward the
+//!   viewer as it turns (its bottom-left corner stays low while the window grows).
 //! - **Drop spot.** A card or a window released over the column goes into the gap between the
 //!   cards whose middles are above and below the pointer. A band around each card's middle
 //!   (`[drag] merge_zone` of its height, for a card dragged with `[strip] merge_on_drop`)
@@ -55,11 +70,12 @@ pub struct Spring {
 }
 
 impl Spring {
-    /// Apple's windows growing out of their card, measured 11-09 (`[animation] spring_*`).
-    pub const APPLE: Spring = Spring { stiffness: 353.0, damping: 37.6, mass: 1.0 };
-    /// Apple's windows shrinking into their card, measured 11-09 (`[animation] shrink_*`;
-    /// 10-12's fit for both ways).
-    pub const APPLE_SHRINK: Spring = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
+    /// Apple's windows growing out of their card, measured 11-09 with the path
+    /// (`[animation] spring_*`).
+    pub const APPLE: Spring = Spring { stiffness: 289.0, damping: 34.0, mass: 1.0 };
+    /// Apple's windows shrinking into their card (`[animation] shrink_*`): the same spring,
+    /// measured the same way.
+    pub const APPLE_SHRINK: Spring = Spring { stiffness: 289.0, damping: 34.0, mass: 1.0 };
 
     /// The same motion `speed` times as fast: ω times `speed`, the same damping ratio
     /// (stiffness times speed², damping times speed). A speed of 0 or less leaves it as it is
@@ -312,6 +328,166 @@ impl Plane {
     }
 }
 
+/// The perspective snapshots are seen through: the strip's eye (overlay coordinates) and its
+/// distance in front of the screen (points).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Eye {
+    pub at: Point,
+    pub distance: f64,
+}
+
+/// A snapshot's pose in flight: turned about its vertical middle line, which lies in the
+/// screen's plane (Apple's turns that way: see the module notes, "Planes"). Its middle, its
+/// size before the turn, the turn (radians, the right side away) and its corner radius, in
+/// the overlay's coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose {
+    pub middle: Point,
+    pub size: Size,
+    pub tilt: f64,
+    pub corner: f64,
+}
+
+/// The factor that moves a point at depth `z` (toward the viewer positive) along the eye's ray
+/// into the screen's plane, where it looks the same: `d / (d − z)`.
+fn into_screen(eye: Eye, z: f64) -> f64 {
+    let d = eye.distance.max(1.0);
+    d / (d - z).max(1.0)
+}
+
+impl Plane {
+    /// The pose that looks exactly like this plane through `eye`: the plane turned about its
+    /// left edge has its middle `w/2 · sin tilt` behind the screen; moved along the eye's rays
+    /// until the middle is in it, everything scales by the same factor and nothing changes
+    /// on screen.
+    pub fn pose(&self, eye: Eye) -> Pose {
+        let half = self.size.w / 2.0;
+        let k = into_screen(eye, -half * self.tilt.sin());
+        let mx = self.left_mid.x + half * self.tilt.cos();
+        let my = self.left_mid.y;
+        Pose {
+            middle: Point::new(eye.at.x + (mx - eye.at.x) * k, eye.at.y + (my - eye.at.y) * k),
+            size: Size::new(self.size.w * k, self.size.h * k),
+            tilt: self.tilt,
+            corner: self.corner * k,
+        }
+    }
+}
+
+impl Pose {
+    /// The plane turned about its left edge that looks exactly like this pose ([`Plane::pose`]
+    /// the other way: the left edge, `w/2 · sin tilt` in front of the screen, moved into it).
+    pub fn plane(&self, eye: Eye) -> Plane {
+        let half = self.size.w / 2.0;
+        let k = into_screen(eye, half * self.tilt.sin());
+        let lx = self.middle.x - half * self.tilt.cos();
+        let ly = self.middle.y;
+        Plane {
+            left_mid: Point::new(eye.at.x + (lx - eye.at.x) * k, eye.at.y + (ly - eye.at.y) * k),
+            size: Size::new(self.size.w * k, self.size.h * k),
+            tilt: self.tilt,
+            corner: self.corner * k,
+        }
+    }
+}
+
+/// How far ahead of the spring a flying snapshot's middle moves sideways and its width
+/// changes, toward the window's end, at the middle of the way: `p + SIDEWAYS_LEAD · p (1 − p)`
+/// of the way there when the spring is at `p` (Apple's, measured 11-09; see the module notes,
+/// "Path").
+pub const SIDEWAYS_LEAD: f64 = 0.33;
+/// How far ahead of the spring the snapshot's turn flattens, toward the window's end (the
+/// same form as [`SIDEWAYS_LEAD`]; Apple's, measured 11-09).
+pub const FLATTEN_LEAD: f64 = 0.19;
+
+/// Which end of a flight is a window's frame: the path leans toward it ([`Path`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Toward {
+    /// A window grows out of a card (or a dropped card's ghost) to its frame.
+    Window,
+    /// A window shrinks from its frame into a card.
+    Card,
+    /// Neither end is a window: a straight path on the spring (a dragged window's card
+    /// dropped into its new card).
+    Straight,
+}
+
+impl Toward {
+    fn lean(self) -> f64 {
+        match self {
+            Toward::Window => 1.0,
+            Toward::Card => -1.0,
+            Toward::Straight => 0.0,
+        }
+    }
+}
+
+/// A snapshot's flight from one pose to another on a spring, along Apple's path (module notes,
+/// "Path").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Path {
+    pub from: Pose,
+    pub to: Pose,
+    pub toward: Toward,
+}
+
+impl Path {
+    /// The pose when the spring has covered `p` of the way: the middle's height, the height
+    /// and the corner on the spring; the middle's sideways place and the width
+    /// [`SIDEWAYS_LEAD`] and the turn [`FLATTEN_LEAD`] of `p (1 − p)` toward the window's end.
+    pub fn at(&self, p: f64) -> Pose {
+        let bend = p * (1.0 - p) * self.toward.lean();
+        let side = p + SIDEWAYS_LEAD * bend;
+        let flat = p + FLATTEN_LEAD * bend;
+        let lerp = |a: f64, b: f64, u: f64| a + (b - a) * u;
+        let (a, b) = (self.from, self.to);
+        Pose {
+            middle: Point::new(lerp(a.middle.x, b.middle.x, side), lerp(a.middle.y, b.middle.y, p)),
+            size: Size::new(lerp(a.size.w, b.size.w, side), lerp(a.size.h, b.size.h, p)),
+            tilt: lerp(a.tilt, b.tilt, flat),
+            corner: lerp(a.corner, b.corner, p),
+        }
+    }
+
+    /// How much farther than the spring's own way any part of the pose can still be from its
+    /// end: shrinking into a card, the sideways motion trails the spring by up to
+    /// [`SIDEWAYS_LEAD`] of what is left; growing, every part is at least as far along.
+    pub fn trail(toward: Toward) -> f64 {
+        1.0 + (-toward.lean()).max(0.0) * SIDEWAYS_LEAD.max(FLATTEN_LEAD)
+    }
+}
+
+/// How many poses a second a flight is drawn from ([`flight_samples`]): Core Animation goes
+/// straight between them, every 8 ms, finer than a 60 or 120 Hz display's frame.
+pub const FLIGHT_SAMPLES_PER_SECOND: f64 = 120.0;
+
+/// The poses `path` passes on spring `s` over `duration` seconds, as (fraction of the
+/// duration, pose), evenly spaced at [`FLIGHT_SAMPLES_PER_SECOND`] or finer: the first is
+/// `path.from`, the last exactly `path.to` (the spring rests within [`END_TOLERANCE`] there
+/// when `duration` is [`path_duration`]).
+pub fn flight_samples(path: &Path, s: Spring, duration: f64) -> Vec<(f64, Pose)> {
+    let n = ((duration.max(0.0) * FLIGHT_SAMPLES_PER_SECOND).ceil() as usize).clamp(1, 2400);
+    (0..=n)
+        .map(|i| {
+            let f = i as f64 / n as f64;
+            let pose = if i == n { path.to } else { path.at(spring_progress(s, f * duration)) };
+            (f, pose)
+        })
+        .collect()
+}
+
+/// How long a snapshot's flight of `travel` points along a path toward `toward` runs on `s`
+/// (seconds): [`spring_duration`], with a trailing part's longer way in.
+pub fn path_duration(s: Spring, travel: f64, toward: Toward) -> f64 {
+    spring_duration(s, travel * Path::trail(toward))
+}
+
+/// When a flight toward `toward` stays within `tolerance` of its end (a fraction of the way)
+/// for good on `s` (seconds): [`settle_time`], with a trailing part's longer way in.
+pub fn path_settle_time(s: Spring, tolerance: f64, toward: Toward) -> f64 {
+    settle_time(s, tolerance / Path::trail(toward))
+}
+
 /// Where something released over the strip column goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropSpot {
@@ -452,39 +628,288 @@ mod tests {
         }
     }
 
-    /// Apple's switch, measured 11-09 (5K screen, 60 fps, the fixture windows; the same
-    /// script run on ours read our 272/33 back within 1 %): a window growing from its card to
-    /// its frame, the mean progress of its left edge, top edge and height, at these ms after
-    /// the motion starts (the fitted onset, about a frame before the first moving frame).
-    const GROWING: [(f64, f64); 9] =
-        [(35.0, 0.138), (68.0, 0.360), (102.0, 0.566), (135.0, 0.717), (168.0, 0.822), (202.0, 0.885), (252.0, 0.942), (302.0, 0.974), (352.0, 0.988)];
-    /// The same switch's other way: a window shrinking from its frame into its card, the mean
-    /// progress of its left and bottom edges, from the same onset as the growing one.
-    const SHRINKING: [(f64, f64); 8] =
-        [(24.0, 0.072), (57.0, 0.233), (91.0, 0.419), (141.0, 0.672), (191.0, 0.815), (241.0, 0.901), (307.0, 0.959), (374.0, 0.985)];
+    /// The 5K screen's eye, where the overlay covers the main display (global = overlay).
+    const EYE: Eye = Eye { at: Point::new(15.0, 720.0), distance: 2260.0 };
 
-    fn misses(s: Spring, measured: &[(f64, f64)]) -> f64 {
-        measured.iter().fold(0.0, |m: f64, (ms, p)| m.max((spring_progress(s, ms / 1000.0) - p).abs()))
+    /// Apple's switch, measured 11-09 (5K screen, 60 fps, the fixture windows), as each frame
+    /// draws the window: ms after the fitted onset (about a frame before the first moving
+    /// frame), then its left edge's x, that edge's top and bottom, its right edge's x, that
+    /// edge's top and bottom (points; the top from the colour's top and the title bar's share
+    /// of the height). The blue window growing out of its card (hovered, slot 5) to
+    /// 759, 258.5, 1100 × 748.5.
+    const GROWN: [(f64, [f64; 6]); 30] = [
+        (16.0, [51.0, 912.3, 1041.9, 171.0, 901.9, 1024.3]),
+        (32.7, [139.0, 860.6, 1042.9, 319.0, 849.2, 1018.7]),
+        (49.3, [243.0, 793.5, 1044.1, 507.0, 786.9, 1013.7]),
+        (66.0, [343.0, 721.1, 1045.1, 703.0, 722.7, 1009.5]),
+        (82.7, [427.0, 652.0, 1046.2, 887.0, 661.0, 1006.7]),
+        (99.3, [499.0, 587.6, 1045.2, 1055.0, 603.4, 1005.7]),
+        (116.0, [551.1, 529.4, 1043.2, 1199.0, 551.0, 1005.9]),
+        (132.7, [595.0, 478.7, 1040.6, 1323.0, 505.0, 1006.1]),
+        (149.3, [627.0, 436.3, 1037.7, 1427.0, 463.7, 1006.4]),
+        (166.0, [655.0, 400.6, 1034.2, 1511.0, 428.5, 1006.8]),
+        (182.7, [675.0, 371.9, 1030.7, 1578.1, 397.6, 1007.1]),
+        (199.3, [691.0, 348.8, 1026.9, 1635.0, 371.8, 1007.8]),
+        (216.0, [703.0, 329.9, 1024.4, 1683.0, 350.3, 1007.8]),
+        (232.7, [715.0, 314.4, 1021.6, 1719.0, 332.9, 1008.1]),
+        (249.3, [723.0, 302.5, 1019.2, 1747.0, 318.0, 1008.5]),
+        (266.0, [731.0, 293.2, 1016.9, 1771.0, 306.0, 1009.0]),
+        (282.7, [741.4, 285.9, 1015.7, 1787.0, 295.4, 1008.8]),
+        (299.3, [743.0, 279.5, 1011.3, 1803.0, 288.4, 1010.9]),
+        (316.0, [747.0, 274.5, 1011.0, 1815.0, 281.9, 1011.0]),
+        (332.7, [747.0, 270.0, 1011.0, 1823.0, 277.7, 1011.0]),
+        (349.3, [751.0, 268.3, 1011.2, 1831.0, 272.8, 1010.6]),
+        (366.0, [755.0, 267.1, 1011.6, 1835.9, 267.1, 1009.8]),
+        (382.7, [755.0, 261.5, 1012.5, 1843.0, 269.2, 1007.7]),
+        (399.3, [755.0, 262.8, 1012.6, 1847.0, 263.1, 1007.0]),
+        (416.0, [760.9, 262.8, 1012.8, 1847.0, 263.1, 1006.6]),
+        (432.7, [759.0, 258.1, 1012.8, 1851.0, 263.9, 1006.2]),
+        (449.3, [759.0, 258.7, 1012.0, 1851.0, 259.0, 1005.9]),
+        (466.0, [759.0, 258.9, 1007.0, 1855.0, 258.9, 1007.0]),
+        (482.7, [759.0, 258.9, 1007.0, 1855.0, 258.9, 1007.0]),
+        (499.3, [759.0, 258.9, 1007.0, 1855.0, 258.9, 1007.0]),
+    ];
+    /// The same switch's other way: the green window (1299, 599, 1000 × 692) shrinking into
+    /// its place in the combined card, measured the same way (NaN: an incoming snapshot
+    /// passed over that edge).
+    const SHRUNK: [(f64, [f64; 6]); 29] = [
+        (18.2, [1275.0, 605.9, 1285.2, 2239.0, 612.9, 1277.8]),
+        (34.8, [1211.0, 632.2, 1272.1, 2091.0, 637.3, 1249.1]),
+        (51.5, [1127.0, 668.1, 1251.0, 1899.0, 669.8, 1214.7]),
+        (68.2, [1031.0, 702.9, 1225.0, 1687.0, 705.0, 1180.3]),
+        (84.8, [923.0, 738.6, 1196.9, 1475.0, 734.0, 1149.5]),
+        (101.5, [815.0, 764.3, 1170.0, 1277.0, 766.6, 1122.5]),
+        (118.2, [711.0, NAN, 1144.2, 1095.0, NAN, 1100.8]),
+        (134.8, [611.0, NAN, NAN, 935.0, NAN, NAN]),
+        (151.5, [523.0, NAN, NAN, 795.0, NAN, NAN]),
+        (168.2, [443.0, NAN, NAN, 675.0, NAN, NAN]),
+        (184.8, [375.0, 875.8, 1077.4, 579.0, 862.8, 1048.4]),
+        (201.5, [315.0, 886.2, 1067.7, 495.0, 873.9, 1041.4]),
+        (218.2, [267.0, 897.0, 1057.8, 423.0, 883.7, 1036.6]),
+        (234.8, [227.0, 904.3, 1052.2, 367.0, 892.2, 1031.9]),
+        (251.5, [195.0, 911.0, 1046.4, 323.0, 899.4, 1027.9]),
+        (268.2, [167.0, 915.5, 1043.1, 283.0, 906.4, 1024.4]),
+        (284.8, [143.0, 920.6, 1040.0, 255.0, 909.8, 1021.5]),
+        (301.5, [124.5, 924.4, 1034.5, 227.0, 913.8, 1020.8]),
+        (318.2, [111.0, 927.7, 1033.8, 207.0, 916.4, 1018.9]),
+        (334.8, [99.0, 928.4, 1031.4, 191.0, 920.8, 1017.4]),
+        (351.5, [91.0, 931.6, 1029.4, 179.0, 921.1, 1016.9]),
+        (368.2, [83.0, 932.9, 1028.7, 171.0, 923.1, 1015.8]),
+        (384.8, [75.0, 932.9, 1029.0, 163.0, 925.2, 1014.5]),
+        (401.5, [68.3, 934.8, 1027.0, 155.0, 925.4, 1013.7]),
+        (418.2, [66.9, 936.3, 1026.5, 151.0, 925.7, 1013.5]),
+        (434.8, [63.0, 937.0, 1025.2, 147.0, 926.4, 1013.8]),
+        (451.5, [63.0, 936.7, 1025.5, 143.0, 928.1, 1013.1]),
+        (468.2, [59.0, 936.7, 1025.5, 139.0, 929.1, 1013.1]),
+        (484.8, [59.0, 936.7, 1025.4, 139.0, 929.1, 1012.9]),
+    ];
+    const NAN: f64 = f64::NAN;
+
+    /// The blue card as drawn (hovered) and its window; the green window and its place in the
+    /// combined card: as planes turned about their left edge (solved from the drawn
+    /// trapezoids through [`EYE`]).
+    fn grow_ends() -> (Plane, Plane) {
+        (plane(11.0, 935.9, 162.68, 107.44, 0.8995), plane(759.0, 258.5, 1100.0, 748.5, 0.0))
+    }
+    fn shrink_ends() -> (Plane, Plane) {
+        (plane(1299.0, 599.0, 1000.0, 692.0, 0.0), plane(55.0, 937.64, 118.7, 86.52, 0.8258))
+    }
+    fn plane(x: f64, top: f64, w: f64, h: f64, tilt: f64) -> Plane {
+        Plane { left_mid: Point::new(x, top + h / 2.0), size: Size::new(w, h), tilt, corner: 0.0 }
+    }
+
+    /// How a pose is drawn through `eye`: [left x, its top, its bottom, right x, its top, its
+    /// bottom].
+    fn drawn_pose(p: Pose, eye: Eye) -> [f64; 6] {
+        let half = p.size.w / 2.0;
+        let mut out = [0.0; 6];
+        for (i, u) in [-half, half].into_iter().enumerate() {
+            let x = p.middle.x + u * p.tilt.cos();
+            let s = eye.distance / (eye.distance + u * p.tilt.sin());
+            out[3 * i] = eye.at.x + (x - eye.at.x) * s;
+            out[3 * i + 1] = eye.at.y + (p.middle.y - p.size.h / 2.0 - eye.at.y) * s;
+            out[3 * i + 2] = eye.at.y + (p.middle.y + p.size.h / 2.0 - eye.at.y) * s;
+        }
+        out
+    }
+
+    /// How a plane turned about its left edge is drawn through `eye` (the same order).
+    fn drawn_plane(p: Plane, eye: Eye) -> [f64; 6] {
+        let (top, bottom) = (p.left_mid.y - p.size.h / 2.0, p.left_mid.y + p.size.h / 2.0);
+        let s = eye.distance / (eye.distance + p.size.w * p.tilt.sin());
+        let x = p.left_mid.x + p.size.w * p.tilt.cos();
+        [
+            p.left_mid.x,
+            top,
+            bottom,
+            eye.at.x + (x - eye.at.x) * s,
+            eye.at.y + (top - eye.at.y) * s,
+            eye.at.y + (bottom - eye.at.y) * s,
+        ]
+    }
+
+    /// Root mean square and worst miss of `model` against `measured` (points; NaN skipped).
+    fn misses(measured: &[(f64, [f64; 6])], model: impl Fn(f64) -> [f64; 6]) -> (f64, f64) {
+        let (mut sum, mut n, mut worst) = (0.0, 0.0, 0.0_f64);
+        for (ms, m) in measured {
+            let d = model(ms / 1000.0);
+            for (a, b) in m.iter().zip(d) {
+                if a.is_nan() {
+                    continue;
+                }
+                sum += (a - b) * (a - b);
+                n += 1.0;
+                worst = worst.max((a - b).abs());
+            }
+        }
+        ((sum / n).sqrt(), worst)
+    }
+
+    /// The pose of a flight from plane `a` to plane `b` toward `toward`, `t` seconds in.
+    fn flown(a: Plane, b: Plane, toward: Toward, s: Spring, t: f64) -> [f64; 6] {
+        let path = Path { from: a.pose(EYE), to: b.pose(EYE), toward };
+        drawn_pose(path.at(spring_progress(s, t)), EYE)
+    }
+
+    /// A plane turned about its left edge moved straight on one spring (every snapshot until
+    /// 11-09), `t` seconds in.
+    fn straight(a: Plane, b: Plane, s: Spring, t: f64) -> [f64; 6] {
+        let p = spring_progress(s, t);
+        let lerp = |x: f64, y: f64| x + (y - x) * p;
+        let q = Plane {
+            left_mid: Point::new(lerp(a.left_mid.x, b.left_mid.x), lerp(a.left_mid.y, b.left_mid.y)),
+            size: Size::new(lerp(a.size.w, b.size.w), lerp(a.size.h, b.size.h)),
+            tilt: lerp(a.tilt, b.tilt),
+            corner: 0.0,
+        };
+        drawn_plane(q, EYE)
+    }
+
+    /// [`misses`] with the model's own onset: the best within 40 ms of the table's (each
+    /// model is judged at its best start, as the tables' onset is the new path's).
+    fn best_misses(measured: &[(f64, [f64; 6])], model: impl Fn(f64) -> [f64; 6]) -> (f64, f64) {
+        (-80..=80).map(|i| misses(measured, |t| model(t + i as f64 * 0.0005))).fold((f64::MAX, 0.0), |best, m| if m.0 < best.0 { m } else { best })
     }
 
     #[test]
-    fn apples_spring_matches_the_measured_curve() {
+    fn apples_path_matches_the_measured_corners() {
         let s = Spring::APPLE;
-        assert!(misses(s, &GROWING) < 0.02, "growing: off by {:.3}", misses(s, &GROWING));
-        let t99 = time_to_progress(s, 0.99);
-        assert!((0.34..=0.37).contains(&t99), "99 % at {t99}");
-        let settle = settle_time(s, 0.001);
-        assert!((0.40..0.55).contains(&settle), "settled at {settle}");
-        // Shrinking into the card is slower: 10-12's spring, which every window used until
-        // 11-09. The two curves are told apart by the recordings: each misses the other way's.
-        let shrink = Spring::APPLE_SHRINK;
-        assert!(misses(shrink, &SHRINKING) < 0.025, "shrinking: off by {:.3}", misses(shrink, &SHRINKING));
-        assert!(misses(shrink, &GROWING) > 0.05, "10-12's spring lagged a growing window by {:.3}", misses(shrink, &GROWING));
-        assert!(misses(s, &SHRINKING) > 0.05, "the growing spring runs ahead of a shrinking window by {:.3}", misses(s, &SHRINKING));
-        assert!((0.38..=0.42).contains(&time_to_progress(shrink, 0.99)));
-        // Both critically damped: no overshoot either way.
-        for spring in [s, shrink] {
-            assert!((0..2000).all(|i| spring_progress(spring, i as f64 / 1000.0) <= 1.0 + 1e-9));
+        assert_eq!(s, Spring::APPLE_SHRINK, "one spring both ways");
+        let (a, b) = grow_ends();
+        let (rms, worst) = best_misses(&GROWN, |t| flown(a, b, Toward::Window, s, t));
+        assert!(rms < 3.5 && worst < 10.5, "growing: {rms:.2} pt rms, {worst:.1} at worst");
+        let (c, d) = shrink_ends();
+        let (rms, worst) = best_misses(&SHRUNK, |t| flown(c, d, Toward::Card, s, t));
+        assert!(rms < 3.6 && worst < 10.5, "shrinking: {rms:.2} pt rms, {worst:.1} at worst");
+        // The straight path of every snapshot until now (turned about the left edge, the
+        // parity round's springs: 353/37.6 growing, 272/33 shrinking) misses by far more: the
+        // window comes up later than it goes sideways, and the other way drops before it
+        // slides in. On this spring, straight, too.
+        let parity_grow = Spring { stiffness: 353.0, damping: 37.6, mass: 1.0 };
+        let parity_shrink = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
+        for spring in [parity_grow, s] {
+            let (rms, worst) = best_misses(&GROWN, |t| straight(a, b, spring, t));
+            assert!(rms > 15.0 && worst > 40.0, "growing straight on {spring:?}: {rms:.2}, {worst:.1}");
+        }
+        for spring in [parity_shrink, s] {
+            let (rms, worst) = best_misses(&SHRUNK, |t| straight(c, d, spring, t));
+            assert!(rms > 10.0 && worst > 25.0, "shrinking straight on {spring:?}: {rms:.2}, {worst:.1}");
+        }
+        // Turned about its middle without the lean: still far off.
+        let (rms, _) = best_misses(&GROWN, |t| flown(a, b, Toward::Straight, s, t));
+        assert!(rms > 12.0, "about the middle, straight: {rms:.2}");
+        // Critically damped: no overshoot, 99 % at about 390 ms.
+        assert!((0..2000).all(|i| spring_progress(s, i as f64 / 1000.0) <= 1.0 + 1e-9));
+        assert!((0.38..0.40).contains(&time_to_progress(s, 0.99)));
+    }
+
+    #[test]
+    fn a_pose_looks_exactly_like_its_plane() {
+        for p in [
+            plane(11.0, 935.9, 162.68, 107.44, 0.8995),
+            plane(55.0, 937.6, 118.7, 86.5, 0.8258),
+            plane(759.0, 258.5, 1100.0, 748.5, 0.0),
+            plane(300.0, 100.0, 900.0, 600.0, 0.3),
+        ] {
+            let pose = p.pose(EYE);
+            let (a, b) = (drawn_plane(p, EYE), drawn_pose(pose, EYE));
+            assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9), "{a:?} vs {b:?}");
+            let back = pose.plane(EYE);
+            assert!((back.left_mid.x - p.left_mid.x).abs() < 1e-9 && (back.size.w - p.size.w).abs() < 1e-9 && (back.left_mid.y - p.left_mid.y).abs() < 1e-9);
+            if p.tilt == 0.0 {
+                assert_eq!(pose.size, p.size, "a flat plane is its own pose");
+            } else {
+                assert!(pose.size.w < p.size.w, "a turned card's pose is nearer, so smaller");
+            }
+        }
+    }
+
+    #[test]
+    fn the_path_leans_toward_the_window_and_ends_on_both_poses() {
+        let (a, b) = grow_ends();
+        let path = Path { from: a.pose(EYE), to: b.pose(EYE), toward: Toward::Window };
+        assert_eq!(path.at(0.0), path.from);
+        assert_eq!(path.at(1.0), path.to);
+        let half = path.at(0.5);
+        let mid = |x: f64, y: f64| (x + y) / 2.0;
+        assert!(half.middle.x > mid(path.from.middle.x, path.to.middle.x) + 100.0, "out sideways early");
+        assert!(half.size.w > mid(path.from.size.w, path.to.size.w), "wide early");
+        assert!(half.tilt < mid(path.from.tilt, path.to.tilt), "flat early");
+        assert!((half.middle.y - mid(path.from.middle.y, path.to.middle.y)).abs() < 1e-9, "up on the spring");
+        assert!((half.size.h - mid(path.from.size.h, path.to.size.h)).abs() < 1e-9, "tall on the spring");
+        // Into a card it trails sideways and stays flat longer; nothing ever overshoots.
+        let back = Path { from: path.to, to: path.from, toward: Toward::Card };
+        let h = back.at(0.5);
+        assert!(h.middle.x > mid(back.from.middle.x, back.to.middle.x) + 100.0 && h.tilt < mid(back.from.tilt, back.to.tilt));
+        for i in 0..=100 {
+            let p = path.at(i as f64 / 100.0);
+            assert!(p.middle.x <= path.to.middle.x + 1e-9 && p.size.w <= path.to.size.w + 1e-9 && p.tilt >= -1e-12);
+        }
+        let straight = Path { toward: Toward::Straight, ..path };
+        assert!((straight.at(0.5).middle.x - mid(path.from.middle.x, path.to.middle.x)).abs() < 1e-9);
+        // A trailing flight runs longer and settles later than its spring alone.
+        let s = Spring::APPLE;
+        assert!(path_duration(s, 1500.0, Toward::Card) > spring_duration(s, 1500.0));
+        assert_eq!(path_duration(s, 1500.0, Toward::Window), spring_duration(s, 1500.0));
+        assert!(path_settle_time(s, 0.002, Toward::Card) > settle_time(s, 0.002));
+        // Within that time every part is within the tolerance of its end.
+        let d = path_duration(s, 1500.0, Toward::Card);
+        let at = back.at(spring_progress(s, d));
+        assert!((at.middle.x - back.to.middle.x).abs() <= END_TOLERANCE * 1500.0 / (back.from.middle.x - back.to.middle.x).abs().max(1.0) * 1500.0 + 0.1);
+    }
+
+    #[test]
+    fn a_flight_is_drawn_from_poses_a_frame_apart_and_ends_exactly() {
+        let (a, b) = grow_ends();
+        let path = Path { from: a.pose(EYE), to: b.pose(EYE), toward: Toward::Window };
+        let s = Spring::APPLE;
+        let d = path_duration(s, 1750.0, Toward::Window);
+        let samples = flight_samples(&path, s, d);
+        assert_eq!(samples.first().map(|x| x.1), Some(path.from));
+        assert_eq!(samples.last().map(|x| x.1), Some(path.to));
+        assert!(samples.len() as f64 >= d * FLIGHT_SAMPLES_PER_SECOND);
+        assert!(samples.windows(2).all(|w| w[1].0 > w[0].0 && (w[1].0 - w[0].0) * d <= 1.0 / FLIGHT_SAMPLES_PER_SECOND + 1e-9));
+        // The step before the last is within the end tolerance: no jump at the end.
+        let before = samples[samples.len() - 2].1;
+        assert!((before.middle.x - path.to.middle.x).abs() < 0.2 && (before.size.w - path.to.size.w).abs() < 0.2, "{before:?}");
+        assert_eq!(flight_samples(&path, s, 0.0).len(), 2, "nothing to fly: from and to");
+    }
+
+    /// The unveil waits for the snapshot as drawn: on the new path, turned about its middle,
+    /// each drawn edge is within the tolerance of the window by the unveil (less the lag).
+    #[test]
+    fn the_unveil_holds_on_apples_path() {
+        let style = StripStyle::default();
+        let (a, b) = grow_ends();
+        let card = drawn_plane(a, EYE);
+        let start = Rect::new(card[0], card[1].min(card[4]), card[3] - card[0], card[2].max(card[5]) - card[1].min(card[4]));
+        let end = Rect::new(759.0, 258.5, 1100.0, 748.5);
+        let t = unveil_time(&style, travel(start, end)) - PRESENTATION_LAG;
+        let w = [end.x, end.y, end.max_y(), end.max_x(), end.y, end.max_y()];
+        for i in 0..400 {
+            let shown = flown(a, b, Toward::Window, switch_spring(&style), t + i as f64 / 1000.0);
+            let off = shown.iter().zip(w).fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+            assert!(off <= UNVEIL_TOLERANCE, "{off:.2} pt off {i} ms after the unveil");
         }
     }
 
@@ -574,7 +999,7 @@ mod tests {
         // 1200 pt edge travel jumped 25–31 pt at 99 %, the snapshot shown 50 ms late).
         let long = unveil_time(&style, 1200.0);
         assert!(shown_gap(&style, 1200.0) <= UNVEIL_TOLERANCE + 1e-6, "{}", shown_gap(&style, 1200.0));
-        assert!((0.53..0.58).contains(&long), "a long travel unveils at {long:.3} s");
+        assert!((0.58..0.63).contains(&long), "a long travel unveils at {long:.3} s");
         let old = time_to_progress(Spring::APPLE, 0.99);
         let old_gap = (1.0 - spring_progress(Spring::APPLE, old - PRESENTATION_LAG)) * 1200.0;
         assert!(old_gap > 20.0, "the 99 % unveil jumped {old_gap:.1} pt");
@@ -622,8 +1047,8 @@ mod tests {
     /// point is left, its last frame's motion under a frame's motion before it.
     #[test]
     fn a_snapshot_s_spring_runs_until_its_last_step_is_unseen() {
-        // The spring of the time (272/33), now the shrinking one.
-        let s = Spring::APPLE_SHRINK;
+        // The spring of the time (272/33).
+        let s = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
         let ca_settle = 0.6;
         let left_at_ca = (1.0 - spring_progress(s, ca_settle)) * 1999.0;
         assert!((1.0..1.2).contains(&left_at_ca), "Core Animation's cut leaves {left_at_ca:.2} pt");

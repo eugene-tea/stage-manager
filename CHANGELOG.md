@@ -12,6 +12,11 @@
   inside the strip, where the whole card used to follow the pointer. Let it go between two
   cards for a stage of its own there, on another card to join that stage, or back on its own
   card to change nothing. Drag a card by its app icons to move the whole card.
+- In a switch, a window now travels between its card and its place along Apple's path, not a
+  straight line: coming out of the strip it goes out sideways and flattens first and rises
+  after, so it seems to grow up from the card's bottom; going in, it drops and shrinks in
+  height first, then slides into its card. It turns about its middle, as Apple's do, and both
+  ways now share Apple's one spring.
 - Hovering a card of two apps grows each window a little on its own, as Apple's does, so
   the card keeps its shape instead of swelling as a whole; the app icons stay where they
   are, at their size, on every card.
