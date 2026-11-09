@@ -524,8 +524,9 @@ wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window
-landed over the corner), never over the menu bar or the Dock's bar, and
-never more than the corner itself (a 320-point square). Where
+landed over the corner), never over the menu bar, and
+never more than the corner itself (a 320-point square). It lies under the Dock, so a
+see-through Dock over the corner shows the cover there, not a waiting window's edge. Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
 desktop there (only the desktop's own layers: the picture and its icons, never a window,
 even one that appears as it is taken; laid over the patch's picture when macOS leaves the

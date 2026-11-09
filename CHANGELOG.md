@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- In a switch, a see-through Dock that reaches the bottom corner no longer shows the edge of
+  a window waiting there: the desktop picture painted over the corner for the switch now goes
+  under the Dock too.
 - With `[log] level = "debug"`, the log names any task that holds the app's window thread
   for 100 ms or more, and how long each save of your stages takes.
 - A closed window about the size of another screen is no longer mistaken for a full-screen
