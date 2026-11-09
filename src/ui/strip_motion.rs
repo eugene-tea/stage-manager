@@ -484,10 +484,11 @@ impl Strip {
         let x = g.x - o.x + layout.frame.x + slot.rect.x + self.current_dx();
         let top = g.y - o.y + layout.frame.y + slot.rect.y;
         let mut plane = Plane::thumb(x, top, slot.rect.size(), m.tilt, self.style.cards.corner_radius * m.k);
-        // As the card is drawn: grown under the pointer, or pressed (the click's card).
+        // As the card is drawn: grown under the pointer, or pressed (the click's card), each
+        // window about its own middle.
         let s = self.card_scale(layout.stage);
         if s != 1.0 {
-            let c = layout.hover_center(m);
+            let c = layout.thumb_center(m, index).unwrap_or_else(|| layout.hover_center(m));
             let c = Point::new(g.x - o.x + c.x + self.current_dx(), g.y - o.y + c.y);
             plane.left_mid = Point::new(c.x + (plane.left_mid.x - c.x) * s, c.y + (plane.left_mid.y - c.y) * s);
             plane.size = Size::new(plane.size.w * s, plane.size.h * s);

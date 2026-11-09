@@ -309,12 +309,71 @@ impl CardLayout {
         self.thumbs.iter().rev().copied().collect()
     }
 
-    /// What the card covers on screen (panel coordinates): its turned thumbnails and icons.
+    /// What the card covers on screen at rest (panel coordinates): its turned thumbnails and
+    /// icons.
     pub fn bounds(&self, m: &Metrics) -> Rect {
+        self.grown_bounds(m, 1.0)
+    }
+
+    /// The thumbnail under `p` (panel coordinates, the card as laid out, unscaled), as its
+    /// index in [`CardLayout::thumbs`]: the frontmost drawn whose turned plane holds `p`
+    /// (the card draws the list back to front, so the first that holds it is on top).
+    pub fn thumb_at(&self, m: &Metrics, p: Point) -> Option<usize> {
+        self.thumb_at_grown(m, p, 1.0)
+    }
+
+    /// [`CardLayout::thumb_at`] on the card drawn at size `s` ([`CardLayout::grown_bounds`]:
+    /// each window grown about its own middle).
+    pub fn thumb_at_grown(&self, m: &Metrics, p: Point, s: f64) -> Option<usize> {
+        self.thumbs.iter().position(|t| {
+            let q = m.project(self.frame.x + t.rect.x, self.frame.y + t.rect.y, t.rect.w, t.rect.h);
+            if s == 1.0 {
+                return in_quad(&q, p);
+            }
+            let c = self.slot_center(m, t);
+            in_quad(&q.map(|v| Point::new(c.x + (v.x - c.x) * s, c.y + (v.y - c.y) * s)), p)
+        })
+    }
+
+    /// The middle of `t`'s turned plane (its box), panel coordinates: what hover grows that
+    /// window about.
+    fn slot_center(&self, m: &Metrics, t: &ThumbSlot) -> Point {
+        let b = m.projected_bounds(self.frame.x + t.rect.x, self.frame.y + t.rect.y, t.rect.w, t.rect.h);
+        Point::new(b.x + b.w / 2.0, b.y + b.h / 2.0)
+    }
+
+    /// The middle of the turned plane of thumbnail `index` in [`CardLayout::thumbs`] (panel
+    /// coordinates): a card drawn at size `s` (hovered, pressed) grows each window by `s`
+    /// about its own middle, as Apple's does (measured 11-09 on a card of two apps: Blue's and
+    /// Green's middles stayed within half a point, the offsets between them kept), and its
+    /// app icons stay as they are.
+    pub fn thumb_center(&self, m: &Metrics, index: usize) -> Option<Point> {
+        self.thumbs.get(index).map(|t| self.slot_center(m, t))
+    }
+
+    /// Thumbnail `index`'s plane before the turn, drawn at size `s` (panel coordinates): its
+    /// left edge and top moved as [`CardLayout::grown_bounds`] grows its box, its size times
+    /// `s`. Turned, it is the window as the card draws it (a dragged card's ghost starts there).
+    pub fn drawn_plane(&self, m: &Metrics, index: usize, s: f64) -> Option<Rect> {
+        let t = self.thumbs.get(index)?;
+        let c = self.slot_center(m, t);
+        let (x, y) = (self.frame.x + t.rect.x, self.frame.y + t.rect.y);
+        Some(Rect::new(c.x + (x - c.x) * s, c.y + (y - c.y) * s, t.rect.w * s, t.rect.h * s))
+    }
+
+    /// What the card covers drawn at size `s` (panel coordinates): each turned thumbnail grown
+    /// by `s` about its own middle ([`CardLayout::thumb_center`]), the icons as they are.
+    pub fn grown_bounds(&self, m: &Metrics, s: f64) -> Rect {
         let mut r: Option<Rect> = None;
         let mut add = |b: Rect| r = Some(r.map_or(b, |a| a.union(&b)));
         for t in &self.thumbs {
-            add(m.projected_bounds(self.frame.x + t.rect.x, self.frame.y + t.rect.y, t.rect.w, t.rect.h));
+            let b = m.projected_bounds(self.frame.x + t.rect.x, self.frame.y + t.rect.y, t.rect.w, t.rect.h);
+            if s == 1.0 {
+                add(b);
+                continue;
+            }
+            let c = Point::new(b.x + b.w / 2.0, b.y + b.h / 2.0);
+            add(Rect::new(c.x - b.w * s / 2.0, c.y - b.h * s / 2.0, b.w * s, b.h * s));
         }
         for (_, i) in &self.icons {
             add(i.translate(self.frame.x, self.frame.y));
@@ -322,14 +381,8 @@ impl CardLayout {
         r.unwrap_or(self.frame)
     }
 
-    /// The thumbnail under `p` (panel coordinates, the card as laid out, unscaled), as its
-    /// index in [`CardLayout::thumbs`]: the frontmost drawn whose turned plane holds `p`
-    /// (the card draws the list back to front, so the first that holds it is on top).
-    pub fn thumb_at(&self, m: &Metrics, p: Point) -> Option<usize> {
-        self.thumbs.iter().position(|t| in_quad(&m.project(self.frame.x + t.rect.x, self.frame.y + t.rect.y, t.rect.w, t.rect.h), p))
-    }
-
-    /// The center hover grows the card about: the middle of its turned thumbnails.
+    /// The middle of the card's turned thumbnails: a reference point that moves with the
+    /// card's slot (a glide from a grown card starts from it, [`super::motion_math::rescaled_start`]).
     pub fn hover_center(&self, m: &Metrics) -> Point {
         let mut r: Option<Rect> = None;
         for t in &self.thumbs {
@@ -507,18 +560,20 @@ pub fn window_grab(full: Size, grab: (f64, f64)) -> (f64, f64) {
     (grab.0.clamp(0.0, full.w.max(0.0) / 2.0), grab.1.clamp(0.0, full.h.max(0.0) / 2.0))
 }
 
-/// The ghost of a card dragged out of the strip, in global coordinates: inside the strip it
-/// is the front thumbnail `thumb` (where it was pressed, grabbed at fractions `grab` of its
-/// size); past `strip_right` it grows toward the window's `full` size, reached `grow` further
-/// (`[drag] grow_distance`), the grab point sliding to where the window is held (`hold`,
-/// [`window_grab`]). The pointer `p` stays at the grab point throughout.
-pub fn ghost_frame(thumb: Rect, grab: (f64, f64), full: Size, strip_right: f64, grow: f64, hold: (f64, f64), p: Point) -> Rect {
+/// The ghost of a card dragged out of the strip, before its turn, in global coordinates:
+/// inside the strip it is the pressed window's plane `start` (its thumbnail before the turn,
+/// as drawn when pressed, the pointer `grab` right of its left edge and below its top); past
+/// `strip_right` it grows toward the window's `full` size, reached `grow` further (`[drag]
+/// grow_distance`), the grab point sliding to where the window is held (`hold`,
+/// [`window_grab`]). The pointer `p` stays at the grab point throughout. The ghost starts
+/// turned as the card is and flattens on its own time (the strip's `Ghost`).
+pub fn ghost_frame(start: Rect, grab: (f64, f64), full: Size, strip_right: f64, grow: f64, hold: (f64, f64), p: Point) -> Rect {
     let t = ((p.x - strip_right) / grow.max(1.0)).clamp(0.0, 1.0);
     let lerp = |a: f64, b: f64| a + (b - a) * t;
-    let w = lerp(thumb.w, full.w.max(thumb.w));
-    let h = lerp(thumb.h, full.h.max(thumb.h));
-    let ox = lerp(grab.0 * thumb.w, hold.0);
-    let oy = lerp(grab.1 * thumb.h, hold.1);
+    let w = lerp(start.w, full.w.max(start.w));
+    let h = lerp(start.h, full.h.max(start.h));
+    let ox = lerp(grab.0, hold.0);
+    let oy = lerp(grab.1, hold.1);
     Rect::new(p.x - ox, p.y - oy, w, h)
 }
 
@@ -589,7 +644,8 @@ mod tests {
         layout_column(&[c], m.visible.h, m).remove(0)
     }
 
-    /// `l`'s box grown by `s` about its hover center (as the strip draws a hovered card).
+    /// `l`'s box grown whole by `s` about its middle: the bound [`Metrics::panel_width`]
+    /// leaves room for, wider than the card drawn grown ([`CardLayout::grown_bounds`]).
     fn grown(l: &CardLayout, m: &Metrics, s: f64) -> Rect {
         let (b, c) = (l.bounds(m), l.hover_center(m));
         Rect::new(c.x + (b.x - c.x) * s, c.y + (b.y - c.y) * s, b.w * s, b.h * s)
@@ -604,6 +660,9 @@ mod tests {
             let panel = m.panel_width();
             let hovered = grown(&l, &m, m.hover_scale);
             assert!(hovered.max_x() + m.shadow <= panel, "grown under the pointer: {} in {panel}", hovered.max_x());
+            // Drawn grown, each window about its own middle: within that bound.
+            let drawn = l.grown_bounds(&m, m.hover_scale);
+            assert!(drawn.max_x() <= hovered.max_x() + 1e-9 && drawn.x >= hovered.x - 1e-9, "{drawn:?} in {hovered:?}");
             // Dragged in the column: pressed at its left edge, the pointer at the column's edge.
             let dragged = hovered.max_x() + (m.width - hovered.x);
             assert!(dragged + m.shadow <= panel, "following the pointer: {dragged} in {panel}");
@@ -877,6 +936,83 @@ mod tests {
         assert_eq!(l.draw_order().last().map(|t| t.id), Some(1));
     }
 
+    /// Apple's hovered card of two apps (11-09, `05-rest-strip` and `05-hover-combined-strip`,
+    /// 2 px a point): Blue's left edge moved 4.5 pt left, Green's 4; each window's middle stayed
+    /// within half a point (Blue 55.5 → 55.3, Green 93.3 → 93); Blue 79 → 87.5 pt wide, Green
+    /// 70.5 → 78 (11 %); the pair 112.5 → 120.5 pt wide (7 %); the icons' boxes unchanged to the
+    /// pixel. A single card grows as before (`13-hover-blue`: 88.5 → 99 pt wide, its icon
+    /// unchanged).
+    #[test]
+    fn a_hovered_card_grows_each_window_about_its_own_middle_and_keeps_its_icons() {
+        let m = five_k();
+        let (blue, green) = (Rect::new(760.0, 262.0, 1100.0, 748.0), Rect::new(1300.0, 604.0, 1000.0, 688.0));
+        let l = layout_column(&[card_at(1, &[(1, 20, green), (2, 10, blue)])], 1410.0, &m).remove(0);
+        let s = m.hover_scale;
+        let rest = l.bounds(&m);
+        let grown = l.grown_bounds(&m, s);
+        let box_of = |t: &ThumbSlot| m.projected_bounds(l.frame.x + t.rect.x, l.frame.y + t.rect.y, t.rect.w, t.rect.h);
+        let (g, b) = (box_of(&l.thumbs[0]), box_of(&l.thumbs[1]));
+        // Each window about its own middle: its left edge moves (s - 1) / 2 of its width.
+        let moved = |r: &Rect| r.w * (s - 1.0) / 2.0;
+        assert!((moved(&b) - 4.5).abs() < 1.0 && (moved(&g) - 4.0).abs() < 1.0, "Blue {:.2}, Green {:.2}", moved(&b), moved(&g));
+        // Blue grown stays right of the icon, whose left edge is the card's, grown or not.
+        assert!(b.x - moved(&b) > grown.x && grown.x == rest.x, "{grown:?} {rest:?}");
+        // The offsets between the windows' middles are kept.
+        let (cg, cb) = (l.thumb_center(&m, 0).unwrap(), l.thumb_center(&m, 1).unwrap());
+        assert!((cg.x - (g.x + g.w / 2.0)).abs() < 1e-9 && (cb.y - (b.y + b.h / 2.0)).abs() < 1e-9);
+        // The windows' span 7 % wider (the card grown whole would be 11 %).
+        let span = |k: f64| {
+            let (bl, gr) = (b.x + b.w / 2.0 - b.w * k / 2.0, g.x + g.w / 2.0 + g.w * k / 2.0);
+            gr - bl
+        };
+        let wider = span(s) / span(1.0);
+        assert!((1.06..1.085).contains(&wider), "{wider}");
+        // The icons where they were, at their size.
+        for (_, i) in &l.icons {
+            let at = i.translate(l.frame.x, l.frame.y);
+            assert_eq!(grown.union(&at), grown, "the icon at rest is the icon drawn");
+        }
+        assert_eq!(l.grown_bounds(&m, 1.0), rest);
+        // A press past Green's far edge at rest, inside it grown, finds Green.
+        let q = m.project(l.frame.x + l.thumbs[0].rect.x, l.frame.y + l.thumbs[0].rect.y, l.thumbs[0].rect.w, l.thumbs[0].rect.h);
+        let past = Point::new(q[1].x + 2.0, (q[1].y + q[2].y) / 2.0);
+        assert_eq!(l.thumb_at(&m, past), None);
+        assert_eq!(l.thumb_at_grown(&m, past, s), Some(0));
+        // One window: grown about its middle, as the whole card was.
+        let one = layout_column(&[card_at(1, &[(1, 10, blue)])], 1410.0, &m).remove(0);
+        let t = box_of_one(&m, &one);
+        let c = one.thumb_center(&m, 0).unwrap();
+        let g1 = one.grown_bounds(&m, s);
+        assert!((g1.max_x() - (c.x + t.w * s / 2.0)).abs() < 1e-9 && (g1.y - (c.y - t.h * s / 2.0)).abs() < 1e-9, "{g1:?}");
+    }
+
+    /// A dragged card's ghost starts as the window the card draws: its plane turned is the
+    /// card's grown box, within a point and a half (the widest card: 1.2 pt).
+    #[test]
+    fn the_drawn_plane_turned_is_the_window_as_the_card_draws_it() {
+        for m in [laptop(), five_k()] {
+            let l = widest(&m);
+            for s in [1.0, m.hover_scale] {
+                for i in 0..l.thumbs.len() {
+                    let p = l.drawn_plane(&m, i, s).unwrap();
+                    let turned = m.projected_bounds(p.x, p.y, p.w, p.h);
+                    let t = &l.thumbs[i];
+                    let b = m.projected_bounds(l.frame.x + t.rect.x, l.frame.y + t.rect.y, t.rect.w, t.rect.h);
+                    let c = l.thumb_center(&m, i).unwrap();
+                    let drawn = Rect::new(c.x - b.w * s / 2.0, c.y - b.h * s / 2.0, b.w * s, b.h * s);
+                    for (a, z) in [(turned.x, drawn.x), (turned.y, drawn.y), (turned.max_x(), drawn.max_x()), (turned.max_y(), drawn.max_y())] {
+                        assert!((a - z).abs() < 1.5, "{s}, window {i}: {turned:?} vs {drawn:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    fn box_of_one(m: &Metrics, l: &CardLayout) -> Rect {
+        let t = &l.thumbs[0];
+        m.projected_bounds(l.frame.x + t.rect.x, l.frame.y + t.rect.y, t.rect.w, t.rect.h)
+    }
+
     #[test]
     fn a_second_app_peeks_out_on_its_side_of_the_screen() {
         let m = five_k();
@@ -963,7 +1099,7 @@ mod tests {
     fn the_ghost_grows_from_the_thumbnail_to_the_window_past_the_strip() {
         let thumb = Rect::new(20.0, 500.0, 150.0, 100.0);
         let full = Size::new(900.0, 600.0);
-        let grab = (0.5, 0.5);
+        let grab = (75.0, 50.0);
         let style = StripStyle::default();
         let (grow, d) = (style.drag.grow_distance, &style.drag);
         let hold = window_grab(full, (d.window_grab_x, d.window_grab_y));
@@ -978,7 +1114,7 @@ mod tests {
         let at = drop_origin(hold, Point::new(200.0 + grow + 50.0, 550.0));
         assert_eq!((at.x, at.y), (far.x, far.y), "the drop lands where the grown ghost was");
         // Wherever the card was pressed (Apple's 03 at 47 % of the card, 06 at 71 %), the same.
-        let other = ghost_frame(thumb, (0.71, 0.67), full, 200.0, grow, hold, Point::new(200.0 + grow + 50.0, 550.0));
+        let other = ghost_frame(thumb, (106.5, 67.0), full, 200.0, grow, hold, Point::new(200.0 + grow + 50.0, 550.0));
         assert_eq!((other.x, other.y), (far.x, far.y));
         // A small window is held at most at its middle.
         assert_eq!(window_grab(Size::new(150.0, 120.0), (96.0, 100.0)), (75.0, 60.0));

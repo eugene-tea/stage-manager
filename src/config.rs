@@ -153,6 +153,8 @@ pub struct CardStyle {
     pub press_scale: f64,
     pub press_ms: u64,
     pub fade_ms: u64,
+    /// A window on a card before its picture arrives: its glass at this opacity.
+    pub empty_opacity: f64,
     /// Each window's picture on a card (1: opaque; below, the wallpaper shows through).
     pub window_opacity: f64,
     /// The same on the card under the pointer (or a drop's target), eased with its growth.
@@ -947,6 +949,7 @@ impl Config {
                     press_scale: v.num("cards.press_scale"),
                     press_ms: v.uint("cards.press_ms"),
                     fade_ms: v.uint("cards.fade_ms"),
+                    empty_opacity: v.num("cards.empty_opacity"),
                     window_opacity: v.num("cards.window_opacity"),
                     hover_window_opacity: v.num("cards.hover_window_opacity"),
                     backdrop_saturation: v.num("cards.backdrop_saturation"),

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Hovering a card of two apps grows each window a little on its own, as Apple's does, so
+  the card keeps its shape instead of swelling as a whole; the app icons stay where they
+  are, at their size, on every card.
+- A card you drag into the middle starts tilted, as it sits in the strip, and straightens as
+  it grows toward its window, as with Apple's, instead of going flat at once.
+- At launch, a card still waiting for its window's picture is faint glass instead of a dark
+  grey block, and the picture fades in when it arrives, so the strip no longer flicks from
+  dark blocks to pictures one card at a time.
 - A card is no longer cut off at the strip's right edge: a second app's window on a combined
   card (Mail beside Telegram, say), a card growing under the pointer, and a card you drag
   toward the edge show whole.

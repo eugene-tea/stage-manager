@@ -15,9 +15,10 @@
 //!   Animation stacked the planes by depth, and a second app's window, further right, covered
 //!   the front one (owner, 10-27). Every depth gets the same slide and the same glide in one
 //!   transaction, which keeps the card one unit.
-//! - **Hover** grows the card about its center (eased); a click acts on mouse-up in the same
-//!   card and goes out as [`StripEvent::CardClicked`], or [`StripEvent::IconClicked`] on its
-//!   app icon.
+//! - **Hover** grows each window of the card about its own middle on the hover's spring, the
+//!   icons, badge and name staying as they are (Apple's, measured 11-09); a click acts on
+//!   mouse-up in the same card and goes out as [`StripEvent::CardClicked`], or
+//!   [`StripEvent::IconClicked`] on its app icon.
 //! - Cards glide to new slots on the spring; the strip **slides** out to the left when
 //!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
 //! - Thumbnails come from [`capture`], refreshed every `thumbnail_interval_ms`.
@@ -42,7 +43,8 @@
 //!   card itself follows the pointer and the others make room on the spring
 //!   (`[strip] reorder`; released there it goes out as [`StripEvent::CardMoved`]); past the
 //!   column a ghost of the window pressed (the frontmost turned plane under the press)
-//!   follows the pointer in its own click-through panel and grows toward that window's size;
+//!   follows the pointer in its own click-through panel, turned as the card at first and flat
+//!   on the growing spring, and grows toward that window's size;
 //!   released outside the strip it goes out as [`StripEvent::CardDropped`]. On a card of
 //!   several windows that window goes alone, as on Apple's (the event names it; its plane
 //!   fades while it is out, and the card drops it at the release); in the column the card
@@ -914,7 +916,8 @@ impl Geometry {
 /// the card draws them in their order, back to front, with the same transforms as before.
 struct Depth {
     /// Covers the panel, anchored at the eye; its `sublayerTransform` is the strip's slide
-    /// and the perspective ([`perspective`]).
+    /// and the perspective ([`perspective`]), and a thumbnail depth's `transform` its window's
+    /// growth (hovered, pressed: [`Strip::window_transform`]).
     space: Retained<CALayer>,
     /// The 3D group inside it: its `position` is the card's offset from where its content
     /// was built. Every depth of a card gets the same position and glide in the same
@@ -950,8 +953,9 @@ impl Depth {
 
 /// One card's layers.
 struct CardLayers {
-    /// The card: covers the panel, anchored at the eye, flat; its `transform` is the hover.
-    /// It draws its depths in their order.
+    /// The card: covers the panel, anchored at the eye, flat (each window grows in its own
+    /// depth; the card's `transform` only shrinks a card merged into another). It draws its
+    /// depths in their order.
     card: Retained<CALayer>,
     /// The thumbnails' depths, back to front, one per plane.
     depths: Vec<Depth>,
@@ -1162,13 +1166,35 @@ fn fade_in(layer: &CALayer, seconds: f64) {
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("fade")));
 }
 
+/// The plate under an opaque picture (the glass off, or no picture of the wallpaper).
+fn plate() -> CFRetained<CGColor> {
+    color(0.22, 0.22, 0.24, 1.0)
+}
+
+/// A window's plane before its picture arrives (`[cards] empty_opacity`): the glass's under
+/// (`look`) at that opacity, nearly see-through; with no under (no picture of the wallpaper,
+/// the glass off), black darkening the wallpaper as much as that glass would (the under is
+/// the wallpaper at `backdrop_brightness`), so it stays faint, never a dark plate.
+fn empty_plate(look: Option<&GlassLook>, c: &crate::config::CardStyle) -> CFRetained<CGColor> {
+    let a = c.empty_opacity.clamp(0.0, 1.0);
+    look.and_then(|l| CGColor::new_copy_with_alpha(Some(&l.color), a))
+        .unwrap_or_else(|| color(0.0, 0.0, 0.0, a * (1.0 - c.backdrop_brightness).clamp(0.0, 1.0)))
+}
+
+/// True once `image` shows its window's picture.
+fn has_picture(image: &CALayer) -> bool {
+    // SAFETY: reading a layer's contents; nil when it has none.
+    unsafe { image.contents() }.is_some()
+}
+
 /// Paints `plane`'s glass: its background the under and `image` at the card's opacity, or
-/// (none) the plain plate under an opaque picture; on the curve `fade` when it takes time.
-fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>, fade: Ease) {
-    let plate = color(0.22, 0.22, 0.24, 1.0);
+/// (none) the plain plate under an opaque picture; a plane whose picture has not arrived
+/// shows the faint plate alone ([`empty_plate`]); on the curve `fade` when it takes time.
+fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>, c: &crate::config::CardStyle, fade: Ease) {
     let (to_color, to_opacity) = match look {
+        _ if !has_picture(image) => (empty_plate(look, c), 0.0),
         Some(l) => (l.color.clone(), l.opacity),
-        None => (plate, 1.0),
+        None => (plate(), 1.0),
     };
     if fade.seconds() > 0.0 {
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
@@ -1244,8 +1270,19 @@ fn app_icon(pid: i32, points: f64) -> Option<CFRetained<CGImage>> {
 /// The ghost of a dragged card: its front thumbnail in a click-through panel of its own. The
 /// panel holds the whole picture (a popup sticking out of the window included); the card's
 /// plate is the window's part of it.
+///
+/// It starts turned as the card is (the strip's turn, seen from the strip's eye) and flattens
+/// on the spring of windows growing out of the strip, whatever the pointer does: Apple's
+/// dragged card appears turned like a card and is flat about 300 ms later (measured 11-09 on
+/// two drags at different distances: the turn halved after about 90 ms and was under a tenth
+/// after about 230 ms both times, while the pointer had moved 114 and 150 pt).
 struct Ghost {
     panel: Retained<NSPanel>,
+    /// Covers the panel, anchored at the strip's eye: its `sublayerTransform` is the strip's
+    /// perspective.
+    space: Retained<CALayer>,
+    /// The window's plane (the plate and the picture), turned about its left edge.
+    turn: Retained<CALayer>,
     /// The window's plate (background, border, rounded corners).
     layer: Retained<CALayer>,
     /// The picture, over the plate and past it where child windows stick out.
@@ -1253,10 +1290,28 @@ struct Ghost {
     extent: Extent,
     /// Where its window was last put (global, top-left) and the primary display's height.
     placed: std::cell::Cell<Option<(Rect, f64)>>,
+    /// The strip's eye (global, top-left), for the turn.
+    eye: Point,
+    /// It shows its window's picture (else its faint plate alone, the picture fading in when
+    /// it arrives).
+    pictured: bool,
+    /// How long an arriving picture takes to fade in (seconds; 0: at once).
+    fade: f64,
+}
+
+/// How a card's ghost starts: the card's turn and the strip's eye, the spring it flattens on
+/// (`None`: flat at once), its plate's colour and an arriving picture's fade.
+struct GhostLook {
+    tilt: f64,
+    eye: Point,
+    perspective: f64,
+    flatten: Option<motion_math::Spring>,
+    plate: CFRetained<CGColor>,
+    fade: f64,
 }
 
 impl Ghost {
-    fn new(mtm: MainThreadMarker, picture: Option<&Picture>, opacity: f32) -> Self {
+    fn new(mtm: MainThreadMarker, picture: Option<&Picture>, opacity: f32, look: GhostLook) -> Self {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0));
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -1278,31 +1333,60 @@ impl Ghost {
         view.setLayer(Some(&root));
         view.setWantsLayer(true);
         root.setOpacity(opacity);
+        let space = CALayer::new();
+        let mut p = identity();
+        p.m34 = -1.0 / look.perspective.max(1.0);
+        space.setSublayerTransform(p);
+        let turn = CALayer::new();
+        turn.setAnchorPoint(CGPoint::new(0.0, 0.5));
         let layer = CALayer::new();
         layer.setCornerRadius(9.0);
         layer.setMasksToBounds(true);
         layer.setBorderWidth(0.5);
         layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.35)));
-        layer.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 0.95)));
+        // Faint, as a card without its picture: the picture covers it where it has one.
+        layer.setBackgroundColor(Some(&look.plate));
         let image = CALayer::new();
         image.setCornerRadius(9.0);
         image.setMasksToBounds(true);
         // SAFETY: framework constant.
         image.setContentsGravity(unsafe { kCAGravityResizeAspectFill });
-        root.addSublayer(&layer);
-        root.addSublayer(&image);
+        root.addSublayer(&space);
+        space.addSublayer(&turn);
+        turn.addSublayer(&layer);
+        turn.addSublayer(&image);
         let mut extent = Extent::NONE;
         if let Some(picture) = picture {
             extent = picture.extent;
             // SAFETY: a CGImage is valid layer contents.
             unsafe { image.setContents(Some(as_object(&*picture.image))) };
         }
+        // Turned as the card is, then flat on the spring.
+        if look.tilt != 0.0
+            && let Some(s) = look.flatten
+        {
+            let from = CATransform3D::new_rotation(look.tilt, 0.0, 1.0, 0.0);
+            turn.setTransform(identity());
+            turn.addAnimation_forKey(&spring(s, "transform", &transform_value(from), &transform_value(identity())), Some(&NSString::from_str("flatten")));
+        }
         panel.setContentView(Some(&view));
-        Self { panel, layer, image, extent, placed: std::cell::Cell::new(None) }
+        Self {
+            panel,
+            space,
+            turn,
+            layer,
+            image,
+            extent,
+            placed: std::cell::Cell::new(None),
+            eye: look.eye,
+            pictured: picture.is_some(),
+            fade: look.fade,
+        }
     }
 
-    /// Places the ghost's window at `r` (global, top-left origin); the panel holds the whole
-    /// picture around it.
+    /// Places the ghost's window at `r` (global, top-left origin), before its turn; the panel
+    /// holds the whole picture around it (the turned plane lies within it: the turn only draws
+    /// a plane right of the eye narrower and nearer the eye's height).
     fn set_frame(&self, r: Rect, primary_height: f64) {
         let whole = self.extent.around(r);
         let cocoa = NSRect::new(NSPoint::new(whole.x, primary_height - (whole.y + whole.h)), NSSize::new(whole.w, whole.h));
@@ -1310,18 +1394,34 @@ impl Ghost {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         // The view is not flipped: layer frames go up from the panel's bottom edge.
-        self.layer.setFrame(cg_rect(&Rect::new(r.x - whole.x, whole.max_y() - r.max_y(), r.w, r.h)));
-        self.image.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(whole.w, whole.h)));
+        let eye = Point::new(self.eye.x - whole.x, whole.max_y() - self.eye.y);
+        self.space.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(whole.w, whole.h)));
+        self.space.setAnchorPoint(CGPoint::new(eye.x / whole.w.max(1.0), eye.y / whole.h.max(1.0)));
+        self.space.setPosition(CGPoint::new(eye.x, eye.y));
+        self.turn.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(r.w, r.h)));
+        self.turn.setPosition(CGPoint::new(r.x - whole.x, whole.max_y() - r.max_y() + r.h / 2.0));
+        self.layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(r.w, r.h)));
+        self.image.setFrame(cg_rect(&Rect::new(whole.x - r.x, r.max_y() - whole.max_y(), whole.w, whole.h)));
         CATransaction::commit();
         self.placed.set(Some((r, primary_height)));
         self.panel.orderFrontRegardless();
     }
 
+    /// Flat at once (released: the drop's motion starts from the flat window).
+    fn flatten(&self) {
+        self.turn.removeAnimationForKey(&NSString::from_str("flatten"));
+    }
+
     /// A newer picture: the panel keeps the window where it is and grows or shrinks around it
-    /// when the window sits elsewhere in the picture (by half a point or more as drawn).
+    /// when the window sits elsewhere in the picture (by half a point or more as drawn). The
+    /// first picture of a ghost drawn without one fades in.
     fn set_image(&mut self, picture: &Picture) {
         // SAFETY: a CGImage is valid layer contents.
         unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
+        if !self.pictured {
+            self.pictured = true;
+            fade_in(&self.image, self.fade);
+        }
         let placed = self.placed.get();
         let (w, h) = placed.map_or((0.0, 0.0), |(r, _)| (r.w, r.h));
         if placed.is_none() || !picture.extent.same_as(&self.extent, w, h) {
@@ -1366,7 +1466,10 @@ struct CardDrag {
     press: Point,
     /// The pressed window's thumbnail where it was pressed (global, its turned plane's box).
     thumb: Rect,
-    /// The press point as fractions of the thumbnail's size.
+    /// The pressed window's plane before the turn, as drawn when pressed (global, grown with
+    /// the card): the ghost starts there, turned as the card is ([`Ghost`]).
+    plane: Rect,
+    /// The press point right of that plane's left edge and below its top (points).
     grab: (f64, f64),
     /// The pressed window's size.
     full: Size,
@@ -2208,15 +2311,23 @@ impl Strip {
         strip_model::publish_cards(self.display, frames);
     }
 
-    /// The transform of a card's container (anchored at the eye): a scale about the card's
-    /// center at `layout` by [`Strip::card_scale`].
-    fn card_transform(&self, layout: &CardLayout) -> CATransform3D {
+    /// The transform of the depth of window `id` on the card at `layout` (its container is
+    /// anchored at the eye): a scale by [`Strip::card_scale`] about that window's own middle
+    /// ([`CardLayout::thumb_center`]), as Apple's card grows each of its windows, the offsets
+    /// between them kept; the icons, badge and name (the top depth) stay as they are.
+    fn window_transform(&self, layout: &CardLayout, id: u32) -> CATransform3D {
         let s = self.card_scale(layout.stage);
-        if s == 1.0 {
-            return identity();
-        }
         let m = self.m();
-        scale_about(s, layout.hover_center(m), m.eye)
+        match layout.thumbs.iter().position(|t| t.id == id).and_then(|i| layout.thumb_center(m, i)) {
+            Some(c) if s != 1.0 => scale_about(s, c, m.eye),
+            _ => identity(),
+        }
+    }
+
+    /// Each thumbnail depth's transform on `stage`'s card at `layout` ([`Strip::window_transform`]),
+    /// back to front as its depths.
+    fn depth_transforms(&self, stage: u64, layout: &CardLayout) -> Vec<CATransform3D> {
+        self.pane.cards.get(&stage).map_or_else(Vec::new, |l| l.planes.iter().map(|(id, _)| self.window_transform(layout, *id)).collect())
     }
 
     /// Where a card's unit sits: its content was built for the card at `built`, and the card
@@ -2309,7 +2420,7 @@ impl Strip {
             }
         }
         let glide = self.glide().filter(|_| !(immediate || self.instant));
-        let hover = self.card_transform(layout);
+        let grown = self.depth_transforms(card.stage, layout);
         let scale = self.card_scale(card.stage);
         if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
             // The whole card glides to its new place as one unit, from where it is drawn: its
@@ -2319,7 +2430,9 @@ impl Strip {
             let now = Point::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
             let from = motion_math::rescaled_start(now, scale, old_center, layout.hover_center(&m));
             layers.move_units(glide, CGPoint::new(from.x, from.y), to);
-            layers.card.setTransform(hover);
+            for (d, t) in layers.depths.iter().zip(grown) {
+                d.space.setTransform(t);
+            }
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
         }
@@ -2401,7 +2514,7 @@ impl Strip {
                 continue;
             }
             let fade = if old.is_some() && look.is_some() { fade } else { Ease::Out(0.0) };
-            paint_plane_glass(plane, image, look.as_ref(), fade);
+            paint_plane_glass(plane, image, look.as_ref(), &self.style.cards, fade);
         }
         CATransaction::commit();
         if let Some(layers) = self.pane.cards.get_mut(&stage) {
@@ -2428,14 +2541,40 @@ impl Strip {
         unsafe { unit.setSublayers(None) };
         unit.removeAnimationForKey(&NSString::from_str("position"));
         unit.setPosition(CGPoint::new(0.0, 0.0));
-        for d in layers.depths.drain(..) {
-            d.space.removeFromSuperlayer();
-        }
         // Thumbnails back to front, each a plane turned about its left edge in a depth of its
-        // own (see `Depth`), so the front window is drawn on top.
+        // own (see `Depth`), so the front window is drawn on top. A window the card showed
+        // already keeps its depth, so its growth under way carries on (a merge preview adding
+        // windows to a card growing under the pointer); a window gone takes its depth along.
         let order = layout.draw_order();
-        let depths: Vec<Depth> =
-            (0..order.len()).map(|i| Depth::new(&layers.card, i as u32, &m, dx, Some(&layers.top.space))).collect();
+        let old: Vec<Depth> = std::mem::take(&mut layers.depths);
+        let mut kept: Vec<(u32, Depth)> = Vec::new();
+        for (i, d) in old.into_iter().enumerate() {
+            match layers.planes.get(i).map(|(id, _)| *id).filter(|id| order.iter().any(|t| t.id == *id)) {
+                Some(id) => kept.push((id, d)),
+                None => d.space.removeFromSuperlayer(),
+            }
+        }
+        let mut depths: Vec<Depth> = Vec::with_capacity(order.len());
+        for (i, slot) in order.iter().enumerate() {
+            let depth = match kept.iter().position(|(id, _)| *id == slot.id) {
+                Some(j) => {
+                    let (_, d) = kept.remove(j);
+                    // SAFETY: setting no sublayers removes the old children.
+                    unsafe { d.unit.setSublayers(None) };
+                    d.unit.removeAnimationForKey(&NSString::from_str("position"));
+                    d.unit.setPosition(CGPoint::new(0.0, 0.0));
+                    // The depths before it are in place, so it lies at `i` or further up.
+                    // SAFETY: reading a layer's sublayers; nil when it has none.
+                    let there = unsafe { layers.card.sublayers() }.is_some_and(|a| i < a.count() && Retained::as_ptr(&a.objectAtIndex(i)) == Retained::as_ptr(&d.space));
+                    if !there {
+                        layers.card.insertSublayer_atIndex(&d.space, i as u32);
+                    }
+                    d
+                }
+                None => Depth::new(&layers.card, i as u32, &m, dx, Some(&layers.top.space)),
+            };
+            depths.push(depth);
+        }
         layers.depths = depths;
         let Some(layers) = self.pane.cards.get(&stage) else { return };
         let style = self.style.clone();
@@ -2450,7 +2589,7 @@ impl Strip {
             plane.setPosition(CGPoint::new(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y + slot.rect.h / 2.0));
             plane.setTransform(turn(&m));
             plane.setCornerRadius(c.corner_radius * k);
-            plane.setBackgroundColor(Some(&color(0.22, 0.22, 0.24, 1.0)));
+            plane.setBackgroundColor(Some(&plate()));
             #[cfg(feature = "debug-render")]
             if let Some((r, g, b)) = crate::ui::strip_demo::fake_color(slot.id) {
                 plane.setBackgroundColor(Some(&color(r, g, b, 1.0)));
@@ -2481,8 +2620,18 @@ impl Strip {
             if let Some(picture) = self.thumbs.get(&slot.id).or_else(|| self.motion.snapshot(slot.id)) {
                 show_picture(&image, picture, window);
             } else {
-                // Drawn gray until its next capture (the owner saw short gray flashes, 10-22).
+                // Faint until its capture arrives, then the picture fades in (`set_thumbnail`):
+                // a column of dark plates turning into pictures one by one caught the eye
+                // (owner 11-09; gray flashes before that, 10-22).
                 tracing::debug!(stage, window = slot.id, "card drawn with a thumbnail that has no picture yet");
+                #[cfg(feature = "debug-render")]
+                let fake = crate::ui::strip_demo::fake_color(slot.id).is_some();
+                #[cfg(not(feature = "debug-render"))]
+                let fake = false;
+                if !fake {
+                    plane.setBackgroundColor(Some(&empty_plate(None, c)));
+                    image.setOpacity(0.0);
+                }
             }
             plane.addSublayer(&image);
             depth.unit.addSublayer(&plane);
@@ -2565,13 +2714,20 @@ impl Strip {
             return;
         }
         self.motion.thumbnail_arrived(id, &picture);
+        let fade = Ease::Out(self.style.animation.seconds(self.style.cards.fade_ms));
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
             for ((wid, layer), (_, plane)) in layers.images.iter().zip(&layers.planes) {
                 if *wid == id {
+                    let first = !has_picture(layer);
                     let b = plane.bounds();
                     show_picture(layer, &picture, Rect::new(0.0, 0.0, b.size.width, b.size.height));
+                    if first {
+                        // Its first picture fades in over the faint plate, which takes the glass.
+                        let look = layers.glass.iter().find(|(w, _)| w == wid).and_then(|(_, l)| l.as_ref());
+                        paint_plane_glass(plane, layer, look, &self.style.cards, fade);
+                    }
                 }
             }
         }
@@ -2633,18 +2789,11 @@ impl Strip {
         Some(if Some(first) == lifted { first } else { hits.find(|s| Some(*s) == lifted).unwrap_or(first) })
     }
 
-    /// A card's box where it is drawn: on its way to its slot, and grown when hovered.
+    /// A card's box where it is drawn: on its way to its slot, and grown when hovered (each
+    /// window about its own middle, the icons as they are).
     fn drawn_bounds(&self, l: &CardLayout) -> Rect {
-        let m = self.m();
         let d = self.drawn_offset(l.stage);
-        let b = l.bounds(m).translate(d.x, d.y);
-        let s = self.card_scale(l.stage);
-        if s == 1.0 {
-            return b;
-        }
-        let c = l.hover_center(m);
-        let (cx, cy) = (c.x + d.x, c.y + d.y);
-        Rect::new(cx + (b.x - cx) * s, cy + (b.y - cy) * s, b.w * s, b.h * s)
+        l.grown_bounds(self.m(), self.card_scale(l.stage)).translate(d.x, d.y)
     }
 
     /// How far `stage`'s card is drawn from its slot (on its way there).
@@ -2735,8 +2884,12 @@ impl Strip {
         let g = self.geometry.global;
         let b = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let thumb = Rect::new(g.x + b.x, g.y + b.y, b.w.max(1.0), b.h.max(1.0));
+        // The plane as the card draws it now: grown about its own middle when hovered.
+        let index = layout.thumbs.iter().position(|t| t.id == slot.id).unwrap_or(0);
+        let drawn = layout.drawn_plane(self.m(), index, self.card_scale(stage)).unwrap_or(b);
+        let plane = Rect::new(g.x + drawn.x, g.y + drawn.y, drawn.w.max(1.0), drawn.h.max(1.0));
         let press = self.pointer();
-        let grab = (((press.x - thumb.x) / thumb.w).clamp(0.0, 1.0), ((press.y - thumb.y) / thumb.h).clamp(0.0, 1.0));
+        let grab = (press.x - plane.x, press.y - plane.y);
         Some(CardDrag {
             stage,
             mode: DragMode::Pressed,
@@ -2745,6 +2898,7 @@ impl Strip {
             onto: None,
             press,
             thumb,
+            plane,
             grab,
             full: pressed.frame.size(),
             window: pressed.id,
@@ -2758,13 +2912,9 @@ impl Strip {
     /// now (on its way to its slot, grown or pressed), as its index in the layout's
     /// thumbnails: the frontmost whose turned plane holds it ([`CardLayout::thumb_at`]).
     fn window_at(&self, layout: &CardLayout, p: Point) -> Option<usize> {
-        let m = self.m();
         let d = self.drawn_offset(layout.stage);
-        let s = self.card_scale(layout.stage);
-        // Undo the growth about the drawn middle, then the offset: the card as laid out.
-        let c = layout.hover_center(m);
-        let at = Point::new(c.x + (p.x - d.x - c.x) / s, c.y + (p.y - d.y - c.y) / s);
-        layout.thumb_at(m, at)
+        // Undo the offset; each window drawn grown about its own middle.
+        layout.thumb_at_grown(self.m(), Point::new(p.x - d.x, p.y - d.y), self.card_scale(layout.stage))
     }
 
     /// Fades the plane of `window` on `stage`'s card to `opacity` (a window dragged out
@@ -2822,6 +2972,14 @@ impl Strip {
         let (before, onto) = if mode == DragMode::Reorder { self.card_spot(p, stage) } else { (None, None) };
         let image = self.thumbs.get(&drag.window).cloned();
         let (window, alone) = (drag.window, drag.alone);
+        let look = {
+            let (m, g, full) = (self.m(), self.geometry.global, &self.style);
+            let (tilt, eye, perspective) = (m.tilt, Point::new(g.x + m.eye.x, g.y + m.eye.y), m.perspective);
+            let flatten = full.animation.animates().then(|| motion_math::switch_spring(full));
+            let plate = empty_plate(None, &full.cards);
+            let fade = full.animation.seconds(full.cards.fade_ms);
+            move || GhostLook { tilt, eye, perspective, flatten, plate: plate.clone(), fade }
+        };
         let was = drag.mode;
         let was_onto = self.merge_onto();
         if was == DragMode::Pressed {
@@ -2838,8 +2996,8 @@ impl Strip {
                 drag.ghost = None;
             } else {
                 let hold = strip_layout::window_grab(drag.full, (style.window_grab_x, style.window_grab_y));
-                let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, hold, p);
-                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32));
+                let frame = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, strip_right, style.grow_distance, hold, p);
+                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32, look()));
                 ghost.set_frame(frame, primary_height);
             }
         }
@@ -2943,7 +3101,10 @@ impl Strip {
                 let right = self.geometry.global.max_x();
                 let d = &self.style.drag;
                 let hold = strip_layout::window_grab(drag.full, (d.window_grab_x, d.window_grab_y));
-                let rect = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, right, d.grow_distance, hold, at);
+                let rect = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, right, d.grow_distance, hold, at);
+                if let Some(g) = drag.ghost.as_ref() {
+                    g.flatten();
+                }
                 self.motion.keep_landing(drag.ghost, drag.window, rect);
                 if drag.alone {
                     // The card shows its other windows at once; the controller's snapshot agrees.
@@ -3177,9 +3338,11 @@ impl Strip {
         CATransaction::setDisableActions(true);
         for stage in stages.into_iter().flatten() {
             let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
-            let t = self.card_transform(&layout);
+            let grown = self.depth_transforms(stage, &layout);
             if let Some(layers) = self.pane.cards.get(&stage) {
-                ease_transform(&layers.card, t, e);
+                for (d, t) in layers.depths.iter().zip(grown) {
+                    ease_transform(&d.space, t, e);
+                }
             }
         }
         for stage in stages.into_iter().flatten() {
@@ -3422,6 +3585,24 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner 11-09: a card drawn before its picture arrives is faint, never the dark plate: the
+    /// glass's under at `empty_opacity`, or with no under black darkening the wallpaper as
+    /// much as that glass would.
+    #[test]
+    fn a_card_without_its_picture_is_faint_glass() {
+        let c = StripStyle::default().cards;
+        assert_eq!(c.empty_opacity, 0.35);
+        let alpha = |col: &CGColor| CGColor::alpha(Some(col));
+        let none = empty_plate(None, &c);
+        assert!((alpha(&none) - 0.35 * (1.0 - 0.78)).abs() < 1e-6, "{}", alpha(&none));
+        let look = GlassLook { color: color(0.5, 0.3, 0.2, 1.0), rgb: [0.5, 0.3, 0.2], opacity: 0.78 };
+        let under = empty_plate(Some(&look), &c);
+        assert!((alpha(&under) - 0.35).abs() < 1e-6);
+        // As dark over the wallpaper as each other: the under is the wallpaper at 78 %.
+        assert!(((1.0 - 0.35) + 0.35 * 0.78 - (1.0 - alpha(&none))).abs() < 1e-6);
+        assert!(alpha(&plate()) == 1.0, "the plate under an opaque picture stays");
+    }
 
     thread_local! {
         static SEEN: RefCell<Option<Vec<u32>>> = const { RefCell::new(Some(Vec::new())) };
