@@ -326,6 +326,27 @@ placement = "center"    # and open centered on the screen
 Every option, with its values and default, is in the
 [configuration reference](CONFIG.md).
 
+## Accessibility
+
+- **Keyboard.** Turn on **Keyboard shortcuts** in Settings → Windows: ⌃⌥1–9 switches to a
+  stage (VoiceOver reads each card's number), ⌃⌥⇧1–9 sends the front window to one, ⌃⌥N gives it a
+  stage of its own, ⌃⌥S shows or hides the strip. ⌘-Tab and the Dock also bring an app's
+  stage forward, and holding Shift as you open an app brings it into the stage you are in.
+  Settings, the welcome window and the menu work with Full Keyboard Access.
+- **VoiceOver** reads each card as a button, "Stage 3: Safari, Notes" (or the stage's name),
+  and pressing it switches to that stage. Its actions include "Show all Safari windows", as
+  a click on the app's icon. The edge tab, when you use it, is a button too.
+- **Reduce Motion** (System Settings → Accessibility → Display) is followed: windows fade in
+  and out where they are instead of flying from the strip, the strip fades instead of
+  sliding, and cards no longer grow under the pointer or glide. To decide it in Stage
+  Manager alone, set `reduce_motion = "on"` or `"off"` under `[animation]` in the config file;
+  `speed = 0` there turns every animation off.
+- **Reduce Transparency** (and Increase Contrast) makes the cards solid, as macOS's own
+  glass turns solid.
+
+[Accessibility](../.github/ACCESSIBILITY.md) says what works and what doesn't yet, and how to
+report a problem.
+
 ## Updates and privacy
 
 Stage Manager checks GitHub for a new version once a day. When one is out, it asks:

@@ -136,6 +136,11 @@ struct Running {
     /// The incoming snapshots' group, above the outgoing ones: they land as one picture
     /// ([`GhostGroup`]).
     incoming: Option<GhostGroup>,
+    /// Under Reduce Motion, the outgoing snapshots' group (they fade out as one picture).
+    outgoing: Option<GhostGroup>,
+    /// Under Reduce Motion, the cross-fade's length (seconds): nothing moves, the snapshots
+    /// fade where the windows are ([`crossfade_times`]).
+    crossfade: Option<f64>,
     /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane,
     /// the card's glass there, the path's lean: a window's into its card, a dropped window's
     /// card straight).
@@ -409,6 +414,14 @@ fn draws_motion(animates: bool, fullscreen: bool) -> bool {
     animates && !fullscreen
 }
 
+/// A Reduce Motion switch's times for a cross-fade of `fade` seconds: (the unveil, when the
+/// incoming snapshots are opaque over their frames and the windows go in place under them;
+/// when the outgoing snapshots have faded out and the switch may land). Both at the fade's
+/// end: nothing travels, so nothing waits for a spring to settle.
+fn crossfade_times(fade: f64) -> (f64, f64) {
+    (fade, fade)
+}
+
 /// Runs `f` once on the main run loop after `seconds`, in every mode (also while a menu
 /// tracks the pointer or a card is dragged: the review's U10, one-shots in the default mode
 /// left a lifted card lifted and a merged card's layer behind).
@@ -664,6 +677,9 @@ impl Strip {
         // The outgoing windows leave `cover_ms` after their snapshots are drawn: the
         // snapshots' shadows come in around then, as the windows' go.
         let (out_begin, out_duration) = handover(style.cover_ms as f64 / 1000.0, 2.0 * style.cover_ms as f64 / 1000.0);
+        // Reduce Motion: a cross-fade where the windows are (UX-SPEC, "Reduce Motion").
+        let crossfade = crate::ui::display_options::reduced(&style).then(|| crate::ui::display_options::fade_seconds(&style));
+        let mut outgoing: Option<GhostGroup> = None;
         for w in &t.outgoing {
             let id = w.window.id;
             let (end, card, aimed, glass) =
@@ -684,13 +700,16 @@ impl Strip {
                     }
                     let at = Plane::window(w.window.frame, o, style.corner_radius);
                     let (shadow, note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_out == Some(id), 1.0);
-                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, None);
+                    let group = if crossfade.is_some() { Some(&*outgoing.get_or_insert_with(|| self.motion.overlay.group())) } else { None };
+                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, group);
                     ghost.fade_shadow(0.0, 1.0, out_begin, out_duration);
                     (ghost, Some(note))
                 }
             };
             // It holds still over the window until the window has parked behind it.
             let start = Plane::window(w.window.frame, o, style.corner_radius);
+            // Under Reduce Motion it never leaves: it fades out there.
+            let shown_end = if crossfade.is_some() { start } else { end };
             report.push(GhostReport {
                 window: id,
                 outgoing: true,
@@ -698,7 +717,7 @@ impl Strip {
                 slot: w.slot,
                 aimed_slot: aimed,
                 start: self.plane_rect(&start),
-                end: self.plane_rect(&end),
+                end: self.plane_rect(&shown_end),
                 real: None,
                 at_unveil: None,
                 shown_ms: None,
@@ -723,12 +742,24 @@ impl Strip {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
-            let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
-            let group = incoming.get_or_insert_with(|| self.motion.overlay.group());
+            let end = Plane::window(w.window.frame, o, style.corner_radius);
+            // Under Reduce Motion it starts at its window's frame, looking as the window, and
+            // fades in there (its group, from transparent).
+            let (start, glass, amount) = if crossfade.is_some() { (end, None, 1.0) } else { (start, glass, 0.0) };
+            let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), amount);
+            let group = incoming.get_or_insert_with(|| {
+                let g = self.motion.overlay.group();
+                if crossfade.is_some() {
+                    g.set_opacity(0.0);
+                }
+                g
+            });
             let ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
             // From its card's look.
             ghost.set_glass(glass.as_ref(), 1.0);
-            let end = Plane::window(w.window.frame, o, style.corner_radius);
+            if crossfade.is_some() {
+                ghost.set_shadow_amount(1.0);
+            }
             rising.push((ghosts.len(), end, glass));
             report.push(GhostReport {
                 window: id,
@@ -748,7 +779,7 @@ impl Strip {
             cover.incoming = true;
         }
         if ghosts.is_empty() {
-            if let Some(g) = &incoming {
+            for g in incoming.iter().chain(&outgoing) {
                 g.remove();
             }
             strip_model::cover(t.id, cover);
@@ -779,7 +810,10 @@ impl Strip {
         // The incoming windows take their place once their snapshots as shown are within a
         // point of them: the farthest edge's travel decides when.
         let travel = report.iter().filter(|g| !g.outgoing).fold(0.0, |m: f64, g| m.max(travel(g.start, g.end)));
-        let unveil = cover.incoming.then(|| unveil_time(&self.style, travel));
+        let unveil = cover.incoming.then(|| match crossfade {
+            Some(fade) => crossfade_times(fade).0,
+            None => unveil_time(&self.style, travel),
+        });
         let drawn_at = Instant::now();
         // Late windows (an app we hid, unhidden after the unveil) show when their app says so,
         // bounded: their snapshots wait for that ([`Self::late_shown`]).
@@ -799,7 +833,8 @@ impl Strip {
         }
         let rises_now = waiting.is_empty();
         if rises_now {
-            timers.push(after(settle_time(spring, SETTLED), move || {
+            let settles = crossfade.map_or_else(|| settle_time(spring, SETTLED), |fade| crossfade_times(fade).1);
+            timers.push(after(settles, move || {
                 with_strip_of(display, |s| s.end_transition(id));
             }));
         } else {
@@ -848,6 +883,8 @@ impl Strip {
                 id,
                 ghosts,
                 incoming,
+                outgoing,
+                crossfade,
                 waiting,
                 rise: Some(rise),
                 drawn_at,
@@ -927,7 +964,10 @@ impl Strip {
                     let t = g.target;
                     let off = (t.left_mid.x - to.left_mid.x).abs().max((t.left_mid.y - to.left_mid.y).abs()).max((t.size.w - to.size.w).abs()).max((t.size.h - to.size.h).abs());
                     tracing::debug!(id, window, real = %real, off, "transition: ghost end vs the window's real frame");
-                    if off > 0.25 {
+                    if off > 0.25 && r.crossfade.is_some() {
+                        // Reduce Motion: it fades in where the window is, never travels.
+                        g.set(to);
+                    } else if off > 0.25 {
                         g.spring_to(to, spring, Toward::Window);
                         g.spring_shadow(1.0, spring);
                     }
@@ -964,6 +1004,36 @@ impl Strip {
         // One commit for both ways: every spring begins on the same frame.
         objc2_quartz_core::CATransaction::begin();
         self.start_motion(id, waited_out);
+        let crossfade = self.motion.running.as_ref().and_then(|r| r.crossfade.filter(|_| r.id == id));
+        if let Some(fade) = crossfade {
+            // Reduce Motion: the outgoing snapshots fade out where they are, as one picture,
+            // while their cards fade in at their slots (where the windows went).
+            let mut held = Vec::new();
+            if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+                if let Some(g) = &r.outgoing {
+                    g.fade_to(0.0, fade);
+                }
+                for (i, ..) in std::mem::take(&mut r.waiting) {
+                    if let Some(g) = r.ghosts.get(i).filter(|g| !g.grouped()) {
+                        g.fade_to(0.0, fade);
+                    }
+                }
+                held.clone_from(&r.held);
+            }
+            for stage in &held {
+                if let Some(layers) = self.pane.cards.get(stage) {
+                    layers.card.setOpacity(1.0);
+                    super::fade_in(&layers.card, fade);
+                }
+            }
+            objc2_quartz_core::CATransaction::commit();
+            if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+                r.timers.push(after(crossfade_times(fade).1, move || {
+                    with_strip_of(display, |s| s.end_transition(id));
+                }));
+            }
+            return;
+        }
         if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
             for (i, end, glass, toward) in std::mem::take(&mut r.waiting) {
                 if let Some(g) = r.ghosts.get_mut(i) {
@@ -992,7 +1062,11 @@ impl Strip {
         let spring = self.spring();
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
         let Some(rise) = r.rise.take() else { return };
-        for (i, end, glass) in &rise.ghosts {
+        if let (Some(fade), Some(group)) = (r.crossfade, &r.incoming) {
+            // Reduce Motion: the incoming snapshots fade in at their windows' frames.
+            group.fade_to(1.0, fade);
+        }
+        for (i, end, glass) in rise.ghosts.iter().filter(|_| r.crossfade.is_none()) {
             if let Some(g) = r.ghosts.get_mut(*i) {
                 g.spring_to(*end, spring, Toward::Window);
                 g.spring_shadow(1.0, spring);
@@ -1301,11 +1375,16 @@ impl Strip {
         let hold = facts.filter(|(f, _)| cover_holds(f)).and_then(|(f, screen)| r.corner.take().map(|g| (g, f, screen)));
         // Landed, the incoming snapshots fade out over their windows as one picture (their
         // group: never one through another, 11-02); the rest go at once.
-        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) = std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped());
+        let arrived = &r.arrived;
+        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) =
+            std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped() && arrived.iter().any(|(w, _)| *w == g.window));
         let group = r.incoming.take();
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
         for g in gone.iter().chain(&r.corner) {
+            g.remove();
+        }
+        if let Some(g) = r.outgoing.take() {
             g.remove();
         }
         let group = match group {
@@ -1521,6 +1600,20 @@ impl Strip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reduce Motion: the windows go in place once the snapshots over them are opaque, and the
+    /// switch lands once the leaving ones are gone; both within the short fade.
+    #[test]
+    fn a_crossfade_unveils_and_lands_at_the_fades_end() {
+        let style = crate::config::AnimationStyle { reduce_motion: crate::config::ReduceMotion::On, ..crate::config::Config::default().style.animation };
+        let fade = crate::ui::display_options::fade_seconds(&style);
+        let (unveil, lands) = crossfade_times(fade);
+        assert_eq!(unveil, fade, "never before the snapshots are opaque");
+        assert_eq!(lands, fade);
+        assert!(lands <= 0.25, "short: {lands}");
+        let full = unveil_time(&crate::config::Config::default().style, 600.0);
+        assert!(unveil < full, "the cross-fade is quicker than the flight it stands in for: {unveil} vs {full}");
+    }
 
     /// U8: no transition is drawn on a full-screen Space (the overlay cannot show there).
     #[test]
