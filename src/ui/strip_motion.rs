@@ -71,7 +71,8 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::platform::windows;
 use crate::ui::motion_math::{
-    Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, switch_spring, travel, unveil_time,
+    Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, shrink_spring, switch_spring, travel,
+    unveil_time,
 };
 use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, Overlay};
 use crate::ui::shadow_math::handover;
@@ -403,9 +404,14 @@ impl Strip {
         self.motion.overlay.shown().then(|| (self.motion.overlay.window_number(), self.motion.overlay.origin()))
     }
 
-    /// The windows' spring (`[animation]` at its speed).
+    /// The spring of windows growing out of the strip (`[animation] spring_*` at its speed).
     fn spring(&self) -> Spring {
         switch_spring(&self.style)
+    }
+
+    /// The spring of windows shrinking into the strip (`[animation] shrink_*` at its speed).
+    fn shrink(&self) -> Spring {
+        shrink_spring(&self.style)
     }
 
     /// The shadows a snapshot can carry at full size (`[animation] shadow`): the key window's
@@ -903,7 +909,7 @@ impl Strip {
     pub(super) fn outgoing_parked(&mut self, id: u64) {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
-        let spring = self.spring();
+        let spring = self.shrink();
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.waiting.is_empty()) else { return };
         for (i, end, glass) in std::mem::take(&mut r.waiting) {
             if let Some(g) = r.ghosts.get_mut(i) {

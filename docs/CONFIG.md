@@ -89,8 +89,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.behind_scale` | `1.0` | number, 0.3 to 1 | Each window behind another of the same app is drawn this much smaller. |
 | `cards.second_app_dx` | `68.0` | number, -300 to 300 | A second app's window sits this far right of the first. |
 | `cards.second_app_dy` | `14.0` | number, -300 to 300 | ...and this far up. |
-| `cards.hover_scale` | `1.06` | number, 1 to 2 | The card under the pointer grows by this factor, about its center. |
-| `cards.hover_ms` | `210` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, eased out, in milliseconds (Apple's, measured: 208 growing, 220 shrinking). |
+| `cards.hover_scale` | `1.11` | number, 1 to 2 | The card under the pointer grows by this factor, about its center (Apple's, measured on a card of one window: 1.11). |
+| `cards.hover_ms` | `400` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, in milliseconds: a spring, 99 % there by then, half way at a quarter of it (Apple's, measured: about 400). |
 | `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
 | `cards.press_ms` | `100` | whole number, 0 to 3000 | How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100). |
 | `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, in milliseconds (not measured on Apple's). |
@@ -114,24 +114,29 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `motion.slide_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the slide. |
 | `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides; further when the widest card needs it to leave the screen. |
 | `reveal.edge_width` | `2.0` | number, 0 to 100 | The pointer within this many points of the left edge counts as at the edge. |
-| `reveal.delay_ms` | `250` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back. |
+| `reveal.delay_ms` | `130` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back (Apple's slide starts about 180 ms after the pointer reaches the edge; the poll and the drawing take the rest). |
 | `reveal.hide_delay_ms` | `500` | whole number, 0 to 10000 | A strip brought back hides again this long after the pointer leaves it. |
-| `reveal.poll_ms` | `60` | whole number, 10 to 1000 | How often the pointer is checked while the strip is hidden. |
+| `reveal.poll_ms` | `30` | whole number, 10 to 1000 | How often the pointer is checked while it rests at the edge or the strip is brought back. |
 | `reveal.edge_tab` | `false` | true or false | Show a slim tab at the left edge while a window hides the strip (an extension). |
 | `reveal.launch_reveal` | `false` | true or false | Show a covered strip for a moment at launch (an extension). |
 | `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |
 | `drag.threshold` | `5.0` | number, 0 to 100 | A press that moves farther than this (points, at least 5) drags the card; less is a click. |
 | `drag.merge_zone` | `0.5` | number, 0 to 1 | With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards. |
-| `drag.grow_distance` | `260.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance. |
+| `drag.grow_distance` | `100.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance (Apple's is there about 100 pt out). |
+| `drag.window_grab_x` | `96.0` | number, 0 to 1000 | A card dragged out holds its window with the pointer this far right of the window's left edge, wherever the card was pressed (Apple's, measured: 96; at most half the window's width). |
+| `drag.window_grab_y` | `100.0` | number, 0 to 1000 | ...and this far below the window's top edge (Apple's, measured: 100; at most half its height). |
 | `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
 | `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip. |
 | `drag.merge_ms` | `200` | whole number, 0 to 3000 | How long a card dropped onto another takes to shrink into it and fade, in milliseconds (an extension; Apple's has no merge). |
 | `animation.enabled` | `true` | true or false | Animate as Apple does: switches, the desktop reveal, Cmd-M and drops, and the strip's slides, glides, hover and press. false: everything jumps. |
 | `animation.speed` | `1.0` | number, 0 to 4 | Speed of every animation: 1 is Apple's, 2 twice as fast, 0.5 half as fast (0.25 to 4); 0 is no animation, as enabled = false. It multiplies every spring and duration of [animation], [motion], [cards] and [drag]. |
-| `animation.spring_stiffness` | `272.0` | number, 1 to 10000 | Spring stiffness of the windows' motion in a switch, the desktop reveal, Cmd-M and drops. Apple's, measured: 272 (99 % by about 400 ms). |
-| `animation.spring_damping` | `33.0` | number, 0 to 1000 | Spring damping of the windows' motion (33 with stiffness 272 and mass 1: critically damped, no overshoot). |
-| `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the windows' motion. |
-| `animation.unpark_at` | `0.99` | number, 0.5 to 1 | The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 600 ms for a window growing from its card). |
+| `animation.spring_stiffness` | `353.0` | number, 1 to 10000 | Spring stiffness of windows growing out of the strip: a switch's incoming windows, the desktop coming back, a card dropped in the middle. Apple's, measured: 353 (99 % by about 355 ms). |
+| `animation.spring_damping` | `37.6` | number, 0 to 1000 | Spring damping of windows growing out of the strip (37.6 with stiffness 353 and mass 1: critically damped, no overshoot). |
+| `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of windows growing out of the strip. |
+| `animation.shrink_stiffness` | `272.0` | number, 1 to 10000 | Spring stiffness of windows shrinking into the strip: the stage you leave, the desktop reveal, Cmd-M, a window dropped on the strip. Apple's, measured: 272 (99 % by about 400 ms). |
+| `animation.shrink_damping` | `33.0` | number, 0 to 1000 | Spring damping of windows shrinking into the strip (33 with stiffness 272 and mass 1: critically damped). |
+| `animation.shrink_mass` | `1.0` | number, 0.01 to 100 | Spring mass of windows shrinking into the strip. |
+| `animation.unpark_at` | `0.99` | number, 0.5 to 1 | The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 550 ms for a window growing from its card). |
 | `animation.cover_ms` | `20` | whole number, 0 to 500 | Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first. |
 | `animation.corner_radius` | `0.0` | number, 0 to 60 | Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius). |
 | `animation.shadow` | `"window"` | "window", "custom" | A moving snapshot's shadow: "window" is macOS's own window shadow (the key window's on the window that is or becomes key, an inactive window's on the others), turning into the card's shadow on a card; "custom" is one shadow from shadow_radius, shadow_opacity and shadow_offset_y. |

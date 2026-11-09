@@ -96,7 +96,9 @@ You can switch stages the same ways as with Apple's Stage Manager:
 - Click the app in the Dock.
 - Click a card's app icon to bring every window of that app, from all stages.
 
-The stage you leave takes the card's place in the strip.
+The stage you leave takes the card's place in the strip. As with Apple's, the new stage grows
+out of its card a little faster than the old one shrinks into the strip; each way has its own
+spring in the config file (`[animation] spring_*` and `shrink_*`).
 
 ### Stages in place
 
@@ -197,7 +199,9 @@ with Apple's.
 
 - **Drag a card into the middle** to bring its windows into the stage you are in. On a card
   of several windows, the window you drag it by comes alone, as with Apple's; the others
-  stay on the card.
+  stay on the card. As with Apple's, you hold the window near its top-left corner, about 100
+  points in and 100 down, wherever you picked up the card (`[drag] window_grab_x`,
+  `window_grab_y`).
 - **Drag a window onto the strip** by its title bar to give it a stage of its own.
 - **Drag a card up or down** to move it to another place in the strip.
 - **Drop a card onto another card** to merge the two stages. To split them again, drag a

@@ -41,7 +41,9 @@ stays up under it. It slides away only once a window of the front stage comes wi
 the screen's left edge, as Apple's does (measured on a Studio Display: Apple's stayed up under
 a window dragged left over the cards and went at about 50 pt; a laptop's windows nearly fill
 the screen, so there it goes more often). Each screen's strip follows its
-own front stage. Resting the pointer at the left edge brings it back. Each card draws the stage's
+own front stage. Resting the pointer at the left edge brings it back: Apple's starts sliding
+in about 180 ms after the pointer gets there (measured), ours rests 130 ms and checks the
+pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
 laptop, 6 on a 5K screen. A popup open on a window (a popover, a child window sticking out
@@ -68,8 +70,8 @@ The card under the pointer turns solid as it grows, as Apple's does: its picture
 on leave; a card a dragged card would merge into does the same, as it grows. A click on it
 hands the snapshot over at the look drawn that moment (solid, or part way), so nothing jumps;
 a card the snapshots land in under the pointer shows at rest, then grows and turns solid
-together. Not measured on Apple's yet: whether its card turns solid on the same timing as the
-growth (`measure-apple-card-glass.py --hover` reads it). The wallpaper is drawn from its file,
+together. Apple's turns solid on the growth's own curve (measured: the windows' opacity and the
+card's edge fit the same spring, ω 16.8 and 16.6). The wallpaper is drawn from its file,
 as the clean corner's is; where it cannot be (a shuffle, an unreadable picture), the cards are
 opaque.
 
@@ -78,7 +80,9 @@ leave takes the slot the clicked card vacated. A stage entering a full strip tak
 of the least recently used card. (Keep stages in place, an extra below, orders it otherwise.)
 
 **Switching.** The pressed card eases back on mouse-down. On release, the windows you leave
-shrink into their card's slot and the new stage grows from its card, on Apple's spring.
+shrink into their card's slot and the new stage grows from its card, each on Apple's spring for
+its way: a window growing out of its card moves faster than one shrinking into its card
+(measured, below).
 Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
 Clicking a card's app icon brings every window of that app, from all stages.
 
@@ -212,12 +216,16 @@ switches stages. The Dock's window spans its whole screen, clear away from its b
 there is on the wallpaper (or the window) below it, and only one on or near the bar (its
 magnified icons included) is the Dock's.
 
-**Drag and drop.** A card dragged into the main area grows to window size and joins the
-current stage where you drop it. On a card of several windows each window drags out on its
-own, as on Apple's: the press picks the frontmost window drawn under the pointer (its turned
-plane, as drawn), the stand-in is that window's picture and grows to its size, and the drop
-brings that window alone into the current stage, in front with the keyboard, its title bar
-under the pointer. The stage it left keeps its other windows in their order, its slot and its
+**Drag and drop.** A card dragged into the main area grows to window size within about
+100 pt past the strip (`[drag] grow_distance`) and joins the current stage where you drop it.
+The window is held with the pointer 96 pt in from its left edge and 100 pt below its top
+(`[drag] window_grab_x`, `window_grab_y`; at most half the window's width and height),
+wherever the card was pressed: Apple's put two drags pressed at 47 % and at 71 % of a card's
+width at the same spot (measured, 96 and 100 pt, the fixture's 990 × 690 pt window). On a card
+of several windows each window drags out on its own, as on Apple's: the press picks the
+frontmost window drawn under the pointer (its turned plane, as drawn), the stand-in is that
+window's picture and grows to its size, and the drop brings that window alone into the current
+stage, in front with the keyboard, held the same way. The stage it left keeps its other windows in their order, its slot and its
 number, and its card shows them at once (a stage's only window is the whole card's drop).
 Within the column a card still moves whole: reordering and dropping onto another card are
 extensions (below), and there the card is what is arranged. A window dragged onto the strip
@@ -227,7 +235,7 @@ becomes a stage of its own in the slot under the pointer.
 as far as the widest card can draw: a combined card's second app's window (`[cards]
 second_app_dx` right of the first), grown under the pointer, or dragged to the column's
 edge with its right part past the pointer, shadows included (the widest card's span at
-`hover_scale`, past the column; about 465 pt in all on the laptop, 485 on a 5K screen). The
+`hover_scale`, past the column; about 477 pt in all on the laptop, 499 on a 5K screen). The
 column alone is the strip for everything that measures it (hit tests of drops, window drags
 over the strip, auto-hide, `[windows] fit`); the room right of it lets every click and
 scroll through, except over a card drawn there, which hovers and clicks as the rest of it. A
@@ -239,11 +247,23 @@ edge moves less than its left: 286 pt is just enough on the laptop, 297 on a 5K 
 
 | Motion | Apple's timing |
 |---|---|
-| Windows in a switch, the desktop reveal, ⌘M and drops | critically damped spring, 99 % at about 400 ms |
+| Windows growing out of the strip: a switch's incoming stage, the desktop coming back, a card dropped in the middle | critically damped spring, 50 % at about 90 ms, 99 % at about 355 ms (stiffness 353, damping 37.6) |
+| Windows shrinking into the strip: the stage you leave, the desktop reveal, ⌘M, a window dropped on the strip | critically damped spring, 50 % at about 100 ms, 99 % at about 400 ms (272, 33) |
 | Cards gliding to new slots | spring, 99 % at about 375 ms |
 | The strip sliding out and in | spring, 99 % at about 400 ms, 286 pt |
-| Hover | grows 6 % in about 210 ms, its windows turning solid as it grows |
+| The edge reveal | starts about 180 ms after the pointer reaches the left edge |
+| Hover | grows 11 % on a spring, half way at about 100 ms, 99 % at about 400 ms, its windows turning solid on the same curve |
 | Press | eases to 0.987 of its size in about 100 ms |
+| A card dragged out | window size within about 100 pt past the strip |
+
+Measured 11-09 on a 5K screen at 60 frames a second, Apple's and ours running the same
+scripted clicks and drags, each edge of a window tracked frame by frame (our own known springs
+read back within 1 % the same way). Both of Apple's switch springs start from rest at the same
+moment; a single spring for both ways (the 10-12 fit, 272/33) left the growing window behind
+from the first frames (half way 12 ms later, 90 % 30 ms later), the "speed curve" ours
+lacked. Apple's hover is a spring too: an ease-out of any length misses its gentle first
+frames and its long tail. The slide (Apple's read ω 16.3, ours 16.8) and the press are
+unchanged.
 
 ## Deliberate differences
 
@@ -653,8 +673,20 @@ in front, and the windows on screen all along bring no stage forward even after 
 - Since macOS 15, macOS asks about once a month whether the app may capture windows
   directly. Apple's content picker avoids that alert but cannot serve a strip of every
   window.
-- Not measured yet on Apple's: the edge-reveal and auto-hide delays (ours: 250 ms and
-  500 ms), the hover's exact easing, a new card's fade, a Shift-click on a card holding
+- In a switch the windows you leave start shrinking about 50 ms (three frames) after the new
+  stage starts growing: their snapshots wait until the windows behind them have moved to the
+  hiding corner, or the windows would show around them. Apple's start together. Measured 11-09;
+  the springs themselves match.
+- Apple's card dragged out appears turned like a card, a moment after the pointer leaves the
+  strip, and flattens to its window as it grows, in about 120 ms whatever the pointer does;
+  ours stays flat and grows with the distance. A card dragged from the main screen's strip
+  onto the laptop's screen landed with the pointer 39 pt in and 353 pt down (once, measured
+  11-09): Apple's rule across screens is not known.
+- Apple's hovered card keeps its app icon where it was, at its size; ours grows and moves it
+  with the card. On a card of two apps Apple's grows each window by about 11 % about its own
+  middle, the gaps between them unchanged (the card as a whole about 7 %); ours grows the
+  whole card 11 %, the same on a card of one window.
+- Not measured yet on Apple's: the auto-hide delay (ours: 500 ms), a new card's fade, a Shift-click on a card holding
   several apps, and the cards' shadow and corner radius.
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a

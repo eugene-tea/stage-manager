@@ -1,16 +1,22 @@
 //! Motion math, pure: the spring's progress over time, the planes snapshots move between,
 //! where a drop lands in the column, and the snapshot cache's bookkeeping.
 //!
-//! - **Spring.** Apple moves windows on a spring that starts at rest one frame after the
-//!   mouse-up: mass 1, stiffness 272, damping 33 (critically damped, ω ≈ 16.5 rad/s: 50 % at
-//!   ~100 ms, 90 % at ~235 ms, 99 % at ~400 ms from its start; fitted 10-12 to 37 windows of the
-//!   laptop session; the record: `docs/UX-SPEC.md` as of commit 20665a3, "Transitions"); cards glide at ω ≈ 17.0 and the strip
-//!   slides at ω ≈ 16.8. [`spring_progress`] gives the fraction of the way covered after `t`
-//!   seconds for any mass, stiffness and damping; [`time_to_progress`] when a fraction is first
-//!   reached, [`settle_time`] when it stays within a tolerance for good. `[animation] speed`
-//!   scales every spring ([`Spring::at_speed`]: the same curve, ω times the speed) and
-//!   duration; [`switch_spring`], [`glide_spring`] and [`slide_spring`] are the style's springs
-//!   with it applied.
+//! - **Springs.** Apple moves windows on critically damped springs that start at rest, the
+//!   two ways at different speeds (measured 11-09 on a 5K screen at 60 fps, frame by frame,
+//!   each edge on its own; our own known spring read back within 1 % the same way): a window
+//!   growing out of its card on stiffness 353, damping 37.6 (ω ≈ 18.8 rad/s: 50 % at ~90 ms,
+//!   90 % at ~205 ms, 99 % at ~355 ms), one shrinking into its card on 272/33 (ω ≈ 16.5: 50 %
+//!   at ~100 ms, 99 % at ~400 ms), both from the same moment. The 10-12 fit (272/33 for both,
+//!   37 windows of the laptop session) read the growing snapshot's size, which the card's
+//!   turn holds back: our 272/33 read by width in the same recording looks like ω 14.4. Cards
+//!   glide at ω ≈ 17.0, the strip slides at ω ≈ 16.8 (Apple's slide-in read ω 16.3 on 11-09),
+//!   and a card under the pointer grows on ω ≈ 16.6 ([`hover_spring`]). [`spring_progress`]
+//!   gives the fraction of the way covered after `t` seconds for any mass, stiffness and
+//!   damping; [`time_to_progress`] when a fraction is first reached, [`settle_time`] when it
+//!   stays within a tolerance for good. `[animation] speed` scales every spring
+//!   ([`Spring::at_speed`]: the same curve, ω times the speed) and duration;
+//!   [`switch_spring`], [`shrink_spring`], [`glide_spring`] and [`slide_spring`] are the
+//!   style's springs with it applied.
 //! - **Unveil.** An incoming window takes its place behind its growing snapshot when the
 //!   snapshot as shown is within [`UNVEIL_TOLERANCE`] of the window on every edge
 //!   ([`unveil_time`]): by distance, from the transition's own start and end rectangles
@@ -49,8 +55,11 @@ pub struct Spring {
 }
 
 impl Spring {
-    /// Apple's windows in a switch, measured (`[animation]`'s default).
-    pub const APPLE: Spring = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
+    /// Apple's windows growing out of their card, measured 11-09 (`[animation] spring_*`).
+    pub const APPLE: Spring = Spring { stiffness: 353.0, damping: 37.6, mass: 1.0 };
+    /// Apple's windows shrinking into their card, measured 11-09 (`[animation] shrink_*`;
+    /// 10-12's fit for both ways).
+    pub const APPLE_SHRINK: Spring = Spring { stiffness: 272.0, damping: 33.0, mass: 1.0 };
 
     /// The same motion `speed` times as fast: ω times `speed`, the same damping ratio
     /// (stiffness times speed², damping times speed). A speed of 0 or less leaves it as it is
@@ -63,11 +72,32 @@ impl Spring {
     }
 }
 
-/// The windows' spring in a switch, the desktop reveal, ⌘M and drops (`[animation]`), at the
-/// style's speed.
+/// The spring of windows growing out of the strip: a switch's incoming windows, the desktop
+/// coming back, a card dropped in the middle (`[animation] spring_*`), at the style's speed.
 pub fn switch_spring(style: &StripStyle) -> Spring {
     let a = &style.animation;
     Spring { stiffness: a.spring_stiffness, damping: a.spring_damping, mass: a.spring_mass }.at_speed(a.speed())
+}
+
+/// The spring of windows shrinking into the strip: a switch's outgoing windows, the desktop
+/// reveal, ⌘M, a window dropped on the strip (`[animation] shrink_*`), at the style's speed.
+pub fn shrink_spring(style: &StripStyle) -> Spring {
+    let a = &style.animation;
+    Spring { stiffness: a.shrink_stiffness, damping: a.shrink_damping, mass: a.shrink_mass }.at_speed(a.speed())
+}
+
+/// Where a critically damped spring from rest is 99 % of the way, in units of 1/ω:
+/// (1 + x)·e^(-x) = 0.01.
+const CRITICAL_99: f64 = 6.6384;
+
+/// The hover's spring: critically damped, 99 % of the way after `seconds` (`[cards] hover_ms`
+/// at the style's speed; Apple's card grows on ω ≈ 16.6, 99 % at ~400 ms, its windows turning
+/// solid on the same curve, measured 11-09). `None` for no time (it jumps).
+pub fn hover_spring(seconds: f64) -> Option<Spring> {
+    (seconds > 0.0).then(|| {
+        let w = CRITICAL_99 / seconds;
+        Spring { stiffness: w * w, damping: 2.0 * w, mass: 1.0 }
+    })
 }
 
 /// How close the snapshot as shown is to its window, on every edge, when the window takes
@@ -422,27 +452,54 @@ mod tests {
         }
     }
 
-    /// Apple's switch, measured (10-12, the laptop session at ~120 Hz): the median progress
-    /// of 37 incoming windows (size, from card to frame) at these ms after the mouse-up. The
-    /// motion starts one frame (~11 ms) after the mouse-up.
-    const MEASURED: [(f64, f64); 8] =
-        [(50.0, 0.132), (100.0, 0.401), (150.0, 0.657), (200.0, 0.815), (250.0, 0.914), (300.0, 0.959), (400.0, 0.991), (500.0, 0.998)];
-    const START_MS: f64 = 11.0;
+    /// Apple's switch, measured 11-09 (5K screen, 60 fps, the fixture windows; the same
+    /// script run on ours read our 272/33 back within 1 %): a window growing from its card to
+    /// its frame, the mean progress of its left edge, top edge and height, at these ms after
+    /// the motion starts (the fitted onset, about a frame before the first moving frame).
+    const GROWING: [(f64, f64); 9] =
+        [(35.0, 0.138), (68.0, 0.360), (102.0, 0.566), (135.0, 0.717), (168.0, 0.822), (202.0, 0.885), (252.0, 0.942), (302.0, 0.974), (352.0, 0.988)];
+    /// The same switch's other way: a window shrinking from its frame into its card, the mean
+    /// progress of its left and bottom edges, from the same onset as the growing one.
+    const SHRINKING: [(f64, f64); 8] =
+        [(24.0, 0.072), (57.0, 0.233), (91.0, 0.419), (141.0, 0.672), (191.0, 0.815), (241.0, 0.901), (307.0, 0.959), (374.0, 0.985)];
+
+    fn misses(s: Spring, measured: &[(f64, f64)]) -> f64 {
+        measured.iter().fold(0.0, |m: f64, (ms, p)| m.max((spring_progress(s, ms / 1000.0) - p).abs()))
+    }
 
     #[test]
     fn apples_spring_matches_the_measured_curve() {
         let s = Spring::APPLE;
-        for (ms, measured) in MEASURED {
-            let ours = spring_progress(s, (ms - START_MS) / 1000.0);
-            assert!((ours - measured).abs() < 0.035, "{ms} ms after the mouse-up: ours {ours:.3}, Apple's {measured}");
-        }
+        assert!(misses(s, &GROWING) < 0.02, "growing: off by {:.3}", misses(s, &GROWING));
         let t99 = time_to_progress(s, 0.99);
-        assert!((0.38..=0.42).contains(&t99), "99 % at {t99}");
+        assert!((0.34..=0.37).contains(&t99), "99 % at {t99}");
         let settle = settle_time(s, 0.001);
-        assert!((0.45..0.65).contains(&settle), "settled at {settle}");
-        // The spring before 10-12 (240/31, ω 15.5) lagged Apple's: 99 % ~30 ms later.
-        let old = Spring { stiffness: 240.0, damping: 31.0, mass: 1.0 };
-        assert!(time_to_progress(old, 0.99) - t99 > 0.02);
+        assert!((0.40..0.55).contains(&settle), "settled at {settle}");
+        // Shrinking into the card is slower: 10-12's spring, which every window used until
+        // 11-09. The two curves are told apart by the recordings: each misses the other way's.
+        let shrink = Spring::APPLE_SHRINK;
+        assert!(misses(shrink, &SHRINKING) < 0.025, "shrinking: off by {:.3}", misses(shrink, &SHRINKING));
+        assert!(misses(shrink, &GROWING) > 0.05, "10-12's spring lagged a growing window by {:.3}", misses(shrink, &GROWING));
+        assert!(misses(s, &SHRINKING) > 0.05, "the growing spring runs ahead of a shrinking window by {:.3}", misses(s, &SHRINKING));
+        assert!((0.38..=0.42).contains(&time_to_progress(shrink, 0.99)));
+        // Both critically damped: no overshoot either way.
+        for spring in [s, shrink] {
+            assert!((0..2000).all(|i| spring_progress(spring, i as f64 / 1000.0) <= 1.0 + 1e-9));
+        }
+    }
+
+    /// Apple's hover, measured 11-09: the card's top edge and its windows' opacity (turning
+    /// solid) at these ms after the pointer came onto it, both fitted best by a critically
+    /// damped spring of ω ≈ 16.7 (an ease-out of ~285 ms missed by twice as much).
+    #[test]
+    fn the_hover_spring_reaches_99_percent_in_hover_ms() {
+        let s = hover_spring(0.4).expect("a spring");
+        assert!((time_to_progress(s, 0.99) - 0.4).abs() < 0.002);
+        let w = (s.stiffness / s.mass).sqrt();
+        assert!((w - 16.6).abs() < 0.1, "ω {w}");
+        assert!((s.damping - 2.0 * w).abs() < 1e-9, "critically damped");
+        assert!((time_to_progress(s, 0.5) - 0.1).abs() < 0.005, "half way at a quarter of it");
+        assert_eq!(hover_spring(0.0), None);
     }
 
     #[test]
@@ -459,12 +516,14 @@ mod tests {
         // The style's springs: each its own section, all at [animation] speed.
         let mut style = StripStyle::default();
         assert_eq!(switch_spring(&style), Spring::APPLE, "the default is Apple's");
+        assert_eq!(shrink_spring(&style), Spring::APPLE_SHRINK, "both ways");
         let glide = glide_spring(&style);
         let slide = slide_spring(&style);
         let omega = |s: Spring| (s.stiffness / s.mass).sqrt();
         assert!((omega(glide) - 17.0).abs() < 0.1 && (omega(slide) - 16.8).abs() < 0.1, "{} {}", omega(glide), omega(slide));
         style.animation.speed = 2.0;
         assert!((omega(switch_spring(&style)) - 2.0 * omega(Spring::APPLE)).abs() < 1e-9);
+        assert!((omega(shrink_spring(&style)) - 2.0 * omega(Spring::APPLE_SHRINK)).abs() < 1e-9);
         assert!((omega(glide_spring(&style)) - 2.0 * omega(glide)).abs() < 1e-9);
         assert!((omega(slide_spring(&style)) - 2.0 * omega(slide)).abs() < 1e-9);
         assert!((style.animation.seconds(210) - 0.105).abs() < 1e-9, "durations too");
@@ -515,7 +574,7 @@ mod tests {
         // 1200 pt edge travel jumped 25–31 pt at 99 %, the snapshot shown 50 ms late).
         let long = unveil_time(&style, 1200.0);
         assert!(shown_gap(&style, 1200.0) <= UNVEIL_TOLERANCE + 1e-6, "{}", shown_gap(&style, 1200.0));
-        assert!((0.60..0.65).contains(&long), "a long travel unveils at {long:.3} s");
+        assert!((0.53..0.58).contains(&long), "a long travel unveils at {long:.3} s");
         let old = time_to_progress(Spring::APPLE, 0.99);
         let old_gap = (1.0 - spring_progress(Spring::APPLE, old - PRESENTATION_LAG)) * 1200.0;
         assert!(old_gap > 20.0, "the 99 % unveil jumped {old_gap:.1} pt");
@@ -563,7 +622,8 @@ mod tests {
     /// point is left, its last frame's motion under a frame's motion before it.
     #[test]
     fn a_snapshot_s_spring_runs_until_its_last_step_is_unseen() {
-        let s = Spring::APPLE;
+        // The spring of the time (272/33), now the shrinking one.
+        let s = Spring::APPLE_SHRINK;
         let ca_settle = 0.6;
         let left_at_ca = (1.0 - spring_progress(s, ca_settle)) * 1999.0;
         assert!((1.0..1.2).contains(&left_at_ca), "Core Animation's cut leaves {left_at_ca:.2} pt");
@@ -580,9 +640,10 @@ mod tests {
         // Shorter travels stop sooner, never before Core Animation's for a long one.
         assert!(spring_duration(s, 100.0) < d && spring_duration(s, 100.0) > 0.4);
         assert_eq!(spring_duration(s, 0.0), STEP);
-        // It ends before the snapshot lands (the unveil plus 120 ms).
+        // A growing window's snapshot ends before it lands (the unveil plus 120 ms).
         let style = StripStyle::default();
-        assert!(d <= unveil_time(&style, 1999.0) + 0.12, "{d}");
+        let grown = spring_duration(Spring::APPLE, 1999.0);
+        assert!(grown <= unveil_time(&style, 1999.0) + 0.12, "{grown}");
         assert!(spring_duration(s, 1e6) < HORIZON);
     }
 

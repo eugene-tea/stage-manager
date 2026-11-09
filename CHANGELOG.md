@@ -9,6 +9,16 @@
   its windows into the middle and that window alone joins the stage you are in, where you let
   it go; the others stay on the card. Dragged up or down the strip, or onto another card, the
   card still moves whole.
+- Motion matched to Apple's, measured frame by frame from recordings of both side by side:
+  - Switching: the new stage now grows out of its card faster, with Apple's quick start and
+    gentle finish, instead of an almost even pace; the stage you leave keeps its slower curve,
+    as on Apple's.
+  - Hovering a card: it grows a little more (11 %, as Apple's) and eases in on a spring, slow
+    to start and settling softly, instead of jumping most of the way at once.
+  - The strip comes back sooner when you rest the pointer at the left edge (Apple's starts
+    sliding in about 180 ms after the pointer gets there; ours took about 320 ms).
+  - A card dragged into the middle grows to its window's size sooner, and you hold the window
+    near its top-left corner, as with Apple's, instead of by the middle of its title bar.
 
 ## 1.7.0 — 2026-11-06
 

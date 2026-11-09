@@ -208,6 +208,10 @@ pub struct DragStyle {
     /// The middle fraction of a card's height that takes a dropped card (a merge).
     pub merge_zone: f64,
     pub grow_distance: f64,
+    /// Where a card dragged out holds its window: the pointer this far right of the window's
+    /// left edge and this far below its top (points), whatever the press.
+    pub window_grab_x: f64,
+    pub window_grab_y: f64,
     pub lifted_opacity: f64,
     pub ghost_opacity: f64,
     /// A card dropped onto another shrinks into it and fades this long.
@@ -220,9 +224,14 @@ pub struct AnimationStyle {
     pub enabled: bool,
     /// Multiplies the speed of every animation; 0 = none.
     pub speed: f64,
+    /// Windows growing out of the strip (a switch's incoming windows).
     pub spring_stiffness: f64,
     pub spring_damping: f64,
     pub spring_mass: f64,
+    /// Windows shrinking into the strip (a switch's outgoing windows).
+    pub shrink_stiffness: f64,
+    pub shrink_damping: f64,
+    pub shrink_mass: f64,
     pub unpark_at: f64,
     pub cover_ms: u64,
     pub corner_radius: f64,
@@ -975,6 +984,8 @@ impl Config {
                     threshold: v.num("drag.threshold"),
                     merge_zone: v.num("drag.merge_zone"),
                     grow_distance: v.num("drag.grow_distance"),
+                    window_grab_x: v.num("drag.window_grab_x"),
+                    window_grab_y: v.num("drag.window_grab_y"),
                     lifted_opacity: v.num("drag.lifted_opacity"),
                     ghost_opacity: v.num("drag.ghost_opacity"),
                     merge_ms: v.uint("drag.merge_ms"),
@@ -985,6 +996,9 @@ impl Config {
                     spring_stiffness: v.num("animation.spring_stiffness"),
                     spring_damping: v.num("animation.spring_damping"),
                     spring_mass: v.num("animation.spring_mass"),
+                    shrink_stiffness: v.num("animation.shrink_stiffness"),
+                    shrink_damping: v.num("animation.shrink_damping"),
+                    shrink_mass: v.num("animation.shrink_mass"),
                     unpark_at: v.num("animation.unpark_at"),
                     cover_ms: v.uint("animation.cover_ms"),
                     corner_radius: v.num("animation.corner_radius"),
@@ -1354,12 +1368,17 @@ mod tests {
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
-        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
+        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (353.0, 37.6, 1.0), "Apple's windows growing out of a card, measured 11-09");
+        assert_eq!((a.shrink_stiffness, a.shrink_damping, a.shrink_mass), (272.0, 33.0, 1.0), "Apple's windows shrinking into a card, measured 11-09");
         let m = &c.style.motion;
         assert_eq!((m.spring_stiffness, m.spring_damping, m.spring_mass), (289.0, 34.0, 1.0), "Apple's card glide");
         assert_eq!((m.slide_stiffness, m.slide_damping, m.slide_mass), (282.0, 33.6, 1.0), "Apple's slide");
         let k = &c.style.cards;
-        assert_eq!((k.hover_scale, k.hover_ms, k.press_scale, k.press_ms), (1.06, 210, 0.987, 100), "Apple's hover and press");
+        assert_eq!((k.hover_scale, k.hover_ms, k.press_scale, k.press_ms), (1.11, 400, 0.987, 100), "Apple's hover (measured 11-09) and press");
+        let d = &c.style.drag;
+        assert_eq!((d.grow_distance, d.window_grab_x, d.window_grab_y), (100.0, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
+        let r = &c.style.reveal;
+        assert_eq!((r.delay_ms, r.poll_ms), (130, 30), "Apple's edge reveal, measured 11-09");
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }
@@ -1405,6 +1424,9 @@ mod tests {
         "animation.spring_stiffness",
         "animation.spring_damping",
         "animation.spring_mass",
+        "animation.shrink_stiffness",
+        "animation.shrink_damping",
+        "animation.shrink_mass",
         "animation.unpark_at",
         "motion.spring_stiffness",
         "motion.spring_damping",

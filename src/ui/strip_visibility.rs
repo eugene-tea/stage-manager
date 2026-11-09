@@ -331,8 +331,10 @@ mod tests {
         let away = Some(Point::new(900.0, 500.0));
         assert!(!v.step(Mode::EdgeOnly, away, &STRIP, t).shown);
         assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 0)).shown);
-        assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 200)).shown);
-        assert!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 260)).shown);
+        // Apple's dwell, measured 11-09 (its slide starts ~180 ms after the pointer gets
+        // there; ours polls and draws in the rest).
+        assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 100)).shown);
+        assert!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 140)).shown);
         // Moving into the strip keeps it.
         assert!(v.step(Mode::EdgeOnly, inside, &STRIP, ms(t, 2000)).shown);
         // Leaving: still shown before the delay, hidden after it.
@@ -375,10 +377,10 @@ mod tests {
         let mut v = Visibility::default();
         let t = Instant::now();
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, t).shown);
-        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(40.0, 500.0)), &STRIP, ms(t, 120)).shown);
+        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(40.0, 500.0)), &STRIP, ms(t, 100)).shown);
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 300)).shown);
-        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 500)).shown);
-        assert!(v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 560)).shown);
+        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 400)).shown);
+        assert!(v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 440)).shown);
         // The edge outside the strip's rows (the menu bar) does not count.
         let mut v = Visibility::default();
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 5.0)), &STRIP, t).shown);
@@ -393,8 +395,8 @@ mod tests {
         v.set_tab(Some(tab));
         let on_tab = Some(Point::new(8.0, 730.0));
         assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, t).shown);
-        assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 200)).shown);
-        assert!(v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 260)).shown, "same dwell as the edge");
+        assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 100)).shown);
+        assert!(v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 140)).shown, "same dwell as the edge");
         let mut v = Visibility::default();
         v.set_tab(Some(tab));
         v.reveal_now();
