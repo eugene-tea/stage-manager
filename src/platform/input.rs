@@ -34,7 +34,7 @@ use objc2_foundation::{MainThreadMarker, NSString};
 use super::desktop::{point_to_top_left, primary_height};
 use super::windows;
 use crate::ui::strip_model;
-use crate::engine::geometry::Point;
+use crate::engine::geometry::{Point, Rect};
 
 /// What the user did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,20 +291,40 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
     let own = std::process::id() as i32;
     // Every screen's strip: off the main one's cards, another screen's pane read as
     // click-through and its card's press was refused (round displays-live-1).
-    let cards = strip_model::every_published_card();
+    let cards: Vec<Rect> = strip_model::every_published_card().into_iter().map(|(_, r)| r).collect();
     // The Dock draws its bar in one window as large as its display, clear and click-through
     // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
     // it counts only on the bar's own frame, read through Accessibility, and wherever that
     // frame is unknown.
     let dock = std::cell::OnceCell::new();
     let dock_bar = || *dock.get_or_init(|| super::dock::dock_pid().map(|pid| (pid, super::dock::bar_frame(pid))));
+    path_refusal(&list, path, pids, press, own, &cards, &dock_bar).map_or(Ok(()), Err)
+}
+
+/// Why a synthetic input along `path` is refused over `list` (front to back), or `None`
+/// when every point is safe ([`path_is_safe`]): `own` our pid, `cards` every screen's cards,
+/// `dock_bar` the Dock's pid and bar frame (read only when the Dock's window is met).
+///
+/// After a drag's press the bare desktop (no window above the desktop level) is safe: the
+/// moves and the release go to the window pressed, and nothing of anyone's lies there. A
+/// card dragged onto another screen crosses that screen's desktop to its middle (11-09:
+/// the behave phase's drag was refused unposted at the first point past the strip).
+fn path_refusal(
+    list: &[windows::CgWindow],
+    path: &[Point],
+    pids: &[i32],
+    press: bool,
+    own: i32,
+    cards: &[Rect],
+    dock_bar: &dyn Fn() -> Option<(i32, Option<Rect>)>,
+) -> Option<String> {
     for (i, p) in path.iter().enumerate() {
         // Our own strip sits below normal windows (layer -1): it counts where nothing covers
         // it, and for the press only on a card: off the cards its pane lets clicks through
         // (R1-ui 8), so what lies below must be safe (a drag stays with the window it was
         // pressed in). Our click-through windows above the floating level (card ghosts, the
         // motion overlay) never take a click, so they never count.
-        let on_card = !press || i > 0 || cards.iter().any(|(_, r)| r.contains(*p));
+        let on_card = !press || i > 0 || cards.iter().any(|r| r.contains(*p));
         let top = list.iter().find(|w| {
             let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || (w.bounds.w > TAB_MAX_WIDTH && !on_card));
             let clear_dock = w.layer == super::dock::DOCK_LAYER
@@ -313,7 +333,8 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
         });
         match top {
             Some(w) if pids.contains(&w.pid) => {}
-            Some(w) => return Err(format!("the topmost window at {:.0},{:.0} is not ours or a fixture's (pid {})", p.x, p.y, w.pid)),
+            Some(w) => return Some(format!("the topmost window at {:.0},{:.0} is not ours or a fixture's (pid {})", p.x, p.y, w.pid)),
+            None if press && i > 0 => {}
             None => {
                 // Say where our own windows are: the strip panel missing from the screen there
                 // (ordered out, on another Space, elsewhere) is the usual story.
@@ -322,11 +343,11 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
                     .filter(|w| w.pid == own)
                     .map(|w| format!("layer {} {} {}", w.layer, w.bounds, if w.onscreen { "on screen" } else { "off screen" }))
                     .collect();
-                return Err(format!("no window at {:.0},{:.0} (our windows: {})", p.x, p.y, ours.join("; ")));
+                return Some(format!("no window at {:.0},{:.0} (our windows: {})", p.x, p.y, ours.join("; ")));
             }
         }
     }
-    Ok(())
+    None
 }
 
 /// The highest level of our own windows that take clicks (the strip lifted, the edge tab).
@@ -615,6 +636,33 @@ mod tests {
         let mut other = reveal;
         other.owner = "Dock".into();
         assert!(desktop_at(&[other, icons], Point::new(1200.0, 700.0), own).is_err(), "only WindowManager's");
+    }
+
+    #[test]
+    fn a_drag_may_cross_the_bare_desktop_after_its_press() {
+        let (own, fixture, owner) = (7, 70, 55);
+        let w = |pid: i32, layer: i64, bounds: Rect| windows::CgWindow { id: 1, pid, owner: String::new(), name: None, layer, bounds, onscreen: true, alpha: 1.0 };
+        // The 5K and the laptop left of it, a card on the 5K's strip, the laptop's desktop
+        // bare, an owner's window low on the laptop.
+        let strip = w(own, -1, Rect::new(0.0, 30.0, 220.0, 1410.0));
+        let wallpaper = w(300, -2_147_483_624, Rect::new(-1800.0, 271.0, 1800.0, 1169.0));
+        let mail = w(owner, 0, Rect::new(-1700.0, 1000.0, 800.0, 400.0));
+        let list = [mail, strip, wallpaper];
+        let card = [Rect::new(15.0, 686.0, 88.0, 97.0)];
+        let no_dock = || None;
+        let pids = [own, fixture];
+        let path = |to: Point| {
+            let mut p = vec![Point::new(55.0, 739.0), Point::new(55.0, 751.0)];
+            p.extend(segment(Point::new(55.0, 751.0), to, 4.0).into_iter().skip(1));
+            p
+        };
+        let across = path(Point::new(-900.0, 687.0));
+        assert_eq!(path_refusal(&list, &across, &pids, true, own, &card, &no_dock), None, "the card onto the laptop's middle");
+        let onto_mail = path(Point::new(-1300.0, 1200.0));
+        assert!(path_refusal(&list, &onto_mail, &pids, true, own, &card, &no_dock).is_some_and(|e| e.contains("not ours")), "an owner's window still refuses");
+        let off_card = [Point::new(-900.0, 687.0), Point::new(-880.0, 687.0)];
+        assert!(path_refusal(&list, &off_card, &pids, true, own, &card, &no_dock).is_some(), "the press itself is never on the bare desktop");
+        assert!(path_refusal(&list, &across[1..], &pids, false, own, &card, &no_dock).is_some(), "a hover never is either");
     }
 
     const NONE: Modifiers = Modifiers { shift: false, cmd: false };

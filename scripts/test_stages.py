@@ -1887,6 +1887,16 @@ def phase_native():
     time.sleep(1.5)
     front = state()["stages"][1]["windows"][0]
     drop = (vis["x"] + 700, cy)
+    # The whole card by its app icons: since window-out-of-card (11-09) a press on one window
+    # of a combined card drags that window alone, and the press at the card's middle took
+    # Charlie 1 out by itself (Lifted, alone=true).
+    probe = strip_probe() or {}
+    card_stage = ids_by_number(s).get(2)
+    card = next((c for c in probe.get("cards", []) if c.get("stage") == card_stage), None)
+    icons = (card or {}).get("icons") or []
+    if icons:
+        cx, cy = center(icons[0])
+    check(bool(icons), f"the card's app icons are drawn, to grip the whole card ({icons})")
     r = ctl("debug-drag", cx, cy, cx + 60, cy, *drop)
     if not blocked(r, "the card drop (the drag, its windows joining, where they land)"):
         check(r.get("ok"), f"dragged the card to {drop[0]:.0f},{drop[1]:.0f} ({r.get('error', 'ok')}{whose(r.get('error'))})")
@@ -2904,6 +2914,10 @@ def phase_behave():
     before_log = len(log_text())
     out, _ = card_drag(center(card["frame"]), drop, "Alpha's card onto the other screen")
     if blocked(out, "the card dragged onto the other screen (where its window opens)"):
+        return
+    # A refusal used to pass unseen here (11-09: the path over the other screen's bare desktop
+    # was refused unposted, and only the wait below failed).
+    if not check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:160]}{whose(out)})"):
         return
     s = wait_state(lambda x: by_title(x)["Alpha 1"]["display"] == other["id"] and not by_title(x)["Alpha 1"]["parked"],
                    "Alpha 1 on the other screen")
@@ -4022,9 +4036,11 @@ def landing_blend_check():
     say("-- a stage's overlapping windows land as one picture: the one behind never shows through the one in front")
     s = state()
     t = by_title(s)
-    nums = numbers_by_id(s)
-    here = nums.get(t["Fixture 3"]["home"])
-    away = nums.get(t["Fixture 1"]["home"])
+    # `home` is the stage's number already. Read through `numbers_by_id` (keyed by stage id)
+    # it held only while ids and numbers matched: with a second screen its first stage takes
+    # id 2 and the main screen's second stage is id 3, number 2 (11-09: "(1, None)").
+    here = t["Fixture 3"]["home"]
+    away = t["Fixture 1"]["home"]
     if not check(here is not None and away is not None and here != away,
                  f"Fixture 3 and Fixture 1 in stages of their own ({here}, {away})"):
         return
@@ -4276,8 +4292,6 @@ def phase_glass():
     # A snapshot shrinking into a card lands on its look: Fixture 4 leaves into the slot of
     # the card clicked (Apple's order), Fixture 1 arrives.
     s = state()
-    nums = numbers_by_id(s)
-    one = nums.get(by_title(s)["Fixture 1"]["home"])
     before = (s.get("last_transition") or {}).get("id")
     # A card click, as a person switches: `ctl switch` lands at once, with no snapshots (11-05).
     click_card(s, "Fixture 1", "Fixture 1's card")
@@ -4304,7 +4318,6 @@ def phase_glass():
 
     # A snapshot growing from a card leaves it as the window, opaque: Fixture 4 comes back.
     s = state()
-    four = numbers_by_id(s).get(by_title(s)["Fixture 4"]["home"])
     before = (s.get("last_transition") or {}).get("id")
     # A card click, as a person switches: `ctl switch` lands at once, with no snapshots (11-05).
     click_card(s, "Fixture 4", "Fixture 4's card")
