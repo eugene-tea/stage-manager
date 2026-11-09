@@ -10,7 +10,9 @@
 //!   captures off (`[strip] capture = false`, `STAGE_MANAGER_NO_CAPTURE`) or refused by
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
-//!   snapshots appear exactly over them and shrink into their card's slot on the spring;
+//!   snapshots appear exactly over them and shrink into their card's slot on the spring (a
+//!   minimized window's, already in the Dock, comes out of its Dock tile instead, or its card
+//!   fades in: [`Transition::minimized`], [`crate::ui::minimize_motion`]);
 //!   incoming windows' snapshots grow from their card to their frames, both along Apple's
 //!   path (`motion_math::Path`: the window's picture, never stretched, turned about its
 //!   middle and seen from Apple's flight eye in front of the display's middle, its size, turn
@@ -82,6 +84,7 @@ use crate::ui::motion_math::{
     Plane, SHOWN_FADE, SnapshotCache, Spring, Toward, path_settle_time, settle_time, shown_handover, shown_lands, shows_at, shrink_spring,
     switch_spring, travel, unveil_time,
 };
+use crate::ui::minimize_motion;
 use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, Overlay};
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
@@ -677,6 +680,10 @@ impl Strip {
         // Reduce Motion: a cross-fade where the windows are (UX-SPEC, "Reduce Motion").
         let crossfade = crate::ui::display_options::reduced(&style).then(|| crate::ui::display_options::fade_seconds(&style));
         let mut outgoing: Option<GhostGroup> = None;
+        // A minimized window's: its picture flies from the Dock (the overlay goes above the
+        // Dock for it), or its card fades in (no picture moves).
+        let mut from_dock = false;
+        let mut fade_in: Vec<u64> = Vec::new();
         for w in &t.outgoing {
             let id = w.window.id;
             let (end, card, aimed, glass) =
@@ -684,6 +691,50 @@ impl Strip {
                     Some((p, stage, slot, glass)) => (p, Some(stage), Some(slot), glass),
                     None => (self.offscreen_plane(w.window.frame), None, None, None),
                 };
+            // A window already in the Dock (minimized): its picture comes out of its Dock tile,
+            // or its card fades in; never a full-size picture where it was before the genie.
+            if let Some(m) = t.minimized.filter(|m| m.window == id) {
+                let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
+                let frame = w.window.frame;
+                match minimize_motion::start(m.tile, frame.size(), image.is_some() || plain, crossfade.is_some(), self.screen_global()) {
+                    minimize_motion::Start::Tile(at_rect) => {
+                        let corner = self.style.cards.corner_radius * self.m().k * (at_rect.w / frame.w.max(1.0)).min(1.0);
+                        let at = Plane::window(at_rect, o, corner);
+                        // Card-sized: the card's shadow, not a window's.
+                        let (shadow, note) = self.ghost_shadow(id, image.as_ref(), frame, false, 0.0);
+                        let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, None);
+                        report.push(GhostReport {
+                            window: id,
+                            outgoing: true,
+                            stage: w.stage,
+                            slot: w.slot,
+                            aimed_slot: aimed,
+                            start: self.plane_rect(&at),
+                            end: self.plane_rect(&end),
+                            real: None,
+                            at_unveil: None,
+                            shown_ms: None,
+                            handover_ms: None,
+                            shadow: Some(note),
+                        });
+                        tracing::debug!(id, tile = ?m.tile, start = %at_rect, "a minimized window's picture comes out of its Dock tile");
+                        waiting.push((ghosts.len(), end, glass, Toward::Card));
+                        ghosts.push(ghost);
+                        cover.outgoing = true;
+                        from_dock = true;
+                        if let Some(stage) = card.filter(|s| !held.contains(s)) {
+                            held.push(stage);
+                        }
+                    }
+                    minimize_motion::Start::Fade => {
+                        tracing::debug!(id, tile = ?m.tile, reduced = crossfade.is_some(), picture = image.is_some(), "a minimized window's card fades in");
+                        if let Some(stage) = card.filter(|s| !fade_in.contains(s)) {
+                            fade_in.push(stage);
+                        }
+                    }
+                }
+                continue;
+            }
             // A window dropped on the strip: its card under the pointer becomes the snapshot.
             let dragged = self.motion.window_card.take_if(|c| c.window == id);
             let toward = if dragged.is_some() { Toward::Straight } else { Toward::Card };
@@ -775,6 +826,7 @@ impl Strip {
             ghosts.push(ghost);
             cover.incoming = true;
         }
+        self.fade_in_cards(&fade_in);
         if ghosts.is_empty() {
             for g in incoming.iter().chain(&outgoing) {
                 g.remove();
@@ -796,7 +848,7 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        self.show_overlay(under);
+        self.show_overlay(under, from_dock);
         self.motion.overlay.flush();
         self.motion.landing = None;
         // The cards' thumbnails are not captured while the snapshots move.
@@ -904,6 +956,24 @@ impl Strip {
         if rises_now {
             self.start_motion(id, false);
         }
+    }
+
+    /// The cards of `stages` fade in at their slots ([`crate::ui::display_options::fade_seconds`]): a
+    /// minimized window's card with no picture to fly from the Dock, or under Reduce Motion.
+    fn fade_in_cards(&self, stages: &[u64]) {
+        let fade = crate::ui::display_options::fade_seconds(&self.style.animation);
+        for stage in stages {
+            if let Some(layers) = self.pane.cards.get(stage) {
+                layers.card.setOpacity(1.0);
+                super::fade_in(&layers.card, fade);
+            }
+        }
+    }
+
+    /// This strip's screen (global, top-left): where its overlay draws.
+    fn screen_global(&self) -> Rect {
+        let g = &self.geometry;
+        Rect::new(g.screen.origin.x, g.primary_height - (g.screen.origin.y + g.screen.size.height), g.screen.size.width, g.screen.size.height)
     }
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
@@ -1308,9 +1378,10 @@ impl Strip {
         objc2_quartz_core::CATransaction::commit();
     }
 
-    /// Shows the overlay where [`overlay_place`] puts it.
-    fn show_overlay(&mut self, under: Option<u32>) {
-        match overlay_place(self.motion.window_card.is_some(), under) {
+    /// Shows the overlay where [`overlay_place`] puts it (`from_dock`: a picture leaves the
+    /// Dock, which it must pass over).
+    fn show_overlay(&mut self, under: Option<u32>, from_dock: bool) {
+        match overlay_place(self.motion.window_card.is_some() || from_dock, under) {
             OverlayPlace::OnTop => self.motion.overlay.show_on_top(),
             OverlayPlace::Under(id) => self.motion.overlay.show_under(Some(id)),
             OverlayPlace::OverWindows => self.motion.overlay.show_under(None),

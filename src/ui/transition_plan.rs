@@ -150,7 +150,7 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
         Some(w) => incoming.iter().any(|x| x.window.id == w).then_some(w),
         None => incoming.first().map(|w| w.window.id),
     };
-    Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None, key_out, key_in, late: Vec::new() })
+    Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None, key_out, key_in, late: Vec::new(), minimized: None })
 }
 
 /// The stage ids of `slots`, top to bottom (for the logs).

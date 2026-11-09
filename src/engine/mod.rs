@@ -20,6 +20,7 @@ pub mod handoff;
 pub mod hidden_tab;
 pub mod leftovers;
 pub mod logout_watch;
+pub mod minimize;
 pub mod model;
 pub mod not_ours;
 pub mod observe_retry;

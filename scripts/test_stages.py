@@ -33,7 +33,9 @@ is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of
 first start, switch and creation, a too-wide one narrowed and given back its exact frame on
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
 menu-path quit right after a first start with many windows), parity (the generated config has
-no live values and registers no hotkey; Cmd-M sends a window to the strip; a click on a
+no live values and registers no hotkey; Cmd-M sends a window to the strip, its picture from
+its Dock tile, the window never shown outside the corner past two frames after the genie,
+sampled every 8 ms; a click on a
 card's app icon brings every window of that app), motion (the strip below windows, also
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
@@ -5015,6 +5017,12 @@ def phase_parity():
     alpha = s["active"] if t["Alpha 1"]["home"] == s["active"] else t["Alpha 1"]["home"]
     do("switch", alpha)
     time.sleep(0.9)
+    a1_id = t["Alpha 1"]["id"]
+    before_min = len(log_text())
+    # The window server every 8 ms through the genie, the un-minimize and the park (round
+    # minimize-flow): the window never shows outside the corner past a frame or two.
+    sampler = start_sampler([EXTRA["a"][0]], 3500, every=8)
+    time.sleep(0.3)
     os.kill(extra_pid("a"), signal.SIGUSR2)
     s = wait_state(lambda x: by_title(x)["Alpha 1"]["parked"], "Alpha 1 to go to the strip")
     if check(s is not None, "a minimized window goes to the strip, not the Dock"):
@@ -5030,6 +5038,7 @@ def phase_parity():
         check(a1["parked"] and stage_titles(s)[a1["home"]] == ["Alpha 1"] and a1["home"] in s["strip"],
               f"1.5 s on, the card is still there: Alpha 1 parked in its own stage ({stage_titles(s)}, strip {s['strip']})")
         check(s["active"] == alpha, "and the view still on the current stage")
+    minimize_path_check(sampler_out(sampler, "Cmd-M"), a1_id, log_text()[before_min:])
     consistent("Cmd-M")
     wins, d = fixture_windows([EXTRA["a"][0]])
     check(len([w for w in wins if w["bounds"]["h"] > 60]) == 2, "the window is not left in the Dock (both Alpha windows listed)")
@@ -5052,6 +5061,69 @@ def phase_parity():
     stop_app()
     all_onscreen("parity quit")
     stop_all_fixtures()
+
+
+# The bottom band a bottom Dock's tiles sit in (points): the un-minimize sinks out of the
+# window's tile there, off the screen (round minimize-flow, measured 11-09: within 80 pt of the
+# bottom for 0.2 s).
+DOCK_BAND = 100.0
+
+
+def minimize_path_check(p, wid, log):
+    """Round minimize-flow, from the window server's samples (`p`, probe-windows every 8 ms) of
+    a window minimized while Stage Manager sends it to the strip, and the app's log of it
+    (`log`): after macOS's genie has put it in the Dock (listed off screen), it is never shown
+    outside the park corner for more than about two frames (40 ms), except sinking out of its
+    Dock tile (the bottom band) or off every display, and it ends parked; the strip's picture
+    starts at the Dock tile (or the card fades in), never at the window's old frame. Every
+    distinct place it was listed at is logged."""
+    if p is None:
+        return
+    d = p["display"]
+    seen = []
+    for smp in p.get("samples", []):
+        w = next((w for w in smp["windows"] if w["id"] == wid), None)
+        if w:
+            seen.append((smp["t"], w["onscreen"], w["bounds"]))
+    if not check(len(seen) > 10, f"Cmd-M: the window sampled ({len(seen)} samples)"):
+        return
+    # The genie into the Dock: until the window is first listed off screen.
+    docked = next((i for i, (_, on, _) in enumerate(seen) if not on), None)
+    if not check(docked is not None, "Cmd-M: the window went into the Dock (listed off screen)"):
+        return
+    t0 = seen[docked][0]
+    last, runs, run, band_ms = None, [], [], 0.0
+    for i, (t, on, b) in enumerate(seen[docked:]):
+        place = f"{b['x']:.0f},{b['y']:.0f} {b['w']:.0f}x{b['h']:.0f} {'on' if on else 'off'}"
+        if place != last:
+            say(f"    +{(t - t0) * 1000:4.0f} ms  {place}")
+            last = place
+        shows = on and min(b["x"] + b["w"], d["x"] + d["w"]) > max(b["x"], d["x"]) and min(b["y"] + b["h"], d["y"] + d["h"]) > max(b["y"], d["y"])
+        in_band = b["y"] >= d["y"] + d["h"] - DOCK_BAND
+        if shows and in_band and not is_parked(b, d):
+            band_ms += 8.0
+        if shows and not in_band and not is_parked(b, d):
+            run.append(t)
+        elif run:
+            runs.append(run)
+            run = []
+    if run:
+        runs.append(run)
+    worst = max(((r[-1] - r[0]) * 1000 + 8 for r in runs), default=0.0)
+    check(worst <= 40.0, f"Cmd-M: after the genie the window never shows outside the corner past two frames (longest {worst:.0f} ms, {len(runs)} times)")
+    check(band_ms <= 400.0, f"Cmd-M: its un-minimize sinks out of the Dock tile quickly ({band_ms:.0f} ms in the bottom band)")
+    end = seen[-1]
+    check(end[1] and is_parked(end[2], d), f"Cmd-M: it ends parked ({end[2]})")
+    ghost = [ln for ln in log.splitlines() if "transition ghost" in ln and f"window={wid} " in ln]
+    tile = [ln for ln in log.splitlines() if "a minimized window's picture comes out of its Dock tile" in ln or "a minimized window's card fades in" in ln]
+    check(bool(tile), f"Cmd-M: the strip's picture starts at the Dock tile, or the card fades in ({tile[-1:] or 'no line'})")
+    if ghost:
+        m = re.search(r"start=(-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)", ghost[-1])
+        if m:
+            w, h = float(m.group(3)), float(m.group(4))
+            check(w <= 200 and h <= 200, f"Cmd-M: no full-size picture at the old frame ({w:.0f}x{h:.0f} at the start)")
+    dived = [ln for ln in log.splitlines() if "window minimized: it goes to the strip" in ln]
+    say(f"    {dived[-1][dived[-1].find('window minimized'):] if dived else 'no minimize line'}")
 
 
 def start_extra_frames(k, n, frames):
@@ -6922,9 +6994,9 @@ def phase_enhanced():
 
 # ----- window server samples -------------------------------------------------------------
 
-def start_sampler(bundles, ms):
-    """The window server's view of `bundles`' windows every 20 ms for `ms` (probe-windows)."""
-    return subprocess.Popen([BIN, "probe-windows", "--every", "20", "--for", str(ms), *bundles],
+def start_sampler(bundles, ms, every=20):
+    """The window server's view of `bundles`' windows every `every` ms for `ms` (probe-windows)."""
+    return subprocess.Popen([BIN, "probe-windows", "--every", str(every), "--for", str(ms), *bundles],
                             env=ENV, stdout=subprocess.PIPE, text=True)
 
 

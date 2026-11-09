@@ -124,6 +124,21 @@ pub struct Transition {
     /// `[windows] hide_parked_apps` (an app hidden in place, unhidden at the landing) was
     /// retired on 11-09.
     pub late: Vec<u32>,
+    /// An outgoing window already in the Dock (minimized: `[windows] minimize_to_strip`): its
+    /// picture starts at its Dock tile, or its card fades in ([`crate::ui::minimize_motion`]),
+    /// never at the frame it had before the genie.
+    pub minimized: Option<Minimized>,
+}
+
+/// A minimized window on its way to the strip ([`Transition::minimized`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Minimized {
+    /// The window.
+    pub window: u32,
+    /// Its Dock tile (global, top-left), read through the Dock's Accessibility: its own
+    /// minimized-window item, else its app's icon (macOS's "minimize windows into
+    /// application icon"). `None`: not read.
+    pub tile: Option<Rect>,
 }
 
 /// Late incoming windows of transition `id` ([`Transition::late`]) on their way to the screen.

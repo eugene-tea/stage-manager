@@ -114,6 +114,7 @@ use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::stale_activation;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
+use crate::engine::minimize;
 use crate::engine::park::{Corner, ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
 use crate::engine::sliver;
@@ -133,7 +134,7 @@ use crate::engine::rules::{Decision, RuleAction, ShiftEffect};
 use crate::engine::save_clock::SaveClock;
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
-use crate::ui::strip_model::{self, CardSnapshot, CardWindow, StripDrop, StripEvent, StripSnapshot, Transition};
+use crate::ui::strip_model::{self, CardSnapshot, CardWindow, Minimized, StripDrop, StripEvent, StripSnapshot, Transition};
 use crate::ui::{motion_math, transition_plan};
 
 mod arrival;
@@ -172,6 +173,10 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 /// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
+/// A window un-minimized on its way to the strip is parked again when its un-minimize ends
+/// within this long ([`Controller::on_deminiaturized`]; measured 11-09: the notice 0.65 s
+/// after the un-minimize was asked).
+const UNMINIMIZE_MAX: Duration = Duration::from_secs(3);
 
 /// How long Finder's desktop icons as read for the corner patch are trusted (a new
 /// rectangle reads them at once).
@@ -1158,6 +1163,12 @@ pub struct Controller {
     /// "Follow the Dock": when the Dock's order is read next, and one waiting for the strip
     /// to be still ([`dock_order`]).
     dock_order: dock_order::DockOrderWatch,
+    /// A minimized window on its way to the strip, while its batch runs: its transition's
+    /// picture starts at its Dock tile ([`Self::on_minimized`]).
+    minimizing: Option<Minimized>,
+    /// Minimized windows un-minimized on their way to the strip, and when: each is parked
+    /// again as soon as its un-minimize is over ([`Self::on_deminiaturized`]).
+    unminimizing: HashMap<u32, Instant>,
     /// The moves of an arrangement made at a Dock click, until the window server shows them.
     verify: Option<arrival::Verify>,
     /// The latest Dock press's prediction, until a Space change shows where it went.
@@ -1367,6 +1378,8 @@ impl Controller {
             dock_pid: None,
             dock_bar: None,
             dock_order: dock_order::DockOrderWatch::default(),
+            minimizing: None,
+            unminimizing: HashMap::new(),
             verify: None,
             dock_seen: None,
             defer_present: false,
@@ -2809,8 +2822,9 @@ impl Controller {
     /// leaves into or arrives from (the engine's, [`transition_plan::plan`]).
     fn transition_for(&mut self, ob: &Observer, actions: &[Action]) -> Option<Transition> {
         let m = self.model.as_ref()?;
-        let t = transition_plan::plan(m, actions, &self.before, |id| ob.window(id).map(|t| t.frame), self.next_transition + 1)?;
+        let mut t = transition_plan::plan(m, actions, &self.before, |id| ob.window(id).map(|t| t.frame), self.next_transition + 1)?;
         self.next_transition = t.id;
+        t.minimized = self.minimizing.filter(|w| t.outgoing.iter().any(|g| g.window.id == w.window));
         for g in &t.outgoing {
             tracing::debug!(id = t.id, window = g.window.id, stage = ?g.stage, to_slot = ?g.slot, from = %g.window.frame, "transition: outgoing");
         }
@@ -3745,6 +3759,7 @@ impl Controller {
                 }
             }
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
+            WinEvent::Deminiaturized(id) => self.on_deminiaturized(ob, id),
             // Logged by the observer; a running switch's windows came first (above).
             WinEvent::AppHidden(_) | WinEvent::AppUnhidden(_) | WinEvent::AppTookActivation(_) => {}
             WinEvent::AppTerminated(pid) => {
@@ -3936,29 +3951,82 @@ impl Controller {
         Duration::from_millis(self.store.config().sugar.activation_window_ms)
     }
 
-    /// ⌘M on a managed window: with `[windows] minimize_to_strip` (Apple's behavior) the
-    /// window goes to the strip as a card of its own instead of the Dock: it is parked, then
-    /// un-minimized there (macOS may flash its restore animation toward the corner).
+    /// A managed window minimized (the yellow button, ⌘M, Window → Minimize, its app's own
+    /// code; macOS tells once its genie has put it in the Dock): with `[windows]
+    /// minimize_to_strip` (Apple's behavior) it goes to the strip as a card of its own
+    /// instead. Its picture comes out of its Dock tile into the card ([`Minimized`]); the
+    /// window is put beyond the screen's Dock edge in line with its park frame while still
+    /// minimized ([`minimize::dive_frame`]), so its un-minimize, which macOS always animates,
+    /// sinks out of the tile off the screen instead of crossing it to the corner, and it is
+    /// parked again the moment it is down ([`Self::on_deminiaturized`]).
     fn on_minimized(&mut self, ob: &mut Observer, id: u32) {
         if !self.store.config().windows.minimize_to_strip || self.frozen() {
             return;
         }
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
-        let actions = m.minimize_to_strip(WindowId(id), &obs);
+        let mut actions = m.minimize_to_strip(WindowId(id), &obs);
         if actions.is_empty() {
             return;
         }
-        tracing::info!(id, "window minimized: it goes to the strip instead of the Dock");
+        let screen = m.window(WindowId(id)).map(|w| m.display(w.meta.display).frame);
+        let (pid, title) = ob.window(id).map_or((0, String::new()), |w| (w.pid, w.title.clone()));
+        let read_at = Instant::now();
+        let dock = super::dock::dock_pid();
+        let tile = dock.and_then(|d| super::dock::minimized_tile(d, super::dock::app_path(pid).as_deref(), &title));
+        // The Dock's edge from its bar when no tile was read.
+        let edge = tile.or_else(|| dock.and_then(super::dock::bar_frame));
+        let read_ms = read_at.elapsed().as_millis() as u64;
+        let mut dive = None;
+        if let (Some(screen), Some(edge)) = (screen, edge) {
+            for a in &mut actions {
+                if let Action::Park { id: w, frame } = a
+                    && w.0 == id
+                    && let Some(d) = minimize::dive_frame(*frame, edge, screen, &desktop::cg_display_bounds())
+                {
+                    *frame = d;
+                    dive = Some(d);
+                }
+            }
+        }
+        tracing::info!(
+            id,
+            tile = ?tile,
+            dive = ?dive,
+            read_ms,
+            "window minimized: it goes to the strip instead of the Dock"
+        );
+        self.minimizing = Some(Minimized { window: id, tile });
         self.execute_animated(ob, actions);
+        self.minimizing = None;
         if let Some(w) = ob.window(id) {
             let now = Instant::now();
             self.echoes.touch_window(id, now);
             self.echoes.touch_app(w.pid, now);
+            self.unminimizing.retain(|_, at| now.duration_since(*at) < UNMINIMIZE_MAX);
+            self.unminimizing.insert(id, now);
             if let Err(e) = w.element.set_minimized(false) {
                 tracing::warn!(id, "cannot restore the minimized window: {e}");
             }
         }
+    }
+
+    /// A window un-minimized on its way to the strip ([`Self::on_minimized`]) is down: AppKit
+    /// has set it where it keeps a title bar on screen (from beyond the Dock's edge, in the park
+    /// corner, or at that edge for a side Dock). It is parked again now, before the reconcile's
+    /// wait for it to rest, so it shows outside the corner a frame or two at most.
+    fn on_deminiaturized(&mut self, ob: &mut Observer, id: u32) {
+        let Some(at) = self.unminimizing.remove(&id) else { return };
+        if at.elapsed() >= UNMINIMIZE_MAX {
+            return;
+        }
+        let Some(frame) = self.model.as_ref().filter(|m| m.window(WindowId(id)).is_some_and(|w| w.parked)).and_then(|m| m.frame_left(WindowId(id)))
+        else {
+            return;
+        };
+        let listed = ob.window(id).and_then(|w| w.element.frame().ok());
+        tracing::debug!(id, listed = ?listed, park = %frame, after_ms = at.elapsed().as_millis() as u64, "a window un-minimized on its way to the strip is down: parked again at once");
+        self.execute(ob, vec![Action::Park { id: WindowId(id), frame }]);
     }
 
     /// True when window `id` sits in a stage that is not in front on its screen.

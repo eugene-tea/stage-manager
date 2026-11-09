@@ -323,6 +323,7 @@ impl Demo {
             key_out: None,
             key_in: None,
             late: Vec::new(),
+            minimized: None,
         });
         tracing::info!(id, stage, "demo: playing a switch");
         strip_model::present(s.clone());

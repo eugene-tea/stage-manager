@@ -166,8 +166,11 @@ pub enum WinEvent {
     AppUnhidden(i32),
     /// An app quit (NSWorkspace; its windows' `Destroyed` come with it).
     AppTerminated(i32),
-    /// A window was minimized (⌘M, the yellow button).
+    /// A window was minimized (⌘M, the yellow button, Window → Minimize, its app's own
+    /// code): posted once macOS's genie has put it in the Dock.
     Minimized(u32),
+    /// A window's un-minimize is over: AppKit has set it down (`AXWindowDeminiaturized`).
+    Deminiaturized(u32),
 }
 
 struct ObservedApp {
@@ -1261,6 +1264,12 @@ impl Observer {
                     tracing::debug!(id = w.id, pid, "window minimized");
                     let id = w.id;
                     self.events.push(WinEvent::Minimized(id));
+                }
+            }
+            n::WINDOW_DEMINIATURIZED => {
+                if let Some(id) = self.find_window(pid, &element) {
+                    tracing::debug!(id, pid, "window un-minimized");
+                    self.events.push(WinEvent::Deminiaturized(id));
                 }
             }
             other => tracing::debug!(pid, "unhandled AX notification {other}"),
