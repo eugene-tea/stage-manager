@@ -596,11 +596,26 @@ A window of a combined card lifts off as that picture from the first move, insid
 too, where Apple's leaves it on the card until the pointer is about 245 pt from the edge
 (Drag and drop, above).
 
-**⌘M** parks the window and then un-minimizes it there, so macOS may show its restore
-animation toward the corner. Apple's window shrinks straight into the strip. macOS's
-un-minimize focuses the window and may set it down short of the corner: it is parked again
-where it rests, never taken for a window you brought out (only a focus or a drag of yours
-after the park counts as that).
+**Minimize** (the yellow button, ⌘M, Window → Minimize, or an app minimizing its own window)
+sends the window to the strip as a card of its own, but macOS's genie into the Dock plays
+first: Stage Manager hears of the minimize only once the window is in the Dock. Apple's
+window shrinks straight into the strip (how exactly is not recorded yet). Then one motion: a
+picture of the window comes out of its Dock tile (its own tile, or its app's icon with
+"Minimize windows into application icon"), the size the genie left it at, and flies into its
+card. With no tile on that screen or no picture of the window, the card fades in where it
+lands; under Reduce Motion the card's fade is all. No full-size picture ever shows where the
+window was.
+
+The window itself has to leave the Dock to be parked, and macOS animates every un-minimize
+out of the Dock tile toward the window's frame, whatever that frame (on screen, off every
+display, with its app hidden: measured 11-09). So while it is still in the Dock it is put
+beyond the screen edge the Dock is on, in line with its park frame (2000 pt past every
+display): its un-minimize sinks out of the tile off the screen within the Dock's band
+(gone in about 0.2 s) instead of rising and crossing the screen to the corner, macOS sets it
+down in the corner, and it is parked again the moment it is down. Where that way would pass
+another screen it goes to the park frame as before. macOS's un-minimize focuses the window:
+that is never taken for a window you brought out (only a focus or a drag of yours after the
+park counts as that).
 
 **Desktop items are left alone.** Hiding Finder's desktop icons is outside a window
 manager's reach through public API.
@@ -830,7 +845,8 @@ still turns everything off, fades included.
 
 | Case | Full motion | Under Reduce Motion | Why |
 |---|---|---|---|
-| The switch (also the desktop reveal, ⌘M, an activation, a drop) | windows fly between card and frame at full-screen scale, turned and scaled in depth | a cross-fade where the windows are: the outgoing pictures fade out at their frames while their stage's card fades in at its slot; the incoming pictures fade in at their frames while their card fades out | the largest trigger of all: depth, scale and a 3D turn over most of the screen. The card fading in at its slot as the windows fade out says where they went; the same unveil, handover and landing rules hold, with no spring travel |
+| A minimized window going to the strip | its picture flies from its Dock tile into its card | its card fades in at its slot; no picture | the window is already gone into the Dock (macOS's own animation, which follows Reduce Motion itself); the card fading in says where it went |
+| The switch (also the desktop reveal, an activation, a drop) | windows fly between card and frame at full-screen scale, turned and scaled in depth | a cross-fade where the windows are: the outgoing pictures fade out at their frames while their stage's card fades in at its slot; the incoming pictures fade in at their frames while their card fades out | the largest trigger of all: depth, scale and a 3D turn over most of the screen. The card fading in at its slot as the windows fade out says where they went; the same unveil, handover and landing rules hold, with no spring travel |
 | The strip sliding out and in | 286 pt sideways, in 3D | fades in at its place; fades out where it is, then leaves the screen unseen | a large surface moving across the screen |
 | Hover | the card's windows grow 11 % on a spring | no growth; the glass still turns solid | scaling by itself; the colour change alone still shows which card is under the pointer |
 | Press | the card eases to 0.987 | none | scaling |

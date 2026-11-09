@@ -37,13 +37,15 @@ and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.
 
 ## Live checks
 
-**One session, about 50 minutes.** Use the dev app and fixture windows only, with the 5K and the laptop
+**One session, about 52 minutes.** Use the dev app and fixture windows only, with the 5K and the laptop
 screen both attached. The main thread runs it, with Eugene at the Mac for the steps marked (E).
 
-1. **The suite's new checks, 12 min.** `scripts/test-stages.sh safety park capture` on today's
+1. **The suite's new checks, 13 min.** `scripts/test-stages.sh safety park capture parity` on today's
    build: `kill -9` with a dialog open, an app answering late at the quit, a fit move then a
    crash, a dialog opened in a hidden stage, a window showing only a piece at the corner, no
-   captures while the strip is hidden. Hands off the Mac; they have never run.
+   captures while the strip is hidden, and a minimized window's way to the strip sampled every
+   8 ms (its places are printed: after the genie only the sink out of the Dock tile, then the
+   corner). Hands off the Mac; they have never run.
 2. **Both screens, 5 min.** `scripts/test-stages.sh displays` on today's build. All checks pass, including
    each screen's own card glass and corner patch (`displays[i].pictures`, `displays[i].corner_patch.shown`).
 3. **⌘-Tab to the other screen, 3 min.** Put fixture B on the laptop screen (`ctl debug-frame`) as a stage of
@@ -58,7 +60,7 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
 6. **A window moved to another Desktop of the laptop screen (E), 4 min.** Eugene drags fixture B in Mission
    Control to the laptop screen's second Desktop. In the log: B leaves its stage, and on that Desktop it
    starts a stage of its own. Back on the first Desktop, its stages are as they were.
-7. **Apple's Stage Manager, measured (E), 15 min.** Eugene turns on Apple's Stage Manager and Dark Mode.
+7. **Apple's Stage Manager, measured (E), 16 min.** Eugene turns on Apple's Stage Manager and Dark Mode.
    - `scripts/measure-apple-card-glass.py`, in Dark Mode.
    - Then, in Light Mode, on fixture cards:
      - Shift-click on a card of two apps: whole card, or the app under the pointer?
@@ -66,6 +68,19 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
      - ⌘H, then ⌘\`.
      - The auto-hide delay and a new card's fade (recordings).
      - A card of three apps.
+   - **Minimize, one 30 s recording** (screen recording at 60 fps, the 5K only; round minimize-flow).
+     Fixture `--windows 2` as one stage, two cards of other fixtures in the strip. At 0 s the yellow
+     button on Fixture 1; at 10 s ⌘M on Fixture 2; at 20 s Reduce Motion on, ⌘M on the window
+     brought back from Fixture 1's card. Read frame by frame: does a genie into the Dock play at all;
+     where the window shrinks to (the new card's slot: top or bottom of the strip) and in how many
+     frames; does it turn and take on the card's glass on the way, or fly flat; does its card appear
+     at once, fade or slide; does the Dock show anything (a tile, a bounce); and what Reduce Motion
+     makes of it. Constants that may change after it: the flight's spring (today `[animation]
+     shrink_*`, a pair of its own if Apple's is faster), where the picture starts and its size
+     (`ui::minimize_motion::start`: the Dock tile, at the size the genie left the window), the
+     card's fade without a tile and under Reduce Motion (`display_options::FADE_MS`), and the new
+     card's slot (the engine's `Target::New`). macOS's own genie stays: Stage Manager hears of a
+     minimize only after it.
    - With Reduce Motion on: one switch recorded (for the accessibility round).
    - Eugene turns Apple's Stage Manager and Dark Mode back off.
 8. **VoiceOver on the strip (E), 5 min.** The accessibility round's checklist: each card reads its stage and

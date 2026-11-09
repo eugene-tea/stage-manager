@@ -241,6 +241,49 @@ pub fn app_order(dock: i32) -> Option<Vec<DockApp>> {
     )
 }
 
+/// Where a window just minimized sits in the Dock (`dock`: its pid), read through
+/// Accessibility at the Dock's bounded timeout: the minimized-window item titled `title`
+/// (the last such one when several are: the Dock adds each window minimized at the end of
+/// its minimized items, just before the Trash), else the icon of its app (`app_path`, the
+/// app bundle's path), where macOS's "Minimize windows into application icon" puts it (seen
+/// 11-09: the un-minimize starts from the app's icon, 61×61 inside its 68×84 item). `None`
+/// when the Dock does not answer or has neither.
+pub fn minimized_tile(dock: i32, app_path: Option<&str>, title: &str) -> Option<Rect> {
+    let t = DOCK_AX_TIMEOUT_SECONDS;
+    let lists = AxElement::application(dock).bounded(t, AxElement::children).ok()?;
+    let app_path = app_path.map(|p| p.trim_end_matches('/'));
+    let (mut own, mut icon) = (None, None);
+    for list in &lists {
+        let items = match list.bounded(t, AxElement::children) {
+            Ok(items) => items,
+            Err(AxError::CANNOT_COMPLETE) => return None,
+            Err(_) => continue,
+        };
+        for item in items {
+            let Ok(subrole) = item.bounded(t, AxElement::subrole) else { continue };
+            if subrole == names::SUBROLE_MINIMIZED_WINDOW_DOCK_ITEM {
+                if item.bounded(t, AxElement::title).is_ok_and(|s| s == title)
+                    && let Ok(frame) = item.bounded(t, AxElement::frame)
+                {
+                    own = Some(frame);
+                }
+            } else if subrole == names::SUBROLE_APPLICATION_DOCK_ITEM
+                && icon.is_none()
+                && app_path.is_some_and(|want| item.bounded(t, AxElement::url_path).is_ok_and(|p| p.trim_end_matches('/') == want))
+            {
+                icon = item.bounded(t, AxElement::frame).ok();
+            }
+        }
+    }
+    own.or(icon).filter(|f| !f.is_degenerate())
+}
+
+/// The path of app `pid`'s bundle (no trailing slash), when it runs.
+pub fn app_path(pid: i32) -> Option<String> {
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    Some(app.bundleURL()?.path()?.to_string().trim_end_matches('/').to_string())
+}
+
 /// The running apps by their bundle's path (no trailing slash).
 fn running_by_path() -> HashMap<String, i32> {
     NSWorkspace::sharedWorkspace()

@@ -11,6 +11,7 @@ pub mod display_options;
 pub mod form;
 pub mod glass_math;
 pub mod glyph;
+pub mod minimize_motion;
 pub mod motion_math;
 pub mod overlay;
 pub mod panels;

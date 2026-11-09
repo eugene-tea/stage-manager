@@ -9,6 +9,13 @@
 - A window dragged off a card onto another card, or a card dropped onto another card, now goes
   in front of that stage's windows: it is the card's front picture and the window in front,
   with the keyboard, when you switch there. It went behind them all.
+- Minimizing a window (the yellow button, ⌘M, Window → Minimize) now ends in one motion
+  after macOS's genie: a small picture of the window comes out of its Dock tile and flies
+  into its new card. A full-size picture used to appear where the window had been and fly to
+  the strip, and the window itself came back out of the Dock and crossed the screen to the
+  corner at odd sizes. Now it sinks out of its Dock tile below the screen and waits in the
+  corner unseen. Without a Dock tile to start from, and under Reduce Motion, the card fades
+  in instead.
 - VoiceOver reads the strip: each card is a button that says its stage and apps ("Stage 3:
   Safari, Notes", or the stage's name), and pressing it switches to that stage. Its actions
   show all of one app's windows, as a click on the app's icon. The edge tab is a button too.
