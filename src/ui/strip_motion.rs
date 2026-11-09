@@ -154,8 +154,6 @@ struct Running {
     /// Cards hidden until their snapshots land.
     held: Vec<u64>,
     timers: Vec<Retained<NSTimer>>,
-    /// The window in place the snapshots pass under ([`Transition::under`]).
-    under: Option<u32>,
     /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
     corner: Option<Ghost>,
     /// Where that cover is, what it shows, and the screen it is on.
@@ -660,7 +658,6 @@ impl Strip {
         }
         self.place_overlay();
         let under = t.under;
-        let below = self.overlay_below(under);
         let style = self.style.animation.clone();
         let spring = self.spring();
         let o = self.motion.overlay.origin();
@@ -799,7 +796,7 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        self.show_overlay(below);
+        self.show_overlay(under);
         self.motion.overlay.flush();
         self.motion.landing = None;
         // The cards' thumbnails are not captured while the snapshots move.
@@ -890,7 +887,6 @@ impl Strip {
                 drawn_at,
                 held,
                 timers,
-                under,
                 corner,
                 corner_at,
                 arrived,
@@ -1312,38 +1308,12 @@ impl Strip {
         objc2_quartz_core::CATransaction::commit();
     }
 
-    /// Where the overlay goes for a transition (`under`: its window in place): just under the
-    /// strip's pane while the strip is raised over windows (the edge revealing it, or its
-    /// level above windows), so snapshots grow from and shrink into the cards from behind
-    /// them (drawn over the cards and gone at the end, the cards popped back to the front:
-    /// 10-13, a laptop with windows over the strip); else just under `under`; above every
-    /// window while a dragged window's card shows, or with neither.
-    fn overlay_below(&self, under: Option<u32>) -> Option<(u32, isize)> {
-        if self.motion.window_card.is_some() {
-            return None;
-        }
-        if self.pane.lifted == Some(true) {
-            return u32::try_from(self.pane.panel.windowNumber()).ok().map(|n| (n, objc2_app_kit::NSFloatingWindowLevel));
-        }
-        under.map(|id| (id, objc2_app_kit::NSNormalWindowLevel))
-    }
-
-    /// The strip was raised or lowered: a running transition's overlay goes where it now
-    /// belongs ([`Self::overlay_below`]).
-    pub(super) fn reorder_overlay(&mut self) {
-        let Some(under) = self.motion.running.as_ref().map(|r| r.under) else { return };
-        let below = self.overlay_below(under);
-        self.show_overlay(below);
-    }
-
-    /// Shows the overlay where [`Self::overlay_below`] puts it: above every window while a
-    /// dragged window's card shows (it passes over the raised strip's cards), else under
-    /// `below`, or above every normal window and below floating ones.
-    fn show_overlay(&mut self, below: Option<(u32, isize)>) {
-        if self.motion.window_card.is_some() {
-            self.motion.overlay.show_on_top();
-        } else {
-            self.motion.overlay.show_below(below);
+    /// Shows the overlay where [`overlay_place`] puts it.
+    fn show_overlay(&mut self, under: Option<u32>) {
+        match overlay_place(self.motion.window_card.is_some(), under) {
+            OverlayPlace::OnTop => self.motion.overlay.show_on_top(),
+            OverlayPlace::Under(id) => self.motion.overlay.show_under(Some(id)),
+            OverlayPlace::OverWindows => self.motion.overlay.show_under(None),
         }
     }
 
@@ -1597,6 +1567,33 @@ impl Strip {
 
 }
 
+/// Where the motion overlay goes for a transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayPlace {
+    /// Above every window, floating ones and the raised strip included: only while a
+    /// dragged window's card shows (it passes over the raised strip's cards).
+    OnTop,
+    /// Just under this window (in place, at the normal level), as Apple's snapshots pass
+    /// behind a window just opened or activated.
+    Under(u32),
+    /// Above every normal window, below floating ones.
+    OverWindows,
+}
+
+/// Where the overlay goes for a transition (`under`: its window in place). Whether the strip
+/// is raised does not matter: the overlay's own level is under floating windows, so it is
+/// under the raised strip (its cards cover the snapshots growing from and shrinking into
+/// them) and under always-on-top windows, which stay on top through a switch. Until 11-09 a
+/// raised strip put the overlay at the floating level, just under the strip, and so over an
+/// always-on-top window.
+fn overlay_place(window_card: bool, under: Option<u32>) -> OverlayPlace {
+    match (window_card, under) {
+        (true, _) => OverlayPlace::OnTop,
+        (false, Some(id)) => OverlayPlace::Under(id),
+        (false, None) => OverlayPlace::OverWindows,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1621,5 +1618,14 @@ mod tests {
         assert!(draws_motion(true, false));
         assert!(!draws_motion(true, true));
         assert!(!draws_motion(false, false));
+    }
+
+    /// The overlay never goes to the floating level for a switch (an always-on-top window
+    /// stays on top); only a dragged window's card takes it above everything.
+    #[test]
+    fn the_overlay_stays_under_floating_windows_in_a_switch() {
+        assert_eq!(overlay_place(false, None), OverlayPlace::OverWindows);
+        assert_eq!(overlay_place(false, Some(7)), OverlayPlace::Under(7));
+        assert_eq!(overlay_place(true, Some(7)), OverlayPlace::OnTop);
     }
 }

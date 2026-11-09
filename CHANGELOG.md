@@ -17,6 +17,19 @@
   instead of a number, and Tab reaches every control of the pane shown with Full Keyboard
   Access. In the welcome window, each Allow button says what it allows.
 
+- `[windows] hide_parked_apps` is gone: Stage Manager no longer hides apps whose windows all
+  wait in the strip. It was off by default and never in Settings; the corner patch already
+  covers the edges of those windows. A config file that sets it to `true` gets a note that it
+  is no longer used; one that sets it to `false` loads without a word.
+- In a switch, a see-through Dock that reaches the bottom corner no longer shows the edge of
+  a window waiting there: the desktop picture painted over the corner for the switch now goes
+  under the Dock too.
+- With `[log] level = "debug"`, the log names any task that holds the app's window thread
+  for 100 ms or more, and how long each save of your stages takes.
+- A closed window about the size of another screen is no longer mistaken for a full-screen
+  one: its card used to stay, and the app's window was tried again at every switch.
+- A window kept on top of all others (a music player in a corner) now stays on top through
+  a switch also while the strip shows over your windows; the moving pictures went over it.
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", grabbing a window's edge
   to resize it no longer sends your stage to the strip when the press lands a hair outside the
   window. The window used to hide mid-drag and shrink to its smallest size out of sight, so an

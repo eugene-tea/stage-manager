@@ -14,7 +14,8 @@ at a quit or a kill -9; a window closed while its app answers nothing (the fixtu
 app ignoring destroyed notices) leaves the model and its card; round 8N: a guardian waiting for
 a window on a Desktop not shown hands its watch to the next app and exits, that app's quit
 leaves the window to its own guardian, which hands it on again, and the last app's quit brings
-it back), m4 (rules, placement,
+it back; then `kill -9` with a dialog open in a hidden stage, an app that answers late at the
+quit, and a `[windows] fit` move followed by a crash, with and without the guardian), m4 (rules, placement,
 hot reload), m6 (persistence across a relaunch of the app and of the fixture), strip (a
 synthetic click and shift-click on a card of the real strip; the click is posted by the app
 only when its own strip window is topmost at that point), native (Apple's defaults with three
@@ -42,7 +43,9 @@ another app's stage grows from its card (round 8L: see `activation_grows_check`)
 `level = "above_windows"` keeps the strip on top), park (round park-reconcile: a parked window
 the fixture moves to the middle of the screen by itself, SIGALRM, is parked again within about a
 second, its restore frame untouched, and a switch brings it back exactly; round fixes-151:
-the corner patch is its sliver grown by a parked window's shadow reach per side), offscreen
+the corner patch is its sliver grown by a parked window's shadow reach per side; a dialog opened
+while its stage is hidden is parked with its window, no switch; a window showing only a piece
+at the hidden corner is a card at launch and comes back whole in that corner), offscreen
 (round offscreen-windows: a window the fixture opens wholly off every display, as a headless
 browser does, never joins a stage, never moves, stays off screen through switches and a
 relaunch, and is never saved), enhanced (round enhanced-ui: the fixture's
@@ -71,7 +74,8 @@ keep it, a card dragged down springs back with no switch, and the strip still fo
 an app quits), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
 its card as Apple's thumbnails show it, two overlapping windows landing as one picture (the
-one behind never through the one in front), and a quit that waits for captures in flight), expose (Mission Control and App Exposé,
+one behind never through the one in front), no capture while the strip is hidden, and a quit
+that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
 is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
 Desktop, drawn as before, and a card click switches), restore (a restart simulated with
@@ -97,10 +101,7 @@ phase: a click or key press ends the restore window early). Run by name only: st
 corner patch drawn from a still of the desktop, with window captures on: a disk image of the
 test's own mounted and its icon placed under the park corner; the patch shows over it, the
 icon opens with a double click through the patch and drags out, a new still follows; the
-volume is ejected after), and hide (`[windows] hide_parked_apps`, a prototype: an app whose
-every window is parked is hidden and comes back in place by ⌘Tab, a card click and a Dock
-click; never hidden with a window shown; the user's own ⌘H never undone; a quit with an app
-hidden; see `phase_hide`), and away (after a simulated restart the windows saved on one Desktop and
+volume is ejected after), and away (after a simulated restart the windows saved on one Desktop and
 shown on another are named in the restore's line, titles hashed, and nowhere else; an old
 config's `[stages] restore_notice` loads without a warning; hands off the Mac, as in
 restore; see `phase_away`).
@@ -182,12 +183,73 @@ def run(args, **kw):
     return subprocess.run(args, env=ENV, capture_output=True, text=True, **kw)
 
 
-def ctl(*words):
+def ctl_once(*words):
     r = run([BIN, "ctl", *map(str, words)], timeout=15)
     try:
         return json.loads(r.stdout.strip() or "{}")
     except json.JSONDecodeError:
         return {"ok": False, "error": r.stdout + r.stderr}
+
+
+# A synthetic click or hover refused under a Notification Center banner is tried again for
+# this long (a banner stays about 5 s; drags already wait, `drag_sampled`).
+BANNER_WAIT = 8.0
+
+
+def ctl(*words):
+    """One ctl command, its JSON reply. A synthetic click or hover the app refused because a
+    Notification Center banner was topmost there (`banner_pid`) is tried again every half
+    second for up to `BANNER_WAIT` seconds; a banner still there then is named in the reply's
+    error (the app it belongs to, `banner_app`), and the caller's own handling of a refused
+    click goes on as before."""
+    r = ctl_once(*words)
+    if not words or words[0] not in ("debug-click", "debug-hover") or banner_pid(r) is None:
+        return r
+    end = time.time() + BANNER_WAIT
+    say(f"  a Notification Center banner covers the {words[0][6:]} point; waiting up to {BANNER_WAIT:.0f} s")
+    while time.time() < end:
+        time.sleep(0.5)
+        r = ctl_once(*words)
+        if banner_pid(r) is None:
+            return r
+    app = banner_app()
+    note = f" (a Notification Center banner of {app or 'an app not named'} stayed {BANNER_WAIT:.0f} s)"
+    say(f"  the banner stayed{note}")
+    if isinstance(r, dict):
+        r = {**r, "error": str(r.get("error", "")) + note}
+    return r
+
+
+def banner_pid(reply):
+    """The pid of Notification Center when `reply` (a ctl reply) refused a synthetic input
+    because Notification Center's window (a banner) was topmost on its path; else None."""
+    err = str(reply.get("error") or "") if isinstance(reply, dict) else str(reply or "")
+    m = re.search(r"not ours or a fixture's \(pid (\d+)\)", err)
+    if not m:
+        return None
+    r = subprocess.run(["ps", "-o", "comm=", "-p", m.group(1)], capture_output=True, text=True)
+    return int(m.group(1)) if "NotificationCenter" in r.stdout else None
+
+
+def banner_app():
+    """The app a Notification Center banner on screen belongs to: the first part of the
+    banner's accessibility description ("App, title, body"; only the app's name is kept, never
+    the banner's text), read through System Events; None when it cannot be told."""
+    js = (
+        'const p = Application("System Events").processes.byName("NotificationCenter");'
+        'let out = null;'
+        'for (const w of p.windows()) { for (const e of w.entireContents()) {'
+        '  try { const s = e.subrole(), d = e.description();'
+        '    if (s && String(s).includes("Notification") && d && String(d).includes(", ")) { out = String(d).split(", ")[0]; break; }'
+        '  } catch (_) {} } if (out) break; }'
+        'out || "";'
+    )
+    try:
+        r = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        return None
+    name = r.stdout.strip()
+    return name[:40] if r.returncode == 0 and name else None
 
 
 def probe(bundle=FIX_ID):
@@ -264,194 +326,12 @@ def pids_of(pattern):
     return [int(p) for p in r.stdout.split()]
 
 
-def running_apps(pids, verb="read"):
-    """NSRunningApplication for each pid, through JXA (no Accessibility, no Apple events):
-    "read" answers `isHidden`; "hide" and "unhide" ask for it, as ⌘H and an unhide do, and
-    answer whether macOS took the request. {pid: True or False, None for no such app}; {} when
-    osascript failed."""
-    call = {"read": "a.isHidden", "hide": "a.hide", "unhide": "a.unhide"}[verb]
-    js = ('ObjC.import("AppKit"); var out = {}; '
-          f'{json.dumps(sorted(int(p) for p in pids))}.forEach(function (p) {{ '
-          'var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(p); '
-          'if (a.isNil()) { out[p] = null; return; } '
-          f'out[p] = ObjC.unwrap({call}) ? true : false; }}); JSON.stringify(out);')
-    r = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True)
-    try:
-        return {int(k): v for k, v in json.loads(r.stdout.strip() or "{}").items()}
-    except (json.JSONDecodeError, ValueError):
-        say(f"  (osascript could not {verb} apps {sorted(pids)}: {r.stderr.strip()[:120]})")
-        return {}
-
-
-def apps_hidden(pids):
-    """{pid: whether its app is hidden now (None: no such app)}."""
-    return running_apps(pids, "read") if pids else {}
-
-
-def fixture_windows(bundles=None):
-    """Fixture windows on layer 0 as the window server sees them, with the display."""
-    out, display = [], None
-    for b in bundles or ALL_IDS:
-        p = probe(b)
-        display = p["display"]
-        out += [w for w in p["windows"] if w["layer"] == 0]
-    return out, display
-
-
-def start_fixture(n, *extra):
-    stop_fixture()
-    subprocess.run(["open", "-n", "-g", FIX_APP, "--args", "--windows", str(n), "--background", *extra], check=True)
-    want = n + (1 if "--panel" in extra else 0)
-    return wait_until(lambda: len(fixture_windows([FIX_ID])[0]) >= want, 15, f"{want} fixture windows")
-
-
-def stop_fixture():
-    for pid in pids_of(FIX_EXE):
-        os.kill(pid, signal.SIGTERM)
-    wait_until(lambda: not pids_of(FIX_EXE), 10, "the fixture to quit")
-
-
-def app_pid():
-    r = ctl("ping")
-    return r.get("pid") if r.get("ok") else None
-
-
-def guardian_pids(app):
-    """The guardian of our own app (pid `app`) only: never another Stage Manager's."""
-    return pids_of(f"stage-manager --guardian {app}$") if app else []
-
-
-def owner_app_running():
-    """Any Stage Manager that is not this run's own app (the owner's, from ~/Applications,
-    a repo's target/ or anywhere else), or another Stage Manager's guardian still waiting for a
-    window it left parked: no live phase runs while it is up. Such a guardian brings back any
-    window it finds in the park zone, the fixtures' too (10-16: every Dock arrival failed)."""
-    ours = app_pid()
-    apps = pids_of("Stage Manager.app/Contents/MacOS/stage-manager$")
-    guardians = set(pids_of("Stage Manager.app/Contents/MacOS/stage-manager --guardian ")) - set(guardian_pids(ours))
-    return any(p != ours for p in apps) or bool(guardians)
-
-
-def archive_log():
-    """Keeps the last app run's log as stage-manager.run-NN.log (renamed, not removed: its
-    guardian keeps writing into the same file), so a run leaves the whole story."""
-    log = log_path()
-    if not os.path.exists(log):
-        return None
-    n = 1 + max([int(f[len("stage-manager.run-"):-4]) for f in os.listdir(HOME)
-                 if f.startswith("stage-manager.run-") and f.endswith(".log") and f[18:-4].isdigit()] or [0])
-    path = os.path.join(HOME, f"stage-manager.run-{n:02d}.log")
-    os.rename(log, path)
-    return path
-
-
-def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
-    """Launches the app (window captures off unless `capture`) and waits for its windows."""
-    if app_pid():
-        stop_app()
-    if fresh_log:
-        archive_log()
-    args = ["open", "-n", APP]
-    env = {
-        "STAGE_MANAGER_HOME": HOME,
-        "STAGE_MANAGER_ONLY": ONLY,
-        "STAGE_MANAGER_NO_PROMPT": "1",
-        "RUST_LOG": "info,stage_manager=debug",
-    }
-    if not capture:
-        env["STAGE_MANAGER_NO_CAPTURE"] = "1"
-    env.update(extra_env or {})
-    for k, v in env.items():
-        args += ["--env", f"{k}={v}"]
-    subprocess.run(args, check=True)
-    ok = wait_until(app_pid, 15, "the app")
-    if not ok:
-        return None
-    return wait_until(
-        lambda: (lambda s: s if s.get("ok") and len(s["windows"]) >= expect_windows else None)(ctl("state")),
-        20,
-        f"{expect_windows} managed windows",
-    )
-
-
-def wait_gone(pid, timeout=10):
-    def gone():
-        try:
-            os.kill(pid, 0)
-            return False
-        except ProcessLookupError:
-            return True
-
-    return wait_until(gone, timeout, f"process {pid} to exit")
-
-
-def stop_app():
-    pid = app_pid()
-    if pid:
-        ctl("quit")
-        wait_gone(pid)
-
-
-def log_text():
-    try:
-        with open(log_path(), encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except FileNotFoundError:
-        return ""
-
-
-# ----- state helpers ---------------------------------------------------------------------
-
-
-def state(landed=True):
-    """The engine's state (`ctl state`). A question never lands a running switch (8L3: the
-    incoming windows wait behind their snapshots until the motion unveils them), so by default
-    this waits (up to 2 s) until no switch holds windows, as before, when asking landed it;
-    `landed=False` reads it at once (a check that samples a switch while it runs)."""
-    end = time.time() + 2.0
-    while True:
-        s = ctl("state")
-        if not s.get("ok"):
-            raise RuntimeError(f"ctl state: {s}")
-        if not landed or s.get("switching") is None or time.time() >= end:
-            return s
-        time.sleep(0.05)
-
-
-def by_title(s):
-    return {w["title"]: w for w in s["windows"]}
-
-
-def stage_titles(s):
-    """Stage number -> titles of its standard windows, front to back."""
-    titles = {w["id"]: w["title"] for w in s["windows"]}
-    return {st["number"]: [titles[i] for i in st["windows"]] for st in s["stages"]}
-
-
-def all_onscreen(what, never_ours=()):
-    """Every fixture window out of the park zone, but `never_ours`: windows we never parked
-    and must leave where they are (the stray of the 8M drills: never shown, off screen)."""
-    wins, d = fixture_windows()
-    wins = [w for w in wins if w["id"] not in set(never_ours)]
-    if not wins:
-        # A fixture that crashed, or a probe that failed, must not pass as "nothing parked".
-        return check(False, f"{what}: every fixture window onscreen (the window server lists no fixture window)")
-    stuck = [fmt(w["bounds"]) for w in wins if is_parked(w["bounds"], d)]
-    return check(not stuck, f"{what}: every fixture window onscreen" + (f" (parked: {stuck})" if stuck else ""))
-
-
-def consistent(what, hidden_ok=False):
+def consistent(what):
     """Every managed window is where the model says: shown ones at their restore frame (±1),
-    parked ones in the park zone, and nothing parked that the model shows. `hidden_ok` (the
-    hide phase, `[windows] hide_parked_apps`): a parked window of a hidden app may also wait
-    at its own restore frame, off screen (the prototype puts the stage an activation of the
-    app would bring there while it is hidden)."""
+    parked ones in the park zone, and nothing parked that the model shows."""
     s = state()
     wins, d = fixture_windows()
     cg = {w["id"]: w for w in wins}
-    hidden = set()
-    if hidden_ok:
-        hidden = {p for p, h in apps_hidden({w["pid"] for w in wins}).items() if h}
     bad = []
     for w in s["windows"]:
         c = cg.get(w["id"])
@@ -461,10 +341,7 @@ def consistent(what, hidden_ok=False):
             continue
         parked_now = is_parked(c["bounds"], d)
         if w["parked"] and not parked_now:
-            if c["pid"] in hidden and not c["onscreen"] and (w["role"] != "standard" or close(c["bounds"], w["restore"])):
-                continue
-            bad.append(f"{w['title']} should be parked, is at {fmt(c['bounds'])}"
-                       + (" (its app hidden)" if c["pid"] in hidden else ""))
+            bad.append(f"{w['title']} should be parked, is at {fmt(c['bounds'])}")
         if not w["parked"]:
             if parked_now:
                 bad.append(f"{w['title']} should be shown, is parked")
@@ -653,6 +530,179 @@ def phase_safety():
     drill_hidden_tab()
     drill_not_ours()
     drill_closed_unanswered()
+    drill_dialog_killed()
+    drill_late_quit()
+    drill_fit_crash()
+
+
+def hidden_alpha_with_dialog(what):
+    """Fixture 1 and Alpha 1 in stages of their own, the fixture's in front and Alpha's hidden,
+    then Alpha opens a dialog (the fixture's SIGVTALRM). Returns (state, the dialog's ctl
+    window), or None with the failure noted."""
+    start_fixture(1)
+    start_extra("a", 1)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, f"{what}: app up with Fixture 1 and Alpha 1"):
+        return None
+    t = by_title(s)
+    front, hidden = t["Fixture 1"]["home"], t["Alpha 1"]["home"]
+    if not check(front != hidden, f"{what}: Fixture 1 and Alpha 1 in stages of their own ({front}, {hidden})"):
+        return None
+    do("switch", front)
+    s = wait_state(lambda x: x["active"] == front and by_title(x)["Alpha 1"]["parked"], "Alpha 1 hidden, the fixture in front")
+    if not check(s is not None, f"{what}: Alpha's stage hidden, the fixture's in front"):
+        return None
+    time.sleep(1.2)  # past the park's echo window
+    alpha = extra_pid("a")
+    if not check(alpha is not None, f"{what}: Alpha runs"):
+        return None
+    os.kill(alpha, signal.SIGVTALRM)
+    s = wait_state(lambda x: "Alpha Dialog" in by_title(x), "Alpha's dialog managed", timeout=6)
+    if not check(s is not None, f"{what}: the dialog Alpha opened is managed"):
+        return None
+    return s, by_title(s)["Alpha Dialog"]
+
+
+def drill_dialog_killed():
+    """Never written until the 11-09 audit: `kill -9` with a dialog open in a hidden stage. The
+    dialog is parked with its window (`phase_park`'s dialog check); the guardian brings both
+    back, the dialog included, though only its window has a card."""
+    say("-- drill: kill -9 with a dialog open in a hidden stage (the guardian brings it back too)")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    got = hidden_alpha_with_dialog("kill -9 with a dialog")
+    if got is not None:
+        s, dialog = got
+        parked = wait_state(lambda x: by_title(x)["Alpha Dialog"]["parked"], "the dialog parked", timeout=4)
+        check(parked is not None, "kill -9 with a dialog: the dialog is parked with its window before the kill")
+        pid = app_pid()
+        guards = guardian_pids(pid)
+        os.kill(pid, signal.SIGKILL)
+        wait_gone(pid)
+        for g in guards:
+            wait_gone(g, 15)
+        time.sleep(0.5)
+        all_onscreen("kill -9 with a dialog open")
+        text = log_text()
+        check("guardian: recovery scan done" in text, "kill -9 with a dialog: the guardian's recovery ran")
+        back = [ln for ln in text.splitlines() if "recovery: window brought back" in ln and f"id={dialog['id']} " in ln]
+        say(f"    the dialog's way back: {back[0][back[0].find('recovery:'):][:160] if back else 'no recovery line names it (its app put it back with its window)'}")
+    stop_app()
+    stop_all_fixtures()
+
+
+def drill_late_quit():
+    """Never written until the 11-09 audit: an app that answers late at the quit. The fixture's
+    main thread blocks 6 s (SIGPROF), past the quit's leftovers budget (about 4 s,
+    engine::leftovers), just before `ctl quit`: the quit does not wait for it, and its parked
+    window comes back once it answers (its own late carrying out of the move, or the guardian,
+    which waits for it). Nothing is left in the park corner."""
+    say("-- drill: an app that answers late at the quit (blocked 6 s): its parked window still comes back")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    start_fixture(2, "--hang-ms", "6000")
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    t = by_title(s) if s else {}
+    if not check(s is not None and "Fixture 2" in t, "late quit: app up with Fixture 1 and 2"):
+        stop_app()
+        stop_fixture()
+        return
+    do("new", t["Fixture 2"]["id"])
+    do("switch", 1)
+    s = wait_state(lambda x: by_title(x)["Fixture 2"]["parked"] and not by_title(x)["Fixture 1"]["parked"], "Fixture 2 parked")
+    fixture = pids_of(FIX_EXE)
+    if not check(s is not None and bool(fixture), "late quit: Fixture 2 parked in its own stage"):
+        stop_app()
+        stop_fixture()
+        return
+    time.sleep(1.2)
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    os.kill(fixture[0], signal.SIGPROF)
+    time.sleep(0.2)
+    t0 = time.time()
+    ctl("quit")
+    wait_gone(pid, 15)
+    took = time.time() - t0
+    check(took <= 8.0, f"late quit: the quit did not wait for the busy app ({took:.1f} s)")
+    for g in guards:
+        wait_gone(g, 30)
+    time.sleep(max(0.0, 6.5 - (time.time() - t0)))  # the fixture answers again
+    time.sleep(1.0)
+    all_onscreen("an app that answered late at the quit")
+    text = log_text()
+    how = ("the guardian" if 'reason="guardian"' in text else
+           "the quit's leftovers check" if "leftover" in text.lower() else "its app, late")
+    say(f"    brought back by {how}")
+    stop_fixture()
+
+
+def drill_fit_crash():
+    """Never written until the 11-09 audit: a window `[windows] fit = "move"` moved clear of
+    the strip, then a crash. With the guardian (`kill -9` of the app): the guardian puts back
+    its exact pre-fit frame. Without it (`kill -9` of both): the window stays where it was
+    fitted, the next launch keeps its pre-fit frame from state.json, and that launch's quit
+    puts it back exactly."""
+    say("-- drill: a fit move, then a crash: the window's own frame comes back")
+    stop_app()
+    stop_all_fixtures()
+    write_config('[windows]\nfit = "move"\n')
+    start_extra_frames("a", 1, "20,60,700,400")
+    activate("a")
+    time.sleep(1.0)
+    before = live_frame_probe("a", "Alpha 1")
+
+    def fitted():
+        f = live_frame_probe("a", "Alpha 1")
+        return f if f and before and f["x"] > before["x"] + 1 and abs(f["w"] - before["w"]) <= 1 else None
+
+    s = start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    ok = s is not None and before is not None and wait_until(fitted, 4, "Alpha 1 moved clear of the strip")
+    if not check(bool(ok), f"fit crash: Alpha 1 moved clear of the strip (was {fmt(before) if before else None})"):
+        stop_app()
+        stop_extra("a")
+        write_config(None)
+        return
+    time.sleep(1.0)  # state.json catches up (debounced)
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    os.kill(pid, signal.SIGKILL)
+    wait_gone(pid)
+    for g in guards:
+        wait_gone(g, 15)
+    time.sleep(0.5)
+    after = live_frame_probe("a", "Alpha 1")
+    check(after is not None and close(after, before),
+          f"fit crash: after a kill -9 the guardian puts back the exact pre-fit frame ({fmt(after) if after else None}, was {fmt(before)})")
+
+    say("   kill -9 of the app and its guardian: the next launch's quit puts it back")
+    s = start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and bool(wait_until(fitted, 4, "Alpha 1 fitted again")), "fit crash: fitted again at the relaunch"):
+        stop_app()
+        stop_extra("a")
+        write_config(None)
+        return
+    time.sleep(1.0)
+    pid = app_pid()
+    for g in guardian_pids(pid):
+        os.kill(g, signal.SIGKILL)
+    os.kill(pid, signal.SIGKILL)
+    wait_gone(pid)
+    time.sleep(0.5)
+    left = live_frame_probe("a", "Alpha 1")
+    say(f"    left at {fmt(left) if left else None} by the crash")
+    s = start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    a = by_title(s).get("Alpha 1") if s else None
+    check(a is not None and a["original"] is not None and close(a["original"], before),
+          f"fit crash: the relaunch keeps the pre-fit frame ({fmt(a['original']) if a and a['original'] else None}, was {fmt(before)})")
+    stop_app()
+    after = live_frame_probe("a", "Alpha 1")
+    check(after is not None and close(after, before),
+          f"fit crash: that launch's quit puts back the exact pre-fit frame ({fmt(after) if after else None}, was {fmt(before)})")
+    stop_extra("a")
+    write_config(None)
 
 
 def drill_not_ours():
@@ -4211,6 +4261,7 @@ def phase_capture():
           f"pictures keep coming ({cap.get('images')} so far)")
     if not os.environ.get("SM_SKIP_LANDING"):
         landing_blend_check()
+    captures_stop_with_strip_hidden()
 
     say("-- an activation grows over a still of the desktop (8L4: only desktop-level windows in it)")
     start_extra("a", 1)
@@ -4232,6 +4283,27 @@ def phase_capture():
     all_onscreen("capture quit")
     for over in (0, 230):
         popup_over_check(over)
+
+
+def captures_stop_with_strip_hidden():
+    """Never written until the 11-09 audit: window captures serve the strip only. Hidden (`ctl
+    debug-toggle-strip`, the Show/Hide Strip hotkey's path), no window is captured; shown again,
+    pictures come again."""
+    say("-- the strip hidden: window captures stop; shown again, they resume")
+    r = ctl("debug-toggle-strip")
+    if not check(r.get("ok"), f"strip hidden: toggled off ({r})"):
+        return
+    time.sleep(2.0)  # a round in flight ends
+    a = state().get("capture", {})
+    time.sleep(4.5)  # three thumbnail rounds (1.5 s each)
+    b = state().get("capture", {})
+    check(b.get("images") == a.get("images") and b.get("in_flight", 0) == 0,
+          f"strip hidden: no window captured meanwhile ({a.get('images')} -> {b.get('images')}, in flight {b.get('in_flight')})")
+    r = ctl("debug-toggle-strip")
+    check(r.get("ok"), f"strip hidden: toggled on again ({r})")
+    more = wait_until(lambda: (lambda x: x if x.get("capture", {}).get("images", 0) > b.get("images", 0) else None)(state()),
+                      8, "pictures again")
+    check(more is not None, f"strip shown again: pictures come again ({state().get('capture', {}).get('images')})")
 
 
 # ----- still: the corner patch drawn from a still of the desktop (round desktop-still-patch)
@@ -6392,6 +6464,118 @@ def phase_park():
     consistent("after the switch back")
     stop_app()
     all_onscreen("park reconcile quit")
+    dialog_born_parked()
+    corner_piece_at_launch()
+
+
+def dialog_born_parked():
+    """Never written until the 11-09 audit: a dialog an app opens while its window waits in a
+    hidden stage (Safari's download prompt; the fixture's SIGVTALRM: an AXDialog panel in the
+    middle of the screen, ordered in without activating). It follows its window: managed as
+    that window's child, parked at once, the stage in front stays in front (no switch), and a
+    switch to its stage brings it back with its window."""
+    say("-- a dialog opened while its stage is hidden is parked with its window; no switch")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    got = hidden_alpha_with_dialog("dialog born parked")
+    if got is None:
+        stop_app()
+        stop_all_fixtures()
+        return
+    s, dialog = got
+    t = by_title(s)
+    front, hidden = t["Fixture 1"]["home"], t["Alpha 1"]["home"]
+    check(dialog["role"] == "child" and dialog["parent"] == t["Alpha 1"]["id"],
+          f"dialog born parked: Alpha 1's child (role {dialog['role']}, parent {dialog['parent']}, Alpha 1 {t['Alpha 1']['id']})")
+    parked = wait_state(lambda x: by_title(x)["Alpha Dialog"]["parked"], "the dialog parked", timeout=4)
+    wins, d = fixture_windows([EXTRA["a"][0]])
+    listed = next((w for w in wins if w["id"] == dialog["id"]), None)
+    check(parked is not None and listed is not None and is_parked(listed["bounds"], d),
+          f"dialog born parked: parked in the corner with its window (listed at {fmt(listed['bounds']) if listed else None})")
+    time.sleep(1.5)
+    s = state()
+    check(s["active"] == front and not by_title(s)["Fixture 1"]["parked"],
+          f"dialog born parked: no switch, the fixture's stage stays in front (active {s['active']})")
+    consistent("dialog born parked")
+    do("switch", hidden)
+    s = wait_state(lambda x: x["active"] == hidden and not by_title(x)["Alpha Dialog"]["parked"], "Alpha's stage with its dialog")
+    check(s is not None, "dialog born parked: a switch to Alpha's stage brings the dialog back with its window")
+    consistent("dialog born parked, its stage in front")
+    stop_app()
+    all_onscreen("dialog born parked quit")
+    stop_all_fixtures()
+
+
+# engine::park::CORNER_PIECE_WIDTH and CORNER_PIECE_HEIGHT.
+CORNER_PIECE_WIDTH = 1.5 * (PARK_MARGIN + 16.0)
+CORNER_PIECE_HEIGHT = 64.0
+
+
+def is_corner_piece(b, d):
+    """engine::park::is_corner_piece_in at the bottom-right corner: past the right side, all
+    that shows within CORNER_PIECE_WIDTH of it and CORNER_PIECE_HEIGHT of the bottom, against
+    `d`'s full frame or its visible frame."""
+    def piece(a):
+        x0, x1 = max(b["x"], a["x"]), min(b["x"] + b["w"], a["x"] + a["w"])
+        y0, y1 = max(b["y"], a["y"]), min(b["y"] + b["h"], a["y"] + a["h"])
+        if x1 <= x0 or y1 <= y0:
+            return False
+        return (b["x"] + b["w"] > a["x"] + a["w"] and x0 >= a["x"] + a["w"] - CORNER_PIECE_WIDTH
+                and y0 >= a["y"] + a["h"] - CORNER_PIECE_HEIGHT)
+    v = d.get("visible")
+    return piece(d) or (bool(v) and v["w"] > 0 and v["h"] > 0 and piece(v))
+
+
+def corner_piece_at_launch():
+    """Never written until the 11-09 audit: a window showing only a piece at the hidden corner
+    (UX-SPEC, "The hidden corner"). Found there at a launch it is a card, its stage not in
+    front, and a switch to it brings it wholly on screen in that corner at its size; the quit
+    leaves it there, on screen."""
+    say("-- a window showing only a piece at the hidden corner is a card at launch; brought back whole")
+    stop_app()
+    stop_all_fixtures()
+    write_config(None)
+    start_fixture(1)
+    v = probe(FIX_ID)["display"].get("visible") or {}
+    if not check(v.get("w", 0) > 0, f"corner piece: the main screen's visible frame ({v})"):
+        stop_all_fixtures()
+        return
+    size = (700.0, 400.0)
+    # From the visible frame's top-left: 100 pt past its right side, its title bar's 32 pt
+    # above its bottom (macOS keeps that much of a title bar there).
+    start_extra_frames("a", 1, f"{v['w'] - 100:.0f},{v['h'] - 32:.0f},{size[0]:.0f},{size[1]:.0f}")
+    time.sleep(0.8)
+    wins, d = fixture_windows([EXTRA["a"][0]])
+    piece = wins[0]["bounds"] if wins else None
+    if piece is None or is_parked(piece, d) or not is_corner_piece(piece, d):
+        skip("the corner piece at launch", f"macOS did not leave Alpha 1 as a piece at the corner ({fmt(piece) if piece else None})")
+        stop_all_fixtures()
+        return
+    say(f"    Alpha 1 shows only a piece at the corner: {fmt(piece)}")
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "corner piece: app up with Fixture 1 and Alpha 1"):
+        stop_app()
+        stop_all_fixtures()
+        return
+    s = wait_state(lambda x: by_title(x)["Alpha 1"]["parked"], "Alpha 1 a card", timeout=4) or state()
+    a = by_title(s)["Alpha 1"]
+    check(a["parked"] and s["active"] != a["home"],
+          f"corner piece: a card at launch, its stage not in front (parked {a['parked']}, stage {a['home']}, active {s['active']})")
+    do("switch", a["home"])
+    s = wait_state(lambda x: x["active"] == a["home"] and not by_title(x)["Alpha 1"]["parked"], "Alpha's stage in front")
+    f = live_frame("Alpha 1")
+    vis = s["display"]["visible"] if s else v
+    whole = (f["x"] >= vis["x"] - 1 and f["y"] >= vis["y"] - 1 and f["x"] + f["w"] <= vis["x"] + vis["w"] + 1
+             and f["y"] + f["h"] <= vis["y"] + vis["h"] + 1)
+    in_corner = abs(f["x"] + f["w"] - (vis["x"] + vis["w"])) <= 2 and abs(f["y"] + f["h"] - (vis["y"] + vis["h"])) <= 2
+    same_size = abs(f["w"] - piece["w"]) <= 1 and abs(f["h"] - piece["h"]) <= 1
+    check(s is not None and whole and in_corner and same_size,
+          f"corner piece: brought back wholly on screen in the corner at its size ({fmt(f)}, was {fmt(piece)})")
+    consistent("corner piece brought back")
+    stop_app()
+    all_onscreen("corner piece quit")
+    stop_all_fixtures()
 
 
 def phase_offscreen():
@@ -6601,36 +6785,7 @@ def phase_enhanced():
     check(lines[-1:] == ["on"], f"the fixture's flag is on after the quit ({lines[-3:]})")
 
 
-# ----- hide_parked_apps: the prototype's live phase (run by name only) ---------------------
-
-CONFIG_HIDE = "[windows]\nhide_parked_apps = true\n"
-
-
-def app_hidden(k):
-    """Whether fixture app `k` is hidden now (None: not running, or unread)."""
-    pid = extra_pid(k)
-    return apps_hidden([pid]).get(pid) if pid else None
-
-
-def wait_hidden(k, want, timeout=3.0):
-    """Waits until fixture app `k` is hidden (`want` True) or not; True when it is so."""
-    word = "hidden" if want else "unhidden"
-    return wait_until(lambda: app_hidden(k) is want, timeout, f"{EXTRA[k][3]} {word}") is not None
-
-
-def never_hidden(k, secs):
-    """Reads app `k`'s `isHidden` for `secs`: the reads, every one False when it never was."""
-    end, seen = time.time() + secs, []
-    while time.time() < end:
-        seen.append(app_hidden(k))
-        time.sleep(0.2)
-    return seen
-
-
-def app_frames(s, k):
-    """The model's standard windows of fixture app `k`: id -> restore frame."""
-    return {w["id"]: w["restore"] for w in s["windows"] if w["bundle_id"] == EXTRA[k][0] and w["role"] == "standard"}
-
+# ----- window server samples -------------------------------------------------------------
 
 def start_sampler(bundles, ms):
     """The window server's view of `bundles`' windows every 20 ms for `ms` (probe-windows)."""
@@ -6647,408 +6802,6 @@ def sampler_out(p, what):
         p.kill()
         check(False, f"{what}: the window server was sampled ({e})")
         return None
-
-
-def in_zone_looks(samples, ids, display):
-    """(t, id) of every look listing one of windows `ids` in the park zone, on screen or not."""
-    return [(x["t"], w["id"]) for x in samples for w in x["windows"]
-            if w["id"] in ids and w["layer"] == 0 and is_parked(w["bounds"], display)]
-
-
-def hide_then_in_place(samples, frames):
-    """From looks at an app's windows (`frames`: id -> its restore frame): when the hide took
-    (the first look listing every one of them off screen) and the first look from then on
-    with every one at its own frame (±2); None for either not seen."""
-    t_hid = None
-    for x in samples:
-        ws = {w["id"]: w for w in x["windows"] if w["id"] in frames}
-        if len(ws) < len(frames):
-            continue
-        if t_hid is None and not any(w["onscreen"] for w in ws.values()):
-            t_hid = x["t"]
-        if t_hid is not None and all(close(ws[i]["bounds"], frames[i], 2.0) for i in frames):
-            return t_hid, x["t"]
-    return t_hid, None
-
-
-def parked_or_hidden(k, what):
-    """App `k`, whose every window waits in a parked stage: hidden (the rule allows it), or
-    not hidden with every window of it in the park zone."""
-    name = EXTRA[k][3]
-    hid = app_hidden(k)
-    ids = set(app_frames(state(), k))
-    wins, d = fixture_windows([EXTRA[k][0]])
-    listed = [w for w in wins if w["id"] in ids]
-    if hid:
-        return check(bool(listed) and not any(w["onscreen"] for w in listed),
-                     f"{what}: {name} is hidden (the rule allows it), no window of it on screen")
-    return check(bool(listed) and all(is_parked(w["bounds"], d) for w in listed),
-                 f"{what}: {name} is not hidden ({hid}), so every window of it is parked in the corner "
-                 f"({[fmt(w['bounds']) for w in listed]})")
-
-
-def first_on_screen(samples, frames):
-    """From looks at windows (`frames`: id -> its restore frame): per window, the time of the
-    first look listing it on screen (None: never), and every look listing it on screen away
-    from its own frame (±2) as (t, bounds)."""
-    first, away = {}, []
-    for i, f in frames.items():
-        first[i] = None
-        for x in samples:
-            w = next((w for w in x["windows"] if w["id"] == i and w["layer"] == 0), None)
-            if w is None or not w["onscreen"]:
-                continue
-            if first[i] is None:
-                first[i] = x["t"]
-            if not close(w["bounds"], f, 2.0):
-                away.append((round(x["t"], 3), i, fmt(w["bounds"])))
-    return first, away
-
-
-def hide_arrival(how, k, what):
-    """Steps 2-4: app `k`, hidden by us with its stage parked, comes back by `how`: "open" (an
-    activation with no click, as ⌘Tab's: `open` of its path, as the native phase), "dock" (its
-    Dock item, `ctl debug-dock-click`) or "card" (a click on its stage's card). The stage's
-    apps unhide, the stage becomes active with every window at its exact frame, and the stage
-    left behind is parked: its apps not hidden with their windows parked, or hidden. macOS's
-    own unhide ("open", "dock") and ours alike: no window of the stage is listed in the park
-    zone at any look (every 20 ms) while it comes. Our switch ("card", round hide-arrival):
-    an incoming snapshot grows for each window from the card while the window waits hidden
-    at its frame; the app is unhidden at the landing, so no window of it is listed on screen
-    before then, and every one is listed on screen at its frame after."""
-    s0 = state()
-    name, title = EXTRA[k][3], f"{EXTRA[k][3]} 1"
-    home = by_title(s0)[title]["home"]
-    stage = next(st for st in s0["stages"] if st["number"] == home)
-    frames = {w["id"]: w["restore"] for w in s0["windows"] if w["id"] in set(stage["windows"]) and w["role"] == "standard"}
-    coming = [j for j in EXTRA if any(w["bundle_id"] == EXTRA[j][0] for w in s0["windows"] if w["id"] in frames)]
-    leaving = [j for j in EXTRA if j not in coming and app_frames(s0, j)]
-    check(wait_hidden(k, True), f"{what}: {name} is hidden before (its stage parked; hidden: {app_hidden(k)})")
-    before_log = len(log_text())
-    sampler = start_sampler([EXTRA[j][0] for j in coming], 2500)
-    time.sleep(0.15)  # the sampler's first looks are before the arrival
-    t_click = time.time()
-    if how == "dock":
-        r = ctl("debug-dock-click", EXTRA[k][0])
-        check(r.get("ok"), f"{what}: the Dock item was pressed ({r.get('error') or 'ok'})")
-    elif how == "card":
-        click_card(s0, title, f"{name}'s card")
-    else:
-        activate(k)
-    s1 = wait_state(lambda x: title in active_titles(x), f"{what}: {name}'s stage to come")
-    check(s1 is not None, f"{what}: {name}'s stage is active")
-    for j in coming:
-        check(wait_hidden(j, False), f"{what}: {EXTRA[j][3]} is unhidden")
-    p = sampler_out(sampler, what)
-    if p is not None:
-        flashed = in_zone_looks(p.get("samples", []), set(frames), p["display"])
-        check(not flashed, f"{what}: no window of the stage is listed in the park zone at any look "
-                           f"({len(p.get('samples', []))} looks; seen there: {flashed[:6]})")
-    time.sleep(0.6)  # the motion has landed
-    if how == "card":
-        log = log_text()[before_log:]
-        lines = log.splitlines()
-        t = state().get("last_transition") or {}
-        grows = {g["window"] for g in t.get("ghosts", []) if not g["outgoing"]}
-        check(set(frames) <= grows, f"{what}: an incoming snapshot grows for every window of the stage "
-                                    f"(incoming {sorted(grows)}, the stage's {sorted(frames)})")
-        covered = next((n for n, ln in enumerate(lines) if "transition covered" in ln and "incoming: true" in ln), None)
-        check(covered is not None, f"{what}: the switch holds the stage's windows behind their snapshots, as a parked stage's")
-        check("it is unhidden when they land" in log, f"{what}: the hidden apps' unhide waits for the landing")
-        unhid = [n for n, ln in enumerate(lines) if "unhiding it pid=" in ln]
-        check(bool(unhid) and covered is not None and min(unhid) > covered,
-              f"{what}: our unhide comes after the switch's snapshots are up (covered at line {covered}, unhides at {unhid[:3]})")
-        # The hidden app's snapshots hand over and land when its windows show (the unhide's
-        # notice, the app's activation), not at the unveil, and not by the strip's wait.
-        shown = [ln for n, ln in enumerate(lines) if "transition: late windows show" in ln and unhid and n > min(unhid)]
-        told = [ln[ln.find("on_screen="):][:120] for ln in shown[:3]]
-        check(bool(shown) and all("waited_out=false" in ln for ln in shown),
-              f"{what}: the snapshots land once the windows show, told by the app's notices ({told or 'none'})")
-        check("never took the activation of its key window" not in log,
-              f"{what}: every app we unhid took the activation of its key window focused again")
-        unveil = re.search(r"unveil_ms=(\d+)", lines[covered]) if covered is not None else None
-        if p is not None:
-            first, away = first_on_screen(p.get("samples", []), frames)
-            check(not away, f"{what}: no window of the stage is listed on screen away from its frame ({away[:4]})")
-            soon = 0.5 * int(unveil.group(1)) / 1000 if unveil else 0.15
-            late = {i: None if f is None else round(f - t_click, 3) for i, f in first.items()}
-            check(all(v is not None and v >= soon for v in late.values()),
-                  f"{what}: no window of the stage is listed on screen before the landing "
-                  f"(first on screen, s after the click: {late}; the unveil at {unveil.group(1) if unveil else '?'} ms)")
-    wins, _ = fixture_windows([EXTRA[j][0] for j in coming])
-    cg = {w["id"]: w for w in wins}
-    off = [f"{i} at {fmt(cg[i]['bounds']) if i in cg else 'unlisted'}, wanted {fmt(f)}"
-           for i, f in frames.items() if i not in cg or not close(cg[i]["bounds"], f)]
-    check(not off, f"{what}: every window of the stage at its exact frame" + (f" ({off})" if off else ""))
-    check(all(cg[i]["onscreen"] for i in frames if i in cg), f"{what}: every window of the stage on screen")
-    time.sleep(1.0)  # a tick or two: the apps left behind may be hidden now
-    for j in leaving:
-        parked_or_hidden(j, f"{what}, the stage left")
-    consistent(what, hidden_ok=True)
-
-
-def supersede_check():
-    """Round broken-1021 (11-02: two card clicks 0.56 s apart, both to apps we hid; the
-    first switch's focus ran after the second began, the two apps took the activation in turn,
-    and a late focus notice switched stages by itself). Three stages, Alpha's and Bravo's apps
-    hidden, Charlie's shown: a click on Alpha's card, 0.5 s later one on Bravo's, 0.5 s later
-    one on Charlie's. Exactly the three switches asked for, Charlie's stage stays (3 s of looks),
-    Charlie the active app; nothing of the switches left behind focuses a window or activates
-    an app after the click that superseded it, and no focus or activation switches stages."""
-    say("-- 7. card clicks 0.5 s apart on two hidden apps' stages, then a third: no unasked switch, no stale focus")
-    s = state()
-    t = by_title(s)
-    do("send", len(s["stages"]) + 1, t["Charlie 1"]["id"])  # Charlie alone, no switch
-    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1"], ["Charlie 1"]],
-                   "Alpha, Bravo and Charlie each in a stage")
-    if not check(s is not None, f"supersede: three stages ({stage_titles(state())})"):
-        return
-    do("switch", number_of(s, "Charlie 1"))
-    s = wait_state(lambda x: "Charlie 1" in active_titles(x), "Charlie's stage")
-    check(s is not None, "supersede: Charlie's stage active")
-    time.sleep(1.0)
-    hidden_ok = all(wait_hidden(k, True, 4.0) for k in ("a", "b"))
-    if not check(hidden_ok, f"supersede: Alpha and Bravo hidden (their stages parked; {app_hidden('a')}, {app_hidden('b')})"):
-        return
-    time.sleep(0.8)  # past every echo window
-    pids = {k: extra_pid(k) for k in ("a", "b", "c")}
-    before = len(log_text())
-    click_card(state(), "Alpha 1", "Alpha's card")
-    time.sleep(0.5)
-    click_card(state(), "Bravo 1", "Bravo's card")
-    time.sleep(0.5)
-    click_card(state(), "Charlie 1", "Charlie's card")
-    looks = []
-    end = time.time() + 3.0
-    while time.time() < end:
-        looks.append(state().get("active"))
-        time.sleep(0.25)
-    charlie = number_of(state(), "Charlie 1")
-    check(bool(looks) and looks[-1] == charlie and all(a == charlie for a in looks[2:]),
-          f"supersede: Charlie's stage comes and stays for 3 s (active stage at each look: {looks}; Charlie's {charlie})")
-    lines = log_text()[before:].splitlines()
-    clicks = [n for n, ln in enumerate(lines) if "card clicked" in ln]
-    switches = [ln for ln in lines if "INFO  platform::controller: stage switch" in ln]
-    check(len(clicks) == 3 and len(switches) == 3,
-          f"supersede: three clicks, three switches ({len(clicks)} clicks, {len(switches)} switches)")
-    unasked = [ln.strip()[24:160] for ln in lines if "focused window is in another stage" in ln or "activated app lives in another stage" in ln]
-    check(not unasked, f"supersede: no focus or activation switches stages ({unasked[:3]})")
-    # After Bravo's click nothing more of Alpha's switch; after Charlie's nothing of Bravo's.
-    def stale(k, since):
-        pid = pids[k]
-        words = ("the key window focused again now that its app is unhidden", "focused once more")
-        return [ln.strip()[24:160] for ln in lines[since:] if f"pid={pid}" in ln and any(w in ln for w in words)]
-    if len(clicks) == 3:
-        late_a, late_b = stale("a", clicks[1]), stale("b", clicks[2])
-        check(not late_a and not late_b,
-              f"supersede: no focus of ours for a switch already superseded (Alpha's after Bravo's click: {late_a[:2]}; "
-              f"Bravo's after Charlie's: {late_b[:2]})")
-    time.sleep(0.5)
-    front = frontmost_bundle()
-    check(front == EXTRA["c"][0], f"supersede: the keyboard is Charlie's at the end (frontmost {front})")
-    consistent("supersede", hidden_ok=True)
-    # Back to step 7's layout: Bravo and Charlie together, their stage active.
-    s = state()
-    do("send", number_of(s, "Bravo 1"), by_title(s)["Charlie 1"]["id"])
-    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1", "Charlie 1"]],
-                   "Bravo and Charlie together again")
-    check(s is not None, f"supersede: Bravo and Charlie together again ({stage_titles(state())})")
-    if s is not None and "Bravo 1" not in active_titles(s):
-        do("switch", number_of(s, "Bravo 1"))
-
-
-def phase_hide():
-    """Round hide-phase: `[windows] hide_parked_apps = true` (a prototype, off by default;
-    src/platform/controller/hide.rs) with Alpha (two windows), Bravo and Charlie. Run by name
-    only. `isHidden` is read, and the user's ⌘H made, through NSRunningApplication (JXA).
-    1. Hide: Alpha alone in its stage, Bravo and Charlie in another; a switch to theirs hides
-       Alpha, no window of it is left in the park zone, and its windows are listed at their
-       own frames, off screen, the moment the hide takes (within a tick or two).
-    2. ⌘Tab (an activation with no click), 3. a click on Bravo's card, 4. a Dock click on Alpha:
-       the app unhides, its stage comes with every window at its exact frame, and the stage
-       left behind is parked (its apps hidden, or not hidden with their windows parked).
-       Nothing of it is listed in the corner at any look (every 20 ms). Our card click (3,
-       round hide-arrival): an incoming snapshot grows from the card for each window, which
-       waits hidden at its frame; the app is unhidden at the landing (no window of it listed
-       on screen before then).
-    5. No hide: Alpha 1 shown (with Bravo and Charlie, Bravo the active app), Alpha 2 alone in
-       another stage: Alpha is never hidden, and Alpha 2 parks in the corner.
-    6. The user's ⌘H: Bravo hidden by the test while its stage is active, then a switch away
-       and back: never ours (hide.rs: the user's hides are never adopted, never unhidden by
-       us); the switch back raises Bravo's window and macOS unhides it for that, as Apple's
-       Stage Manager does when you click the stage of an app you hid.
-    7. Card clicks 0.5 s apart on Alpha's and Bravo's stages (both hidden), then Charlie's
-       (`supersede_check`): three switches and no more, no stale focus, Charlie in front.
-    8. A quit with Alpha hidden: Alpha unhidden or its windows back at their frames, and the
-       quit's leftovers check quiet.
-    Throughout, `consistent` (a hidden app's parked window may wait at its own frame); at the
-    end no fixture window is parked and no fixture app hidden."""
-    say("\n== hide_parked_apps: an app wholly parked is hidden, and comes back in place ==")
-    stop_app()
-    stop_all_fixtures()
-    write_config(CONFIG_HIDE)
-    try:
-        hide_body()
-    finally:
-        left = {k: extra_pid(k) for k in EXTRA if extra_pid(k)}
-        hidden = [k for k, h in ((k, apps_hidden([p]).get(p)) for k, p in left.items()) if h]
-        if hidden:
-            running_apps([left[k] for k in hidden], "unhide")
-            say(f"  (unhid the fixture apps left hidden: {[EXTRA[k][3] for k in hidden]})")
-
-
-def hide_body():
-    start_extra("a", 2)
-    start_extra("b", 1)
-    start_extra("c", 1)
-    activate("a")
-    time.sleep(1.0)
-    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
-    if not check(s is not None, "app up with three fixture apps, hide_parked_apps on"):
-        return
-    check(active_titles(s) == {"Alpha 1", "Alpha 2"}, f"first start: Alpha's stage active ({stage_titles(s)})")
-    t = by_title(s)
-    do("send", t["Bravo 1"]["home"], t["Charlie 1"]["id"])
-    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1", "Charlie 1"]],
-                   "Alpha alone, Bravo and Charlie in one stage")
-    if not check(s is not None, f"Alpha in its own stage, Bravo and Charlie in another ({stage_titles(state())})"):
-        return
-    time.sleep(1.0)
-    say(f"  before the switch: Bravo hidden {app_hidden('b')}, Charlie hidden {app_hidden('c')} (their stage parked)")
-    consistent("hide setup", hidden_ok=True)
-
-    say("-- 1. a switch away from Alpha's stage hides Alpha, its windows in place")
-    frames_a = app_frames(state(), "a")
-    sampler = start_sampler([EXTRA["a"][0]], 3500)
-    time.sleep(0.15)
-    do("switch", number_of(state(), "Bravo 1"))
-    s = wait_state(lambda x: "Bravo 1" in active_titles(x), "Bravo's stage")
-    check(s is not None, "hide: Bravo and Charlie's stage is active")
-    for j in ("b", "c"):
-        check(wait_hidden(j, False), f"hide: {EXTRA[j][3]}, whose stage came, is not hidden")
-    p = sampler_out(sampler, "hide")
-    check(wait_hidden("a", True), "hide: Alpha is hidden (NSRunningApplication.isHidden)")
-    if p is not None:
-        t_hid, t_place = hide_then_in_place(p.get("samples", []), frames_a)
-        took = None if t_hid is None or t_place is None else t_place - t_hid
-        check(took is not None and took <= 0.6,
-              f"hide: Alpha's windows at their own frames the moment the hide takes "
-              f"({'-' if took is None else f'{took * 1000:.0f} ms'} after every one left the screen; 600 at most; "
-              f"left the screen: {t_hid is not None})")
-        if t_hid is not None:
-            later = [x for x in p.get("samples", []) if x["t"] >= (t_place or t_hid)]
-            check(not in_zone_looks(later, set(frames_a), p["display"]),
-                  "hide: once in place, no window of Alpha is listed in the park zone at any look")
-    wins, d = fixture_windows([EXTRA["a"][0]])
-    cg = {w["id"]: w for w in wins}
-    check(not any(is_parked(cg[i]["bounds"], d) for i in frames_a if i in cg),
-          f"hide: no window of Alpha is listed in the park zone ({[fmt(cg[i]['bounds']) for i in frames_a if i in cg]})")
-    check(all(i in cg and close(cg[i]["bounds"], f) and not cg[i]["onscreen"] for i, f in frames_a.items()),
-          "hide: Alpha's windows are listed at their own frames, off screen, while hidden")
-    consistent("hide", hidden_ok=True)
-
-    say("-- 2. ⌘Tab, simulated (an activation with no click): Alpha unhides in place")
-    hide_arrival("open", "a", "⌘Tab to Alpha")
-
-    say("-- 3. a click on Bravo's card: Bravo and Charlie grow from the card, unhidden as they land")
-    time.sleep(0.8)  # past the activation's echo window
-    hide_arrival("card", "b", "a click on Bravo's card")
-
-    say("-- 4. a Dock click on Alpha: Alpha unhides in place")
-    time.sleep(0.8)
-    hide_arrival("dock", "a", "a Dock click on Alpha")
-
-    say("-- 5. no hide: an app with a window shown is never hidden; its window elsewhere parks")
-    time.sleep(0.8)
-    s = state()
-    if number_of(s, "Alpha 1") != s["active"]:
-        # Step 4 should have left Alpha's stage active; the merge below needs it so.
-        do("switch", number_of(s, "Alpha 1"))
-        s = wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage for the merge") or state()
-    do("merge", number_of(s, "Bravo 1"))
-    s = state()
-    t = by_title(s)
-    do("send", len(s["stages"]) + 1, t["Alpha 2"]["id"])  # a new stage, no switch (`new` switches)
-    activate("b")
-    s = wait_state(lambda x: active_titles(x) == {"Alpha 1", "Bravo 1", "Charlie 1"} and by_title(x)["Alpha 2"]["parked"],
-                   "Alpha 1 with Bravo and Charlie, Alpha 2 parked alone")
-    if check(s is not None, f"no hide: Alpha 1 shown with Bravo and Charlie, Alpha 2 alone in another stage ({stage_titles(state())})"):
-        reads = never_hidden("a", 2.5)
-        check(bool(reads) and not any(reads), f"no hide: Alpha is never hidden ({len(reads)} reads over 2.5 s: {sorted(set(map(str, reads)))})")
-        wins, d = fixture_windows([EXTRA["a"][0]])
-        a2 = next((w for w in wins if w["id"] == t["Alpha 2"]["id"]), None)
-        check(a2 is not None and a2["onscreen"] and is_parked(a2["bounds"], d),
-              f"no hide: Alpha 2 parks in the corner as without the key ({fmt(a2['bounds']) if a2 else 'unlisted'})")
-        consistent("no hide", hidden_ok=True)
-    # Back to Alpha's stage of two and Bravo and Charlie's, Bravo's active.
-    s = state()
-    do("send", number_of(s, "Alpha 2"), by_title(s)["Alpha 1"]["id"])
-    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Alpha 1", "Alpha 2"], ["Bravo 1", "Charlie 1"]]
-                   and "Bravo 1" in active_titles(x), "Alpha's stage parked again")
-    check(s is not None, f"no hide: Alpha's two windows parked together again ({stage_titles(state())})")
-
-    say("-- 6. the user's ⌘H: never ours to undo; a switch back brings it, as Apple's does")
-    activate("b")  # Bravo the active app, its window the stage's key
-    time.sleep(1.0)
-    r = running_apps([extra_pid("b")], "hide")
-    say(f"  the test's hide of Bravo, as macOS answered it: {r} (macOS 27 answers NO and hides anyway)")
-    check(wait_hidden("b", True), "⌘H: Bravo is hidden, its stage active")
-    time.sleep(1.0)
-    s = state()
-    act = next(st for st in s["stages"] if st["number"] == s["active"])
-    key = next((w["title"] for w in s["windows"] if w["id"] == act.get("key")), None)
-    say(f"  the active stage's key window: {key}")
-    do("switch", number_of(s, "Alpha 1"))
-    check(wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage") is not None, "⌘H: switched away to Alpha's stage")
-    time.sleep(1.5)
-    check(app_hidden("b") is True, "⌘H: switched away, Bravo stays hidden")
-    before_back = len(log_text())
-    do("switch", number_of(state(), "Bravo 1"))
-    check(wait_state(lambda x: "Bravo 1" in active_titles(x), "Bravo's stage") is not None, "⌘H: switched back to Bravo's stage")
-    time.sleep(1.5)
-    # The switch back raises Bravo's window, and macOS unhides the app for that, as Apple's
-    # Stage Manager does when the stage of an app you hid is clicked (the owner, 10-29). Ours
-    # never unhides it: the log of the switch back has no unhide of Bravo.
-    reads = never_hidden("b", 1.0)
-    check(bool(reads) and all(h is False for h in reads),
-          f"⌘H: switched back, Bravo comes back with its stage, as Apple's does "
-          f"({sorted(set(map(str, reads)))}; the stage's key window {key})")
-    check(f"unhiding it pid={extra_pid('b')}" not in log_text()[before_back:], "⌘H: brought back by macOS's raise, never by an unhide of ours")
-    check("hidden by the user (never ours)" in log_text(), "⌘H: the app logs the hide as the user's, never ours")
-    consistent("⌘H", hidden_ok=True)
-    running_apps([extra_pid("b")], "unhide")
-    check(wait_hidden("b", False), "⌘H: Bravo is not hidden at the end")
-    time.sleep(1.0)
-    consistent("⌘H undone", hidden_ok=True)
-
-    supersede_check()
-
-    say("-- 8. a quit with Alpha hidden")
-    activate("b")
-    time.sleep(0.8)
-    if not check(wait_hidden("a", True, 4.0), "quit: Alpha is hidden (its stage parked)"):
-        say("  (the quit is checked anyway)")
-    frames_a = app_frames(state(), "a")
-    before = len(log_text())
-    pid = app_pid()
-    guards = guardian_pids(pid)
-    ctl("quit")
-    wait_gone(pid)
-    for g in guards:
-        wait_gone(g, 15)
-    time.sleep(0.5)
-    hid = app_hidden("a")
-    wins, _ = fixture_windows([EXTRA["a"][0]])
-    cg = {w["id"]: w for w in wins}
-    home = all(i in cg and close(cg[i]["bounds"], f) for i, f in frames_a.items())
-    check(hid is False or home, f"quit: Alpha unhidden ({hid is False}) or its windows back at their frames ({home})")
-    log = log_text()[before:]
-    check("unparked every window" in log, "quit: every window unparked")
-    loud = [ln.strip()[:160] for ln in log.splitlines() if "windows still parked" in ln or "a window still parked" in ln]
-    check(not loud, f"quit: the leftovers check is quiet ({loud[:2]})")
-    all_onscreen("hide quit")
-    left = [EXTRA[k][3] for k in EXTRA if app_hidden(k)]
-    check(not left, f"hide: no fixture app left hidden at the end ({left})")
 
 
 # ----- stale activations: late notices never switch stages back ---------------------------
@@ -7430,7 +7183,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "hide": phase_hide, "away": phase_away,
+             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "crop": phase_crop, "behave": phase_behave}[p]()
     finally:
         stop_app()

@@ -119,9 +119,10 @@ pub struct Transition {
     /// The incoming window the switch makes key (the batch's focus, else the front one; none
     /// when the focus goes to a window already in place).
     pub key_in: Option<u32>,
-    /// Incoming windows that show only once their app is unhidden and active again after the
-    /// unveil (`[windows] hide_parked_apps`: hidden in place, our unhide at the landing): their
-    /// snapshots hand over and land when [`StripSnapshot::late`] says so, not at the unveil.
+    /// Incoming windows that show only after the unveil: their snapshots hand over and land
+    /// when [`StripSnapshot::late`] says so, not at the unveil. Nothing sends any since
+    /// `[windows] hide_parked_apps` (an app hidden in place, unhidden at the landing) was
+    /// retired on 11-09.
     pub late: Vec<u32>,
 }
 

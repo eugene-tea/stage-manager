@@ -367,10 +367,8 @@ pub const KEYS: &[KeyDef] = &[
         "Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it."),
     k("windows", "park_drop", f(-32.0, 10_000.0), "-1.0",
         "How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it."),
-    k("windows", "hide_parked_apps", Kind::Bool, "false",
-        "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
     k("windows", "corner_patch", Kind::Bool, "true",
-        "Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it."),
+        "Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour) or a desktop icon lies under it."),
     k("windows", "corner_patch_reach", Kind::FloatOrAuto { min: 0.0, max: 400.0 }, "\"auto\"",
         "How far past a sliver the corner patch reaches, in points, to cover its shadow: \"auto\" is a parked (inactive) window's shadow, side by side; a number is used on every side."),
     k("windows", "inert_slivers", Kind::Bool, "true",
@@ -422,7 +420,9 @@ pub const KEYS: &[KeyDef] = &[
 /// The `[[rule]]` keys (an array of tables, documented by example in the file).
 pub const RULE_KEYS: &[&str] = &["app", "title", "action", "placement"];
 
-/// Keys from earlier versions that are no longer read, with what replaced them.
+/// Keys from earlier versions that are no longer read, with what replaced them: a warning
+/// when an old file sets one, but not for a switch left off (`false`), which asked for
+/// nothing.
 pub const RETIRED: &[(&str, &str, &str)] = &[
     ("stages", "fit_windows", "it is ignored; [windows] fit = \"off\", \"move\" or \"narrow\" replaced it"),
     (
@@ -434,6 +434,11 @@ pub const RETIRED: &[(&str, &str, &str)] = &[
         "drag",
         "grow_distance",
         "it is ignored; a card dragged out of the strip shows its window as soon as it leaves the strip, as Apple's does ([drag] appear_ms)",
+    ),
+    (
+        "windows",
+        "hide_parked_apps",
+        "no longer used; apps are no longer hidden (the corner patch covers parked windows' slivers)",
     ),
 ];
 
@@ -585,6 +590,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-37.toml"),
     include_str!("legacy/default-38.toml"),
     include_str!("legacy/default-39.toml"),
+    include_str!("legacy/default-40.toml"),
 ];
 
 #[cfg(test)]

@@ -20,7 +20,7 @@
 //! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
 //! for dead until it is looked up afresh (round stale-handles), `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
-//! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
+//! Escape, to leave it), `debug-toggle-strip` shows or hides the strip, `debug-strip` tells what the strip draws this frame (cards in slot
 //! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
 //! read back from a capture of our own overlay window, with a region's mean colour there and
@@ -169,6 +169,9 @@ pub enum Command {
     },
     /// What the strip draws this frame (needs `STAGE_MANAGER_TEST=1`).
     DebugStrip,
+    /// Shows or hides the strip, as the Show/Hide Strip hotkey does (needs
+    /// `STAGE_MANAGER_TEST=1`): the suite's check that captures stop while it is hidden.
+    DebugToggleStrip,
     /// Where the motion overlay draws, read back from its pixels, within a global region
     /// when given (needs `STAGE_MANAGER_TEST=1`).
     DebugOverlay {
@@ -324,6 +327,7 @@ impl Command {
                 Ok(Self::DebugSpace { direction, numpad: !rest.is_empty() })
             }
             ["debug-strip"] => Ok(Self::DebugStrip),
+            ["debug-toggle-strip"] => Ok(Self::DebugToggleStrip),
             ["debug-overlay"] => Ok(Self::DebugOverlay { region: None }),
             ["debug-overlay", x, y, w, h] => {
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
@@ -779,6 +783,7 @@ mod tests {
         assert_eq!(Command::parse("pin 12"), Ok(Command::Pin(Some(12))));
         assert_eq!(Command::parse("merge 2"), Ok(Command::Merge(2)));
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
+        assert_eq!(Command::parse("debug-toggle-strip"), Ok(Command::DebugToggleStrip));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
         assert_eq!(Command::parse("settings"), Ok(Command::Settings));

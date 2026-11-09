@@ -72,10 +72,9 @@ scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore
                                           # visible parity motion slots expose capture raise park
                                           # offscreen enhanced stale handles displays
 scripts/test-stages.sh m3 safety          # some phases
-scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still,
-                                          # away, glass and crop (a combined card drawn whole,
-                                          # one of its windows lifted off alone in the column,
-                                          # dropped in a gap, and dragged out)
+scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
+                                          # card drawn whole, one of its windows lifted off
+                                          # alone in the column, dropped in a gap, dragged out)
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
@@ -174,7 +173,7 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 
 Exit status is 0 on success, 1 on an error reply and 2 when the app is not running. With
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
-Control shortcuts, and full-screen toggles for the scripted checks, and `debug-stale-handle
+Control shortcuts, full-screen toggles and the strip shown or hidden for the scripted checks, and `debug-stale-handle
 ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
 handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
 `src/platform/ctl.rs`.
@@ -211,6 +210,10 @@ menu. Day files are capped in size and kept 14 days.
   warning and error, deduplicated: short enough to paste.
 - `stage-manager mark ["note"]` (or **Mark a Problem** in the menu) writes a marked block
   with the app's state and the last 30 seconds of detailed lines.
+- At `debug`, a task that held the window thread 100 ms or more (a command, a tick, an
+  Accessibility callback) logs one `slow WM task` line: its name, how long, the tick's slowest
+  part, and how many such lines were held back (one a second per task at most). Each
+  `state saved` line says how long the save took (`ms`, `encode_ms`, `write_ms`).
 
 Window titles go into the log, and into a mark's state dumps, as a short hash
 (`#1a2b3c4d`, the same for the same title in every process on this Mac: it is keyed with a

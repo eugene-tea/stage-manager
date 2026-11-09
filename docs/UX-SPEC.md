@@ -136,7 +136,11 @@ extra, off by default, puts it in the current stage instead: see Extras).
 An app that opens several windows at once comes forward with the one it opened last in
 front, as macOS shows them, and that one is in front on every switch back to its stage
 (Apple's, 11-09; the window used last comes in front, and the keyboard goes to it).
-Sheets and dialogs follow their window. An app that quits takes its windows out of their
+Sheets and dialogs follow their window. Short-lived windows (Safari's small dialogs, Chrome's
+address-bar suggestions) join the stage shown and leave it a second later, as any window
+does: nothing changes on screen, and holding every new window back to see whether it stays
+would slow them all, so they stay managed (decided 11-09). One that shows on a card or
+switches a stage is a bug. An app that quits takes its windows out of their
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 An app that saved a hidden window's corner place when it quit, and reopens the window there
 within a day, has the window put back where it was before the quit (else centered).
@@ -496,23 +500,10 @@ has ended). The picture goes only after that, 300 ms past
 the unveil at the most; an outgoing picture's shadow comes in over twice
 `[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
 switch's pictures move (a round of captures is the window server's work, and drops a frame).
-With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
-unhide after the unveil has taken (about 100 ms later), when the window server lists it on
-screen: its picture's shadow hands over then, except the key window's: it shows inactive
-first, so its picture keeps the key shadow until the app is active and has focused it again
-(drawn key then: a frame of the inactive shadow alone reads 4 levels lighter, and the key
-shadow over the inactive one is the smaller error, as the inactive one lies mostly within
-it). The picture stays until the
-app has taken the activation of its key window focused again, so the window is never seen in
-its inactive look (Messages turns to its key look up to 180 ms after it shows); 400 ms past
-the unveil at the most. An app that has not taken that activation 60 ms after its key window
-was focused again is focused once more, twice at most (a window can take the focus while its
-app never becomes active, the keyboard staying with the app before).
 
 **Deviation (superseded switches):** a switch overtaken before it lands (another card
 click, a click of yours anywhere, an activation, a focus) still brings its windows, but
-never focuses one or activates its app afterwards: its held focus, the focus again after its
-app's unhide and the retries above are dropped, so the keyboard is the newer switch's or
+never focuses one or activates its app afterwards: its held focus is dropped, so the keyboard is the newer switch's or
 where you clicked (else two card clicks half a second apart hand the activation back and
 forth between the two apps). A window's focus brings its stage only in the active app (or with the button down
 on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
@@ -524,8 +515,9 @@ wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window
-landed over the corner), never over the menu bar or the Dock's bar, and
-never more than the corner itself (a 320-point square). Where
+landed over the corner), never over the menu bar, and
+never more than the corner itself (a 320-point square). It lies under the Dock, so a
+see-through Dock over the corner shows the cover there, not a waiting window's edge. Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
 desktop there (only the desktop's own layers: the picture and its icons, never a window,
 even one that appears as it is taken; laid over the patch's picture when macOS leaves the
